@@ -7,13 +7,13 @@ name: CI
 # part of it is worse than one that says which part.
 #
 #   RUNS HERE (offline, no credentials, no database):
-#     test_gh_app_token.sh            92  the credential-minter regression suite
-#     omniroute_combo_cli.sh selftest 114 containment logic, fixture catalogue
-#     syntax + secret scan             -  see the steps below
+#     test_gh_app_token.sh              the credential-minter regression suite
+#     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
+#     syntax + secret scan              see the steps below
 #
 #   CANNOT RUN HERE:
-#     test_privilege_ceilings.sh      46
-#     test_request_queue.sh           35
+#     test_privilege_ceilings.sh
+#     test_request_queue.sh
 #   Both require COMPANY_ID and a live PaperclipAI Postgres reached through
 #   `podman exec paperclip-db`, and both CREATE AND DELETE REAL AGENTS in that
 #   company as their method. There is no fixture database to point them at, and
@@ -27,9 +27,9 @@ name: CI
 #   NOT A SUITE: org_access_review.sh is cron/CI-able in principle but also
 #   needs the live database, so it is excluded for the same reason.
 #
-# The counts above are from a real run, not from README.md. The omniroute
-# selftest reports 114; README.md still says 104. CI asserts EXIT STATUS and
-# never a count, so the drift cannot make CI lie in either direction.
+# This list deliberately carries no test counts. CI asserts EXIT STATUS and
+# never a count: counts drift as suites grow, and a gate that pins one turns
+# ordinary growth into a red build. Do not add them back.
 
 on:
   push:
