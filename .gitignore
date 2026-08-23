@@ -7,3 +7,19 @@
 secure-drop/
 *.bak
 *.bak-*
+
+# gh-app-token.js writes its minted token here at 0600. The default location is
+# $PAPERCLIP_RUN_SCRATCH_DIR, but GH_APP_TOKEN_CACHE can point anywhere, and the
+# filename matched none of the patterns above — a LIVE token, one `git add -A`
+# from being committed. (TOG-193)
+.gh-app-token.json
+.gh-app-token.*.json
+
+# Run state the suites drop in the repo root. *.jsonl already covers the queue
+# file; these two did not match anything and both survive an interrupted run.
+.test-disabled-templates
+.provisioner-disabled
+
+# Per-operator agent-harness config. Not a secret, but it is local machine state
+# and pins absolute paths that mean nothing on anyone else's checkout.
+.claude/
