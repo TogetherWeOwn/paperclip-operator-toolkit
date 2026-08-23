@@ -1,0 +1,9 @@
+# Never commit operational state or credentials.
+*.env
+*.pem
+*.key
+*-log.jsonl
+*.jsonl
+secure-drop/
+*.bak
+*.bak-*
