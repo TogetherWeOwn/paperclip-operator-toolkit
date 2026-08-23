@@ -483,6 +483,28 @@ jobs:
 
           exit $rc
 
+      # Second authorization mutation, guarding a DIFFERENT property. The
+      # dormancy gate above only exercises derivation; until TOG-197 review it
+      # was possible to delete the approval-time re-validation outright and keep
+      # this suite green, because the only coverage of it lived in
+      # test_request_queue.sh, which needs Postgres and never runs here.
+      # Mutation: drop the re-check of the requester's ceiling at approval, so a
+      # request banks the authority the requester held at SUBMIT time.
+      - name: Prove the suite still detects banked (stale) authority
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
+          perl -0pi -e 's/^  may_request "\$now_tpl" "\$template" \\\n.*\n.*\n.*\n/  : # mutated\n/m' \
+            "$mut/org_request_queue.sh"
+          grep -q 'may_request "$now_tpl"' "$mut/org_request_queue.sh" && {
+            echo "::error::mutation did not apply; this gate is no longer testing anything"; exit 1; }
+          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
+            echo "::error::the authorization suite passed with the approval-time ceiling re-check removed"
+            exit 1
+          fi
+          echo "authorization suite correctly rejects the banked-authority mutation"
+
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail
