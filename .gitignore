@@ -29,4 +29,10 @@ secure-drop/
 # agent workspace this path is a SYMLINK to the instance plugin root
 # (/paperclip/.paperclip/plugins/node_modules) — committing it would either
 # commit a dangling absolute symlink or splat the whole instance tree in here.
+#   BOTH forms are listed deliberately. A trailing slash matches DIRECTORIES
+# ONLY, and git records a symlink as a file, so `node_modules/` alone does not
+# ignore the workspace symlink — the exact case the paragraph above is about.
+# Verified with `git check-ignore`: with only the slashed form, `ln -s …
+# node_modules` shows up as an untracked `?? node_modules` ready to commit.
+node_modules
 node_modules/
