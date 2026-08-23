@@ -1,0 +1,127 @@
+name: CI
+
+# WHAT THIS RUNS, AND WHAT IT DOES NOT.
+#
+# This repo has five suites. CI runs three of them. Read this before adding a
+# green badge anywhere: a CI that looks like it tests everything while testing
+# part of it is worse than one that says which part.
+#
+#   RUNS HERE (offline, no credentials, no database):
+#     test_gh_app_token.sh            92  the credential-minter regression suite
+#     omniroute_combo_cli.sh selftest 114 containment logic, fixture catalogue
+#     syntax + secret scan             -  see the steps below
+#
+#   CANNOT RUN HERE:
+#     test_privilege_ceilings.sh      46
+#     test_request_queue.sh           35
+#   Both require COMPANY_ID and a live PaperclipAI Postgres reached through
+#   `podman exec paperclip-db`, and both CREATE AND DELETE REAL AGENTS in that
+#   company as their method. There is no fixture database to point them at, and
+#   giving a GitHub runner credentials to the production company database to run
+#   tests would be a far worse trade than the coverage is worth. They stay
+#   operator-run, on the VPS, before a release. `bash -n` below at least proves
+#   they still parse, which catches the most common way a shell suite rots.
+#     Making them CI-able means giving them a disposable database. That is real
+#   work, it is not this task, and it is filed rather than hidden here.
+#
+#   NOT A SUITE: org_access_review.sh is cron/CI-able in principle but also
+#   needs the live database, so it is excluded for the same reason.
+#
+# The counts above are from a real run, not from README.md. The omniroute
+# selftest reports 114; README.md still says 104. CI asserts EXIT STATUS and
+# never a count, so the drift cannot make CI lie in either direction.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-suites:
+    name: Offline suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Every tool here is a script; there is no build. A parse error is the
+      # most common regression and the cheapest to catch, so catch it first —
+      # including in the two suites CI cannot execute.
+      - name: Syntax check every script
+        run: |
+          set -euo pipefail
+          rc=0
+          for f in *.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
+          exit $rc
+
+      # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
+      # generated throwaway RSA key, and fabricated token-shaped canaries.
+      - name: gh-app-token.js regression suite
+        run: ./test_gh_app_token.sh
+
+      - name: omniroute containment selftest
+        run: ./omniroute_combo_cli.sh selftest
+
+      # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
+      # an assertion rather than a promise. Scans TRACKED files only: anything
+      # .gitignore covers is by definition not in the repo, and scanning the
+      # working tree would fail on an operator's local scratch files.
+      #   test_gh_app_token.sh assembles its canaries from fragments at runtime
+      # precisely so the suite does not trip this step.
+      - name: Secret scan
+        run: |
+          set -uo pipefail
+          rc=0
+          # git grep searches tracked files only, which is the scope we want.
+          # Live GitHub credentials of every prefix, and private key material.
+          if git grep -nIE '(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})'; then
+            echo "::error::a GitHub-token-shaped string is committed"; rc=1
+          fi
+          if git grep -nIE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY'; then
+            echo "::error::private key material is committed"; rc=1
+          fi
+          # The .gitignore entries other steps and the tools depend on. Losing
+          # one is silent until the day something lands in a commit.
+          for pat in '*.env' '*.pem' '*.key' '*.jsonl' '.gh-app-token.json'; do
+            grep -qxF "$pat" .gitignore || { echo "::error::.gitignore no longer covers $pat"; rc=1; }
+          done
+          [ $rc -eq 0 ] && echo "secret scan: clean"
+          exit $rc
+
+      # A suite that cannot fail is decoration. This reintroduces the exact
+      # 2026-08-23 bug into a THROWAWAY COPY — never the tracked file — and
+      # requires the suite to reject it. If someone weakens the assertions
+      # later, this step goes red before the regression can ship behind them.
+      - name: Prove the regression suite still detects the bug
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh-app-token.js test_gh_app_token.sh "$mut/"
+          # Delete the help branch and the refusal, restoring the unconditional
+          # trailing mint that leaked a live org-admin token. Written with no
+          # single quotes inside so the shell quoting stays legible.
+          node -e '
+            var fs = require("fs");
+            var p = process.argv[1];
+            var s = fs.readFileSync(p, "utf8");
+            var i = s.indexOf("if (mode === undefined");
+            var j = s.indexOf("main().catch");
+            if (i < 0 || j < 0) {
+              console.error("::error::could not find the dispatch tail of main() to mutate; this guard is now blind, fix it");
+              process.exit(2);
+            }
+            fs.writeFileSync(p, s.slice(0, i) + "process.stdout.write(await token())\n}\n\n" + s.slice(j));
+          ' "$mut/gh-app-token.js"
+          node --check "$mut/gh-app-token.js"
+          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the regression suite PASSED against a deliberately reintroduced bug"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
