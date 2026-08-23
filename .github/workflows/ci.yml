@@ -2,7 +2,7 @@ name: CI
 
 # WHAT THIS RUNS, AND WHAT IT DOES NOT.
 #
-# This repo has five suites. CI runs three of them. Read this before adding a
+# CI runs some of this repo's suites and not others. Read this before adding a
 # green badge anywhere: a CI that looks like it tests everything while testing
 # part of it is worse than one that says which part.
 #
@@ -10,6 +10,7 @@ name: CI
 #     test_gh_app_token.sh              the credential-minter regression suite
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     syntax + secret scan              see the steps below
+#     plugins/gh-token-broker           see the `broker-suite` job below
 #
 #   CANNOT RUN HERE:
 #     test_privilege_ceilings.sh
@@ -125,3 +126,99 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+  # ---------------------------------------------------------------------------
+  # The gh-token-broker plugin suite (TOG-213 / TOG-174).
+  #
+  # Separate job, not a step on `offline-suites`, for two reasons that are not
+  # stylistic: it needs a different Node major (see below), and it is the only
+  # thing in this repo with npm dependencies. Keeping it apart means a registry
+  # hiccup cannot turn the shell suites red, and the two failures read
+  # differently in the checks list instead of as one opaque "CI failed".
+  #
+  # Like every other suite here, this one is gated on EXIT STATUS and never on a
+  # test count. See the header.
+  broker-suite:
+    name: gh-token-broker suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/gh-token-broker
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24, deliberately, while the job above pins 20. This suite is written
+      # against the runtime the Paperclip instance actually executes the plugin
+      # on, and `node --test` semantics have moved between those majors. Testing
+      # the broker on a Node the host does not run would be testing the wrong
+      # thing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/gh-token-broker/package-lock.json
+
+      # --ignore-scripts: nothing in this dependency tree should be running
+      # lifecycle scripts on a runner that has a checkout of credential tooling
+      # sitting next to it. It is three packages with no build step; if this flag
+      # ever starts breaking the install, that is a fact worth stopping on rather
+      # than a flag worth removing.
+      #
+      # --include=dev is NOT redundant, however much it looks it. Both packages
+      # are devDependencies (the host supplies plugin-sdk at runtime; shared is
+      # test-only), and npm silently implies --omit=dev whenever NODE_ENV is
+      # `production`. The Paperclip instance sets exactly that, so `npm ci` there
+      # installs NOTHING, exits 0, prints "up to date", and every test then fails
+      # ERR_MODULE_NOT_FOUND. A green install step followed by an unexplained
+      # module error is a bad afternoon; the flag makes it impossible.
+      - name: Install pinned host packages
+        run: npm ci --include=dev --ignore-scripts
+
+      # Guard the above rather than trusting it. If the install silently no-ops
+      # again, fail HERE with the reason, not 40 lines later as a module error.
+      - name: Verify the install actually landed
+        run: |
+          set -euo pipefail
+          for p in @paperclipai/shared @paperclipai/plugin-sdk; do
+            [ -d "node_modules/$p" ] || {
+              echo "::error::$p is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
+              exit 1
+            }
+          done
+          echo "install ok: both host packages present"
+
+      # Pass the FILE, not the directory. `node --test test/` resolves `test` as
+      # a module specifier on Node 24 and dies with one MODULE_NOT_FOUND before
+      # running anything — which looks precisely like a broken suite and is not.
+      # `npm test` in package.json passes the file for this reason; it is invoked
+      # here rather than open-coded so the two cannot drift apart.
+      - name: Broker suite
+        run: npm test
+
+      # No credential, no network, no host: the suite fabricates its own RSA key
+      # and stubs every outbound call. Anything that starts reaching the real
+      # GitHub API from CI is a regression in the suite's isolation, not a
+      # networking problem to be fixed by opening the runner up.
+      #   This asserts that property instead of trusting it: the private key the
+      # broker signs with must never appear in the suite's own output, and the
+      # run must not need GH_APP_* to pass.
+      - name: Prove the suite needs no credential and leaks no key
+        env:
+          GH_APP_ID: ''
+          GH_APP_ORG: ''
+          GH_APP_PRIVATE_KEY: ''
+          GH_APP_REPOS: ''
+          GH_APP_PERMISSIONS: ''
+        run: |
+          set -uo pipefail
+          npm test > out.txt 2>&1; rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::the broker suite requires a credential to pass; it must not"
+            cat out.txt; exit 1
+          fi
+          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
+            echo "::error::private key material reached the suite's stdout"
+            exit 1
+          fi
+          echo "broker suite: passes with GH_APP_* empty, no key in output"
+          rm -f out.txt
