@@ -40,21 +40,23 @@ Five suites. Three run anywhere; two need the VPS.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
-./test_gh_app_token.sh              # 92   credential-minter regression suite
-./omniroute_combo_cli.sh selftest   # 114  containment logic, fixture catalogue
+./test_gh_app_token.sh              # credential-minter regression suite
+./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 for f in *.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
 # They create and delete real agents in that company as their method, so run them
 # on the VPS, before a release, and read the teardown output.
 export COMPANY_ID=<uuid>
-./test_privilege_ceilings.sh        # 46
-./test_request_queue.sh             # 35
+./test_privilege_ceilings.sh
+./test_request_queue.sh
 ./org_access_review.sh --allow-active   # 0 findings expected
 ```
 
-Do not hardcode those counts in any gate. They drift — the omniroute selftest reports 114 while
-README.md still says 104. Gate on exit status.
+**Gate on exit status, never on a test count.** Counts drift as suites grow, and three places in
+this repo used to quote three different numbers for the same omniroute selftest. A count in a gate
+turns ordinary growth into a red build; a count in prose is just wrong a month later. Neither the
+docs nor CI assert one — if you add a suite, do not start.
 
 `test_gh_app_token.sh` needs `node` and nothing else. It fabricates its whole credential environment:
 a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries

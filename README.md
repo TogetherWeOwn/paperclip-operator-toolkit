@@ -8,27 +8,35 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 
 ## What is here
 
-| Tool | Purpose | Tests |
+| Tool | Purpose | Suite |
 |---|---|---|
-| `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | 46 |
-| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`. | 35 |
+| `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
+| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`. | `test_request_queue.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | — |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | — |
-| `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | 104 |
+| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
+| `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `ROLLBACK.md` | Rollback procedures. |
 
 ## Running the suites
 
 ```bash
+# Offline — no credentials, no network, no database. These are what CI runs.
+./test_gh_app_token.sh
+./omniroute_combo_cli.sh selftest
+
+# Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 export COMPANY_ID=<uuid>
-./test_privilege_ceilings.sh      # 46
-./test_request_queue.sh           # 35
+./test_privilege_ceilings.sh
+./test_request_queue.sh
 ./org_access_review.sh --allow-active   # 0 findings expected
-./omniroute_combo_cli.sh selftest # 104, fully offline
 ```
+
+**Pass/fail is the exit status, never a test count.** Counts drift as suites grow — this file
+carried `104` for the omniroute selftest long after it had passed that — and a count baked into a
+gate turns ordinary growth into a red build. Nothing in CI or in these docs asserts one.
 
 `--allow-active` is required once any agent has `wakeOnDemand=true`; without it the review
 reports each wakeable agent as a finding.
