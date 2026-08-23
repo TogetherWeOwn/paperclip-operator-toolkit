@@ -165,17 +165,55 @@ export function narrowPermissions(profile, requested) {
 }
 
 /**
+ * Say which of the two derivation sources was consulted and what it yielded, so
+ * the 409 names the one fix that applies instead of listing every fix.
+ *
+ * The three cases are genuinely different pieces of work by different owners:
+ * attaching an issue to a project is an ordinary board edit any agent can do,
+ * while setting `GH_APP_REPOS` is a project-env change. TOG-226 spent its first
+ * pass working out which of these each refusal meant; the answer was always
+ * present at the throw site, just not written down.
+ */
+function noScopeMessage({ projectId, hasProjectEnv, workspaceRepoUrl }) {
+  const why = !projectId
+    ? "This issue has no project, so there is no GH_APP_REPOS to read"
+    : !hasProjectEnv
+      ? `Project ${projectId} has no env, so there is no GH_APP_REPOS to read`
+      : `Project ${projectId} has an env but no usable GH_APP_REPOS ` +
+        "(a secret_ref or non-string binding is treated as absent — it must be a plain literal)";
+
+  const workspace = workspaceRepoUrl
+    ? `The issue's workspace repo URL (${workspaceRepoUrl}) did not parse to a repo name.`
+    : "The issue has no workspace repo URL to fall back to.";
+
+  const fix = !projectId
+    ? "Fix: attach this issue to a project that pins GH_APP_REPOS."
+    : "Fix: set GH_APP_REPOS on the project to the repos this project's work actually touches.";
+
+  return (
+    `Refusing to mint: no repository scope could be derived for this issue. ${why}. ` +
+    `${workspace} ${fix} ` +
+    "An unscoped token would grant every repo in the installation."
+  );
+}
+
+/**
  * Resolve the repository ceiling and intersect the caller's request with it.
  *
  * The ceiling is whatever the operator pinned on the project (`GH_APP_REPOS`),
  * falling back to the repo the issue's own primary workspace points at. Both are
  * server-derived. If neither yields a repo we raise — minting unscoped is the
  * failure this issue is about.
+ *
+ * `projectId`/`hasProjectEnv` are diagnostic only: they never widen the ceiling,
+ * and are read exclusively on the path that already decided to refuse.
  */
 export function resolveRepositories({
   projectRepos = null,
   workspaceRepoUrl = null,
   requested = null,
+  projectId = null,
+  hasProjectEnv = false,
 }) {
   const ceiling =
     projectRepos ??
@@ -183,9 +221,7 @@ export function resolveRepositories({
 
   if (!ceiling || ceiling.length === 0) {
     throw new ScopeError(
-      "Refusing to mint: no repository scope could be derived for this issue. " +
-        "Set GH_APP_REPOS on the project, or attach a workspace with a repo URL. " +
-        "An unscoped token would grant every repo in the installation.",
+      noScopeMessage({ projectId, hasProjectEnv, workspaceRepoUrl }),
       409,
     );
   }
@@ -220,6 +256,7 @@ export function resolveScope({
   requestedRepositories = null,
   requestedPermissions = null,
   defaultPermissions = DEFAULT_PERMISSION_PROFILE,
+  projectId = null,
 }) {
   const env = projectEnv ?? {};
 
@@ -255,6 +292,8 @@ export function resolveScope({
     projectRepos,
     workspaceRepoUrl,
     requested: requestedRepositories,
+    projectId,
+    hasProjectEnv: Object.keys(env).length > 0,
   });
 
   const permissions = narrowPermissions(profile, requestedPermissions);
