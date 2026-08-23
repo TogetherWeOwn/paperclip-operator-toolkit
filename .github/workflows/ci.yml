@@ -9,6 +9,7 @@ name: CI
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
+#     test_responsible_leader.sh        who may approve a provisioning request
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #
@@ -69,6 +70,15 @@ jobs:
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
+      # The authorization change from TOG-194: who may approve a provisioning
+      # request. Runs here because it fabricates its whole world — a TSV org
+      # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it
+      # needs neither the database nor a company. It is the ONLY automated
+      # coverage of that logic that CI can execute; test_request_queue.sh is
+      # better evidence and stays operator-run for the reasons above.
+      - name: responsible-leader authorization suite
+        run: ./test_responsible_leader.sh
+
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
       # .gitignore covers is by definition not in the repo, and scanning the
@@ -99,6 +109,24 @@ jobs:
       # 2026-08-23 bug into a THROWAWAY COPY — never the tracked file — and
       # requires the suite to reject it. If someone weakens the assertions
       # later, this step goes red before the regression can ship behind them.
+      # Same discipline for the authorization suite. A green suite that cannot
+      # fail is worse than no suite, and this one guards a privilege boundary.
+      # Mutation: let a dormant leader be SKIPPED instead of woken. That is the
+      # single most tempting future "fix" to this design and it silently turns
+      # waiting into approver-shopping, so the suite must reject it.
+      - name: Prove the authorization suite still detects a widened rule
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
+          sed -i 's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' \
+            "$mut/org_request_queue.sh"
+          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
+            echo "::error::the authorization suite passed against a skipped-dormant-leader mutation"
+            exit 1
+          fi
+          echo "authorization suite correctly rejects the mutation"
+
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail
