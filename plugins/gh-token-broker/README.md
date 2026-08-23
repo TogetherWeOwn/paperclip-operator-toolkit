@@ -173,8 +173,18 @@ every push here; see `.github/workflows/ci.yml`.
 ### On the instance (agent workspace, VPS)
 
 ```bash
-NODE_PATH=/paperclip/.paperclip/plugins/node_modules node --test test/broker.test.mjs
+ln -s /paperclip/.paperclip/plugins/node_modules node_modules   # once, per checkout
+node --test test/broker.test.mjs
 ```
+
+> **`NODE_PATH` does not work here, however much it looks like it should.**
+> `NODE_PATH` is a CommonJS resolution mechanism and the ESM loader ignores it
+> outright, so `NODE_PATH=/paperclip/.paperclip/plugins/node_modules node --test
+> test/broker.test.mjs` fails `ERR_MODULE_NOT_FOUND` on `@paperclipai/shared`
+> even though the package is sitting at exactly that path. This suite is `.mjs`.
+> The symlink is what makes local runs work; the env var only makes the failure
+> confusing. Earlier revisions of this file recommended the env var — it was
+> never the reliable form.
 
 ### On a machine without the instance plugin root (CI, a laptop)
 
@@ -198,11 +208,13 @@ and still be wrong.
 
 **Two invocation traps, both of which look like a broken suite and are not:**
 
-- Without either `NODE_PATH` pointing at the instance plugin root *or* a local
-  `npm install`, every test fails with `ERR_MODULE_NOT_FOUND` for
-  `@paperclipai/shared`. In the agent workspace a `node_modules` symlink covers
-  local runs, but the env var is the reliable form. That symlink is deliberately
-  not committed here.
+- Without either a `node_modules` symlink to the instance plugin root *or* a
+  local `npm install`, every test fails with `ERR_MODULE_NOT_FOUND` for
+  `@paperclipai/shared`. Reach for the symlink in the agent workspace and
+  `npm ci` everywhere else — **not** `NODE_PATH`, which the ESM loader ignores
+  (see the box above). The symlink is deliberately not committed here;
+  `.gitignore` lists `node_modules` both with and without a trailing slash so
+  that the symlink is actually covered, not just the directory.
 - Pass the **file**, not the directory. On Node 24 `node --test test/` resolves
   `test` as a module specifier and dies with a single `MODULE_NOT_FOUND` failure
   before running anything. The `npm test` script passes the file for this reason
