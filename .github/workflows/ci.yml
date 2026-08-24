@@ -190,6 +190,23 @@ jobs:
           fi
           echo "authorization suite correctly rejects the mutation"
 
+      # Second mutation, same discipline, on the control that makes the logged
+      # bypass mean anything: an auditor may not clear an override it took
+      # itself. Drop that one comparison and the open-item list becomes
+      # self-service — the bypasser writes the entry AND retires it, which is a
+      # write-only log wearing an audit trail's clothes.
+      - name: Prove the suite still detects a self-clearable override
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
+          sed -i 's/rv_id" == "$a_id"/rv_id" == "never-matches"/' "$mut/org_request_queue.sh"
+          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
+            echo "::error::the suite passed while an override could be cleared by the agent that took it"
+            exit 1
+          fi
+          echo "authorization suite correctly rejects the self-acknowledgement mutation"
+
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail

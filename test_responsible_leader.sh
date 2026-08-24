@@ -41,6 +41,9 @@ must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
 eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (got '$2', wanted '$3')"; }
+# For commands whose exit STATUS is the contract (findings=1) rather than
+# refusal (=2), so the two cannot be conflated.
+rc_of() { "$@" >/dev/null 2>&1; echo $?; }
 
 # --- the stub provisioner ---------------------------------------------------
 # `ceiling` re-emits the REAL CEILING_JSON. `create` records its argv and
@@ -305,6 +308,102 @@ must_refuse "a chief still cannot disable a template" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer T0
 must_allow "the steward still can" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer A0
+
+hdr "12. An override is SURFACED, and only an independent auditor retires it"
+# Section 6 proves the bypass is WRITTEN. Recording it into a file nobody reads
+# is the same as not recording it, so this section proves somebody is SHOWN it,
+# and that the showing drains rather than accumulating into background noise.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced" >/dev/null 2>&1
+REQ="$(last_sub)"
+banner_err="$("$Q" review --reviewer A0 --request "$REQ" --approve 2>&1 >"$TMP/banner.out")"
+banner="$(cat "$TMP/banner.out")"
+# STDOUT specifically: an agent reviewer reaches this over mcp_remote, and a
+# tool wrapper returns stdout while discarding stderr. A notice delivered only
+# on stderr would be invisible to exactly the reviewer this epic added.
+grep -q 'STANDING-AUTHORITY OVERRIDE' <<<"$banner" \
+  && ok "the reviewer is told on STDOUT, where a tool transport will carry it" \
+  || { bad "the bypass was silent to the agent that took it"; sed 's/^/        /' <<<"$banner"; }
+grep -q "ack-override --request $REQ" <<<"$banner" \
+  && ok "  ...and told exactly what clears it" || bad "banner gives no way to clear it"
+grep -q 'STANDING-AUTHORITY OVERRIDE' <<<"$banner_err" \
+  && ok "  ...and an operator watching stderr sees it too" || bad "no stderr notice"
+
+out="$("$Q" overrides 2>&1)"
+{ grep -q "$REQ" <<<"$out" && grep -q "DIR" <<<"$out"; } \
+  && ok "'overrides' lists it by request, naming the bypassed leader" \
+  || { bad "'overrides' did not surface the bypass"; sed 's/^/        /' <<<"$out"; }
+eq "  ...and exits non-zero, so a cron or CI gate goes red" "$(rc_of "$Q" overrides)" "1"
+
+out="$("$Q" list --status approved 2>&1)"
+grep -q "UNREVIEWED" <<<"$out" \
+  && ok "the default listing carries an OVERRIDE column, not just the thread" \
+  || { bad "list hides the override"; sed 's/^/        /' <<<"$out"; }
+
+eq "check 10 of the access review gets machine-readable input" \
+   "$("$Q" overrides --json | jq -r '.bypassedLeader')" "DIR"
+
+must_refuse "the steward that took it cannot clear it — standing authority is not audit authority" \
+  "$Q" ack-override --request "$REQ" --auditor A0 --note "fine by me"
+must_refuse "an agent without audit authority cannot clear it" \
+  "$Q" ack-override --request "$REQ" --auditor DIR --note "looks ok"
+must_refuse "an acknowledgement without a note is refused" \
+  "$Q" ack-override --request "$REQ" --auditor O3
+must_allow "O3, the independent audit function, clears it with a note" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "DIR was dormant 6d; bypass justified"
+must_refuse "and it cannot be cleared twice" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "again"
+
+eq "the open list drains, so the report can return to green" "$(rc_of "$Q" overrides)" "0"
+eq "  ...but the override is still there under --all" \
+   "$("$Q" overrides --all --json | jq -r '.ack.auditor')" "O3"
+out="$("$Q" thread --request "$REQ" 2>&1)"
+grep -q "OVERRIDE-ACK  by O3" <<<"$out" \
+  && ok "the acknowledgement joins the request's own thread" \
+  || { bad "thread lost the acknowledgement"; sed 's/^/        /' <<<"$out"; }
+
+# Regression guard. An acknowledgement is not a decision. If it is ever allowed
+# to become a request's LAST event, the request loses its status and vanishes
+# from every filtered listing — the audited request would become the one you
+# cannot see, which is exactly backwards.
+out="$("$Q" list --status approved 2>&1)"
+grep -q "$REQ" <<<"$out" \
+  && ok "an acknowledged request is still listed as approved" \
+  || { bad "acknowledging dropped the request from the listing"; sed 's/^/        /' <<<"$out"; }
+grep -q "acked" <<<"$out" && ok "  ...and shows as acked rather than open" || bad "no acked marker"
+
+must_refuse "a request carrying no override cannot be acknowledged" \
+  "$Q" ack-override --request "${REQ}-nope" --auditor O3 --note "phantom"
+
+# The not-your-own-override rule has to be exercised by an agent that would
+# OTHERWISE be allowed to clear it, or the test passes on the wrong check. A0
+# holds standing authority but not acknowledgement authority, so refusing A0
+# above proves nothing about this rule — it is refused either way. O1 holds
+# BOTH, and is the only agent that can take an override and then be tempted to
+# retire it. This is the case the CI mutation step aims at.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced 2" >/dev/null 2>&1
+REQ="$(last_sub)"
+must_allow "O1 takes a break-glass decision of its own" \
+  "$Q" review --reviewer O1 --request "$REQ" --approve
+eq "  ...recorded as an override over DIR" \
+   "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override.bypassedLeader' "$QUEUE")" "DIR"
+must_refuse "O1 cannot clear its OWN override, though it does hold acknowledgement authority" \
+  "$Q" ack-override --request "$REQ" --auditor O1 --note "I stand by it"
+eq "  ...and the refused self-acknowledgement is itself logged" \
+   "$(jq -r 'select(.reason=="self_acknowledgement")|.reason' "$GRANT_LOG" | tail -1)" "self_acknowledgement"
+must_allow "O3 clears it instead" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "reviewed independently"
+
+# Availability: P1 is in the acknowledgement set so a dormant P3 cannot wedge
+# the review forever — for overrides P1 did not take.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced 3" >/dev/null 2>&1
+REQ="$(last_sub)"
+must_allow "a break-glass decision taken by A0" \
+  "$Q" review --reviewer A0 --request "$REQ" --approve
+must_allow "O1 may clear an override A0 took" \
+  "$Q" ack-override --request "$REQ" --auditor O1 --note "P3 dormant; reviewed by P1"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
