@@ -8,7 +8,13 @@ name: CI
 #
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
+#     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
+#     test_responsible_leader.sh        who may approve a provisioning request
+#     test_request_record_integrity.sh  whether the RECORD of a decision can
+#                                       still say what was approved and why
+#     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
+#                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -16,18 +22,32 @@ name: CI
 #   CANNOT RUN HERE:
 #     test_privilege_ceilings.sh
 #     test_request_queue.sh
-#   Both require COMPANY_ID and a live PaperclipAI Postgres reached through
-#   `podman exec paperclip-db`, and both CREATE AND DELETE REAL AGENTS in that
-#   company as their method. There is no fixture database to point them at, and
-#   giving a GitHub runner credentials to the production company database to run
-#   tests would be a far worse trade than the coverage is worth. They stay
-#   operator-run, on the VPS, before a release. `bash -n` below at least proves
-#   they still parse, which catches the most common way a shell suite rots.
-#     Making them CI-able means giving them a disposable database. That is real
-#   work, it is not this task, and it is filed rather than hidden here.
+#   Both CREATE AND DELETE REAL AGENTS in a company as their method, and giving
+#   a GitHub runner credentials to the production company database would be a
+#   far worse trade than the coverage is worth. They stay operator-run, on the
+#   VPS, before a release. `bash -n` below at least proves they still parse,
+#   which catches the most common way a shell suite rots.
 #
-#   NOT A SUITE: org_access_review.sh is cron/CI-able in principle but also
-#   needs the live database, so it is excluded for the same reason.
+#   WHAT IS STILL MISSING, precisely (TOG-202). The first blocker is gone: as of
+#   lib/pcsql.sh the tools no longer hard-wire `podman exec paperclip-db`, so
+#   they CAN be pointed at a throwaway database with PAPERCLIP_SQL_BACKEND=psql.
+#   Three things still stand between that and a green run here, and the third
+#   was not obvious until someone read the provisioner:
+#     1. a schema dump, so a service container has tables to talk to;
+#     2. an org fixture — the suites reference P0/P1/O*/T*/F* rows by
+#        `metadata->>'orgRoleId'` and assume they already exist;
+#     3. A LIVE PAPERCLIP API SERVER. The suites drive org_provisioner.sh, which
+#        creates and terminates agents through `paperclipai agent create` /
+#        `terminate` against PAPERCLIP_API_URL, not through SQL. A Postgres
+#        service container alone does not make these suites run; it makes them
+#        fail later, at the first `pc agent create`, which is a worse failure
+#        mode than today's honest exclusion.
+#   Do not wire these two into CI until 3 is answered. A suite that is present
+#   and failing for an environmental reason gets muted, and a muted suite is
+#   indistinguishable from a deleted one.
+#
+#   NOT A SUITE: org_access_review.sh is read-only and needs no API server, so
+#   it clears blocker 3 — but it still needs 1 and 2, so it is excluded too.
 #
 # This list deliberately carries no test counts. CI asserts EXIT STATUS and
 # never a count: counts drift as suites grow, and a gate that pins one turns
@@ -58,7 +78,10 @@ jobs:
         run: |
           set -euo pipefail
           rc=0
-          for f in *.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # lib/*.sh is included explicitly. It is sourced by five tools, so a
+          # parse error there breaks all of them, and a bare `*.sh` glob does
+          # not descend into it.
+          for f in *.sh lib/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           exit $rc
 
@@ -67,8 +90,99 @@ jobs:
       - name: gh-app-token.js regression suite
         run: ./test_gh_app_token.sh
 
+      # TOG-222: the credential-source half. test_gh_app_token.sh owns the leak
+      # traps and the cache fixtures; this suite owns broker-vs-PEM selection,
+      # which needs a stub broker on loopback and is far easier to express here.
+      #
+      # Pass the FILE, not the directory — same Node 24 gotcha the broker-suite
+      # job documents. It bites on 20 too, so do not "fix" this to `test/`.
+      #
+      # Offline by construction: GH_API_URL and GH_APP_BROKER_URL both point at
+      # stubs the suite starts itself, and the RSA key is generated per-run.
+      - name: gh-app-token.js broker/credential-source suite
+        run: node --test test/gh-app-token.test.mjs
+
+      # Same reasoning as the broker suite's equivalent step: assert the
+      # isolation rather than trust it. If this ever needs a real GH_APP_*, the
+      # suite has started reaching for a live credential.
+      - name: Prove the credential-source suite needs no credential
+        env:
+          GH_APP_ID: ''
+          GH_APP_PRIVATE_KEY: ''
+          PAPERCLIP_API_URL: ''
+          PAPERCLIP_API_KEY: ''
+          PAPERCLIP_TASK_ID: ''
+        run: |
+          set -uo pipefail
+          node --test test/gh-app-token.test.mjs > out.txt 2>&1; rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::the credential-source suite requires a credential to pass; it must not"
+            cat out.txt; exit 1
+          fi
+          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
+            echo "::error::private key material reached the suite's stdout"; exit 1
+          fi
+          echo "credential-source suite: passes with GH_APP_*/PAPERCLIP_* empty"
+          rm -f out.txt
+
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
+
+      # The TOG-226 standing gate. Offline: the board and GitHub reads are
+      # redirected to fixtures, and the argv assertions use a stub curl that
+      # never opens a socket. It covers the two ways this check can be wrong
+      # in the direction that matters — reporting a clean board when residue
+      # exists (which is what authorises a PEM unbind), including the ARG_MAX
+      # failure-open that only appeared at production board size.
+      - name: scope-residue gate regression suite
+        run: ./test_gh_scope_residue.sh
+
+      # TOG-310. Audits every link in git's credential-helper chain for
+      # substitutability by the shared agent uid — the helper program, its
+      # directory, and every config file that can name a helper, including ones
+      # that do not exist yet but can be created.
+      #
+      # Portable by construction: the analysis is pure permission arithmetic, so
+      # the suite builds its fixtures from real root-owned paths (/usr/bin/git,
+      # /etc) that exist on a runner too, and skips only the handful of
+      # assertions about /paperclip itself. It pins both bugs found by checking
+      # the audit's output against live write probes rather than by reading it:
+      # symlinked /bin reported as a world-writable hole, and an absent config
+      # under a creatable parent reported clean.
+      - name: credential-chain audit regression suite
+        run: ./test_credential_chain_audit.sh
+
+      # The authorization change from TOG-194: who may approve a provisioning
+      # request. Runs here because it fabricates its whole world — a TSV org
+      # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it
+      # needs neither the database nor a company. It is the ONLY automated
+      # coverage of that logic that CI can execute; test_request_queue.sh is
+      # better evidence and stays operator-run for the reasons above.
+      - name: responsible-leader authorization suite
+        run: ./test_responsible_leader.sh
+
+      # TOG-253. The sibling suite asks "who may decide?"; this one asks the
+      # question an audit actually asks — can the RECORD still say what was
+      # approved and why, six months later. Different question, different
+      # failure modes, so it is a separate suite rather than more sections
+      # bolted onto the one above. Same two offline seams (ORG_SNAPSHOT and a
+      # stub PROV), so it needs no database and no credential either.
+      - name: request-record integrity suite
+        run: ./test_request_record_integrity.sh
+
+      # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
+      # is a dispatcher, so it is testable without a database: the suite puts
+      # recording fakes for `podman` and `psql` on PATH and asserts the exact
+      # argv, stdin and environment each backend produces. No database, no
+      # credential, no network.
+      - name: SQL backend seam suite
+        run: ./test_sql_backend.sh
+      # TOG-247: the CI status reader that must never report a denial or an
+      # empty result set as green. Offline — a stub GitHub API on 127.0.0.1
+      # serves a different permission/result case off each ref, so this needs no
+      # credential and no network.
+      - name: fail-closed CI status suite
+        run: ./test_gh_ci_status.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
@@ -96,10 +210,118 @@ jobs:
           [ $rc -eq 0 ] && echo "secret scan: clean"
           exit $rc
 
-      # A suite that cannot fail is decoration. This reintroduces the exact
-      # 2026-08-23 bug into a THROWAWAY COPY — never the tracked file — and
-      # requires the suite to reject it. If someone weakens the assertions
-      # later, this step goes red before the regression can ship behind them.
+      # A suite that cannot fail is decoration. Each mutation step below
+      # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
+      # file — and requires the suite to reject it.
+      #
+      # WHY THERE IS A BASELINE ASSERTION IN HERE (TOG-253). Until this commit
+      # these steps copied the suites into a temp directory WITHOUT lib/, which
+      # org_request_queue.sh sources and exits 1 without. The copied suite
+      # therefore failed in that directory no matter what the sed did, and
+      # "the mutated suite failed" was true for a reason that had nothing to do
+      # with the mutation. Both gates passed while proving nothing.
+      #
+      # The fix is not merely `cp -r lib` — it is asserting that the UNMUTATED
+      # copy passes in the same directory first. That single check is what makes
+      # a red result attributable to the mutation, and it is what would have
+      # caught the original hole. mutation_check below does both, and every
+      # mutation step goes through it.
+      - name: Mutation gates — the suites must reject reintroduced defects
+        run: |
+          set -uo pipefail
+
+          # stage <dir> — a runnable copy of the tools, lib/ included.
+          stage() {
+            cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
+               test_responsible_leader.sh test_request_record_integrity.sh "$1/"
+            mkdir -p "$1/lib" && cp lib/*.sh "$1/lib/"
+          }
+
+          # mutation_check <label> <suite> <expect-sibling: yes|no|skip> <sed-expr>...
+          #   1. the unmutated copy must PASS      (else the gate is vacuous)
+          #   2. the mutated copy must still PARSE (else it fails for the wrong reason)
+          #   3. the mutated copy must FAIL        (the actual assertion)
+          mutation_check() {
+            local label="$1" suite="$2" sibling="$3"; shift 3
+            local mut; mut="$(mktemp -d)"; stage "$mut"
+
+            if ! (cd "$mut" && "./$suite" >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy of $suite already fails — this gate proves nothing"
+              (cd "$mut" && "./$suite" 2>&1 | tail -20)
+              rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/org_request_queue.sh"; done
+            if ! bash -n "$mut/org_request_queue.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if ! cmp -s org_request_queue.sh "$mut/org_request_queue.sh"; then :; else
+              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
+              rm -rf "$mut"; return 1
+            fi
+
+            if (cd "$mut" && "./$suite" >/dev/null 2>&1); then
+              echo "::error::$label: $suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+
+            # Cross-check: is this defect visible to the OTHER suite? Pins which
+            # suite is actually carrying the weight, so the two cannot quietly
+            # collapse into one.
+            if [ "$sibling" != "skip" ]; then
+              local other=test_responsible_leader.sh
+              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
+              if (cd "$mut" && "./$other" >/dev/null 2>&1); then
+                [ "$sibling" = "yes" ] && {
+                  echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
+              else
+                [ "$sibling" = "no" ] && {
+                  echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
+                  rm -rf "$mut"; return 1; }
+              fi
+            fi
+            rm -rf "$mut"
+            echo "  ok  $label"
+          }
+
+          rc=0
+
+          # Let a dormant leader be SKIPPED instead of woken. The single most
+          # tempting future "fix" to this design, and it silently turns waiting
+          # into approver-shopping.
+          mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
+            's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
+
+          # An auditor may not clear an override it took itself. Drop that one
+          # comparison and the open-item list becomes self-service: the bypasser
+          # writes the entry AND retires it, a write-only log in audit clothing.
+          mutation_check "self-clearable-override" test_responsible_leader.sh skip \
+            's/rv_id" == "$a_id"/rv_id" == "never-matches"/' || rc=1
+
+          # TOG-253 defect 4, exactly as found: the reason guard back on the
+          # denial path only, leaving approvals unreasoned. Expected to be
+          # INVISIBLE to the authorization suite — a denial still needs a
+          # reason — which is what shows the record suite earns its place.
+          mutation_check "unreasoned-approval" test_request_record_integrity.sh no \
+            's/\[\[ -n "$reason" \]\] || die "every decision/[[ -n "$reason" || "$decision" == "approved" ]] || die "every decision/' || rc=1
+
+          # TOG-253 defect 3: expiry back to being a side effect of an attempted
+          # review. Both halves go together — the reaper and the derivation in
+          # request_state — because either alone still gives the right answer,
+          # which is the point of having both.
+          mutation_check "never-expires" test_request_record_integrity.sh skip \
+            's/^reap_expired() {/reap_expired() { return 0;/' \
+            's/expired "$exp" \&\& rec=/false \&\& rec=/' || rc=1
+
+          # TOG-253 defect 1: the invariant, not the lock. An ambiguous id gets
+          # resolved by tail -1 again instead of being refused.
+          mutation_check "ambiguous-request-id" test_request_record_integrity.sh skip \
+            's/\[\[ "$n" -le 1 \]\]/[[ "$n" -le 99 ]]/' || rc=1
+
+          exit $rc
+
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail
@@ -127,6 +349,194 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # TOG-200. Asserts on the kernel's record — a stub curl on PATH reading
+      # its own /proc/<pid>/cmdline — rather than on the source text, so a
+      # future rewrite of how gh_token.sh calls curl cannot pass by accident.
+      - name: gh_token.sh argv-leak suite
+        run: ./test_gh_token_argv.sh
+
+      # The matching mutation guard. This one is surgical: it leaves the config
+      # file exactly as it is and ADDS the header back on argv, so every other
+      # assertion in the suite still passes and only the /proc check can go red.
+      # That is the point — it proves the /proc detector is what carries this
+      # suite, not the config-file bookkeeping around it.
+      - name: Prove the argv-leak suite still detects a credential on argv
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh_token.sh test_gh_token_argv.sh "$mut/"
+          chmod +x "$mut/gh_token.sh" "$mut/test_gh_token_argv.sh"
+          # TOG-253's rule, applied here too: the UNMUTATED copy must pass in
+          # this same staging directory FIRST. Without it, "the mutated suite
+          # failed" is not attributable to the mutation — the staged copy could
+          # be failing for any reason at all (a missing sibling file, a change
+          # in how GH_TOKEN_SH is resolved) and this gate would still go green
+          # while proving nothing. It passes today; this keeps it honest.
+          if ! GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/base.txt" 2>&1; then
+            echo "::error::the UNMUTATED copy of test_gh_token_argv.sh already fails in the staging dir — this gate proves nothing"
+            tail -25 "$mut/base.txt"
+            exit 1
+          fi
+          before='  curl --config "$cfg" "$@"'
+          after='  curl --config "$cfg" -H "Authorization: Bearer $bearer" "$@"'
+          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+            echo "::error::could not find the curl invocation in curl_authed() to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          # awk, not sed: the replacement is full of characters sed would treat
+          # as syntax, and a mutation that silently does nothing is the one
+          # failure mode this step exists to avoid.
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh_token.sh" > "$mut/gh_token.mut" && mv "$mut/gh_token.mut" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          bash -n "$mut/gh_token.sh"
+          if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the argv-leak suite PASSED against a credential deliberately put back on argv"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # Same discipline for the SQL backend seam. Both mutations below are
+      # things a reasonable person would actually write; neither is a strawman.
+      #
+      # 1. Hand the URI to psql instead of decomposing it. This is the obvious
+      #    one-liner, and it publishes the database password through
+      #    /proc/*/cmdline on a host every company on the box shares.
+      # 2. Auto-select the psql backend when DATABASE_URL happens to be set.
+      #    This reads as a convenience and silently retargets the PROVISIONER —
+      #    which creates and deletes real agents — at whatever that variable
+      #    points to.
+      - name: Prove the SQL backend suite still detects both unsafe shortcuts
+        run: |
+          set -uo pipefail
+          rc=0
+          for m in uri-on-argv sniff-database-url; do
+            mut="$(mktemp -d)"
+            cp -r lib "$mut/"
+            cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
+               org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh "$mut/"
+            node -e '
+              var fs = require("fs");
+              var p = process.argv[1], which = process.argv[2];
+              var s = fs.readFileSync(p, "utf8");
+              var anchor = which === "uri-on-argv"
+                ? "\n  psql \\\n"
+                : "  local b=\"${PAPERCLIP_SQL_BACKEND:-podman}\"";
+              if (s.indexOf(anchor) < 0) {
+                console.error("::error::could not find the " + which + " anchor in lib/pcsql.sh; this guard is now blind, fix it");
+                process.exit(2);
+              }
+              var repl = which === "uri-on-argv"
+                ? "\n  psql \"$DATABASE_URL\" \\\n"
+                : "  local b=\"${PAPERCLIP_SQL_BACKEND:-${DATABASE_URL:+psql}}\"; b=\"${b:-podman}\"";
+              fs.writeFileSync(p, s.replace(anchor, repl));
+            ' "$mut/lib/pcsql.sh" "$m" || exit 2
+            bash -n "$mut/lib/pcsql.sh"
+            if "$mut/test_sql_backend.sh" > "$mut/out.txt" 2>&1; then
+              echo "::error::the SQL backend suite PASSED against the '$m' mutant"
+              cat "$mut/out.txt"; rc=1
+            else
+              echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
+            fi
+          done
+      # Same discipline for the CI status reader (TOG-247). Its entire value is
+      # the refusal to call an unobserved CI green, so a suite that cannot
+      # detect that refusal being weakened is decoration. Both mutations below
+      # are the tempting ones, not invented nonsense:
+      #
+      #   1. Make `unknown` exit 0. This is what someone reaches for the first
+      #      time exit 3 breaks a pipeline — and it silently restores the exact
+      #      false green, because `if gh_ci_status.sh; then merge` goes green on
+      #      a token that was denied.
+      #   2. Drop the no-signal guard, so zero results from a readable source
+      #      falls through to pass. That is the naive "all runs concluded
+      #      success" predicate, which is vacuously true for an empty list.
+      - name: Prove the CI status suite still detects a weakened refusal
+        run: |
+          set -uo pipefail
+          rc=0
+          run_mutation() {
+            mut="$(mktemp -d)"
+            cp gh_ci_status.sh test_gh_ci_status.sh "$mut/"
+            sed -i "$2" "$mut/gh_ci_status.sh"
+            if ! bash -n "$mut/gh_ci_status.sh"; then
+              echo "::error::the $1 mutation no longer parses; this guard is now blind, fix it"
+              rc=1; return
+            fi
+            if diff -q gh_ci_status.sh "$mut/gh_ci_status.sh" >/dev/null; then
+              echo "::error::the $1 mutation changed nothing; the sed no longer matches, so this guard is blind"
+              rc=1; return
+            fi
+            if (cd "$mut" && ./test_gh_ci_status.sh >/dev/null 2>&1); then
+              echo "::error::the CI status suite PASSED against the $1 mutation"
+              rc=1; return
+            fi
+            echo "suite correctly rejects the $1 mutation"
+          }
+          run_mutation "unknown-exits-zero" 's/EXIT=3/EXIT=0/g'
+          run_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/'
+          exit $rc
+
+      # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
+      # strict mode. That is the tempting simplification here — it reads as
+      # "something was requested, so this is scoped" — and it silently reinstates
+      # a token spanning every repo in the installation while GH_APP_SCOPE_STRICT=1
+      # keeps reporting least-privilege. Mutating strictGaps() rather than its
+      # callers reproduces the original semantics at every call site at once.
+      - name: Prove the suite still detects a permissions-only scope passing strict mode
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh-app-token.js test_gh_app_token.sh "$mut/"
+          node -e '
+            var fs = require("fs");
+            var p = process.argv[1];
+            var s = fs.readFileSync(p, "utf8");
+            var anchor = "function strictGaps(scope) {";
+            if (s.indexOf(anchor) < 0) {
+              console.error("::error::could not find strictGaps() to mutate; this guard is now blind, fix it");
+              process.exit(2);
+            }
+            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  if (Object.keys(scope).length > 0) return [];"));
+          ' "$mut/gh-app-token.js"
+          node --check "$mut/gh-app-token.js"
+          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the suite PASSED with strict mode satisfied by permissions alone (TOG-238 regression)"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the strict-mode mutant"
+
+      # The second TOG-238 mutation, and the subtler one. Strict mode gates the
+      # PEM path, so `SOURCE === 'pem'` reads as a correct, even careful,
+      # narrowing — the broker bounds scope server-side, why gate it? Because
+      # the DEFAULT is `auto`, which falls back to the PEM on a retryable broker
+      # failure. Under that spelling a broker outage silently turns the control
+      # off on the one path that mints a ceiling token. This is not a strawman:
+      # it is the exact line the TOG-226 merge produced, caught by this suite.
+      - name: Prove the suite still detects strict mode gated on the wrong source
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh-app-token.js test_gh_app_token.sh "$mut/"
+          before="  if (enforce && SOURCE !== 'broker') assertStrictForPem(scope)"
+          after="  if (enforce && SOURCE === 'pem') assertStrictForPem(scope)"
+          if ! grep -qxF "$before" "$mut/gh-app-token.js"; then
+            echo "::error::could not find the strict-mode source gate to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh-app-token.js" > "$mut/mut.js" && mv "$mut/mut.js" "$mut/gh-app-token.js"
+          chmod +x "$mut/gh-app-token.js"
+          node --check "$mut/gh-app-token.js"
+          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the suite PASSED with strict mode gated on GH_APP_TOKEN_SOURCE === 'pem', which exempts the auto fallback (TOG-238)"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the source-gate mutant"
 
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).

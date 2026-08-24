@@ -26,9 +26,10 @@ must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
 
-q() { PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="${2:-}" podman exec -i \
-        -e PGV_COMPANY_ID -e PGV_TEXT paperclip-db sh -c \
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -v company_id="$PGV_COMPANY_ID" -v text="$PGV_TEXT" -f -' <<<"$1"; }
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+q() { PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="${2:-}" pcsql_run -Atq <<<"$1"; }
 
 sub_id() { # last submitted request id
   jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | tail -1; }
@@ -57,25 +58,25 @@ must_allow "T0 submits a legitimate director request" \
   "$Q" submit --requester T0 --template C1_DIRECTOR_BUILDER --title "TESTQ Director AI Engineering"
 REQ_DIR="$(sub_id)"
 must_refuse "T0 (a chief) cannot review — no org.review_request" \
-  "$Q" review --reviewer T0 --request "$REQ_DIR" --approve
+  "$Q" review --reviewer T0 --request "$REQ_DIR" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "O3 Audit cannot review — independence, not approval authority" \
-  "$Q" review --reviewer O3 --request "$REQ_DIR" --approve
+  "$Q" review --reviewer O3 --request "$REQ_DIR" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "O2 Chief of Staff cannot review" \
-  "$Q" review --reviewer O2 --request "$REQ_DIR" --approve
+  "$Q" review --reviewer O2 --request "$REQ_DIR" --approve --reason "reason supplied so this case asserts authority, not arity"
 
 hdr "4. Separation of duties — no self-approval even with review authority"
 must_allow "O1 submits a request (O1 also holds review authority)" \
   "$Q" submit --requester O1 --template E1_REVIEWER_COACH --title "TESTQ Exec Coach"
 REQ_SELF="$(sub_id)"
 must_refuse "O1 cannot approve its OWN request" \
-  "$Q" review --reviewer O1 --request "$REQ_SELF" --approve
+  "$Q" review --reviewer O1 --request "$REQ_SELF" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "A0 steward can approve O1's request (different principal)" \
-  "$Q" review --reviewer A0 --request "$REQ_SELF" --approve
+  "$Q" review --reviewer A0 --request "$REQ_SELF" --approve --reason "reason supplied so this case asserts authority, not arity"
 COACH_ID="$(jq -r --arg r "$REQ_SELF" 'select(.requestId==$r and .status=="approved")|.newAgentId' "$QUEUE" | tail -1)"
 
 hdr "5. Decisions are final"
 must_refuse "an approved request cannot be re-approved" \
-  "$Q" review --reviewer A0 --request "$REQ_SELF" --approve
+  "$Q" review --reviewer A0 --request "$REQ_SELF" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "an approved request cannot be flipped to rejected" \
   "$Q" review --reviewer A0 --request "$REQ_SELF" --reject --reason "changed mind"
 
@@ -85,11 +86,11 @@ must_refuse "a chief cannot disable a template" \
 must_allow "A0 steward disables C1_DIRECTOR_BUILDER" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer A0
 must_refuse "pending director request is now refused at approval time" \
-  "$Q" review --reviewer A0 --request "$REQ_DIR" --approve
+  "$Q" review --reviewer A0 --request "$REQ_DIR" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "A0 re-enables C1_DIRECTOR_BUILDER" \
   "$Q" enable-template C1_DIRECTOR_BUILDER --reviewer A0
 must_allow "the same request now approves cleanly" \
-  "$Q" review --reviewer A0 --request "$REQ_DIR" --approve
+  "$Q" review --reviewer A0 --request "$REQ_DIR" --approve --reason "reason supplied so this case asserts authority, not arity"
 DIR_ID="$(jq -r --arg r "$REQ_DIR" 'select(.requestId==$r and .status=="approved")|.newAgentId' "$QUEUE" | tail -1)"
 
 hdr "7. Approved requests execute with the requester's placement and exact template"
@@ -114,7 +115,7 @@ REQ_STALE="$(sub_id)"
 must_allow "T0 deactivates the director while its request is still pending" \
   "$PROV" deactivate --caller T0 --target "${DIR_ID:-none}"
 must_refuse "the pending request is refused — stale requester, authority not banked" \
-  "$Q" review --reviewer A0 --request "$REQ_STALE" --approve
+  "$Q" review --reviewer A0 --request "$REQ_STALE" --approve --reason "reason supplied so this case asserts authority, not arity"
 
 hdr "9. Audit trail completeness"
 for ev in request.refused review.refused template.disabled template.enabled create.applied; do
