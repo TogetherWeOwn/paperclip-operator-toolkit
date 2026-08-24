@@ -12,6 +12,7 @@ name: CI
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
+#     mcp/                              see the `mcp-suite` job below
 #
 #   CANNOT RUN HERE:
 #     test_privilege_ceilings.sh
@@ -60,6 +61,11 @@ jobs:
           rc=0
           for f in *.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
+          # mcp/ is ES modules, so --check needs to be told; without the flag
+          # node parses them as CommonJS and every `export` is a syntax error.
+          for f in mcp/*.mjs mcp/test/*.mjs; do
+            node --check --input-type=module < "$f" || { echo "::error file=$f::node parse error"; rc=1; }
+          done
           exit $rc
 
       # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
@@ -250,3 +256,110 @@ jobs:
           fi
           echo "broker suite: passes with GH_APP_* empty, no key in output"
           rm -f out.txt
+
+  # ---------------------------------------------------------------------------
+  # The host-side MCP transport (TOG-196 / TOG-194).
+  #
+  # Separate job, and pinned to Node 24 rather than the 20 the shell job uses,
+  # for the same reason as broker-suite: this code runs on the HOST under the
+  # node the operator actually has, and `node --test` semantics have moved
+  # between those majors. Testing the transport on a Node the host does not run
+  # would be testing the wrong thing.
+  #
+  # Zero dependencies by design — no npm install step here, and there should
+  # never be one. This process runs as the operator user with podman access;
+  # an npm tree next to that is a supply-chain surface the server is small
+  # enough not to need.
+  #
+  # Gated on EXIT STATUS, never a test count. See the header.
+  mcp-suite:
+    name: org-request-mcp suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: org-request-mcp regression suite
+        run: node --test mcp/test/org-request-mcp.test.mjs
+
+      # A suite that cannot fail is decoration, and this one guards an IDENTITY
+      # boundary — the property the whole epic rests on. Both mutations below
+      # are real, tempting simplifications rather than invented nonsense, and
+      # the suite must reject each of them. Written with node -e and no single
+      # quotes inside, matching the style of the offline-suites mutations above.
+      #
+      # MUTATION 1: silently ignore a forged identity argument instead of
+      # refusing it. This is the most likely future "cleanup" — buildQueueArgs
+      # never reads a `requester` key anyway, so the denylist looks redundant.
+      # It is not. A silent drop lets a caller believe it acted as someone else
+      # right up until it reads the audit log; the refusal has to be loud.
+      - name: Prove the suite rejects a silently-ignored identity argument
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp -r mcp "$mut/"
+          node -e '
+            var fs = require("fs");
+            var p = process.argv[1];
+            var s = fs.readFileSync(p, "utf8");
+            var needle = "const bad = Object.keys(args).find((key) => FORBIDDEN_ARGUMENT_NAMES.has(key));";
+            if (s.indexOf(needle) < 0) {
+              console.error("::error::could not find the identity-argument guard to mutate; this check is now blind, fix it");
+              process.exit(2);
+            }
+            fs.writeFileSync(p, s.replace(needle, "const bad = undefined;"));
+          ' "$mut/mcp/org-request-mcp.mjs"
+          if node --test "$mut/mcp/test/org-request-mcp.test.mjs" >/dev/null 2>&1; then
+            echo "::error::the suite PASSED against a silently-dropped identity argument"
+            exit 1
+          fi
+          echo "suite correctly rejects the silent-drop mutation"
+
+      # MUTATION 2: let an unreachable database fail OPEN. The tempting version
+      # is "do not take the transport down just because podman hiccuped" — which
+      # converts a database outage into an authentication bypass, because the
+      # agent header is then trusted on its own.
+      - name: Prove the suite rejects a fail-open run check
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp -r mcp "$mut/"
+          node -e '
+            var fs = require("fs");
+            var p = process.argv[1];
+            var s = fs.readFileSync(p, "utf8");
+            var needle = "    if (failure) {";
+            if (s.indexOf(needle) < 0) {
+              console.error("::error::could not find the run-check failure branch to mutate; this check is now blind, fix it");
+              process.exit(2);
+            }
+            fs.writeFileSync(p, s.replace(needle, "    if (failure) { return; }\n    if (false) {"));
+          ' "$mut/mcp/org-request-mcp.mjs"
+          if node --test "$mut/mcp/test/org-request-mcp.test.mjs" >/dev/null 2>&1; then
+            echo "::error::the suite PASSED against a fail-open run corroboration check"
+            exit 1
+          fi
+          echo "suite correctly rejects the fail-open mutation"
+
+      # The transport must never grow a path to the provisioner. This is a
+      # source-level assertion because it is cheaper than any test and the
+      # constraint is absolute: the queue is the only entry point.
+      - name: Prove the transport cannot reach the provisioner
+        run: |
+          set -uo pipefail
+          rc=0
+          if grep -n "org_provisioner" mcp/org-request-mcp.mjs | grep -qv "never the provisioner"; then
+            echo "::error::org-request-mcp.mjs references the provisioner"; rc=1
+          fi
+          # execFile only, and only with an argv array. A shell would make every
+          # argument-hygiene test in the suite meaningless.
+          for bad in "execSync" "spawnSync" "shell: true" "eval("; do
+            if grep -nF "$bad" mcp/org-request-mcp.mjs; then
+              echo "::error::mcp/org-request-mcp.mjs uses $bad; this transport shells out only via execFile with an argv array"; rc=1
+            fi
+          done
+          [ $rc -eq 0 ] && echo "transport surface: clean"
+          exit $rc
