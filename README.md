@@ -18,6 +18,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
+| `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
 | `ROLLBACK.md` | Rollback procedures. |
 
 ## Running the suites
