@@ -341,6 +341,37 @@ must_refuse "a chief still cannot disable a template" \
 must_allow "the steward still can" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer A0
 
+# TOG-255. The ceiling check used to interpolate the caller-supplied --template
+# into a `grep -E` pattern, so a metacharacter turned "is this template inside my
+# ceiling?" into "does my ceiling match this pattern?". Every case below is a
+# template MGR may NOT request; each one was ALLOWED before the fix.
+#
+# These are not spelled with must_refuse alone. must_refuse only asserts that
+# SOME refusal happened, and a bad fix that rejected every exotic string would
+# satisfy it for the wrong reason — so the exact-match cases below prove the
+# legitimate template still gets through, and the reason is asserted too.
+reset
+must_refuse "a wildcard template does not match the whole ceiling" \
+  "$Q" submit --requester MGR --template '.*' --title "TESTQ Regex Wildcard"
+must_refuse "  ...nor does an alternation smuggling a director past a specialist" \
+  "$Q" submit --requester MGR --template 'C1_DIRECTOR_BUILDER|E0_SPECIALIST' --title "TESTQ Regex Alternation"
+must_refuse "  ...nor a single-character wildcard standing in for the last letter" \
+  "$Q" submit --requester MGR --template 'E0_SPECIALIS.' --title "TESTQ Regex Dot"
+must_refuse "  ...nor a character class" \
+  "$Q" submit --requester MGR --template 'E0_SPECIALIS[T]' --title "TESTQ Regex Class"
+eq "all four refusals are on the ceiling, not on some incidental parse error" \
+   "$(jq -r 'select(.event=="request.refused")|.reason' "$GRANT_LOG" | sort | uniq -c | tr -s ' ' | sed 's/^ //')" \
+   "4 template_above_request_ceiling"
+must_allow "and the exact template MGR really may request still submits" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Exact Still Works"
+
+# The same helper steers derive_leader, so the bypass also chose the approver:
+# under a pattern every ancestor "could create it", making the nearest manager
+# the responsible leader for a template nobody is entitled to.
+eq "a pattern cannot make the nearest ancestor look qualified" \
+   "$(who_f 1 MGR '.*')" "escalate"
+eq "  ...and it names no leader" "$(who_f 2 MGR '.*')" ""
+
 hdr "12. An override is SURFACED, and only an independent auditor retires it"
 # Section 6 proves the bypass is WRITTEN. Recording it into a file nobody reads
 # is the same as not recording it, so this section proves somebody is SHOWN it,
