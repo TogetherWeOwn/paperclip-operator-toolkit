@@ -85,15 +85,39 @@ test("default profile carries no organization_* or members scope", () => {
     assert.notEqual(key, "administration");
   }
   assert.deepEqual(Object.keys(DEFAULT_PERMISSION_PROFILE).sort(), [
+    "checks",
     "contents",
     "issues",
     "metadata",
     "pull_requests",
+    "statuses",
   ]);
 });
 
 test("workflows is excluded from the default profile", () => {
   assert.equal(DEFAULT_PERMISSION_PROFILE.workflows, undefined);
+});
+
+// The CI-visibility permissions are read-only on purpose. checks and statuses
+// both exist as `write` on this App, and a copy-paste of the granted level
+// would hand every agent the ability to POST fabricated check runs and commit
+// statuses — i.e. to mark its own PR green.
+test("the CI-visibility permissions are read, never write", () => {
+  assert.equal(DEFAULT_PERMISSION_PROFILE.checks, "read");
+  assert.equal(DEFAULT_PERMISSION_PROFILE.statuses, "read");
+});
+
+// TOG-247 refused actions:read because it also grants workflow LOG download,
+// and logs carry whatever CI printed. This test is the guard on that decision:
+// it is expected to fail loudly if someone adds the permission back for
+// convenience. If you are here because it failed, read WITHHELD_CI_SOURCES in
+// scope.js before changing it — the refusal is the point, not an oversight.
+test("actions is excluded from the default profile, deliberately", () => {
+  assert.equal(
+    DEFAULT_PERMISSION_PROFILE.actions,
+    undefined,
+    "actions:read also grants workflow log download; TOG-247 refused it",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -642,31 +666,42 @@ test("an unknown routeKey is rejected", async () => {
 // it will not see until much later.
 // ---------------------------------------------------------------------------
 
-test("the default profile cannot observe CI, and the grant says so", () => {
+// Since the TOG-247 decision the default profile CAN observe CI. This is the
+// acceptance test for that change: an agent minting with no overrides must be
+// able to answer "did my own PR pass" from check runs and commit statuses.
+test("the default profile can observe CI from checks and statuses", () => {
   const v = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
-  assert.equal(v.observable, false);
-  assert.deepEqual(v.readable, []);
-  assert.deepEqual(v.blind.sort(), ["actions", "checks", "statuses"]);
-  assert.ok(v.warning, "a blind grant must carry a warning");
+  assert.equal(v.observable, true);
+  assert.deepEqual(v.readable.sort(), ["checks", "statuses"]);
+  assert.equal(v.warning, null, "an observable grant must not carry a standing warning");
 });
 
-// The specific misreading this whole issue is about. The warning has to say
-// that an empty result is a denial, not an absence of CI — a warning that only
-// said "you lack checks:read" would leave the dangerous inference intact.
-test("the warning names the empty-list misreading, not just the missing scope", () => {
-  const { warning } = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+// The refusal has to survive contact with a reader. `actions` is absent from
+// the default grant, but it must not show up as a gap — it reports as withheld,
+// with the reason attached, so the next agent to read a mint response does not
+// file "we should add actions:read" as an improvement.
+test("actions reports as withheld-by-decision, not as a blind spot", () => {
+  const v = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+  assert.deepEqual(v.blind, [], "no source should read as an unclosed gap");
+  assert.deepEqual(Object.keys(v.withheld), ["actions"]);
+  assert.match(v.withheld.actions, /log/i, "the reason must name log download");
+  assert.match(v.withheld.actions, /TOG-247/);
+});
+
+// A grant that really is blind must still say so in the dangerous terms. This
+// is the pre-decision profile — the shape an older deployment, or an App whose
+// ceiling is narrower than our profile, still hands out.
+test("a blind grant still names the empty-list misreading, not just the missing scope", () => {
+  const legacy = { contents: "write", pull_requests: "write", metadata: "read" };
+  const { warning, observable } = describeCiVisibility(legacy);
+  assert.equal(observable, false);
   assert.match(warning, /denied/i);
   assert.match(warning, /not treat the absence of failing checks as a pass/i);
+  // Every source is named when nothing is readable, withheld ones included:
+  // a caller who can see no CI at all needs the complete list to diagnose it.
   for (const scope of ["checks:read", "actions:read", "statuses:read"]) {
     assert.ok(warning.includes(scope), `warning should name ${scope}`);
   }
-});
-
-test("granting checks:read makes CI observable and drops the warning", () => {
-  const v = describeCiVisibility({ ...DEFAULT_PERMISSION_PROFILE, checks: "read" });
-  assert.equal(v.observable, true);
-  assert.deepEqual(v.readable, ["checks"]);
-  assert.equal(v.warning, null, "an observable grant must not carry a standing warning");
 });
 
 // checks:read and statuses:read are different permissions. A grant that can

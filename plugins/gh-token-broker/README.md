@@ -58,48 +58,74 @@ Response:
   "permissions": { "contents": "write", "…": "…" },
   "scope": { "repoSource": "project", "profileSource": "default" },
   "ciVisibility": {                            // advisory; see below
-    "observable": false,
-    "readable": [],
-    "blind": ["checks", "actions", "statuses"],
-    "warning": "This token cannot read CI status: every source returns 403. …"
+    "observable": true,
+    "readable": ["checks", "statuses"],
+    "blind": [],
+    "withheld": { "actions": "withheld by decision: actions:read also grants …" },
+    "warning": null
   }
 }
 ```
 
-### `ciVisibility` — why the mint says what it cannot see (TOG-247)
+### `ciVisibility` — what the mint can and cannot see (TOG-247)
 
-The default profile grants no `checks`, `actions` or `statuses` read, so a token
-minted from it **cannot observe CI**. That is a legitimate posture — the operator
-may well want a human to verify before merge — but it is dangerous *silently*,
-because the natural way to ask "did CI pass" fails green in two directions:
+The default profile grants `checks:read` and `statuses:read`, so a token minted
+from it **can** observe whether its own PR passed. It does **not** grant
+`actions:read`, and that absence is a decision — see below.
+
+This matters because the natural way to ask "did CI pass" fails *green* in two
+directions, and one of them survives granting the permission:
 
 | what happens | HTTP | what a naive gate concludes |
 |---|---|---|
 | token lacks `checks:read` | `403` | parses `.check_runs` out of the error body, gets nothing, reads it as "no CI configured" |
 | token has `checks:read`, ref has no runs yet | `200`, `total_count: 0` | "all zero runs succeeded" — vacuously true |
 
-So the mint response states the blindness outright rather than leaving the caller
-to discover it at a merge gate. It is **advisory only**: it changes what the
-caller knows, never what the token can do. The grant is decided by the profile
-and by GitHub, and re-deciding it here would be a second source of truth for the
-blast radius.
+So the mint response states its own visibility outright rather than leaving the
+caller to discover it at a merge gate. It is **advisory only**: it changes what
+the caller knows, never what the token can do. The grant is decided by the
+profile and by GitHub, and re-deciding it here would be a second source of truth
+for the blast radius.
 
 `observable` is computed from **what GitHub actually granted**, not from what was
 requested — if the App's own ceiling is narrower than the profile, the caller is
 told it is blind based on the real grant.
 
+#### Why `actions:read` is refused
+
+`blind` and `withheld` are separate fields on purpose. `blind` is a gap someone
+might reasonably close; `withheld` is a decision they should not.
+
 Measured against the live installation, 2026-08-24:
 
-| token permissions | `check-runs` |
-|---|---|
-| `contents,pull_requests,issues,metadata` (the default) | `403` |
-| … `+ workflows:write` (what Ops Tooling has) | `403` — `workflows` does not help |
-| … `+ actions:read, checks:read` | `200`, 6 runs |
+| token permissions | `check-runs` | `actions/runs` | `commits/{sha}/status` | `runs/{id}/logs` |
+|---|---|---|---|---|
+| `contents,pull_requests,issues,metadata` (the old default) | `403` | `403` | `403` | `403` |
+| … `+ workflows:write` (what Ops Tooling has) | `403` | `403` | `403` | `403` — `workflows` does not help |
+| … `+ checks:read, statuses:read` (**the default**) | `200` | `403` | `200` | `403` |
+| … `+ actions:read, checks:read` | `200` | `200` | `403` | `200` — 47 KB zip |
 
-Note `statuses` is a **separate** permission: a token holding `actions:read` and
-`checks:read` still gets `403` from `/commits/{ref}/status`, so a repo whose CI
-posts commit statuses rather than check runs stays invisible. `ciVisibility`
-reports the three sources separately for that reason.
+That last cell is the whole decision. `actions:read` also grants full workflow
+**log** download, and logs carry whatever CI printed, including an accidentally
+echoed secret; check-run *conclusions* do not. Under TOG-191 every agent on this
+host shares uid 1000 and can read every other agent's environment, so granting
+the fleet a log-download capability to answer "is my PR green" is a bad trade
+when the conclusions already answer it.
+
+The accepted cost, stated plainly: a red check shows as red with **no reason
+attached**, and whoever picks it up reproduces the failure locally. That is a
+real recurring inconvenience, and it was chosen over a standing exfiltration
+path. Do not add `actions:read` back as a convenience.
+
+Note `statuses` is a **separate** permission from `checks`: a token holding
+`actions:read` and `checks:read` still gets `403` from `/commits/{ref}/status`,
+so a repo whose CI posts commit statuses rather than check runs stays invisible
+to a checks-only grant. Both are granted, and `ciVisibility` reports the three
+sources separately for that reason.
+
+Both new permissions are **read**, never write. `checks` and `statuses` exist as
+`write` on this App, and granting at that level would let any agent POST a
+fabricated check run or commit status — that is, mark its own PR green.
 
 The consuming side of this contract is [`gh_ci_status.sh`](../../gh_ci_status.sh)
 at the repo root, which turns the three sources into a three-state verdict and
@@ -114,12 +140,21 @@ Entirely server-side, from the issue the caller demonstrably holds:
    of the issue's primary workspace.
 2. **Permissions** — `GH_APP_PERMISSIONS` on the project, falling back to the
    default profile: `contents:write`, `pull_requests:write`, `issues:write`,
-   `metadata:read`.
+   `metadata:read`, `checks:read`, `statuses:read`.
 
 A project's `GH_APP_PERMISSIONS` **replaces** the default profile rather than
 intersecting with it. That is deliberate: a project must be able to grant
 `workflows:write` (Ops Tooling does) *and* to narrow below the default, and
 intersection would quietly make the second case impossible.
+
+> **Consequence, and it bites.** A project that pins `GH_APP_PERMISSIONS` does
+> **not** inherit later additions to the default profile. When TOG-247 added
+> `checks:read` and `statuses:read`, Ops Tooling was the one project with a pin
+> — so it would have stayed CI-blind while the six unpinned projects gained
+> visibility, in the very repo the issue was found in. Its pin was updated by
+> hand at the same time. **If you add a permission to the default profile, audit
+> the pinned projects in the same change**, or the change is a silent no-op
+> exactly where someone already cared enough to pin.
 
 `workflows:write` is deliberately **not** in the default profile and is granted
 per project. GitHub rejects an entire ref push when a branch touches

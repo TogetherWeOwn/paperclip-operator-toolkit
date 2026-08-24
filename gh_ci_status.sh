@@ -26,6 +26,7 @@ set -uo pipefail
 #   ------------------------------------  ---------------------------
 #   contents,pull_requests,issues,metadata  403 not accessible
 #   + workflows:write                       403 not accessible   <- no help
+#   + checks:read, statuses:read            200 total_count: 6   <- the default
 #   + actions:read, checks:read             200 total_count: 6
 #   (checks:read, commit predating CI)      200 total_count: 0   <- vacuous
 #   (checks:read, SHA not in repo)          422 no commit found
@@ -35,6 +36,13 @@ set -uo pipefail
 # the permission, and produces the same false green. Hence: three states, never
 # two. "I could not observe CI" is a distinct answer from "CI passed", and this
 # tool will not collapse them however inconvenient that is at a merge gate.
+#
+# Since the TOG-247 decision the broker's default profile grants `checks:read`
+# and `statuses:read`, so a normally-minted agent token reaches `pass`/`fail`
+# here rather than `unknown`. Both remaining reasons for `unknown` are still
+# live and still matter: `actions:read` is deliberately NOT granted (it also
+# grants workflow LOG download), and the vacuous case above is unaffected by
+# any permission. Keep gating on the exit code, not on the presence of a token.
 #
 # USAGE
 #   ./gh_ci_status.sh <owner>/<repo> <ref>
