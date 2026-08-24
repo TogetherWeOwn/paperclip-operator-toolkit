@@ -16,7 +16,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | — |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
+| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. `scope-check` reports whether strict mode accepts an environment without minting. | `test_gh_app_token.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `ROLLBACK.md` | Rollback procedures. |
 
@@ -50,8 +50,11 @@ These are load-bearing and were each learned by breaking something:
   this box shares the host.
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
-- **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1` so an
-  unscoped mint fails rather than silently returning a ceiling token.
+- **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
+  `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
+  Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a
+  permissions-only scope passed the check while still minting across every repo in the installation.
+  Narrowing *what* a token may do is not a substitute for narrowing *where* it may do it.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once; the tests now pin exit codes.

@@ -156,6 +156,12 @@ mkdir -p "$TMP/scratch"
 mint_count() { local n; n="$(grep -c 'ACCESS_TOKENS' "$REQLOG" 2>/dev/null)"; echo "${n:-0}"; }
 
 RC=0; OUT=""; ERR=""; MINTS=0
+# Extra NAME=VALUE pairs spliced into the `env -i` line. The scope variables have
+# to be injected rather than exported, because `env -i` is the whole point of the
+# runner: an inherited environment would let the operator's real settings decide
+# what the suite is testing. Default empty, so every pre-existing test runs with
+# no scope configured exactly as before.
+EXTRA_ENV=()
 run_tool() { # run_tool [--stdin <text>] <args...>
   local stdin_text=""
   if [[ "${1:-}" == "--stdin" ]]; then stdin_text="$2"; shift 2; fi
@@ -170,6 +176,7 @@ run_tool() { # run_tool [--stdin <text>] <args...>
     GH_APP_PRIVATE_KEY="$FAKE_PEM" \
     GH_APP_TOKEN_CACHE="$CACHE" \
     PAPERCLIP_RUN_SCRATCH_DIR="$TMP/scratch" \
+    ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     "$TOOL" "$@" 2>"$TMP/stderr")"
   RC=$?
   ERR="$(cat "$TMP/stderr")"
@@ -284,6 +291,127 @@ if [[ $RC -eq 0 ]] && grep -q "password=$CACHE_CANARY" <<<"$OUT" && grep -q 'use
 else
   bad "credential get for github.com did not answer (rc=$RC) — this would break git"
 fi
+
+hdr "6. GH_APP_SCOPE_STRICT=1 must require a BOUNDED REPO SCOPE (TOG-238)"
+# THE BUG (measured 2026-08-24, deployed copy line 92): strict mode was
+# satisfied by `Object.keys(scope).length > 0` — an OR across the two halves. So
+# GH_APP_PERMISSIONS alone passed the check while the minted token still carried
+# repository_selection: "all", i.e. every repo in the installation. Strict mode
+# reported least-privilege and delivered org-wide repo reach.
+#
+# This matters more than a missing permission set, and is easy to get backwards:
+# the permissions half narrows WHAT the token may do, the repositories half
+# narrows WHERE. Only the second one bounds blast radius across repos, and it is
+# the one that was optional.
+#
+# WHY THESE TESTS ARE NOT VACUOUS. Every case below supplies a full fake
+# credential environment (see the header) and asserts THREE things via
+# must_not_mint: non-zero exit, nothing token-shaped emitted, and zero mint
+# requests reaching the stub API. A regression that restores the OR would mint
+# the ceiling token, trip TRAP 1 or TRAP 2, and fail here — a check on exit
+# status alone would not distinguish "refused" from "died for another reason".
+strict_env() { EXTRA_ENV=("GH_APP_SCOPE_STRICT=1" "$@"); }
+
+# --- the acceptance criterion: permissions set, repos NOT set -----------------
+strict_env "GH_APP_PERMISSIONS=contents=write,metadata=read"
+must_not_mint "strict + GH_APP_REPOS unset (permissions alone must NOT satisfy strict)" nonzero token
+
+# Set-but-empty and whitespace-only are the shapes this actually arrives in: the
+# projection writes GH_APP_REPOS whether or not the project pinned a value, so
+# "" is the common case in the field, not a contrived one. CI pins GH_APP_REPOS:''
+# for the same reason.
+strict_env "GH_APP_PERMISSIONS=contents=write" "GH_APP_REPOS="
+must_not_mint "strict + GH_APP_REPOS='' (set but empty is not a scope)" nonzero token
+
+strict_env "GH_APP_PERMISSIONS=contents=write" "GH_APP_REPOS=  ,   , "
+must_not_mint "strict + GH_APP_REPOS whitespace/commas only" nonzero token
+
+# --- the other half, and neither ----------------------------------------------
+strict_env "GH_APP_REPOS=paperclip-ops-tooling"
+must_not_mint "strict + GH_APP_PERMISSIONS unset (repos alone must NOT satisfy strict)" nonzero token
+
+strict_env
+must_not_mint "strict + neither half set" nonzero token
+
+# The credential-helper path is how git actually reaches this tool, so strict
+# mode must hold there too. A gap here would mean every `git push` bypassed the
+# check that `token` enforces.
+strict_env "GH_APP_PERMISSIONS=contents=write"
+must_not_mint "strict + repos unset, via 'credential get' (git's real path)" nonzero \
+  --stdin $'protocol=https\nhost=github.com\n\n' credential get
+
+hdr "7. Strict mode must still mint when BOTH halves are bounded"
+# The negative controls above are only meaningful if the tool can still do its
+# job. Without this, deleting currentScope() entirely would pass section 6.
+strict_env "GH_APP_REPOS=paperclip-ops-tooling" "GH_APP_PERMISSIONS=contents=write,metadata=read"
+run_tool token
+if [[ $RC -eq 0 && "$OUT" == "$STUB_CANARY" && "$MINTS" -eq 1 ]]; then
+  ok "strict + both halves bounded still mints (scoped, so it correctly misses the 'ceiling' cache entry)"
+else
+  bad "strict + both halves bounded did not mint: rc=$RC mints=$MINTS out='${OUT:0:24}...' err='${ERR:0:80}'"
+fi
+
+# Equivalent flags must satisfy strict mode identically, or the documented
+# --repos/--permissions forms become a way to trip a check the env vars pass.
+EXTRA_ENV=("GH_APP_SCOPE_STRICT=1")
+run_tool token --repos paperclip-ops-tooling --permissions contents=write
+if [[ $RC -eq 0 && "$MINTS" -eq 1 ]]; then
+  ok "strict is satisfied by --repos/--permissions flags too"
+else
+  bad "strict rejected the flag form: rc=$RC mints=$MINTS err='${ERR:0:80}'"
+fi
+
+hdr "8. Strict mode OFF must keep working unchanged (no silent breakage)"
+# The hardening must not change behaviour for anyone who has not opted in.
+# Deploying this must be inert until GH_APP_SCOPE_STRICT=1 is set, which is what
+# lets the rollout be sequenced behind the project-less set (TOG-226).
+EXTRA_ENV=()
+run_tool token
+if [[ $RC -eq 0 && "$OUT" == "$CACHE_CANARY" ]]; then
+  ok "strict unset + no scope still mints the ceiling token as before"
+else
+  bad "strict unset changed behaviour: rc=$RC out='${OUT:0:24}...' — this would break every unstrict caller"
+fi
+
+EXTRA_ENV=("GH_APP_SCOPE_STRICT=0")
+run_tool token
+if [[ $RC -eq 0 && "$OUT" == "$CACHE_CANARY" ]]; then
+  ok "GH_APP_SCOPE_STRICT=0 is not strict (only the literal '1' enables it)"
+else
+  bad "GH_APP_SCOPE_STRICT=0 was treated as strict: rc=$RC out='${OUT:0:24}...'"
+fi
+
+hdr "9. 'scope-check' must answer without minting (the rollout preflight)"
+# `scope` and `verify` mint in order to report, so neither can be swept across
+# environments that are about to start failing. scope-check answers from config
+# alone: no JWT, no network, no credential. If it ever mints, an operator
+# sweeping every agent env would issue a token in each one.
+EXTRA_ENV=("GH_APP_SCOPE_STRICT=1" "GH_APP_PERMISSIONS=contents=write")
+must_not_mint "scope-check flags an unbounded repo scope, non-zero, without minting" nonzero scope-check
+if grep -q '"repositoriesBounded": false' <<<"$OUT" && grep -q '"wouldMint": false' <<<"$OUT"; then
+  ok "scope-check names the missing half in its report"
+else
+  bad "scope-check did not report the missing repo scope: '${OUT:0:120}'"
+fi
+
+EXTRA_ENV=("GH_APP_SCOPE_STRICT=1" "GH_APP_REPOS=paperclip-ops-tooling" "GH_APP_PERMISSIONS=contents=write")
+must_not_mint "scope-check passes a fully bounded env, still without minting" 0 scope-check
+if grep -q '"wouldMint": true' <<<"$OUT"; then
+  ok "scope-check confirms a bounded env would mint"
+else
+  bad "scope-check did not confirm a bounded env: '${OUT:0:120}'"
+fi
+
+# Reported even when strict is off, so an environment can be fixed BEFORE strict
+# is switched on rather than discovered by an outage afterwards.
+EXTRA_ENV=("GH_APP_PERMISSIONS=contents=write")
+must_not_mint "scope-check reports gaps with strict off, but exits 0" 0 scope-check
+if grep -q '"repositoriesBounded": false' <<<"$OUT" && grep -q '"strictMode": false' <<<"$OUT"; then
+  ok "scope-check surfaces the gap pre-emptively with strict off"
+else
+  bad "scope-check hid the gap when strict was off: '${OUT:0:120}'"
+fi
+EXTRA_ENV=()
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
