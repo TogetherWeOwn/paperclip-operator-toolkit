@@ -26,9 +26,10 @@ must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
 
-q() { PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="${2:-}" podman exec -i \
-        -e PGV_COMPANY_ID -e PGV_TEXT paperclip-db sh -c \
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -v company_id="$PGV_COMPANY_ID" -v text="$PGV_TEXT" -f -' <<<"$1"; }
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+q() { PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="${2:-}" pcsql_run -Atq <<<"$1"; }
 
 sub_id() { # last submitted request id
   jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | tail -1; }
