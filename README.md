@@ -33,12 +33,21 @@ told at decision time, `org_request_queue.sh overrides` lists the open ones and 
 one into a finding. It stays open until an auditor who did *not* take it clears it with a written
 note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logged.
 
+**The requester is told.** Every terminal transition — approved, rejected, expired, failed — notifies
+the agent that submitted the request: the reason on a denial, the seated agent's id on an approval,
+and the fact of expiry, which previously woke nobody at all. Delivery is an outbox and never a gate:
+the decision is committed before delivery is attempted, a failed delivery is logged rather than
+retried into a different recipient, and `inbox --for <ROLE>` works with no transport, no credential
+and no network. Push makes a decision timely; pull is what makes it reliable. See
+[docs/responsible-leader.md](docs/responsible-leader.md) and `notify_paperclip_issue.sh`.
+
 ## What is here
 
 | Tool | Purpose | Suite |
 |---|---|---|
 | `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
-| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader. | `test_responsible_leader.sh` (offline), `test_request_queue.sh` (live) |
+| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
+| `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. | covered via the stub transport in `test_decision_notify.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
