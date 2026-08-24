@@ -223,9 +223,26 @@ f() { cut -f"$1" <<<"$2"; }   # field $1 of a resolve_agent row
 ceiling_for() { "$PROV" ceiling 2>/dev/null | awk -v t="$1" '$1==t{$1="";print}'; }
 
 # May template $2 be CREATED by a caller whose profile is $1 ? (create ceiling)
+#
+# The ceiling is a comma-separated list, so the entries are split out and matched
+# LITERALLY, one at a time. This used to interpolate $2 into a `grep -E` pattern
+# instead, which inverted the question: the caller supplies --template, so a
+# metacharacter stopped asking "is my template in the ceiling?" and started
+# asking "does the ceiling match my pattern?" — and `.*` matches every ceiling
+# there is. `[[ x == "$y" ]]` with the right side QUOTED is the literal
+# comparison; unquoting it would reintroduce the same class of bug as a glob.
+#
+# derive_leader calls this too, so the bypass also chose the approver: under a
+# pattern every ancestor looked able to create the template, which made the
+# requester's own manager the responsible leader for a template nobody was
+# entitled to. See TOG-255 and section 11 of test_responsible_leader.sh.
 may_create() {
   [[ -n "$1" && -n "$2" ]] || return 1
-  grep -qE "(^|[ ,])${2}([ ,]|\$)" <<<"$(ceiling_for "$1")"
+  local entry
+  while IFS= read -r entry; do
+    [[ "$entry" == "$2" ]] && return 0
+  done < <(ceiling_for "$1" | tr ', \t' '\n' | grep -v '^$')
+  return 1
 }
 
 # May template $2 be REQUESTED by a caller whose profile is $1 ?
