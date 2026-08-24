@@ -467,6 +467,80 @@ must_allow "a break-glass decision taken by A0" \
   "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "O1 may clear an override A0 took" \
   "$Q" ack-override --request "$REQ" --auditor O1 --note "P3 dormant; reviewed by P1"
+hdr "13. Approval-time re-validation, offline"
+# TOG-197 names four properties that must survive the authority change. Sections
+# 5-12 cover two of them (no self-approval, execution as the original requester).
+# The other two — the two-time ceiling check and template disablement at approval
+# time — were covered ONLY by test_request_queue.sh, which needs Postgres and
+# podman and so never runs in CI. Deleting either check from org_request_queue.sh
+# left this suite green, which means nothing automated was holding them. These
+# cases close that: the org fixture is mutated BETWEEN submit and review, which
+# is exactly the window the defence exists for.
+must_refuse_with() { local d="$1" pat="$2"; shift 2; local o; o="$("$@" 2>&1)"; local rc=$?
+  if [[ $rc -ne 0 ]] && grep -qi -- "$pat" <<<"$o"; then ok "$d"
+  else bad "$d (rc=$rc, wanted /$pat/)"; sed 's/^/        /' <<<"$o" | head -3; fi; }
+provisioned_count() { [[ -f "$CREATE_ARGV" ]] && wc -l < "$CREATE_ARGV" | tr -d ' ' || echo 0; }
+
+# --- template disabled after submit -----------------------------------------
+reset
+must_allow "MGR submits, and the template is disabled while it is pending" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Frozen"
+REQ="$(last_sub)"
+must_allow "A0 disables E0_SPECIALIST" "$Q" disable-template E0_SPECIALIST --reviewer A0
+must_refuse_with "the responsible leader cannot approve a disabled template" \
+  "currently disabled" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+must_refuse_with "  ...and standing authority cannot approve it either" \
+  "currently disabled" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+eq "  ...the refusal is logged as template_disabled" \
+   "$(jq -r 'select(.reason=="template_disabled")|.reason' "$GRANT_LOG" | tail -1)" "template_disabled"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+must_allow "a disabled template does not trap the request — it can still be denied" \
+  "$Q" review --reviewer DIR --request "$REQ" --reject --reason "template frozen; withdraw"
+
+# --- requester demoted after submit ------------------------------------------
+reset
+must_allow "MGR submits, then is demoted before the decision" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Demoted"
+REQ="$(last_sub)"
+sed -i 's/^u-mgr\tMGR\tD1_MANAGER/u-mgr\tMGR\tE0_SPECIALIST/' "$ORG_SNAPSHOT"
+must_refuse_with "a demoted requester's pending request is refused at approval" \
+  "ceiling changed" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+eq "  ...logged as ceiling_changed_since_submit" \
+   "$(jq -r 'select(.reason=="ceiling_changed_since_submit")|.reason' "$GRANT_LOG" | tail -1)" \
+   "ceiling_changed_since_submit"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+
+# --- requester terminated after submit ---------------------------------------
+reset
+must_allow "MGR submits, then is terminated before the decision" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Terminated"
+REQ="$(last_sub)"
+sed -i 's/^\(u-mgr\tMGR\tD1_MANAGER\t\)idle/\1terminated/' "$ORG_SNAPSHOT"
+must_refuse_with "a terminated requester's pending request is refused at approval" \
+  "is terminated" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+
+# --- requester removed, and requester re-created under the same role id ------
+# Both are reviewed by A0: with the submitting agent id gone, no leader is
+# derivable, so the standing floor is the only reviewer that can reach the
+# re-validation at all. The point is that reaching it does not help.
+reset
+must_allow "MGR submits, then is deleted outright" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Vanished"
+REQ="$(last_sub)"
+grep -v '^u-mgr	' "$ORG_SNAPSHOT" > "$ORG_SNAPSHOT.tmp" && mv "$ORG_SNAPSHOT.tmp" "$ORG_SNAPSHOT"
+must_refuse_with "a vanished requester's request is not executable by anyone" \
+  "no longer exists" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+
+reset
+must_allow "MGR submits, then MGR is re-created as a different agent" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Impostor"
+REQ="$(last_sub)"
+sed -i 's/^u-mgr\tMGR\t/u-mgr2\tMGR\t/' "$ORG_SNAPSHOT"
+must_refuse_with "authority does not transfer to a new agent holding the same role id" \
+  "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

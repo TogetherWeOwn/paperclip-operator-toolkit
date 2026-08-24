@@ -346,6 +346,19 @@ jobs:
           mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
             's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
 
+          # TOG-197's two-time validation: the requester's ceiling is checked at
+          # SUBMIT and RE-CHECKED at approval against freshly-read state. Drop
+          # the re-check and a pending request banks the authority its requester
+          # held when it submitted — so a demotion, a transfer or a termination
+          # between submit and approval no longer reaches the decision. This is
+          # the TOCTOU defence TOG-194 says must survive the epic intact, and
+          # until TOG-258 the only coverage of it lived in test_request_queue.sh,
+          # which needs Postgres and podman and never runs here. `no`: the record
+          # suite does not see this one, which is what shows the authorization
+          # suite carries it.
+          mutation_check "banked-stale-authority" test_responsible_leader.sh no \
+            's/^  may_request "$now_tpl"/  true "$now_tpl"/' || rc=1
+
           # An auditor may not clear an override it took itself. Drop that one
           # comparison and the open-item list becomes self-service: the bypasser
           # writes the entry AND retires it, a write-only log in audit clothing.
