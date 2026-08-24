@@ -48,6 +48,7 @@ note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logg
 | `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
+| `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
 | `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
 

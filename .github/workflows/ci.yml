@@ -17,6 +17,7 @@ name: CI
 #                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
+#     gh-event-capture                  see the `capture-suite` job below
 #
 #   CANNOT RUN HERE:
 #     test_privilege_ceilings.sh
@@ -631,4 +632,104 @@ jobs:
             exit 1
           fi
           echo "broker suite: passes with GH_APP_* empty, no key in output"
+          rm -f out.txt
+
+  # ---------------------------------------------------------------------------
+  # gh-event-capture (TOG-289 / TOG-244).
+  #
+  # The self-hosted GitHub webhook store that stands in — partially, and the
+  # README is emphatic about which parts — for the org audit log GitHub Free
+  # does not give us.
+  #
+  # Its own job for the same reason as `broker-suite`: a different runtime
+  # concern from the shell suites, and a failure here should read as "the
+  # capture suite went red", not as one opaque "CI failed".
+  #
+  # NO INSTALL STEP, and that is not an omission. This directory has zero
+  # runtime and zero dev dependencies: `node --test` on the sources, an
+  # in-memory store standing in for D1, and a stub HTTP server for the shell
+  # tools. Nothing here reaches npm, Cloudflare or GitHub. If a dependency ever
+  # becomes necessary, the `--include=dev --ignore-scripts` install and the
+  # did-it-actually-land guard from `broker-suite` are the pattern to copy.
+  #
+  # Gated on EXIT STATUS, never on a test count. See the header.
+  capture-suite:
+    name: gh-event-capture suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gh-event-capture
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: the suite uses the global Request/Response/Headers and the
+      # WebCrypto that the Workers runtime provides, so testing on a Node that
+      # lacks them would be testing a different program than the one deployed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Syntax check
+        run: |
+          set -euo pipefail
+          npm run check
+          for f in scripts/*.sh test/*.sh; do bash -n "$f"; done
+
+      - name: Receiver suite
+        run: npm test
+
+      - name: Shell tool suite
+        run: ./test/test_scripts.sh
+
+      # The assertion behind every other step here. Reintroduce the exact bug
+      # this module exists to prevent — a receiver that accepts without
+      # verifying the signature — into a THROWAWAY COPY, never the tracked
+      # file, and require the suite to reject it.
+      #
+      # The URL is public by construction, so "we verify signatures" is the
+      # whole security model. A suite that would stay green without the
+      # verification is decoration, and it would be believed.
+      - name: Prove the suite detects a receiver that skips verification
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp -r src test package.json "$mut/"
+          node -e '
+            const fs = require("fs")
+            const p = process.argv[1]
+            const s = fs.readFileSync(p, "utf8")
+            const call = "const verdict = await verifySignature({ secret: webhookSecret, body: bodyBytes, header: signature })"
+            if (!s.includes(call)) {
+              console.error("::error::could not find the verification call to mutate; this guard is now blind, fix it")
+              process.exit(2)
+            }
+            fs.writeFileSync(p, s.replace(call, "const verdict = { ok: true }"))
+          ' "$mut/src/app.js"
+          node --check "$mut/src/app.js"
+          if (cd "$mut" && node --test test/capture.test.mjs > out.txt 2>&1); then
+            echo "::error::the suite PASSED against a receiver that does not verify signatures"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          echo "suite correctly went red against the unverifying mutant"
+
+      # The shell suite fabricates its own RSA key and stubs the GitHub API.
+      # Anything that starts needing a real credential is a regression in the
+      # suite's isolation, not a networking problem to open the runner up for.
+      - name: Prove the shell suite needs no credential and leaks no key
+        env:
+          GH_APP_ID: ''
+          GH_APP_PRIVATE_KEY: ''
+        run: |
+          set -uo pipefail
+          ./test/test_scripts.sh > out.txt 2>&1; rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::the shell suite requires a credential to pass; it must not"
+            cat out.txt; exit 1
+          fi
+          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
+            echo "::error::private key material reached the suite's stdout"
+            exit 1
+          fi
+          echo "shell suite: passes with GH_APP_* empty, no key in output"
           rm -f out.txt
