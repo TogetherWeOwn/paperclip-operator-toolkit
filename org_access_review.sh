@@ -17,6 +17,8 @@
 #   8. SUBTREE SANITY    — reporting chain is acyclic and rooted
 #   9. SECRET PROJECTION — every env.* secret binding has a matching
 #                          adapterConfig.env declaration that actually projects
+#  10. STANDING OVERRIDES — provisioning requests decided under break-glass
+#                          authority OVER the responsible leader, unacknowledged
 #
 # Read-only. Exits non-zero when findings exist, so it can be wired to CI,
 # a cron, or a routine.
@@ -36,8 +38,12 @@ note()  { printf '  \033[33mFINDING\033[0m  %s\n' "$1"; FINDINGS=$((FINDINGS+1))
 good()  { printf '  \033[32mOK\033[0m       %s\n' "$1"; }
 hdr()   { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-sql() { podman exec -i -e C="$COMPANY_ID" "$PAPERCLIP_DB_CTR" sh -c \
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -F"|" -v cid="$C" -f -' <<<"$1"; }
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+# Takes the SQL as an argument rather than on stdin, as it always has; the
+# helper wants it on stdin. See lib/pcsql.sh for the backend choice.
+sql() { PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -F"|" <<<"$1"; }
 
 # Declared role templates. Source of truth is the provisioner so the review and
 # the provisioner can never drift apart.
@@ -273,6 +279,35 @@ if [[ -z "$orphan_decl" ]]; then
   good "no adapterConfig.env entry references a secret the agent is not granted"
 else
   while read -r od; do [[ -n "$od" ]] && note "declared but not granted: $od"; done <<<"$orphan_decl"
+fi
+
+# ---------------------------------------------------------------------------
+hdr "10. Standing-authority overrides on the provisioning queue"
+# TOG-194 gave the standing authority set (P4/P1) a break-glass path to decide a
+# request OVER the responsible leader derived from the reporting chain, so a
+# dormant leader cannot deadlock its subtree. The design accepted that trade on
+# the explicit condition that the bypass is VISIBLE — docs/responsible-leader.md
+# says the control is that it "is visible to org_access_review.sh". This is that
+# sentence being true. Until this check existed, an override was written to the
+# queue and read by nobody.
+#
+# Read-only, no database: it shells out to the queue's own reporting command so
+# the two cannot drift, and that command is DB-free by construction.
+QUEUE_CLI="${QUEUE_CLI:-$HERE/org_request_queue.sh}"
+if [[ ! -x "$QUEUE_CLI" ]]; then
+  note "org_request_queue.sh not found next to this script — standing-authority overrides went UNREVIEWED"
+else
+  ov_json="$(COMPANY_ID="$COMPANY_ID" "$QUEUE_CLI" overrides --json 2>/dev/null)"; ov_rc=$?
+  if [[ $ov_rc -gt 1 ]]; then
+    note "could not read the provisioning request queue (exit $ov_rc) — standing-authority overrides went UNREVIEWED"
+  elif [[ -z "$ov_json" ]]; then
+    good "no unacknowledged standing-authority overrides on the provisioning queue"
+  else
+    while IFS= read -r ov; do
+      [[ -n "$ov" ]] || continue
+      note "$(jq -r '"standing-authority override, unacknowledged: \(.reviewer) decided \(.requestId) over the responsible leader \(.bypassedLeader) at \(.at) (\(.requester) requesting \(.template)) — clear it with: org_request_queue.sh ack-override --request \(.requestId) --auditor <ROLE> --note \"...\""' <<<"$ov")"
+    done <<<"$ov_json"
+  fi
 fi
 
 # --------------------------------------------------------------------------

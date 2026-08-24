@@ -41,6 +41,9 @@ must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
 eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (got '$2', wanted '$3')"; }
+# For commands whose exit STATUS is the contract (findings=1) rather than
+# refusal (=2), so the two cannot be conflated.
+rc_of() { "$@" >/dev/null 2>&1; echo $?; }
 
 # --- the stub provisioner ---------------------------------------------------
 # `ceiling` re-emits the REAL CEILING_JSON. `create` records its argv and
@@ -162,21 +165,21 @@ must_allow "MGR submits a specialist request" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Backend Engineer"
 REQ="$(last_sub)"
 must_refuse "T0 cannot decide it — an ancestor, but not the RESPONSIBLE one" \
-  "$Q" review --reviewer T0 --request "$REQ" --approve
+  "$Q" review --reviewer T0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "S0 cannot decide it — a peer chief in another subtree" \
-  "$Q" review --reviewer S0 --request "$REQ" --approve
+  "$Q" review --reviewer S0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "O2 Chief of Staff cannot decide it" \
-  "$Q" review --reviewer O2 --request "$REQ" --approve
+  "$Q" review --reviewer O2 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_refuse "the requester cannot decide its own request" \
-  "$Q" review --reviewer MGR --request "$REQ" --approve
+  "$Q" review --reviewer MGR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "DIR — the responsible leader — approves" \
-  "$Q" review --reviewer DIR --request "$REQ" --approve
+  "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "execution ran as the ORIGINAL REQUESTER, not the reviewer" \
    "$(grep -c -- '--caller MGR' "$CREATE_ARGV")" "1"
 eq "  ...and the reviewer could not redirect placement" \
    "$(grep -c -- '--caller DIR' "$CREATE_ARGV")" "0"
 must_refuse "an approved request cannot be re-decided" \
-  "$Q" review --reviewer DIR --request "$REQ" --approve
+  "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 
 hdr "6. Standing authority is a floor and a break-glass, and the bypass is recorded"
 reset
@@ -184,7 +187,7 @@ must_allow "MGR submits again" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Second Engineer"
 REQ="$(last_sub)"
 must_allow "A0 steward may still decide it (break-glass)" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve
+  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "the bypass is recorded as an override naming the leader" \
    "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override.bypassedLeader' "$QUEUE")" "DIR"
 reset
@@ -192,9 +195,9 @@ must_allow "O1 submits a request of its own (escalate mode)" \
   "$Q" submit --requester O1 --template E1_REVIEWER_COACH --title "TESTQ Exec Coach"
 REQ="$(last_sub)"
 must_refuse "O1 cannot approve its own request despite standing authority" \
-  "$Q" review --reviewer O1 --request "$REQ" --approve
+  "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "A0 can, as the escalation floor" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve
+  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "a floor decision is NOT flagged as an override" \
    "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override' "$QUEUE")" "null"
 
@@ -211,7 +214,7 @@ must_allow "T0 submits a director request" \
   "$Q" submit --requester T0 --template C1_DIRECTOR_BUILDER --title "TESTQ Captive Test"
 REQ="$(last_sub)"
 must_refuse "the steward inside T0's subtree cannot approve T0's request" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve
+  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "  ...and the refusal is logged with its reason" \
    "$(jq -r 'select(.reason=="reviewer_is_descendant_of_requester")|.reason' "$GRANT_LOG" | tail -1)" \
    "reviewer_is_descendant_of_requester"
@@ -255,25 +258,49 @@ must_allow "the amended request is decided on its merits" \
   "$Q" review --reviewer DIR --request "$REQ2" --approve --reason "numbers supplied"
 
 hdr "9. Resubmission is capped — five denials are not a disagreement resubmission fixes"
+# MAX_SUPERSEDE_CHAIN counts RESUBMISSIONS, not requests: the original submission
+# is not an amendment of anything. docs/responsible-leader.md is explicit —
+# "resubmitted five times ... the cap refuses the sixth" — so amendments 1..5 are
+# allowed and the 6th is refused. The original and the amendments are counted
+# separately below because conflating them is precisely the off-by-one that let
+# this cap allow four (TOG-253 defect 2).
 reset
-prev=""
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag original" >/dev/null 2>&1
+prev="$(last_sub)"
+[[ -n "$prev" ]] && ok "the original request is submitted" || bad "the original submit failed"
+"$Q" review --reviewer DIR --request "$prev" --reject --reason "no" >/dev/null 2>&1
+capped=""
 for i in 1 2 3 4 5 6; do
-  if [[ -z "$prev" ]]; then
-    "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag $i" >/dev/null 2>&1
-  else
-    "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag $i" --supersedes "$prev" >/dev/null 2>&1
-  fi
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag $i" \
+       --supersedes "$prev" >/dev/null 2>&1
   rc=$?
-  cur="$(last_sub)"
   if [[ $i -le 5 ]]; then
-    [[ $rc -eq 0 ]] || { bad "resubmission $i should be allowed"; break; }
-    "$Q" review --reviewer DIR --request "$cur" --reject --reason "still no" >/dev/null 2>&1
-    prev="$cur"
+    [[ $rc -eq 0 ]] || { bad "amendment $i of 5 should be allowed"; break; }
+    prev="$(last_sub)"
+    "$Q" review --reviewer DIR --request "$prev" --reject --reason "still no" >/dev/null 2>&1
   else
-    [[ $rc -ne 0 ]] && ok "the sixth attempt is refused; escalate instead of resubmitting" \
-                    || bad "the supersede chain is uncapped"
+    [[ $rc -ne 0 ]] && capped=yes
   fi
 done
+[[ -n "$capped" ]] && ok "the sixth amendment is refused; escalate instead of resubmitting" \
+                   || bad "the supersede chain is uncapped"
+grep -q supersede_chain_exhausted "$GRANT_LOG" \
+  && ok "  ...and the exhausted chain is logged, so the forced escalation is visible" \
+  || bad "  ...but nothing was logged, so no one learns the cap fired"
+
+# The cap must count amendments of ONE DENIAL, not the length of one path.
+# Fanning six amendments off the same denial keeps every one of them at path
+# depth 1, which is how an uncapped re-argument used to slip through.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ fan root" >/dev/null 2>&1
+ROOT="$(last_sub)"
+"$Q" review --reviewer DIR --request "$ROOT" --reject --reason "no" >/dev/null 2>&1
+fan_allowed=0
+for i in 1 2 3 4 5 6 7 8; do
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ fan $i" \
+       --supersedes "$ROOT" >/dev/null 2>&1 && fan_allowed=$((fan_allowed+1))
+done
+eq "fanning amendments off one denial is capped at 5, not unbounded" "$fan_allowed" "5"
 
 hdr "10. Expiry closes a request; it never re-targets it to a softer approver"
 reset
@@ -282,11 +309,19 @@ REQUEST_TTL_DAYS=-1 "$Q" submit --requester MGR --template E0_SPECIALIST \
   || bad "submit failed"
 REQ="$(last_sub)"
 must_refuse "the responsible leader cannot decide an expired request" \
-  "$Q" review --reviewer DIR --request "$REQ" --approve
+  "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+# Filter to STATUS-BEARING events, not merely to the request id. The queue also
+# carries comments, acknowledgements and (since TOG-254) notifications for a
+# request; `tail -1` over all of them reads whichever row happens to be last.
+# That is the same latent bug the queue itself fixed by replacing its denylist
+# with the STATUS_EVENTS allowlist — asserting state by shape rather than by
+# event name makes a test flip on unrelated changes.
 eq "  ...it is marked expired, not escalated" \
-   "$(jq -r --arg r "$REQ" 'select(.requestId==$r)|.status' "$QUEUE" | tail -1)" "expired"
+   "$(jq -r --arg r "$REQ" 'select(.requestId==$r and (
+        .event=="request.submitted" or .event=="request.reviewed" or .event=="request.expired"
+      ))|.status' "$QUEUE" | tail -1)" "expired"
 must_refuse "standing authority cannot decide it either — expiry is not an escalation" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve
+  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "it is answered by resubmitting, which returns to the SAME leader" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Fresh" --supersedes "$REQ"
 eq "  ...and that leader is still DIR" "$(who_f 2 MGR E0_SPECIALIST)" "DIR"
@@ -305,6 +340,102 @@ must_refuse "a chief still cannot disable a template" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer T0
 must_allow "the steward still can" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer A0
+
+hdr "12. An override is SURFACED, and only an independent auditor retires it"
+# Section 6 proves the bypass is WRITTEN. Recording it into a file nobody reads
+# is the same as not recording it, so this section proves somebody is SHOWN it,
+# and that the showing drains rather than accumulating into background noise.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced" >/dev/null 2>&1
+REQ="$(last_sub)"
+banner_err="$("$Q" review --reviewer A0 --request "$REQ" --approve --reason "break-glass banner check" 2>&1 >"$TMP/banner.out")"
+banner="$(cat "$TMP/banner.out")"
+# STDOUT specifically: an agent reviewer reaches this over mcp_remote, and a
+# tool wrapper returns stdout while discarding stderr. A notice delivered only
+# on stderr would be invisible to exactly the reviewer this epic added.
+grep -q 'STANDING-AUTHORITY OVERRIDE' <<<"$banner" \
+  && ok "the reviewer is told on STDOUT, where a tool transport will carry it" \
+  || { bad "the bypass was silent to the agent that took it"; sed 's/^/        /' <<<"$banner"; }
+grep -q "ack-override --request $REQ" <<<"$banner" \
+  && ok "  ...and told exactly what clears it" || bad "banner gives no way to clear it"
+grep -q 'STANDING-AUTHORITY OVERRIDE' <<<"$banner_err" \
+  && ok "  ...and an operator watching stderr sees it too" || bad "no stderr notice"
+
+out="$("$Q" overrides 2>&1)"
+{ grep -q "$REQ" <<<"$out" && grep -q "DIR" <<<"$out"; } \
+  && ok "'overrides' lists it by request, naming the bypassed leader" \
+  || { bad "'overrides' did not surface the bypass"; sed 's/^/        /' <<<"$out"; }
+eq "  ...and exits non-zero, so a cron or CI gate goes red" "$(rc_of "$Q" overrides)" "1"
+
+out="$("$Q" list --status approved 2>&1)"
+grep -q "UNREVIEWED" <<<"$out" \
+  && ok "the default listing carries an OVERRIDE column, not just the thread" \
+  || { bad "list hides the override"; sed 's/^/        /' <<<"$out"; }
+
+eq "check 10 of the access review gets machine-readable input" \
+   "$("$Q" overrides --json | jq -r '.bypassedLeader')" "DIR"
+
+must_refuse "the steward that took it cannot clear it — standing authority is not audit authority" \
+  "$Q" ack-override --request "$REQ" --auditor A0 --note "fine by me"
+must_refuse "an agent without audit authority cannot clear it" \
+  "$Q" ack-override --request "$REQ" --auditor DIR --note "looks ok"
+must_refuse "an acknowledgement without a note is refused" \
+  "$Q" ack-override --request "$REQ" --auditor O3
+must_allow "O3, the independent audit function, clears it with a note" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "DIR was dormant 6d; bypass justified"
+must_refuse "and it cannot be cleared twice" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "again"
+
+eq "the open list drains, so the report can return to green" "$(rc_of "$Q" overrides)" "0"
+eq "  ...but the override is still there under --all" \
+   "$("$Q" overrides --all --json | jq -r '.ack.auditor')" "O3"
+out="$("$Q" thread --request "$REQ" 2>&1)"
+grep -q "OVERRIDE-ACK  by O3" <<<"$out" \
+  && ok "the acknowledgement joins the request's own thread" \
+  || { bad "thread lost the acknowledgement"; sed 's/^/        /' <<<"$out"; }
+
+# Regression guard. An acknowledgement is not a decision. If it is ever allowed
+# to become a request's LAST event, the request loses its status and vanishes
+# from every filtered listing — the audited request would become the one you
+# cannot see, which is exactly backwards.
+out="$("$Q" list --status approved 2>&1)"
+grep -q "$REQ" <<<"$out" \
+  && ok "an acknowledged request is still listed as approved" \
+  || { bad "acknowledging dropped the request from the listing"; sed 's/^/        /' <<<"$out"; }
+grep -q "acked" <<<"$out" && ok "  ...and shows as acked rather than open" || bad "no acked marker"
+
+must_refuse "a request carrying no override cannot be acknowledged" \
+  "$Q" ack-override --request "${REQ}-nope" --auditor O3 --note "phantom"
+
+# The not-your-own-override rule has to be exercised by an agent that would
+# OTHERWISE be allowed to clear it, or the test passes on the wrong check. A0
+# holds standing authority but not acknowledgement authority, so refusing A0
+# above proves nothing about this rule — it is refused either way. O1 holds
+# BOTH, and is the only agent that can take an override and then be tempted to
+# retire it. This is the case the CI mutation step aims at.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced 2" >/dev/null 2>&1
+REQ="$(last_sub)"
+must_allow "O1 takes a break-glass decision of its own" \
+  "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+eq "  ...recorded as an override over DIR" \
+   "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override.bypassedLeader' "$QUEUE")" "DIR"
+must_refuse "O1 cannot clear its OWN override, though it does hold acknowledgement authority" \
+  "$Q" ack-override --request "$REQ" --auditor O1 --note "I stand by it"
+eq "  ...and the refused self-acknowledgement is itself logged" \
+   "$(jq -r 'select(.reason=="self_acknowledgement")|.reason' "$GRANT_LOG" | tail -1)" "self_acknowledgement"
+must_allow "O3 clears it instead" \
+  "$Q" ack-override --request "$REQ" --auditor O3 --note "reviewed independently"
+
+# Availability: P1 is in the acknowledgement set so a dormant P3 cannot wedge
+# the review forever — for overrides P1 did not take.
+reset
+"$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Surfaced 3" >/dev/null 2>&1
+REQ="$(last_sub)"
+must_allow "a break-glass decision taken by A0" \
+  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+must_allow "O1 may clear an override A0 took" \
+  "$Q" ack-override --request "$REQ" --auditor O1 --note "P3 dormant; reviewed by P1"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

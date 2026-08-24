@@ -31,6 +31,13 @@ export const manifest = {
     "http.outbound",
     // Derive scope server-side from the issue the caller actually holds.
     "issues.read",
+    // TOG-309. Held for its *side effects*, not as the gate: the host's
+    // assertCheckoutOwner clears a checkout lock left behind by a terminated run
+    // before it evaluates anything, and adopts an unowned lock for the caller.
+    // The broker calls it best-effort so that behaviour survives the move to
+    // checkoutPolicy "none". A conflict from it is not fatal — its status term
+    // is precisely what TOG-309 widened.
+    "issues.checkout",
     "projects.read",
     "project.workspaces.read",
     // Audit every mint. Never records the token or the PEM.
@@ -58,27 +65,43 @@ export const manifest = {
     {
       // Step 2: the actual broker.
       //
-      // checkoutPolicy MUST be "always-for-agent", not
-      // "required-for-agent-in-progress". Read the host enforcement in
-      // server/dist/routes/plugins.js before changing this:
+      // checkoutPolicy is "none" and the gate lives in the worker
+      // (dist/ownership.js). That reads like a relaxation and is not one. The
+      // three host policies are:
       //
-      //   if (policy === "required-for-agent-in-progress") {
-      //     if (issue.status !== "in_progress" ||
-      //         issue.assigneeAgentId !== req.actor.agentId) return;
-      //   }
+      //   "required-for-agent-in-progress" — NEVER USE. The host reads:
+      //       if (policy === "required-for-agent-in-progress") {
+      //         if (issue.status !== "in_progress" ||
+      //             issue.assigneeAgentId !== req.actor.agentId) return;
+      //       }
+      //     It *skips* assertCheckoutOwner in exactly the case an attacker would
+      //     pick — an issue the caller does not own — so any agent could mint for
+      //     any project in the company by naming a stale issue in it.
       //
-      // That policy *skips* assertCheckoutOwner in exactly the case an attacker
-      // would pick — an issue the caller does not own. It would let any agent
-      // mint a repo-scoped token for any project in the company by naming a
-      // stale issue in that project. "always-for-agent" calls
-      // assertCheckoutOwner unconditionally, which requires status
-      // in_progress + assignee == caller + matching run lock.
+      //   "always-for-agent" — what this route used to be. Asserts ownership
+      //     unconditionally, but hardcodes status == in_progress, which refuses
+      //     an agent working its own issue in in_review. Because the credential
+      //     helper correctly treats the resulting 409 as definitive and will not
+      //     fall back to the org-admin PEM, that refusal kills git (TOG-309).
+      //     The host cannot express a wider status set, and patching the control
+      //     plane is not ours to do.
+      //
+      //   "none" — the host still enforces auth: "agent" and, independently of
+      //     this setting, assertCompanyAccess() against the company resolved
+      //     from the issue below. So cross-company is closed either way. What is
+      //     left — assignee, run lock, status — is asserted in
+      //     assertMintOwnership() before any secret is resolved.
+      //
+      // The honest cost: there is no longer a second, independent enforcement of
+      // the assignee and run-lock terms behind the worker. That is why
+      // ownership.js re-asserts both verbatim, fails closed on an absent field,
+      // and is unit-tested directly.
       routeKey: "mint",
       method: "POST",
       path: "/issues/:issueId/github-token",
       auth: "agent",
       capability: "api.routes.register",
-      checkoutPolicy: "always-for-agent",
+      checkoutPolicy: "none",
       companyResolution: { from: "issue", param: "issueId" },
     },
   ],

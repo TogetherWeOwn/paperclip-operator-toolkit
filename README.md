@@ -25,27 +25,54 @@ makes every check below decorative.
 Who decides a request is derived from the reporting chain, not a fixed pair of roles — see
 [docs/responsible-leader.md](docs/responsible-leader.md).
 
+The standing authority set (`P4_PROVISIONING_STEWARD`, `P1_PRESIDENT_COO`) is retained as an
+escalation floor and a break-glass path, so a dormant leader cannot deadlock its subtree. A
+break-glass decision taken *over* a derivable leader is recorded **and surfaced**: the reviewer is
+told at decision time, `org_request_queue.sh overrides` lists the open ones and exits non-zero,
+`list` carries an `OVERRIDE` column, and check 10 of `org_access_review.sh` turns each unacknowledged
+one into a finding. It stays open until an auditor who did *not* take it clears it with a written
+note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logged.
+
+**The requester is told.** Every terminal transition — approved, rejected, expired, failed — notifies
+the agent that submitted the request: the reason on a denial, the seated agent's id on an approval,
+and the fact of expiry, which previously woke nobody at all. Delivery is an outbox and never a gate:
+the decision is committed before delivery is attempted, a failed delivery is logged rather than
+retried into a different recipient, and `inbox --for <ROLE>` works with no transport, no credential
+and no network. Push makes a decision timely; pull is what makes it reliable. See
+[docs/responsible-leader.md](docs/responsible-leader.md) and `notify_paperclip_issue.sh`.
+
 ## What is here
 
 | Tool | Purpose | Suite |
 |---|---|---|
 | `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
-| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader. | `test_responsible_leader.sh` (offline), `test_request_queue.sh` (live) |
+| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
+| `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
-| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | — |
+| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
+| `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
+| `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
+| `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
-| `ROLLBACK.md` | Rollback procedures. |
+| `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
+| `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
+| `ROLLBACK.md` | Rollback procedures (company bootstrap). |
+| `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
 
 ## Running the suites
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh
+node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
+./test_gh_token_argv.sh
+./test_gh_ci_status.sh
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
+./test_sql_backend.sh
+(cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 export COMPANY_ID=<uuid>
@@ -53,6 +80,34 @@ export COMPANY_ID=<uuid>
 ./test_request_queue.sh
 ./org_access_review.sh --allow-active   # 0 findings expected
 ```
+
+## Which database the tools talk to
+
+`org_provisioner.sh`, `org_request_queue.sh`, `org_access_review.sh` and the two operator suites all
+reach PostgreSQL through `lib/pcsql.sh`. It offers two backends:
+
+```bash
+# Default. Unchanged from before lib/pcsql.sh existed; you need not set anything.
+podman exec -i "$PAPERCLIP_DB_CTR" psql ...      # PAPERCLIP_DB_CTR defaults to paperclip-db
+
+# A plain psql, for a throwaway database that is not the VPS.
+export PAPERCLIP_SQL_BACKEND=psql
+export DATABASE_URL=postgres://user:pass@host:5432/db    # or export the libpq PG* variables
+```
+
+The backend is **selected explicitly and never sniffed**. Setting `DATABASE_URL` alone does not
+switch it: the provisioner creates and deletes real agents, and an operator who happens to have that
+variable exported for an unrelated reason must not silently retarget it.
+
+`DATABASE_URL` is decomposed into libpq's `PG*` variables rather than passed to `psql`, because a
+connection URI carries a password and `/proc/*/cmdline` is world-readable on a host every company on
+this box shares. Unrecognised URL parameters are refused rather than dropped — silently discarding
+`?sslmode=require` would downgrade the connection while the URL still claimed otherwise.
+
+This seam exists so the privilege-ceiling suites can eventually run against a disposable database
+(TOG-202). **It is not sufficient on its own**: those suites drive `org_provisioner.sh`, which
+creates and terminates agents through the Paperclip *API*, so they still need a live server as well
+as a seeded database. `.github/workflows/ci.yml` lists exactly what is still missing.
 
 **Pass/fail is the exit status, never a test count.** Counts drift as suites grow — this file
 carried `104` for the omniroute selftest long after it had passed that — and a count baked into a
@@ -67,11 +122,35 @@ These are load-bearing and were each learned by breaking something:
 
 - **No secrets in this repo, ever.** Credentials live in `~/secure-drop/` at 0600 and are passed by
   inherited environment, never on `argv` — `/proc/*/cmdline` is world-readable and every company on
-  this box shares the host.
+  this box shares the host. A bearer token that must reach `curl` goes into a 0600 `curl --config`
+  file, never `-H`. `gh_token.sh` violated this until TOG-200; `test_gh_token_argv.sh` now asserts it
+  from `/proc` rather than trusting the source to keep reading correctly.
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
-- **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1` so an
-  unscoped mint fails rather than silently returning a ceiling token.
+- **A catch-all arm refuses, and refusing means a non-zero exit.** `gh_token.sh` printed usage on
+  *stdout* and exited **0** for any unrecognised subcommand until TOG-201, so
+  `tok="$(gh_token.sh tokne)" && use "$tok"` proceeded with usage text in `$tok`. Usage errors now go
+  to stderr with exit 2; only `help` / `--help` / `-h` succeed, and they answer *above* the
+  credential preamble so asking a tool how to use it never requires the credentials it sets up.
+  Pinned by `test_gh_token_dispatch.sh`, which asserts exit status and which stream — never wording.
+- **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
+  `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
+  Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a
+  permissions-only scope passed the check while still minting across every repo in the installation.
+  Narrowing *what* a token may do is not a substitute for narrowing *where* it may do it. On the
+  broker path the scope is derived server-side from the issue the caller holds, and a caller may
+  only narrow it.
+- **A safety gate must be keyed on the path taken, not the mode requested.** Strict mode gates the
+  PEM, so gating it on `GH_APP_TOKEN_SOURCE === 'pem'` looks right and isn't: the default `auto`
+  falls back to the PEM on a broker outage, which switched the gate off for the one path that mints
+  a ceiling token. It is asserted where the signing key is actually used.
+- **A cached token is only valid for a credential we still hold.** Keying the cache on the App ID
+  alone meant unbinding `GH_APP_PRIVATE_KEY` revoked nothing — the agent kept authenticating from
+  cache. Entries carry a fingerprint of what minted them, and nothing is written outside per-run
+  scratch: every agent shares uid `node`, so `0600` in a shared tmpdir separates nothing.
+- **A credential helper must fail loudly, not silently.** git discards a helper's exit status and
+  falls through to its own prompt, so a failure has to emit `quit=1` or the last line the operator
+  sees is git's unattributable `could not read Username`.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once; the tests now pin exit codes.
