@@ -183,6 +183,18 @@ jobs:
       - name: decision-notification suite
         run: ./test_decision_notify.sh
 
+      # TOG-198 review. The suite above proves the QUEUE treats the notifier as
+      # untrusted, and proves it well. This one asks the mirror-image question
+      # nobody had asked — whether the NOTIFIER treats its PAYLOAD as untrusted
+      # — because every transport in that suite is a stub, so the reference
+      # transport that actually ships bytes had no coverage at all and carried
+      # three defects: the API key on curl's argv, a requester-chosen URL path,
+      # and a fixed ``` fence a request body could close. Fourth offline seam:
+      # a `curl` stub on PATH, so what would have gone over the wire is an
+      # assertable artifact. No network, no credential.
+      - name: notification-transport suite
+        run: ./test_notify_transport.sh
+
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
       # recording fakes for `podman` and `psql` on PATH and asserts the exact
@@ -375,6 +387,73 @@ jobs:
           # nobody is learning.
           mutation_check "undelivered-gate-always-green" test_decision_notify.sh skip \
             's/\[\[ "$bad" -eq 0 \]\] ||/[[ "$bad" -ge 0 ]] ||/' || rc=1
+
+          # The queue-side half of the steering guard. The transport validates
+          # too, so this gate exists to prove the door check is load-bearing on
+          # its own — without it, deleting the submit-time refusal would leave
+          # every suite green and a hostile address sitting in the audit record.
+          mutation_check "notify-issue-unvalidated-at-submit" test_decision_notify.sh skip \
+            's|^  if \[\[ -n "\$notify_issue" && ! "\$notify_issue" =~.*$|  if false; then|' || rc=1
+
+          # --- the transport's own gates (TOG-198 review) ---------------------
+          # Separate helper because these mutate notify_paperclip_issue.sh, not
+          # org_request_queue.sh, and the suite reaches it through NOTIFY_SH
+          # rather than by cwd. Same three-step contract: the unmutated copy
+          # must pass in the staging dir (or the gate is vacuous), the mutation
+          # must still parse (or it fails for the wrong reason), and the sed
+          # must actually change something (or the code moved and the mutation
+          # silently missed).
+          notify_mutation_check() {
+            local label="$1"; shift
+            local mut; mut="$(mktemp -d)"
+            cp notify_paperclip_issue.sh test_notify_transport.sh "$mut/"
+            chmod +x "$mut/notify_paperclip_issue.sh" "$mut/test_notify_transport.sh"
+
+            if ! NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh 2>&1 | tail -20
+              rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/notify_paperclip_issue.sh"; done
+            if ! bash -n "$mut/notify_paperclip_issue.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s notify_paperclip_issue.sh "$mut/notify_paperclip_issue.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
+              rm -rf "$mut"; return 1
+            fi
+
+            if NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
+              echo "::error::$label: test_notify_transport.sh PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"
+            echo "  ok  $label"
+          }
+
+          # The credential back on argv. /proc/<pid>/cmdline is world-readable
+          # and this box is shared between companies; gh_token.sh:75-131 made
+          # this a repo-wide rule under TOG-200 and the notifier shipped
+          # breaking it, which is how a rule decays — one new caller at a time.
+          notify_mutation_check "notify-credential-on-argv" \
+            's|^  printf .header = "Authorization: Bearer %s..n. "\$PAPERCLIP_API_KEY"$|  :|' \
+            's|^RESP="\$(curl --config "\$CFG" -o /dev/null -w .%{http_code}. 2>&1)"|RESP="$(curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "$(jq -cn --arg b "$MSG" "{body:\\$b}")" "$BASE/api/issues/$ISSUE/comments" 2>\&1)"|' || rc=1
+
+          # The issue id unvalidated, so the least-privileged party in the flow
+          # picks the route an operator-credentialed POST takes. curl resolves
+          # dot segments client-side, so this is not theoretical: `..` in the
+          # id removed /api/issues/ from url_effective entirely.
+          notify_mutation_check "notify-unvalidated-issue-id" \
+            's|^if \[\[ ! "\$ISSUE" =~ \^\[A-Za-z0-9\]\[A-Za-z0-9_-\]\*\$ \]\]; then|if false; then|' || rc=1
+
+          # A fixed ``` fence, which a body containing ``` closes. These
+          # comments WAKE agents, so the forged block that follows is read by a
+          # machine, not merely displayed to a human.
+          notify_mutation_check "notify-fence-not-measured" \
+            's|^FENCE_LEN=\$(( \$(longest_tick_run "\$BODY") + 1 )).*$|FENCE_LEN=3|' || rc=1
 
           exit $rc
 
