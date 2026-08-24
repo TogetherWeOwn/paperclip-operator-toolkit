@@ -18,6 +18,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
+| `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
 | `ROLLBACK.md` | Rollback procedures. |
 
 ## Running the suites
@@ -26,6 +27,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh
 ./omniroute_combo_cli.sh selftest
+./test_sql_backend.sh
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 export COMPANY_ID=<uuid>
@@ -33,6 +35,34 @@ export COMPANY_ID=<uuid>
 ./test_request_queue.sh
 ./org_access_review.sh --allow-active   # 0 findings expected
 ```
+
+## Which database the tools talk to
+
+`org_provisioner.sh`, `org_request_queue.sh`, `org_access_review.sh` and the two operator suites all
+reach PostgreSQL through `lib/pcsql.sh`. It offers two backends:
+
+```bash
+# Default. Unchanged from before lib/pcsql.sh existed; you need not set anything.
+podman exec -i "$PAPERCLIP_DB_CTR" psql ...      # PAPERCLIP_DB_CTR defaults to paperclip-db
+
+# A plain psql, for a throwaway database that is not the VPS.
+export PAPERCLIP_SQL_BACKEND=psql
+export DATABASE_URL=postgres://user:pass@host:5432/db    # or export the libpq PG* variables
+```
+
+The backend is **selected explicitly and never sniffed**. Setting `DATABASE_URL` alone does not
+switch it: the provisioner creates and deletes real agents, and an operator who happens to have that
+variable exported for an unrelated reason must not silently retarget it.
+
+`DATABASE_URL` is decomposed into libpq's `PG*` variables rather than passed to `psql`, because a
+connection URI carries a password and `/proc/*/cmdline` is world-readable on a host every company on
+this box shares. Unrecognised URL parameters are refused rather than dropped — silently discarding
+`?sslmode=require` would downgrade the connection while the URL still claimed otherwise.
+
+This seam exists so the privilege-ceiling suites can eventually run against a disposable database
+(TOG-202). **It is not sufficient on its own**: those suites drive `org_provisioner.sh`, which
+creates and terminates agents through the Paperclip *API*, so they still need a live server as well
+as a seeded database. `.github/workflows/ci.yml` lists exactly what is still missing.
 
 **Pass/fail is the exit status, never a test count.** Counts drift as suites grow — this file
 carried `104` for the omniroute selftest long after it had passed that — and a count baked into a
