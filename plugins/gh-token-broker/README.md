@@ -136,6 +136,53 @@ So the `409` names which of the two real fixes applies — *attach a project* wh
 there is none, *set `GH_APP_REPOS`* when there is one — rather than listing both
 and leaving the caller to work it out.
 
+### A `409` is usually correct, and counting them badly is how this looks worse than it is
+
+Not every project-less issue with git-ish words in it is a gap. Sort them by
+whether the code they name is **in the installation**:
+
+| class | example | is it residue? |
+|---|---|---|
+| names a repo we hold | `paperclip-ops-tooling`, `two-bot` | **yes** — attach it to the project that pins that repo |
+| names the Paperclip control plane | `server/src/services/secrets.ts` | no — no token in this installation reaches it |
+| names an upstream vendor | `omniroute@3.8.49`, `open-sse/…` | no — same |
+| names an operator-side file | `/paperclip/operator-handoff/…` | no — not version-controlled here |
+| no git work at all | a hiring issue | no |
+
+Scanning open project-less issues for git-ish words flags ~25 of 63; only a
+handful are real. Attaching the rest would mint tokens nothing can use, and
+treating them as a broker defect sends you looking for a fix that cannot exist.
+
+### The residue regenerates — this is a standing check, not a migration
+
+The 2026-08-23 sweep drove the count to zero. Within five hours it was four
+again: TOG-289 and TOG-290 were filed project-less, and TOG-289 had already
+pushed a branch to `paperclip-ops-tooling`. Every issue filed without a project
+re-opens the gap, so a number measured once says nothing about the next unbind.
+
+`../../gh_scope_residue.sh` is that check as a command. It mints nothing — it
+reads the board, and optionally asks GitHub for `tog-<n>-*` branches using a
+token the caller already has. It is the board-side half of the pair; the
+configuration-side half is `gh-app-token.js scope-check` (TOG-238), which
+reports whether an environment survives strict mode, also without minting.
+
+Two things about it are worth knowing before you trust a zero:
+
+- **Text scanning alone misses the case that motivated it.** TOG-289 names no
+  repository anywhere in its title or body and had a branch pushed. That is why
+  there is a branch detector, and why a text-only run reports `partial` and
+  exits `3` rather than `0`.
+- **No agent can run the full sweep.** Each agent's token is scoped to its own
+  project's `GH_APP_REPOS`, so it can list branches in those repos and gets
+  *Resource not accessible* on the rest — measured from an Ops Tooling run
+  against `kofra`. A token that could read all eight is the org-wide blast
+  radius TOG-174 removes. So the full sweep belongs host-side, an agent runs
+  `--repos <its own>`, and the union of slices is the gate. Partial coverage
+  never exits `0`.
+
+Even a full sweep is a floor, not a proof: an issue that will do git work, names
+no repo, and has not pushed yet is invisible to both detectors.
+
 ## Security invariants
 
 Each is covered by a test in `test/broker.test.mjs`.
