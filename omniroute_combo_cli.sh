@@ -28,6 +28,22 @@
 #            pattern as previousCombo/newCombo. 'by' (the operator identity) is the
 #            provisioner's own field name, not an invention. See audit().
 #
+#   [RESOLVED-8] The audit log is now PROVEN WRITABLE BEFORE the first mutation, not
+#            discovered unwritable after it. audit() must run after the API write (it
+#            records the server-assigned id), so every audit failure was landing on a
+#            combo change that had already happened. Measured on v0.2.4: an unwritable
+#            log directory produced exit 1 and a bare "Permission denied" AFTER the
+#            PUT, with no record written and nothing on screen saying the combo had
+#            been written; a COMBO_LOG_FILE that was a symlink was followed, so the
+#            record went into the target and a 0644 file was chmod'd to 0600.
+#            Now: preflight_mutate writes a 'run_start' record (proving the path by
+#            using it, not by testing a permission bit); symlinks are refused;
+#            the record is BUILT before the file is touched; and a failure after a
+#            mutation prints "THE MUTATION WAS APPLIED AND IS NOT IN THE LOG", the
+#            backup path, and the exact JSON line to append by hand. Exit code 6.
+#            DO NOT make the chmod or the append best-effort again — "|| true" on
+#            those lines is what let an unrecorded mutation look like a normal error.
+#
 #   [RESOLVED-2] Management auth is a **Bearer API key carrying 'manage' or 'admin'
 #            scope** — requireManagementAuth.ts credential type #4. There is no login
 #            call, no password read and no cookie anywhere in this tool now; the
@@ -98,11 +114,16 @@
 # ------------------------------------------------------------------------------------
 # STILL OPEN — one item, and it needs the operator, not more agent-side work
 # ------------------------------------------------------------------------------------
-#   [OPEN-6] Whether a real manage-scoped key is ACCEPTED by requireManagementAuth.
-#            check-endpoints proves the endpoint is right and enforcing auth; it
-#            cannot prove a credential is correctly scoped, because it deliberately
-#            sends none. That needs one authenticated 'list' by the operator. Until
-#            then, treat the mutation paths as untested against a live server.
+#   [RESOLVED-6] The operator ran an authenticated 'list' on the host with a
+#            manage-scoped key: three combos returned, exit 0. The auth path and the
+#            READ path are proven live.
+#
+#   [STILL OPEN] No MUTATION path has ever run against a live server. apply, delete,
+#            map-apply and map-delete are exercised only against fixtures in the
+#            selftest. As of v0.2.3 the backup that guards them IS exercised for real
+#            (a live WAL database is built, backed up and verified in-suite), but the
+#            writes themselves are not. The TOG-152 bake-off is the first live
+#            exercise. Until it lands, treat every write as unproven.
 #
 # ------------------------------------------------------------------------------------
 # THE CLAUDE CONTAINMENT CONTROL — read this before changing it
@@ -161,13 +182,15 @@
 
 set -euo pipefail
 
-readonly VERSION="0.2.0-proposal"
+readonly VERSION="0.2.5-proposal"
 readonly PROG="${0##*/}"
 
 # ---------------------------------------------------------------------------- config
 : "${OMNIROUTE_BASE_URL:=http://127.0.0.1:20128}"
 : "${OMNIROUTE_ENV_FILE:=./omniroute.env}"
-: "${OMNIROUTE_SQLITE:=./storage.sqlite}"
+# Operator-confirmed host path (2026-08-23). In-container it is /app/data/storage.sqlite,
+# but this tool runs on the HOST, so the host path is the default.
+: "${OMNIROUTE_SQLITE:=$HOME/.local/share/containers/storage/volumes/systemd-omniroute/_data/storage.sqlite}"
 : "${COMBO_ALLOWLIST_FILE:=./omniroute_combo_allowlist.txt}"
 : "${COMBO_BACKUP_DIR:=./backups/omniroute}"
 : "${COMBO_LOG_FILE:=./omniroute-combo-log.jsonl}"      # sibling of provisioner-grant-log.jsonl
@@ -193,6 +216,16 @@ readonly PROG="${0##*/}"
 # silent DATA LOSS on a field the operator may not know exists, and rebinding a leg to
 # a different connection is a legitimate operation that must simply be stated out loud.
 : "${COMBO_ALLOW_REBIND:=0}"
+
+# Set by --allow-reorder. The read-back asserts member ORDER as well as membership,
+# because for priority / fill-first / context-relay / pipeline the list order is the
+# routing order. It is not yet known whether OmniRoute persists members in the order
+# they were sent; if it does not, the first apply will fail closed on the order check
+# rather than report a match it cannot back up. This flag is how the operator records
+# "I have seen that this server reorders, and I accept it" — deliberately a conscious
+# statement rather than a tolerance baked into the comparison, which is exactly how the
+# order blindness got in.
+: "${COMBO_ALLOW_REORDER:=0}"
 
 # The model catalogue is resolved LIVE and is deliberately NOT bundled with this
 # script. TOG-150 and TOG-176 both established that the routing surface must be read
@@ -240,7 +273,11 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 # by a reviewer on any box, including one without sqlite3 or network access.
 preflight_offline() { need jq; need mktemp; need sed; need awk; }
 preflight_online()  { preflight_offline; need curl; }
-preflight_mutate()  { preflight_online; need sqlite3; need sha256sum; }
+# A mutating run must prove three capabilities before it changes anything: that it can
+# UNDO (sqlite engine), that it can VERIFY the undo (sha256), and that it can ACCOUNT
+# for what it did (audit log). The third was missing — the log was only discovered
+# unwritable after the write had already landed.
+preflight_mutate()  { preflight_online; need_sqlite_engine; need_sha256; assert_audit_log_writable "${PREFLIGHT_SUBCOMMAND:-}"; }
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -309,17 +346,75 @@ glob_match() { case "$2" in $1) return 0 ;; *) return 1 ;; esac; }
 # gets timestamps and identity from elsewhere, this tool is run by hand and needs to
 # carry its own. A refusal is logged as loudly as a success — a log that only records
 # what succeeded cannot tell you what was attempted.
+# [RESOLVED-8] audit() runs AFTER the API write on every mutation path — it has to,
+# because it records the id the server assigned. That ordering means an audit failure
+# is not a logging inconvenience: it is a routing change sitting on the server with
+# nothing recording who asked for it or why. Three rules follow, and all three are
+# tested:
+#   1. The path is proven usable in preflight_mutate, BEFORE the backup and the write.
+#   2. The record is BUILT before the file is touched, so a malformed field is caught
+#      while it is still harmless, and so we have the exact line to hand back.
+#   3. A failure after the mutation says "THE MUTATION WAS APPLIED AND IS NOT LOGGED"
+#      and prints the line for manual entry. It must never surface as a bare
+#      "Permission denied", which is what it did before: the operator's last message
+#      was 'updating existing combo id=...' followed by a path error, with nothing
+#      saying the combo had in fact been written.
+#
+# Set by the mutation commands immediately after the API call lands. Read only by
+# audit_failed, to decide whether a failure means "nothing happened" or "something
+# happened and is unrecorded". Those two need different words.
+MUTATION_APPLIED=0
+
+audit_log_path_ok() {   # pure; 0 usable, 2 empty, 3 symlink
+  if [ -z "${COMBO_LOG_FILE:-}" ]; then return 2; fi
+  # -e follows symlinks, so the old code would happily append the audit record to,
+  # and chmod 0600, whatever the link pointed at. Demonstrated: a 0644 victim.txt
+  # became 0600 and gained a combo_apply record.
+  if [ -L "$COMBO_LOG_FILE" ]; then return 3; fi
+  return 0
+}
+
+audit_failed() {
+  local event="$1" why="$2" line="${3:-}"
+  c_red "AUDIT WRITE FAILED for event '$event': $why"
+  if [ "${MUTATION_APPLIED:-0}" = "1" ]; then
+    c_red "THE MUTATION WAS APPLIED AND IS NOT IN THE LOG."
+    c_red "  backup: ${BACKUP_PATH:-<none>}"
+    c_red "  Append this line to $COMBO_LOG_FILE by hand, then fix the log path:"
+  else
+    c_red "  No mutation had been applied at this point; nothing is unrecorded."
+  fi
+  if [ -n "$line" ]; then printf '%s\n' "$line" >&2; fi
+  exit 6
+}
+
+# Proves the log is writable before the first mutation, by writing a real record
+# rather than testing a permission bit — the same reason backup verification checks
+# the artifact instead of the exit status. An aborted run then also leaves a trace.
+assert_audit_log_writable() {
+  local rc=0; audit_log_path_ok || rc=$?
+  case "$rc" in
+    2) die "COMBO_LOG_FILE is empty. Every mutation must be logged; set it to a real path." ;;
+    3) refuse "COMBO_LOG_FILE '$COMBO_LOG_FILE' is a symlink. This tool appends to that
+path and chmods it 0600, so following the link would write the audit record into — and
+change the permissions of — a different file. Point it at a real file." ;;
+  esac
+  audit "run_start" "ok" "$(jq -cn --arg s "${1:-}" '{subcommand:$s}')"
+}
+
 audit() {
   local event="$1" outcome="$2" detail_json="$3"
   local prev_json="${4:-null}" next_json="${5:-null}"
+  local prc=0; audit_log_path_ok || prc=$?
+  [ "$prc" -eq 0 ] || audit_failed "$event" "log path unusable (rc=$prc): ${COMBO_LOG_FILE:-<empty>}"
   local dir; dir="$(dirname "$COMBO_LOG_FILE")"
-  [ -d "$dir" ] || mkdir -p "$dir"
-  if [ ! -e "$COMBO_LOG_FILE" ]; then
-    ( umask 077; : > "$COMBO_LOG_FILE" )
-    chmod 0600 "$COMBO_LOG_FILE"
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" || audit_failed "$event" "cannot create log directory '$dir'"
   fi
-  chmod 0600 "$COMBO_LOG_FILE" 2>/dev/null || true
-  jq -cn \
+  # Build the record BEFORE touching the file (rule 2). jq failing here used to abort
+  # the script with a raw jq usage dump and no indication a combo had just been written.
+  local line jrc=0
+  line="$(jq -cn \
     --arg ts "$(now_iso)" \
     --arg tool "$PROG" \
     --arg ver "$VERSION" \
@@ -338,10 +433,22 @@ audit() {
     '{ts:$ts,tool:$tool,version:$ver,event:$event,callerAgentId:$callerAgentId,
       callerTemplate:$callerTemplate,reason:$reason,by:$by,outcome:$outcome,
       requestId:$requestId,requestIssue:$issue,credentialClass:$credential,
-      previousCombo:$previousCombo,newCombo:$newCombo,detail:$detail}' \
-    >> "$COMBO_LOG_FILE"
+      previousCombo:$previousCombo,newCombo:$newCombo,detail:$detail}')" || jrc=$?
+  [ "$jrc" -eq 0 ] || audit_failed "$event" "could not build the record (jq rc=$jrc); a field was not valid JSON"
+
+  # Create at 0600 rather than creating then narrowing, so the record is never briefly
+  # world-readable. mkdir/creat and the append are each checked: an append that fails
+  # is the case that leaves a mutation unrecorded, so it may not be best-effort.
+  if [ ! -e "$COMBO_LOG_FILE" ]; then
+    ( umask 077; : > "$COMBO_LOG_FILE" ) \
+      || audit_failed "$event" "cannot create '$COMBO_LOG_FILE'" "$line"
+  fi
+  printf '%s\n' "$line" >> "$COMBO_LOG_FILE" \
+    || audit_failed "$event" "append to '$COMBO_LOG_FILE' failed" "$line"
   # Append-only intent: the real guarantee is filesystem/backup policy, not this line.
-  chmod 0600 "$COMBO_LOG_FILE" 2>/dev/null || true
+  # The mode, however, is not advisory — this file names agents and routing changes.
+  chmod 0600 "$COMBO_LOG_FILE" \
+    || audit_failed "$event" "cannot chmod 0600 '$COMBO_LOG_FILE'" "$line"
 }
 
 # Mutations must carry a reason. An unexplained routing change in the log is a row
@@ -695,36 +802,238 @@ api_error_text() {
 }
 
 # ================================================================ BACKUP AND VERIFY
-# sqlite3 .backup, NOT cp: OmniRoute is live and in WAL mode; a cp of a hot database
-# can capture a torn page set that restores to a corrupt file. Verification is
-# integrity_check plus a row-count comparison of the two tables we are about to touch.
+# A SQLite .backup(), NOT cp: OmniRoute is live and in WAL mode, and a cp of the main
+# database file alone silently omits everything still in the -wal. Demonstrated, not
+# assumed — 5 committed rows, cp taken while the WAL was hot:
+#     cp of main file only  -> 4 rows
+#     integrity_check on it -> ok          <-- says the truncated copy is FINE
+#     live truth            -> 5 rows
+# A restore from that backup loses a committed row and nothing warns you. Same
+# silent-success class as the two holes below. Never cp; always .backup().
+#
+# v0.2.3 — THERE IS NO sqlite3 BINARY on the operator's host or inside the omniroute
+# container (operator-verified 2026-08-23). Every call below used to shell out to it,
+# so backup_and_verify could not run at all on the only box it was ever meant to run
+# on — and it failed at the exact moment before a mutation. Python's stdlib sqlite3 is
+# present on both, so the engine is now pluggable and prefers Python. If NEITHER engine
+# exists the tool refuses to mutate: a missing engine must never degrade into
+# "proceed without a backup", because this is the tool's only undo (ROLLBACK.md).
+#
+# v0.2.2 — this verification could PASS ON AN EMPTY BACKUP. Two independent holes:
+#   1. PRAGMA integrity_check returns 'ok' for a ZERO-BYTE file, because a zero-byte
+#      file is a valid empty SQLite database. integrity_check therefore proves the
+#      backup is not corrupt; it proves nothing about whether it captured any data.
+#   2. the row-count comparison read both sides with `2>/dev/null || echo NA`, so when
+#      the counts could not be read the check compared the string NA against the string
+#      NA, found them equal, and reported 'row-counts match'. Two error markers were
+#      being compared to each other. The table names were an unchecked assumption at
+#      the time, which made that the likely path. They have since been confirmed
+#      correct — but the hole was real regardless of which way that fact landed.
+# Together they printed 'backup verified' over a backup holding none of the data it
+# exists to protect, and then mutated. This is the tool's only undo, and the failure is
+# invisible until a restore is attempted — i.e. during an incident.
+# The three helpers below are pure so the offline selftest can reach them: this code
+# runs only on the operator's box behind sqlite3, and an untested guard is the one that
+# will not work.
+
+# [RESOLVED-7] Operator-confirmed against the real storage.sqlite (2026-08-23): both
+# names exist exactly as spelled, in a schema of 118 tables. Live counts at that time
+# were combos=3, model_combo_mappings=0. Still overridable, but no longer an assumption.
+#
+# ⚠ Four neighbours are close enough to catch by accident and are NOT the combo tables:
+#     compression_combos  compression_combo_assignments
+#     combo_adaptation_state  agent_bridge_mappings
+# Every name comparison in this tool is exact (grep -Fxq / SQL on a literal name). Do
+# not "improve" any of it into a glob or a LIKE — a glob here selects the wrong table
+# and the row-count check would then verify a table nobody is mutating.
+: "${COMBO_DB_TABLES:=combos model_combo_mappings}"
+
+# ------------------------------------------------------- portable sqlite engine
+# Preference order is deliberate: python3 FIRST, because the operator's box has the
+# stdlib module and no binary. The binary branch is a fallback for a box with the
+# reverse, not the primary path.
+SQLITE_ENGINE=""
+detect_sqlite_engine() {
+  [ -n "$SQLITE_ENGINE" ] && return 0
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sqlite3' >/dev/null 2>&1; then
+    SQLITE_ENGINE=python; return 0
+  fi
+  if command -v sqlite3 >/dev/null 2>&1; then SQLITE_ENGINE=binary; return 0; fi
+  return 1
+}
+need_sqlite_engine() {
+  detect_sqlite_engine || die "no usable SQLite engine on this box.
+Need EITHER python3 with the stdlib sqlite3 module, OR the sqlite3 binary. Neither found.
+The backup step cannot be skipped: it is this tool's only undo (ROLLBACK.md), so a
+missing engine is a refusal to mutate, not a warning. Install python3 and re-run."
+}
+
+# Paths travel as argv, never interpolated into SQL or a dot-command, so a path
+# containing a quote is a non-event on the python engine.
+readonly PY_SQLITE_HELPER='
+import os, sqlite3, sys
+from urllib.request import pathname2url
+def ro(p):
+    return sqlite3.connect("file:" + pathname2url(os.path.abspath(p)) + "?mode=ro", uri=True)
+op = sys.argv[1]
+if op == "tables":
+    c = ro(sys.argv[2])
+    for (n,) in c.execute(
+        "SELECT name FROM sqlite_master WHERE type=(?) ORDER BY name", ("table",)):
+        print(n)
+elif op == "count":
+    # Identifier cannot be bound; quote it and double any embedded quote.
+    t = sys.argv[3].replace(chr(34), chr(34) * 2)
+    print(ro(sys.argv[2]).execute("SELECT COUNT(*) FROM " + chr(34) + t + chr(34)).fetchone()[0])
+elif op == "integrity":
+    print(ro(sys.argv[2]).execute("PRAGMA integrity_check").fetchone()[0])
+elif op == "backup":
+    src, dest = ro(sys.argv[2]), sqlite3.connect(sys.argv[3])
+    src.backup(dest)          # atomic and WAL-safe; does not lock the live database
+    dest.close(); src.close()
+else:
+    sys.exit("unknown op " + op)
+'
+
+db_tables() {   # <db>
+  case "$SQLITE_ENGINE" in
+    python) python3 -c "$PY_SQLITE_HELPER" tables "$1" ;;
+    binary) sqlite3 "$1" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;" ;;
+    *) die "db_tables called before detect_sqlite_engine" ;;
+  esac
+}
+db_count() {    # <db> <table>
+  case "$SQLITE_ENGINE" in
+    python) python3 -c "$PY_SQLITE_HELPER" count "$1" "$2" ;;
+    binary) sqlite3 "$1" "SELECT COUNT(*) FROM \"${2//\"/\"\"}\";" ;;
+    *) die "db_count called before detect_sqlite_engine" ;;
+  esac
+}
+db_integrity() { # <db>
+  case "$SQLITE_ENGINE" in
+    python) python3 -c "$PY_SQLITE_HELPER" integrity "$1" ;;
+    binary) sqlite3 "$1" 'PRAGMA integrity_check;' ;;
+    *) die "db_integrity called before detect_sqlite_engine" ;;
+  esac
+}
+db_backup() {   # <src> <dest>
+  case "$SQLITE_ENGINE" in
+    python) python3 -c "$PY_SQLITE_HELPER" backup "$1" "$2" ;;
+    binary)
+      # Only the dot-command interpolates the path, so only this branch needs the check.
+      case "$2" in *"'"*)
+        die "backup path contains a single quote, which would break the sqlite3 .backup dot-command: $2" ;;
+      esac
+      sqlite3 "$1" ".backup '${2}'" ;;
+    *) die "db_backup called before detect_sqlite_engine" ;;
+  esac
+}
+
+# sha256sum is coreutils and normally present, but it is a hard dependency at exactly
+# the same moment as the engine, so it gets the same fail-closed treatment.
+need_sha256() {
+  command -v sha256sum >/dev/null 2>&1 && return 0
+  detect_sqlite_engine && [ "$SQLITE_ENGINE" = python ] && return 0
+  die "no way to checksum the backup: need sha256sum or python3. Refusing to mutate."
+}
+file_sha256() { # <file>
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
+  fi
+}
+
+# Verifies the ARTIFACT, not the exit status. rc 2 = missing/empty, rc 3 = not SQLite.
+# Deliberately does not shell out to sqlite3 so the selftest can run it anywhere.
+sqlite_file_ok() {
+  local f="$1" sz hdr
+  [ -f "$f" ] || return 2
+  sz="$(wc -c < "$f" 2>/dev/null || echo 0)"
+  [ "$sz" -gt 0 ] 2>/dev/null || return 2
+  hdr="$(head -c 15 "$f" 2>/dev/null || true)"
+  [ "$hdr" = "SQLite format 3" ] || return 3
+  return 0
+}
+
+# rc 2 = a side was unreadable (the old NA), rc 3 = a genuine mismatch. An unreadable
+# count is never equal to anything, including another unreadable count.
+assert_row_count() {
+  local src="$1" dst="$2" n
+  for n in "$src" "$dst"; do
+    case "$n" in ''|*[!0-9]*) return 2 ;; esac
+  done
+  [ "$src" = "$dst" ] || return 3
+  return 0
+}
+
+# Pure: takes the newline-separated table list already read from sqlite_master.
+tables_missing_from() {
+  local have="$1"; shift
+  local want miss=""
+  for want in "$@"; do
+    printf '%s\n' "$have" | grep -Fxq -- "$want" || miss="${miss}${miss:+ }${want}"
+  done
+  printf '%s' "$miss"
+}
+
 backup_and_verify() {
   local label="$1"
+  need_sqlite_engine
   [ -f "$OMNIROUTE_SQLITE" ] || die "storage.sqlite not found at $OMNIROUTE_SQLITE (set OMNIROUTE_SQLITE)"
-  mkdir -p "$COMBO_BACKUP_DIR"; chmod 0700 "$COMBO_BACKUP_DIR" 2>/dev/null || true
+  mkdir -p "$COMBO_BACKUP_DIR" || die "cannot create backup dir $COMBO_BACKUP_DIR"
+  # This backup is a byte-for-byte copy of the database holding OmniRoute's PROVIDER
+  # CREDENTIALS. Its directory permissions are not a best-effort concern.
+  chmod 0700 "$COMBO_BACKUP_DIR" \
+    || die "cannot chmod 0700 $COMBO_BACKUP_DIR; refusing to write a credential-bearing backup into a directory I cannot restrict"
+
+  # Confirm the tables we are about to count actually exist under the names we assume.
+  # This is what turns hole 2 above from a silent no-op into a precise question.
+  local src_tables miss
+  src_tables="$(db_tables "$OMNIROUTE_SQLITE" 2>&1)" \
+    || die "cannot read the table list from $OMNIROUTE_SQLITE (engine=$SQLITE_ENGINE): $src_tables"
+  miss="$(tables_missing_from "$src_tables" $COMBO_DB_TABLES)"
+  [ -z "$miss" ] || die "table(s) not present in $OMNIROUTE_SQLITE: $miss
+This tool assumed those names and has never run against a real storage.sqlite.
+Tables actually present:
+$(printf '%s\n' "$src_tables" | sed 's/^/  /')
+Set COMBO_DB_TABLES to the correct names and re-run. Refusing to mutate: a backup
+whose row counts cannot be checked is not a verified backup."
+
   local stamp dest
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="${COMBO_BACKUP_DIR}/storage.${stamp}.${label}.sqlite"
+  local berr
+  berr="$(db_backup "$OMNIROUTE_SQLITE" "$dest" 2>&1)" \
+    || die "sqlite backup failed (engine=$SQLITE_ENGINE): ${berr:-no output}; refusing to mutate"
+  chmod 0600 "$dest" \
+    || die "cannot chmod 0600 $dest; refusing to leave a credential-bearing backup readable"
 
-  sqlite3 "$OMNIROUTE_SQLITE" ".backup '${dest}'" \
-    || die "sqlite backup failed; refusing to mutate"
-  chmod 0600 "$dest"
+  # Artifact before exit status: do not trust that sqlite3 returning 0 wrote anything.
+  local frc=0; sqlite_file_ok "$dest" || frc=$?
+  case "$frc" in
+    2) die "backup at $dest is missing or empty even though the $SQLITE_ENGINE engine reported success; refusing to mutate" ;;
+    3) die "backup at $dest is not a SQLite database (bad header); refusing to mutate" ;;
+  esac
 
-  local ic; ic="$(sqlite3 "$dest" 'PRAGMA integrity_check;' 2>&1 || true)"
+  local ic; ic="$(db_integrity "$dest" 2>&1 || true)"
   [ "$ic" = "ok" ] || die "backup integrity_check failed ($ic); refusing to mutate"
 
-  local t
-  for t in combos model_combo_mappings; do
-    local src_n dst_n
-    src_n="$(sqlite3 "$OMNIROUTE_SQLITE" "SELECT COUNT(*) FROM ${t};" 2>/dev/null || echo NA)"
-    dst_n="$(sqlite3 "$dest"             "SELECT COUNT(*) FROM ${t};" 2>/dev/null || echo NA)"
-    [ "$src_n" = "$dst_n" ] || die "backup row-count mismatch on ${t} (source=${src_n} backup=${dst_n}); refusing to mutate"
+  local t src_n dst_n rc
+  for t in $COMBO_DB_TABLES; do
+    # stderr is CAPTURED, not discarded: the sqlite error text is the diagnosis.
+    src_n="$(db_count "$OMNIROUTE_SQLITE" "$t" 2>&1 || true)"
+    dst_n="$(db_count "$dest"             "$t" 2>&1 || true)"
+    rc=0; assert_row_count "$src_n" "$dst_n" || rc=$?
+    case "$rc" in
+      2) die "could not read a row count for ${t} (source=[${src_n}] backup=[${dst_n}]); refusing to mutate — an unverifiable backup is not a backup" ;;
+      3) die "backup row-count mismatch on ${t} (source=${src_n} backup=${dst_n}); refusing to mutate" ;;
+    esac
+    log "  ${t}: ${src_n} rows in source and backup"
   done
 
-  local sum; sum="$(sha256sum "$dest" | awk '{print $1}')"
+  local sum; sum="$(file_sha256 "$dest")"
   BACKUP_PATH="$dest"; BACKUP_SHA="$sum"
   c_grn "backup verified: $dest"
-  log   "  sha256=$sum  integrity_check=ok  row-counts match"
+  log   "  sha256=$sum  integrity_check=ok  row-counts match  engine=$SQLITE_ENGINE"
   audit "backup" "verified" "$(jq -cn --arg p "$dest" --arg s "$sum" '{path:$p,sha256:$s}')"
 }
 
@@ -901,6 +1210,35 @@ bindings_of() {
   jq -c '[(.models // [])[]? | select((.connectionId // "") != "") | {model,connectionId}] | sort' <<<"$1"
 }
 
+# The same bindings, but keeping the leg's position in the members array.
+#
+# bindings_of() SORTS, which makes it blind to a change in *which leg* holds a binding
+# whenever two legs carry the same model id — and that is not a corner case here: the
+# bake-off spec is two legs of 'ocgo/glm-5' across the two live opencode-go connections.
+# Under bindings_of, [legA=connA, legB=connB] and [legA=connB, legB=connA] compare EQUAL.
+# For priority / fill-first / context-relay / pipeline the list order IS the routing
+# order, so that swap changes which upstream serves first while the guard sees no change.
+# A normalisation in the comparison had quietly discarded the field carrying the meaning.
+# 'leg' is the index in the ORIGINAL models array, not in the filtered list, so an
+# unbound leg between two bound ones does not shift the positions of the others.
+# The member-comparison verdict, as a pure function, so the offline selftest exercises
+# the SAME code the live read-back does. Inline in read_back_assert it could only be
+# reached through a live server, and a re-implementation in the test would be a test of
+# the copy rather than of the thing that runs.
+# Echoes exactly one of: match | order | accepted | members
+member_verdict() {
+  local sent="$1" stored="$2" allow="${3:-0}"
+  if [ "$(jq -c 'sort' <<<"$sent")" != "$(jq -c 'sort' <<<"$stored")" ]; then echo members; return; fi
+  if [ "$sent" = "$stored" ]; then echo match; return; fi
+  if [ "$allow" = "1" ]; then echo accepted; else echo order; fi
+}
+
+bindings_ordered() {
+  jq -c '[(.models // []) | to_entries[]?
+          | select((.value.connectionId // "") != "")
+          | {leg: .key, model: .value.model, connectionId: .value.connectionId}]' <<<"$1"
+}
+
 # Refuses an update that would change or drop an existing leg's connection binding.
 # Extracted from cmd_apply so the selftest can exercise it directly — inline in the
 # apply path it would only ever run against a live server, which is precisely how an
@@ -912,7 +1250,22 @@ connection_rebind_check() {
   prev_bound="$(bindings_of "$previous")"
   spec_bound="$(bindings_of "$spec")"
   [ "$prev_bound" = "[]" ] && return 0
-  [ "$prev_bound" = "$spec_bound" ] && return 0
+  if [ "$prev_bound" = "$spec_bound" ]; then
+    # Same SET of bindings. Same positions? Only bindings_ordered can answer that, and
+    # this is the branch where the old code returned 0 unconditionally.
+    local prev_ord spec_ord
+    prev_ord="$(bindings_ordered "$previous")"
+    spec_ord="$(bindings_ordered "$spec")"
+    [ "$prev_ord" = "$spec_ord" ] && return 0
+    if [ "$allow" != "1" ]; then
+      c_red "The stored combo binds the same connections, but this spec moves them to different legs."
+      c_red "  currently stored: $prev_ord"
+      c_red "  this spec sends : $spec_ord"
+      refuse "refusing to silently reorder connection bindings. Leg order is the routing order for priority/fill-first/context-relay/pipeline, so this changes which connection serves first. Re-run with --allow-rebind if the reorder IS the intent. Nothing has been written."
+    fi
+    c_ylw "--allow-rebind: proceeding with a connection-binding REORDER (was: $prev_ord)"
+    return 0
+  fi
   if [ "$allow" != "1" ]; then
     c_red "The stored combo has explicit connection bindings that this spec would change or drop."
     c_red "  currently stored: $prev_bound"
@@ -921,6 +1274,45 @@ connection_rebind_check() {
   fi
   c_ylw "--allow-rebind: proceeding with a connection-binding change (was: $prev_bound)"
   return 0
+}
+
+# One definition of "what this mapping IS", for the same reason bindings_of exists:
+# the pre-write duplicate check, the request capture and the read-back must not be
+# three separately-drifting opinions. Everything is compared as a string because the
+# API has returned priority as both a number and a numeric string.
+mapping_fields_of() {
+  jq -cS '{pattern: (.pattern // ""),
+           comboId: ((.comboId // "") | tostring),
+           priority: ((.priority // 0) | tostring),
+           enabled: (.enabled != false)}' <<<"$1"
+}
+
+# Which mapping row did this write actually create?
+#
+# The previous implementation asked "does a mapping with this pattern exist?" after the
+# POST. That question cannot distinguish a successful create from a mapping that was
+# already there before we ran — and duplicate patterns are entirely possible, since a
+# glob may legitimately appear at more than one priority. So a POST that returned 200
+# and persisted nothing would read back as verified.
+#
+# Identify by the id the server returned; if it returned none, by set difference
+# against the ids seen before the write. Ambiguity is reported, never guessed at.
+# Pure function, no network: $3 is the post-write mapping array.
+identify_new_mapping() {
+  local mid="$1" before_ids="$2" after="$3" row n
+  if [ -n "$mid" ]; then
+    row="$(jq -c --arg i "$mid" 'map(select((.id|tostring)==$i))[0] // null' <<<"$after")"
+    [ "$row" != "null" ] || return 2
+    printf '%s\n' "$row"; return 0
+  fi
+  local new_ids
+  new_ids="$(jq -c --argjson b "$before_ids" '[.[] | .id | tostring] - $b' <<<"$after")"
+  n="$(jq -r 'length' <<<"$new_ids")"
+  case "$n" in
+    1) jq -c --argjson v "$new_ids" 'map(select((.id|tostring)==$v[0]))[0]' <<<"$after"; return 0 ;;
+    0) return 2 ;;
+    *) printf '%s\n' "$new_ids"; return 3 ;;
+  esac
 }
 
 validate_mapping_spec() {
@@ -955,13 +1347,14 @@ validate_mapping_spec() {
 # 200" proves nothing. We re-read and compare what was actually persisted.
 read_back_assert() {
   local combo_id="$1" want_name="$2" want_strategy="$3" want_models_json="$4"
-  local want_bindings="${5:-[]}"
+  local want_bindings="${5:-[]}" want_bindings_ord="${6:-[]}"
   api GET "/api/combos/${combo_id}"
   local got got_name got_strategy got_models got_bindings
   got="$(json_unwrap <<<"$API_BODY")" || die "could not parse read-back response [OPEN-3]"
   got_name="$(jq -r '.name // empty' <<<"$got")"
   got_strategy="$(jq -r '.strategy // empty' <<<"$got")"
-  got_models="$(jq -c '[.models[]? | .model] | sort' <<<"$got")"
+  # NOT sorted: order is asserted separately below. Sorting here was the bug.
+  got_models="$(jq -c '[.models[]? | .model]' <<<"$got")"
   got_bindings="$(bindings_of "$got")"
 
   local ok=1
@@ -971,8 +1364,27 @@ read_back_assert() {
     [ "$got_strategy" = "priority" ] && c_red "  -> this is normalizeRoutingStrategy() silently coercing an unrecognised strategy. The combo is NOT what was requested."
     ok=0
   fi
-  local want_sorted; want_sorted="$(jq -c 'sort' <<<"$want_models_json")"
-  [ "$got_models" = "$want_sorted" ] || { c_red "  read-back MISMATCH members: wanted $want_sorted got $got_models"; ok=0; }
+  # Membership and ORDER are two separate claims and get two separate verdicts. Folding
+  # them together by sorting both sides meant an order change could only ever report as
+  # a match: the comparison normalised away the thing it was meant to detect.
+  case "$(member_verdict "$want_models_json" "$got_models" "$COMBO_ALLOW_REORDER")" in
+    match) ;;
+    accepted)
+      c_ylw "  --allow-reorder: same members, stored in a different order than sent"
+      c_ylw "     sent:   $want_models_json"
+      c_ylw "     stored: $got_models" ;;
+    order)
+      c_red "  read-back MISMATCH member ORDER: sent $want_models_json but stored $got_models"
+      c_red "  -> the same members in a different order. For priority/fill-first/context-relay/"
+      c_red "     pipeline the list order IS the routing order, so this is a live traffic"
+      c_red "     difference, not a cosmetic one."
+      c_red "  -> Nothing is corrupt and the combo does exist. If OmniRoute simply does not"
+      c_red "     preserve member order, re-run with --allow-reorder to accept it knowingly."
+      ok=0 ;;
+    members)
+      c_red "  read-back MISMATCH members: wanted $(jq -c 'sort' <<<"$want_models_json") got $(jq -c 'sort' <<<"$got_models")"
+      ok=0 ;;
+  esac
 
   # Connection bindings. Asserted only where the spec actually asked for one — the
   # server may legitimately assign a connectionId we did not request, and failing on
@@ -981,11 +1393,21 @@ read_back_assert() {
   # that was reviewed. This is the check whose absence would have let a dropped
   # binding read as success.
   if [ "$want_bindings" != "[]" ]; then
-    [ "$got_bindings" = "$want_bindings" ] || {
+    if [ "$got_bindings" != "$want_bindings" ]; then
       c_red "  read-back MISMATCH connection bindings: wanted $want_bindings got $got_bindings"
       c_red "  -> a leg is bound to a different connection than the spec specified. With more than"
       c_red "     one connection per providerId, this changes which upstream actually serves traffic."
-      ok=0; }
+      ok=0
+    elif [ "$want_bindings_ord" != "[]" ] && [ "$(bindings_ordered "$got")" != "$want_bindings_ord" ]; then
+      # Same connections, different legs. Invisible to the sorted comparison above
+      # whenever two legs share a model id — which is the shape of the bake-off spec.
+      c_red "  read-back MISMATCH connection binding ORDER:"
+      c_red "     sent:   $want_bindings_ord"
+      c_red "     stored: $(bindings_ordered "$got")"
+      c_red "  -> the right connections are bound, but to different legs than the spec asked for,"
+      c_red "     which changes which one serves first under an order-sensitive strategy."
+      ok=0
+    fi
   elif [ "$got_bindings" != "[]" ]; then
     c_ylw "  note: the server assigned connection bindings this spec did not request: $got_bindings"
     c_ylw "  Not an error. Copy them into the spec if you want future updates to preserve them."
@@ -999,6 +1421,47 @@ read_back_assert() {
   fi
   c_grn "read-back verified: name, strategy and members match what was requested"
   audit "read_back" "verified" "$(jq -cn --arg id "$combo_id" --arg s "$want_strategy" '{combo:$id,strategy:$s}')"
+}
+
+# Read-back for a created mapping. The combo path has had this since the beginning;
+# the mapping path asserted only that *a* row with the pattern existed, which is not
+# the same claim. Priority is the field that most needs asserting: resolution is
+# priority DESC, created_at ASC, first-match-wins, so a coerced or defaulted priority
+# silently reorders routing while the pattern still looks exactly as reviewed.
+map_read_back_assert() {
+  local mid="$1" before_ids="$2" want_payload="$3"
+  api GET "/api/model-combo-mappings"
+  local after; after="$(json_list_strict "mappings")" || exit 3
+
+  local row rc=0
+  row="$(identify_new_mapping "$mid" "$before_ids" "$after")" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) die "POST returned 200 but the mapping is not present on read-back${mid:+ (server said id '$mid')}.
+  The write was accepted and did not persist. Nothing to roll back, but do not assume
+  the mapping exists. Backup: ${BACKUP_PATH:-<none>}" ;;
+    3) die "POST returned 200 but more than one new mapping appeared: ${row}
+  This write cannot be attributed to a single row. Inspect with '$PROG map-list' before
+  doing anything else. Backup: ${BACKUP_PATH:-<none>}" ;;
+  esac
+
+  local want got
+  want="$(mapping_fields_of "$want_payload")"
+  got="$(mapping_fields_of "$row")"
+  if [ "$want" != "$got" ]; then
+    c_red "  read-back MISMATCH mapping fields:"
+    c_red "    wanted $want"
+    c_red "    got    $got"
+    c_red "  -> the row was created but is not the mapping that was requested. If priority"
+    c_red "     differs, resolution ORDER differs: first-match-wins means this can capture"
+    c_red "     traffic the reviewed spec never described, or be shadowed and never fire."
+    audit "map_read_back" "mismatch" \
+      "$(jq -cn --arg id "$mid" --argjson w "$want" --argjson g "$got" '{mapping:$id,wanted:$w,persisted:$g}')"
+    c_red "Backup for rollback: ${BACKUP_PATH:-<none taken>}"
+    exit 4
+  fi
+  c_grn "mapping created and read-back verified: pattern, comboId, priority and enabled all match"
+  audit "map_read_back" "verified" "$(jq -cn --arg id "$mid" --argjson w "$want" '{mapping:$id,fields:$w}')"
 }
 
 # ===================================================================== SUBCOMMANDS
@@ -1024,7 +1487,9 @@ cmd_dry_run() {
   echo
   log "catalogue consulted: ${CATALOGUE_SOURCE:-none}"
   log "would POST/PUT to ${OMNIROUTE_BASE_URL}/api/combos"
+  detect_sqlite_engine || true
   log "would back up ${OMNIROUTE_SQLITE} to ${COMBO_BACKUP_DIR} and verify before mutating"
+  log "  sqlite engine: ${SQLITE_ENGINE:-NONE FOUND — apply would refuse to mutate}"
   log "would then re-read the combo and assert strategy=='$(jq -r .strategy <<<"$spec")'"
   audit "dry_run" "ok" "$(jq -c '{name,strategy,members:[.models[].model]}' <<<"$spec")"
 }
@@ -1038,7 +1503,7 @@ cmd_apply() {
   local spec; spec="$(cat "${1:--}")"
   validate_spec "$spec"
 
-  local name strategy models_json spec_bindings
+  local name strategy models_json spec_bindings spec_bindings_ord
   name="$(jq -r .name <<<"$spec")"
   strategy="$(jq -r .strategy <<<"$spec")"
   models_json="$(jq -c '[.models[].model]' <<<"$spec")"
@@ -1046,6 +1511,7 @@ cmd_apply() {
   # "no bindings exist": it means we made no claim, so read-back reports what the
   # server chose instead of asserting on it.
   spec_bindings="$(bindings_of "$spec")"
+  spec_bindings_ord="$(bindings_ordered "$spec")"
 
   c_ylw "About to apply combo '$name' (strategy=$strategy, ${#models_json} bytes of members)."
   jq -S '{name,strategy,models}' <<<"$spec" >&2
@@ -1094,9 +1560,11 @@ cmd_apply() {
 
     log "updating existing combo id=$existing_id"
     api PUT "/api/combos/${existing_id}" "$payload"
+    MUTATION_APPLIED=1
   else
     log "creating new combo"
     api POST "/api/combos" "$payload"
+    MUTATION_APPLIED=1
     existing_id="$(json_unwrap <<<"$API_BODY" | jq -r '.id // empty')"
     [ -n "$existing_id" ] || die "create returned no id; expected the combo object or {combo:{...}}. Body: ${API_BODY:0:300}"
   fi
@@ -1105,7 +1573,7 @@ cmd_apply() {
     "$(jq -cn --arg id "$existing_id" --arg b "${BACKUP_PATH:-}" '{combo:$id,backup:$b}')" \
     "$previous" \
     "$(jq -cn --arg id "$existing_id" --arg n "$name" --arg s "$strategy" --argjson m "$models_json" '{id:$id,name:$n,strategy:$s,members:$m}')"
-  read_back_assert "$existing_id" "$name" "$strategy" "$models_json" "$spec_bindings"
+  read_back_assert "$existing_id" "$name" "$strategy" "$models_json" "$spec_bindings" "$spec_bindings_ord"
   c_grn "combo '$name' applied and verified (id=$existing_id)"
 }
 
@@ -1136,6 +1604,7 @@ cmd_delete() {
 
   backup_and_verify "pre-combo-delete"
   api DELETE "/api/combos/${id}"
+  MUTATION_APPLIED=1
   audit "combo_delete" "deleted" \
     "$(jq -cn --arg id "$id" --arg n "$name" --arg b "${BACKUP_PATH:-}" '{combo:$id,name:$n,backup:$b}')" \
     "$previous" "null"
@@ -1164,6 +1633,20 @@ cmd_map_apply() {
   validate_mapping_spec "$spec"
   local pattern; pattern="$(jq -r .pattern <<<"$spec")"
 
+  # Snapshot BEFORE the write. The read-back needs to prove that THIS invocation
+  # created a row, and it cannot do that from the post-write state alone.
+  api GET "/api/model-combo-mappings"
+  local before before_ids
+  before="$(json_list_strict "mappings")" || exit 3
+  before_ids="$(jq -c '[.[] | .id | tostring] | sort' <<<"$before")"
+
+  if jq -e --arg p "$pattern" '[.[] | select(.pattern==$p)] | length > 0' >/dev/null <<<"$before"; then
+    c_ylw "WARNING: a mapping with pattern '$pattern' already exists:"
+    jq -S --arg p "$pattern" '[.[] | select(.pattern==$p)]' <<<"$before" >&2
+    c_ylw "Resolution is priority DESC, created_at ASC, FIRST MATCH WINS. Adding a second row"
+    c_ylw "for the same pattern means one of them can never fire. Confirm only if you mean it."
+  fi
+
   c_ylw "About to create mapping '$pattern' -> $(jq -r .comboId <<<"$spec") at priority $(jq -r .priority <<<"$spec")."
   read -r -p "Type the pattern to confirm: " confirm
   [ "$confirm" = "$pattern" ] || die "confirmation did not match; nothing applied"
@@ -1172,16 +1655,13 @@ cmd_map_apply() {
   local payload
   payload="$(jq -c '{pattern,comboId,priority,enabled:(.enabled // true),description:(.description // "")}' <<<"$spec")"
   api POST "/api/model-combo-mappings" "$payload"
+  MUTATION_APPLIED=1
   local mid; mid="$(json_unwrap <<<"$API_BODY" | jq -r '.id // empty')"
   audit "mapping_apply" "written" \
     "$(jq -cn --arg id "$mid" --arg b "${BACKUP_PATH:-}" '{mapping:$id,backup:$b}')" \
     "null" "$(jq -cn --argjson s "$spec" --arg id "$mid" '{id:$id,spec:$s}')"
 
-  api GET "/api/model-combo-mappings"
-  local maps; maps="$(json_list_strict "mappings")" || exit 3
-  jq -e --arg p "$pattern" '[.[] | select(.pattern==$p)] | length > 0' >/dev/null <<<"$maps" \
-    || die "mapping create returned success but '$pattern' is not present on read-back. Backup: ${BACKUP_PATH:-<none>}"
-  c_grn "mapping created and verified"
+  map_read_back_assert "$mid" "$before_ids" "$payload"
 }
 
 cmd_map_delete() {
@@ -1201,10 +1681,23 @@ cmd_map_delete() {
   [ "$confirm" = "$id" ] || die "confirmation did not match; nothing deleted"
   backup_and_verify "pre-mapping-delete"
   api DELETE "/api/model-combo-mappings/${id}"
+  MUTATION_APPLIED=1
   audit "mapping_delete" "deleted" \
     "$(jq -cn --arg id "$id" --arg b "${BACKUP_PATH:-}" '{mapping:$id,backup:$b}')" \
     "$previous" "null"
-  c_grn "mapping $id deleted"
+
+  # Verify absence. Without this, map-delete was the only mutation in the tool that
+  # reported success on the strength of an HTTP status alone — the exact inference
+  # this tool exists to refuse to make. Ids are compared as strings because the API
+  # has returned both numeric and string ids, and a route that resolves the id
+  # differently from the way we sent it can return 200 having deleted nothing.
+  api GET "/api/model-combo-mappings"
+  local after; after="$(json_list_strict "mappings")" || exit 3
+  if jq -e --arg i "$id" '[.[] | select((.id|tostring)==$i)] | length > 0' >/dev/null <<<"$after"; then
+    die "delete returned success but mapping '$id' is still present on read-back.
+  The routing rule you believe you removed is still live. Backup: ${BACKUP_PATH:-<none>}"
+  fi
+  c_grn "mapping $id deleted and absence verified"
 }
 
 cmd_allowlist_scaffold() {
@@ -1515,6 +2008,52 @@ EOF
     fail=$((fail+1)); c_red "  FAIL  bindings_of disagrees across call sites"
   fi
 
+  # ---- leg-order blindness. Two legs, SAME model id, connections swapped between
+  # them. bindings_of sorts, so both sides are byte-identical and the pre-fix guard
+  # returned 0. This is the bake-off spec's exact shape: two 'ocgo/glm-5' legs across
+  # the two live opencode-go connections, where leg 0 is the one fill-first drains.
+  local SWAP_AB="{\"models\":[{\"model\":\"m\",\"connectionId\":\"$UUID_A\"},{\"model\":\"m\",\"connectionId\":\"$UUID_B\"}]}"
+  local SWAP_BA="{\"models\":[{\"model\":\"m\",\"connectionId\":\"$UUID_B\"},{\"model\":\"m\",\"connectionId\":\"$UUID_A\"}]}"
+  _bcase "same-model legs, connections SWAPPED"  refuse "$SWAP_AB" "$SWAP_BA"
+  _bcase "  ...permitted by --allow-rebind"      allow  "$SWAP_AB" "$SWAP_BA" 1
+  _bcase "identical order is still a no-op"      allow  "$SWAP_AB" "$SWAP_AB"
+  # The property that makes the above possible, asserted directly so a regression in
+  # bindings_of shows up as its own failure rather than only through the guard.
+  if [ "$(bindings_of "$SWAP_AB")" = "$(bindings_of "$SWAP_BA")" ] \
+  && [ "$(bindings_ordered "$SWAP_AB")" != "$(bindings_ordered "$SWAP_BA")" ]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "sorted view blind, ordered view sees it" "ok"
+  else
+    fail=$((fail+1)); c_red "  FAIL  bindings_ordered does not distinguish a leg swap"
+  fi
+  # 'leg' must index the ORIGINAL members array: an unbound leg in front of a bound one
+  # must not renumber it, or the positional comparison drifts against its own spec.
+  local GAP='{"models":[{"model":"m"},{"model":"m","connectionId":"'"$UUID_A"'"}]}'
+  if [ "$(jq -r '.[0].leg' <<<"$(bindings_ordered "$GAP")")" = "1" ]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "leg index is position in models, not filtered" "ok"
+  else
+    fail=$((fail+1)); c_red "  FAIL  bindings_ordered renumbers legs when one is unbound"
+  fi
+
+  # ---- read-back member ORDER. Same members, different order: the pre-fix assertion
+  # sorted both sides, so it could only ever report a match.
+  echo "read-back member order:"
+  _ocase() { local nm="$1" expect="$2" sent="$3" stored="$4" allow="${5:-0}" got
+    got="$(member_verdict "$sent" "$stored" "$allow")"
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got"; fi; }
+  _ocase "identical order verifies"              match    '["a","b"]' '["a","b"]'
+  _ocase "reordered members are a MISMATCH"      order    '["a","b"]' '["b","a"]'
+  _ocase "  ...accepted under --allow-reorder"   accepted '["a","b"]' '["b","a"]' 1
+  _ocase "a genuinely different member set"      members  '["a","b"]' '["a","c"]'
+  _ocase "membership beats order in the verdict" members  '["a","b"]' '["c","a"]'
+  # Guard against the assertion being re-fused into one sorted comparison: if it were,
+  # sent and stored below would compare equal and 'order' could never be reported.
+  if [ "$(jq -c 'sort' <<<'["a","b"]')" = "$(jq -c 'sort' <<<'["b","a"]')" ]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "sorting alone cannot see a reorder" "ok"
+  else
+    fail=$((fail+1)); c_red "  FAIL  premise wrong: sort distinguishes these"
+  fi
+
   echo "mapping validation:"
   _mcase() { local nm="$1" expect="$2" json="$3" rc=0
     ( validate_mapping_spec "$json" ) >/dev/null 2>&1 || rc=$?
@@ -1526,6 +2065,190 @@ EOF
   _mcase "Claude-targeting glob" refuse '{"pattern":"claude-*","comboId":"c1","priority":100}'
   _mcase "hidden Claude glob"    refuse '{"pattern":"opus*","comboId":"c1","priority":100}'
   _mcase "omitted priority"      refuse '{"pattern":"gpt-5*","comboId":"c1"}'
+
+  # --------------------------------------------------- mapping write verification
+  # The bug these exist to keep out: map-apply used to read back "does a mapping with
+  # this pattern exist?", which a PRE-EXISTING row satisfies. A POST that returned 200
+  # and persisted nothing printed "mapping created and verified" and exited 0.
+  # Asserted on exit status, not printed text — same rule as the envelope suite.
+  echo "mapping write identification (silent-success class):"
+  local M_OLD='{"id":"m1","pattern":"gpt-5*","comboId":"c1","priority":100,"enabled":true}'
+  local M_NEW='{"id":"m2","pattern":"gpt-5*","comboId":"c2","priority":50,"enabled":true}'
+  _icase() { # name expect(found|absent|ambiguous) mid before_ids after
+    local nm="$1" expect="$2" mid="$3" bids="$4" after="$5" rc=0 out=""
+    out="$(identify_new_mapping "$mid" "$bids" "$after" 2>/dev/null)" || rc=$?
+    local got=found
+    [ "$rc" -eq 2 ] && got=absent
+    [ "$rc" -eq 3 ] && got=ambiguous
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got (rc=$rc out=$out)"; fi; }
+
+  # THE regression. Pattern already present, POST persisted nothing, server gave no id.
+  _icase "pre-existing pattern is not our write"  absent    "" '["m1"]' "[$M_OLD]"
+  _icase "server id present and persisted"        found     "m2" '["m1"]' "[$M_OLD,$M_NEW]"
+  _icase "server id returned but row absent"      absent    "m2" '["m1"]' "[$M_OLD]"
+  _icase "no id, one new row, identified"         found     "" '["m1"]' "[$M_OLD,$M_NEW]"
+  _icase "no id, two new rows, ambiguous"         ambiguous "" '["m1"]' \
+    "[$M_OLD,$M_NEW,{\"id\":\"m3\",\"pattern\":\"o3*\",\"comboId\":\"c3\",\"priority\":10}]"
+  _icase "numeric ids compare as strings"         found     "2" '["1"]' \
+    '[{"id":1,"pattern":"a*","comboId":"c1","priority":1},{"id":2,"pattern":"b*","comboId":"c2","priority":2}]'
+
+  echo "mapping field assertion (coercion class):"
+  _mfcase() { # name expect(match|mismatch) want got
+    local nm="$1" expect="$2" w="$3" g="$4"
+    local got=mismatch
+    [ "$(mapping_fields_of "$w")" = "$(mapping_fields_of "$g")" ] && got=match
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got"; fi; }
+  local M_WANT='{"pattern":"gpt-5*","comboId":"c1","priority":100,"enabled":true}'
+  _mfcase "identical fields verify"        match    "$M_WANT" "$M_WANT"
+  # Priority is the routing-order field: first-match-wins makes a coerced priority a
+  # silent reroute, which is the mapping analogue of normalizeRoutingStrategy().
+  _mfcase "priority defaulted to 0 by server" mismatch "$M_WANT" '{"pattern":"gpt-5*","comboId":"c1","priority":0,"enabled":true}'
+  _mfcase "priority as string is not a diff" match    "$M_WANT" '{"pattern":"gpt-5*","comboId":"c1","priority":"100","enabled":true}'
+  _mfcase "comboId silently changed"       mismatch "$M_WANT" '{"pattern":"gpt-5*","comboId":"c2","priority":100,"enabled":true}'
+  _mfcase "enabled dropped by server"      mismatch "$M_WANT" '{"pattern":"gpt-5*","comboId":"c1","priority":100,"enabled":false}'
+  _mfcase "enabled absent means enabled"   match    "$M_WANT" '{"pattern":"gpt-5*","comboId":"c1","priority":100}'
+  # description is deliberately NOT compared: it is free prose the server may normalise,
+  # and asserting on it would produce failures that mean nothing about routing.
+  _mfcase "description is not asserted on" match    "$M_WANT" '{"pattern":"gpt-5*","comboId":"c1","priority":100,"description":"server added this"}'
+
+  # ---- backup verification (silent-success class) ---------------------------------
+  # backup_and_verify runs only on the operator's box, behind sqlite3. Its checks were
+  # extracted into pure functions precisely so this suite can reach them with no
+  # sqlite3, no database and no credential. Asserted on exit status, never on text.
+  echo "backup verification (silent-success class):"
+  local BK="$tmp/bk"; mkdir -p "$BK"
+  : > "$BK/zero.sqlite"
+  printf 'not a database at all'                > "$BK/garbage.sqlite"
+  printf 'SQLite format 3\000rest-of-the-header' > "$BK/good.sqlite"
+  _fcase() { # name expect(ok|empty|badhdr) path
+    local nm="$1" expect="$2" f="$3" rc=0
+    sqlite_file_ok "$f" || rc=$?
+    local got=ok
+    [ "$rc" -eq 2 ] && got=empty
+    [ "$rc" -eq 3 ] && got=badhdr
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got (rc=$rc)"; fi; }
+  # THE regression: a zero-byte file is a VALID empty SQLite database, so PRAGMA
+  # integrity_check answers 'ok' on it. Only the size/header check catches an empty
+  # backup, and without it "backup verified" could print over nothing at all.
+  _fcase "zero-byte backup is not a backup"       empty  "$BK/zero.sqlite"
+  _fcase "backup file never created"              empty  "$BK/none.sqlite"
+  _fcase "non-sqlite content rejected"            badhdr "$BK/garbage.sqlite"
+  _fcase "valid sqlite header accepted"           ok     "$BK/good.sqlite"
+
+  _rcase() { # name expect(match|unreadable|mismatch) src dst
+    local nm="$1" expect="$2" s="$3" d="$4" rc=0
+    assert_row_count "$s" "$d" || rc=$?
+    local got=match
+    [ "$rc" -eq 2 ] && got=unreadable
+    [ "$rc" -eq 3 ] && got=mismatch
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got (rc=$rc)"; fi; }
+  # THE regression: the old code read both counts with `|| echo NA`, so two FAILURES
+  # compared equal and were reported as 'row-counts match'.
+  _rcase "NA vs NA must not count as a match"     unreadable "NA" "NA"
+  _rcase "empty vs empty is not a match"          unreadable "" ""
+  _rcase "sqlite error text is not a count"       unreadable \
+    "Error: no such table: combos" "Error: no such table: combos"
+  _rcase "one side unreadable"                    unreadable "12" "NA"
+  _rcase "equal counts verify"                    match      "12" "12"
+  _rcase "zero rows on both sides verify"         match      "0"  "0"
+  _rcase "real mismatch still caught"             mismatch   "12" "11"
+
+  _tcase() { # name expect-missing have wanted...
+    local nm="$1" expect="$2" have="$3"; shift 3
+    local got; got="$(tables_missing_from "$have" "$@")"
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "${got:-none missing}"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=[$expect] got=[$got]"; fi; }
+  local HAVE_T='combos
+model_combo_mappings
+users'
+  _tcase "assumed tables present"                 "" "$HAVE_T" combos model_combo_mappings
+  _tcase "assumed table name absent is named"     "model_combo_mappings" \
+    'combos
+users' combos model_combo_mappings
+  _tcase "both absent are named"                  "combos model_combo_mappings" \
+    'Combo
+ModelComboMapping' combos model_combo_mappings
+  # Substring/prefix must not satisfy the check, or a differently-named table would
+  # pass and the row-count check would be counting the wrong rows.
+  _tcase "substring is not a match"               "combo" "$HAVE_T" combo
+  # The four real neighbours in OmniRoute's 118-table schema. Named individually
+  # because each is one careless glob away from being counted instead of the real table.
+  _tcase "compression_combos is not combos"       "combos" \
+    'compression_combos
+compression_combo_assignments
+combo_adaptation_state
+agent_bridge_mappings
+model_combo_mappings' combos model_combo_mappings
+
+  # ---- sqlite engine + REAL backup (v0.2.3) ---------------------------------------
+  # Until v0.2.3 backup_and_verify shelled out to a sqlite3 binary that does not exist
+  # on the operator's box, so this suite could only ever reach its pure helpers. The
+  # python engine is present on any box that can run these tests, so the tool's only
+  # undo is now exercised end to end for real: build a live WAL database, back it up,
+  # verify the artifact. If python3 is unavailable this block is skipped, not failed.
+  echo "sqlite engine and real backup:"
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sqlite3' >/dev/null 2>&1; then
+    SQLITE_ENGINE=""; detect_sqlite_engine || true
+    _eq() { local nm="$1" want="$2" got="$3"
+      if [ "$want" = "$got" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+      else fail=$((fail+1)); c_red "  FAIL  $nm expected=[$want] got=[$got]"; fi; }
+    _eq "engine prefers python over absent binary" "python" "$SQLITE_ENGINE"
+
+    local DB="$tmp/live.sqlite"
+    python3 - "$DB" <<'PYFIX' >/dev/null
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("PRAGMA journal_mode=WAL")
+c.execute("CREATE TABLE combos(id INTEGER PRIMARY KEY, name TEXT)")
+c.execute("CREATE TABLE model_combo_mappings(id INTEGER PRIMARY KEY, pattern TEXT)")
+c.execute("CREATE TABLE compression_combos(id INTEGER PRIMARY KEY)")
+c.executemany("INSERT INTO combos(name) VALUES(?)", [("a",),("b",),("c",)])
+c.commit()   # left in the -wal, exactly like a live OmniRoute
+PYFIX
+    _eq "db_tables lists real tables"     "combos compression_combos model_combo_mappings" \
+        "$(db_tables "$DB" | tr '\n' ' ' | sed 's/ $//')"
+    _eq "db_count reads a real count"     "3" "$(db_count "$DB" combos)"
+    _eq "db_count on empty table"         "0" "$(db_count "$DB" model_combo_mappings)"
+    # An absent table must be UNREADABLE, never a number — this is the NA/NA class.
+    local mrc=0; db_count "$DB" no_such_table >/dev/null 2>&1 || mrc=$?
+    _eq "db_count on missing table fails"  "fails" "$([ "$mrc" -ne 0 ] && echo fails || echo silent)"
+
+    # THE regression the operator's guidance exists to prevent: rows committed to the
+    # -wal are invisible to a cp of the main file. .backup() must capture all three.
+    local BKD="$tmp/realbk"; mkdir -p "$BKD"
+    db_backup "$DB" "$BKD/out.sqlite" >/dev/null 2>&1
+    local brc=0; sqlite_file_ok "$BKD/out.sqlite" || brc=$?
+    _eq "real backup is a valid sqlite file" "0" "$brc"
+    _eq "backup captured the WAL rows"       "3" "$(db_count "$BKD/out.sqlite" combos)"
+    _eq "backup integrity_check"             "ok" "$(db_integrity "$BKD/out.sqlite")"
+    # Paths go via argv on this engine, so a quote is a non-event rather than a refusal.
+    db_backup "$DB" "$BKD/it's.sqlite" >/dev/null 2>&1
+    local qrc=0; sqlite_file_ok "$BKD/it's.sqlite" || qrc=$?
+    _eq "quoted backup path is safe on python" "0" "$qrc"
+    _eq "file_sha256 is 64 hex chars" "64" "$(file_sha256 "$BKD/out.sqlite" | tr -d '\n' | wc -c)"
+
+    # Full backup_and_verify, the whole guard, against the live WAL database.
+    local BP_OLD="$COMBO_BACKUP_DIR"
+    COMBO_BACKUP_DIR="$tmp/bv"
+    local vrc=0
+    ( OMNIROUTE_SQLITE="$DB" backup_and_verify "selftest" ) >/dev/null 2>&1 || vrc=$?
+    _eq "backup_and_verify passes on a good db" "0" "$vrc"
+    _eq "backup written 0600" "600" \
+        "$(stat -c '%a' "$COMBO_BACKUP_DIR"/storage.*.selftest.sqlite 2>/dev/null | head -1)"
+    # And it must REFUSE when the assumed tables are absent, rather than counting nothing.
+    local trc=0
+    ( OMNIROUTE_SQLITE="$DB" COMBO_DB_TABLES="Combo ModelComboMapping" \
+        backup_and_verify "selftest" ) >/dev/null 2>&1 || trc=$?
+    _eq "backup_and_verify refuses wrong tables" "fails" \
+        "$([ "$trc" -ne 0 ] && echo fails || echo silent)"
+    COMBO_BACKUP_DIR="$BP_OLD"
+  else
+    log "  SKIP  python3 unavailable; engine tests not run"
+  fi
 
   echo "empty allowlist denies everything:"
   : > "$COMBO_ALLOWLIST_FILE"
@@ -1591,6 +2314,90 @@ EOF
   local rrc=0; ( COMBO_REASON="" require_reason ) >/dev/null 2>&1 || rrc=$?
   if [ "$rrc" -ne 0 ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "empty reason is rejected" "refuse"
   else fail=$((fail+1)); c_red "  FAIL  empty reason was accepted"; fi
+
+  # ---------------------------------------------------------------- [RESOLVED-8]
+  # Audit-write failure. audit() runs after the API write, so these paths decide
+  # whether an unlogged mutation is announced or buried. Before the fix, an
+  # unwritable log produced a bare "Permission denied" AFTER the combo had been
+  # written, with nothing saying so; a malformed field produced a jq usage dump.
+  echo "audit-write failure is loud, not bare (RESOLVED-8):"
+  local adir; adir="$(mktemp -d)"
+
+  _acase() { local nm="$1" want_rc="$2"; shift 2
+    local out rc=0
+    out="$( "$@" 2>&1 )" || rc=$?
+    if [ "$rc" = "$want_rc" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=%s\n' "$nm" "$rc"
+    else fail=$((fail+1)); c_red "  FAIL  $nm — rc=$rc want=$want_rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; fi; }
+  _agrep() { local nm="$1" pat="$2"; shift 2
+    local out; out="$( "$@" 2>&1 )" || true
+    if printf '%s' "$out" | grep -qF "$pat"; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "ok"
+    else fail=$((fail+1)); c_red "  FAIL  $nm — no '$pat' in: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; fi; }
+
+  # Pure path classifier.
+  _prc() { local f="$1"; local r=0; ( COMBO_LOG_FILE="$f" audit_log_path_ok ) || r=$?; printf '%s' "$r"; }
+  : > "$adir/real.jsonl"; ln -sf "$adir/real.jsonl" "$adir/link.jsonl"
+  for _t in "real.jsonl:0" "link.jsonl:3"; do
+    local _f="${_t%%:*}" _w="${_t##*:}" _g; _g="$(_prc "$adir/$_f")"
+    if [ "$_g" = "$_w" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=%s\n' "audit_log_path_ok $_f" "$_g"
+    else fail=$((fail+1)); c_red "  FAIL  audit_log_path_ok $_f rc=$_g want=$_w"; fi
+  done
+  local _g; _g="$(_prc "")"
+  if [ "$_g" = "2" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=2\n' "audit_log_path_ok empty path"
+  else fail=$((fail+1)); c_red "  FAIL  audit_log_path_ok empty path rc=$_g want=2"; fi
+
+  # A symlink must be refused, and the file it points at must be untouched. The old
+  # code chmod'd a 0644 victim to 0600 and appended the audit record to it.
+  printf 'PREEXISTING\n' > "$adir/victim.txt"; chmod 0644 "$adir/victim.txt"
+  ln -sf "$adir/victim.txt" "$adir/vlink.jsonl"
+  local slrc=0
+  ( COMBO_LOG_FILE="$adir/vlink.jsonl" assert_audit_log_writable "apply" ) >/dev/null 2>&1 || slrc=$?
+  if [ "$slrc" = "3" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=3\n' "symlink log path is refused"
+  else fail=$((fail+1)); c_red "  FAIL  symlink log path rc=$slrc want=3 (policy refusal)"; fi
+  if [ "$(stat -c '%a' "$adir/victim.txt")" = "644" ] && [ "$(wc -l < "$adir/victim.txt")" = "1" ]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "symlink target left unmodified" "644, 1 line"
+  else fail=$((fail+1)); c_red "  FAIL  symlink target was modified: mode=$(stat -c '%a' "$adir/victim.txt") lines=$(wc -l < "$adir/victim.txt")"; fi
+
+  # Malformed field: exit 6, never a raw jq usage dump.
+  local mrc=0; ( COMBO_LOG_FILE="$adir/m.jsonl" audit "combo_apply" "written" '{oops' ) >/dev/null 2>&1 || mrc=$?
+  if [ "$mrc" = "6" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=6\n' "malformed detail -> audit_failed"
+  else fail=$((fail+1)); c_red "  FAIL  malformed detail rc=$mrc want=6"; fi
+
+  # Unwritable directory, file absent — the reachable production trigger.
+  mkdir -p "$adir/ro"; chmod 0500 "$adir/ro"
+  local urc=0; ( COMBO_LOG_FILE="$adir/ro/log.jsonl" audit "combo_apply" "written" '{"combo":"c1"}' ) >/dev/null 2>&1 || urc=$?
+  if [ "$urc" = "6" ]; then pass=$((pass+1)); printf '  PASS  %-46s rc=6\n' "unwritable log dir -> audit_failed"
+  else fail=$((fail+1)); c_red "  FAIL  unwritable log dir rc=$urc want=6 (root ignores 0500?)"; fi
+
+  # The words that matter. A post-mutation failure must say the mutation stands.
+  _postfail() { ( COMBO_LOG_FILE="$adir/ro/log.jsonl" MUTATION_APPLIED=1 BACKUP_PATH="/bk/x.sqlite" \
+                  audit "combo_apply" "written" '{"combo":"c1"}' ) 2>&1 || true; }
+  _prefail()  { ( COMBO_LOG_FILE="$adir/ro/log.jsonl" MUTATION_APPLIED=0 \
+                  audit "run_start" "ok" '{"subcommand":"apply"}' ) 2>&1 || true; }
+  _agrep "post-mutation says MUTATION WAS APPLIED" "THE MUTATION WAS APPLIED AND IS NOT IN THE LOG." _postfail
+  _agrep "post-mutation names the backup"          "/bk/x.sqlite"                                    _postfail
+  _agrep "pre-mutation says nothing is unrecorded" "nothing is unrecorded"                           _prefail
+  local pre_out; pre_out="$(_prefail)"
+  if printf '%s' "$pre_out" | grep -qF "THE MUTATION WAS APPLIED"; then
+    fail=$((fail+1)); c_red "  FAIL  pre-mutation failure wrongly claims a mutation was applied"
+  else pass=$((pass+1)); printf '  PASS  %-46s %s\n' "pre-mutation does NOT claim a mutation" "ok"; fi
+
+  # The handed-back line must be valid JSON, or "append it by hand" is not an
+  # instruction the operator can follow.
+  local recov; recov="$(_postfail | grep '^{' | tail -n1)"
+  if [ -n "$recov" ] && jq -e 'type=="object" and .event=="combo_apply"' >/dev/null 2>&1 <<<"$recov"; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "recovery line is valid, pasteable JSON" "ok"
+  else fail=$((fail+1)); c_red "  FAIL  recovery line not usable JSON: ${recov:0:120}"; fi
+
+  # Preflight must leave a run_start record, and create the file 0600 under a loose umask.
+  local frc=0; ( umask 000; COMBO_LOG_FILE="$adir/fresh.jsonl" assert_audit_log_writable "apply" ) >/dev/null 2>&1 || frc=$?
+  if [ "$frc" = "0" ] && jq -e '.event=="run_start" and .detail.subcommand=="apply"' >/dev/null 2>&1 <<<"$(tail -n1 "$adir/fresh.jsonl" 2>/dev/null)"; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "preflight writes a run_start record" "ok"
+  else fail=$((fail+1)); c_red "  FAIL  preflight wrote no usable run_start record (rc=$frc)"; fi
+  if [ "$(stat -c '%a' "$adir/fresh.jsonl" 2>/dev/null || echo '?')" = "600" ]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "new log is 0600 despite umask 000" "ok"
+  else fail=$((fail+1)); c_red "  FAIL  new log mode $(stat -c '%a' "$adir/fresh.jsonl" 2>/dev/null) under umask 000"; fi
+
+  chmod 0700 "$adir/ro" 2>/dev/null || true; rm -rf "$adir"
   rrc=0; ( COMBO_REASON="because" COMBO_REQUEST_AGENT="a1" require_reason ) >/dev/null 2>&1 || rrc=$?
   if [ "$rrc" -eq 0 ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "reason + agent is accepted" "allow"
   else fail=$((fail+1)); c_red "  FAIL  valid reason was rejected (rc=$rrc)"; fi
@@ -1696,8 +2503,10 @@ $PROG $VERSION — constrained OmniRoute combo/mapping manager (operator-run)
   list                         list combos
   delete         <combo-name>  backup+verify, delete, verify absence
   map-list                     list model_combo_mappings in resolution order
-  map-apply      <spec.json>   create a mapping (backup+verify+read-back)
-  map-delete     <mapping-id>  delete a mapping
+  map-apply      <spec.json>   create a mapping (backup + read-back asserts the row
+                               THIS write created, and its pattern/comboId/priority/
+                               enabled; warns first if the pattern already exists)
+  map-delete     <mapping-id>  delete a mapping (backup + read-back verifies absence)
   allowlist-scaffold           emit a CANDIDATE allowlist from /v1/models for review
   allowlist-audit              re-check the reviewed allowlist against the live
                                catalogue: withdrawn ids, newly-blended routes.
@@ -1719,7 +2528,15 @@ Global flags (before or after the subcommand):
                              connectionId the stored combo has would silently move
                              that leg to a different connection. Not a containment
                              override — it guards data loss, and rebinding is a
-                             legitimate thing to do out loud.
+                             legitimate thing to do out loud. Also required to MOVE a
+                             binding between legs: leg order is the routing order, so
+                             swapping which connection serves first is a real change.
+  --allow-reorder            accept a read-back where OmniRoute stored the members in a
+                             different ORDER than they were sent. Without it that is a
+                             mismatch (exit 4), because for priority/fill-first/
+                             context-relay/pipeline the list order is the routing order.
+                             Whether this server preserves order is not yet known; the
+                             first live apply is what settles it.
 
 KNOWN UNMANAGEABLE: context_cache_protection exists as a combos column and in
 OmniRoute's code but is absent from the management API payload at every privilege
@@ -1743,10 +2560,29 @@ Env: OMNIROUTE_BASE_URL OMNIROUTE_ENV_FILE OMNIROUTE_SQLITE OMNIROUTE_MANAGEMENT
      OMNIROUTE_MODELS_URL OMNIROUTE_API_KEY (read scope) COMBO_CATALOGUE_FILE
      COMBO_ALLOWLIST_FILE COMBO_BACKUP_DIR COMBO_LOG_FILE COMBO_OWNED_PREFIX
      COMBO_REASON COMBO_REQUEST_AGENT COMBO_REQUEST_TEMPLATE COMBO_REQUEST_ID
-     COMBO_REQUEST_ISSUE
+     COMBO_REQUEST_ISSUE COMBO_DB_TABLES
+
+COMBO_DB_TABLES defaults to "combos model_combo_mappings". These are CONFIRMED against
+the real storage.sqlite (operator, 2026-08-23) in a schema of 118 tables. The backup
+verification counts rows in exactly these names; if they ever differ the tool stops and
+prints the actual table list rather than verifying nothing. Four neighbours are NOT the
+combo tables and must never be matched by a glob: compression_combos,
+compression_combo_assignments, combo_adaptation_state, agent_bridge_mappings.
+
+SQLITE ENGINE: there is no sqlite3 BINARY on the operator's host or in the omniroute
+container. The backup uses python3's stdlib sqlite3 .backup() — atomic, WAL-safe, and
+it does not lock the live database. The sqlite3 binary is a fallback if it is present.
+If NEITHER exists the tool REFUSES to mutate; a missing engine never degrades into
+proceeding without a backup. Never cp storage.sqlite: it runs in WAL mode, and a cp of
+the main file alone omits everything still in the -wal while integrity_check still
+answers 'ok' on the result.
 
 Exit codes: 0 ok  1 error  3 policy refusal  4 read-back mismatch (mutation may stand)
             5 allowlist stale vs live catalogue (allowlist-audit only)
+            6 audit log write failed. If it says THE MUTATION WAS APPLIED, a routing
+              change is live and unrecorded: append the printed line to the log by
+              hand. A mutating run now writes a 'run_start' record during preflight,
+              so an unwritable log stops the run BEFORE the backup and the write.
 EOF
 }
 
@@ -1837,6 +2673,7 @@ main() {
       --request)  COMBO_REQUEST_ID="${2:?--request needs a value}"; shift 2 ;;
       --issue)    COMBO_REQUEST_ISSUE="${2:?--issue needs a value}"; shift 2 ;;
       --allow-rebind) COMBO_ALLOW_REBIND=1; shift ;;
+      --allow-reorder) COMBO_ALLOW_REORDER=1; shift ;;
       --)         shift; rest+=( "$@" ); break ;;
       *)          rest+=( "$1" ); shift ;;
     esac
@@ -1844,6 +2681,7 @@ main() {
   set -- "${rest[@]+"${rest[@]}"}"
 
   local sub="${1:-}"; shift || true
+  PREFLIGHT_SUBCOMMAND="$sub"   # recorded in the run_start audit record
   case "$sub" in
     selftest)            preflight_offline; cmd_selftest "$@" ;;
     check-endpoints)     preflight_online;  cmd_check_endpoints "$@" ;;

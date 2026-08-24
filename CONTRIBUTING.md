@@ -73,10 +73,31 @@ Everything above tests what is *in this repo*. None of it tests whether that is 
 running on the VPS, and the import that created this repo was a snapshot — a snapshot is only the
 source of truth until somebody edits the other copy.
 
-TOG-212 is the first case: the omniroute selftest reported 114 assertions here and 156 on the VPS.
-Same tool, two behaviours, and the reviewed one was not the one containing Claude routing. It was
-noticed by eye, from a number a human happened to quote in a different issue. That is not a
-detection mechanism.
+TOG-212 is the first case, and it taught something sharper than "the VPS drifted". The omniroute
+selftest reported 114 assertions here against 156 quoted elsewhere — later 181. The divergence was
+real, and the reviewed copy was not the one containing Claude routing. But the larger copy was never
+on the VPS. It was `/paperclip/operator-handoff/TOG-151-omniroute_combo_cli.sh` — v0.2.5, written by
+an agent as a *proposal* into the outbound handoff channel, and never landed in git until the import
+this paragraph documents.
+
+So drift has two directions here, not one, and the second is the one actually happening:
+
+- **Inbound** — somebody edits the running copy and the repo falls behind. This is the case the
+  tooling was built for. Measured 2026-08-24 it had not yet occurred: the one genuinely
+  operator-placed file in the channel, `REFERENCE-org_provisioner.sh` (root-owned, unlike every
+  agent-authored drop), was *behind* `main`, not ahead — the import took, and the repo then improved
+  on it.
+- **Outbound** — an agent writes a newer tool into the handoff channel, the operator installs it
+  from there, and nobody reviews it because it never becomes a PR. Measured the same day,
+  **9 of the 11 executables in that channel existed in no git repo at all.**
+
+Read the drop channel's own `README.md` before treating anything in it as evidence of what runs:
+"Writing here is a proposal, not a deployment." A file there is an agent's outbound claim, not a
+reading of the VPS. Ownership tells you the direction: root-owned is the operator's, `node`-owned is
+an agent's.
+
+The 114-vs-156 gap was noticed by eye, from a number a human happened to quote in a different issue.
+That is not a detection mechanism.
 
 `tool_drift.sh` is. Run this whenever you have shell on the VPS, and before any release:
 
