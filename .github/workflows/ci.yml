@@ -11,24 +11,40 @@ name: CI
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_responsible_leader.sh        who may approve a provisioning request
+#     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
+#                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #
 #   CANNOT RUN HERE:
 #     test_privilege_ceilings.sh
 #     test_request_queue.sh
-#   Both require COMPANY_ID and a live PaperclipAI Postgres reached through
-#   `podman exec paperclip-db`, and both CREATE AND DELETE REAL AGENTS in that
-#   company as their method. There is no fixture database to point them at, and
-#   giving a GitHub runner credentials to the production company database to run
-#   tests would be a far worse trade than the coverage is worth. They stay
-#   operator-run, on the VPS, before a release. `bash -n` below at least proves
-#   they still parse, which catches the most common way a shell suite rots.
-#     Making them CI-able means giving them a disposable database. That is real
-#   work, it is not this task, and it is filed rather than hidden here.
+#   Both CREATE AND DELETE REAL AGENTS in a company as their method, and giving
+#   a GitHub runner credentials to the production company database would be a
+#   far worse trade than the coverage is worth. They stay operator-run, on the
+#   VPS, before a release. `bash -n` below at least proves they still parse,
+#   which catches the most common way a shell suite rots.
 #
-#   NOT A SUITE: org_access_review.sh is cron/CI-able in principle but also
-#   needs the live database, so it is excluded for the same reason.
+#   WHAT IS STILL MISSING, precisely (TOG-202). The first blocker is gone: as of
+#   lib/pcsql.sh the tools no longer hard-wire `podman exec paperclip-db`, so
+#   they CAN be pointed at a throwaway database with PAPERCLIP_SQL_BACKEND=psql.
+#   Three things still stand between that and a green run here, and the third
+#   was not obvious until someone read the provisioner:
+#     1. a schema dump, so a service container has tables to talk to;
+#     2. an org fixture — the suites reference P0/P1/O*/T*/F* rows by
+#        `metadata->>'orgRoleId'` and assume they already exist;
+#     3. A LIVE PAPERCLIP API SERVER. The suites drive org_provisioner.sh, which
+#        creates and terminates agents through `paperclipai agent create` /
+#        `terminate` against PAPERCLIP_API_URL, not through SQL. A Postgres
+#        service container alone does not make these suites run; it makes them
+#        fail later, at the first `pc agent create`, which is a worse failure
+#        mode than today's honest exclusion.
+#   Do not wire these two into CI until 3 is answered. A suite that is present
+#   and failing for an environmental reason gets muted, and a muted suite is
+#   indistinguishable from a deleted one.
+#
+#   NOT A SUITE: org_access_review.sh is read-only and needs no API server, so
+#   it clears blocker 3 — but it still needs 1 and 2, so it is excluded too.
 #
 # This list deliberately carries no test counts. CI asserts EXIT STATUS and
 # never a count: counts drift as suites grow, and a gate that pins one turns
@@ -59,7 +75,10 @@ jobs:
         run: |
           set -euo pipefail
           rc=0
-          for f in *.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # lib/*.sh is included explicitly. It is sourced by five tools, so a
+          # parse error there breaks all of them, and a bare `*.sh` glob does
+          # not descend into it.
+          for f in *.sh lib/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           exit $rc
 
@@ -114,6 +133,14 @@ jobs:
       # better evidence and stays operator-run for the reasons above.
       - name: responsible-leader authorization suite
         run: ./test_responsible_leader.sh
+
+      # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
+      # is a dispatcher, so it is testable without a database: the suite puts
+      # recording fakes for `podman` and `psql` on PATH and asserts the exact
+      # argv, stdin and environment each backend produces. No database, no
+      # credential, no network.
+      - name: SQL backend seam suite
+        run: ./test_sql_backend.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
@@ -226,6 +253,51 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # Same discipline for the SQL backend seam. Both mutations below are
+      # things a reasonable person would actually write; neither is a strawman.
+      #
+      # 1. Hand the URI to psql instead of decomposing it. This is the obvious
+      #    one-liner, and it publishes the database password through
+      #    /proc/*/cmdline on a host every company on the box shares.
+      # 2. Auto-select the psql backend when DATABASE_URL happens to be set.
+      #    This reads as a convenience and silently retargets the PROVISIONER —
+      #    which creates and deletes real agents — at whatever that variable
+      #    points to.
+      - name: Prove the SQL backend suite still detects both unsafe shortcuts
+        run: |
+          set -uo pipefail
+          rc=0
+          for m in uri-on-argv sniff-database-url; do
+            mut="$(mktemp -d)"
+            cp -r lib "$mut/"
+            cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
+               org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh "$mut/"
+            node -e '
+              var fs = require("fs");
+              var p = process.argv[1], which = process.argv[2];
+              var s = fs.readFileSync(p, "utf8");
+              var anchor = which === "uri-on-argv"
+                ? "\n  psql \\\n"
+                : "  local b=\"${PAPERCLIP_SQL_BACKEND:-podman}\"";
+              if (s.indexOf(anchor) < 0) {
+                console.error("::error::could not find the " + which + " anchor in lib/pcsql.sh; this guard is now blind, fix it");
+                process.exit(2);
+              }
+              var repl = which === "uri-on-argv"
+                ? "\n  psql \"$DATABASE_URL\" \\\n"
+                : "  local b=\"${PAPERCLIP_SQL_BACKEND:-${DATABASE_URL:+psql}}\"; b=\"${b:-podman}\"";
+              fs.writeFileSync(p, s.replace(anchor, repl));
+            ' "$mut/lib/pcsql.sh" "$m" || exit 2
+            bash -n "$mut/lib/pcsql.sh"
+            if "$mut/test_sql_backend.sh" > "$mut/out.txt" 2>&1; then
+              echo "::error::the SQL backend suite PASSED against the '$m' mutant"
+              cat "$mut/out.txt"; rc=1
+            else
+              echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
+            fi
+          done
+          exit $rc
 
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).

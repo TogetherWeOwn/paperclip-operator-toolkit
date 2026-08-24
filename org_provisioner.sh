@@ -75,7 +75,12 @@ AGENT_BUDGET_CENTS="${AGENT_BUDGET_CENTS:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRANT_LOG="${GRANT_LOG:-$HERE/provisioner-grant-log.jsonl}"
 
-for bin in jq curl podman; do
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+# Depend on the binary the SELECTED backend needs, not on podman unconditionally
+# — demanding podman on a machine running the psql backend is a false failure.
+for bin in jq curl "$(pcsql_required_bin)"; do
   command -v "$bin" >/dev/null 2>&1 || { echo "ERROR: missing $bin" >&2; exit 1; }
 done
 
@@ -89,14 +94,10 @@ resolve_cli() {
 PC_CLI="$(resolve_cli)"
 pc() { "$PC_CLI" "$@" --api-base "$PAPERCLIP_API_URL"; }
 
-pcsql() {
-  podman exec -i -e PGV_COMPANY_ID -e PGV_AGENT_ID -e PGV_TEXT -e PGV_GRANTS \
-    "$PAPERCLIP_DB_CTR" sh -c '
-      exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
-        -v company_id="${PGV_COMPANY_ID:-}" -v agent_id="${PGV_AGENT_ID:-}" \
-        -v text="${PGV_TEXT:-}" -v grants="${PGV_GRANTS:-[]}" "$@" -f -
-    ' _ "$@"
-}
+# ON_ERROR_STOP is this tool's own policy, not the shared helper's: a partial
+# write during provisioning is worse than a refusal. Kept as a one-line wrapper
+# so every call site below stays exactly as it was.
+pcsql() { pcsql_run -v ON_ERROR_STOP=1 "$@"; }
 
 die() { echo "REFUSED: $*" >&2; exit 2; }
 

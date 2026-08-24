@@ -111,6 +111,9 @@ MAX_SUPERSEDE_CHAIN="${MAX_SUPERSEDE_CHAIN:-5}"
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 [[ -x "$PROV" ]] || { echo "ERROR: org_provisioner.sh not found/executable" >&2; exit 1; }
 
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
 die() { echo "REFUSED: $*" >&2; exit 2; }
 
 # Standing authority. This is the escalation floor when no leader can be
@@ -126,11 +129,9 @@ now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 plus_days() { date -u -d "+$1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
               || date -u -v "+$1d" +%Y-%m-%dT%H:%M:%SZ; }
 
-pcsql() {
-  podman exec -i -e PGV_COMPANY_ID -e PGV_TEXT "$PAPERCLIP_DB_CTR" sh -c \
-    'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -v ON_ERROR_STOP=1 \
-       -v company_id="$PGV_COMPANY_ID" -v text="${PGV_TEXT:-}" "$@" -f -' _ "$@"
-}
+# -Atq and ON_ERROR_STOP are this tool's flags; the backend choice is not its
+# business. Wrapper keeps every call site below unchanged. See lib/pcsql.sh.
+pcsql() { pcsql_run -Atq -v ON_ERROR_STOP=1 "$@"; }
 
 # Freshly resolve an agent by org role id OR uuid, live from state. Emits
 # "<id>\t<orgRoleId>\t<template>\t<status>\t<reportsTo>\t<title>".

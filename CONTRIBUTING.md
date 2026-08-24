@@ -36,14 +36,16 @@ unreviewable; **if you find a bug while doing something else, file it rather tha
 
 ## Running the suites
 
-Six suites. Four run anywhere; two need the VPS.
+The suites below run anywhere and are what CI runs. Exactly two more need the VPS.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh              # credential-minter regression suite
+./test_gh_token_argv.sh             # gh_token.sh: no credential on argv
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 ./test_responsible_leader.sh        # who may approve a provisioning request
-for f in *.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
+./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
+for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
 # They create and delete real agents in that company as their method, so run them
@@ -70,6 +72,18 @@ the authorization logic with it.
 a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries
 that are not real tokens. It invokes the tool under `env -i`, so a live `GH_APP_PRIVATE_KEY` exported
 in your shell cannot leak into a test run. Nothing it writes leaves `mktemp -d`.
+
+`test_sql_backend.sh` needs `bash` and nothing else. It tests a dispatcher — which command
+`lib/pcsql.sh` builds, and what lands on that command's `argv` — so it puts *recording fakes* for
+`podman` and `psql` on `PATH` rather than requiring either. Fake, do not skip: a suite that skips
+the psql path when `psql` is absent passes on every runner in the world while that path is broken.
+Both fakes are always present, so both backends always execute.
+
+If you touch `lib/pcsql.sh`, the two mutations CI runs against it are the ones to keep working:
+passing `$DATABASE_URL` to `psql` instead of decomposing it into `PG*` (which publishes the database
+password through `/proc/*/cmdline`), and auto-selecting the psql backend whenever `DATABASE_URL`
+happens to be set (which silently retargets the provisioner). Both are things a reasonable person
+would write. Neither may go green.
 
 ## What "done" means for a change to a credential-handling tool
 
