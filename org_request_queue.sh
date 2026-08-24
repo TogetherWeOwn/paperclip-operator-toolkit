@@ -59,9 +59,20 @@ set -uo pipefail
 #     The reviewer cannot redirect placement or widen the template. `review`
 #     takes only a decision and a reason; there is no argument that can alter
 #     a submitted request.
+#   * EVERY decision carries a reason, approvals included — the record has to
+#     answer "why was this approved", not only "who approved it".
 #   * A denial is not a dead end. It carries a reason, it can be answered with
 #     `comment`, and it can be amended by a NEW request that `--supersedes` it.
 #     `thread` renders the whole exchange, not just the final verdict.
+#   * One denial may be re-argued MAX_SUPERSEDE_CHAIN (5) times in total. The
+#     cap counts every amendment sharing a chain root, so it cannot be evaded
+#     by pointing many amendments at the same denial instead of chaining them.
+#   * A request id names exactly one submission. Ids are allocated under a
+#     lock, and a record where one id names two submissions is refused rather
+#     than resolved — a decision that does not bind to what was decided is not
+#     a decision. See assert_unambiguous.
+#   * A pending request past its expiry is expired everywhere it is read, with
+#     no review attempt needed to make that true.
 #
 # TRANSPORT NOTE
 # --------------
@@ -84,7 +95,8 @@ set -uo pipefail
 #   ./org_request_queue.sh list    [--status pending|approved|rejected|all]
 #   ./org_request_queue.sh who     --requester <ROLE> --template <T>
 #   ./org_request_queue.sh review  --reviewer <ROLE> --request <ID> \
-#                                  (--approve|--reject) [--reason "..."]
+#                                  (--approve|--reject) --reason "..."
+#                                  # --reason is required on BOTH decisions
 #   ./org_request_queue.sh comment --request <ID> --author <ROLE> --body "..."
 #   ./org_request_queue.sh thread  --request <ID>
 #   ./org_request_queue.sh overrides [--all] [--json]   # exit 1 if any are open
@@ -244,16 +256,90 @@ template_disabled() { [[ -f "$DISABLED_TEMPLATES" ]] && grep -qxF "$1" "$DISABLE
 log_event()    { printf '%s\n' "$1" >> "$GRANT_LOG"; chmod 0600 "$GRANT_LOG" 2>/dev/null || true; }
 append_queue() { printf '%s\n' "$1" >> "$QUEUE"; chmod 0600 "$QUEUE" 2>/dev/null || true; }
 
+# --- serialising the queue --------------------------------------------------
+# An id is allocated by COUNTING existing rows, so allocate-then-append has to
+# be one critical section or two concurrent submits take the same id. `mkdir` is
+# the lock because it is atomic on every filesystem this runs on and needs no
+# util-linux (`flock` is absent in the paperclip container, same as `column`).
+#
+# The holder's pid goes in the lock so a crashed holder cannot wedge the queue
+# forever. This is a liveness aid, NOT a correctness one: the invariant that
+# actually protects a decision is assert_unambiguous below, which holds even if
+# this lock is defeated, skipped, or the queue file is restored from a backup
+# that already contains duplicates.
+QUEUE_LOCK="${QUEUE}.lock"
+LOCK_WAIT_TRIES="${LOCK_WAIT_TRIES:-100}"
+
+queue_lock() {
+  local i pid
+  for (( i=0; i<LOCK_WAIT_TRIES; i++ )); do
+    if mkdir "$QUEUE_LOCK" 2>/dev/null; then
+      printf '%s\n' "$$" > "$QUEUE_LOCK/pid" 2>/dev/null || true
+      return 0
+    fi
+    pid="$(cat "$QUEUE_LOCK/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$QUEUE_LOCK" 2>/dev/null || true   # holder died mid-write
+      continue
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  die "could not acquire the queue lock ($QUEUE_LOCK) — another writer is stuck."
+}
+queue_unlock() { rm -rf "$QUEUE_LOCK" 2>/dev/null || true; }
+
 # Current state of a request = its most recent status-bearing record.
+#
+# Expiry is DERIVED here, not waited for. A pending request past its expiresAt
+# is expired whether or not anybody has looked at it: materialising expiry only
+# as a side effect of an attempted review made an unread request permanently
+# 'pending', which in turn refused the documented remedy (--supersedes) and left
+# the requester with no move at all. Deriving it here means every read path —
+# review, the supersede precondition, list, thread — agrees without depending on
+# somebody having tried something first.
 request_state() {
   [[ -f "$QUEUE" ]] || return 1
-  jq -c --arg id "$1" 'select(.requestId==$id and has("status"))' "$QUEUE" | tail -1
+  local rec exp
+  rec="$(jq -c --arg id "$1" 'select(.requestId==$id and has("status"))' "$QUEUE" | tail -1)"
+  [[ -n "$rec" ]] || return 1
+  if [[ "$(jq -r '.status' <<<"$rec")" == "pending" ]]; then
+    exp="$(request_submission "$1" | jq -r '.expiresAt // ""')"
+    expired "$exp" && rec="$(jq -c '.status="expired" | .derivedExpiry=true' <<<"$rec")"
+  fi
+  printf '%s\n' "$rec"
 }
 request_submission() {
   [[ -f "$QUEUE" ]] || return 1
   jq -c --arg id "$1" 'select(.requestId==$id and .event=="request.submitted")' "$QUEUE" | tail -1
 }
+submission_count() {
+  [[ -f "$QUEUE" ]] || { echo 0; return 0; }
+  jq -r --arg id "$1" 'select(.requestId==$id and .event=="request.submitted")|.requestId' "$QUEUE" | wc -l
+}
 
+# THE INVARIANT. A reviewer decides an ID; if that ID names two submissions then
+# whatever it decided is not what executes — request_submission() resolves the
+# ambiguity with `tail -1`, which is an arbitrary answer, not a correct one.
+# Both requests can be inside the requester's ceiling, so no other control fires
+# and the decision simply does not bind to what was decided.
+#
+# Refusing outright is the only safe answer: there is no way to tell from the
+# record which of the two the reviewer read. This is deliberately separate from
+# queue_lock — the lock stops duplicates being CREATED, this stops a duplicate
+# that exists anyway (restored backup, rotated file, defeated lock) being ACTED
+# ON. Callers invoke it from a function body, never a command substitution,
+# because `die` inside `$(...)` exits only the subshell.
+assert_unambiguous() {
+  local n; n="$(submission_count "$1")"
+  [[ "$n" -le 1 ]] || {
+    log_event "$(jq -cn --arg id "$1" --argjson n "$n" \
+      '{event:"review.refused",reason:"ambiguous_request_id",requestId:$id,submissions:$n}')"
+    die "request id $1 names $n distinct submissions; refusing to act on an ambiguous record."
+  }
+}
+
+# CALL ONLY WITH THE QUEUE LOCK HELD. This counts rows and returns the next
+# number; the count is stale the moment the lock is released.
 next_id() {
   local n=1
   [[ -f "$QUEUE" ]] && n=$(( $(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" 2>/dev/null | wc -l) + 1 ))
@@ -266,6 +352,28 @@ expired() {
   local exp="$1"
   [[ -n "$exp" && "$exp" != "null" ]] || return 1
   [[ "$(now_iso)" > "$exp" ]]
+}
+
+# Materialise expiry for every request that has aged out, so `thread` and `list`
+# show it and the audit trail records that it happened. Idempotent, and safe to
+# call from a read path: it writes a DERIVED fact, never a decision. On a
+# read-only queue it fails quietly and request_state() still derives correctly.
+reap_expired() {
+  [[ -f "$QUEUE" ]] || return 0
+  local rows rid exp
+  rows="$(jq -s -r '
+      map(select(.event != "request.comment" and .event != "override.acknowledged"))
+      | group_by(.requestId)
+      | map({rid: .[0].requestId, exp: (.[0].expiresAt // ""), last: .[-1].status})
+      | map(select(.last == "pending" and .exp != ""))
+      | .[] | "\(.rid)\t\(.exp)"' "$QUEUE" 2>/dev/null)"
+  [[ -n "$rows" ]] || return 0
+  while IFS=$'\t' read -r rid exp; do
+    [[ -n "$rid" ]] || continue
+    expired "$exp" && append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg e "$exp" \
+      '{event:"request.expired",requestId:$id,status:"expired",at:$at,expiredAt:$e}')"
+  done <<<"$rows"
+  return 0
 }
 
 # --------------------------------------------------------------------------
@@ -284,6 +392,7 @@ cmd_submit() {
   done
   [[ -n "$requester" && -n "$template" && -n "$title" ]] \
     || die "usage: submit --requester <ROLE> --template <T> --title <TITLE>"
+  reap_expired
 
   local row id tpl status
   row="$(resolve_agent "$requester")"; [[ -n "$row" ]] || die "requester not found: $requester"
@@ -302,9 +411,10 @@ cmd_submit() {
   # An amendment must come from the SAME requester, and may only follow a
   # closed request. Nobody chains onto someone else's denial, and nobody forks
   # a request that is still live.
-  local depth=0
+  local depth=0 root=""
   if [[ -n "$supersedes" ]]; then
-    local prev prev_sub prev_status prev_requester
+    assert_unambiguous "$supersedes"
+    local prev prev_sub prev_status prev_requester path_depth root_count
     prev="$(request_state "$supersedes")" || die "no such request: $supersedes"
     [[ -n "$prev" ]] || die "no such request: $supersedes"
     prev_sub="$(request_submission "$supersedes")"
@@ -314,25 +424,48 @@ cmd_submit() {
       || die "only the original requester may supersede $supersedes."
     [[ "$prev_status" == "rejected" || "$prev_status" == "expired" ]] \
       || die "request $supersedes is '$prev_status'; only a rejected or expired request can be superseded."
-    depth=$(( $(jq -r '.supersedeDepth // 0' <<<"$prev_sub") + 1 ))
-    if [[ $depth -ge $MAX_SUPERSEDE_CHAIN ]]; then
-      log_event "$(jq -cn --arg id "$supersedes" --arg r "$requester" --argjson d "$depth" \
-        '{event:"request.refused",reason:"supersede_chain_exhausted",supersedes:$id,requester:$r,depth:$d}')"
-      die "this request has already been resubmitted $depth times; escalate instead of resubmitting."
+
+    # THE CAP COUNTS AMENDMENTS OF ONE DENIAL, NOT THE LENGTH OF ONE PATH.
+    # supersedeDepth = prev.depth + 1 measures a single chain, so N amendments
+    # all pointing at the SAME denial are each depth 1, forever — one denial
+    # could be re-argued without limit, which is how a rubber stamp is
+    # manufactured. Every amendment therefore carries the ROOT of its chain and
+    # the cap counts submissions sharing that root.
+    root="$(jq -r '.chainRoot // .requestId' <<<"$prev_sub")"
+    root_count="$(jq -r --arg r "$root" \
+      'select(.event=="request.submitted" and (.chainRoot // "")==$r)|.requestId' "$QUEUE" 2>/dev/null | wc -l)"
+    # Path depth is kept as a floor so a queue written before chainRoot existed
+    # is still bounded by the old rule rather than by nothing.
+    path_depth=$(( $(jq -r '.supersedeDepth // 0' <<<"$prev_sub") + 1 ))
+    depth=$(( root_count + 1 ))
+    [[ $path_depth -gt $depth ]] && depth=$path_depth
+    # `>` not `>=`: MAX_SUPERSEDE_CHAIN is the number of resubmissions ALLOWED,
+    # and the docs and the CLI both say five. `>=` allowed four.
+    if [[ $depth -gt $MAX_SUPERSEDE_CHAIN ]]; then
+      log_event "$(jq -cn --arg id "$supersedes" --arg root "$root" --arg r "$requester" --argjson d "$depth" \
+        '{event:"request.refused",reason:"supersede_chain_exhausted",supersedes:$id,chainRoot:$root,requester:$r,depth:$d}')"
+      die "request $root has already been resubmitted $MAX_SUPERSEDE_CHAIN times; escalate instead of resubmitting."
     fi
   fi
 
-  local rid exp; rid="$(next_id)"; exp="$(plus_days "$REQUEST_TTL_DAYS")"
+  # Allocate and append as ONE critical section. next_id() derives the id by
+  # counting rows, so a concurrent submitter that reads between our count and
+  # our append takes the same id.
+  local rid exp; exp="$(plus_days "$REQUEST_TTL_DAYS")"
+  queue_lock
+  rid="$(next_id)"
   append_queue "$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg t "$tpl" \
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
-    --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
+    --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
     '{event:"request.submitted",requestId:$id,status:"pending",requester:$r,requesterAgentId:$rid2,
       requesterTemplate:$t,template:$w,title:$ti,rationale:$ra,
       supersedes:(if $sup=="" then null else $sup end),supersedeDepth:$d,
+      chainRoot:(if $root=="" then null else $root end),
       submittedAt:$at,expiresAt:$exp}')"
+  queue_unlock
 
   echo "SUBMITTED $rid  ($requester [$tpl] requests $template — \"$title\")  status=pending"
-  [[ -n "$supersedes" ]] && echo "  supersedes $supersedes (resubmission $depth of $((MAX_SUPERSEDE_CHAIN-1)))"
+  [[ -n "$supersedes" ]] && echo "  supersedes $supersedes (resubmission $depth of $MAX_SUPERSEDE_CHAIN)"
 
   # Name the decider at submit time so the requester knows who was woken. This
   # is INFORMATIONAL ONLY and confers nothing: the leader is re-derived from
@@ -379,13 +512,21 @@ cmd_review() {
     esac
   done
   [[ -n "$reviewer" && -n "$rid" && -n "$decision" ]] \
-    || die "usage: review --reviewer <ROLE> --request <ID> (--approve|--reject)"
+    || die "usage: review --reviewer <ROLE> --request <ID> (--approve|--reject) --reason \"...\""
+
+  # EVERY decision carries a reason, not just a denial. A denial needs one so
+  # the requester knows what to answer; an approval needs one because "why was
+  # this approved" is the question an audit actually comes back for, and the
+  # approval path was the unguarded one. Checked before anything is read so the
+  # refusal cannot depend on who is asking.
+  [[ -n "$reason" ]] || die "every decision must carry --reason: a denial so the requester can answer it, an approval so the record can answer 'why'."
+
+  reap_expired
+  assert_unambiguous "$rid"
 
   local rec sub; rec="$(request_state "$rid")" || die "no such request: $rid"
   [[ -n "$rec" ]] || die "no such request: $rid"
   sub="$(request_submission "$rid")"
-  local cur; cur="$(jq -r '.status' <<<"$rec")"
-  [[ "$cur" == "pending" ]] || die "request $rid is already '$cur'; decisions are final."
 
   local rq_role rq_id_at_submit template title exp
   rq_role="$(jq -r '.requester' <<<"$sub")"
@@ -394,11 +535,12 @@ cmd_review() {
   title="$(jq -r '.title' <<<"$sub")"
   exp="$(jq -r '.expiresAt // ""' <<<"$sub")"
 
-  if expired "$exp"; then
-    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" \
-      '{event:"request.expired",requestId:$id,status:"expired",at:$at}')"
-    die "request $rid expired at $exp; resubmit it with --supersedes $rid."
-  fi
+  # Expiry is derived by request_state(), so this fires whether or not anyone
+  # has observed the request before now.
+  local cur; cur="$(jq -r '.status' <<<"$rec")"
+  [[ "$cur" != "expired" ]] \
+    || die "request $rid expired at $exp; resubmit it with --supersedes $rid."
+  [[ "$cur" == "pending" ]] || die "request $rid is already '$cur'; decisions are final."
 
   local rvrow rv_id rv_tpl
   rvrow="$(resolve_agent "$reviewer")"; [[ -n "$rvrow" ]] || die "reviewer not found: $reviewer"
@@ -475,7 +617,6 @@ cmd_review() {
   }
 
   if [[ "$decision" == "rejected" ]]; then
-    [[ -n "$reason" ]] || die "a denial must carry a reason — the requester has to know what to answer."
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
       --arg at "$(now_iso)" --argjson ov "$override_json" \
       '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov}')"
@@ -541,6 +682,7 @@ cmd_comment() {
   [[ -n "$rid" && -n "$author" && -n "$body" ]] \
     || die "usage: comment --request <ID> --author <ROLE> --body \"...\""
 
+  assert_unambiguous "$rid"
   local sub; sub="$(request_submission "$rid")" || die "no such request: $rid"
   [[ -n "$sub" ]] || die "no such request: $rid"
   local rq_id template; rq_id="$(jq -r '.requesterAgentId' <<<"$sub")"
@@ -548,6 +690,10 @@ cmd_comment() {
 
   local arow; arow="$(resolve_agent "$author")"; [[ -n "$arow" ]] || die "author not found: $author"
   local a_id a_tpl; a_id="$(f 1 "$arow")"; a_tpl="$(f 3 "$arow")"
+  # cmd_review refuses a terminated reviewer; this path resolved the author and
+  # never checked, so a terminated agent could still write into the record of a
+  # live decision.
+  [[ "$(f 4 "$arow")" != "terminated" ]] || die "author $author is terminated."
 
   local d; d="$(derive_leader "$rq_id" "$template")"
   local ok="no"
@@ -572,6 +718,7 @@ cmd_thread() {
   done
   [[ -n "$rid" ]] || die "usage: thread --request <ID>"
   [[ -f "$QUEUE" ]] || die "no such request: $rid"
+  reap_expired
 
   local chain=() cur="$rid" depth=0 sub
   while [[ -n "$cur" && "$cur" != "null" && $depth -lt $((MAX_SUPERSEDE_CHAIN + 2)) ]]; do
@@ -721,6 +868,9 @@ cmd_list() {
   local want="pending"
   [[ "${1:-}" == "--status" ]] && want="$2"
   [[ -f "$QUEUE" ]] || { echo "(queue empty)"; return 0; }
+  # So an aged-out request leaves the pending inbox on its own, rather than
+  # sitting there looking decidable until somebody attempts a review.
+  reap_expired
   jq -s --arg w "$want" -r '
     # A set, not an array: `$acked[.rid]` evaluates .rid against the row being
     # rendered, where `index(.rid)` would evaluate it against the array itself.
