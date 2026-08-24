@@ -3,6 +3,9 @@
 Design decision for TOG-194 / TOG-195. Decided 2026-08-23 by the CTO & Chief AI Officer.
 Status: **accepted**. Implemented by `org_request_queue.sh`; tested offline by `test_responsible_leader.sh`.
 
+This document also carries two later decisions on the same mechanism: *Deny is a conversation, not a
+dead end* (TOG-198 / TOG-253) and *How the requester learns a request was decided* (TOG-254).
+
 ## The question
 
 The owner decided that the responsible leadership agent must be able to *run* the operator
@@ -222,6 +225,120 @@ audit trail has to show the exchange and not just the verdict.
   unread request permanently `pending`, which then refused the documented remedy (`--supersedes`) and
   left the requester with no move at all: a dead end, on the mechanism designed to prevent dead ends.
 
+## How the requester learns a request was decided
+
+Decided 2026-08-24 for TOG-254. Status: **accepted**. Implemented by
+`org_request_queue.sh`; tested offline by `test_decision_notify.sh`.
+
+TOG-198 asked for this explicitly and the first implementation did not answer it: *"decide how the
+requester LEARNS of the decision. A denial nobody reads is a dead end regardless of how good the
+reason is."* There was no notification, no wake and no callback. The requester had to poll
+`org_request_queue.sh list`, so the honest description of the previous behaviour is **it does not
+learn** — and for an expiry, which no human action produces, nothing happened at all.
+
+> **Every terminal transition notifies the requester, addressed to the agent id recorded at submit.
+> Delivery is an outbox, never a gate: the decision is committed first, delivery is attempted after,
+> and a failed delivery is logged rather than retried into a different approver.**
+
+### Four terminal states, not three
+
+The issue named denial, approval and expiry. There is a fourth: **`failed`** — the reviewer approved
+and the provisioner then refused, so no agent was seated. It ends the request as finally as a denial
+does, it is the state in which the requester is *most* confused about what happened, and it was the
+one nobody had named. All four notify.
+
+| State | What the requester is told |
+|---|---|
+| `approved` | who approved it, why, **and the seated agent's id** — that id is the point of having asked |
+| `rejected` | the reason, and both next moves: answer in thread (`comment`), or amend (`submit --supersedes`) |
+| `expired` | that it aged out, that expiry **did not** re-target it, and how to resubmit to the same leader |
+| `failed` | that it was approved but not seated, the provisioner's error, and that no partial state was left |
+
+### The channel, and an honest note about what exists
+
+The right instinct was stated in the issue: whatever wakes the leader is the same mechanism that
+should tell the requester, pointed the other way. Checking that turned up something worth writing
+down — **neither side has a notifier today.** This document's claim that a dormant leader is *woken*
+is, as of now, a statement about design intent with no code behind it, exactly as the requester's
+side was. This section defines the mechanism for one direction; the other direction is the same
+mechanism and should reuse it rather than grow a second one.
+
+There is no agent-addressed notification route on this instance. Measured 2026-08-24 from an agent
+principal:
+
+| Route | Result |
+|---|---|
+| `GET /api/notifications` | 404 |
+| `GET /api/agents/me/notifications` | 404 |
+| `GET /api/agents/me/wake` | 404 |
+
+What does work — and is how this instance's agents already reach each other, including how the
+review that produced this issue reached its author — is an **issue comment and the wake it
+generates**. So delivery is a comment on an issue the recipient is assigned to, named per-request by
+`submit --notify-issue`, and carried by `REQUEST_NOTIFY_CMD`. The reference transport is
+`notify_paperclip_issue.sh`.
+
+The transport is a seam rather than a hardcoded API call because the queue runs operator-side against
+Postgres and holds no Paperclip agent credential of its own. Leaving `REQUEST_NOTIFY_CMD` unset is a
+**supported, recorded state** (`pull_only`), not a failure.
+
+### Push and pull, because push can always fail
+
+`inbox --for <ROLE>` renders every decision on the requester's own requests, with the delivery state
+of each. It needs no transport, no credential, no network and no `column`. This is deliberate: if the
+only answer to a failed push were another push, the design would have replaced one dead end with a
+less obvious one. Push is the thing that makes a decision *timely*; pull is the thing that makes it
+*reliable*, and the requirement is reliability.
+
+`notify --list` shows the outbox; `notify --drain` retries; and `notify` **exits 1 while any
+notification is undelivered**, which is the same cron/CI contract `overrides` uses. `pull_only` is
+explicitly not counted as a failure, or the gate would be red on every correctly-configured
+deployment that has chosen the pull path.
+
+### Delivery is not a security control, and is structurally prevented from becoming one
+
+This is the requirement that mattered most: *"a notification that fails must not block, alter, or
+re-target a decision, or the notifier becomes a way to influence authorization."* That is enforced by
+construction, not by intent:
+
+1. **Ordering.** The decision row is appended to the queue *before* any notification work begins.
+   Every failure mode — bad transport, hang, SIGKILL, full disk — happens to a decision that is
+   already final. This, not the timeout, is the actual guarantee.
+2. **Containment.** Delivery runs in a subshell with its exit status swallowed, so it cannot fail a
+   caller, and there is no code path from the notifier back into reviewer derivation, the ceiling
+   check, or the decision rows. A malformed payload is dropped rather than appended, because one
+   unparseable row breaks every reader of the record.
+3. **No re-targeting, ever.** `notify --drain` re-reads the recipient from the recorded
+   `notify.queued` row and never re-derives it. A retry that re-derived could be pointed at a
+   different agent by an org change made between the decision and the retry — the same hazard the
+   issue names, arriving through the back door. The recipient is an **agent id**, not a role string,
+   for the same reason: a role can be re-pointed at a different agent, and the decision was made
+   about a specific principal.
+4. **A hung transport is bounded** by `REQUEST_NOTIFY_TIMEOUT` where coreutils `timeout` exists. This
+   is a liveness aid for the reviewer's terminal, not a correctness property — correctness is (1).
+
+### Two things this change hardened on the way past
+
+Both were found by the suite rather than reasoned about in advance, and both are the *same class of
+bug the record had already been bitten by once*:
+
+- **Status is now an allowlist, not a denylist.** Queries asked "which rows are *not* comments or
+  acknowledgements" and treated the rest as decisions. Adding notification events opted them silently
+  into being read as decisions, which gave notified requests a null status and dropped them from
+  every filtered listing. The code already carried a written warning about exactly this. It is now
+  `STATUS_EVENTS`, stated positively: an event carries a status only if it is on the list.
+- **A second terminal decision is refused, not resolved.** The record refused ambiguous
+  *submissions* already; it resolved ambiguous *decisions* by `tail -1`. That mattered more once this
+  change introduced a new writer to the queue file — `REQUEST_NOTIFY_CMD` is an operator-configured
+  subprocess that did not previously exist. It runs as the same user and therefore *can* append; what
+  it must not do is have an appended row silently become the decision. `thread`, the view whose whole
+  purpose is to be believed, now checks every request in the chain.
+
+The residual limit, stated plainly: this is detective, not preventive. A transport running as the
+same user cannot be sandboxed by the script that invokes it. What the change buys is that a forged
+decision becomes a loud refusal instead of a silent substitution — the same trade the override design
+already made.
+
 ## What was considered and rejected
 
 **Direct manager only, no walk.** Simpler, and identical to this design in every current case. Rejected
@@ -244,6 +361,29 @@ requires a named agent, not a class.
 
 **Auto-escalation on timeout.** Rejected, with the reasoning above. It is the design's most likely
 future regression, so it is written down as a rejection rather than left unmentioned.
+
+**Polling as the only answer — "the requester runs `list`".** Rejected: it is what the design already
+did, and it is why TOG-254 exists. Polling cannot cover expiry, because nothing prompts the requester
+to poll at the moment their request quietly dies, and a denial nobody is prompted to read is the dead
+end TOG-198 was filed about. Polling is retained as the *backstop* (`inbox`), not as the mechanism.
+
+**Retrying a failed notification to a different recipient — a "fallback approver" or a manager
+copy.** Rejected, firmly, and it is the most dangerous thing that could be added here. A notifier
+that re-targets on failure is a mechanism by which delivery outcomes select who is involved in an
+authorization decision, which is precisely what the requirement forbids. It is the same shape as
+auto-escalation on a timer, one layer down, and it would be easy to add believing it was a
+reliability improvement. A failed delivery is logged and drained to **the original recipient**, or it
+is left visible as an undelivered notification; it is never redirected.
+
+**Blocking the decision until delivery succeeds.** Rejected. It sounds like the safe choice and is
+the opposite: it makes an unreachable requester — or a broken transport, or a slow HTTP call — able
+to prevent a leader from deciding. That hands anyone who can degrade delivery a veto over
+authorization. Notification is a consequence of a decision, never a precondition for one.
+
+**Making the notification itself the audit trail.** Rejected. Delivery state (`delivered`, `failed`,
+`pull_only`) is recorded in the queue, but the *record* of what was decided remains the request
+thread. Notifications are lossy by nature; a record that lives only where it was sent is a record
+that a transport outage can erase.
 
 **Paperclip's native `tool_action_requests` table as the record, instead of this JSONL queue.**
 TOG-198 asked for this to be evaluated rather than assumed, and it is the right question: the table

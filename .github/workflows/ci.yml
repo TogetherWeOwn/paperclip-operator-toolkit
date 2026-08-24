@@ -13,6 +13,9 @@ name: CI
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
 #                                       still say what was approved and why
+#     test_decision_notify.sh           whether the REQUESTER ever learns a
+#                                       request was decided, and that delivery
+#                                       cannot influence a decision — TOG-254
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
@@ -169,6 +172,16 @@ jobs:
       - name: request-record integrity suite
         run: ./test_request_record_integrity.sh
 
+      # TOG-254. A third question again: the first two ask who may decide and
+      # whether the record survives, this one asks whether the REQUESTER ever
+      # finds out. It also carries the containment half — that a failed or
+      # hostile notifier cannot block, alter or re-target a decision — which is
+      # the part that turns a convenience feature into an authorization
+      # concern. Third offline seam: REQUEST_NOTIFY_CMD, a stub transport, so
+      # "delivery failed" is a case the suite CAUSES rather than waits for.
+      - name: decision-notification suite
+        run: ./test_decision_notify.sh
+
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
       # recording fakes for `podman` and `psql` on PATH and asserts the exact
@@ -232,7 +245,8 @@ jobs:
           # stage <dir> — a runnable copy of the tools, lib/ included.
           stage() {
             cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
-               test_responsible_leader.sh test_request_record_integrity.sh "$1/"
+               test_responsible_leader.sh test_request_record_integrity.sh \
+               test_decision_notify.sh "$1/"
             mkdir -p "$1/lib" && cp lib/*.sh "$1/lib/"
           }
 
@@ -318,6 +332,48 @@ jobs:
           # resolved by tail -1 again instead of being refused.
           mutation_check "ambiguous-request-id" test_request_record_integrity.sh skip \
             's/\[\[ "$n" -le 1 \]\]/[[ "$n" -le 99 ]]/' || rc=1
+
+          # --- TOG-254: the requester learns ---------------------------------
+          # All four use sibling=skip. The cross-check picks "the other suite"
+          # from a hard-coded pair, so it cannot express a third suite; using it
+          # here would compare against an arbitrary one of the two and prove
+          # nothing. The gates below still assert the full three-step contract.
+
+          # THE headline defect this issue was filed about: "nothing wakes on an
+          # expiry today at all". Expiry is the quietest of the terminal states
+          # because no human action produces it, so it is the one that silently
+          # reverts to notifying nobody.
+          mutation_check "expiry-notifies-nobody" test_decision_notify.sh skip \
+            's/emit_notification "$rid" expired/true "$rid" expired/' || rc=1
+
+          # Expiry re-notifying on EVERY read, because reap_expired runs from
+          # read paths. A notifier that pages on every `list` gets muted, and a
+          # muted notifier is the dead end this issue exists to close, reached
+          # by a different road.
+          #
+          # BOTH halves go together, for the same reason the never-expires gate
+          # above mutates two lines: single-shot delivery is held by the
+          # idempotency guard in emit_notification AND by reap_expired only
+          # reaping requests whose last status is pending. Either alone gives
+          # the right answer, so mutating one proves nothing — the first draft
+          # of this gate mutated only the guard and the suite passed, which is
+          # how the redundancy was found rather than assumed.
+          mutation_check "notification-repeats-forever" test_decision_notify.sh skip \
+            's/^  notify_already "$rid" && { NOTIFY_RESULT="already"; return 0; }/  false \&\& { NOTIFY_RESULT="already"; return 0; }/' \
+            's/| map(select(.last == "pending" and .exp != ""))/| map(select(.exp != ""))/' || rc=1
+
+          # Put the notification row back to carrying `status`, so it is shaped
+          # like a decision. This is not hypothetical — it is the regression
+          # this feature actually caused while being written, and it made
+          # notified requests vanish from every filtered listing.
+          mutation_check "notification-shaped-like-a-decision" test_decision_notify.sh skip \
+            's/{event:"notify.queued",requestId:$id,decision:$s,/{event:"notify.queued",requestId:$id,status:$s,/' || rc=1
+
+          # The undelivered-notification gate going green. Same failure mode as
+          # a muted alarm: the feature still "works", and nobody learns that
+          # nobody is learning.
+          mutation_check "undelivered-gate-always-green" test_decision_notify.sh skip \
+            's/\[\[ "$bad" -eq 0 \]\] ||/[[ "$bad" -ge 0 ]] ||/' || rc=1
 
           exit $rc
 

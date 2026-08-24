@@ -310,8 +310,16 @@ REQUEST_TTL_DAYS=-1 "$Q" submit --requester MGR --template E0_SPECIALIST \
 REQ="$(last_sub)"
 must_refuse "the responsible leader cannot decide an expired request" \
   "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+# Filter to STATUS-BEARING events, not merely to the request id. The queue also
+# carries comments, acknowledgements and (since TOG-254) notifications for a
+# request; `tail -1` over all of them reads whichever row happens to be last.
+# That is the same latent bug the queue itself fixed by replacing its denylist
+# with the STATUS_EVENTS allowlist — asserting state by shape rather than by
+# event name makes a test flip on unrelated changes.
 eq "  ...it is marked expired, not escalated" \
-   "$(jq -r --arg r "$REQ" 'select(.requestId==$r)|.status' "$QUEUE" | tail -1)" "expired"
+   "$(jq -r --arg r "$REQ" 'select(.requestId==$r and (
+        .event=="request.submitted" or .event=="request.reviewed" or .event=="request.expired"
+      ))|.status' "$QUEUE" | tail -1)" "expired"
 must_refuse "standing authority cannot decide it either — expiry is not an escalation" \
   "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "it is answered by resubmitting, which returns to the SAME leader" \
