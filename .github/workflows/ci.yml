@@ -136,6 +136,21 @@ jobs:
       - name: scope-residue gate regression suite
         run: ./test_gh_scope_residue.sh
 
+      # TOG-310. Audits every link in git's credential-helper chain for
+      # substitutability by the shared agent uid — the helper program, its
+      # directory, and every config file that can name a helper, including ones
+      # that do not exist yet but can be created.
+      #
+      # Portable by construction: the analysis is pure permission arithmetic, so
+      # the suite builds its fixtures from real root-owned paths (/usr/bin/git,
+      # /etc) that exist on a runner too, and skips only the handful of
+      # assertions about /paperclip itself. It pins both bugs found by checking
+      # the audit's output against live write probes rather than by reading it:
+      # symlinked /bin reported as a world-writable hole, and an absent config
+      # under a creatable parent reported clean.
+      - name: credential-chain audit regression suite
+        run: ./test_credential_chain_audit.sh
+
       # The authorization change from TOG-194: who may approve a provisioning
       # request. Runs here because it fabricates its whole world — a TSV org
       # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it
