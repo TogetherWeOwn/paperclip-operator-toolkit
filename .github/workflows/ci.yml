@@ -1016,6 +1016,11 @@ jobs:
       #      is the TOG-253 lesson that mutation_check() already encodes for
       #      the shell suites above; capture-suite never got it. A red is only
       #      attributable to the mutation if the unmutated copy is green FIRST.
+      #
+      # TOG-354 — a third defect of the same family, found verifying the two
+      # above. A red attributable to the mutation is still not necessarily a
+      # red attributable to SIGNATURE VERIFICATION, and this step only asked
+      # for "some test failed". See the two guards inline below.
       - name: Prove the suite detects a receiver that skips verification
         run: |
           set -uo pipefail
@@ -1034,7 +1039,19 @@ jobs:
             cat "$mut/baseline.txt"
             exit 1
           fi
-          echo "baseline: the unmutated staged copy is GREEN — a red below is attributable to the mutation"
+          # A SKIPPED test is a disabled test, and it leaves the baseline green.
+          # Without this, the very tests this gate exists to exercise can be
+          # switched off and every check below still reports success. `todo` is
+          # the same hole by another name: the assertions still run but their
+          # failure is not counted, so a todo'd signature test is a signature
+          # test that cannot go red.
+          if ! grep -qE '^# skipped 0$' "$mut/baseline.txt" ||
+             ! grep -qE '^# todo 0$' "$mut/baseline.txt"; then
+            echo "::error::the staged suite DISABLES tests (skip/todo) — a disabled signature test switches off the thing this gate proves"
+            grep -E '^ok [0-9]+ - .*# (SKIP|TODO)' "$mut/baseline.txt"
+            exit 1
+          fi
+          echo "baseline: the unmutated staged copy is GREEN with nothing skipped — a red below is attributable to the mutation"
 
           # STEP 2 — mutate, and require the suite to notice.
           node -e '
@@ -1054,7 +1071,42 @@ jobs:
             grep -E '^# (tests|pass|fail|skipped)' "$mut/out.txt"
             exit 1
           fi
-          echo "suite correctly went red against the unverifying mutant; it failed on:"
+          # TOG-354 — the red must be THE red. "Some test failed" is not the
+          # assertion we want: an unverifying receiver also reddens the
+          # rejection-counter tests, for BOOKKEEPING reasons — they fail
+          # because nothing is being rejected, not because anything checked
+          # that a forgery was refused. So all five signature tests could be
+          # deleted and this step still printed "correctly went red" and exited
+          # 0. Name the tests that must fail.
+          #
+          # On the enumerated list, given defect 1 above: the staging list
+          # rotted SILENTLY (a missing directory became an ENOENT that read as
+          # success). This one rots LOUDLY — a renamed or deleted test is
+          # reported as missing and the step goes red, rather than quietly
+          # reducing what is checked. Keep that property if you restructure it.
+          not_ok="$(awk '/^not ok [0-9]+ - /{sub(/^not ok [0-9]+ - /,"");print}' "$mut/out.txt")"
+          present="$(awk '/^(not )?ok [0-9]+ - /{sub(/^(not )?ok [0-9]+ - /,"");print}' "$mut/out.txt")"
+          missing=0
+          for name in \
+            "an UNSIGNED delivery is rejected with 401 and stores nothing" \
+            "a delivery signed with the WRONG secret is rejected with 401 and stores nothing" \
+            "a TAMPERED body fails the signature that was valid for the original" \
+            "a MALFORMED signature header is rejected without being treated as a mismatch" \
+            "every 401 looks identical, so probing cannot distinguish the failure"
+          do
+            if ! grep -Fxq -- "$name" <<<"$present"; then
+              echo "::error::required signature test is no longer in the suite: $name"
+              missing=1
+            elif ! grep -Fxq -- "$name" <<<"$not_ok"; then
+              echo "::error::the unverifying mutant did NOT fail: $name — this red is not attributable to signature verification"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::the mutant went red, but not on the signature tests — the gate would be decoration again"
+            exit 1
+          fi
+          echo "suite correctly went red against the unverifying mutant, on every required signature test; it failed on:"
           grep -E '^not ok ' "$mut/out.txt"
 
       # The shell suite fabricates its own RSA key and stubs the GitHub API.
