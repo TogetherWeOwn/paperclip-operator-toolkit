@@ -19,6 +19,8 @@ name: CI
 #                                       cannot influence a decision — TOG-254
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
+#     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
+#                                       is the copy that is REVIEWED — TOG-212
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -53,6 +55,16 @@ name: CI
 #
 #   NOT A SUITE: org_access_review.sh is read-only and needs no API server, so
 #   it clears blocker 3 — but it still needs 1 and 2, so it is excluded too.
+#
+#   READ THIS BEFORE TRUSTING THE DRIFT SUITE'S GREEN (TOG-212). CI runs
+#   test_tool_drift.sh, which proves the DETECTOR works. It does NOT and cannot
+#   run the actual comparison, because the thing to compare against is a
+#   directory on the VPS that no runner can reach. A green badge here means
+#   "tool_drift.sh would notice drift", never "there is no drift". The real
+#   check is `tool_drift.sh fingerprint` on the VPS and `compare` in a clone,
+#   and it stays operator-initiated for exactly the same reason the two suites
+#   above do. Do not let this distinction quietly erode into a green badge that
+#   is read as a clean bill of health.
 #
 # This list deliberately carries no test counts. CI asserts EXIT STATUS and
 # never a count: counts drift as suites grow, and a gate that pins one turns
@@ -215,6 +227,13 @@ jobs:
       # credential and no network.
       - name: fail-closed CI status suite
         run: ./test_gh_ci_status.sh
+
+      # TOG-212. Whether the copy of a tool that RUNS is the copy that is
+      # REVIEWED. The suite fabricates a throwaway git repo and a "deployed"
+      # directory in mktemp, so it needs no VPS, no network and no credential.
+      # See the header for what this suite's green does NOT mean.
+      - name: running-vs-reviewed drift suite
+        run: ./test_tool_drift.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
@@ -699,6 +718,61 @@ jobs:
           run_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/'
           exit $rc
 
+      # Same discipline for the drift detector (TOG-212). Its whole value is
+      # noticing that two copies of a tool differ, so a suite that cannot detect
+      # that ability being weakened is decoration. All three mutations below are
+      # things a reasonable person would actually write:
+      #
+      #   1. Fingerprint the SIZE instead of the content. This is the obvious
+      #      cheap version, and it is blind to exactly the edit that matters —
+      #      a changed gate condition that happens to keep the byte count. It is
+      #      also the same class of mistake as the test count (114 vs 156) that
+      #      TOG-212 was found by: a fingerprint that collides.
+      #   2. Make drift exit 0. What someone reaches for the first time exit 3
+      #      breaks a pipeline, and it restores the false green wholesale.
+      #   3. Fingerprint secret-shaped files too. Reads as removing a special
+      #      case; publishes a hash oracle for a credential into whatever issue
+      #      the report gets pasted into.
+      #
+      # Each goes through a BASELINE ASSERTION first: the unmutated copy must
+      # pass in the same staging directory. Without that, "the mutated suite
+      # failed" is unattributable — which is how two gates in this repo sat
+      # vacuous for months before TOG-253 found them.
+      - name: Prove the drift suite still detects a weakened detector
+        run: |
+          set -uo pipefail
+          rc=0
+          drift_mutation() {
+            local label="$1" expr="$2"
+            local mut; mut="$(mktemp -d)"
+            cp tool_drift.sh test_tool_drift.sh "$mut/"
+
+            if ! (cd "$mut" && ./test_tool_drift.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_tool_drift.sh 2>&1 | tail -20); rm -rf "$mut"; return 1
+            fi
+
+            sed -i "$expr" "$mut/tool_drift.sh"
+            if ! bash -n "$mut/tool_drift.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s tool_drift.sh "$mut/tool_drift.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if (cd "$mut" && ./test_tool_drift.sh >/dev/null 2>&1); then
+              echo "::error::$label: the drift suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          drift_mutation "size-not-content" \
+            's|^  { printf .blob %d\\0. "\$len"; cat "\$f"; } . sha1sum . cut -d. . -f1$|  printf "%040d" "$len"|' || rc=1
+          drift_mutation "drift-exits-zero"      's/EXIT_DRIFT=3/EXIT_DRIFT=0/' || rc=1
+          drift_mutation "secrets-fingerprinted" 's/^is_secretish() {/is_secretish() { return 1;/' || rc=1
+          exit $rc
       # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
       # strict mode. That is the tempting simplification here — it reads as
       # "something was requested, so this is scoped" — and it silently reinstates

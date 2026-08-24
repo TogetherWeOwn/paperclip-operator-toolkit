@@ -50,6 +50,7 @@ The suites below run anywhere and are what CI runs. Exactly two more need the VP
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 ./test_responsible_leader.sh        # who may approve a provisioning request
 ./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
+./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
@@ -65,6 +66,47 @@ export COMPANY_ID=<uuid>
 this repo used to quote three different numbers for the same omniroute selftest. A count in a gate
 turns ordinary growth into a red build; a count in prose is just wrong a month later. Neither the
 docs nor CI assert one — if you add a suite, do not start.
+
+## Is the copy that runs the copy that is reviewed?
+
+Everything above tests what is *in this repo*. None of it tests whether that is what is actually
+running on the VPS, and the import that created this repo was a snapshot — a snapshot is only the
+source of truth until somebody edits the other copy.
+
+TOG-212 is the first case: the omniroute selftest reported 114 assertions here and 156 on the VPS.
+Same tool, two behaviours, and the reviewed one was not the one containing Claude routing. It was
+noticed by eye, from a number a human happened to quote in a different issue. That is not a
+detection mechanism.
+
+`tool_drift.sh` is. Run this whenever you have shell on the VPS, and before any release:
+
+```bash
+# 1. On the VPS, in the directory the tools actually run from.
+#    Needs bash + coreutils only — no git, no clone, no network, no credential.
+./tool_drift.sh fingerprint > /tmp/vps.fp
+
+# 2. Bring /tmp/vps.fp to a clone, and compare against the ref you believe in.
+./tool_drift.sh compare /tmp/vps.fp --ref main
+```
+
+Exit `0` no drift · `2` refused · `3` drift found. It reports three things, and the middle one is
+the one that should stop you: **DRIFT** (same path, different content), **UNVERSIONED** (a tool at
+the source that was never imported at all), and **NOT DEPLOYED** (informational — the VPS has no
+reason to hold every test file; `--strict` makes it count).
+
+Two design points, both deliberate and both worth keeping:
+
+- **It compares content, not counts or sizes.** A count collides and drifts innocently, which is
+  precisely why 114-vs-156 sat unnoticed. The fingerprint is the git blob hash, computed with
+  `sha1sum` so the VPS side needs no git, and the CI mutation gate fails if anyone "simplifies" it
+  back into a size check.
+- **There is no committed manifest of expected hashes.** `compare` reads the ref directly. A
+  committed manifest would be stale the first time anyone landed a PR, and a drift detector that
+  cries wolf gets muted — at which point it is indistinguishable from a deleted one.
+
+**CI cannot run the actual comparison** and never will: the thing to compare against is a directory
+no runner can reach. A green badge means the detector works, not that there is no drift. Only
+running step 1 on the VPS answers that.
 
 `test_responsible_leader.sh` needs `jq` and nothing else. It fabricates the whole world it tests:
 a TSV org fixture read through the `ORG_SNAPSHOT` seam instead of the database, and a stub
