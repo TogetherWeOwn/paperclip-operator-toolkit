@@ -141,6 +141,12 @@ jobs:
       # credential, no network.
       - name: SQL backend seam suite
         run: ./test_sql_backend.sh
+      # TOG-247: the CI status reader that must never report a denial or an
+      # empty result set as green. Offline — a stub GitHub API on 127.0.0.1
+      # serves a different permission/result case off each ref, so this needs no
+      # credential and no network.
+      - name: fail-closed CI status suite
+        run: ./test_gh_ci_status.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
@@ -314,6 +320,42 @@ jobs:
               echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
             fi
           done
+      # Same discipline for the CI status reader (TOG-247). Its entire value is
+      # the refusal to call an unobserved CI green, so a suite that cannot
+      # detect that refusal being weakened is decoration. Both mutations below
+      # are the tempting ones, not invented nonsense:
+      #
+      #   1. Make `unknown` exit 0. This is what someone reaches for the first
+      #      time exit 3 breaks a pipeline — and it silently restores the exact
+      #      false green, because `if gh_ci_status.sh; then merge` goes green on
+      #      a token that was denied.
+      #   2. Drop the no-signal guard, so zero results from a readable source
+      #      falls through to pass. That is the naive "all runs concluded
+      #      success" predicate, which is vacuously true for an empty list.
+      - name: Prove the CI status suite still detects a weakened refusal
+        run: |
+          set -uo pipefail
+          rc=0
+          run_mutation() {
+            mut="$(mktemp -d)"
+            cp gh_ci_status.sh test_gh_ci_status.sh "$mut/"
+            sed -i "$2" "$mut/gh_ci_status.sh"
+            if ! bash -n "$mut/gh_ci_status.sh"; then
+              echo "::error::the $1 mutation no longer parses; this guard is now blind, fix it"
+              rc=1; return
+            fi
+            if diff -q gh_ci_status.sh "$mut/gh_ci_status.sh" >/dev/null; then
+              echo "::error::the $1 mutation changed nothing; the sed no longer matches, so this guard is blind"
+              rc=1; return
+            fi
+            if (cd "$mut" && ./test_gh_ci_status.sh >/dev/null 2>&1); then
+              echo "::error::the CI status suite PASSED against the $1 mutation"
+              rc=1; return
+            fi
+            echo "suite correctly rejects the $1 mutation"
+          }
+          run_mutation "unknown-exits-zero" 's/EXIT=3/EXIT=0/g'
+          run_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/'
           exit $rc
 
   # ---------------------------------------------------------------------------

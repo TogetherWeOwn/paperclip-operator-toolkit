@@ -22,13 +22,116 @@ const PERMISSION_LEVELS = ["read", "write", "admin"];
  * `workflows` is deliberately excluded and granted per project instead, because
  * GitHub rejects an entire ref push when a branch touches `.github/workflows/**`
  * without it — so it is not a safe global default in either direction.
+ *
+ * `checks:read` + `statuses:read` were added by the TOG-247 decision, so that an
+ * agent that opens a PR can observe whether its own CI passed instead of
+ * asserting it. Both are read-only and neither widens the repo ceiling.
+ *
+ * `actions:read` is NOT here, and its absence is a decision rather than an
+ * oversight — see WITHHELD_CI_SOURCES below before adding it.
  */
 export const DEFAULT_PERMISSION_PROFILE = Object.freeze({
   contents: "write",
   pull_requests: "write",
   issues: "write",
   metadata: "read",
+  checks: "read",
+  statuses: "read",
 });
+
+/**
+ * The permissions that make CI observable, and the endpoint each one unlocks.
+ *
+ * `statuses` is listed separately from `checks` on purpose: they are distinct
+ * permissions, and granting `checks:read` does NOT make the combined commit
+ * status endpoint readable. Measured against the live installation on
+ * 2026-08-24 — a token holding actions:read + checks:read still gets 403 from
+ * `/commits/{ref}/status`. A repo whose CI posts commit statuses instead of
+ * check runs is therefore invisible to a checks-only grant.
+ */
+const CI_SOURCES = Object.freeze({
+  checks: "check runs (GET /repos/{o}/{r}/commits/{ref}/check-runs)",
+  actions: "workflow runs (GET /repos/{o}/{r}/actions/runs)",
+  statuses: "commit statuses (GET /repos/{o}/{r}/commits/{ref}/status)",
+});
+
+/**
+ * CI sources deliberately NOT granted, and why (TOG-247).
+ *
+ * This exists so the absence reads as a decision rather than a gap. Without it
+ * the mint response lists `actions` under `blind`, someone reads that as a TODO,
+ * and the permission gets added back as a convenience — which is precisely what
+ * the decision refused.
+ *
+ * Measured 2026-08-24: `actions:read` also grants `GET /actions/runs/{id}/logs`
+ * (200, a 47 KB zip). `checks:read` alone gets 403 on the same endpoint. So
+ * `actions:read` is a different KIND of increment from the other two: check-run
+ * conclusions say pass/fail, but logs carry whatever CI printed, including an
+ * accidentally echoed secret. Under TOG-191 every agent on this host shares uid
+ * 1000 and can read every other agent's environment, so a fleet-wide
+ * log-download capability is a standing exfiltration path traded for a
+ * convenience the conclusions already provide.
+ *
+ * The accepted cost, stated plainly: a red check shows as red with no reason
+ * attached, and whoever picks it up reproduces the failure locally.
+ */
+const WITHHELD_CI_SOURCES = Object.freeze({
+  actions:
+    "withheld by decision: actions:read also grants workflow LOG download " +
+    "(GET /actions/runs/{id}/logs), and logs carry whatever CI printed. " +
+    "Check-run conclusions answer 'did my PR pass' without that. Do not add " +
+    "this to the default profile as a convenience — TOG-247.",
+});
+
+/**
+ * Report which CI sources this grant can actually read (TOG-247).
+ *
+ * A minted token that cannot see CI is not, by itself, a problem — the operator
+ * may well decide that humans verify before merge. The problem is a token that
+ * cannot see CI and does not SAY so, because the failure mode is silent: a
+ * caller pulls `check_runs` out of a 403 body, finds nothing, and concludes
+ * "no CI configured" rather than "you may not look".
+ *
+ * Deliberately advisory, and it carries no enforcement. This changes what the
+ * caller KNOWS, never what the token can do — the grant is decided by the
+ * profile and by GitHub, and duplicating that decision here would be a second
+ * source of truth for the blast radius.
+ */
+export function describeCiVisibility(permissions) {
+  const perms = permissions ?? {};
+  const readable = Object.keys(CI_SOURCES).filter((key) => perms[key] != null);
+
+  // An absent source is one of two different things, and collapsing them is how
+  // a refused permission gets quietly re-added. `blind` is a gap someone might
+  // reasonably close; `withheld` is a decision they should not.
+  const absent = Object.keys(CI_SOURCES).filter((key) => perms[key] == null);
+  const blind = absent.filter((key) => !(key in WITHHELD_CI_SOURCES));
+  const withheld = Object.fromEntries(
+    absent
+      .filter((key) => key in WITHHELD_CI_SOURCES)
+      .map((key) => [key, WITHHELD_CI_SOURCES[key]]),
+  );
+
+  return {
+    observable: readable.length > 0,
+    readable,
+    blind,
+    withheld,
+    // Present only when it is needed, so a caller that CAN see CI is not handed
+    // a standing warning it has to learn to ignore. Note this reports on the
+    // grant GitHub returned, not the profile we asked for — the App ceiling can
+    // be narrower than the profile, and then the caller really is blind.
+    warning:
+      readable.length > 0
+        ? null
+        : "This token cannot read CI status: every source returns 403. A client " +
+          "that reads the result array out of the error body sees nothing, which " +
+          "looks like 'no CI configured' rather than 'denied'. Do not treat the " +
+          "absence of failing checks as a pass. Missing: " +
+          absent.map((key) => `${key}:read for ${CI_SOURCES[key]}`).join("; ") +
+          ".",
+  };
+}
 
 export class ScopeError extends Error {
   constructor(message, status = 400) {

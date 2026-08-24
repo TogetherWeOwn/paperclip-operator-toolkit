@@ -45,6 +45,7 @@ note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logg
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
+| `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
@@ -57,6 +58,7 @@ note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logg
 ./test_gh_app_token.sh
 node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_gh_token_argv.sh
+./test_gh_ci_status.sh
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_sql_backend.sh
