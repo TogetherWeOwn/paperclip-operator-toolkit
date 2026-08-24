@@ -114,7 +114,7 @@ longest_tick_run() {
   done
   printf '%s' "$max"
 }
-FENCE_LEN=3
+FENCE_LEN=$(( $(longest_tick_run "$BODY") + 1 )); (( FENCE_LEN < 3 )) && FENCE_LEN=3
 FENCE="$(printf '%*s' "$FENCE_LEN" '' | tr ' ' '`')"
 
 MSG="$(printf '**Provisioning request %s: %s**\n\nAddressed to %s (agent %s).\n\n%s\n%s\n%s\n' \
