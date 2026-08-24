@@ -9,6 +9,7 @@ name: CI
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
+#     test_gh_token_dispatch.sh         gh_token.sh: refuses unknown subcommands
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
@@ -532,6 +533,84 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # TOG-201. The other half of gh_token.sh's contract: an unrecognised
+      # subcommand printed usage on STDOUT and exited 0, so
+      # `tok="$(gh_token.sh tokne)" && use "$tok"` took the `&&` with usage text
+      # in $tok. Offline — fake credential environment, stub curl.
+      - name: gh_token.sh dispatch-contract suite
+        run: ./test_gh_token_dispatch.sh
+
+      # Its mutation guard, with a BASELINE. "The mutated suite failed" is
+      # unattributable on its own — a staging dir that breaks the suite for an
+      # unrelated reason (a missing sibling file, a copy that lost +x) produces
+      # the same red as a working detector. So assert the UNMUTATED copy passes
+      # in the same directory first, then mutate it there.
+      #
+      # Two mutations, one per half of the fix, because they fail independently:
+      #   catchall-exits-zero   restores the pre-TOG-201 arm verbatim.
+      #   help-below-preamble   keeps `help` recognised but moves it back under
+      #                         the credential preamble, so `--help` on a box
+      #                         with no ~/secure-drop dies with "cannot read
+      #                         github-app.pem" instead of answering. Only the
+      #                         two --no-creds cases can catch that one; if
+      #                         someone deletes them, this step goes red.
+      - name: Prove the dispatch suite still detects both regressions
+        run: |
+          set -uo pipefail
+          rc=0
+          base="$(mktemp -d)"
+          cp gh_token.sh test_gh_token_dispatch.sh "$base/"
+          if ! (cd "$base" && ./test_gh_token_dispatch.sh > out.txt 2>&1); then
+            echo "::error::the dispatch suite fails on an UNMUTATED copy in a staging dir; every mutation result below would be unattributable"
+            cat "$base/out.txt"
+            exit 1
+          fi
+          echo "baseline: unmutated copy passes in the staging dir"
+
+          for m in catchall-exits-zero help-below-preamble; do
+            mut="$(mktemp -d)"
+            cp gh_token.sh test_gh_token_dispatch.sh "$mut/"
+            case "$m" in
+              catchall-exits-zero)
+                before='  *) refuse_usage "${1:-}" ;;'
+                after='  *) usage ;;' ;;
+              help-below-preamble)
+                before='  help|--help|-h) usage; exit 0 ;;'
+                after='  help|--help|-h) : ;;' ;;
+            esac
+            if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+              echo "::error::could not find the '$m' anchor in gh_token.sh; this guard is now blind, fix it"
+              exit 2
+            fi
+            # awk, not sed: these lines are full of characters sed reads as
+            # syntax, and a mutation that silently does nothing is the one
+            # failure mode this step exists to avoid.
+            awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+              "$mut/gh_token.sh" > "$mut/mut" && mv "$mut/mut" "$mut/gh_token.sh"
+            if [ "$m" = help-below-preamble ]; then
+              # Put help back as an ordinary arm of the main case, i.e. below
+              # the preamble. Without this the mutant merely stops recognising
+              # help, which is a different and more obvious bug.
+              j='  jwt)   app_jwt; echo ;;'
+              if ! grep -qxF "$j" "$mut/gh_token.sh"; then
+                echo "::error::could not find the jwt arm to anchor the '$m' mutation; this guard is now blind, fix it"
+                exit 2
+              fi
+              awk -v b="$j" -v a='  help|--help|-h) usage ;;' \
+                '$0 == b { print a; print b; next } { print }' \
+                "$mut/gh_token.sh" > "$mut/mut" && mv "$mut/mut" "$mut/gh_token.sh"
+            fi
+            chmod +x "$mut/gh_token.sh"
+            bash -n "$mut/gh_token.sh" || { echo "::error::the '$m' mutant does not parse"; exit 2; }
+            if (cd "$mut" && ./test_gh_token_dispatch.sh > out.txt 2>&1); then
+              echo "::error::the dispatch suite PASSED against the '$m' mutant"
+              cat "$mut/out.txt"; rc=1
+            else
+              echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
+            fi
+          done
+          exit $rc
 
       # Same discipline for the SQL backend seam. Both mutations below are
       # things a reasonable person would actually write; neither is a strawman.

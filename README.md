@@ -50,7 +50,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
-| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
+| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
@@ -127,6 +127,12 @@ These are load-bearing and were each learned by breaking something:
   from `/proc` rather than trusting the source to keep reading correctly.
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
+- **A catch-all arm refuses, and refusing means a non-zero exit.** `gh_token.sh` printed usage on
+  *stdout* and exited **0** for any unrecognised subcommand until TOG-201, so
+  `tok="$(gh_token.sh tokne)" && use "$tok"` proceeded with usage text in `$tok`. Usage errors now go
+  to stderr with exit 2; only `help` / `--help` / `-h` succeed, and they answer *above* the
+  credential preamble so asking a tool how to use it never requires the credentials it sets up.
+  Pinned by `test_gh_token_dispatch.sh`, which asserts exit status and which stream — never wording.
 - **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
   `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
   Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a

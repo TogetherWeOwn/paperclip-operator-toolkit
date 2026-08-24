@@ -46,6 +46,7 @@ The suites below run anywhere and are what CI runs. Exactly two more need the VP
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh              # credential-minter regression suite
 ./test_gh_token_argv.sh             # gh_token.sh: no credential on argv
+./test_gh_token_dispatch.sh         # gh_token.sh: unknown subcommands refuse, non-zero
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 ./test_responsible_leader.sh        # who may approve a provisioning request
 ./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
