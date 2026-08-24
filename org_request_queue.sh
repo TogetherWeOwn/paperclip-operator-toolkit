@@ -87,6 +87,9 @@ set -uo pipefail
 #                                  (--approve|--reject) [--reason "..."]
 #   ./org_request_queue.sh comment --request <ID> --author <ROLE> --body "..."
 #   ./org_request_queue.sh thread  --request <ID>
+#   ./org_request_queue.sh overrides [--all] [--json]   # exit 1 if any are open
+#   ./org_request_queue.sh ack-override --request <ID> --auditor <ROLE> \
+#                                       --note "..."
 #   ./org_request_queue.sh log                       # org.read_grant_log
 #   ./org_request_queue.sh disable-template <T> --reviewer <ROLE>
 #   ./org_request_queue.sh enable-template  <T> --reviewer <ROLE>
@@ -117,6 +120,13 @@ die() { echo "REFUSED: $*" >&2; exit 2; }
 # derived, and the break-glass path over a derived leader. It is no longer the
 # only way a request can be decided.
 STANDING_AUTHORITY='["P4_PROVISIONING_STEWARD","P1_PRESIDENT_COO"]'
+
+# Who may ACKNOWLEDGE a standing-authority override, clearing it from the open
+# audit list. Deliberately NOT the same set: an override that its own author can
+# retire is a log entry, not a control. P3 is the independent audit function and
+# is the intended acknowledger; P1 is here so a dormant P3 cannot wedge the
+# review permanently, and is still bound by the not-your-own-override rule.
+AUDIT_AUTHORITY='["P3_AUDIT_RISK","P1_PRESIDENT_COO"]'
 
 # Request ceiling = create ceiling, plus the report's explicit approval-gated
 # exception for the independent audit function.
@@ -442,12 +452,34 @@ cmd_review() {
   local override_json='null'
   [[ "$override" == "yes" ]] && override_json="$(jq -cn --arg l "$leader_role" '{bypassedLeader:$l}')"
 
+  # An override is an open audit item from the moment it is taken, and whoever
+  # takes it is told so to their face. Writing it to the queue and saying
+  # nothing is how a logged bypass becomes an unread one.
+  #
+  # On STDOUT, not stderr, and deliberately: the reviewer may be an agent
+  # reaching this over the mcp_remote transport, and a tool wrapper returns the
+  # command's stdout as the result while stderr is routinely discarded. A
+  # notice the reviewer never receives is the failure this whole change exists
+  # to fix. The stderr copy is one line, for an operator watching a terminal
+  # with stdout piped somewhere else.
+  announce_override() {
+    [[ "$override" == "yes" ]] || return 0
+    printf '\n  ** STANDING-AUTHORITY OVERRIDE **\n'
+    printf '  %s decided this OVER the responsible leader (%s).\n' "$reviewer" "$leader_role"
+    printf '  It is now an OPEN item in the standing access review (org_access_review.sh\n'
+    printf '  check 10) until an auditor other than %s closes it with a reason:\n' "$reviewer"
+    printf '      ./org_request_queue.sh ack-override --request %s --auditor <ROLE> --note "..."\n\n' "$rid"
+    printf '\033[1;33mSTANDING-AUTHORITY OVERRIDE\033[0m on %s (bypassed %s) — now an open audit item.\n' \
+           "$rid" "$leader_role" >&2
+  }
+
   if [[ "$decision" == "rejected" ]]; then
     [[ -n "$reason" ]] || die "a denial must carry a reason — the requester has to know what to answer."
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
       --arg at "$(now_iso)" --argjson ov "$override_json" \
       '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov}')"
     echo "REJECTED $rid by $reviewer — $reason"
+    announce_override
     echo "  the requester may answer with: comment --request $rid --author $rq_role --body \"...\""
     echo "  or amend and resubmit with:    submit --requester $rq_role ... --supersedes $rid"
     return 0
@@ -487,7 +519,7 @@ cmd_review() {
     --arg at "$(now_iso)" --argjson ov "$override_json" \
     '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,newAgentId:$n,reason:$re,at:$at,override:$ov}')"
   echo "APPROVED $rid by $reviewer"
-  [[ "$override" == "yes" ]] && echo "  NOTE: decided under standing authority, bypassing the responsible leader ($leader_role)."
+  announce_override
   echo "$out"
 }
 
@@ -563,8 +595,124 @@ cmd_thread() {
         (if (.reason // "") != "" then " — \(.reason)" else "" end) +
         (if (.override // null) != null then "\n        (standing-authority override; bypassed \(.override.bypassedLeader))" else "" end) +
         (if (.newAgentId // "") != "" then "\n        provisioned \(.newAgentId)" else "" end)
+      elif .event=="override.acknowledged" then
+        "\($id)  OVERRIDE-ACK  by \(.auditor) — \(.note)"
       else empty end' "$QUEUE"
   done
+}
+
+# --------------------------------------------------------------------------
+# overrides — the standing-authority bypasses, as a list somebody is expected to
+# read. The queue has recorded `override.bypassedLeader` since the derivation
+# change landed, but recording is not surfacing: before this, seeing one meant
+# already knowing the request id and opening its thread, or grepping the JSONL.
+#
+# Deliberately DB-free and `column`-free so it can run anywhere — this is what
+# org_access_review.sh check 10 shells out to, and that has to work on a CI
+# runner and inside a container, not only on the VPS.
+#
+# Exit status: 1 when unacknowledged overrides exist, 0 when none. That is the
+# same cron/CI contract org_access_review.sh already uses. `die` still exits 2,
+# so a real error stays distinguishable from a finding.
+cmd_overrides() {
+  local want="open" fmt="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)  want="all";  shift;;
+      --json) fmt="json";  shift;;
+      *) die "usage: overrides [--all] [--json]";;
+    esac
+  done
+  [[ -f "$QUEUE" ]] || { [[ "$fmt" == "text" ]] && echo "(queue empty — no overrides)"; return 0; }
+
+  local rows
+  rows="$(jq -s -c --arg w "$want" '
+    (map(select(.event=="override.acknowledged"))
+     | map({key:.requestId, value:{auditor:.auditor, note:.note, at:.at}})
+     | from_entries) as $ack
+    | (map(select(.event=="request.submitted"))
+       | map({key:.requestId, value:{requester:.requester, template:.template, title:.title}})
+       | from_entries) as $sub
+    | map(select(.event=="request.reviewed" and (.override // null) != null)
+          | {requestId, status, reviewer, at,
+             bypassedLeader: .override.bypassedLeader,
+             requester: ($sub[.requestId].requester // "?"),
+             template:  ($sub[.requestId].template  // "?"),
+             title:     ($sub[.requestId].title     // ""),
+             ack:       ($ack[.requestId] // null)})
+    | map(select($w == "all" or .ack == null))
+    | .[]' "$QUEUE")"
+
+  if [[ "$fmt" == "json" ]]; then
+    [[ -n "$rows" ]] && printf '%s\n' "$rows"
+  elif [[ -z "$rows" ]]; then
+    echo "no unacknowledged standing-authority overrides"
+  else
+    printf 'REQUEST\tDECISION\tREVIEWER\tBYPASSED LEADER\tWHEN\tREQUESTER\tTEMPLATE\tACK\n'
+    jq -r '[.requestId, .status, .reviewer, .bypassedLeader, .at, .requester, .template,
+            (if .ack == null then "OPEN" else "acked by \(.ack.auditor)" end)] | @tsv' <<<"$rows"
+  fi
+
+  # Only OPEN ones are a finding; --all is a report, not a gate.
+  local open_n
+  open_n="$(jq -s 'map(select(.ack == null)) | length' <<<"$rows")"
+  [[ "${open_n:-0}" -eq 0 ]]
+}
+
+# --------------------------------------------------------------------------
+# ack-override — an auditor closes out a bypass, on the record and with a note.
+#
+# The point of the acknowledgement is that it makes the open list DRAIN. A
+# finding that can never clear trains everyone to ignore the report, which is
+# the same failure as not reporting it. So: overrides accumulate until an
+# auditor looks at each one and says, in writing, what they concluded.
+cmd_ack_override() {
+  local rid="" auditor="" note=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --request) rid="$2";     shift 2;;
+      --auditor) auditor="$2"; shift 2;;
+      --note)    note="$2";    shift 2;;
+      *) die "unknown argument: $1";;
+    esac
+  done
+  [[ -n "$rid" && -n "$auditor" ]] || die "usage: ack-override --request <ID> --auditor <ROLE> --note \"...\""
+  [[ -n "$note" ]] || die "an acknowledgement must carry a note — 'seen' is not a review finding."
+  [[ -f "$QUEUE" ]] || die "no such request: $rid"
+
+  local ov
+  ov="$(jq -s -c --arg id "$rid" \
+        'map(select(.event=="request.reviewed" and .requestId==$id and (.override // null) != null)) | .[-1] // empty' \
+        "$QUEUE")"
+  [[ -n "$ov" ]] || die "$rid carries no standing-authority override to acknowledge."
+
+  jq -e -s --arg id "$rid" 'any(.[]; .event=="override.acknowledged" and .requestId==$id)' "$QUEUE" >/dev/null \
+    && die "$rid is already acknowledged."
+
+  local row; row="$(resolve_agent "$auditor")"
+  [[ -n "$row" ]] || die "auditor $auditor not found."
+  local a_id a_tpl a_status
+  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"
+  [[ "$a_status" != "terminated" ]] || die "auditor $auditor is terminated."
+  jq -e --arg t "$a_tpl" 'index($t) != null' <<<"$AUDIT_AUTHORITY" >/dev/null \
+    || die "$auditor [$a_tpl] does not hold override-acknowledgement authority."
+
+  # Not your own override. The whole value of the acknowledgement is that a
+  # second pair of eyes saw the bypass; letting the bypasser clear it turns the
+  # open list back into a write-only log.
+  local rv_role rv_row rv_id
+  rv_role="$(jq -r '.reviewer' <<<"$ov")"
+  rv_row="$(resolve_agent "$rv_role")"
+  rv_id="$(f 1 "$rv_row")"
+  if [[ -n "$rv_id" && "$rv_id" == "$a_id" ]]; then
+    log_event "$(jq -cn --arg id "$rid" --arg a "$auditor" \
+      '{event:"override.ack_refused",reason:"self_acknowledgement",requestId:$id,auditor:$a}')"
+    die "$auditor took this override; it cannot also clear it."
+  fi
+
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg n "$note" --arg at "$(now_iso)" \
+    '{event:"override.acknowledged",requestId:$id,auditor:$a,note:$n,at:$at}')"
+  echo "ACKNOWLEDGED override on $rid by $auditor — $note"
 }
 
 # --------------------------------------------------------------------------
@@ -573,14 +721,28 @@ cmd_list() {
   [[ "${1:-}" == "--status" ]] && want="$2"
   [[ -f "$QUEUE" ]] || { echo "(queue empty)"; return 0; }
   jq -s --arg w "$want" -r '
-    map(select(.event != "request.comment"))
+    # A set, not an array: `$acked[.rid]` evaluates .rid against the row being
+    # rendered, where `index(.rid)` would evaluate it against the array itself.
+    (map(select(.event=="override.acknowledged")) | map({key:.requestId, value:true}) | from_entries) as $acked
+    # Neither comments nor acknowledgements are decisions, so neither may become
+    # `last` — an acknowledgement landing there would give the request a null
+    # status and silently drop it from every filtered listing.
+    | map(select(.event != "request.comment" and .event != "override.acknowledged"))
     | group_by(.requestId)
     | map({rid: .[0].requestId, sub: .[0], last: .[-1]})
     | map(select($w == "all" or .last.status == $w))
     | .[]
-    | "\(.rid)\t\(.last.status)\t\(.sub.requester) [\(.sub.requesterTemplate)]\t\(.sub.template)\t\(.sub.title)\t\(.last.reviewer // "-")"
-  ' "$QUEUE" | { printf 'ID\tSTATUS\tREQUESTER\tTEMPLATE\tTITLE\tREVIEWER\n'; cat; } | column -t -s$'\t'
+    | "\(.rid)\t\(.last.status)\t\(.sub.requester) [\(.sub.requesterTemplate)]\t\(.sub.template)\t\(.sub.title)\t\(.last.reviewer // "-")\t" +
+      (if (.last.override // null) == null then "-"
+       elif $acked[.rid] then "bypassed \(.last.override.bypassedLeader) (acked)"
+       else "BYPASSED \(.last.override.bypassedLeader) — UNREVIEWED" end)
+  ' "$QUEUE" | { printf 'ID\tSTATUS\tREQUESTER\tTEMPLATE\tTITLE\tREVIEWER\tOVERRIDE\n'; cat; } | tabulate
 }
+
+# `column` is util-linux and is NOT present everywhere this runs — a container
+# without it does not error, it prints NOTHING, so the whole listing silently
+# disappears. Fall back to the raw TSV, which is ugly and complete.
+tabulate() { if command -v column >/dev/null; then column -t -s$'\t'; else cat; fi; }
 
 cmd_set_template() {
   local tpl="$1" enable="$2" reviewer=""
@@ -615,6 +777,8 @@ case "${1:-}" in
   comment)          shift; cmd_comment "$@";;
   thread)           shift; cmd_thread "$@";;
   list)             shift; cmd_list "$@";;
+  overrides)        shift; cmd_overrides "$@";;
+  ack-override)     shift; cmd_ack_override "$@";;
   log)              [[ -f "$GRANT_LOG" ]] && cat "$GRANT_LOG" || echo "(no log)";;
   disable-template) shift; cmd_set_template "$1" no  "${@:2}";;
   enable-template)  shift; cmd_set_template "$1" yes "${@:2}";;

@@ -82,6 +82,46 @@ This is a deliberate trade: availability and a working escape hatch, bought with
 instead of an unbypassable rule that turns one dormant agent into an outage. The control on the
 bypass is that it is visible to `org_access_review.sh` and to O3 audit, not that it is impossible.
 
+### What "visible" actually means
+
+The sentence above was, when first written, a claim about intent rather than about code: the override
+was written into the queue, and the only ways to encounter one were to already know the request id
+and open its `thread`, or to grep the JSONL. The approval of this design attached a condition — that
+`bypassedLeader` be *surfaced*, not merely recorded — because a bypass nobody reads is the same as a
+bypass nobody logged. Four things now make it true, deliberately covering both push and pull:
+
+1. **At decision time.** The reviewer that takes a break-glass decision gets a notice naming the
+   leader it went over and the exact command that clears it — **on stdout**, because an agent
+   reviewer reaches this over `mcp_remote` and a tool wrapper returns stdout while routinely
+   discarding stderr. A notice delivered only on stderr would be invisible to exactly the reviewer
+   this epic added. A one-line copy goes to stderr for an operator at a terminal.
+2. **In the default listing.** `org_request_queue.sh list` carries an `OVERRIDE` column —
+   `BYPASSED <leader> — UNREVIEWED` until it is cleared. No request id needed in advance.
+3. **As a report and a gate.** `org_request_queue.sh overrides [--all] [--json]` lists them and
+   **exits 1 while any are unacknowledged**, which is the same cron/CI contract the access review
+   uses. It is database-free on purpose, so it runs in CI and in a container, not only on the VPS.
+4. **In the standing access review.** Check 10 of `org_access_review.sh` shells out to that command
+   and raises one finding per unacknowledged override. The two cannot drift, because the review does
+   not reimplement the query.
+
+### Why acknowledgement exists, and who may give it
+
+A finding that can never clear teaches everyone to ignore the report — which is the same failure as
+not reporting at all. So an override is an *open item* that drains: an auditor clears it with
+`ack-override --request <ID> --auditor <ROLE> --note "..."`, and the note is mandatory, because
+"seen" is not a review finding. The acknowledgement lands in the request's own thread, so the
+override and its disposition are one record rather than two.
+
+Two rules keep it from becoming self-service. The acknowledgement set is **`P3_AUDIT_RISK` and
+`P1_PRESIDENT_COO`**, deliberately *not* the standing-authority set — P3 is the independent audit
+function and is the intended acknowledger; P1 is there so a dormant P3 cannot wedge the review
+permanently. And whoever took the override **cannot clear it**, by agent id, on either path. An
+override its own author can retire is a log entry, not a control.
+
+The residual limit, stated plainly: this is detective, not preventive. It does not stop a bypass, it
+guarantees a bypass is seen and answered for. That is the trade the design already made; this makes
+the second half of it real.
+
 ## The security properties, and how each survives
 
 The epic named five. Each is stated here with what actually preserves it.

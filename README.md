@@ -25,6 +25,14 @@ makes every check below decorative.
 Who decides a request is derived from the reporting chain, not a fixed pair of roles — see
 [docs/responsible-leader.md](docs/responsible-leader.md).
 
+The standing authority set (`P4_PROVISIONING_STEWARD`, `P1_PRESIDENT_COO`) is retained as an
+escalation floor and a break-glass path, so a dormant leader cannot deadlock its subtree. A
+break-glass decision taken *over* a derivable leader is recorded **and surfaced**: the reviewer is
+told at decision time, `org_request_queue.sh overrides` lists the open ones and exits non-zero,
+`list` carries an `OVERRIDE` column, and check 10 of `org_access_review.sh` turns each unacknowledged
+one into a finding. It stays open until an auditor who did *not* take it clears it with a written
+note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logged.
+
 ## What is here
 
 | Tool | Purpose | Suite |
