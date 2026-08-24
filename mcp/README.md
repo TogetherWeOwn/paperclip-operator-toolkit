@@ -119,7 +119,7 @@ is deliberate and safe: `tools/list` reveals only the two tool schemas.
 | Where | What | Why it is safe |
 |---|---|---|
 | Paperclip secret store | the bearer | Injected per call as `authorization` by `resolveCredentialHeaders`. Held by the **gateway**, never in an agent's env, argv or workspace — there is nothing in agent-readable memory for a same-uid process to lift. |
-| `/etc/caddy/org-request-mcp.bearer` | the bearer | 0600, root-owned. |
+| `/etc/caddy/org-request-mcp.env` | the bearer | 0600, root-owned. Read by systemd as Caddy's `EnvironmentFile`; this is where `{$ORG_MCP_BEARER}` in the site block is expanded from. One file, one consumer — an earlier draft also had the operator write a `.bearer` file that *nothing read* (TOG-341). |
 | `/etc/org-request-mcp/config.json` | **sha256 of** the bearer | The server refuses to start if the mode has group or other bits. A read of this file does not yield a usable credential. |
 | `transport_config.url` | **nothing** | The existing Zapier row carries its token in plaintext in the URL. That half of the pattern is deliberately not copied. |
 | argv | **nothing** | `/proc/*/cmdline` is world-readable and every company on this box shares the host. The config *path* is an argument; the config *contents* are not. |
@@ -145,11 +145,26 @@ appears in the server source.
 `--requester` and `--reviewer` are written by the server from the authenticated
 principal, every time. They are structurally unreachable from tool input.
 
+**Unknown arguments are refused, not dropped.** Each schema says
+`additionalProperties: false`, and since TOG-341 that is *enforced* rather than
+merely advertised: any key the tool does not declare is a `unknown_argument`
+refusal naming what the tool does accept. There is no JSON-Schema validator in
+this process — deliberately, since an npm tree next to a podman-capable
+operator account is a supply-chain surface — so the check reads the same schema
+object `tools/list` hands out. Add a property to a schema and it is accepted;
+add it nowhere and it is refused. The two cannot drift.
+
 An argument named `requester`, `reviewer`, `reports_to`, `on_behalf_of` (and a
-dozen more) is **refused by name**, not silently dropped. A silent drop would
-let a caller believe it had acted as someone else right up until it read the
-audit log. CI has a mutation that proves the suite rejects the silent-drop
-version.
+dozen more) is **refused by name**. That denylist is now genuinely redundant for
+safety — every name on it is already an undeclared key — and load-bearing only
+for the *message*: `requester` and `templat` are both unknown keys, but only one
+of them is someone trying to be somebody else, and the audit log should say
+which. Before TOG-341 it was the other way round, and the header claimed
+otherwise.
+
+Either way the refusal is loud. A silent drop would let a caller believe it had
+acted as someone else right up until it read the audit log. CI mutates each of
+these controls out in turn and requires the suite to go red.
 
 The queue's own refusals (`REFUSED: template … is above the request ceiling`)
 come back as MCP tool errors with the text intact, not as transport failures —
@@ -173,7 +188,12 @@ transport whose refusals can only be tested against production is a transport
 whose refusals are not tested.
 
 CI runs it on Node 24 (the host's major, not the runner default) in the
-`mcp-suite` job, plus two mutation guards and a source-surface check.
+`mcp-suite` job, plus five mutation guards and a source-surface check. Each
+guard proves the unmutated copy passes in the staging directory first, asserts
+its needle matches exactly once (`String.replace` takes only the first match, so
+a duplicated site would silently mutate the wrong one), and checks the mutant
+still parses — a mutation that fails to parse fails the suite for the wrong
+reason, which reads exactly like success.
 
 ---
 

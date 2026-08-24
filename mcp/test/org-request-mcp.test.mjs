@@ -217,6 +217,39 @@ test("neither tool schema declares an identity property", () => {
   }
 });
 
+// A schema property that no arm of buildQueueArgs reads is the SAME failure as
+// an unknown key, arriving from the other direction: the tool advertises it,
+// the caller supplies it, and it goes nowhere. The fixture is asserted to cover
+// exactly the declared keys, so adding a property to a schema and forgetting to
+// consume it fails here rather than in production.
+const EVERY_ARGUMENT = {
+  submit_provisioning_request: {
+    template: "E4_AUDIT_ANALYST", title: "audit analyst", rationale: "because", supersedes: "REQ-004",
+  },
+  review_provisioning_request: { request_id: "REQ-004", decision: "approve", reason: "fine" },
+};
+
+test("every property a schema advertises is actually read onto the queue's argv", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  for (const tool of TOOLS) {
+    const args = EVERY_ARGUMENT[tool.name];
+    assert.deepEqual(
+      Object.keys(args).sort(),
+      Object.keys(tool.inputSchema.properties).sort(),
+      `${tool.name}: the advertised schema and this fixture disagree; one of them was changed alone`,
+    );
+    const argv = buildQueueArgs(tool.name, args, identity);
+    for (const [name, value] of Object.entries(args)) {
+      // `decision` is the one property that becomes a flag rather than a value.
+      const expected = name === "decision" ? "--approve" : value;
+      assert.ok(
+        argv.includes(expected),
+        `${tool.name} advertises '${name}' but nothing puts it on the argv — it is silently dropped`,
+      );
+    }
+  }
+});
+
 test("review is invoked with the authenticated principal as --reviewer", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
@@ -455,6 +488,51 @@ test("the bearer is never passed into the queue script's environment", async () 
   }
 });
 
+// TOG-341: queueEnv is an operator seam for the queue's own test hooks. It is
+// not a way to restate a value this server owns. Two independent controls,
+// because they fail independently — the config one is loud at startup, the
+// ordering one still holds for a cfg object nobody normalized.
+
+test("a config whose queueEnv restates a reserved name is refused at load", () => {
+  for (const key of ["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR"]) {
+    assert.throws(
+      () => normalizeConfig({
+        companyId: COMPANY,
+        bearerSha256: BEARER_SHA,
+        queueScript: "/x/org_request_queue.sh",
+        queueEnv: { [key]: "anything" },
+      }),
+      (error) => error.message.includes("queueEnv may not set") && error.message.includes(key),
+      `queueEnv was allowed to set ${key}`,
+    );
+  }
+  // The seam itself still works — this refuses reserved names, not the feature.
+  assert.doesNotThrow(() => normalizeConfig({
+    companyId: COMPANY,
+    bearerSha256: BEARER_SHA,
+    queueScript: "/x/org_request_queue.sh",
+    queueEnv: { ORG_QUEUE_FIXTURE_DIR: "/tmp/fixture" },
+  }));
+});
+
+test("the tenancy the queue sees comes from the server, not from queueEnv", async () => {
+  const dir = scratch();
+  // Deliberately NOT via normalizeConfig: that path already refuses this. The
+  // property under test is that the spread order alone is enough, so the
+  // control survives a cfg object assembled some other way.
+  const cfg = {
+    ...configFor(dir),
+    queueEnv: { COMPANY_ID: "00000000-0000-4000-8000-000000000000", PAPERCLIP_DB_CTR: "not-our-db" },
+  };
+  const run = makeQueueRunner(cfg);
+  await run(["submit", "--requester", CALLER, "--template", "E4_AUDIT_ANALYST", "--title", "t"]);
+  const env = readFileSync(path.join(dir, "env.txt"), "utf8");
+  assert.match(
+    env, new RegExp(`COMPANY_ID=${COMPANY}`),
+    "a config key overrode the tenancy value handed to the queue",
+  );
+});
+
 // ===========================================================================
 // 5. Exactly two tools, and never the provisioner.
 // ===========================================================================
@@ -573,6 +651,129 @@ test("decision is a closed set; nothing else becomes a flag", () => {
     buildQueueArgs("review_provisioning_request", { request_id: "REQ-001", decision: "approve" }, identity),
     ["review", "--reviewer", CALLER, "--request", "REQ-001", "--approve"],
   );
+});
+
+// ---------------------------------------------------------------------------
+// TOG-341: the inputSchema is ENFORCED, not merely advertised.
+//
+// Before this, `additionalProperties: false` was a claim made to clients that
+// nothing in this process checked. An unlisted key could not reach the CLI —
+// buildQueueArgs reads named arguments and nothing else — but it was dropped in
+// silence, which is precisely the failure mode the identity denylist exists to
+// avoid. These assert the refusal, not the drop.
+// ---------------------------------------------------------------------------
+
+test("an argument the schema does not declare is refused, not silently dropped", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  for (const [tool, args] of [
+    ["submit_provisioning_request", { template: "E4_AUDIT_ANALYST", title: "t", notify: "x" }],
+    ["submit_provisioning_request", { template: "E4_AUDIT_ANALYST", title: "t", reason: "wrong tool" }],
+    ["review_provisioning_request", { request_id: "REQ-001", decision: "approve", rationale: "wrong tool" }],
+    ["review_provisioning_request", { request_id: "REQ-001", decision: "approve", force: true }],
+  ]) {
+    assert.throws(
+      () => buildQueueArgs(tool, args, identity),
+      (error) => error.code === "unknown_argument" && error.status === 400,
+      `${tool} silently accepted an undeclared argument`,
+    );
+  }
+});
+
+// The exact call measured in the TOG-336 review of PR #9, which returned
+// ["submit","--requester",A,"--template","E4_X","--title","x"] and dropped the
+// other three keys without a word.
+test("the review's measured silent-drop case is now a refusal", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  // `submitter` is not on the identity denylist — deliberately, because that is
+  // the point: the schema check has to stand on its own, without the denylist
+  // happening to cover the name.
+  assert.throws(
+    () => buildQueueArgs(
+      "submit_provisioning_request",
+      { template: "E4_X", title: "x", submitter: VICTIM },
+      identity,
+    ),
+    (error) => error.code === "unknown_argument" && error.message.includes("submitter"),
+    "a caller naming a submitter still gets no error",
+  );
+});
+
+test("a denylisted identity name is still refused BY NAME, not as a generic unknown key", () => {
+  // Both checks would refuse `requester`; the specific one has to win, or the
+  // audit log stops distinguishing a typo from an impersonation attempt.
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  assert.throws(
+    () => buildQueueArgs(
+      "submit_provisioning_request",
+      { template: "E4_AUDIT_ANALYST", title: "t", requester: VICTIM },
+      identity,
+    ),
+    (error) => error.code === "identity_argument_refused",
+  );
+});
+
+test("prototype keys are unknown keys, not inherited ones", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  // `"constructor" in {}` is true, so an `in` check here would admit exactly the
+  // names a prototype-pollution probe reaches for first.
+  for (const key of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+    // Parsed, not an object literal: `{__proto__: "x"}` sets the prototype and
+    // leaves no own key, while JSON.parse defines a real own property — and
+    // JSON.parse is how these arguments actually arrive.
+    const args = JSON.parse(`{"template":"E4_AUDIT_ANALYST","title":"t",${JSON.stringify(key)}:"x"}`);
+    assert.ok(Object.keys(args).includes(key), `the fixture did not actually carry '${key}'`);
+    assert.throws(
+      () => buildQueueArgs("submit_provisioning_request", args, identity),
+      (error) => error.code === "unknown_argument",
+      `'${key}' was treated as a declared property`,
+    );
+  }
+});
+
+test("an undeclared argument is refused over the wire, and the queue never runs", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_provisioning_request",
+        arguments: { template: "E4_AUDIT_ANALYST", title: "t", submitter: VICTIM },
+      }),
+      IDENTITY_HEADERS,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.json.result.isError, true, "an undeclared argument was accepted");
+    assert.match(response.json.result.content[0].text, /unknown_argument/);
+    // The message has to name what IS accepted, or the caller retries blind.
+    assert.match(response.json.result.content[0].text, /Accepted: template, title, rationale, supersedes/);
+    assert.equal(recordedArgv(dir), null, "the queue ran for a call carrying an undeclared argument");
+  });
+});
+
+test("the enforcement reads the SAME schema object that tools/list advertises", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    const response = await call(rpc("tools/list", {}));
+    const advertised = response.json.result.tools
+      .find((tool) => tool.name === "submit_provisioning_request");
+    assert.equal(advertised.inputSchema.additionalProperties, false);
+    const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+    // Every advertised property is accepted...
+    assert.doesNotThrow(
+      () => buildQueueArgs("submit_provisioning_request", EVERY_ARGUMENT.submit_provisioning_request, identity),
+    );
+    // ...and a name one character off is not. The schema is the whole list.
+    for (const name of Object.keys(advertised.inputSchema.properties)) {
+      assert.throws(
+        () => buildQueueArgs(
+          "submit_provisioning_request",
+          { template: "E4_AUDIT_ANALYST", title: "t", [name + "s"]: "x" },
+          identity,
+        ),
+        (error) => error.code === "unknown_argument",
+        `'${name}s' was accepted; the check is not reading the advertised property list`,
+      );
+    }
+  });
 });
 
 test("an argument that is not a string is refused rather than coerced", () => {

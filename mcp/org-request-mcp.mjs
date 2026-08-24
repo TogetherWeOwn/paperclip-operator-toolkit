@@ -97,6 +97,13 @@ const RUN_CHECK_TIMEOUT_MS = 15_000;
 const RUN_CHECK_TTL_MS = 10_000;
 const RUN_CHECK_CACHE_MAX = 512;
 
+// Environment names this server supplies to the queue itself. `queueEnv` is an
+// operator seam for the queue's own test hooks; it is not a way to restate any
+// of these. See normalizeConfig and makeQueueRunner — both refuse, in that
+// order, because the second is what still holds if someone builds a cfg object
+// without going through the first.
+const RESERVED_QUEUE_ENV = new Set(["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR"]);
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TEMPLATE_RE = /^[A-Za-z0-9_]{1,64}$/;
 const REQUEST_ID_RE = /^REQ-[0-9]{3,9}$/;
@@ -112,9 +119,23 @@ const REQUEST_ID_RE = /^REQ-[0-9]{3,9}$/;
 // a caller believe it had acted as someone else right up until it read the
 // audit log.
 //
-// `additionalProperties: false` plus strict validation already rejects every
-// name here. The list is kept so the message is specific, and so that anyone
-// adding a field to a schema has to walk past it.
+// TWO CONTROLS, AND THE ORDER BETWEEN THEM MATTERS (TOG-341)
+//   The general control is assertKnownArguments(): any key absent from the
+//   tool's own inputSchema.properties is refused. That is what
+//   `additionalProperties: false` advertises to clients, and it is enforced
+//   here because NOTHING ELSE ENFORCES IT — there is no JSON-Schema validator
+//   in this process, and buildQueueArgs reads named arguments explicitly, so
+//   an unlisted key would otherwise be dropped in silence.
+//
+//   This list is the SPECIFIC control, checked first so the message names the
+//   actual rule. `requester` and `template_typo` are both unknown keys, but
+//   only one of them is someone trying to be somebody else, and the operator
+//   reading the audit log should be able to tell them apart at a glance.
+//
+//   Every name here is already an unknown key, so the list is now genuinely
+//   redundant for SAFETY and load-bearing only for the MESSAGE. It was the
+//   other way round before TOG-341, and the header claimed otherwise. Keep it:
+//   it also means anyone adding a field to a schema has to walk past it.
 // ---------------------------------------------------------------------------
 const FORBIDDEN_ARGUMENT_NAMES = new Set([
   "requester", "requesterAgentId", "requester_agent_id",
@@ -172,6 +193,19 @@ export function normalizeConfig(input, configPath = "(inline)") {
   const port = Number(cfg.port ?? 8391);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     problems.push("port must be an integer 1-65535");
+  }
+  // queueEnv is an operator-owned test seam, but a config file that can set
+  // COMPANY_ID is a config file that can lie about tenancy to the queue — and
+  // one that can set PATH chooses which `podman` and which `psql` run. Refuse
+  // at load, so it is a unit that will not start rather than a request that
+  // quietly ran against the wrong company. (TOG-341)
+  const reservedEnv = Object.keys(isPlainObject(cfg.queueEnv) ? cfg.queueEnv : {})
+    .filter((key) => RESERVED_QUEUE_ENV.has(key));
+  if (reservedEnv.length > 0) {
+    problems.push(
+      `queueEnv may not set ${reservedEnv.join(", ")}: ${[...RESERVED_QUEUE_ENV].join(", ")} are supplied by this `
+      + "server and a config that can override them can misdirect the queue's tenancy or its PATH",
+    );
   }
   if (problems.length > 0) {
     throw new Error(`invalid config ${configPath}:\n  - ${problems.join("\n  - ")}`);
@@ -469,6 +503,41 @@ export const TOOLS = [
   },
 ];
 
+const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
+
+/**
+ * Enforce the tool's own inputSchema: every key must be one it declares.
+ *
+ * The schemas say `additionalProperties: false`, but a schema is a CLAIM made
+ * to the client — there is no JSON-Schema validator in this process and adding
+ * one would mean an npm tree next to a podman-capable operator account. So the
+ * claim is enforced here instead, against the very same schema object that
+ * tools/list hands out. Add a property to a schema and it is accepted
+ * here; add it nowhere and it is refused. The two cannot drift.
+ *
+ * Refusing rather than dropping is the point. An unlisted key could never
+ * reach the CLI either way — buildQueueArgs reads named arguments and nothing
+ * else — but a silent drop lets a caller believe it acted as someone else
+ * until it reads the audit log, which is the exact failure this whole file is
+ * built to prevent. Whatever the caller thought it was saying, it must be told
+ * we did not hear it.
+ */
+function assertKnownArguments(tool, args) {
+  const declared = tool.inputSchema.properties;
+  // Object.hasOwn, not `in`: `constructor` and `toString` are `in` every plain
+  // object, so `in` would quietly admit exactly the keys a prototype-pollution
+  // probe reaches for first.
+  const unknown = Object.keys(args).find((key) => !Object.hasOwn(declared, key));
+  if (unknown === undefined) return;
+  throw new HttpError(
+    400, "unknown_argument",
+    `'${unknown}' is not an argument of ${tool.name}. This tool declares `
+    + `additionalProperties: false and that is enforced, not merely advertised: an unrecognised key is `
+    + "refused rather than dropped, so a caller is never left believing it said something this transport "
+    + `never heard. Accepted: ${Object.keys(declared).join(", ")}.`,
+  );
+}
+
 /**
  * Translate validated tool arguments into an argv array for the queue script.
  *
@@ -478,6 +547,13 @@ export const TOOLS = [
  * server, from a header the caller cannot set, every single time.
  */
 export function buildQueueArgs(toolName, args, identity) {
+  const tool = TOOLS_BY_NAME.get(toolName);
+  if (!tool) {
+    throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
+  }
+
+  // Specific before general: both checks refuse the same key, but only this one
+  // names the rule that makes it interesting. See FORBIDDEN_ARGUMENT_NAMES.
   const bad = Object.keys(args).find((key) => FORBIDDEN_ARGUMENT_NAMES.has(key));
   if (bad) {
     throw new HttpError(
@@ -487,6 +563,8 @@ export function buildQueueArgs(toolName, args, identity) {
       + "check below this transport.",
     );
   }
+
+  assertKnownArguments(tool, args);
 
   if (toolName === "submit_provisioning_request") {
     const template = requireStringArg(args, "template", TEMPLATE_RE);
@@ -511,6 +589,9 @@ export function buildQueueArgs(toolName, args, identity) {
     return argv;
   }
 
+  // Unreachable while TOOLS_BY_NAME and the arms above agree. It is here so
+  // that adding a tool to TOOLS and forgetting its arm fails loudly instead of
+  // returning undefined into execFile.
   throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
 }
 
@@ -598,12 +679,18 @@ export function makeQueueRunner(cfg, exec = execFileAsync) {
           // A deliberately minimal environment. The parent process holds
           // nothing the queue needs, and inheriting an environment wholesale is
           // how a credential ends up somewhere nobody expected it.
+          //
+          // queueEnv is spread FIRST, so the values this server owns are
+          // written last and win. normalizeConfig already refuses a config that
+          // names one of them; this ordering is what still holds for a cfg
+          // object built by hand, and it is one line. A config file must never
+          // be able to tell the queue it is a different company. (TOG-341)
           env: {
+            ...cfg.queueEnv,
             PATH: process.env.PATH ?? "/usr/bin:/bin",
             HOME: process.env.HOME ?? "/",
             COMPANY_ID: cfg.companyId,
             PAPERCLIP_DB_CTR: cfg.dbContainer,
-            ...cfg.queueEnv,
           },
         });
         return { ok: true, text: (stdout + stderr).trim(), exitCode: 0 };
