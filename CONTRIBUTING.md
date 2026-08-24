@@ -50,6 +50,7 @@ The suites below run anywhere and are what CI runs. Exactly two more need the VP
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 ./test_responsible_leader.sh        # who may approve a provisioning request
 ./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
+./test_agent_endpoint_preflight.sh  # model-endpoint cutover gate, against a stub front
 ./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 

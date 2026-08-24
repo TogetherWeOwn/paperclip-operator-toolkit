@@ -21,6 +21,9 @@ name: CI
 #                                       podman/psql binaries — see TOG-202
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
 #                                       is the copy that is REVIEWED — TOG-212
+#     test_agent_endpoint_preflight.sh  agent_endpoint_preflight.sh: whether the
+#                                       model endpoint the agents are about to be
+#                                       pointed at can serve them — TOG-358
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -234,6 +237,14 @@ jobs:
       # See the header for what this suite's green does NOT mean.
       - name: running-vs-reviewed drift suite
         run: ./test_tool_drift.sh
+
+      # TOG-358. Whether the model endpoint the agents are about to be pointed
+      # at can actually serve them. The suite stands up a stub Anthropic front
+      # on 127.0.0.1 that serves a different failure off each path prefix —
+      # PAYG lane, missing cache accounting, wrong dialect, 401, a hang — so it
+      # needs no credential, no network and no quota.
+      - name: model-endpoint preflight suite
+        run: ./test_agent_endpoint_preflight.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
@@ -785,6 +796,68 @@ jobs:
             's|^  { printf .blob %d\\0. "\$len"; cat "\$f"; } . sha1sum . cut -d. . -f1$|  printf "%040d" "$len"|' || rc=1
           drift_mutation "drift-exits-zero"      's/EXIT_DRIFT=3/EXIT_DRIFT=0/' || rc=1
           drift_mutation "secrets-fingerprinted" 's/^is_secretish() {/is_secretish() { return 1;/' || rc=1
+          exit $rc
+
+      # TOG-358. The preflight's whole job is to refuse to say "ok" about an
+      # endpoint it could not actually use. Each mutation below reintroduces one
+      # specific way of saying ok anyway. `unreachable-reads-ok` is the one that
+      # matters most: it is the exact shape of the failure this tool was written
+      # for — :20129 answers a TCP reset from inside a container, and a gate that
+      # scores that as a pass green-lights a company-wide outage.
+      #
+      # Baseline first, as everywhere else here: the unmutated copy must pass in
+      # the same staging directory, or a red below is unattributable.
+      - name: Prove the preflight suite still detects a weakened refusal
+        run: |
+          set -uo pipefail
+          rc=0
+          preflight_mutation() {
+            local label="$1"; shift
+            local mut; mut="$(mktemp -d)"
+            cp agent_endpoint_preflight.sh test_agent_endpoint_preflight.sh "$mut/"
+
+            if ! (cd "$mut" && ./test_agent_endpoint_preflight.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_agent_endpoint_preflight.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/agent_endpoint_preflight.sh"; done
+            if cmp -s agent_endpoint_preflight.sh "$mut/agent_endpoint_preflight.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! bash -n "$mut/agent_endpoint_preflight.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if (cd "$mut" && ./test_agent_endpoint_preflight.sh >/dev/null 2>&1); then
+              echo "::error::$label: the preflight suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # A refused connection scored as a pass — the outage green-light.
+          preflight_mutation "unreachable-reads-ok" \
+            's/verdict "unreachable" 5/verdict "unreachable" 0/g' || rc=1
+          # A hung endpoint folded into "reachable enough".
+          preflight_mutation "hang-reads-ok" \
+            's/verdict "timeout" 6/verdict "timeout" 0/' || rc=1
+          # Cost accounting quietly dropped: every request still succeeds.
+          preflight_mutation "cache-check-deleted" \
+            's/if \[\[ "\$HAS_CACHE" != "yes" \]\]; then/if [[ "$HAS_CACHE" == "impossible" ]]; then/' || rc=1
+          # Billing per token while the subscriptions idle, reported as fine.
+          preflight_mutation "payg-not-flagged" \
+            's/^\[\[ "\$RESP_ID" == gen-\* \]\]/[[ "$RESP_ID" == nevermatch-* ]]/' \
+            's|^\[\[ "\$RESP_MODEL" == \*/\* \]\]|[[ "$RESP_MODEL" == *@@@* ]]|' || rc=1
+          # An OpenAI-dialect body accepted as an Anthropic envelope.
+          preflight_mutation "wrong-dialect-accepted" \
+            's/^  anthropic) ;;$/  anthropic|openai|error|*) ;;/' || rc=1
+          # The property that keeps CLIProxy from IP-banning the host: one
+          # request, ever. This mutation adds a second probe call.
+          preflight_mutation "retries-on-auth-failure" \
+            's|^CURL_EXIT=0$|curl -sS -o /dev/null -H "@$HDRS" -d "$REQ" --max-time "$TIMEOUT" "$BASE/v1/messages" >/dev/null 2>\&1\nCURL_EXIT=0|' || rc=1
           exit $rc
       # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
       # strict mode. That is the tempting simplification here — it reads as

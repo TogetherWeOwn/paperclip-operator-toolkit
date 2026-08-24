@@ -57,6 +57,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
 | `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
+| `agent_endpoint_preflight.sh` | Cutover gate for the agents' model endpoint (TOG-358). Run it **from inside an agent container** before repointing `ANTHROPIC_BASE_URL`: exit 0 only if the endpoint is reachable *from there*, authorized, speaks the Anthropic messages dialect, still reports cache accounting, and is not a pay-per-token lane. | `test_agent_endpoint_preflight.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
 | `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
@@ -71,6 +72,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_gh_token_argv.sh
 ./test_gh_ci_status.sh
+./test_agent_endpoint_preflight.sh
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_credential_chain_audit.sh
