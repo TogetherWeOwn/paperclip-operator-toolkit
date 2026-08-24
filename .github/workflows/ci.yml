@@ -451,6 +451,65 @@ jobs:
           run_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/'
           exit $rc
 
+      # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
+      # strict mode. That is the tempting simplification here — it reads as
+      # "something was requested, so this is scoped" — and it silently reinstates
+      # a token spanning every repo in the installation while GH_APP_SCOPE_STRICT=1
+      # keeps reporting least-privilege. Mutating strictGaps() rather than its
+      # callers reproduces the original semantics at every call site at once.
+      - name: Prove the suite still detects a permissions-only scope passing strict mode
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh-app-token.js test_gh_app_token.sh "$mut/"
+          node -e '
+            var fs = require("fs");
+            var p = process.argv[1];
+            var s = fs.readFileSync(p, "utf8");
+            var anchor = "function strictGaps(scope) {";
+            if (s.indexOf(anchor) < 0) {
+              console.error("::error::could not find strictGaps() to mutate; this guard is now blind, fix it");
+              process.exit(2);
+            }
+            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  if (Object.keys(scope).length > 0) return [];"));
+          ' "$mut/gh-app-token.js"
+          node --check "$mut/gh-app-token.js"
+          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the suite PASSED with strict mode satisfied by permissions alone (TOG-238 regression)"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the strict-mode mutant"
+
+      # The second TOG-238 mutation, and the subtler one. Strict mode gates the
+      # PEM path, so `SOURCE === 'pem'` reads as a correct, even careful,
+      # narrowing — the broker bounds scope server-side, why gate it? Because
+      # the DEFAULT is `auto`, which falls back to the PEM on a retryable broker
+      # failure. Under that spelling a broker outage silently turns the control
+      # off on the one path that mints a ceiling token. This is not a strawman:
+      # it is the exact line the TOG-226 merge produced, caught by this suite.
+      - name: Prove the suite still detects strict mode gated on the wrong source
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh-app-token.js test_gh_app_token.sh "$mut/"
+          before="  if (enforce && SOURCE !== 'broker') assertStrictForPem(scope)"
+          after="  if (enforce && SOURCE === 'pem') assertStrictForPem(scope)"
+          if ! grep -qxF "$before" "$mut/gh-app-token.js"; then
+            echo "::error::could not find the strict-mode source gate to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh-app-token.js" > "$mut/mut.js" && mv "$mut/mut.js" "$mut/gh-app-token.js"
+          chmod +x "$mut/gh-app-token.js"
+          node --check "$mut/gh-app-token.js"
+          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the suite PASSED with strict mode gated on GH_APP_TOKEN_SOURCE === 'pem', which exempts the auto fallback (TOG-238)"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the source-gate mutant"
+
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).
   #

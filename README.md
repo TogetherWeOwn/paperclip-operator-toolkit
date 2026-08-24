@@ -43,7 +43,7 @@ note (`ack-override`). A bypass nobody reads is the same as a bypass nobody logg
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
+| `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
 | `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
@@ -117,9 +117,17 @@ These are load-bearing and were each learned by breaking something:
   from `/proc` rather than trusting the source to keep reading correctly.
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
-- **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1` so an
-  unscoped mint fails rather than silently returning a ceiling token. On the broker path the scope
-  is derived server-side from the issue the caller holds, and a caller may only narrow it.
+- **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
+  `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
+  Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a
+  permissions-only scope passed the check while still minting across every repo in the installation.
+  Narrowing *what* a token may do is not a substitute for narrowing *where* it may do it. On the
+  broker path the scope is derived server-side from the issue the caller holds, and a caller may
+  only narrow it.
+- **A safety gate must be keyed on the path taken, not the mode requested.** Strict mode gates the
+  PEM, so gating it on `GH_APP_TOKEN_SOURCE === 'pem'` looks right and isn't: the default `auto`
+  falls back to the PEM on a broker outage, which switched the gate off for the one path that mints
+  a ceiling token. It is asserted where the signing key is actually used.
 - **A cached token is only valid for a credential we still hold.** Keying the cache on the App ID
   alone meant unbinding `GH_APP_PRIVATE_KEY` revoked nothing — the agent kept authenticating from
   cache. Entries carry a fingerprint of what minted them, and nothing is written outside per-run

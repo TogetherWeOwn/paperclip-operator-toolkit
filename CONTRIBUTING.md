@@ -17,7 +17,11 @@ breaking something.
 - **`gh-app-token.js` must never fall through to a mint.** An earlier version printed a real
   org-admin-capable installation token when invoked as `--help`. `test_gh_app_token.sh` now fails if
   any unrecognised argument produces anything token-shaped.
-- **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1`.
+- **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
+  `GH_APP_SCOPE_STRICT=1` — which requires both halves, not either one (TOG-238). If you touch
+  `currentScope()`, re-run the mutation check in `test_gh_app_token.sh` §6: restore the old
+  `Object.keys(scope).length > 0` condition and confirm the suite goes red. A strict-mode test that
+  stays green against that mutation is asserting nothing.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once. Tests pin exit codes; they must not pin human-readable message text, which drifts.
