@@ -8,7 +8,9 @@ name: CI
 #
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
+#     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
+#     test_responsible_leader.sh        who may approve a provisioning request
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
@@ -88,6 +90,15 @@ jobs:
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
+      # The authorization change from TOG-194: who may approve a provisioning
+      # request. Runs here because it fabricates its whole world — a TSV org
+      # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it
+      # needs neither the database nor a company. It is the ONLY automated
+      # coverage of that logic that CI can execute; test_request_queue.sh is
+      # better evidence and stays operator-run for the reasons above.
+      - name: responsible-leader authorization suite
+        run: ./test_responsible_leader.sh
+
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
       # recording fakes for `podman` and `psql` on PATH and asserts the exact
@@ -126,6 +137,24 @@ jobs:
       # 2026-08-23 bug into a THROWAWAY COPY — never the tracked file — and
       # requires the suite to reject it. If someone weakens the assertions
       # later, this step goes red before the regression can ship behind them.
+      # Same discipline for the authorization suite. A green suite that cannot
+      # fail is worse than no suite, and this one guards a privilege boundary.
+      # Mutation: let a dormant leader be SKIPPED instead of woken. That is the
+      # single most tempting future "fix" to this design and it silently turns
+      # waiting into approver-shopping, so the suite must reject it.
+      - name: Prove the authorization suite still detects a widened rule
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
+          sed -i 's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' \
+            "$mut/org_request_queue.sh"
+          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
+            echo "::error::the authorization suite passed against a skipped-dormant-leader mutation"
+            exit 1
+          fi
+          echo "authorization suite correctly rejects the mutation"
+
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail
@@ -149,6 +178,42 @@ jobs:
           node --check "$mut/gh-app-token.js"
           if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
             echo "::error::the regression suite PASSED against a deliberately reintroduced bug"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # TOG-200. Asserts on the kernel's record — a stub curl on PATH reading
+      # its own /proc/<pid>/cmdline — rather than on the source text, so a
+      # future rewrite of how gh_token.sh calls curl cannot pass by accident.
+      - name: gh_token.sh argv-leak suite
+        run: ./test_gh_token_argv.sh
+
+      # The matching mutation guard. This one is surgical: it leaves the config
+      # file exactly as it is and ADDS the header back on argv, so every other
+      # assertion in the suite still passes and only the /proc check can go red.
+      # That is the point — it proves the /proc detector is what carries this
+      # suite, not the config-file bookkeeping around it.
+      - name: Prove the argv-leak suite still detects a credential on argv
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh_token.sh test_gh_token_argv.sh "$mut/"
+          before='  curl --config "$cfg" "$@"'
+          after='  curl --config "$cfg" -H "Authorization: Bearer $bearer" "$@"'
+          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+            echo "::error::could not find the curl invocation in curl_authed() to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          # awk, not sed: the replacement is full of characters sed would treat
+          # as syntax, and a mutation that silently does nothing is the one
+          # failure mode this step exists to avoid.
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh_token.sh" > "$mut/gh_token.mut" && mv "$mut/gh_token.mut" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          bash -n "$mut/gh_token.sh"
+          if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the argv-leak suite PASSED against a credential deliberately put back on argv"
             cat "$mut/out.txt"
             exit 1
           fi
