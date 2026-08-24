@@ -299,6 +299,90 @@ test("the live Ops Tooling env resolves its repo and keeps workflows:write", () 
   assert.equal(scope.profileSource, "project");
 });
 
+// ---------------------------------------------------------------------------
+// TOG-226. Community Platform and Onboarding shipped with no env at all, so the
+// broker refused for every issue on them — 47 and 8 issues respectively. Both do
+// real git work, so the fix was a repo pin, not a "does no git work" note. These
+// pin the values that were set, at the least-privilege width they were set to:
+// Onboarding touches only the Discord bot, so widening it to the other two repos
+// is a regression even though they sit in the same installation.
+// ---------------------------------------------------------------------------
+
+test("the live Community Platform env scopes to its three transferred repos", () => {
+  const scope = resolveScope({
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-web,two-bot,two-design" } },
+    projectId: "4c57214d",
+    workspaceRepoUrl: null, // the project has no workspace; the pin is the only source
+  });
+  assert.deepEqual(scope.repositories, ["two-web", "two-bot", "two-design"]);
+  assert.equal(scope.repoSource, "project");
+});
+
+test("the live Onboarding env scopes to two-bot alone", () => {
+  const scope = resolveScope({
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-bot" } },
+    projectId: "88f949ff",
+    workspaceRepoUrl: null,
+  });
+  assert.deepEqual(scope.repositories, ["two-bot"]);
+});
+
+test("a project-less issue is told to attach a project, not to set env it has no project for", () => {
+  assert.throws(
+    () => resolveScope({ projectEnv: null, projectId: null, workspaceRepoUrl: null }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /no project/);
+      assert.match(error.message, /attach this issue to a project/);
+      // The remedy that does not apply must not be offered.
+      assert.doesNotMatch(error.message, /set GH_APP_REPOS on the project to/i);
+      return true;
+    },
+  );
+});
+
+test("a project without GH_APP_REPOS is named in the refusal", () => {
+  assert.throws(
+    () => resolveScope({ projectEnv: {}, projectId: "88f949ff", workspaceRepoUrl: null }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /88f949ff/);
+      assert.match(error.message, /has no env/);
+      return true;
+    },
+  );
+});
+
+test("a project whose GH_APP_REPOS is a secret_ref is told the binding must be a literal", () => {
+  assert.throws(
+    () =>
+      resolveScope({
+        projectEnv: { GH_APP_REPOS: { type: "secret_ref", secretId: "x" } },
+        projectId: "4c57214d",
+        workspaceRepoUrl: null,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /plain literal/);
+      return true;
+    },
+  );
+});
+
+test("the refusal never leaks a repo name it did not authorise", () => {
+  // An unparseable workspace URL is reported as the input, not as a scope.
+  assert.throws(
+    () =>
+      resolveRepositories({
+        projectRepos: null,
+        workspaceRepoUrl: "https://github.com/",
+        projectId: "4c57214d",
+        hasProjectEnv: true,
+      }),
+    (error) => error.status === 409 && /did not parse/.test(error.message),
+  );
+});
+
 test("a tagged plain GH_APP_REPOS is honoured, not ignored", () => {
   const scope = resolveScope({
     projectEnv: { GH_APP_REPOS: { type: "plain", value: "kofra" } },

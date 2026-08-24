@@ -135,9 +135,9 @@ exits non-zero on `unknown`.
 
 Entirely server-side, from the issue the caller demonstrably holds:
 
-1. **Repositories** — `GH_APP_REPOS` on the issue's project (the literal the
-   operator already set on all five repo projects), falling back to the repo URL
-   of the issue's primary workspace.
+1. **Repositories** — `GH_APP_REPOS` on the issue's project, falling back to the
+   repo URL of the issue's primary workspace. All seven projects now pin it; see
+   the table below.
 2. **Permissions** — `GH_APP_PERMISSIONS` on the project, falling back to the
    default profile: `contents:write`, `pull_requests:write`, `issues:write`,
    `metadata:read`, `checks:read`, `statuses:read`.
@@ -174,6 +174,94 @@ Ops Tooling loses `workflows:write`, while `profileSource` still reports
 never stringified. Scope is derived from operator-visible literals only; a secret
 value must never become a repo name. An underivable scope is a `409`, not a
 broad mint.
+
+### The repo pins (TOG-226)
+
+The App is installed on **eight** repos, so an unscoped token would grant all
+eight. Every project pins the subset its work actually touches:
+
+| Project | `GH_APP_REPOS` |
+|---|---|
+| Ops Tooling | `paperclip-ops-tooling` |
+| Model Router Plugin | `paperclip-model-router` |
+| Routeware Shadow API | `routeware-shadow-api` |
+| NNTune | `nntune` |
+| Kofra | `kofra` |
+| Community Platform | `two-web,two-bot,two-design` |
+| Onboarding | `two-bot` |
+
+Community Platform and Onboarding shipped with no `env` at all, so the broker
+refused for all 55 issues on them. Both do real git work — Community Platform
+owns the three repos transferred out of the TWO-Gaming org, Onboarding owns the
+Discord bot — so the fix was a pin, not a "does no git work" note. Onboarding is
+pinned to `two-bot` alone; widening it to the other two would be a regression.
+
+### Project-less issues
+
+An issue with no project has no `GH_APP_REPOS` to read and gets a `409`. That is
+the **correct** outcome for the large majority of them, which do no git work at
+all — the remedy is to attach the repo-bearing ones to a project, not to give the
+broker a company-wide default repo list, which would re-widen exactly the scope
+TOG-174 narrowed.
+
+Two derivation sources were considered and rejected on measurement:
+
+- **Inherit the parent issue's project.** Zero project-less issues have a
+  project-bearing ancestor — their parents are project-less too. It closes
+  nothing.
+- **Fall back to the run's checkout workspace.** Zero project-less issues carry
+  an `executionWorkspaceId` or `projectWorkspaceId`. Also nothing.
+
+So the `409` names which of the two real fixes applies — *attach a project* when
+there is none, *set `GH_APP_REPOS`* when there is one — rather than listing both
+and leaving the caller to work it out.
+
+### A `409` is usually correct, and counting them badly is how this looks worse than it is
+
+Not every project-less issue with git-ish words in it is a gap. Sort them by
+whether the code they name is **in the installation**:
+
+| class | example | is it residue? |
+|---|---|---|
+| names a repo we hold | `paperclip-ops-tooling`, `two-bot` | **yes** — attach it to the project that pins that repo |
+| names the Paperclip control plane | `server/src/services/secrets.ts` | no — no token in this installation reaches it |
+| names an upstream vendor | `omniroute@3.8.49`, `open-sse/…` | no — same |
+| names an operator-side file | `/paperclip/operator-handoff/…` | no — not version-controlled here |
+| no git work at all | a hiring issue | no |
+
+Scanning open project-less issues for git-ish words flags ~25 of 63; only a
+handful are real. Attaching the rest would mint tokens nothing can use, and
+treating them as a broker defect sends you looking for a fix that cannot exist.
+
+### The residue regenerates — this is a standing check, not a migration
+
+The 2026-08-23 sweep drove the count to zero. Within five hours it was four
+again: TOG-289 and TOG-290 were filed project-less, and TOG-289 had already
+pushed a branch to `paperclip-ops-tooling`. Every issue filed without a project
+re-opens the gap, so a number measured once says nothing about the next unbind.
+
+`../../gh_scope_residue.sh` is that check as a command. It mints nothing — it
+reads the board, and optionally asks GitHub for `tog-<n>-*` branches using a
+token the caller already has. It is the board-side half of the pair; the
+configuration-side half is `gh-app-token.js scope-check` (TOG-238), which
+reports whether an environment survives strict mode, also without minting.
+
+Two things about it are worth knowing before you trust a zero:
+
+- **Text scanning alone misses the case that motivated it.** TOG-289 names no
+  repository anywhere in its title or body and had a branch pushed. That is why
+  there is a branch detector, and why a text-only run reports `partial` and
+  exits `3` rather than `0`.
+- **No agent can run the full sweep.** Each agent's token is scoped to its own
+  project's `GH_APP_REPOS`, so it can list branches in those repos and gets
+  *Resource not accessible* on the rest — measured from an Ops Tooling run
+  against `kofra`. A token that could read all eight is the org-wide blast
+  radius TOG-174 removes. So the full sweep belongs host-side, an agent runs
+  `--repos <its own>`, and the union of slices is the gate. Partial coverage
+  never exits `0`.
+
+Even a full sweep is a floor, not a proof: an issue that will do git work, names
+no repo, and has not pushed yet is invisible to both detectors.
 
 ## Security invariants
 

@@ -125,6 +125,15 @@ jobs:
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
+      # The TOG-226 standing gate. Offline: the board and GitHub reads are
+      # redirected to fixtures, and the argv assertions use a stub curl that
+      # never opens a socket. It covers the two ways this check can be wrong
+      # in the direction that matters — reporting a clean board when residue
+      # exists (which is what authorises a PEM unbind), including the ARG_MAX
+      # failure-open that only appeared at production board size.
+      - name: scope-residue gate regression suite
+        run: ./test_gh_scope_residue.sh
+
       # The authorization change from TOG-194: who may approve a provisioning
       # request. Runs here because it fabricates its whole world — a TSV org
       # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it

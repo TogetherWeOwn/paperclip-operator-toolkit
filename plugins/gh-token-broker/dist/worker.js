@@ -92,6 +92,9 @@ async function deriveScope(ctx, { issueId, companyId, body, config, actor }) {
 
   const scope = resolveScope({
     projectEnv,
+    // Diagnostic only — lets a refusal name whether the gap is "no project" or
+    // "project without GH_APP_REPOS". It never participates in the ceiling.
+    projectId: issue.projectId ?? null,
     workspaceRepoUrl: workspace?.repoUrl ?? null,
     requestedRepositories: body?.repositories ?? null,
     requestedPermissions: body?.permissions ?? null,
