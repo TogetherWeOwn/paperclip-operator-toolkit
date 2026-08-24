@@ -11,6 +11,8 @@ name: CI
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_responsible_leader.sh        who may approve a provisioning request
+#     test_request_record_integrity.sh  whether the RECORD of a decision can
+#                                       still say what was approved and why
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
 #     syntax + secret scan              see the steps below
@@ -134,6 +136,15 @@ jobs:
       - name: responsible-leader authorization suite
         run: ./test_responsible_leader.sh
 
+      # TOG-253. The sibling suite asks "who may decide?"; this one asks the
+      # question an audit actually asks — can the RECORD still say what was
+      # approved and why, six months later. Different question, different
+      # failure modes, so it is a separate suite rather than more sections
+      # bolted onto the one above. Same two offline seams (ORG_SNAPSHOT and a
+      # stub PROV), so it needs no database and no credential either.
+      - name: request-record integrity suite
+        run: ./test_request_record_integrity.sh
+
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
       # recording fakes for `podman` and `psql` on PATH and asserts the exact
@@ -168,44 +179,117 @@ jobs:
           [ $rc -eq 0 ] && echo "secret scan: clean"
           exit $rc
 
-      # A suite that cannot fail is decoration. This reintroduces the exact
-      # 2026-08-23 bug into a THROWAWAY COPY — never the tracked file — and
-      # requires the suite to reject it. If someone weakens the assertions
-      # later, this step goes red before the regression can ship behind them.
-      # Same discipline for the authorization suite. A green suite that cannot
-      # fail is worse than no suite, and this one guards a privilege boundary.
-      # Mutation: let a dormant leader be SKIPPED instead of woken. That is the
-      # single most tempting future "fix" to this design and it silently turns
-      # waiting into approver-shopping, so the suite must reject it.
-      - name: Prove the authorization suite still detects a widened rule
+      # A suite that cannot fail is decoration. Each mutation step below
+      # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
+      # file — and requires the suite to reject it.
+      #
+      # WHY THERE IS A BASELINE ASSERTION IN HERE (TOG-253). Until this commit
+      # these steps copied the suites into a temp directory WITHOUT lib/, which
+      # org_request_queue.sh sources and exits 1 without. The copied suite
+      # therefore failed in that directory no matter what the sed did, and
+      # "the mutated suite failed" was true for a reason that had nothing to do
+      # with the mutation. Both gates passed while proving nothing.
+      #
+      # The fix is not merely `cp -r lib` — it is asserting that the UNMUTATED
+      # copy passes in the same directory first. That single check is what makes
+      # a red result attributable to the mutation, and it is what would have
+      # caught the original hole. mutation_check below does both, and every
+      # mutation step goes through it.
+      - name: Mutation gates — the suites must reject reintroduced defects
         run: |
           set -uo pipefail
-          mut="$(mktemp -d)"
-          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
-          sed -i 's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' \
-            "$mut/org_request_queue.sh"
-          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
-            echo "::error::the authorization suite passed against a skipped-dormant-leader mutation"
-            exit 1
-          fi
-          echo "authorization suite correctly rejects the mutation"
 
-      # Second mutation, same discipline, on the control that makes the logged
-      # bypass mean anything: an auditor may not clear an override it took
-      # itself. Drop that one comparison and the open-item list becomes
-      # self-service — the bypasser writes the entry AND retires it, which is a
-      # write-only log wearing an audit trail's clothes.
-      - name: Prove the suite still detects a self-clearable override
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
-          sed -i 's/rv_id" == "$a_id"/rv_id" == "never-matches"/' "$mut/org_request_queue.sh"
-          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
-            echo "::error::the suite passed while an override could be cleared by the agent that took it"
-            exit 1
-          fi
-          echo "authorization suite correctly rejects the self-acknowledgement mutation"
+          # stage <dir> — a runnable copy of the tools, lib/ included.
+          stage() {
+            cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
+               test_responsible_leader.sh test_request_record_integrity.sh "$1/"
+            mkdir -p "$1/lib" && cp lib/*.sh "$1/lib/"
+          }
+
+          # mutation_check <label> <suite> <expect-sibling: yes|no|skip> <sed-expr>...
+          #   1. the unmutated copy must PASS      (else the gate is vacuous)
+          #   2. the mutated copy must still PARSE (else it fails for the wrong reason)
+          #   3. the mutated copy must FAIL        (the actual assertion)
+          mutation_check() {
+            local label="$1" suite="$2" sibling="$3"; shift 3
+            local mut; mut="$(mktemp -d)"; stage "$mut"
+
+            if ! (cd "$mut" && "./$suite" >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy of $suite already fails — this gate proves nothing"
+              (cd "$mut" && "./$suite" 2>&1 | tail -20)
+              rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/org_request_queue.sh"; done
+            if ! bash -n "$mut/org_request_queue.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if ! cmp -s org_request_queue.sh "$mut/org_request_queue.sh"; then :; else
+              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
+              rm -rf "$mut"; return 1
+            fi
+
+            if (cd "$mut" && "./$suite" >/dev/null 2>&1); then
+              echo "::error::$label: $suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+
+            # Cross-check: is this defect visible to the OTHER suite? Pins which
+            # suite is actually carrying the weight, so the two cannot quietly
+            # collapse into one.
+            if [ "$sibling" != "skip" ]; then
+              local other=test_responsible_leader.sh
+              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
+              if (cd "$mut" && "./$other" >/dev/null 2>&1); then
+                [ "$sibling" = "yes" ] && {
+                  echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
+              else
+                [ "$sibling" = "no" ] && {
+                  echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
+                  rm -rf "$mut"; return 1; }
+              fi
+            fi
+            rm -rf "$mut"
+            echo "  ok  $label"
+          }
+
+          rc=0
+
+          # Let a dormant leader be SKIPPED instead of woken. The single most
+          # tempting future "fix" to this design, and it silently turns waiting
+          # into approver-shopping.
+          mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
+            's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
+
+          # An auditor may not clear an override it took itself. Drop that one
+          # comparison and the open-item list becomes self-service: the bypasser
+          # writes the entry AND retires it, a write-only log in audit clothing.
+          mutation_check "self-clearable-override" test_responsible_leader.sh skip \
+            's/rv_id" == "$a_id"/rv_id" == "never-matches"/' || rc=1
+
+          # TOG-253 defect 4, exactly as found: the reason guard back on the
+          # denial path only, leaving approvals unreasoned. Expected to be
+          # INVISIBLE to the authorization suite — a denial still needs a
+          # reason — which is what shows the record suite earns its place.
+          mutation_check "unreasoned-approval" test_request_record_integrity.sh no \
+            's/\[\[ -n "$reason" \]\] || die "every decision/[[ -n "$reason" || "$decision" == "approved" ]] || die "every decision/' || rc=1
+
+          # TOG-253 defect 3: expiry back to being a side effect of an attempted
+          # review. Both halves go together — the reaper and the derivation in
+          # request_state — because either alone still gives the right answer,
+          # which is the point of having both.
+          mutation_check "never-expires" test_request_record_integrity.sh skip \
+            's/^reap_expired() {/reap_expired() { return 0;/' \
+            's/expired "$exp" \&\& rec=/false \&\& rec=/' || rc=1
+
+          # TOG-253 defect 1: the invariant, not the lock. An ambiguous id gets
+          # resolved by tail -1 again instead of being refused.
+          mutation_check "ambiguous-request-id" test_request_record_integrity.sh skip \
+            's/\[\[ "$n" -le 1 \]\]/[[ "$n" -le 99 ]]/' || rc=1
+
+          exit $rc
 
       - name: Prove the regression suite still detects the bug
         run: |

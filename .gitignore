@@ -20,6 +20,14 @@ secure-drop/
 .test-disabled-templates
 .provisioner-disabled
 
+# The queue's id-allocation lock (TOG-253) is a DIRECTORY named "<queue>.lock".
+# `*.jsonl` does NOT cover it: that pattern matches on the suffix, and this name
+# ends in .lock. The lock deliberately survives a killed writer — the next
+# writer clears it after a pid liveness check — which is precisely the window in
+# which somebody runs `git add -A`. Verified with `git check-ignore`.
+*.jsonl.lock
+*.jsonl.lock/
+
 # Per-operator agent-harness config. Not a secret, but it is local machine state
 # and pins absolute paths that mean nothing on anyone else's checkout.
 .claude/

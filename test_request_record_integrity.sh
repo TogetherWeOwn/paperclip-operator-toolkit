@@ -239,5 +239,45 @@ else
   bad "list prints nothing when \`column\` is absent — an unusable inbox looks like an empty one"
 fi
 
+# ===========================================================================
+hdr "6. A duplicate id is REFUSED, not resolved — even when no race made it"
+# Added by TOG-253 alongside the fix. Section 1 asserts the same invariant but
+# is deliberately fail-closed: once ids are allocated under a lock the race
+# stops firing, so section 1 passes trivially and stops exercising the refusal.
+#
+# The invariant has to hold for duplicates the lock never saw — a queue restored
+# from a backup, a rotated file, a hand-edited one, a lock defeated on a
+# filesystem where mkdir is not atomic. So this writes the duplicate directly
+# and asserts the REVIEW refuses. Deterministic, and it is what makes the
+# ambiguous-id mutation gate in CI meaningful.
+reset
+"$Q" submit --requester DIR --template E0_SPECIALIST --title "IRQ Original" >/dev/null 2>&1
+REQ="$(last_sub)"
+# Same id, different template: exactly the shape that provisioned a D1_MANAGER
+# against a reviewer who had been shown an E0_SPECIALIST.
+jq -c --arg r "$REQ" 'select(.requestId==$r and .event=="request.submitted")
+  | .template="D1_MANAGER" | .title="IRQ Smuggled in behind it"' "$QUEUE" | head -1 >> "$QUEUE"
+if [[ "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .event=="request.submitted")|.requestId' "$QUEUE" | wc -l)" -eq 2 ]]; then
+  ok "fixture built: one id now names two submissions"
+else
+  bad "fixture failed to build; the rest of this section proves nothing"
+fi
+if "$Q" review --reviewer T0 --request "$REQ" --approve --reason "looks fine to me" >/dev/null 2>&1; then
+  bad "the review decided an id that names two different requests"
+  note "request_submission() resolves the ambiguity with tail -1 — an arbitrary answer, not a correct one"
+else
+  ok "the review is refused outright; an ambiguous record is not decidable"
+fi
+if [[ ! -s "$CREATE_ARGV" ]]; then
+  ok "nothing was provisioned off the ambiguous record"
+else
+  bad "the provisioner ran anyway: $(cat "$CREATE_ARGV")"
+fi
+if grep -q ambiguous_request_id "$GRANT_LOG" 2>/dev/null; then
+  ok "the refusal is logged, so a corrupted queue is visible rather than merely inert"
+else
+  bad "nothing was logged; a corrupted queue refuses silently"
+fi
+
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

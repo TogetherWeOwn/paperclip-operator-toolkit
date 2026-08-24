@@ -194,6 +194,33 @@ audit trail has to show the exchange and not just the verdict.
 - **Supersede chains are capped at 5.** A denied request resubmitted five times is not a
   disagreement to be resolved by resubmission; the cap refuses the sixth and logs it, which forces
   the escalation that should have happened already.
+  - **The cap counts amendments of one denial, not the length of one path.** Each amendment records
+    the `chainRoot` it descends from, and the cap counts every request sharing that root. Measuring
+    path depth alone — `supersedeDepth = previous + 1` — bounded a *chain* but not a *denial*:
+    pointing six amendments at the same rejection left every one of them at depth 1, so a single
+    denial could be re-argued without limit. Unbounded re-argument is how a rubber stamp is
+    manufactured, which is the failure mode this design exists to prevent. Fixed in TOG-253.
+  - Five means five: amendments 1–5 are allowed and the sixth is refused. The original submission is
+    not an amendment of anything and is not counted. The previous rule allowed four.
+
+- **Every decision carries a reason, approvals included.** A denial needs one so the requester knows
+  what to answer. An approval needs one because "why was this approved" is the question an audit
+  actually returns for — and until TOG-253 the denial path was guarded while the approval path, the
+  one that actually seats an agent, was not.
+
+- **A request id names exactly one submission.** Ids are allocated under a lock (`mkdir`-based;
+  `flock` is absent in the paperclip container) and, separately, a record in which one id names two
+  submissions is **refused rather than resolved**. The two are not redundant: the lock stops
+  duplicates being created, the refusal stops a duplicate that exists anyway — restored backup,
+  rotated file, defeated lock — from being acted on. `tail -1` is an arbitrary answer to "which of
+  these did the reviewer approve", and an arbitrary answer is worse than a refusal here, because
+  every other control still passes while the decision quietly fails to bind to what was decided.
+
+- **Expiry is derived, not awaited.** A pending request past `expiresAt` reads as expired from every
+  path — `review`, `list`, `thread`, and the `--supersedes` precondition — with no review attempt
+  needed to make it true. Materialising expiry only as a side effect of an attempted review left an
+  unread request permanently `pending`, which then refused the documented remedy (`--supersedes`) and
+  left the requester with no move at all: a dead end, on the mechanism designed to prevent dead ends.
 
 ## What was considered and rejected
 
@@ -217,3 +244,33 @@ requires a named agent, not a class.
 
 **Auto-escalation on timeout.** Rejected, with the reasoning above. It is the design's most likely
 future regression, so it is written down as a rejection rather than left unmentioned.
+
+**Paperclip's native `tool_action_requests` table as the record, instead of this JSONL queue.**
+TOG-198 asked for this to be evaluated rather than assumed, and it is the right question: the table
+already carries `requested_by_agent_id`, `decided_by_agent_id`, `approval_id`, `interaction_id`,
+`preview_markdown`, `canonical_arguments_hash`, `signed_arguments` and `expires_at`, which is most of
+what this queue reinvents. **Rejected, on measurement, not on preference.**
+
+There is no agent-reachable surface for it. Probed from an agent principal on 2026-08-23 during the
+review of PR #6, and re-probed independently on 2026-08-24 while writing this section:
+
+| Route | Result |
+|---|---|
+| `GET /api/tool-action-requests` | 404 |
+| `GET /api/agents/me/tool-action-requests` | 404 |
+| `GET /api/companies/{companyId}/tool-action-requests` | 404 |
+| `GET /api/tool-policies` | 404 |
+| `GET /api/tool-connections` | 404 |
+
+The table exists in the database and has zero rows on this instance; what does not exist is any HTTP
+route an agent can use to write to it or read it back. A record the requester and the reviewer cannot
+read is not an audit trail for them, whatever it is for the platform. The second problem is shape: it
+models a **single** decision per request, and the exchange this epic is required to preserve —
+request, reason, denial, amendment, decision — is multi-round. Representing that would mean either
+one row per round with the linkage held somewhere else, or a parallel record anyway.
+
+So the local JSONL queue is the record, deliberately. **Revisit this if** either a company-scoped or
+`agents/me` route for `tool_action_requests` ships, or the tool gateway starts writing rows on an
+agent's behalf that the agent can then read — at that point the argument changes and this decision
+should be re-taken rather than inherited. Do not re-probe the routes above without checking the API
+surface has changed first; the answer was the same on both dates.
