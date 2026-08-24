@@ -47,7 +47,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 |---|---|---|
 | `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
 | `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
-| `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. | covered via the stub transport in `test_decision_notify.sh` |
+| `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |

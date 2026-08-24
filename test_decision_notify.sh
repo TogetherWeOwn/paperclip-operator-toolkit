@@ -343,5 +343,42 @@ inb="$("$Q" inbox --for MGR 2>&1)"
 has "$inb" "$R1" "MGR sees its own decision"
 grep -q "$R2" <<<"$inb" && bad "MGR can read DIR's decisions" || ok "  ...and not DIR's"
 
+# ===========================================================================
+hdr "8. A delivery address a transport could be steered by is never RECORDED"
+# ===========================================================================
+# TOG-198 review. --notify-issue is written by the requester — the
+# least-privileged party in the flow — and is interpolated into a URL by
+# whatever transport ships it. Unvalidated, it let the requester choose the
+# route an operator-credentialed POST took; test_notify_transport.sh covers the
+# transport's own guard against that. This is the other half: refuse it at the
+# door, so a hostile address never enters the record at all. Either guard alone
+# closes the hole, which is precisely why both are tested — a suite covering
+# only the transport would stay green if this one were deleted.
+reset
+for evil in "../../agents/me/secrets?x=" "x/../../y" "a;b" "@evil.example.com"; do
+  if "$Q" submit --requester MGR --template E0_SPECIALIST \
+       --title "TESTQ steer me" --notify-issue "$evil" >/dev/null 2>&1; then
+    bad "submit recorded a malformed --notify-issue: '$evil'"
+  else
+    ok "submit refused a malformed --notify-issue: '$evil'"
+  fi
+done
+if jq -e 'select(.event=="request.submitted")' "$QUEUE" >/dev/null 2>&1; then
+  bad "a request was recorded anyway"
+else
+  ok "nothing was recorded — the address never entered the audit trail"
+fi
+has "$(cat "$GRANT_LOG" 2>/dev/null)" "malformed_notify_issue" \
+  "the refusal is logged, so a steering attempt is visible rather than merely refused"
+
+# A well-formed address must still be recorded and delivered on, or the guard
+# above has quietly broken the feature rather than secured it.
+reset
+export REQUEST_NOTIFY_CMD="$TMP/t_ok.sh"
+REQ="$(submit_one "TESTQ addressed" --notify-issue "6ad942ae-66ba-4c0c-ab14-8e0e8fc2efca")"
+[[ -n "$REQ" ]] && ok "a well-formed --notify-issue is accepted" || bad "a well-formed --notify-issue was refused"
+"$Q" review --reviewer DIR --request "$REQ" --reject --reason "still notifies" >/dev/null 2>&1
+eq "  ...and the decision still reaches the requester" "$(state_of "$REQ")" "delivered"
+
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

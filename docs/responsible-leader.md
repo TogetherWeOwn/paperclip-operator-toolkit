@@ -282,6 +282,42 @@ The transport is a seam rather than a hardcoded API call because the queue runs 
 Postgres and holds no Paperclip agent credential of its own. Leaving `REQUEST_NOTIFY_CMD` unset is a
 **supported, recorded state** (`pull_only`), not a failure.
 
+#### The notification payload is attacker-adjacent input
+
+Found in review, 2026-08-24, after the transport had shipped. The queue is careful to treat the
+notifier as untrusted — a hostile courier cannot block, alter or re-target a decision, and
+`test_decision_notify.sh` proves it. Nobody had asked the mirror-image question: **the notifier must
+treat its payload as untrusted too.** Two payload fields are written by the requester, the
+least-privileged party in the flow, and both reached somewhere they should not.
+
+- **`notifyIssue` chose the route.** It was interpolated into the URL path unvalidated. curl resolves
+  dot segments client-side, so a `--notify-issue` of `../../agents/me/secrets?x=` produced a
+  `url_effective` with `/api/issues/` gone entirely — a requester steering an *operator-credentialed*
+  POST onto a route of its choosing. Now an allowlisted charset (`^[A-Za-z0-9][A-Za-z0-9_-]*$`, so
+  `..` is unrepresentable rather than filtered), refused at submit so it is never recorded **and** in
+  the transport so a restored or hand-edited queue is still refused. Deliberately not a denylist:
+  `..`, `%2e%2e`, a bare `/` and `//host` are one bug, and a denylist is one encoding away from
+  missing the next.
+- **`body` could forge a verdict.** It was wrapped in a fixed ` ``` ` fence, which text containing
+  ` ``` ` closes. A *rejected* request could render a fabricated "REQ-001: approved / Addressed to
+  A0" block into the comment — and these comments **wake agents**, so the forgery is read by a
+  machine, not merely displayed to a human. The fence is now measured longer than the longest
+  backtick run in the body.
+- **The credential was on argv.** `-H "Authorization: Bearer $KEY"` puts it in `/proc/<pid>/cmdline`,
+  which is world-readable on this shared box. TOG-200 made that a repo-wide rule and `gh_token.sh`
+  documents it; the notifier shipped breaking it, which is how a rule decays — one new caller at a
+  time. Now a `0600` `curl --config` file, the same pattern as `curl_authed()`.
+
+`test_notify_transport.sh` covers all three, with a `curl` stub on PATH so what would have gone over
+the wire is an assertable artifact. Each has a CI mutation gate, because a guard nobody can break on
+purpose is a guard nobody knows still works.
+
+**Accepted residual risk:** a requester may still name any *well-formed* issue id it knows, including
+one it is not assigned to, and its own decision notice is posted there. Verifying assignment needs an
+API read this offline tool deliberately does not make, and the disclosure is bounded to the
+requester's own request record, which it already holds. Worth revisiting if the notifier ever carries
+anything the requester did not itself submit.
+
 ### Push and pull, because push can always fail
 
 `inbox --for <ROLE>` renders every decision on the requester's own requests, with the delivery state

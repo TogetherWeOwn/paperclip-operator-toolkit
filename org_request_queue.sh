@@ -652,8 +652,14 @@ cmd_submit() {
       --rationale)  rationale="$2";  shift 2;;
       --supersedes) supersedes="$2"; shift 2;;
       # Where the requester wants to be TOLD. Recorded at submit, addressed to
-      # at decision time. It names a delivery address only — it can never
-      # affect who decides, so a requester supplying it is not a control issue.
+      # at decision time. It cannot affect who decides — but "not a control
+      # issue", which is what this comment used to say, was too strong. A
+      # delivery address is interpolated into a URL by whatever transport ships
+      # it, so an unvalidated one lets the least-privileged party in the flow
+      # choose the route an operator-credentialed request takes. It did: see
+      # the TOG-198 review note in notify_paperclip_issue.sh. Validated here so
+      # a hostile address is never RECORDED, and again in the transport so a
+      # restored or hand-edited queue is still refused.
       --notify-issue) notify_issue="$2"; shift 2;;
       --reports-to|--parent) die "reportsTo is never caller-supplied; placement is derived from the requester.";;
       *) die "unknown argument: $1";;
@@ -661,6 +667,11 @@ cmd_submit() {
   done
   [[ -n "$requester" && -n "$template" && -n "$title" ]] \
     || die "usage: submit --requester <ROLE> --template <T> --title <TITLE>"
+  if [[ -n "$notify_issue" && ! "$notify_issue" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    log_event "$(jq -cn --arg r "$requester" --arg n "$notify_issue" \
+      '{event:"request.refused",reason:"malformed_notify_issue",requester:$r,notifyIssue:$n}')"
+    die "--notify-issue '$notify_issue' is not a well-formed issue id."
+  fi
   reap_expired
 
   local row id tpl status
