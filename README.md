@@ -14,7 +14,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 | `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`. | `test_request_queue.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
-| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | — |
+| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
@@ -25,6 +25,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh
+./test_gh_token_argv.sh
 ./omniroute_combo_cli.sh selftest
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
@@ -47,7 +48,9 @@ These are load-bearing and were each learned by breaking something:
 
 - **No secrets in this repo, ever.** Credentials live in `~/secure-drop/` at 0600 and are passed by
   inherited environment, never on `argv` — `/proc/*/cmdline` is world-readable and every company on
-  this box shares the host.
+  this box shares the host. A bearer token that must reach `curl` goes into a 0600 `curl --config`
+  file, never `-H`. `gh_token.sh` violated this until TOG-200; `test_gh_token_argv.sh` now asserts it
+  from `/proc` rather than trusting the source to keep reading correctly.
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
 - **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1` so an
