@@ -36,8 +36,12 @@ note()  { printf '  \033[33mFINDING\033[0m  %s\n' "$1"; FINDINGS=$((FINDINGS+1))
 good()  { printf '  \033[32mOK\033[0m       %s\n' "$1"; }
 hdr()   { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-sql() { podman exec -i -e C="$COMPANY_ID" "$PAPERCLIP_DB_CTR" sh -c \
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -F"|" -v cid="$C" -f -' <<<"$1"; }
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+# Takes the SQL as an argument rather than on stdin, as it always has; the
+# helper wants it on stdin. See lib/pcsql.sh for the backend choice.
+sql() { PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -F"|" <<<"$1"; }
 
 # Declared role templates. Source of truth is the provisioner so the review and
 # the provisioner can never drift apart.

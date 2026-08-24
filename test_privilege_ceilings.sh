@@ -39,10 +39,11 @@ must_allow() {
   fi
 }
 
-q() { # scalar SQL helper
-  PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="${2:-}" podman exec -i \
-    -e PGV_COMPANY_ID -e PGV_AGENT_ID paperclip-db sh -c \
-    'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -v company_id="$PGV_COMPANY_ID" -v agent_id="$PGV_AGENT_ID" -f -' <<<"$1"
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
+q() { # scalar SQL helper: q <sql> [agent_id]
+  PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="${2:-}" pcsql_run -Atq <<<"$1"
 }
 
 grant_count() { q "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
