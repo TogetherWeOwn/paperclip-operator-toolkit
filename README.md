@@ -2,16 +2,35 @@
 
 Operator tooling for PaperclipAI companies on the `example.net` VPS.
 
-**These are operator-run CLIs, not agent tools.** Agents cannot execute them: the `paperclip` container
-mounts exactly one host path (`~/.local/share/paperclip -> /paperclip`), and none of this is on it.
-Agents propose changes through `org_request_queue.sh`; the operator applies them.
+**Most of these are operator-run CLIs. `org_request_queue.sh` is not — agents drive it.**
+
+This reverses what this file said until 2026-08-23, and the reversal is the point rather than a
+correction of a typo. The old statement was "agents cannot execute any of this; agents propose
+changes and the operator applies them." The owner decided (TOG-194) that the responsible leadership
+agent must be able to *run* the provisioning path: a subordinate requests and makes its case, the
+responsible leader evaluates, and an approval **executes**. The leader is accountable for the
+decision; it is explicitly not a rubber stamp.
+
+What has NOT changed is why the constraint existed. The `paperclip` container still mounts exactly
+one host path (`~/.local/share/paperclip -> /paperclip`) and none of this tooling is on it, so an
+agent still cannot execute these scripts directly, and a `local_stdio` MCP server — spawned from the
+server process, inside that container — cannot either. Agents reach the queue over a host-side
+`mcp_remote` MCP server running as the operator user, which is the only sanctioned transport.
+
+That transport carries one requirement that the entire authorization design rests on: **it must
+derive requester and reviewer identity from the authenticated agent principal supplied by Paperclip's
+tool gateway, and must never accept either as a tool argument.** An identity the model can fill in
+makes every check below decorative.
+
+Who decides a request is derived from the reporting chain, not a fixed pair of roles — see
+[docs/responsible-leader.md](docs/responsible-leader.md).
 
 ## What is here
 
 | Tool | Purpose | Suite |
 |---|---|---|
 | `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
-| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`. | `test_request_queue.sh` |
+| `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader. | `test_responsible_leader.sh` (offline), `test_request_queue.sh` (live) |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
@@ -27,6 +46,7 @@ Agents propose changes through `org_request_queue.sh`; the operator applies them
 ./test_gh_app_token.sh
 ./test_gh_token_argv.sh
 ./omniroute_combo_cli.sh selftest
+./test_responsible_leader.sh
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 export COMPANY_ID=<uuid>

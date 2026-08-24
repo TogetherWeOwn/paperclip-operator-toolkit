@@ -36,12 +36,13 @@ unreviewable; **if you find a bug while doing something else, file it rather tha
 
 ## Running the suites
 
-Five suites. Three run anywhere; two need the VPS.
+Six suites. Four run anywhere; two need the VPS.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh              # credential-minter regression suite
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
+./test_responsible_leader.sh        # who may approve a provisioning request
 for f in *.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
@@ -57,6 +58,13 @@ export COMPANY_ID=<uuid>
 this repo used to quote three different numbers for the same omniroute selftest. A count in a gate
 turns ordinary growth into a red build; a count in prose is just wrong a month later. Neither the
 docs nor CI assert one — if you add a suite, do not start.
+
+`test_responsible_leader.sh` needs `jq` and nothing else. It fabricates the whole world it tests:
+a TSV org fixture read through the `ORG_SNAPSHOT` seam instead of the database, and a stub
+provisioner injected through `PROV`. The stub *extracts* the delegation ceiling from
+`org_provisioner.sh` rather than carrying a copy, so a ceiling change cannot leave the suite green
+against a stale fixture. Both seams are load-bearing — removing either takes the only CI coverage of
+the authorization logic with it.
 
 `test_gh_app_token.sh` needs `node` and nothing else. It fabricates its whole credential environment:
 a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries
