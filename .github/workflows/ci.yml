@@ -8,6 +8,7 @@ name: CI
 #
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
+#     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
@@ -122,6 +123,42 @@ jobs:
           node --check "$mut/gh-app-token.js"
           if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
             echo "::error::the regression suite PASSED against a deliberately reintroduced bug"
+            cat "$mut/out.txt"
+            exit 1
+          fi
+          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # TOG-200. Asserts on the kernel's record — a stub curl on PATH reading
+      # its own /proc/<pid>/cmdline — rather than on the source text, so a
+      # future rewrite of how gh_token.sh calls curl cannot pass by accident.
+      - name: gh_token.sh argv-leak suite
+        run: ./test_gh_token_argv.sh
+
+      # The matching mutation guard. This one is surgical: it leaves the config
+      # file exactly as it is and ADDS the header back on argv, so every other
+      # assertion in the suite still passes and only the /proc check can go red.
+      # That is the point — it proves the /proc detector is what carries this
+      # suite, not the config-file bookkeeping around it.
+      - name: Prove the argv-leak suite still detects a credential on argv
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh_token.sh test_gh_token_argv.sh "$mut/"
+          before='  curl --config "$cfg" "$@"'
+          after='  curl --config "$cfg" -H "Authorization: Bearer $bearer" "$@"'
+          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+            echo "::error::could not find the curl invocation in curl_authed() to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          # awk, not sed: the replacement is full of characters sed would treat
+          # as syntax, and a mutation that silently does nothing is the one
+          # failure mode this step exists to avoid.
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh_token.sh" > "$mut/gh_token.mut" && mv "$mut/gh_token.mut" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          bash -n "$mut/gh_token.sh"
+          if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/out.txt" 2>&1; then
+            echo "::error::the argv-leak suite PASSED against a credential deliberately put back on argv"
             cat "$mut/out.txt"
             exit 1
           fi
