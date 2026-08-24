@@ -20,6 +20,7 @@ import {
   resolveScope,
 } from "./scope.js";
 import { GitHubError, createAppJwt, getInstallationId, mintInstallationToken } from "./github.js";
+import { OwnershipError, assertMintOwnership } from "./ownership.js";
 
 /** Held from setup() so onApiRequest can reach host services. */
 let context = null;
@@ -29,7 +30,7 @@ function json(status, body) {
 }
 
 function errorStatus(error) {
-  if (error instanceof ScopeError || error instanceof GitHubError) {
+  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError) {
     return error.status ?? 400;
   }
   return 500;
@@ -41,7 +42,7 @@ function errorStatus(error) {
  * whose message might quote resolved config, so it is replaced wholesale.
  */
 function errorMessage(error) {
-  if (error instanceof ScopeError || error instanceof GitHubError) {
+  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError) {
     return error.message;
   }
   return "Internal broker error.";
@@ -63,24 +64,59 @@ async function readConfig(ctx, companyId) {
  * Derive repo + permission scope from the issue the caller demonstrably holds.
  * Every input here comes from the host, not from the request body.
  */
-async function deriveScope(ctx, { issueId, companyId, body, config, actor }) {
-  const issue = await ctx.issues.get(issueId, companyId);
-  if (!issue) throw new ScopeError("Issue not found.", 404);
+/**
+ * Ask the host to reconcile the checkout lock before we read it (TOG-309).
+ *
+ * We are NOT using this as the gate — its status term is exactly what TOG-309
+ * widened, so it refuses legitimate in_review callers. We call it for the two
+ * things it does *before* it evaluates anything: it clears a checkout lock whose
+ * holding run has terminated, and it adopts an unowned lock for the caller.
+ * Without this, an issue whose previous run crashed would keep a dead lock
+ * forever and `assertMintOwnership` would refuse it on the run-lock term — the
+ * same "git stops working" failure this issue exists to fix, in a new place.
+ *
+ * A throw is expected and swallowed: for in_review/blocked it always conflicts.
+ * Nothing downstream trusts its return value; the issue is re-read afterwards.
+ */
+async function reconcileCheckoutLock(ctx, { issueId, companyId, actor }) {
+  if (typeof ctx.issues.assertCheckoutOwner !== "function") return null;
+  const runId = typeof actor.runId === "string" ? actor.runId.trim() : "";
+  if (!runId || !actor.agentId) return null;
+  try {
+    return await ctx.issues.assertCheckoutOwner({
+      issueId,
+      companyId,
+      actorAgentId: actor.agentId,
+      actorRunId: runId,
+    });
+  } catch {
+    // Deliberately ignored. This call grants nothing; assertMintOwnership below
+    // is the decision, and it runs against a freshly re-read issue either way.
+    return null;
+  }
+}
 
-  // Defence in depth against a manifest regression. The host's
-  // "always-for-agent" checkout policy already asserts ownership, but the
-  // neighbouring "required-for-agent-in-progress" policy silently skips that
-  // assertion for issues the caller does not own. If someone ever swaps the
-  // policy, this keeps the broker from minting on a stale or foreign issue.
-  if (issue.assigneeAgentId !== actor.agentId) {
-    throw new ScopeError("Issue is not assigned to the calling agent.", 403);
+async function deriveScope(ctx, { issueId, companyId, body, config, actor }) {
+  const preliminary = await ctx.issues.get(issueId, companyId);
+  if (!preliminary) throw new ScopeError("Issue not found.", 404);
+
+  // Refuse a foreign issue before touching the host's checkout machinery, so a
+  // caller probing other agents' issues cannot cause lock adoption as a side
+  // effect of being told no.
+  if (preliminary.assigneeAgentId !== actor.agentId) {
+    throw new OwnershipError("Issue is not assigned to the calling agent.", 403);
   }
-  if (issue.status !== "in_progress") {
-    throw new ScopeError(
-      `Issue is ${issue.status}, not in_progress. Tokens are minted only for active work.`,
-      409,
-    );
-  }
+
+  await reconcileCheckoutLock(ctx, { issueId, companyId, actor });
+
+  // Re-read: the reconcile above may have cleared a dead lock or adopted an
+  // unowned one, and the decision must be made on the post-reconcile record.
+  const issue = (await ctx.issues.get(issueId, companyId)) ?? preliminary;
+
+  // THE GATE. Since checkoutPolicy is "none" (see manifest.js), this is the only
+  // enforcement of assignee, status and run lock. It runs before any secret is
+  // resolved and before any outbound call.
+  const ownership = assertMintOwnership(issue, actor);
 
   const workspace = await ctx.projects.getWorkspaceForIssue(issueId, companyId);
 
@@ -101,7 +137,7 @@ async function deriveScope(ctx, { issueId, companyId, body, config, actor }) {
     defaultPermissions: config.defaultPermissions ?? DEFAULT_PERMISSION_PROFILE,
   });
 
-  return { issue, scope };
+  return { issue, scope, ownership };
 }
 
 async function mint(ctx, { companyId, config, scope }) {
@@ -146,17 +182,18 @@ async function handleMint(ctx, input) {
 
   if (!issueId) throw new ScopeError("Missing issueId.", 400);
 
-  // The host already enforced auth: "agent" and the checkout policy. This is a
-  // belt-and-braces check so a manifest edit that relaxes either one cannot
-  // silently turn the broker into a board-callable mint endpoint.
+  // The host enforced auth: "agent" and assertCompanyAccess. It no longer
+  // enforces checkout ownership for this route (see manifest.js), so this check
+  // and assertMintOwnership below are the only things standing between a
+  // non-agent caller and a mint.
   if (input.actor?.actorType !== "agent" || !input.actor?.agentId) {
-    throw new ScopeError("This route is callable only by an agent run.", 403);
+    throw new OwnershipError("This route is callable only by an agent run.", 403);
   }
 
   const config = await readConfig(ctx, companyId);
   const body = typeof input.body === "object" && input.body !== null ? input.body : {};
 
-  const { scope } = await deriveScope(ctx, {
+  const { scope, ownership } = await deriveScope(ctx, {
     issueId,
     companyId,
     body,
@@ -174,6 +211,11 @@ async function handleMint(ctx, input) {
     metadata: {
       agentId: input.actor.agentId,
       runId: input.actor.runId ?? null,
+      // TOG-309. The gate now lives in the broker, so the audit trail has to
+      // record which lifecycle state and which lock the mint was authorised
+      // under — otherwise a widened status set is invisible after the fact.
+      issueStatus: ownership.status,
+      checkoutRunId: ownership.checkoutRunId,
       repositories: scope.repositories,
       permissions: scope.permissions,
       repoSource: scope.repoSource,

@@ -17,6 +17,7 @@ import {
   resolveScope,
 } from "../dist/scope.js";
 import { createAppJwt, mintInstallationToken } from "../dist/github.js";
+import { MINTABLE_ISSUE_STATUSES, assertMintOwnership } from "../dist/ownership.js";
 import { plugin } from "../dist/worker.js";
 
 // A throwaway key. Never the real App PEM — the point of this plugin is that the
@@ -53,16 +54,23 @@ test("the mint route resolves company from the issue", () => {
   assert.deepEqual(mint.companyResolution, { from: "issue", param: "issueId" });
 });
 
-// Regression guard. server/dist/routes/plugins.js short-circuits
-// "required-for-agent-in-progress" with an early `return` when the issue is not
-// in_progress or not assigned to the caller — i.e. it skips assertCheckoutOwner
-// in exactly the case that matters. Only "always-for-agent" asserts ownership
-// unconditionally. Changing this back silently makes any agent able to mint a
-// token for any project in the company.
-test("the mint route asserts checkout ownership unconditionally", () => {
+// Regression guard, rewritten for TOG-309.
+//
+// "required-for-agent-in-progress" remains forbidden and always will be:
+// server/dist/routes/plugins.js short-circuits it with an early `return` when
+// the issue is not in_progress or not assigned to the caller — it skips
+// assertCheckoutOwner in exactly the case that matters, so any agent could mint
+// for any project in the company by naming a stale issue in it.
+//
+// The route is now "none" and the gate is assertMintOwnership in the worker,
+// because the host's own gate hardcodes status == in_progress and so refuses an
+// agent legitimately working its own issue in in_review (TOG-309). If you are
+// putting "always-for-agent" back, you are re-breaking that; widen
+// MINTABLE_ISSUE_STATUSES instead, or fix the host.
+test("the mint route never uses the policy that skips the ownership check", () => {
   const mint = manifest.apiRoutes.find((r) => r.routeKey === "mint");
-  assert.equal(mint.checkoutPolicy, "always-for-agent");
   assert.notEqual(mint.checkoutPolicy, "required-for-agent-in-progress");
+  assert.equal(mint.checkoutPolicy, "none");
 });
 
 test("manifest requests no capability beyond what the broker uses", () => {
@@ -71,6 +79,7 @@ test("manifest requests no capability beyond what the broker uses", () => {
     "secrets.read-ref",
     "http.outbound",
     "issues.read",
+    "issues.checkout",
     "projects.read",
     "project.workspaces.read",
     "activity.log.write",
@@ -530,6 +539,62 @@ test("mintInstallationToken sends repositories and permissions in the body", asy
 // Route behaviour
 // ---------------------------------------------------------------------------
 
+/**
+ * A complete issue row, shaped like what `ctx.issues.get` actually returns.
+ *
+ * `checkoutRunId` is present on purpose and must stay present. The host's
+ * `issues.getById` does an unprojected `select()`, so the column is always
+ * there; a fixture that omits it would exercise the "field absent" path instead
+ * of the run-lock comparison, and the run-lock tests would pass for the wrong
+ * reason. There is a dedicated test below for the absent case.
+ */
+function issueRow(overrides = {}) {
+  return {
+    id: ISSUE,
+    projectId: PROJECT,
+    status: "in_progress",
+    assigneeAgentId: "agent-1",
+    checkoutRunId: "run-abc",
+    ...overrides,
+  };
+}
+
+/**
+ * Stands in for the host issues client.
+ *
+ * `assertCheckoutOwner` mimics the real one closely enough to matter: it refuses
+ * anything that is not `in_progress`, which is the whole reason the broker
+ * treats it as best-effort rather than as the gate. `calls` records invocations
+ * so a test can assert the broker does not reach for it on a foreign issue.
+ */
+function issuesClient(row = issueRow(), extra = {}) {
+  const calls = [];
+  const client = {
+    calls,
+    get: async () => (typeof row === "function" ? row() : row),
+    assertCheckoutOwner: async (input) => {
+      calls.push(input);
+      const current = typeof row === "function" ? row() : row;
+      if (
+        current?.status !== "in_progress" ||
+        current?.assigneeAgentId !== input.actorAgentId ||
+        (current?.checkoutRunId !== null && current?.checkoutRunId !== input.actorRunId)
+      ) {
+        throw new Error("Issue run ownership conflict");
+      }
+      return {
+        issueId: current.id,
+        status: current.status,
+        assigneeAgentId: current.assigneeAgentId,
+        checkoutRunId: current.checkoutRunId,
+        adoptedFromRunId: null,
+      };
+    },
+    ...extra,
+  };
+  return client;
+}
+
 function makeCtx(overrides = {}) {
   const logs = [];
   const activity = [];
@@ -554,14 +619,7 @@ function makeCtx(overrides = {}) {
         }),
       }),
     },
-    issues: {
-      get: async () => ({
-        id: ISSUE,
-        projectId: PROJECT,
-        status: "in_progress",
-        assigneeAgentId: "agent-1",
-      }),
-    },
+    issues: issuesClient(),
     projects: {
       get: async () => ({ id: PROJECT, env: { GH_APP_REPOS: "nntune" } }),
       getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
@@ -652,51 +710,23 @@ test("an unconfigured broker fails closed with 503", async () => {
 });
 
 test("minting is refused for an issue assigned to a different agent", async () => {
-  const { ctx } = makeCtx({
-    issues: {
-      get: async () => ({
-        id: ISSUE,
-        projectId: PROJECT,
-        status: "in_progress",
-        assigneeAgentId: "some-other-agent",
-      }),
-    },
-  });
+  const issues = issuesClient(issueRow({ assigneeAgentId: "some-other-agent" }));
+  const { ctx } = makeCtx({ issues });
   await plugin.definition.setup(ctx);
 
   const response = await plugin.definition.onApiRequest(request("mint"));
   assert.equal(response.status, 403);
   assert.match(response.body.error, /not assigned to the calling agent/);
-});
 
-test("minting is refused for an issue that is not in progress", async () => {
-  const { ctx } = makeCtx({
-    issues: {
-      get: async () => ({
-        id: ISSUE,
-        projectId: PROJECT,
-        status: "todo",
-        assigneeAgentId: "agent-1",
-      }),
-    },
-  });
-  await plugin.definition.setup(ctx);
-
-  const response = await plugin.definition.onApiRequest(request("mint"));
-  assert.equal(response.status, 409);
-  assert.match(response.body.error, /not in_progress/);
+  // The assignee term is checked before the host's checkout machinery is
+  // touched. Otherwise probing another agent's issue would have a side effect
+  // (lock adoption) even though the probe is refused.
+  assert.deepEqual(issues.calls, [], "reached for the checkout lock on a foreign issue");
 });
 
 test("an issue with no project and no workspace repo is refused, not minted broadly", async () => {
   const { ctx } = makeCtx({
-    issues: {
-      get: async () => ({
-        id: ISSUE,
-        projectId: null,
-        status: "in_progress",
-        assigneeAgentId: "agent-1",
-      }),
-    },
+    issues: issuesClient(issueRow({ projectId: null })),
     projects: {
       get: async () => null,
       getWorkspaceForIssue: async () => null,
@@ -731,6 +761,244 @@ test("an unexpected internal error does not echo its message to the caller", asy
   assert.equal(response.status, 500);
   assert.equal(response.body.error, "Internal broker error.");
   assert.ok(!JSON.stringify(response).includes("hunter2"));
+});
+
+// ---------------------------------------------------------------------------
+// Ownership gate (TOG-309)
+//
+// checkoutPolicy is "none", so nothing behind this file enforces the assignee or
+// run-lock terms. These tests are the enforcement's only proof.
+// ---------------------------------------------------------------------------
+
+test("assertMintOwnership accepts exactly the live-checkout statuses", () => {
+  assert.deepEqual([...MINTABLE_ISSUE_STATUSES], ["in_progress", "in_review", "blocked"]);
+});
+
+// Tested directly, not only through the route, because since checkoutPolicy
+// became "none" this function *is* the authorization boundary.
+test("assertMintOwnership, in isolation, over the full status enum", () => {
+  const actor = { actorType: "agent", agentId: "agent-1", runId: "run-abc" };
+  const ALL_STATUSES = [
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "done",
+    "blocked",
+    "cancelled",
+  ];
+
+  for (const status of ALL_STATUSES) {
+    const row = issueRow({ status });
+    if (MINTABLE_ISSUE_STATUSES.includes(status)) {
+      const result = assertMintOwnership(row, actor);
+      assert.equal(result.status, status);
+      assert.equal(result.runId, "run-abc");
+    } else {
+      assert.throws(() => assertMintOwnership(row, actor), { status: 409 });
+    }
+  }
+
+  // Every non-status term still refuses, in every mintable status.
+  for (const status of MINTABLE_ISSUE_STATUSES) {
+    assert.throws(
+      () => assertMintOwnership(issueRow({ status, assigneeAgentId: "other" }), actor),
+      { status: 403 },
+      `assignee term not enforced in ${status}`,
+    );
+    assert.throws(
+      () => assertMintOwnership(issueRow({ status, checkoutRunId: "other-run" }), actor),
+      { status: 409 },
+      `run-lock term not enforced in ${status}`,
+    );
+    assert.throws(
+      () => assertMintOwnership(issueRow({ status }), { ...actor, runId: "  " }),
+      { status: 403 },
+      `blank runId accepted in ${status}`,
+    );
+  }
+});
+
+// The measured TOG-309 failure. An agent acting on review feedback holds its
+// checkout while the issue sits in in_review; the host refused it with 409, and
+// the helper (correctly) will not retry a 409 with the PEM, so git died.
+test("an in_review issue the agent holds mints — the case TOG-309 measured", async () => {
+  const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status: "in_review" })) });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.token, "ghs_minted");
+});
+
+test("a blocked issue the agent holds mints — it still has to push the branch", async () => {
+  const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status: "blocked" })) });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+});
+
+// The lifetime bound. Status is not an authorization term, but excluding the
+// terminal states is what stops a stale assignment from being a standing
+// credential for a project the agent finished with months ago.
+for (const status of ["done", "cancelled"]) {
+  test(`a ${status} issue is refused — assignment outlives the work`, async () => {
+    const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status })) });
+    await plugin.definition.setup(ctx);
+
+    const response = await plugin.definition.onApiRequest(request("mint"));
+    assert.equal(response.status, 409);
+    assert.match(response.body.error, /issue is finished/i);
+  });
+}
+
+for (const status of ["backlog", "todo"]) {
+  test(`a ${status} issue is refused — no run holds a checkout yet`, async () => {
+    const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status })) });
+    await plugin.definition.setup(ctx);
+
+    const response = await plugin.definition.onApiRequest(request("mint"));
+    assert.equal(response.status, 409);
+    assert.match(response.body.error, /work has not started/i);
+  });
+}
+
+// The run-lock term, preserved verbatim from the host gate. Same agent, same
+// issue, a different concurrent run of its own.
+test("minting is refused when another run of the same agent holds the checkout", async () => {
+  const { ctx } = makeCtx({
+    issues: issuesClient(issueRow({ status: "in_review", checkoutRunId: "run-somebody-else" })),
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /held by a different run/);
+});
+
+test("an unheld checkout (null) is accepted — nobody else has the lock", async () => {
+  const { ctx } = makeCtx({
+    issues: issuesClient(issueRow({ status: "in_review", checkoutRunId: null })),
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+});
+
+// The host required a run id before this route dropped to checkoutPolicy
+// "none". Nothing requires it now except the broker, so this is load-bearing:
+// without it the run-lock comparison above degrades to "null == undefined".
+test("minting is refused when the host supplied no runId", async () => {
+  const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status: "in_review" })) });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(
+    request("mint", { actor: { ...AGENT_ACTOR, runId: null } }),
+  );
+  assert.equal(response.status, 403);
+  assert.match(response.body.error, /run id required/i);
+});
+
+// Fails closed rather than reading a missing column as "no lock held". If the
+// host ever narrows its select, this must break loudly instead of silently
+// dropping the run-lock term while every other test still passes.
+test("an issue record without a checkoutRunId field is refused, not treated as unlocked", async () => {
+  const row = issueRow({ status: "in_review" });
+  delete row.checkoutRunId;
+  const { ctx } = makeCtx({ issues: issuesClient(row) });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /no checkoutRunId/);
+});
+
+// The reconcile call exists for its side effects — it is the host's only path
+// that clears a lock left behind by a terminated run. If it stops being called,
+// a crashed prior run leaves a dead lock that refuses every later mint, which is
+// the same "git stops working" failure in a new place.
+test("the host checkout lock is reconciled before the decision is made", async () => {
+  const issues = issuesClient();
+  const { ctx } = makeCtx({ issues });
+  await plugin.definition.setup(ctx);
+
+  await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(issues.calls.length, 1);
+  assert.deepEqual(issues.calls[0], {
+    issueId: ISSUE,
+    companyId: COMPANY,
+    actorAgentId: "agent-1",
+    actorRunId: "run-abc",
+  });
+});
+
+// The reconcile call must never be able to authorise anything on its own, and
+// its failure must never be fatal — for in_review it always conflicts.
+test("a throwing host reconcile does not block a legitimate in_review mint", async () => {
+  const issues = issuesClient(issueRow({ status: "in_review" }), {
+    assertCheckoutOwner: async () => {
+      throw new Error("Issue run ownership conflict");
+    },
+  });
+  const { ctx } = makeCtx({ issues });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+});
+
+// A host that grants ownership cannot override the broker's own refusal. If the
+// two ever disagree, the stricter one wins.
+test("a permissive host reconcile cannot override the broker's refusal", async () => {
+  const issues = issuesClient(issueRow({ status: "done" }), {
+    assertCheckoutOwner: async () => ({
+      issueId: ISSUE,
+      status: "in_progress",
+      assigneeAgentId: "agent-1",
+      checkoutRunId: "run-abc",
+      adoptedFromRunId: null,
+    }),
+  });
+  const { ctx } = makeCtx({ issues });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 409);
+});
+
+// The gate has to run before the PEM is resolved, not just before the response
+// is written. A refusal that has already touched the secret is a weaker refusal.
+test("a refused mint never resolves the private key", async () => {
+  let resolved = 0;
+  const { ctx } = makeCtx({
+    issues: issuesClient(issueRow({ status: "done" })),
+    secrets: {
+      resolve: async () => {
+        resolved += 1;
+        return TEST_PEM;
+      },
+    },
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("mint"));
+  assert.equal(response.status, 409);
+  assert.equal(resolved, 0, "resolved the PEM for a request that was refused");
+});
+
+// A widened status set is only reviewable after the fact if the audit says which
+// state the mint was authorised under.
+test("the audit entry records the status and lock the mint was authorised under", async () => {
+  const { ctx, activity } = makeCtx({
+    issues: issuesClient(issueRow({ status: "in_review" })),
+  });
+  await plugin.definition.setup(ctx);
+  await plugin.definition.onApiRequest(request("mint"));
+
+  assert.equal(activity[0].metadata.issueStatus, "in_review");
+  assert.equal(activity[0].metadata.checkoutRunId, "run-abc");
 });
 
 test("an unknown routeKey is rejected", async () => {
