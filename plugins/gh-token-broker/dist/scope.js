@@ -30,6 +30,61 @@ export const DEFAULT_PERMISSION_PROFILE = Object.freeze({
   metadata: "read",
 });
 
+/**
+ * The permissions that make CI observable, and the endpoint each one unlocks.
+ * None is in the default profile, so by default a minted token can see none of
+ * this — which is the whole of TOG-247.
+ *
+ * `statuses` is listed separately from `checks` on purpose: they are distinct
+ * permissions, and granting `checks:read` does NOT make the combined commit
+ * status endpoint readable. Measured against the live installation on
+ * 2026-08-24 — a token holding actions:read + checks:read still gets 403 from
+ * `/commits/{ref}/status`. A repo whose CI posts commit statuses instead of
+ * check runs is therefore invisible to a checks-only grant.
+ */
+const CI_SOURCES = Object.freeze({
+  checks: "check runs (GET /repos/{o}/{r}/commits/{ref}/check-runs)",
+  actions: "workflow runs (GET /repos/{o}/{r}/actions/runs)",
+  statuses: "commit statuses (GET /repos/{o}/{r}/commits/{ref}/status)",
+});
+
+/**
+ * Report which CI sources this grant can actually read (TOG-247).
+ *
+ * A minted token that cannot see CI is not, by itself, a problem — the operator
+ * may well decide that humans verify before merge. The problem is a token that
+ * cannot see CI and does not SAY so, because the failure mode is silent: a
+ * caller pulls `check_runs` out of a 403 body, finds nothing, and concludes
+ * "no CI configured" rather than "you may not look".
+ *
+ * Deliberately advisory, and it carries no enforcement. This changes what the
+ * caller KNOWS, never what the token can do — the grant is decided by the
+ * profile and by GitHub, and duplicating that decision here would be a second
+ * source of truth for the blast radius.
+ */
+export function describeCiVisibility(permissions) {
+  const perms = permissions ?? {};
+  const readable = Object.keys(CI_SOURCES).filter((key) => perms[key] != null);
+  const blind = Object.keys(CI_SOURCES).filter((key) => perms[key] == null);
+
+  return {
+    observable: readable.length > 0,
+    readable,
+    blind,
+    // Present only when it is needed, so a caller that CAN see CI is not handed
+    // a standing warning it has to learn to ignore.
+    warning:
+      readable.length > 0
+        ? null
+        : "This token cannot read CI status: every source returns 403. A client " +
+          "that reads the result array out of the error body sees nothing, which " +
+          "looks like 'no CI configured' rather than 'denied'. Do not treat the " +
+          "absence of failing checks as a pass. Missing: " +
+          blind.map((key) => `${key}:read for ${CI_SOURCES[key]}`).join("; ") +
+          ".",
+  };
+}
+
 export class ScopeError extends Error {
   constructor(message, status = 400) {
     super(message);

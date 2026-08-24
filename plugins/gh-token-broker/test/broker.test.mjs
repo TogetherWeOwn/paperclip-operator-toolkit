@@ -8,6 +8,7 @@ import { manifest } from "../dist/manifest.js";
 import {
   DEFAULT_PERMISSION_PROFILE,
   ScopeError,
+  describeCiVisibility,
   narrowPermissions,
   parsePermissionSpec,
   parseRepoList,
@@ -630,4 +631,87 @@ test("an unknown routeKey is rejected", async () => {
 
   const response = await plugin.definition.onApiRequest(request("definitely-not-a-route"));
   assert.equal(response.status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// CI visibility (TOG-247)
+//
+// The broker cannot make an agent read CI status correctly, but it can refuse
+// to let one be blind and unaware of it. These assert that the mint response
+// states the blindness rather than leaving the caller to infer it from a 403
+// it will not see until much later.
+// ---------------------------------------------------------------------------
+
+test("the default profile cannot observe CI, and the grant says so", () => {
+  const v = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+  assert.equal(v.observable, false);
+  assert.deepEqual(v.readable, []);
+  assert.deepEqual(v.blind.sort(), ["actions", "checks", "statuses"]);
+  assert.ok(v.warning, "a blind grant must carry a warning");
+});
+
+// The specific misreading this whole issue is about. The warning has to say
+// that an empty result is a denial, not an absence of CI — a warning that only
+// said "you lack checks:read" would leave the dangerous inference intact.
+test("the warning names the empty-list misreading, not just the missing scope", () => {
+  const { warning } = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+  assert.match(warning, /denied/i);
+  assert.match(warning, /not treat the absence of failing checks as a pass/i);
+  for (const scope of ["checks:read", "actions:read", "statuses:read"]) {
+    assert.ok(warning.includes(scope), `warning should name ${scope}`);
+  }
+});
+
+test("granting checks:read makes CI observable and drops the warning", () => {
+  const v = describeCiVisibility({ ...DEFAULT_PERMISSION_PROFILE, checks: "read" });
+  assert.equal(v.observable, true);
+  assert.deepEqual(v.readable, ["checks"]);
+  assert.equal(v.warning, null, "an observable grant must not carry a standing warning");
+});
+
+// checks:read and statuses:read are different permissions. A grant that can
+// read check runs is still blind to a repo whose CI posts commit statuses, and
+// the response must keep reporting that rather than rounding up to "observable,
+// nothing more to say".
+test("statuses is reported separately from checks", () => {
+  const v = describeCiVisibility({ checks: "read", actions: "read" });
+  assert.deepEqual(v.blind, ["statuses"]);
+});
+
+test("visibility is computed from what GitHub granted, not what was requested", async () => {
+  // The App ceiling is narrower than the profile: we ask for checks:read and
+  // GitHub declines to grant it. The caller must be told it is blind.
+  const { ctx } = makeCtx({
+    http: {
+      fetch: async () => ({
+        status: 201,
+        ok: true,
+        json: async () => ({
+          token: "ghs_minted",
+          expires_at: "2026-08-23T18:00:00Z",
+          // No `checks` key: the grant is narrower than the ask.
+          permissions: { contents: "write", metadata: "read" },
+          repositories: [{ name: "nntune" }],
+        }),
+      }),
+    },
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(
+    request("mint", { body: { permissions: { contents: "write" } } }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ciVisibility.observable, false);
+  assert.ok(response.body.ciVisibility.warning);
+});
+
+test("the advisory changes no grant", async () => {
+  // Belt and braces: describing CI visibility must never alter permissions.
+  const before = resolveScope({
+    projectEnv: { GH_APP_REPOS: "paperclip-ops-tooling" },
+    workspaceRepoUrl: null,
+  });
+  describeCiVisibility(before.permissions);
+  assert.deepEqual(before.permissions, { ...DEFAULT_PERMISSION_PROFILE });
 });

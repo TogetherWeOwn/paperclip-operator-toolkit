@@ -56,9 +56,54 @@ Response:
   "expiresAt": "2026-08-23T18:00:00Z",
   "repositories": ["nntune"],
   "permissions": { "contents": "write", "…": "…" },
-  "scope": { "repoSource": "project", "profileSource": "default" }
+  "scope": { "repoSource": "project", "profileSource": "default" },
+  "ciVisibility": {                            // advisory; see below
+    "observable": false,
+    "readable": [],
+    "blind": ["checks", "actions", "statuses"],
+    "warning": "This token cannot read CI status: every source returns 403. …"
+  }
 }
 ```
+
+### `ciVisibility` — why the mint says what it cannot see (TOG-247)
+
+The default profile grants no `checks`, `actions` or `statuses` read, so a token
+minted from it **cannot observe CI**. That is a legitimate posture — the operator
+may well want a human to verify before merge — but it is dangerous *silently*,
+because the natural way to ask "did CI pass" fails green in two directions:
+
+| what happens | HTTP | what a naive gate concludes |
+|---|---|---|
+| token lacks `checks:read` | `403` | parses `.check_runs` out of the error body, gets nothing, reads it as "no CI configured" |
+| token has `checks:read`, ref has no runs yet | `200`, `total_count: 0` | "all zero runs succeeded" — vacuously true |
+
+So the mint response states the blindness outright rather than leaving the caller
+to discover it at a merge gate. It is **advisory only**: it changes what the
+caller knows, never what the token can do. The grant is decided by the profile
+and by GitHub, and re-deciding it here would be a second source of truth for the
+blast radius.
+
+`observable` is computed from **what GitHub actually granted**, not from what was
+requested — if the App's own ceiling is narrower than the profile, the caller is
+told it is blind based on the real grant.
+
+Measured against the live installation, 2026-08-24:
+
+| token permissions | `check-runs` |
+|---|---|
+| `contents,pull_requests,issues,metadata` (the default) | `403` |
+| … `+ workflows:write` (what Ops Tooling has) | `403` — `workflows` does not help |
+| … `+ actions:read, checks:read` | `200`, 6 runs |
+
+Note `statuses` is a **separate** permission: a token holding `actions:read` and
+`checks:read` still gets `403` from `/commits/{ref}/status`, so a repo whose CI
+posts commit statuses rather than check runs stays invisible. `ciVisibility`
+reports the three sources separately for that reason.
+
+The consuming side of this contract is [`gh_ci_status.sh`](../../gh_ci_status.sh)
+at the repo root, which turns the three sources into a three-state verdict and
+exits non-zero on `unknown`.
 
 ## How scope is derived
 
