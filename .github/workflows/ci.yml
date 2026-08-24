@@ -346,6 +346,19 @@ jobs:
           mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
             's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
 
+          # TOG-197's two-time validation: the requester's ceiling is checked at
+          # SUBMIT and RE-CHECKED at approval against freshly-read state. Drop
+          # the re-check and a pending request banks the authority its requester
+          # held when it submitted — so a demotion, a transfer or a termination
+          # between submit and approval no longer reaches the decision. This is
+          # the TOCTOU defence TOG-194 says must survive the epic intact, and
+          # until TOG-258 the only coverage of it lived in test_request_queue.sh,
+          # which needs Postgres and podman and never runs here. `no`: the record
+          # suite does not see this one, which is what shows the authorization
+          # suite carries it.
+          mutation_check "banked-stale-authority" test_responsible_leader.sh no \
+            's/^  may_request "$now_tpl"/  true "$now_tpl"/' || rc=1
+
           # An auditor may not clear an override it took itself. Drop that one
           # comparison and the open-item list becomes self-service: the bypasser
           # writes the entry AND retires it, a write-only log in audit clothing.
@@ -482,28 +495,6 @@ jobs:
             's|^FENCE_LEN=\$(( \$(longest_tick_run "\$BODY") + 1 )).*$|FENCE_LEN=3|' || rc=1
 
           exit $rc
-
-      # Second authorization mutation, guarding a DIFFERENT property. The
-      # dormancy gate above only exercises derivation; until TOG-197 review it
-      # was possible to delete the approval-time re-validation outright and keep
-      # this suite green, because the only coverage of it lived in
-      # test_request_queue.sh, which needs Postgres and never runs here.
-      # Mutation: drop the re-check of the requester's ceiling at approval, so a
-      # request banks the authority the requester held at SUBMIT time.
-      - name: Prove the suite still detects banked (stale) authority
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp org_request_queue.sh org_provisioner.sh test_responsible_leader.sh "$mut/"
-          perl -0pi -e 's/^  may_request "\$now_tpl" "\$template" \\\n.*\n.*\n.*\n/  : # mutated\n/m' \
-            "$mut/org_request_queue.sh"
-          grep -q 'may_request "$now_tpl"' "$mut/org_request_queue.sh" && {
-            echo "::error::mutation did not apply; this gate is no longer testing anything"; exit 1; }
-          if (cd "$mut" && ./test_responsible_leader.sh >/dev/null 2>&1); then
-            echo "::error::the authorization suite passed with the approval-time ceiling re-check removed"
-            exit 1
-          fi
-          echo "authorization suite correctly rejects the banked-authority mutation"
 
       - name: Prove the regression suite still detects the bug
         run: |

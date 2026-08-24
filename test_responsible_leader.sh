@@ -488,9 +488,9 @@ must_allow "MGR submits, and the template is disabled while it is pending" \
 REQ="$(last_sub)"
 must_allow "A0 disables E0_SPECIALIST" "$Q" disable-template E0_SPECIALIST --reviewer A0
 must_refuse_with "the responsible leader cannot approve a disabled template" \
-  "currently disabled" "$Q" review --reviewer DIR --request "$REQ" --approve
+  "currently disabled" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 must_refuse_with "  ...and standing authority cannot approve it either" \
-  "currently disabled" "$Q" review --reviewer A0 --request "$REQ" --approve
+  "currently disabled" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...the refusal is logged as template_disabled" \
    "$(jq -r 'select(.reason=="template_disabled")|.reason' "$GRANT_LOG" | tail -1)" "template_disabled"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
@@ -504,7 +504,7 @@ must_allow "MGR submits, then is demoted before the decision" \
 REQ="$(last_sub)"
 sed -i 's/^u-mgr\tMGR\tD1_MANAGER/u-mgr\tMGR\tE0_SPECIALIST/' "$ORG_SNAPSHOT"
 must_refuse_with "a demoted requester's pending request is refused at approval" \
-  "ceiling changed" "$Q" review --reviewer DIR --request "$REQ" --approve
+  "ceiling changed" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...logged as ceiling_changed_since_submit" \
    "$(jq -r 'select(.reason=="ceiling_changed_since_submit")|.reason' "$GRANT_LOG" | tail -1)" \
    "ceiling_changed_since_submit"
@@ -517,7 +517,7 @@ must_allow "MGR submits, then is terminated before the decision" \
 REQ="$(last_sub)"
 sed -i 's/^\(u-mgr\tMGR\tD1_MANAGER\t\)idle/\1terminated/' "$ORG_SNAPSHOT"
 must_refuse_with "a terminated requester's pending request is refused at approval" \
-  "is terminated" "$Q" review --reviewer DIR --request "$REQ" --approve
+  "is terminated" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
 # --- requester removed, and requester re-created under the same role id ------
@@ -530,7 +530,7 @@ must_allow "MGR submits, then is deleted outright" \
 REQ="$(last_sub)"
 grep -v '^u-mgr	' "$ORG_SNAPSHOT" > "$ORG_SNAPSHOT.tmp" && mv "$ORG_SNAPSHOT.tmp" "$ORG_SNAPSHOT"
 must_refuse_with "a vanished requester's request is not executable by anyone" \
-  "no longer exists" "$Q" review --reviewer A0 --request "$REQ" --approve
+  "no longer exists" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
 reset
@@ -539,7 +539,7 @@ must_allow "MGR submits, then MGR is re-created as a different agent" \
 REQ="$(last_sub)"
 sed -i 's/^u-mgr\tMGR\t/u-mgr2\tMGR\t/' "$ORG_SNAPSHOT"
 must_refuse_with "authority does not transfer to a new agent holding the same role id" \
-  "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve
+  "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
