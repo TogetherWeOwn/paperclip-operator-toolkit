@@ -287,5 +287,88 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+hdr "9. Staged root-run scripts must drift loudly (--staged)"
+# TOG-310's own remediation was staged at /paperclip/operator-handoff as a
+# node-owned file the operator was asked to `podman exec -u root`.  Any agent
+# could have rewritten it in the twelve hours it sat there.  The control is
+# detection: the staged mirror is compared against its reviewed source in git.
+#
+# These assertions read ROWS, not the exit code, on purpose.  The staged check
+# only runs inside a full chain walk, and on this host the chain walk always
+# finds holes of its own -- so exit 1 would pass whether or not the staged
+# logic ran at all.  A test that cannot fail is not a test.
+
+mkdir -p "$TMP/home"
+MAN="$TMP/manifest.txt"
+printf 'canonical\n' > "$TMP/source.sh"
+# Manifest sources are repo-relative in production; the audit also accepts an
+# absolute path, which is what lets these fixtures live under $TMP.
+printf '%s\t%s\n' "$TMP/staged.sh" "$TMP/source.sh" > "$MAN"
+
+# staged_verdict -> the audit's row for the fixture mirror, colour stripped
+staged_verdict() {
+  "$AUDIT" "${AUDIT_ARGS[@]}" --home "$TMP/home" --staged-manifest "${1:-$MAN}" 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -F "${2:-$TMP/staged.sh}"
+}
+
+# (a) mirror matches the reviewed source
+cp "$TMP/source.sh" "$TMP/staged.sh"
+got="$(staged_verdict)"
+if grep -q '^ *OK' <<<"$got"; then ok "a mirror identical to its source reads OK"
+else bad "identical mirror did not read OK" "$got"; fi
+
+# (b) mirror edited out from under the operator -- the case that matters
+printf 'tampered\n' >> "$TMP/staged.sh"
+got="$(staged_verdict)"
+if grep -q '^ *HOLE' <<<"$got" && grep -q 'DRIFT' <<<"$got"; then
+  ok "a tampered mirror is a HOLE and says DRIFT"
+else
+  bad "tampered mirror did not read as DRIFT" "$got"
+fi
+
+# (c) not staged at all is the desired end state, not a finding
+rm -f "$TMP/staged.sh"
+got="$(staged_verdict)"
+if grep -q '^ *OK' <<<"$got"; then ok "an absent mirror reads OK (nothing to root-run)"
+else bad "absent mirror did not read OK" "$got"; fi
+
+# (d) a manifest naming a source that is not in the checkout must not read OK.
+# This is the fail-open shape: no source to compare against means the mirror is
+# unverified, and unverified must never be indistinguishable from verified.
+printf 'mirror\n' > "$TMP/staged.sh"
+printf '%s\t%s\n' "$TMP/staged.sh" "$TMP/no-such-source.sh" > "$MAN"
+got="$(staged_verdict)"
+if grep -q '^ *INDET' <<<"$got"; then ok "a missing canonical source is INDETERMINATE, not OK"
+else bad "missing source did not read INDET" "$got"; fi
+
+# (e) an unreadable manifest must not silently check nothing and look clean
+got="$(staged_verdict "$TMP/no-manifest" "no-manifest")"
+if grep -q '^ *INDET' <<<"$got"; then ok "an unreadable manifest is INDETERMINATE, not silence"
+else bad "unreadable manifest was not reported" "$got"; fi
+
+# (f) and the check must stay opt-in: without --staged there is no staged row,
+# so the existing callers and CI keep their current verdicts.
+got="$("$AUDIT" "${AUDIT_ARGS[@]}" --home "$TMP/home" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+if grep -qF "$TMP/staged.sh" <<<"$got"; then
+  bad "staged rows appeared without --staged" "$got"
+else
+  ok "no staged rows without --staged"
+fi
+
+# (g) the real manifest shipped in this repo must name sources that exist.
+# Without this, deleting or renaming credential_chain_lockdown.sh degrades the
+# live check to INDET and nothing notices.
+if [[ -r "$HERE/staged_root_scripts.txt" ]]; then
+  missing=""
+  while IFS=$'\t' read -r _staged src; do
+    [[ -z "${_staged// }" || "$_staged" == \#* ]] && continue
+    src="${src// }"
+    [[ -n "$src" && ! -r "$HERE/$src" ]] && missing="$missing $src"
+  done < "$HERE/staged_root_scripts.txt"
+  if [[ -z "$missing" ]]; then ok "every source in staged_root_scripts.txt exists"
+  else bad "staged_root_scripts.txt names missing source(s):$missing"; fi
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n\033[1m%d passed, %d failed\033[0m\n\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

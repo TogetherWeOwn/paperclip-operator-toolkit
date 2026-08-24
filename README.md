@@ -49,6 +49,8 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
 | `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
+| `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh` |
+| `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
@@ -71,6 +73,7 @@ node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_gh_ci_status.sh
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
+./test_credential_chain_audit.sh
 ./test_sql_backend.sh
 (cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 
@@ -115,6 +118,33 @@ gate turns ordinary growth into a red build. Nothing in CI or in these docs asse
 
 `--allow-active` is required once any agent has `wakeOnDemand=true`; without it the review
 reports each wakeable agent as a finding.
+
+## Applying the credential-chain lockdown (operator, root)
+
+`credential_chain_lockdown.sh --apply` is the only tool here that an operator runs as **root**, so
+how it gets to them is part of its threat model.
+
+```bash
+# From the checkout, as root. Verify provenance first -- the script demands it.
+git -C <checkout> fetch origin
+git -C <checkout> diff --stat origin/main -- credential_chain_lockdown.sh   # expect: empty
+podman exec -u root paperclip <checkout>/credential_chain_lockdown.sh --dry-run
+podman exec -u root paperclip <checkout>/credential_chain_lockdown.sh --apply --i-have-verified-this-copy
+podman exec -u root paperclip <checkout>/credential_chain_lockdown.sh --verify
+```
+
+**Do not root-run a copy staged under `/paperclip/operator-handoff`.** That directory is `1777` and
+every file in it is owned by the shared agent uid `node`, so any agent can rewrite a script sitting
+there between staging and execution. TOG-310's own first remediation was staged exactly that way:
+the finding is an agent→agent escalation, and root-running an agent-writable fix would have been
+agent→root, which is worse than the bug. The script refuses `--apply` until you confirm the copy in
+front of you matches `origin/main`, because git — a reviewed PR — is the only tamper-evident record
+in this container. No mode bit substitutes for that: there is no directory here `node` cannot write.
+
+`staged_root_scripts.txt` lists staged mirrors and `credential_chain_audit.sh --staged` reports
+`DRIFT` when one stops matching its source. That is detection, not prevention — an agent that can
+edit the mirror can edit the manifest too. Its value is that a swap has to be loud, which is
+precisely what was missing when the live credential helper was silently replaced on 2026-08-24.
 
 ## Non-negotiables
 
