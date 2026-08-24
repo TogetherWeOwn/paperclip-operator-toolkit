@@ -8,6 +8,7 @@ import { manifest } from "../dist/manifest.js";
 import {
   DEFAULT_PERMISSION_PROFILE,
   ScopeError,
+  describeCiVisibility,
   narrowPermissions,
   parsePermissionSpec,
   parseRepoList,
@@ -84,15 +85,39 @@ test("default profile carries no organization_* or members scope", () => {
     assert.notEqual(key, "administration");
   }
   assert.deepEqual(Object.keys(DEFAULT_PERMISSION_PROFILE).sort(), [
+    "checks",
     "contents",
     "issues",
     "metadata",
     "pull_requests",
+    "statuses",
   ]);
 });
 
 test("workflows is excluded from the default profile", () => {
   assert.equal(DEFAULT_PERMISSION_PROFILE.workflows, undefined);
+});
+
+// The CI-visibility permissions are read-only on purpose. checks and statuses
+// both exist as `write` on this App, and a copy-paste of the granted level
+// would hand every agent the ability to POST fabricated check runs and commit
+// statuses — i.e. to mark its own PR green.
+test("the CI-visibility permissions are read, never write", () => {
+  assert.equal(DEFAULT_PERMISSION_PROFILE.checks, "read");
+  assert.equal(DEFAULT_PERMISSION_PROFILE.statuses, "read");
+});
+
+// TOG-247 refused actions:read because it also grants workflow LOG download,
+// and logs carry whatever CI printed. This test is the guard on that decision:
+// it is expected to fail loudly if someone adds the permission back for
+// convenience. If you are here because it failed, read WITHHELD_CI_SOURCES in
+// scope.js before changing it — the refusal is the point, not an oversight.
+test("actions is excluded from the default profile, deliberately", () => {
+  assert.equal(
+    DEFAULT_PERMISSION_PROFILE.actions,
+    undefined,
+    "actions:read also grants workflow log download; TOG-247 refused it",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -272,6 +297,90 @@ test("the live Ops Tooling env resolves its repo and keeps workflows:write", () 
   assert.equal(scope.permissions.workflows, "write");
   assert.equal(scope.permissions.contents, "write");
   assert.equal(scope.profileSource, "project");
+});
+
+// ---------------------------------------------------------------------------
+// TOG-226. Community Platform and Onboarding shipped with no env at all, so the
+// broker refused for every issue on them — 47 and 8 issues respectively. Both do
+// real git work, so the fix was a repo pin, not a "does no git work" note. These
+// pin the values that were set, at the least-privilege width they were set to:
+// Onboarding touches only the Discord bot, so widening it to the other two repos
+// is a regression even though they sit in the same installation.
+// ---------------------------------------------------------------------------
+
+test("the live Community Platform env scopes to its three transferred repos", () => {
+  const scope = resolveScope({
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-web,two-bot,two-design" } },
+    projectId: "4c57214d",
+    workspaceRepoUrl: null, // the project has no workspace; the pin is the only source
+  });
+  assert.deepEqual(scope.repositories, ["two-web", "two-bot", "two-design"]);
+  assert.equal(scope.repoSource, "project");
+});
+
+test("the live Onboarding env scopes to two-bot alone", () => {
+  const scope = resolveScope({
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-bot" } },
+    projectId: "88f949ff",
+    workspaceRepoUrl: null,
+  });
+  assert.deepEqual(scope.repositories, ["two-bot"]);
+});
+
+test("a project-less issue is told to attach a project, not to set env it has no project for", () => {
+  assert.throws(
+    () => resolveScope({ projectEnv: null, projectId: null, workspaceRepoUrl: null }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /no project/);
+      assert.match(error.message, /attach this issue to a project/);
+      // The remedy that does not apply must not be offered.
+      assert.doesNotMatch(error.message, /set GH_APP_REPOS on the project to/i);
+      return true;
+    },
+  );
+});
+
+test("a project without GH_APP_REPOS is named in the refusal", () => {
+  assert.throws(
+    () => resolveScope({ projectEnv: {}, projectId: "88f949ff", workspaceRepoUrl: null }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /88f949ff/);
+      assert.match(error.message, /has no env/);
+      return true;
+    },
+  );
+});
+
+test("a project whose GH_APP_REPOS is a secret_ref is told the binding must be a literal", () => {
+  assert.throws(
+    () =>
+      resolveScope({
+        projectEnv: { GH_APP_REPOS: { type: "secret_ref", secretId: "x" } },
+        projectId: "4c57214d",
+        workspaceRepoUrl: null,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /plain literal/);
+      return true;
+    },
+  );
+});
+
+test("the refusal never leaks a repo name it did not authorise", () => {
+  // An unparseable workspace URL is reported as the input, not as a scope.
+  assert.throws(
+    () =>
+      resolveRepositories({
+        projectRepos: null,
+        workspaceRepoUrl: "https://github.com/",
+        projectId: "4c57214d",
+        hasProjectEnv: true,
+      }),
+    (error) => error.status === 409 && /did not parse/.test(error.message),
+  );
 });
 
 test("a tagged plain GH_APP_REPOS is honoured, not ignored", () => {
@@ -630,4 +739,98 @@ test("an unknown routeKey is rejected", async () => {
 
   const response = await plugin.definition.onApiRequest(request("definitely-not-a-route"));
   assert.equal(response.status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// CI visibility (TOG-247)
+//
+// The broker cannot make an agent read CI status correctly, but it can refuse
+// to let one be blind and unaware of it. These assert that the mint response
+// states the blindness rather than leaving the caller to infer it from a 403
+// it will not see until much later.
+// ---------------------------------------------------------------------------
+
+// Since the TOG-247 decision the default profile CAN observe CI. This is the
+// acceptance test for that change: an agent minting with no overrides must be
+// able to answer "did my own PR pass" from check runs and commit statuses.
+test("the default profile can observe CI from checks and statuses", () => {
+  const v = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+  assert.equal(v.observable, true);
+  assert.deepEqual(v.readable.sort(), ["checks", "statuses"]);
+  assert.equal(v.warning, null, "an observable grant must not carry a standing warning");
+});
+
+// The refusal has to survive contact with a reader. `actions` is absent from
+// the default grant, but it must not show up as a gap — it reports as withheld,
+// with the reason attached, so the next agent to read a mint response does not
+// file "we should add actions:read" as an improvement.
+test("actions reports as withheld-by-decision, not as a blind spot", () => {
+  const v = describeCiVisibility(DEFAULT_PERMISSION_PROFILE);
+  assert.deepEqual(v.blind, [], "no source should read as an unclosed gap");
+  assert.deepEqual(Object.keys(v.withheld), ["actions"]);
+  assert.match(v.withheld.actions, /log/i, "the reason must name log download");
+  assert.match(v.withheld.actions, /TOG-247/);
+});
+
+// A grant that really is blind must still say so in the dangerous terms. This
+// is the pre-decision profile — the shape an older deployment, or an App whose
+// ceiling is narrower than our profile, still hands out.
+test("a blind grant still names the empty-list misreading, not just the missing scope", () => {
+  const legacy = { contents: "write", pull_requests: "write", metadata: "read" };
+  const { warning, observable } = describeCiVisibility(legacy);
+  assert.equal(observable, false);
+  assert.match(warning, /denied/i);
+  assert.match(warning, /not treat the absence of failing checks as a pass/i);
+  // Every source is named when nothing is readable, withheld ones included:
+  // a caller who can see no CI at all needs the complete list to diagnose it.
+  for (const scope of ["checks:read", "actions:read", "statuses:read"]) {
+    assert.ok(warning.includes(scope), `warning should name ${scope}`);
+  }
+});
+
+// checks:read and statuses:read are different permissions. A grant that can
+// read check runs is still blind to a repo whose CI posts commit statuses, and
+// the response must keep reporting that rather than rounding up to "observable,
+// nothing more to say".
+test("statuses is reported separately from checks", () => {
+  const v = describeCiVisibility({ checks: "read", actions: "read" });
+  assert.deepEqual(v.blind, ["statuses"]);
+});
+
+test("visibility is computed from what GitHub granted, not what was requested", async () => {
+  // The App ceiling is narrower than the profile: we ask for checks:read and
+  // GitHub declines to grant it. The caller must be told it is blind.
+  const { ctx } = makeCtx({
+    http: {
+      fetch: async () => ({
+        status: 201,
+        ok: true,
+        json: async () => ({
+          token: "ghs_minted",
+          expires_at: "2026-08-23T18:00:00Z",
+          // No `checks` key: the grant is narrower than the ask.
+          permissions: { contents: "write", metadata: "read" },
+          repositories: [{ name: "nntune" }],
+        }),
+      }),
+    },
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(
+    request("mint", { body: { permissions: { contents: "write" } } }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ciVisibility.observable, false);
+  assert.ok(response.body.ciVisibility.warning);
+});
+
+test("the advisory changes no grant", async () => {
+  // Belt and braces: describing CI visibility must never alter permissions.
+  const before = resolveScope({
+    projectEnv: { GH_APP_REPOS: "paperclip-ops-tooling" },
+    workspaceRepoUrl: null,
+  });
+  describeCiVisibility(before.permissions);
+  assert.deepEqual(before.permissions, { ...DEFAULT_PERMISSION_PROFILE });
 });

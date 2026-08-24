@@ -13,7 +13,12 @@
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import { manifest } from "./manifest.js";
-import { DEFAULT_PERMISSION_PROFILE, ScopeError, resolveScope } from "./scope.js";
+import {
+  DEFAULT_PERMISSION_PROFILE,
+  ScopeError,
+  describeCiVisibility,
+  resolveScope,
+} from "./scope.js";
 import { GitHubError, createAppJwt, getInstallationId, mintInstallationToken } from "./github.js";
 
 /** Held from setup() so onApiRequest can reach host services. */
@@ -87,6 +92,9 @@ async function deriveScope(ctx, { issueId, companyId, body, config, actor }) {
 
   const scope = resolveScope({
     projectEnv,
+    // Diagnostic only — lets a refusal name whether the gap is "no project" or
+    // "project without GH_APP_REPOS". It never participates in the ceiling.
+    projectId: issue.projectId ?? null,
     workspaceRepoUrl: workspace?.repoUrl ?? null,
     requestedRepositories: body?.repositories ?? null,
     requestedPermissions: body?.permissions ?? null,
@@ -174,15 +182,21 @@ async function handleMint(ctx, input) {
     },
   });
 
+  // Derived from what GitHub actually granted, not from what we asked for. If
+  // the App's own ceiling is narrower than the profile, the caller must be told
+  // it is blind based on the real grant. (TOG-247)
+  const granted = result.permissions ?? scope.permissions;
+
   return json(200, {
     token: result.token,
     expiresAt: result.expiresAt,
     repositories: result.repositories ?? scope.repositories,
-    permissions: result.permissions ?? scope.permissions,
+    permissions: granted,
     scope: {
       repoSource: scope.repoSource,
       profileSource: scope.profileSource,
     },
+    ciVisibility: describeCiVisibility(granted),
   });
 }
 
