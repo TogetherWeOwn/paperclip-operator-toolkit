@@ -996,11 +996,47 @@ jobs:
       # The URL is public by construction, so "we verify signatures" is the
       # whole security model. A suite that would stay green without the
       # verification is decoration, and it would be believed.
+      #
+      # TOG-339 — this step was itself decoration for its whole life, and the
+      # CISO review (TOG-315) caught it. Two independent defects, both fixed
+      # below; do not undo either.
+      #
+      #   1. It staged an ENUMERATED SUBSET (`src test package.json`), while
+      #      the suite's NUL-byte scan walks src/ test/ scripts/ migrations/d1/
+      #      and the root. The staged copy died on `ENOENT scandir scripts`
+      #      BEFORE the mutation was ever exercised, so it was red no matter
+      #      what src/app.js did. Staging is now the whole directory, because a
+      #      hand-maintained list silently rots the next time a directory is
+      #      added and nothing in CI would say so.
+      #
+      #   2. It had no BASELINE. The verdict is "suite passed -> error, else
+      #      it worked", so a copy that is ALWAYS red always reports success.
+      #      Run verbatim with no mutation applied it printed "suite correctly
+      #      went red against the unverifying mutant" and CI went green. This
+      #      is the TOG-253 lesson that mutation_check() already encodes for
+      #      the shell suites above; capture-suite never got it. A red is only
+      #      attributable to the mutation if the unmutated copy is green FIRST.
       - name: Prove the suite detects a receiver that skips verification
         run: |
           set -uo pipefail
           mut="$(mktemp -d)"
-          cp -r src test package.json "$mut/"
+          cp -r . "$mut/"
+
+          # Both runs go through this one function. They must differ ONLY by the
+          # mutation — if the baseline and the mutant ran different commands, a
+          # command that is broken for any other reason would look like a red
+          # and we would be back to a gate that proves nothing.
+          run_suite() { (cd "$mut" && node --test --test-reporter=tap test/capture.test.mjs > "$1" 2>&1); }
+
+          # STEP 1 — baseline. Without this the gate measures nothing.
+          if ! run_suite baseline.txt; then
+            echo "::error::the UNMUTATED copy already fails — this gate proves nothing, fix the staging before trusting any red below"
+            cat "$mut/baseline.txt"
+            exit 1
+          fi
+          echo "baseline: the unmutated staged copy is GREEN — a red below is attributable to the mutation"
+
+          # STEP 2 — mutate, and require the suite to notice.
           node -e '
             const fs = require("fs")
             const p = process.argv[1]
@@ -1011,14 +1047,15 @@ jobs:
               process.exit(2)
             }
             fs.writeFileSync(p, s.replace(call, "const verdict = { ok: true }"))
-          ' "$mut/src/app.js"
+          ' "$mut/src/app.js" || exit 1
           node --check "$mut/src/app.js"
-          if (cd "$mut" && node --test test/capture.test.mjs > out.txt 2>&1); then
+          if run_suite out.txt; then
             echo "::error::the suite PASSED against a receiver that does not verify signatures"
-            cat "$mut/out.txt"
+            grep -E '^# (tests|pass|fail|skipped)' "$mut/out.txt"
             exit 1
           fi
-          echo "suite correctly went red against the unverifying mutant"
+          echo "suite correctly went red against the unverifying mutant; it failed on:"
+          grep -E '^not ok ' "$mut/out.txt"
 
       # The shell suite fabricates its own RSA key and stubs the GitHub API.
       # Anything that starts needing a real credential is a regression in the
