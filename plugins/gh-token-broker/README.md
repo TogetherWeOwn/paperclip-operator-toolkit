@@ -33,8 +33,10 @@ resolution, no outbound call. Safe to leave installed.
 { "ok": true, "actorType": "agent", "agentId": "…", "runId": "…", "companyId": "…" }
 ```
 
-The point is that **none of those values are caller-supplied**; the host derives
-them from the run token.
+`actorType`, `agentId` and `companyId` are **host-derived on every auth path** —
+the caller cannot influence them. **`runId` is the exception**, and an earlier
+revision of this file said otherwise. See
+[what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 
 ### `POST /api/plugins/gh-token-broker/api/issues/:issueId/github-token`
 
@@ -369,6 +371,110 @@ the issue is re-read afterwards and `assertMintOwnership` makes the decision.
 
 A permissive answer from it cannot override a broker refusal. There is a test.
 
+### What a mint record proves about `runId`
+
+**TOG-216. Read this before quoting the mint log as evidence of who minted.**
+
+Every mint writes an activity entry carrying `agentId`, `runId` and
+`checkoutRunId`. For a credential broker, "who minted this" is the entire value
+of that log, so it is worth being exact about which of those fields is proof and
+which is testimony.
+
+`runId` reaches a plugin API route by two mechanisms with two different trust
+properties, and **the host does not tell the plugin which one applied**:
+
+| auth path | where `runId` comes from | trust |
+|---|---|---|
+| agent JWT | the signed `run_id` claim; a mismatched `X-Paperclip-Run-Id` header is rejected `422` and audited (`server/dist/middleware/auth.js:232`, `:256`) | **proved** |
+| long-lived agent key | the raw `X-Paperclip-Run-Id` header, unvalidated (`server/dist/middleware/auth.js:302`) | **asserted** |
+
+The board-key and unauthenticated paths take the header unvalidated too
+(`:190`, `:159`, `:128`), but neither can reach these routes — both are
+`auth: "agent"`.
+
+Measured against the live install on the agent-JWT path, which is how a normal
+run calls: omitting the run header entirely still returned the correct `runId`
+(so it is not header-derived), and a fabricated header returned `422
+agent_jwt_run_id_mismatch` (so it is checked rather than trusted). Those two
+results are specific to that path. The agent-key path is established by reading
+`auth.js:302`, not by that probe.
+
+**So `agentId` is proof and `runId` is not.** `agentId` comes from the JWT claim
+or from the agent-key record on every path; a caller cannot move it. A holder of
+a long-lived agent key can put any string in `runId`.
+
+#### The run-lock term does not launder it
+
+It is tempting to argue that `assertMintOwnership` corroborates `runId` by
+comparing it to `issue.checkoutRunId`. It does not, in the case that matters:
+
+```js
+if (checkoutRunId !== null && checkoutRunId !== runId) { /* 409 */ }
+```
+
+When the lock is **null**, the comparison is skipped and any `runId` satisfies
+the term — that is the `an unheld checkout (null) is accepted` test, and it is
+deliberate. When the lock is non-null, `checkoutRunId` is a plain readable field
+on `GET /api/issues/{id}`, so matching it demonstrates the caller read the issue,
+which they had to be the assignee to mint against anyway.
+
+Neither branch turns an asserted `runId` into a proved one. **The run-lock term
+is mutual exclusion between an agent's own concurrent runs. It was never an
+identity check, and this section exists because two comments in this package
+had drifted into describing it as one.**
+
+#### What this is, and what it is not
+
+**It is not a privilege escalation, and it is not exploitable for scope.** All
+three ownership terms that decide *whether* to mint — assignee, status, and the
+lock comparison above — either ignore `runId` or are already satisfied by
+whoever holds the assignee agent's key. Scope is derived from the issue's
+project, never from `runId`. A forged `runId` widens nothing.
+
+What it costs is narrower and still real: **a mint record cannot distinguish a
+`runId` the host proved from one the caller asserted.** Anyone reading the log to
+answer "which run took this credential" is reading a field that is authoritative
+on one auth path and self-reported on another, with nothing in the record saying
+which.
+
+#### Why the obvious fix is wrong
+
+Refusing when `checkoutRunId` is null — "make the lock mandatory, then `runId`
+is always corroborated" — **re-breaks TOG-309 exactly.** The host adopts an
+unowned lock only for an issue in `in_progress`
+(`server/dist/services/issues.js`, `adoptUnownedCheckoutRun`), so an issue in
+`in_review` or `blocked` keeps a null lock however legitimate the caller is.
+Those are two of the three mintable statuses, and `in_review` is the state whose
+`409` killed git and caused TOG-309. Do not make the lock mandatory.
+
+#### What would actually close it
+
+The host already computes the distinguishing value.
+`getActorInfo` (`server/dist/routes/authz.js:166`) resolves an `actorSource` —
+for an agent caller it is exactly `agent_jwt` or `agent_key`, the two rows of the
+table above. The plugin API handler then drops it when it builds the actor it
+hands to a plugin (`server/dist/routes/plugins.js:1501`, which passes
+`actorType`, `actorId`, `agentId`, `userId` and `runId`, and no source).
+Passing it through is a one-line host change:
+
+```js
+actorSource: actor.actorSource,   // add to the plugin API actor input
+```
+
+**That is upstream-only.** We run a pinned image and do not fork it, the same
+wall that stopped TOG-154 and TOG-175. **When `actorSource` becomes available,
+record it beside `runId` in the mint metadata** so every record states its own
+trust level instead of leaving a reader to assume the better of the two.
+
+#### Also worth knowing before you query the log
+
+On the first real mint (measured 2026-08-23) the activity row's **top-level**
+actor columns were `agentId: null`, `runId: null`, with the true values in
+`details`, `actorId` set to the plugin id and `responsibleUserId` set to the
+operator. Querying activity by the top-level `agentId`/`runId` columns — the
+natural way to ask "what did this agent mint?" — therefore returns nothing and
+attributes the mint to the plugin. Read `details`.
+
 ### Git operations with no issue context
 
 **The broker does not mint, and that is a decision rather than a gap** (TOG-309
@@ -416,8 +522,11 @@ Install is board-gated (`POST /api/plugins/install` returns
    ```
 
    A `runId` in the response proves agent-authenticated plugin API routes
-   dispatch and that the host supplies run identity. Nothing on this instance
-   had exercised that path before.
+   dispatch and that the host populates the actor. Nothing on this instance had
+   exercised that path before. It does **not** prove the `runId` is
+   server-derived — that depends on which auth path the caller used, and this
+   route cannot tell you which. See
+   [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 4. Then mint against a real issue the caller holds and assert the acceptance
    criterion from TOG-174 — no `organization_*` key in `permissions`, and
    `repositories` a single repo rather than all 7.

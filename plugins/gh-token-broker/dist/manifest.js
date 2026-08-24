@@ -51,9 +51,16 @@ export const manifest = {
   apiRoutes: [
     {
       // Step 1 of the operator's de-risk order: prove that agent-authenticated
-      // plugin API routes dispatch at all, and that the host hands the worker a
-      // server-derived runId. Deliberately does nothing else — no secrets, no
-      // outbound calls — so it is safe to leave installed.
+      // plugin API routes dispatch at all, and that the host hands the worker an
+      // actor. Deliberately does nothing else — no secrets, no outbound calls —
+      // so it is safe to leave installed.
+      //
+      // TOG-216. It does NOT prove the runId is server-derived, and an earlier
+      // revision of this comment said it did. `actorType`, `agentId` and
+      // `companyId` are host-derived on every auth path; `runId` is signed only
+      // on the agent-JWT path and is an unvalidated request header on the
+      // long-lived agent-key path. See the runId provenance section in
+      // README.md.
       routeKey: "whoami",
       method: "GET",
       path: "/whoami",

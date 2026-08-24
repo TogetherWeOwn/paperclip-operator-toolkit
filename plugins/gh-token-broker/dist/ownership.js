@@ -98,8 +98,21 @@ function explainStatus(status) {
  * @param issue  the issue row as returned by `ctx.issues.get` — the full row,
  *               so `checkoutRunId` is present. If it is ever absent this
  *               refuses rather than treating it as an unheld lock.
- * @param actor  `input.actor` from the host. Every field is host-derived; the
- *               caller cannot influence `agentId` or `runId`.
+ * @param actor  `input.actor` from the host. `actorType` and `agentId` are
+ *               host-derived on every auth path — `agentId` comes from the JWT
+ *               claim or from the agent-key record, never from a header.
+ *
+ *               `runId` is NOT, and an earlier revision of this comment claimed
+ *               it was (TOG-216). It is the signed `run_id` claim only when the
+ *               caller authenticated with an agent JWT; on the long-lived
+ *               agent-key path it is the raw `X-Paperclip-Run-Id` header with no
+ *               validation (`server/dist/middleware/auth.js:302` against `:256`),
+ *               and the host does not tell a plugin which path applied.
+ *
+ *               So the run-lock term below is mutual exclusion between an
+ *               agent's own concurrent runs, which is what it is for. It is not
+ *               proof of identity, and nothing downstream — the audit entry
+ *               included — may read it as proof of identity.
  */
 export function assertMintOwnership(issue, actor) {
   if (!issue) {

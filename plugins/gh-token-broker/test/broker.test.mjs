@@ -877,6 +877,16 @@ test("minting is refused when another run of the same agent holds the checkout",
   assert.match(response.body.error, /held by a different run/);
 });
 
+// Deliberate, and load-bearing for TOG-309: the host adopts an unowned lock only
+// for an `in_progress` issue, so a legitimate caller on `in_review` or `blocked`
+// arrives here with a null lock. Refusing it would re-create the 409 that killed
+// git.
+//
+// TOG-216 names the cost: in this branch the run-lock comparison is skipped, so
+// the `runId` that lands in the mint audit entry is whatever the caller supplied
+// — proved on the agent-JWT path, merely asserted on the agent-key path. This
+// test pins that the mint succeeds. It does NOT license reading the recorded
+// runId as identity; see the runId provenance section in README.md.
 test("an unheld checkout (null) is accepted — nobody else has the lock", async () => {
   const { ctx } = makeCtx({
     issues: issuesClient(issueRow({ status: "in_review", checkoutRunId: null })),
