@@ -365,6 +365,18 @@ jobs:
           set -uo pipefail
           mut="$(mktemp -d)"
           cp gh_token.sh test_gh_token_argv.sh "$mut/"
+          chmod +x "$mut/gh_token.sh" "$mut/test_gh_token_argv.sh"
+          # TOG-253's rule, applied here too: the UNMUTATED copy must pass in
+          # this same staging directory FIRST. Without it, "the mutated suite
+          # failed" is not attributable to the mutation — the staged copy could
+          # be failing for any reason at all (a missing sibling file, a change
+          # in how GH_TOKEN_SH is resolved) and this gate would still go green
+          # while proving nothing. It passes today; this keeps it honest.
+          if ! GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/base.txt" 2>&1; then
+            echo "::error::the UNMUTATED copy of test_gh_token_argv.sh already fails in the staging dir — this gate proves nothing"
+            tail -25 "$mut/base.txt"
+            exit 1
+          fi
           before='  curl --config "$cfg" "$@"'
           after='  curl --config "$cfg" -H "Authorization: Bearer $bearer" "$@"'
           if ! grep -qxF "$before" "$mut/gh_token.sh"; then
