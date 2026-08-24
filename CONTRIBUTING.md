@@ -40,7 +40,7 @@ unreviewable; **if you find a bug while doing something else, file it rather tha
 
 ## Running the suites
 
-The suites below run anywhere and are what CI runs. Exactly two more need the VPS.
+Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
@@ -53,6 +53,12 @@ The suites below run anywhere and are what CI runs. Exactly two more need the VP
 ./test_agent_endpoint_preflight.sh  # model-endpoint cutover gate, against a stub front
 ./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
+
+# Live org, no database — needs a Paperclip API key and COMPANY_ID, nothing else,
+# so they run from an agent container. Read-only against the company: their only
+# call is a GET of the agent roster.
+./acceptance_rehearsal.sh           # the authorization core against the real org
+./acceptance_transport.sh           # the same run through the real MCP server, over HTTP
 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
 # They create and delete real agents in that company as their method, so run them
@@ -136,6 +142,14 @@ provisioner injected through `PROV`. The stub *extracts* the delegation ceiling 
 `org_provisioner.sh` rather than carrying a copy, so a ceiling change cannot leave the suite green
 against a stale fixture. Both seams are load-bearing — removing either takes the only CI coverage of
 the authorization logic with it.
+
+`acceptance_rehearsal.sh` reuses those same two seams, but fills `ORG_SNAPSHOT` from the live
+company instead of a fixture. That is the whole point of it: a fixture can only contain the cases
+its author thought of, and the org has shapes nobody would think to write down — agents with no
+`orgRoleId`, agents with no `permissionProfile` at all, a reporting graph nobody has checked for
+cycles. It cannot replace `test_request_queue.sh`, because it stubs the provisioner and never
+writes to the database, and it cannot run in CI, because it needs a company. Run it before
+declaring the request flow good in a given company, and after any org restructuring.
 
 `test_gh_app_token.sh` needs `node` and nothing else. It fabricates its whole credential environment:
 a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries
