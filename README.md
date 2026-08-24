@@ -35,20 +35,24 @@ Who decides a request is derived from the reporting chain, not a fixed pair of r
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Mints a fresh scoped token per git call. | `test_gh_app_token.sh` |
+| `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
+| `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
-| `ROLLBACK.md` | Rollback procedures. |
+| `ROLLBACK.md` | Rollback procedures (company bootstrap). |
+| `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
 
 ## Running the suites
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh
+node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_gh_token_argv.sh
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_sql_backend.sh
+(cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 export COMPANY_ID=<uuid>
@@ -104,7 +108,15 @@ These are load-bearing and were each learned by breaking something:
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
 - **Scope every mint.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with `GH_APP_SCOPE_STRICT=1` so an
-  unscoped mint fails rather than silently returning a ceiling token.
+  unscoped mint fails rather than silently returning a ceiling token. On the broker path the scope
+  is derived server-side from the issue the caller holds, and a caller may only narrow it.
+- **A cached token is only valid for a credential we still hold.** Keying the cache on the App ID
+  alone meant unbinding `GH_APP_PRIVATE_KEY` revoked nothing — the agent kept authenticating from
+  cache. Entries carry a fingerprint of what minted them, and nothing is written outside per-run
+  scratch: every agent shares uid `node`, so `0600` in a shared tmpdir separates nothing.
+- **A credential helper must fail loudly, not silently.** git discards a helper's exit status and
+  falls through to its own prompt, so a failure has to emit `quit=1` or the last line the operator
+  sees is git's unattributable `could not read Username`.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once; the tests now pin exit codes.

@@ -87,6 +87,41 @@ jobs:
       - name: gh-app-token.js regression suite
         run: ./test_gh_app_token.sh
 
+      # TOG-222: the credential-source half. test_gh_app_token.sh owns the leak
+      # traps and the cache fixtures; this suite owns broker-vs-PEM selection,
+      # which needs a stub broker on loopback and is far easier to express here.
+      #
+      # Pass the FILE, not the directory — same Node 24 gotcha the broker-suite
+      # job documents. It bites on 20 too, so do not "fix" this to `test/`.
+      #
+      # Offline by construction: GH_API_URL and GH_APP_BROKER_URL both point at
+      # stubs the suite starts itself, and the RSA key is generated per-run.
+      - name: gh-app-token.js broker/credential-source suite
+        run: node --test test/gh-app-token.test.mjs
+
+      # Same reasoning as the broker suite's equivalent step: assert the
+      # isolation rather than trust it. If this ever needs a real GH_APP_*, the
+      # suite has started reaching for a live credential.
+      - name: Prove the credential-source suite needs no credential
+        env:
+          GH_APP_ID: ''
+          GH_APP_PRIVATE_KEY: ''
+          PAPERCLIP_API_URL: ''
+          PAPERCLIP_API_KEY: ''
+          PAPERCLIP_TASK_ID: ''
+        run: |
+          set -uo pipefail
+          node --test test/gh-app-token.test.mjs > out.txt 2>&1; rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::the credential-source suite requires a credential to pass; it must not"
+            cat out.txt; exit 1
+          fi
+          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
+            echo "::error::private key material reached the suite's stdout"; exit 1
+          fi
+          echo "credential-source suite: passes with GH_APP_*/PAPERCLIP_* empty"
+          rm -f out.txt
+
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
