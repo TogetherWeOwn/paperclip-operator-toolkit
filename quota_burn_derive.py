@@ -107,7 +107,21 @@ LADDER = ((1.0, "RELEASE"), (2.0, "LEVEL1"), (5.0, "LEVEL2"))
 LADDER_TOP = "LEVEL3"
 
 DEFAULT_WINDOW_HOURS = 24.0
-DEFAULT_TARGET = 0.97
+
+# Must track quota_brake.sh's PACE_TARGET default. This tool exists to show what
+# the brake WOULD have done, so a default that disagrees with the brake's makes
+# every bare `--series` a replay of a ladder nobody runs. Pinned in both
+# directions by test_quota_burn_derive.sh §10. 0.90 is a RESERVE of 0.10 sized
+# against the brake's reaction lag — TOG-490, derivation in docs/quota-brake.md.
+DEFAULT_TARGET = 0.90
+
+# `sustainable` goes non-positive once `weekly` passes the target. That is not
+# an error and not a release: quota_brake.sh:435 pins `ratio` to 999 in exactly
+# this case, which lands on LEVEL3. Every path here that computes a ratio must
+# do the same, or the offline tool goes quiet precisely when the brake is hard
+# on. With TARGET=0.90 this is a routine condition late in a hot week, not a
+# corner case — on 2026-08-25 it was already true of both accounts.
+TARGET_PASSED_RATIO = 999.0
 
 
 def verdict_for(ratio):
@@ -115,6 +129,18 @@ def verdict_for(ratio):
         if ratio <= bound:
             return name
     return LADDER_TOP
+
+
+def ratio_for(rate, need):
+    """burn / sustainable, with the shell's non-positive guard.
+
+    `quota_brake.sh` pace_ratio(): `ratio: (if $need <= 0 then 999 else ...)`.
+    Anything here that divides by `need` must apply the same pin, because a
+    passed target is the state the brake reacts to MOST strongly and dropping
+    or NaN-ing it reads as "nothing to report". Callers handle `need is None`
+    (no days_left, genuinely unmeasurable) before calling this.
+    """
+    return TARGET_PASSED_RATIO if need <= 0 else rate / need
 
 
 def parse_ts(s):
@@ -261,12 +287,18 @@ def report(series, window_hours, target, at=None):
             print(f"  REPORTED burn_per_day={rep:+.4f}/day   -> reported is {factor:.2f}x derived")
 
         need = sustainable_for(s, target)
-        if need and need > 0:
-            dr = d["rate"] / need
+        if need is None:
+            print("  no days_left on this sample -- sustainable cannot be recomputed")
+        else:
             print(f"  sustainable (recomputed @ TARGET={target}): {need:.4f}/day")
+            if need <= 0:
+                print(f"           TARGET ALREADY PASSED -- ratio pinned to "
+                      f"{TARGET_PASSED_RATIO:.0f}, exactly as quota_brake.sh does. "
+                      f"This is LEVEL3, not a release.")
+            dr = ratio_for(d["rate"], need)
             print(f"  ratio vs sustainable:  DERIVED {dr:.1f}x -> {verdict_for(dr)}", end="")
             if rep is not None:
-                rr = rep / need
+                rr = ratio_for(rep, need)
                 print(f"     REPORTED {rr:.1f}x -> {verdict_for(rr)}")
             else:
                 print("     REPORTED null -> UNKNOWN")
@@ -300,13 +332,22 @@ def series_replay(series, window_hours, target):
         print(f"{'ts':21} {'weekly':>7} {'dBURN':>9} {'dRATIO':>8} {'dLEVEL':>8}   "
               f"{'rBURN':>9} {'rRATIO':>8} {'rLEVEL':>8}   {'agree':>6}")
         agree = disagree = unknown_rep = 0
+        target_passed = no_window = 0
         dlevels, rlevels = {}, {}
         for idx, s in enumerate(samples):
             d = derived_burn(samples, idx, window_hours)
             need = sustainable_for(s, target)
-            if d is None or not need or need <= 0:
+            # A passed target is REPLAYED, not skipped: ratio_for pins it to 999
+            # the way the brake does. Dropping those rows silently shortened the
+            # replay at exactly the samples the brake treats most severely — at
+            # TARGET=0.90 that was 36 of 448 account-samples, every one LEVEL3,
+            # and the tally underneath still printed as though it had seen them.
+            if d is None or need is None:
+                no_window += 1
                 continue
-            dr = d["rate"] / need
+            if need <= 0:
+                target_passed += 1
+            dr = ratio_for(d["rate"], need)
             dlev = verdict_for(dr)
             dlevels[dlev] = dlevels.get(dlev, 0) + 1
             rep = s["reported_burn"]
@@ -316,7 +357,7 @@ def series_replay(series, window_hours, target):
                 rlevels["UNKNOWN"] = rlevels.get("UNKNOWN", 0) + 1
                 same = "-"
             else:
-                rr = rep / need
+                rr = ratio_for(rep, need)
                 rlev = verdict_for(rr)
                 rlevels[rlev] = rlevels.get(rlev, 0) + 1
                 rr_s, rr_txt = f"{rep:+.4f}", f"{rr:.1f}"
@@ -339,6 +380,9 @@ def series_replay(series, window_hours, target):
             print(f"  level agreement: {agree}/{total_cmp} "
                   f"({100.0 * agree / total_cmp:.1f}%)   disagree={disagree}")
         print(f"  samples where REPORTED is null (brake would exit 5): {unknown_rep}")
+        print(f"  samples where the TARGET was already passed "
+              f"(ratio pinned {TARGET_PASSED_RATIO:.0f} -> {LADDER_TOP}): {target_passed}")
+        print(f"  samples with no derivable window or no days_left (not replayed): {no_window}")
         integral_check(samples, window_hours)
 
 
@@ -393,8 +437,13 @@ def sweep(series, target):
         last = samples[-1]
         need = sustainable_for(last, target)
         print("=" * 92)
+        if need is None:
+            print(f"{name}   no days_left on the last sample -- cannot sweep")
+            continue
+        passed = (f"   (TARGET PASSED: every ratio pinned to "
+                  f"{TARGET_PASSED_RATIO:.0f})") if need <= 0 else ""
         print(f"{name}   sustainable={need:.4f}/day @ TARGET={target}   "
-              f"({len(samples)} samples)")
+              f"({len(samples)} samples){passed}")
         print(f"{'window':>8} {'resolution/day':>15} {'x sustainable':>14} "
               f"{'burn@last':>10} {'ratio':>8} {'level':>8} {'flips':>7}")
         for w in windows:
@@ -403,7 +452,7 @@ def sweep(series, target):
                 print(f"{w:7.0f}h {'--':>15} {'--':>14} {'no data':>10}")
                 continue
             res = d["resolution"]
-            ratio = d["rate"] / need if need and need > 0 else float("nan")
+            ratio = ratio_for(d["rate"], need)
             # `flips`: how many times the selected level CHANGES across the
             # whole series at this window. A window that flips on every sample
             # is chattering the roster, which costs a PATCH per agent per flip.
@@ -411,13 +460,17 @@ def sweep(series, target):
             for idx in range(len(samples)):
                 dd = derived_burn(samples, idx, w)
                 nn = sustainable_for(samples[idx], target)
-                if dd is None or not nn or nn <= 0:
+                if dd is None or nn is None:
                     continue
-                lev = verdict_for(dd["rate"] / nn)
+                lev = verdict_for(ratio_for(dd["rate"], nn))
                 if prev is not None and lev != prev:
                     flips += 1
                 prev = lev
-            print(f"{w:7.0f}h {res:15.4f} {res / need:13.2f}x {d['rate']:10.4f} "
+            # `res / need` is the resolution expressed in rungs-of-the-ladder.
+            # It is meaningless once `need` is non-positive, so it says so
+            # rather than printing a negative multiple that reads as a number.
+            xsus = f"{res / need:13.2f}x" if need > 0 else f"{'n/a':>13} "
+            print(f"{w:7.0f}h {res:15.4f} {xsus} {d['rate']:10.4f} "
                   f"{ratio:8.1f} {verdict_for(ratio):>8} {flips:7d}")
 
 
@@ -443,12 +496,17 @@ def emit_json(series, window_hours, target):
             burn, source = s["reported_burn"], "reported"
         else:
             continue
-        need_c = need if need > 0 else 0.0001
+        # `need` is emitted RAW, negative and all, because that is what
+        # quota_brake.sh emits (measured: need=-0.009933 at PACE_TARGET=0.90 on
+        # 2026-08-25) and this shape exists to be diffed against it. Clamping it
+        # here would put a silent disagreement inside the one cross-check that
+        # is supposed to catch disagreements — and TARGET=0.90 makes a negative
+        # `need` a routine reading rather than a corner case.
         out.append({
             "name": name,
             "burn": round(burn, 6),
-            "need": round(need_c, 6),
-            "ratio": round(999.0 if need <= 0 else burn / need_c, 6),
+            "need": round(need, 6),
+            "ratio": round(ratio_for(burn, need), 6),
             "source": source,
         })
     out.sort(key=lambda x: -x["ratio"])

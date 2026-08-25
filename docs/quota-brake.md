@@ -26,7 +26,7 @@ the live database. Line numbers are from the TS source.
 | 44 of 47 throttled at 08:43 | Confirmed exactly, from `quota-pacing.jsonl`. The CoS was refused **68 times in 17 minutes**, not the 22 originally reported. |
 | `maxDailyRuns` is the fix | **Wrong.** See below. |
 | Caps reset at the UTC day boundary | Confirmed — `currentUtcDayWindow()`, `services/heartbeat.ts:12151-12155`, pure clock arithmetic with nothing persisted. |
-| Sustainable burn ≈ 0.09–0.13/day | **Wrong as a constant.** It is `(0.97 − weekly_used) / days_left`, exact to four decimals on three consecutive samples. Today's value is ~0.087 — *below* the quoted band, so a brake pinned to 0.09 runs permanently hot. |
+| Sustainable burn ≈ 0.09–0.13/day | **Wrong as a constant.** It is `(PACE_TARGET − weekly_used) / days_left`, exact to four decimals on three consecutive samples at the producer's own 0.97. That day's value is ~0.087 — *below* the quoted band, so a brake pinned to 0.09 runs permanently hot. Our `PACE_TARGET` is now 0.90; see [the line being defended](#the-line-being-defended-pace_target-tog-490). |
 
 ## Why `maxDailyRuns` is not the fix
 
@@ -182,16 +182,107 @@ could not produce (`LEVEL1=0, LEVEL2=0` on the second account). The defect was i
 fixing the input fixed the ladder's behaviour without moving a threshold. Re-derive this table
 with `quota_burn_derive.py --series` before changing a number here.
 
-**What is still open is `PACE_TARGET`, and it is not ours.** 0.97 is a safety margin somebody
-picked, not a target pace. The thresholds shape the *response curve*; `PACE_TARGET` sets the
-*line being defended*, and that line is the CFO's — it decides how much of a paid-for
-subscription this company is allowed to consume, against a quota that is destroyed unused at
-reset. Substituting one arbitrary threshold for another while the line itself is unowned would
-be motion, not progress. Tracked separately; see the TOG-440 thread.
+The thresholds shape the *response curve*. `PACE_TARGET` sets the **line being defended**, and
+that is a separate decision with a separate owner — settled below.
 
-`PACE_TARGET` is 0.97, not 1.0, so the week lands just under the cap. Unused weekly quota is
-destroyed at reset, so *underrunning is the expensive failure mode* and aiming low wastes the
-subscription; overshooting is the only outcome worth a safety margin.
+## The line being defended: `PACE_TARGET` (TOG-490)
+
+`PACE_TARGET` is the one number in the brake with a financial rather than a technical owner.
+It was `0.97` because an engineer sizing a safety margin picked "just under the cap".
+**It is now `0.90`, decided by the CFO on 2026-08-25**, and the reasoning inverted the framing
+the question had been asked in.
+
+### It is a reserve, not a target
+
+The brake cannot make this company consume *more*. `cap_for()` clamps every rung to the
+captured baseline, and `RELEASE` restores it exactly:
+
+```awk
+if (v == "RELEASE")      c = b;                       # RELEASE restores baseline
+c = int(c); if (c < 1) c = 1; if (c > b) c = b;       # and nothing ever exceeds it
+```
+
+No level runs faster than normal, so **moving the target toward 1.0 buys zero extra
+utilisation — it only removes margin.** If this company is ever *under*running its quota, the
+fix is queue depth, never this number. That is written down here because raising this knob is
+the obvious "fix" for an underrun, and it would achieve nothing but a thinner reserve.
+
+And a cap-hit wastes no quota: it is 100% utilisation, with nothing left to be destroyed at
+reset. What overshooting costs is **delivery** — a dark window in which nothing runs, wakes
+destroyed rather than queued (a quota `429` is not retried, and quota returning does not
+restart the company), and a restart somebody has to perform by hand.
+
+So `1 − PACE_TARGET` is a **reserve**, and the only question is how big it has to be.
+
+### 0.10, because 0.03 was thinner than the brake can see
+
+The brake cannot react faster than one producer sample (~15 min), and lowering
+`maxConcurrentRuns` does not stop runs already in flight (23 of them at 2026-08-25T17:45Z) —
+those drain on their own clock. Measured over the 227-sample history
+(2026-08-23T18:51:04Z → 2026-08-25T19:16:05Z):
+
+| measurement | `1856877+Rick7C2@users.noreply.github.com` | `pisnrzrs@two.gg` |
+|---|---|---|
+| max Δ`weekly` over any ≤1h window | **0.140** | **0.150** |
+| max Δ`weekly` over any ≤5h window | 0.290 | 0.150 |
+| producer sample cadence | ~15 min | ~15 min |
+
+At that peak hour, **0.03 of reserve is 13 minutes** — less than one detection interval, i.e.
+the line was thinner than the brake's ability to see it. 0.10 is ~43 min at the measured peak
+and ~4.3h at the sustained burn (0.558/day), which brackets the exposure across the rates this
+company actually produces.
+
+### What it costs early in the week: nothing
+
+Ladder replay over the same snapshot (`quota_burn_derive.py --series --target N`), counted per
+calendar day across both accounts:
+
+| day | T=0.90 | T=0.97 | T=1.00 |
+|---|---|---|---|
+| 08-23 (early week) | **RELEASE 24** / L1 11 / L2 2 / L3 21 | **RELEASE 24** / L1 12 / L2 2 / L3 20 | RELEASE 26 / L1 10 / L2 2 / L3 20 |
+| 08-24 | L1 17 / L2 115 / L3 100 | L1 33 / L2 147 / L3 52 | L1 46 / L2 142 / L3 44 |
+| 08-25 | L1 26 / L2 58 / L3 78 | RELEASE 26 / L1 13 / L2 46 / L3 77 | RELEASE 26 / L1 17 / L2 44 / L3 75 |
+
+Early in the week the three targets are **indistinguishable**, and that is arithmetic rather
+than luck: with `weekly` small and `days_left` large, `(T − weekly) / days_left` is dominated
+by `days_left`. The entire difference lands on 08-24/08-25 — the reserve is bought out of a
+burst, on a week already running at double the linear pace. Per account, same snapshot:
+
+| account | target | RELEASE | LEVEL1 | LEVEL2 | LEVEL3 | …of which target already passed |
+|---|---|---|---|---|---|---|
+| `1856877+Rick7C2@users.noreply.github.com` | 0.97 | 17 | 45 | 124 | 40 | 3 |
+| `1856877+Rick7C2@users.noreply.github.com` | **0.90** | 17 | 28 | 140 | 41 | 8 |
+| `pisnrzrs@two.gg` | 0.97 | 33 | 13 | 71 | 109 | 0 |
+| `pisnrzrs@two.gg` | **0.90** | 7 | 26 | 35 | 158 | 36 |
+
+### The cost asymmetry, on this week's own numbers
+
+At 2026-08-25T18:30Z the pool was at `weekly=0.96` with 3.65d to reset and a derived burn of
+0.578/day — a **3.58-day dark window**, half the week. Against that, the worst case of a 0.10
+reserve is 0.10 destroyed, and only if the queue empties before reset, because the brake
+*delays* work rather than refusing it. **10% at risk against 50% realised.**
+
+### A passed target is LEVEL3, never a release
+
+Once `weekly` passes `PACE_TARGET`, `sustainable` goes negative. That is guarded, not a bug:
+`pace_ratio` pins `ratio` to `999` when `need <= 0`, which lands on LEVEL3 and stays there
+until reset. It is worth being explicit, because a *negative* ratio falling through the
+ladder's `ratio ≤ 1.0` rung into `RELEASE` is the one failure mode that would make a low
+target dangerous. `test_quota_brake.sh` §10c/§10c2 pin it, and the CI mutation
+`passed-target-releases` deletes the pin and requires the suite to notice.
+
+At 0.90 this is a routine late-week reading rather than a corner case — 44 of 454
+account-samples in the snapshot above. `quota_burn_derive.py --series` used to `continue` past
+those rows *while still printing a level tally*, which is exactly the "a check that measured
+nothing must not read green" failure rule 4 names. It now replays them under the same 999 pin
+and reports the count, alongside the count it genuinely could not replay.
+
+### When to re-derive this number
+
+Not on a hunch, and not after one quiet week. **Re-derive if two consecutive weeks end below
+0.88 with an empty queue while the brake was actually applying.** That is the only evidence
+that 0.90 is too conservative, and it is a measurement rather than a judgement call. Absent
+it, 0.90 stands.
 
 ## Exemptions are an input, not a subtraction
 

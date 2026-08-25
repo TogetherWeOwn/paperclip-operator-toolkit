@@ -58,6 +58,16 @@ bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 check(){ if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1" "expected '$3', got '$2'"; fi; }
 
 # --- fixtures ---------------------------------------------------------------
+# Every ladder fixture below is arithmetic against a TARGET, so base_env pins
+# one rather than inheriting whatever PACE_TARGET happens to default to. These
+# fixtures exist to exercise the RESPONSE CURVE; the default is a separate
+# decision with a separate owner (TOG-490 moved it 0.97 -> 0.90) and §10 pins
+# it on its own. Without this pin, moving the default silently reddens §9h —
+# which is exactly how it went the first time: one fixture crossed the 5.0x
+# rung and the failure read as a ladder regression rather than as the change
+# that was intended.
+LADDER_TARGET=0.97
+
 # A pace sample burning ~7.3x sustainable: weekly=0.62, days_left=4.02 gives
 # need=(0.97-0.62)/4.02=0.0871, and burn 0.6381 over that is LEVEL3. These are
 # the real numbers from quota-pacing.jsonl at 2026-08-25T09:29Z, not invented
@@ -119,6 +129,7 @@ EOF
 chmod +x "$WORK/roster_braked.sh"
 
 base_env() {
+  export PACE_TARGET="$LADDER_TARGET"
   export PACE_SOURCE_CMD="cat $WORK/${1:-pace_hot.json}"
   export ROSTER_SOURCE_CMD="$WORK/${2:-roster_std.sh}"
   export EXEMPT_FILE="$WORK/exempt.txt"
@@ -639,6 +650,50 @@ check "9n  the export writes no agent" "$(wc -l < "$WORK/captured.tsv" | tr -d '
 
 rc=0; (ROSTER_SOURCE_CMD="$WORK/roster_mixed.sh" "$BRAKE" throttled --bogus) >/dev/null 2>&1 || rc=$?
 check "9o  an unknown flag is refused (exit 2)" "$rc" "2"
+
+# ===========================================================================
+echo "== 10. TOG-490: the default is a reserve, and a passed target is not a release =="
+# Everything above pins PACE_TARGET so the ladder can be tested without the
+# default moving under it — which leaves the default itself unasserted, and
+# that is how it sat at 0.97 unexamined until TOG-490. These measure it through
+# the tool's own arithmetic rather than by grepping the source, because a
+# `grep PACE_TARGET quota_brake.sh` passes just as happily on a line nothing
+# reads.
+
+pace_field() {  # $1: field, $2: pace fixture, $3: PACE_TARGET or "" for the default
+  base_env "$2"
+  if [[ -n "${3:-}" ]]; then export PACE_TARGET="$3"; else unset PACE_TARGET; fi
+  "$BRAKE" pace 2>/dev/null | jq -r --arg f "$1" '.[$f]'
+}
+
+# (0.90 - 0.62) / 4.02 = 0.069652
+check "10a the DEFAULT target computes sustainable at 0.90" \
+      "$(pace_field need pace_hot.json "" | jq -r '.*10000|round/10000')" "0.0697"
+# The baseline that gives 10a its meaning. Without it, 10a passes on any build
+# where `need` happens to come out at 0.0697 for some other reason — including
+# one where PACE_TARGET is ignored entirely and a constant was folded in.
+check "10b ...and it is genuinely read: 0.97 still gives the old 0.0871" \
+      "$(pace_field need pace_hot.json 0.97 | jq -r '.*10000|round/10000')" "0.0871"
+
+# THE failure mode that would make a low target dangerous. Once `weekly` passes
+# the target, `sustainable` goes NEGATIVE — and a naive burn/need is then also
+# negative, which sails under the ladder's `ratio <= 1.0` rung and RELEASES the
+# brake at the exact moment the week is already overspent. burn is deliberately
+# tiny here (0.02) so the naive answer would be -1.2, i.e. a comfortable
+# RELEASE, rather than something that lands on LEVEL3 by luck.
+cat > "$WORK/pace_passed.json" <<'EOF'
+{"accounts":[{"name":"passed@example.com","burn_per_day":0.02,"weekly":0.95,"days_left":3.00}],"pool_verdict":"THROTTLE"}
+EOF
+check "10c a passed target pins the ratio to 999, not to a negative number" \
+      "$(pace_field ratio pace_passed.json "")" "999"
+check "10c2 ...and selects LEVEL3 — never RELEASE" \
+      "$(pace_field verdict pace_passed.json "")" "LEVEL3"
+# ...and the owner's hard requirement still holds under that new condition:
+# LEVEL3 floors concurrency at 1, it does not reach 0 or touch wakeOnDemand.
+base_env pace_passed.json; unset PACE_TARGET
+plan="$("$BRAKE" plan 2>/dev/null)"
+check "10d ...with the floor intact: a baseline-20 agent keeps 1 run, not 0" \
+      "$(awk -F'\t' '$3=="Bulk Worker"{print $5}' <<<"$plan")" "1"
 
 # ===========================================================================
 echo

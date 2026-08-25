@@ -2202,6 +2202,25 @@ jobs:
           #    field's instability re-created in our own code.
           brake_mutation "min-window-ignored" 'cannot derive; it falls back' \
             "$(printf 'elif (($dt_days * 24) < $mw) then\x1felif false then')" || rc=1
+          # 7. TOG-490. THE TARGET QUIETLY REVERTED. `1 - PACE_TARGET` is a
+          #    RESERVE sized against the brake's own reaction lag (~15 min of
+          #    producer cadence, plus the drain of runs already in flight), not
+          #    a decision to leave 10% of a subscription unspent — cap_for()
+          #    never exceeds the captured baseline, so this knob can only lower
+          #    consumption, never raise it. That makes 0.90 read like a mistake
+          #    to anyone who has not read the header, and it is one character
+          #    from being "corrected" back. §10 measures the default through the
+          #    tool's own arithmetic rather than by grepping for the literal.
+          brake_mutation "pace-target-reverted" 'the DEFAULT target computes sustainable at 0.90' \
+            "$(printf 'PACE_TARGET="${PACE_TARGET:-0.90}"\x1fPACE_TARGET="${PACE_TARGET:-0.97}"')" || rc=1
+          # 8. TOG-490. THE PASSED-TARGET PIN REMOVED. Once `weekly` passes the
+          #    target `sustainable` goes NEGATIVE, and a bare burn/need is then
+          #    negative too — which sails under the ladder's `ratio <= 1.0` rung
+          #    and RELEASES the brake on an already-overspent week. At 0.90 that
+          #    is a routine late-week reading rather than a corner case: both
+          #    accounts were past it on 2026-08-25.
+          brake_mutation "passed-target-releases" 'selects LEVEL3' \
+            "$(printf 'ratio: (if $need <= 0 then 999 else ($burn / $need) end),\x1fratio: ($burn / $need),')" || rc=1
           exit $rc
 
       # TOG-345. The sibling guard's whole value is the THIRD exit state. Two

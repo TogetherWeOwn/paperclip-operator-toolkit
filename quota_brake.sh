@@ -119,7 +119,10 @@
 # SUSTAINABLE BURN IS COMPUTED, NEVER CONSTANT-FOLDED.
 # TOG-419 quotes "~0.09-0.13 weekly-units/day". That is not a constant, it is
 # a reading of a function taken on one day. Re-derived from quota-pacing.jsonl
-# and exact to four decimals on three consecutive samples:
+# and exact to four decimals on three consecutive samples. The arithmetic below
+# is shown at 0.97 because that is the PRODUCER's target, and those logged
+# values were computed at it — ours is now 0.90 (see below), so the two
+# deliberately differ and it is the IDENTITY being checked here, not the value:
 #
 #     sustainable_per_day = (TARGET - weekly_used) / days_left      TARGET=0.97
 #
@@ -127,11 +130,43 @@
 #     (0.97-0.61)/4.03 = 0.08933   logged 0.0893
 #     (0.97-0.62)/4.02 = 0.08706   logged 0.0870
 #
-# Today's value is ~0.087 — BELOW the quoted band, so a brake pinned to 0.09
-# would run persistently hot and never catch up. TARGET is 0.97 rather than
-# 1.0 so the week lands just under the cap; unused weekly quota is destroyed
-# at reset, so aiming at 1.0 and overshooting is the only truly expensive
-# outcome and aiming low wastes the subscription.
+# That day's value is ~0.087 — BELOW the quoted band, so a brake pinned to
+# 0.09 would run persistently hot and never catch up.
+#
+# ---------------------------------------------------------------------------
+# PACE_TARGET IS A RESERVE, NOT A TARGET.  (TOG-490, decided by the CFO.)
+# `1 - PACE_TARGET` is the margin the brake defends. It is sized against the
+# brake's own reaction lag, NOT against a view of how much of a paid-for
+# subscription this company ought to consume. Two measured facts fix that
+# framing, and both are the opposite of what this header used to say:
+#
+#  * THIS KNOB CANNOT RAISE CONSUMPTION, ONLY LOWER IT. cap_for() clamps every
+#    rung to the captured baseline (`if (c > b) c = b`) and RELEASE restores it
+#    exactly. No level runs faster than normal, so moving TARGET toward 1.0
+#    buys zero extra utilisation — it only removes reserve. If this company is
+#    ever UNDERrunning its quota, the fix is queue depth, never this number.
+#
+#  * A CAP-HIT WASTES NO QUOTA — IT IS 100% UTILISATION. Nothing is destroyed
+#    at reset because nothing is left. Overshooting costs DELIVERY: a dark
+#    window in which nothing runs, wakes destroyed rather than queued (a quota
+#    429 is not retried, and quota returning does not restart the company), and
+#    a restart somebody has to do by hand. Measured 2026-08-25T18:30Z: the pool
+#    was at weekly=0.96 with 3.65d to reset — a 3.58d dark window, half a week.
+#
+# So the reserve covers the lag between "the brake decides" and "burn actually
+# falls": one producer sample (~15 min) plus the drain of runs already in
+# flight (23 at 17:45Z), which do NOT stop when maxConcurrentRuns drops. The
+# largest 1h move in `weekly` across the 224-sample history is 0.140 / 0.150 by
+# account. At that rate a 0.03 reserve is 13 MINUTES — inside one detection
+# interval, i.e. thinner than the brake can see. 0.10 is ~43 min at the
+# measured peak and ~4.3h at the sustained burn, which brackets the exposure
+# across the rates this company actually produces.
+#
+# TARGET is therefore 0.90. Replayed over the history it is indistinguishable
+# from 0.97 early in the week (24 RELEASE against 24 on 08-23) and bites only
+# on a week already running at double pace. The per-day table, the cost
+# asymmetry and the ONE measurement that would move this number again are in
+# docs/quota-brake.md, "The line being defended".
 # ===========================================================================
 set -euo pipefail
 
@@ -149,7 +184,7 @@ REFUSAL_SOURCE_CMD="${REFUSAL_SOURCE_CMD:-}" # stdout: refusal TSV
 
 QUOTA_PACING_FILE="${QUOTA_PACING_FILE:-/paperclip/operator-handoff/quota-pacing.jsonl}"
 EXEMPT_FILE="${EXEMPT_FILE:-$HERE/quota_brake_exempt.txt}"
-PACE_TARGET="${PACE_TARGET:-0.97}"
+PACE_TARGET="${PACE_TARGET:-0.90}"   # a RESERVE of 0.10; see the header (TOG-490)
 REFUSAL_WINDOW_MIN="${REFUSAL_WINDOW_MIN:-15}"
 REFUSAL_ALARM_THRESHOLD="${REFUSAL_ALARM_THRESHOLD:-10}"
 
@@ -224,7 +259,8 @@ Environment:
                             test seams; override the four impure edges
   QUOTA_PACING_FILE         pace samples (default /paperclip/operator-handoff/quota-pacing.jsonl)
   EXEMPT_FILE               agents never braked (default ./quota_brake_exempt.txt)
-  PACE_TARGET               fraction of weekly quota to aim at (default 0.97)
+  PACE_TARGET               weekly-quota line the brake defends (default 0.90;
+                            1-PACE_TARGET is a reserve, not a shortfall)
   PACE_WINDOW_HOURS         trailing window the burn is derived over (default 24)
   PACE_MIN_WINDOW_HOURS     below this, fall back to the reported field (default 2)
   PACE_RESET_DROP           `weekly` drop that counts as a week reset (default 0.2)

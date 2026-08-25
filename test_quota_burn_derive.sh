@@ -244,6 +244,50 @@ check "9c  a torn tail line is skipped, not fatal" "$rc" "0"
 check "9c2 ...and the reading is unchanged" \
       "$(jq -r '(.[0].burn*100|round/100)' <<<"$J")" "0.48"
 
+echo "== 10. TOG-490: a passed target is replayed, not dropped =="
+# `--series` used to `continue` past every sample where `weekly` had already
+# passed the target, and then print a level tally as though it had seen them.
+# That is the failure this repo's rule 4 names: a check that measured nothing
+# reading green. It mattered little at TARGET=0.97 and matters a lot at 0.90,
+# where the condition is a routine late-week reading — on 2026-08-25 it was
+# already true of BOTH accounts, so the tool would have gone quiet exactly
+# where the brake was hardest on.
+#
+# climb.jsonl is weekly 0.10 -> 0.58 in 0.01 steps, so `--target 0.30` puts the
+# last 29 of its 49 samples past the target by construction.
+S="$("$TOOL" --jsonl "$WORK/climb.jsonl" --series --target 0.30 2>/dev/null)"
+check "10a the passed-target samples are counted, not silently skipped" \
+      "$(sed -n 's/.*TARGET was already passed.*: \([0-9]*\)$/\1/p' <<<"$S")" "29"
+check "10b ...and they land on LEVEL3, as quota_brake.sh's 999 pin does" \
+      "$(sed -n 's/.*derived levels *: .*LEVEL3=\([0-9]*\).*/\1/p' <<<"$S")" "48"
+# The assertion that makes 10a/10b mean something: EVERY sample is accounted
+# for, either replayed or explicitly reported as not replayable. A tally that
+# silently omits rows is indistinguishable from one that had none to omit.
+# awk, not `paste -sd+ | bc`: bc is not installed in the agent container or in
+# CI, and its absence made this assertion report 1 instead of failing loudly.
+REPLAYED="$(sed -n 's/.*derived levels *: //p' <<<"$S" \
+            | tr ' ' '\n' | sed -n 's/.*=\([0-9]*\)$/\1/p' | awk '{t+=$1} END{print t+0}')"
+SKIPPED="$(sed -n 's/.*not replayed): \([0-9]*\)$/\1/p' <<<"$S")"
+check "10c every one of the 49 samples is replayed or declared unreplayable" \
+      "$((REPLAYED + SKIPPED))" "49"
+
+echo "== 10bis. the two tools share ONE default target =="
+# This file exists to show what the brake WOULD have done. A default here that
+# disagrees with quota_brake.sh's makes every bare `--series` a replay of a
+# ladder nobody runs — and it would drift silently, because §5 above pins the
+# target EXPLICITLY on both sides and so cannot see a default diverge.
+# climb.jsonl's last sample is weekly=0.58, days_left=4.0.
+PY_NEED="$(env -u PACE_TARGET "$TOOL" --jsonl "$WORK/climb.jsonl" --json | jq -r '.[0].need')"
+SH_NEED="$(env -u PACE_TARGET PACE_SOURCE_CMD="cat $WORK/climb.jsonl" PACE_WINDOW_HOURS=24 \
+           "$BRAKE" pace 2>/dev/null | jq -r '.need')"
+check "10d the python and shell DEFAULTS agree on sustainable" \
+      "$(python3 -c "print('yes' if abs($PY_NEED - $SH_NEED) < 1e-6 else 'no ($PY_NEED vs $SH_NEED)')")" "yes"
+# ...and they agree on 0.90 specifically. Without this, 10d passes just as
+# happily on two tools that both still default to 0.97.
+# (0.90 - 0.58) / 4.0 = 0.08
+check "10e ...and that shared default is 0.90: need is 0.0800, not 0.0975" \
+      "$(jq -rn --argjson n "$SH_NEED" '$n*10000|round/10000')" "0.08"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
