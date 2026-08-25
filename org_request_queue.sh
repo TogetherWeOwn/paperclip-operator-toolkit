@@ -745,6 +745,15 @@ cmd_submit() {
     fi
   fi
 
+  # Derive the decider BEFORE the append, so the routing decision becomes part
+  # of the durable record instead of a line of terminal output. Until TOG-390
+  # this was computed afterwards purely to print, which meant the queue held no
+  # answer to "who was this actually routed at?" — and any later check of
+  # whether that agent could receive it had to re-derive from state that had
+  # since moved. A routing decision nobody recorded is one nobody can audit.
+  local d skips; d="$(derive_leader "$id" "$template")"; skips="$(f 5 "$d")"
+  local lmode lid lrole; lmode="$(f 1 "$d")"; lid="$(f 2 "$d")"; lrole="$(f 3 "$d")"
+
   # Allocate and append as ONE critical section. next_id() derives the id by
   # counting rows, so a concurrent submitter that reads between our count and
   # our append takes the same id.
@@ -755,11 +764,15 @@ cmd_submit() {
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
     --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
     --arg ni "$notify_issue" \
+    --arg lm "$lmode" --arg lid "$lid" --arg lr "$lrole" \
     '{event:"request.submitted",requestId:$id,status:"pending",requester:$r,requesterAgentId:$rid2,
       requesterTemplate:$t,template:$w,title:$ti,rationale:$ra,
       supersedes:(if $sup=="" then null else $sup end),supersedeDepth:$d,
       chainRoot:(if $root=="" then null else $root end),
       notifyIssue:(if $ni=="" then null else $ni end),
+      responsibleLeaderMode:(if $lm=="" then null else $lm end),
+      responsibleLeaderAgentId:(if $lid=="" then null else $lid end),
+      responsibleLeader:(if $lr=="" then null else $lr end),
       submittedAt:$at,expiresAt:$exp}')"
   queue_unlock
 
@@ -769,14 +782,53 @@ cmd_submit() {
   # Name the decider at submit time so the requester knows who was woken. This
   # is INFORMATIONAL ONLY and confers nothing: the leader is re-derived from
   # fresh state at decision time.
-  local d skips; d="$(derive_leader "$id" "$template")"; skips="$(f 5 "$d")"
-  case "$(f 1 "$d")" in
-    leader)   echo "  responsible leader : $(f 3 "$d") [$(f 4 "$d")] — will be woken to decide.";;
+  case "$lmode" in
+    leader)   echo "  responsible leader : $lrole [$(f 4 "$d")]";;
     escalate) echo "  responsible leader : none in the reporting chain; escalated to the standing authority (A0 steward, O1).";;
     cycle)    echo "  responsible leader : UNRESOLVABLE (malformed reporting chain) — only the standing authority can decide this.";;
   esac
   jq -e 'length > 0' <<<"$skips" >/dev/null 2>&1 \
     && echo "  skipped in chain   : $(jq -r 'map("\(.agent) (\(.reason))")|join(", ")' <<<"$skips")"
+
+  # "— will be woken to decide" is what this line used to promise, and on this
+  # company it was usually false: 138 of 144 agents cannot be woken on demand,
+  # so the wake is refused and the request waits until its TTL with nobody
+  # having looked at it. Say what is actually true about reachability, and say
+  # it at submit time while the requester is still standing here to read it.
+  #
+  # This NEVER blocks the submission. A request that was recorded and flagged
+  # is recoverable; one that was refused because a liveness probe could not
+  # reach its database is lost, and the probe is the least reliable component
+  # in this path. The gate reports, the human decides.
+  announce_reachability "$rid" "$lid" "$lrole"
+  return 0
+}
+
+# --------------------------------------------------------------------------
+# Report whether the agent we just routed at can actually receive the decision.
+#
+# Advisory by construction — see the note at the call site. Absent
+# queue_liveness.sh the submission still stands and simply says nothing, which
+# is the honest degradation: this tool has never made the promise before and a
+# missing checker must not start failing submissions that used to work.
+announce_reachability() {
+  local rid="$1" lid="$2" lrole="$3"
+  local probe="$HERE/queue_liveness.sh"
+  [[ -n "$lid" && -x "$probe" ]] || return 0
+
+  local out rc verdict cause
+  out="$("$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?
+  IFS=$'\t' read -r verdict cause _ _ _ <<<"$out"
+  case "$rc" in
+    0) echo "  reachability       : $lrole can receive this decision." ;;
+    4) printf '\033[1;33m  reachability       : %s IS DORMANT (%s) — it will NOT be woken.\033[0m\n' "${lrole:-$lid}" "$cause"
+       echo "  This request has been recorded, but routing it here enqueues it into silence."
+       echo "  Escalate to the standing authority, or hold it until the agent is restored:"
+       echo "      ./queue_liveness.sh probe --agent $lid --explain"
+       [[ "$cause" == undetermined ]] && \
+         echo "  NOTE: throttled vs disabled could not be established — treat as unreachable, not as dead." ;;
+    *) echo "  reachability       : UNKNOWN for ${lrole:-$lid} ($cause) — could not measure. Do not read this as reachable." ;;
+  esac
   return 0
 }
 

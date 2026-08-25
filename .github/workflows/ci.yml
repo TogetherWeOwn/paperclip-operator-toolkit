@@ -17,6 +17,10 @@ name: CI
 #     test_decision_notify.sh           whether the REQUESTER ever learns a
 #                                       request was decided, and that delivery
 #                                       cannot influence a decision — TOG-254
+#     test_queue_liveness.sh            whether a request is routed at an agent
+#                                       that can actually receive it, and
+#                                       whether a queue that has stopped
+#                                       deciding says so — TOG-390
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
@@ -237,6 +241,28 @@ jobs:
       # "delivery failed" is a case the suite CAUSES rather than waits for.
       - name: decision-notification suite
         run: ./test_decision_notify.sh
+
+      # TOG-390. A fourth question in the same series, and the one that makes
+      # the other three conditional: the record can be perfect and the notifier
+      # flawless, and the request still never gets decided because the agent it
+      # was routed at cannot be woken. On this company that is the common case
+      # rather than the edge — 138 of 144 agents carry wakeOnDemand=false.
+      #
+      # Fourth offline seam: LIVENESS_SOURCE_CMD, so reachability is something
+      # the suite DICTATES rather than reads from a database. That is what lets
+      # it run here, and it is also what lets it test the states a real
+      # database will not produce on demand — an unset flag, an unparseable
+      # one, a liveness source that is simply down.
+      #
+      # Two of its sections pin known-wrong READINGS rather than ordinary
+      # behaviour: that an unset wakeOnDemand never reads as reachable (the
+      # top-level path reads unset for EVERY agent, so a regression there would
+      # silently pass the whole roster), and that an unavailable
+      # throttled-vs-disabled discriminator reports 'undetermined' instead of
+      # guessing 'disabled'. Both were confirmed red under mutation, against a
+      # green unmutated baseline.
+      - name: routing-liveness and stall-alarm suite
+        run: ./test_queue_liveness.sh
 
       # TOG-198 review. The suite above proves the QUEUE treats the notifier as
       # untrusted, and proves it well. This one asks the mirror-image question
