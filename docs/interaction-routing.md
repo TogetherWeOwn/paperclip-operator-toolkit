@@ -71,7 +71,11 @@ non-assignee, board_or_agents  → 403 "Agent cannot mutate another agent's issu
 assignee,     board_only       → 403 "This issue-thread interaction is board-only" (:2962)
 ```
 
-**42 of 49 pending interactions were created by the issue's own assignee**, so `:2975` blocks them
+**18 of 49 pending interactions were created by the issue's own assignee**, and only **2** of those are
+actually stopped by `:2975` — the other 16 stop earlier at `:2962` because they are `board_only`. A
+further **31 of 49** were *unassigned*, where `:2793` opens the assignee gate to every agent. Measured
+again for TOG-423; the earlier figure of 42 was wrong, and it pointed at the wrong gate. The queue's
+bottleneck is the **policy field**, which authors choose, not the assignee gate, which they do not
 whatever their kind or policy. Flipping all 49 to `board_or_agents` would still leave 42 dead.
 
 > **An agent must never be the one to answer its own ask.** Either address it to someone else *and

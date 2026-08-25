@@ -50,6 +50,9 @@ name: CI
 #                                       stops sending traffic to a quota-spent
 #                                       account, and whether a watcher that
 #                                       measured nothing says so — TOG-425
+#     test_interaction_triage.sh        interaction_triage.sh: who can actually
+#                                       resolve each pending interaction, and
+#                                       which are dead on the board — TOG-423
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -505,6 +508,17 @@ jobs:
       # nothing ever reached the threshold exits 4 rather than reading green.
       - name: teamclaude rotation watcher suite
         run: ./test_quota_rotation_watch.sh
+      # TOG-423. Who can actually resolve a pending issue-thread interaction.
+      # The gate order this encodes was re-derived from the deployed server
+      # build, and it corrected two claims that had been carried forward as
+      # fact — most importantly that an UNASSIGNED issue passes the assignee
+      # gate for every agent rather than blocking them. Getting that backwards
+      # is what left 13 answerable questions sitting on the owner's queue, so
+      # the suite asserts each verdict against the source line that produced
+      # it and then deletes each gate to prove the naming test goes red.
+      # Pure stdin/stdout: no database, no credentials, no network.
+      - name: interaction triage suite
+        run: ./test_interaction_triage.sh
 
       # TOG-365. acceptance_live.sh can only ever run on the VPS, so the
       # operator would otherwise be the first person to execute it — against a

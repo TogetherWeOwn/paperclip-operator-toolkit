@@ -56,9 +56,13 @@
 #
 # THE MISTAKE THIS TOOL IS BUILT TO CATCH
 # ---------------------------------------
-# 42 of 49 pending interactions were created by the issue's own assignee. The
-# creator bar at :2975 blocks every one of them, *whatever* their kind or
-# policy. Flipping all 49 to `board_or_agents` would still leave 42 dead.
+# Re-measured for TOG-423: 18 of 49 pending interactions were created by the
+# issue's own assignee, and only 2 of those are actually stopped by the creator
+# bar at :2975 — the other 16 stop earlier at :2962, because they are
+# board_only and never reach it. A further 31 of 49 were UNASSIGNED, where
+# :2793 opens the assignee gate to every agent rather than blocking it.
+# So flipping all 49 to `board_or_agents` would leave 2 dead, not 42, and the
+# lever is the policy field rather than the assignee gate.
 #
 # So `route` refuses to emit an envelope whose addressee cannot actually
 # resolve it. Asking politely is not the hard part; being answerable is.
@@ -480,7 +484,7 @@ attempting each refusal rather than inferring it from a field.
          Refusal: 403 "This issue-thread interaction is board-only"
 
   :2971  addresseeAgentId must be unset, or equal to the resolver.
-  :2975  createdByAgentId must NOT be the resolver.  <-- blocks 42 of 49 here
+  :2975  createdByAgentId must NOT be the resolver.  <-- blocks 2 of 49 here
   :2979  sourceRunId must NOT be the resolver's run.
 
 The policy itself is NOT capped by kind. services/issue-thread-interactions.js

@@ -98,7 +98,7 @@ assert_exit "$EX_OK" "happy path: addressee is the assignee and is not me" -- \
 # :2975 — you may never answer your own ask.
 assert_exit "$EX_UNANSWERABLE" "inert: addressee == self (creator bar :2975)" -- \
   "$TOOL" route --addressee "$A_SELF" --issue-assignee "$A_SELF" --self "$A_SELF"
-# :2946 — the addressee must be the assignee. This is the 42-of-49 failure.
+# :2946 — the addressee must be the assignee ON AN ASSIGNED ISSUE.
 assert_exit "$EX_UNANSWERABLE" "inert: addressee is not the assignee (:2946)" -- \
   "$TOOL" route --addressee "$A_PEER" --issue-assignee "$A_THIRD" --self "$A_SELF"
 # Unassigned issues are open to any agent (:2792), so omitting --issue-assignee
