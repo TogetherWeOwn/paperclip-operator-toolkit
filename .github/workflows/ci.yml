@@ -24,6 +24,10 @@ name: CI
 #     test_capability_gate.sh           who may decide a CAPABILITY request, and
 #                                       which four asks stop for the owner
 #                                       whatever any agent says — TOG-387
+#     test_interaction_route.sh         where an ask belongs — the owner, an
+#                                       agent, or an operator runbook; and
+#                                       whether it could be answered at all
+#                                       once created — TOG-389
 #     test_reqrecord_shared.sh          whether the record layer duplicated
 #                                       between lib/reqrecord.sh and
 #                                       org_request_queue.sh has drifted — TOG-387
@@ -295,6 +299,23 @@ jobs:
       # the test that names that gate to go red.
       - name: capability gate suite
         run: ./test_capability_gate.sh
+
+      # TOG-389. Where an ask belongs: the owner, an agent, or an operator
+      # runbook. Two thirds of every question this company has raised died
+      # unanswered (73 cancelled + 47 expired of 187), and 42 of 49 pending
+      # ones are blocked by a gate that has nothing to do with the question's
+      # content — the author was the issue's own assignee. The suite is pure
+      # fixtures and flag combinations: no API key, no VPS, no database.
+      #
+      # §9 is the load-bearing one. Review-verdict eligibility must fail
+      # CLOSED: the first draft defaulted it to true, and against live data
+      # that reported a $1.40/mo spend approval, a credential placement and a
+      # brand decision as agent-resolvable. The mutation check restores that
+      # default and asserts the suite goes red, with a baseline assertion
+      # first so "the mutant failed" is attributable to the mutation and not
+      # to a broken staging copy.
+      - name: interaction routing suite
+        run: ./test_interaction_route.sh
 
       # TOG-387. lib/reqrecord.sh holds the decision record's invariants, and
       # org_request_queue.sh still holds its own copy of eight of them because
