@@ -79,6 +79,17 @@ mk "$REPO/lib/helper.sh"  'helper() { :; }
 '
 mk "$REPO/notes.md"       '# notes
 '
+# The canonical channel README (TOG-373). The name is the REAL one on purpose:
+# channel_drift.sh hardcodes this table rather than reading it from config, so
+# the fixture has to use the same name or the suite would be testing a
+# mechanism the tool does not have. If someone renames the canonical file in
+# the repo, `required mirror source is not on <ref>` fires here too.
+mk "$REPO/handoff-channel-README.md" '# Operator handoff drop
+
+Rules:
+- Writing here is a proposal, not a deployment.
+- A RUNNABLE file must be a MIRROR of something already committed.
+'
 git -C "$REPO" add -A >/dev/null
 git -C "$REPO" commit -qm fixtures
 git -C "$REPO" branch -M main
@@ -86,7 +97,18 @@ git -C "$REPO" branch -M main
 # An empty exemption file, so the suite never picks up the repo's real one.
 EX="$WORK/exempt.txt"; printf '# none\n' > "$EX"
 
-reset_channel() { rm -rf "$CHAN"; mkdir -p "$CHAN"; }
+# The default fabricated world is a CORRECTLY INSTALLED channel: the required
+# README is present and byte-identical. Every "exits 0" assertion in this suite
+# depends on that, and the required-mirror section below is the one place that
+# deliberately breaks it.
+# Loud on failure. A silent `cp` error here would leave every "exits 0"
+# assertion in the suite passing-or-failing for a reason that has nothing to do
+# with what it claims to test.
+install_readme() {
+  cp "$REPO/handoff-channel-README.md" "$CHAN/README.md" \
+    || { echo "FIXTURE BROKEN: cannot install the canonical README into the channel" >&2; exit 2; }
+}
+reset_channel() { rm -rf "$CHAN"; mkdir -p "$CHAN"; install_readme; }
 # Run a check against the fabricated channel, from inside the fabricated repo.
 run() { OUT="$( cd "$REPO" && "$CD" check --dir "$CHAN" --exempt "$EX" "$@" 2>&1 )"; RC=$?; }
 # Same, with an explicit exemption file.
@@ -104,7 +126,7 @@ if [ "$mismatch" -eq 0 ]; then ok "the coreutils blob hash equals git hash-objec
 else bad "the coreutils blob hash equals git hash-object" "see mismatches above"; fi
 
 # ---------------------------------------------------------------------------
-hdr "an empty channel is clean"
+hdr "a correctly installed channel with no drops is clean"
 reset_channel
 run
 want_rc 0 "no runnable artifacts exits 0"
@@ -238,6 +260,94 @@ want_rc 2 "an exemption whose reason is only whitespace is REFUSED too"
 reset_channel
 run_ex "$EX2"
 want_rc 0 "an exemption for an absent file is inert"
+
+# ---------------------------------------------------------------------------
+# ASSERTION 4 — the required mirror (TOG-373).
+#
+# The channel README states the byte-for-byte rule, is root-owned so only the
+# operator can install it, and is not runnable by ANY of the three tests above.
+# Before this existed it was the one artifact in the channel with no receipt:
+# hand-retyped out of a markdown fence, truncated, or never installed at all,
+# and a clean run said nothing. Absence is the failure here, which is exactly
+# what the runnable sweep cannot express — it only sees files that are there.
+hdr "ASSERTION 4 — a required mirror is checked by name, and absence is a finding"
+reset_channel
+run
+want_rc 0 "baseline: the required README installed and matching exits 0"
+
+reset_channel
+rm -f "$CHAN/README.md"
+run
+want_rc 3 "a MISSING required mirror fails"
+want_out 'MISSING' "the report names absence as its own category"
+want_out 'README.md' "the report names the missing file"
+
+# Present, wrong bytes. Distinct from missing: someone installed SOMETHING.
+reset_channel
+mk "$CHAN/README.md" '# Operator handoff drop
+
+Rules:
+- Writing here is a proposal, not a deployment.
+'
+chmod 0644 "$CHAN/README.md"
+# The point of this whole mechanism: this file is inert by all three runnable
+# tests, so the sweep would never look at it. Pin that, or the assertion below
+# could be passing because README.md accidentally became runnable — which
+# would report it as UNVERSIONED and prove nothing about required mirrors.
+inert=1
+[ -x "$CHAN/README.md" ] && inert=0
+case "$(head -c 2 "$CHAN/README.md")" in '#!') inert=0 ;; esac
+case "$CHAN/README.md" in *.sh|*.bash|*.py|*.mjs|*.cjs|*.js) inert=0 ;; esac
+if [ "$inert" -eq 1 ]; then ok "fixture: the required README is NOT runnable by any of the three tests"
+else bad "fixture: the required README is NOT runnable by any of the three tests" \
+         "it is runnable, so the assertion below would fire from the sweep instead"; fi
+run
+want_rc 3 "a required mirror whose bytes are not the committed blob fails"
+want_out 'NOT THE COMMITTED COPY' "a tampered required mirror is not reported as UNVERSIONED"
+
+# An exemption is the one mute path, and it costs a stated reason and a
+# --strict failure, exactly as it does for a drop. No second escape hatch.
+EX5="$WORK/exempt-readme.txt"
+printf '# test\nREADME.md\tmid-migration, operator installs it next window\n' > "$EX5"
+run_ex "$EX5"
+want_rc 0 "an exemption with a reason covers a required mirror too"
+run_ex "$EX5" --strict
+want_rc 3 "--strict fails while a required mirror is exempted"
+
+# The canonical blob missing from the ref must REFUSE, not render a verdict.
+# TOG-357's rule: a comparison that did not happen must never read as an
+# answer. Without this, renaming handoff-channel-README.md in the repo would
+# silently condemn every correctly installed channel as tampered.
+#
+# In a SEPARATE repo, deliberately. Building this ref inside $REPO — an orphan
+# branch, or `git rm --cached` — leaves that working tree half-checked-out, and
+# the three sections after this one then pass for the wrong reason: the channel
+# fails because the fixture broke, not because the assertion held. That is the
+# vacuous green this repo keeps writing gates against, so it is designed out
+# rather than cleaned up after.
+reset_channel
+REPO2="$WORK/repo-no-canonical"
+mkdir -p "$REPO2"
+git -C "$REPO2" init -q
+git -C "$REPO2" config user.email t@example.invalid
+git -C "$REPO2" config user.name  Test
+git -C "$REPO2" config commit.gpgsign false
+mk "$REPO2/tool.sh" '#!/bin/sh
+echo tool v1
+'
+git -C "$REPO2" add -A >/dev/null && git -C "$REPO2" commit -qm "no canonical readme"
+git -C "$REPO2" branch -M main
+OUT="$( cd "$REPO2" && "$CD" check --dir "$CHAN" --exempt "$EX" 2>&1 )"; RC=$?
+want_rc 2 "a ref with no canonical blob REFUSES rather than passing or failing"
+
+# ...and the fixture repo is still intact, so everything after this section is
+# still measuring what it says it measures.
+if [ -f "$REPO/handoff-channel-README.md" ]; then
+  ok "fixture: the main fixture repo survived the refusal test"
+else
+  bad "fixture: the main fixture repo survived the refusal test" \
+      "the canonical file is gone; every assertion below this line is now vacuous"
+fi
 
 # ---------------------------------------------------------------------------
 hdr "refusals — an unrecognised input must never exit 0 (TOG-201)"

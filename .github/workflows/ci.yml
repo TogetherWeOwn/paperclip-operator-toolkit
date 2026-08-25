@@ -1147,6 +1147,42 @@ jobs:
             '  if [ "$unver" -gt 0 ]; then' \
             'a same-size, different-content drop fails' || rc=1
 
+          # 5. Treat an ABSENT required mirror as nothing to report (TOG-373).
+          #    The most tempting of the five: the suite right above it asserts
+          #    that "an exemption for an absent file is inert", so skipping a
+          #    file that is not there reads as the consistent behaviour. It is
+          #    the exact opposite for a required mirror — absence IS the
+          #    finding, and it is the state the channel is in until the
+          #    operator installs the README. This mutation makes the one thing
+          #    TOG-373 exists to detect report clean.
+          chan_mutation_check "absent-required-mirror-ignored" \
+            '      missing=$((missing+1)); L_MISSING+=("$rbase  (want the bytes of $rpath)")' \
+            '      :' \
+            'a MISSING required mirror fails' \
+            'the report names absence as its own category' || rc=1
+
+          # 6. Check a required mirror by PRESENCE rather than content. The
+          #    same defect as mutation 1, on the path where it matters most:
+          #    the README is the file whose entire content is the byte-for-byte
+          #    rule, so "a README is installed" is precisely the assurance that
+          #    is worth nothing. A truncated or hand-retyped copy passes.
+          chan_mutation_check "required-mirror-matched-on-presence" \
+            '    if [ "$hash" = "${REQUIRED_HASH[$rbase]}" ]; then' \
+            '    if [ -f "$rf" ]; then' \
+            'a required mirror whose bytes are not the committed blob fails' \
+            'a tampered required mirror is not reported as UNVERSIONED' || rc=1
+
+          # 7. Downgrade the missing-canonical-blob REFUSAL to a skip. TOG-357's
+          #    lesson, on this table: a comparison that did not happen must not
+          #    read as an answer. Renaming handoff-channel-README.md in the repo
+          #    without updating REQUIRED_MIRRORS would then silently stop
+          #    checking the README, and the run would go green having measured
+          #    nothing — the failure mode that is worse than a red.
+          chan_mutation_check "missing-canonical-blob-skipped-not-refused" \
+            '      || die "required mirror source is not on $ref: $rpath (the table in $ME names a file this ref does not have; fix the table, do not delete the entry)"' \
+            '      || continue' \
+            'a ref with no canonical blob REFUSES rather than passing or failing' || rc=1
+
           exit $rc
 
   # ---------------------------------------------------------------------------

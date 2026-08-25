@@ -32,6 +32,23 @@ The one root-owned file, `REFERENCE-org_provisioner.sh`, is reported `STALE` —
 ahead. Where we have genuine inbound evidence, the import took and the repo then improved on it.
 Ownership still tells you the direction: root-owned is the operator's, `node`-owned is an agent's.
 
+### Re-measured 2026-08-25, later the same day (TOG-373)
+
+Against `origin/main` at `24f0d30`:
+
+```
+mirrored: 6   stale: 1   unversioned: 3   exempt: 0
+```
+
+Eight of the eleven violations closed inside a day, because TOG-371 landed the OmniRoute operator
+tools as PRs and the drops then matched committed blobs without anyone touching the channel. That is
+the rule working in the direction it was meant to: the fix for an unversioned drop is a merge, not a
+deletion, and content-addressing means the drop goes green the moment the review lands.
+
+The three that remain — `TOG-151-dropchannel_scan.sh`, `TOG-178-apply.sh`,
+`TOG-196-identity-probe.mjs` — are still unreviewed code an operator can run, and `STALE` is still
+`REFERENCE-org_provisioner.sh`. **These counts move; do not quote them as current.** Run the check.
+
 ## The rule
 
 > **A runnable file in the handoff channel must be byte-identical to a blob committed on `main`.**
@@ -98,35 +115,50 @@ is open, so a release can refuse to ship with a hole in the rule.
 The file ships empty on purpose. Pre-populating it with the 11 current violations would convert the
 finding into paperwork.
 
-## The channel's own README
+## The channel's own README (TOG-373)
 
-`/paperclip/operator-handoff/README.md` is root-owned and only the operator can replace it. The
-canonical text is below; the operator should install it from `origin/main` rather than from a copy
-staged in the channel — the channel is `1777`, so a staged copy is agent-writable and cannot be its
-own integrity anchor (TOG-310, TOG-349).
+The rule above is only worth what it changes about behaviour, and an agent about to drop a file is
+not reading this document — they are reading `/paperclip/operator-handoff/README.md`, which is
+root-owned `0644` in a `1777` directory. Measured: an agent cannot write it, cannot unlink it and
+cannot rename it (the sticky bit), so installing it is the operator's step and nobody else's.
 
-```markdown
-# Operator handoff drop
+**The canonical text is a committed file, `handoff-channel-README.md` — not a fenced block in this
+document.** It used to be a fence here, which made "install it from `origin/main`" mean "hand-extract
+twenty lines out of a code fence", and left two copies of the same text to drift apart. Both are the
+failure this whole document is about, in miniature.
 
-Agents cannot write to the operator project root (~/paperclip-enterprise-company on the host). The
-paperclip container mounts exactly one host path: ~/.local/share/paperclip -> /paperclip.
+### Installing it
 
-This directory IS on that mount. Anything written to /paperclip/operator-handoff/ appears on the
-host at ~/.local/share/paperclip/operator-handoff/ where the operator can review, install and run it.
+Two commands, from a clone, as the operator. Neither reads anything staged in the channel — the
+channel is `1777`, so a copy staged there is agent-writable and cannot be its own integrity anchor
+(TOG-310, TOG-349). `git show` reads the blob out of the object store, so what lands is the reviewed
+bytes or nothing:
 
-Rules:
-- One file per deliverable, named for its issue: TOG-151-omniroute_combo_cli.sh
-- NEVER write a secret here. Not 0600, and visible to every agent on this instance.
-- Writing here is a proposal, not a deployment. The operator reviews before installing.
-- A RUNNABLE file must be a MIRROR of something already committed to paperclip-ops-tooling `main`,
-  byte for byte. Land the PR first, then drop the mirror, and quote the commit sha in the issue.
-  Runnable means: the exec bit, OR a .sh/.py/.mjs/.js extension, OR a shebang on line 1.
-  Evidence documents are not runnable and are not covered by this rule.
-  Check yourself before you drop: `./channel_drift.sh check` in a paperclip-ops-tooling clone.
-  Exit 3 means something here was never reviewed. TOG-356.
-- This directory is 1777. Any agent can overwrite another agent's staged file between the drop and
-  the install, so the staged copy is never the integrity anchor — git is.
+```bash
+git -C <clone> fetch origin
+git -C <clone> show origin/main:handoff-channel-README.md \
+  | sudo tee /paperclip/operator-handoff/README.md >/dev/null
+
+# and the one genuinely inbound artifact, which channel_drift.sh reports STALE:
+git -C <clone> show origin/main:org_provisioner.sh \
+  | sudo tee /paperclip/operator-handoff/REFERENCE-org_provisioner.sh >/dev/null
 ```
+
+### Why it has a receipt now
+
+The README is not runnable by any of the three tests, so the sweep would never have looked at it —
+the one artifact in the channel whose entire content is the byte-for-byte rule was the one artifact
+with nothing checking it. A hand-retyped, truncated or simply never-installed copy read as clean.
+
+`channel_drift.sh` now carries a short `REQUIRED_MIRRORS` table: files that must be **present** in
+the channel and **byte-identical** to one named path, runnable or not. Absence is a finding, because
+for this file absence is the whole failure mode. `./channel_drift.sh check` reports `MISSING` until
+the install happens and `NOT THE COMMITTED COPY` if what is installed is not that blob — so running
+the check is the receipt for the install, and there is no step here that rests on trust.
+
+If the repo ever renames `handoff-channel-README.md` without updating the table, the check
+**refuses** (exit 2) rather than rendering a verdict. That is TOG-357's rule applied here: a
+comparison that did not happen must never read as an answer.
 
 ## What this does not fix
 

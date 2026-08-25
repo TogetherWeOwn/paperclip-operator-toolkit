@@ -74,6 +74,26 @@ die()   { c_red "$ME: $*" >&2; exit $EXIT_REFUSED; }
 # that mattered.
 RUNNABLE_EXTENSIONS=(sh bash py mjs cjs js)
 
+# --- required mirrors -------------------------------------------------------
+# Runnable-ness is the right test for a DROP. An agent stages a tool and the
+# question is whether anyone reviewed it, so the sweep below has to find files
+# nobody declared. It is the WRONG test for the channel's own README, which is
+# the one file in there whose entire content is the rule this script enforces,
+# and which is not runnable by any of the three tests.
+#
+# TOG-373: that README is root-owned, so only the operator can install it, and
+# until this table existed nothing verified that they had. The step that puts
+# "a drop must be byte-for-byte" in front of agents was itself the one step in
+# the channel with no receipt — it could be hand-retyped out of a fence in a
+# doc, truncated, or never done at all, and a clean run would not have noticed.
+#
+# So: "<channel basename>=<path in the ref>". Unlike a drop, a required mirror
+# is looked up by NAME, is a finding when ABSENT, and is checked whether or not
+# it is runnable. Content still decides; the name only says which blob to want.
+REQUIRED_MIRRORS=(
+  "README.md=handoff-channel-README.md"
+)
+
 is_runnable() {
   local f="$1" base ext
   [ -x "$f" ] && return 0
@@ -165,12 +185,50 @@ cmd_check() {
     [ -z "${BY_BASE[$b]:-}" ] && BY_BASE["$b"]="$p"
   done < <(git ls-tree -r "$ref" | awk '$2=="blob"{ h=$3; sub(/^[^\t]*\t/,""); print h "\t" $0 }')
 
-  local ok=0 stale=0 unver=0 exempted=0 skipped=0
-  local -a L_OK=() L_STALE=() L_UNVER=() L_EXEMPT=()
+  local ok=0 stale=0 unver=0 exempted=0 skipped=0 missing=0 tampered=0
+  local -a L_OK=() L_STALE=() L_UNVER=() L_EXEMPT=() L_MISSING=() L_TAMPERED=()
 
-  local f base owner hash stripped
+  # --- required mirrors, before the sweep -----------------------------------
+  # Resolve each one against the ref FIRST. If the canonical blob is not there,
+  # this check cannot answer the question it was asked, and the honest answer
+  # is a refusal rather than a verdict — the TOG-357 rule: never report a
+  # comparison that did not happen. Renaming the canonical file in the repo
+  # without updating this table therefore breaks the run loudly instead of
+  # silently condemning (or excusing) whatever is installed in the channel.
+  declare -A REQUIRED_SRC=() REQUIRED_HASH=()
+  local entry rbase rpath rhash
+  for entry in "${REQUIRED_MIRRORS[@]}"; do
+    rbase="${entry%%=*}"; rpath="${entry#*=}"
+    rhash="$(git rev-parse --verify --quiet "$ref:$rpath" 2>/dev/null)" \
+      || die "required mirror source is not on $ref: $rpath (the table in $ME names a file this ref does not have; fix the table, do not delete the entry)"
+    REQUIRED_SRC["$rbase"]="$rpath"
+    REQUIRED_HASH["$rbase"]="$rhash"
+  done
+
+  local rf rowner hash
+  for rbase in "${!REQUIRED_SRC[@]}"; do
+    rpath="${REQUIRED_SRC[$rbase]}"; rf="$dir/$rbase"
+    if [ -n "${EXEMPT_REASON[$rbase]:-}" ]; then
+      exempted=$((exempted+1)); L_EXEMPT+=("$rbase — ${EXEMPT_REASON[$rbase]}"); continue
+    fi
+    if [ ! -f "$rf" ] || [ ! -r "$rf" ]; then
+      missing=$((missing+1)); L_MISSING+=("$rbase  (want the bytes of $rpath)")
+      continue
+    fi
+    hash="$(blob_hash "$rf")" || { missing=$((missing+1)); L_MISSING+=("$rbase  (unhashable)"); continue; }
+    rowner="$(stat -c %U "$rf" 2>/dev/null || echo '?')"
+    if [ "$hash" = "${REQUIRED_HASH[$rbase]}" ]; then
+      ok=$((ok+1)); L_OK+=("$rbase -> $rpath  (required)")
+    else
+      tampered=$((tampered+1)); L_TAMPERED+=("$rbase  ($rowner)  is not $rpath on $ref")
+    fi
+  done
+
+  local f base owner stripped
   while IFS= read -r -d '' f; do
     base="$(basename "$f")"
+    # Already accounted for above, by name and against one specific blob.
+    [ -n "${REQUIRED_SRC[$base]:-}" ] && continue
     is_runnable "$f" || continue
     if [ ! -r "$f" ]; then
       # Unreadable is NOT a pass. It is a runnable file this check could not
@@ -201,6 +259,14 @@ cmd_check() {
   if [ "$quiet" -eq 0 ]; then
     printf 'channel drift: %s vs %s (%s)\n\n' "$dir" "$ref" "$(git rev-parse --short "$ref")"
 
+    if [ ${#L_MISSING[@]} -gt 0 ]; then
+      c_red "MISSING — required in the channel and not there. The operator installs these; agents cannot:"
+      for x in "${L_MISSING[@]}"; do printf '  %s\n' "$x"; done; echo
+    fi
+    if [ ${#L_TAMPERED[@]} -gt 0 ]; then
+      c_red "NOT THE COMMITTED COPY — required, present, and its bytes are not the blob it must mirror:"
+      for x in "${L_TAMPERED[@]}"; do printf '  %s\n' "$x"; done; echo
+    fi
     if [ ${#L_UNVER[@]} -gt 0 ]; then
       c_red "UNVERSIONED — runnable, and its content is in no commit on $ref. No review, no history, no rollback:"
       for x in "${L_UNVER[@]}"; do printf '  %s\n' "$x"; done; echo
@@ -218,10 +284,14 @@ cmd_check() {
       for x in "${L_OK[@]}"; do printf '  %s\n' "$x"; done; echo
     fi
 
-    printf 'mirrored: %d   stale: %d   unversioned: %d   exempt: %d\n' \
-      "$ok" "$stale" "$unver" "$exempted"
+    printf 'mirrored: %d   stale: %d   unversioned: %d   exempt: %d   missing: %d   not-the-committed-copy: %d\n' \
+      "$ok" "$stale" "$unver" "$exempted" "$missing" "$tampered"
   fi
 
+  if [ "$missing" -gt 0 ] || [ "$tampered" -gt 0 ]; then
+    [ "$quiet" -eq 0 ] && c_red "channel drift detected"
+    return $EXIT_DRIFT
+  fi
   if [ "$unver" -gt 0 ] || [ "$stale" -gt 0 ]; then
     [ "$quiet" -eq 0 ] && c_red "channel drift detected"
     return $EXIT_DRIFT
@@ -251,7 +321,12 @@ A file counts as runnable if it has the exec bit, OR a script extension
 git blob hash appears anywhere in the ref — content, not path, so the
 TOG-nnn- prefix on a drop does not matter and neither does a rename here.
 
-Exit: 0 clean · 2 refused · 3 unversioned or stale artifacts found.
+Separately, a few files are REQUIRED to be in the channel and to mirror one
+named path, runnable or not, because being absent is itself the failure:
+
+$(for e in "${REQUIRED_MIRRORS[@]}"; do printf '  %s\n' "${e%%=*} -> ${e#*=}"; done)
+
+Exit: 0 clean · 2 refused · 3 unversioned, stale, missing or tampered.
 
 Run it where the channel is mounted (any agent container, or the host):
   ./$ME check

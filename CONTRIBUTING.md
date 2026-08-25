@@ -101,7 +101,10 @@ So drift has two directions here, not one, and the second is the one actually ha
   2026-08-25 by `channel_drift.sh`, it was **11 of 14** — one new unversioned tool had arrived
   overnight, and the first count had missed a `0644` `.mjs` that is run by `node` rather than by
   `./`. The channel got worse in a day. **Hand cleanup loses to the arrival rate**, which is why
-  TOG-356's fix is a rule and not a tidy-up.
+  TOG-356's fix is a rule and not a tidy-up. Later the same day it was **3 of 12**, because TOG-371
+  landed the OmniRoute tools as PRs and the drops went green on content without anyone touching the
+  channel — the rule working in the intended direction. These counts move; run the check rather than
+  quote them.
 
 Read the drop channel's own `README.md` before treating anything in it as evidence of what runs:
 "Writing here is a proposal, not a deployment." A file there is an agent's outbound claim, not a
@@ -175,12 +178,23 @@ The rule it enforces: **a runnable file staged for the operator must be byte-ide
 committed on `main`.** Content, not path — the repo may rename its own files; changing a byte breaks
 it. Runnable is a union of the exec bit, a script extension, and a shebang on line 1, because each
 of those alone has a hole the other two cover. Evidence documents are not runnable and are not
-covered. Exit `0` clean · `2` refused · `3` unversioned or stale.
+covered. Exit `0` clean · `2` refused · `3` unversioned, stale, missing or tampered.
 
-This one needs no operator: the channel and a clone are both visible from any agent container, so
-**run it on yourself before dropping a file.** Land the PR first, then drop the mirror, and quote the
-commit sha. Full rationale, the measurement, and the canonical channel README in
-[docs/operator-handoff-channel.md](docs/operator-handoff-channel.md).
+There is a second, smaller rule alongside it (TOG-373). A short `REQUIRED_MIRRORS` table names files
+that must be **present** in the channel and byte-identical to one tracked path, runnable or not —
+today just the channel's own `README.md`, mirroring
+[`handoff-channel-README.md`](handoff-channel-README.md). Absence is a finding there rather than a
+silence, because that file is the one whose entire content is the rule above, and it is not runnable
+by any of the three tests, so the sweep would never have seen it. If the repo renames a canonical
+path without updating the table, the check **refuses** rather than rendering a verdict on a
+comparison it did not make.
+
+This one needs no operator to *run*: the channel and a clone are both visible from any agent
+container, so **run it on yourself before dropping a file.** Land the PR first, then drop the mirror,
+and quote the commit sha. Installing that README is the operator's step — it is root-owned in a
+`1777` directory, so no agent can — and the command is in
+[docs/operator-handoff-channel.md](docs/operator-handoff-channel.md), with the full rationale and the
+measurement.
 
 The same caveat applies as above and for the same reason: CI runs `test_channel_drift.sh`, which
 proves the detector works. It cannot run `check` — GitHub has no view of `/paperclip`.
