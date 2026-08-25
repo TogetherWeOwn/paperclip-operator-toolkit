@@ -225,6 +225,43 @@ PACE_RESET_DROP="${PACE_RESET_DROP:-0.2}"
 # three weekly resets — comfortably more than any window can use.
 PACE_MAX_LINES="${PACE_MAX_LINES:-2000}"
 
+# --- the FIVE-HOUR bucket (TOG-477) -----------------------------------------
+# A SECOND, FASTER CEILING THAT THE WEEKLY TERM CANNOT SEE.
+#
+# On 2026-08-25 the company ran 47-wide and hard-429'd — `All 2 accounts
+# exhausted` — while `unused_weekly_remaining` was still 0.31. The binding
+# constraint was not the weekly budget. It was the rolling 5-hour bucket, and
+# the weekly term above is structurally blind to it: weekly burn can sit at or
+# under pace (ratio <= 1.0 -> RELEASE, which RESTORES every baseline) while a
+# 5-hour bucket empties underneath it. The pool went from both accounts clear
+# to both exhausted in 89 minutes.
+#
+# The window is deliberately SHORT where the weekly window is long, and the
+# reason is the opposite of TOG-440's. `weekly` needs 24h because it is rounded
+# to 0.01 and a shorter window cannot resolve the ladder's tightest rung.
+# `five_hour` carries the same 0.01 rounding against a bucket that must be
+# spent in 300 minutes, so the signal is ~20x denser per unit time — and a 24h
+# window would average an exhaustion event into the idle hours either side of
+# it and read comfortable. Measured on the real feed, 2026-08-25T12:14Z-17:45Z:
+# the pooled bucket sat pinned at 1.99/2.00 for two and a half hours at ZERO
+# runs in flight, then fell to 1.00 and to 0.00 in two cliffs as the rolling
+# window expired. Averaged over a day that is placid; over 90 minutes it is the
+# incident.
+FIVE_HOUR_WINDOW_MIN="${FIVE_HOUR_WINDOW_MIN:-90}"
+
+# Below this span there is not enough history to difference against, and the
+# 5-hour term reports `unavailable` — never a silent 0. Rule 4 applies to this
+# term exactly as it applies to the roster: unmeasured is not "healthy".
+FIVE_HOUR_MIN_WINDOW_MIN="${FIVE_HOUR_MIN_WINDOW_MIN:-20}"
+
+# The bucket's own period, in minutes. NOT constant-folded into "0.05 per 15
+# minutes", for the same reason the weekly term derives its own sustainable
+# rate rather than quoting one: a number with no visible derivation is a number
+# nobody re-checks when the plan changes. One account's bucket is 1.0 and has
+# to last this long, so the pooled sustainable rate is
+# (accounts / FIVE_HOUR_BUCKET_MIN) bucket-units per minute.
+FIVE_HOUR_BUCKET_MIN="${FIVE_HOUR_BUCKET_MIN:-300}"
+
 # When set, a plan that could not DERIVE its burn exits 5 UNKNOWN instead of
 # falling back to the reported field. Off by default so a freshly-rotated
 # pacing file still brakes; on for the monitor path, where "I braked on the
@@ -238,8 +275,10 @@ usage() {
   cat <<'EOF'
 quota_brake.sh — hold weekly quota to pace without ever disabling an agent.
 
-  plan      [--explain] [--require-derived]   the concurrency plan (0 ok, 5 unmeasured)
-  apply     --yes [--explain] [--require-derived]   apply it   (0 ok, 2 refused, 5 unmeasured)
+  plan      [--explain] [--require-derived]   the concurrency plan
+                               (0 ok, 4 INSUFFICIENT, 5 unmeasured)
+  apply     --yes [--explain] [--require-derived]   apply it
+                               (0 ok, 2 refused, 4 INSUFFICIENT, 5 unmeasured)
   restore   --yes              return every braked agent to baseline (state-free)
   verify                       assert no agent is unwakeable  (0 ok, 3 VIOLATION, 5 unmeasured)
   refusals  [--since-min N]    the loud metric                (0 quiet, 3 ALARM, 5 unmeasured)
@@ -248,6 +287,12 @@ quota_brake.sh — hold weekly quota to pace without ever disabling an agent.
 
 `plan` is the default and NOTHING WRITES WITHOUT --yes. `throttled` is a read;
 `--out` writes only the export file it is given, never an agent.
+
+EXIT 4 means the plan is valid and was applied, and still cannot reach the
+concurrency the 5-hour bucket affords. `maxConcurrentRuns` is enforced per
+agent and clamps at 1, so the company-wide floor is the number of brakeable
+agents; there is no company-level equivalent in the run engine. See
+docs/quota-brake.md, "the per-agent ceiling".
 
 Burn is DERIVED from the trailing `weekly` series, not read from the producer's
 `burn_per_day` field — see the TOG-440 block above read_pace_window(). Every
@@ -266,6 +311,9 @@ Environment:
   PACE_RESET_DROP           `weekly` drop that counts as a week reset (default 0.2)
   PACE_MAX_LINES            most pacing lines read (default 2000, ~20 days)
   PACE_REQUIRE_DERIVED      set to refuse a reported-field fallback
+  FIVE_HOUR_WINDOW_MIN      trailing window for the 5-hour term (default 90)
+  FIVE_HOUR_MIN_WINDOW_MIN  below this the 5-hour term is unavailable (default 20)
+  FIVE_HOUR_BUCKET_MIN      the rolling bucket's period in minutes (default 300)
   PAPERCLIP_API_URL / PAPERCLIP_ADMIN_TOKEN   default write path
   REFUSAL_WINDOW_MIN        refusal metric window in minutes (default 15)
   REFUSAL_ALARM_THRESHOLD   refusals in that window before ALARM (default 10)
@@ -480,6 +528,101 @@ pace_ratio() {
   ' <<<"$window" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# THE FIVE-HOUR TERM. (TOG-477.)
+#
+# Pooled, because rotation moves traffic between accounts and a per-account
+# series therefore reads as "stopped burning" the moment the pacer rotates away
+# from it. Summing `five_hour` across accounts is monotone under load and the
+# pool's capacity is simply the account count. Replayed over the incident:
+#
+#     08:58Z 0.34   09:29Z 0.42   09:44Z 0.71   09:59Z 0.97
+#     10:14Z 1.29   10:29Z 1.67   10:44Z 1.98   <- of a 2.00 pool, then 429
+#
+# ONLY POSITIVE DELTAS ARE BURN. A negative step is the rolling window
+# expiring, not quota being returned by work that did not happen — measured at
+# 15:00Z (1.99 -> 1.00) and 15:45Z (1.00 -> 0.00) with zero runs in flight.
+# Counting those as negative burn would have the pool read healthiest exactly
+# when it had just been drained.
+#
+# The per-run coefficient is burn divided by RUN-MINUTES, not by the latest
+# `runs_in_flight`. In-flight moves within the window (21 -> 23 over the last
+# 45 minutes of the sample above), and dividing a window's total burn by an
+# instantaneous count silently mis-scales the affordable-concurrency answer
+# that do_plan's ceiling check depends on.
+#
+# Emits one object with an explicit `source`, same contract as pace_ratio:
+#   derived      — measured over the window.
+#   unavailable  — with a `reason`. NEVER a fabricated ratio.
+five_hour_ratio() {
+  local window="$1"
+  jq -s -r \
+    --arg win "$FIVE_HOUR_WINDOW_MIN" \
+    --arg minwin "$FIVE_HOUR_MIN_WINDOW_MIN" \
+    --arg bucket "$FIVE_HOUR_BUCKET_MIN" '
+    ($win|tonumber)    as $w
+    | ($minwin|tonumber) as $mw
+    | ($bucket|tonumber) as $bk
+    | (map(select(type == "object")) | sort_by(.ts // "")) as $rows
+    | [ $rows[]
+        | select(.ts != null and (.accounts | type) == "array")
+        | { ts: (try (.ts | fromdateiso8601) catch null),
+            # An account missing `five_hour` contributes 0 to the POOL but must
+            # not shrink the pool CAPACITY, or a partially-reported sample would
+            # read as a smaller pool that is proportionally fuller.
+            pool: ([ .accounts[]? | (.five_hour // 0) ] | add // 0),
+            cap:  (.accounts | length),
+            infl: (.runs_in_flight // null) }
+        | select(.ts != null and .cap > 0) ] as $series
+    | if ($series | length) < 2 then
+        { source: "unavailable", reason: "fewer than 2 pacing samples carry a ts and an accounts array" }
+      else
+        ($series | last) as $now
+        | ( [ $series[] | select(.ts >= ($now.ts - ($w * 60))) ] ) as $win_rows
+        | if ($win_rows | length) < 2 then
+            { source: "unavailable", reason: "only \($win_rows|length) sample(s) inside the \($w)m window" }
+          else
+            (($win_rows | last).ts - ($win_rows | first).ts) as $span_s
+            | if (($span_s / 60) < $mw) then
+                { source: "unavailable",
+                  reason: "window spans \(($span_s / 60 * 10 | round) / 10)m, under the \($mw)m minimum" }
+              else
+                # Pairwise, so a gap in the producer feed contributes its own
+                # elapsed time rather than being smeared over the whole window.
+                [ range(1; ($win_rows|length))
+                  | { d:  ([ 0, ($win_rows[.].pool - $win_rows[. - 1].pool) ] | max),
+                      dt: (($win_rows[.].ts - $win_rows[. - 1].ts) / 60),
+                      infl: ($win_rows[.].infl) } ] as $steps
+                | ([ $steps[] | .d ]  | add // 0) as $burn
+                | ([ $steps[] | .dt ] | add // 0) as $mins
+                | ([ $steps[] | select(.infl != null) | (.infl * .dt) ] | add // 0) as $run_min
+                | ($now.cap / $bk) as $sustain_min
+                | (if $mins <= 0 then 0 else ($burn / $mins) end) as $rate_min
+                | { source: "derived",
+                    reason: "\(($mins * 10 | round) / 10)m, \($win_rows|length) samples",
+                    window_m: (($mins * 10 | round) / 10),
+                    pool_used: (($now.pool * 100 | round) / 100),
+                    pool_cap: $now.cap,
+                    in_flight: $now.infl,
+                    burn_per_15m:    (($rate_min * 15 * 1000 | round) / 1000),
+                    sustain_per_15m: (($sustain_min * 15 * 1000 | round) / 1000),
+                    ratio: (if $sustain_min <= 0 then 999 else (($rate_min / $sustain_min * 100 | round) / 100) end),
+                    # How many concurrent runs this burn rate says the pool can
+                    # actually carry. `null` when the window recorded no
+                    # run-minutes or no burn — an unmeasurable coefficient must
+                    # not become an infinitely generous ceiling.
+                    affordable_in_flight:
+                      (if $run_min <= 0 or $burn <= 0 then null
+                       else (($sustain_min / ($burn / $run_min)) * 10 | round) / 10 end),
+                    minutes_to_exhaustion:
+                      (if $rate_min <= 0 then null
+                       else ((([ 0, ($now.cap - $now.pool) ] | max) / $rate_min) | round) end) }
+              end
+          end
+      end
+  ' <<<"$window" 2>/dev/null
+}
+
 # The ladder. Each level names the fraction of baseline concurrency a
 # brakeable agent keeps. Never a fraction of zero — see cap_for().
 #
@@ -639,6 +782,23 @@ do_plan() {
   [[ -n "$worst" ]] || unknown "no account in the pace window has a burn that can be derived from \`weekly\` or read from \`burn_per_day\`. Refusing to guess."
   ratio="$(jq -r '.ratio' <<<"$worst")"
   source="$(jq -r '.source' <<<"$worst")"
+
+  # --- the 5-hour term, WORST-OF with the weekly one (TOG-477) --------------
+  # Worst-of and not an average: these are two independent ceilings and the
+  # pool dies at whichever it reaches first. Averaging them lets a comfortable
+  # weekly figure — the exact reading taken during the incident, where
+  # `unused_weekly_remaining` was still 0.31 — pull a saturated 5-hour bucket
+  # back under the RELEASE rung and restore every baseline into a hard 429.
+  local fh fh_source fh_ratio="" bind="weekly"
+  fh="$(five_hour_ratio "$window")"
+  fh_source="$(jq -r '.source // "unavailable"' <<<"${fh:-{\}}" 2>/dev/null || echo unavailable)"
+  if [[ "$fh_source" == "derived" ]]; then
+    fh_ratio="$(jq -r '.ratio' <<<"$fh")"
+    # awk, not bash: these are floats.
+    if awk -v a="$fh_ratio" -v b="$ratio" 'BEGIN{exit !(a > b)}'; then
+      ratio="$fh_ratio"; bind="five_hour"
+    fi
+  fi
   verdict="$(verdict_for "$ratio")"
 
   # RULE 5 (TOG-440): A FALLBACK IS NOT A MEASUREMENT, AND MUST NOT LOOK LIKE
@@ -674,6 +834,16 @@ do_plan() {
         echo "  resolution   : +/-$(jq -r '.resolution' <<<"$worst")/day (weekly is rounded to 0.01)"
       fi
       echo "  sustainable  : $(jq -r '.need' <<<"$worst")   [(${PACE_TARGET} - weekly) / days_left]"
+      echo "  weekly ratio : $(jq -r '.ratio' <<<"$worst")"
+      if [[ "$fh_source" == "derived" ]]; then
+        echo "  5h bucket    : $(jq -r '.pool_used' <<<"$fh") / $(jq -r '.pool_cap' <<<"$fh") used, $(jq -r '.in_flight // "?"' <<<"$fh") in flight"
+        echo "  5h burn      : $(jq -r '.burn_per_15m' <<<"$fh")/15m vs $(jq -r '.sustain_per_15m' <<<"$fh")/15m sustainable   ($(jq -r '.reason' <<<"$fh"))"
+        echo "  5h ratio     : $fh_ratio"
+        echo "  5h exhausted : in $(jq -r '.minutes_to_exhaustion // "n/a"' <<<"$fh") min at this rate"
+      else
+        echo "  5h ratio     : unavailable — $(jq -r '.reason // "no reading"' <<<"${fh:-{\}}")"
+      fi
+      echo "  binding term : $bind"
       echo "  ratio        : $ratio"
       echo "  verdict      : $verdict"
       echo "  exempt file  : $EXEMPT_FILE"
@@ -703,6 +873,21 @@ do_plan() {
 
   local id name status wod mcr baseline crit cfg
   local rc=0 line
+  # THE COMPANY-WIDE FLOOR THIS PLAN LEAVES BEHIND. (TOG-477.)
+  # `maxConcurrentRuns` is enforced PER AGENT — `startNextQueuedRunForAgent()`
+  # compares it against `countRunningRunsForAgent(agentId)`, and there is no
+  # company-level equivalent anywhere in the run engine. So the concurrency a
+  # plan actually produces is the SUM of the caps it leaves on the roster, and
+  # the hardest brake this tool can apply still leaves one run per brakeable
+  # agent because HEARTBEAT_MAX_CONCURRENT_RUNS_MIN is 1. Summed here so the
+  # ceiling check below compares a real number against a measured one, rather
+  # than letting a page of `brake` lines imply a reduction that is not there.
+  # `fixed` is the part of that sum the brake MAY NOT TOUCH — exempt agents and
+  # agents whose config could not be read. Tracked apart from the total because
+  # the two produce different verdicts: a floor the ladder simply has not
+  # reached yet is a matter of time, whereas a floor made of agents the brake
+  # is forbidden to touch is structural and no rung will ever clear it.
+  local floor=0 fixed=0 brakeable=0
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     # NOT `IFS=$'\t' read`. Tab is IFS whitespace, so bash collapses runs of it
@@ -719,6 +904,7 @@ do_plan() {
     for e in "${exempt[@]}"; do [[ "$name" == "$e" ]] && { is_exempt=yes; break; }; done
     if [[ "$is_exempt" == yes ]]; then
       printf 'exempt\t%s\t%s\t%s\t%s\t%s\tnamed in %s\n' "$id" "$name" "$mcr" "$mcr" "${baseline:--}" "$(basename "$EXEMPT_FILE")"
+      floor=$((floor + mcr)); fixed=$((fixed + mcr))
       continue
     fi
     # Priority-aware: an agent holding an open `critical` issue is exempt for
@@ -726,6 +912,7 @@ do_plan() {
     # category of mistake as braking the owner's channel, just less visible.
     if (( crit > 0 )); then
       printf 'exempt\t%s\t%s\t%s\t%s\t%s\tholds %s open critical issue(s)\n' "$id" "$name" "$mcr" "$mcr" "${baseline:--}" "$crit"
+      floor=$((floor + mcr)); fixed=$((fixed + mcr))
       continue
     fi
     # A paused/terminated agent runs nothing, so braking it saves nothing and
@@ -745,6 +932,11 @@ do_plan() {
     if ! jq -e . >/dev/null 2>&1 <<<"${cfg:-}"; then
       printf 'skip\t%s\t%s\t%s\t%s\t%s\truntimeConfig unreadable; refusing to write a partial config\n' \
         "$id" "$name" "$mcr" "$mcr" "${baseline:--}"
+      # Unwritable, but still RUNNING — it keeps its current cap and therefore
+      # still occupies the pool. Counted, unlike a paused agent above, which
+      # consumes nothing and contributes 0. Untouchable, so it counts to
+      # `fixed` as well: the brake refuses to write it at any rung.
+      floor=$((floor + mcr)); fixed=$((fixed + mcr))
       continue
     fi
 
@@ -757,29 +949,84 @@ do_plan() {
     fi
 
     local want; want="$(cap_for "$verdict" "$eff_baseline")"
+    brakeable=$((brakeable + 1))
 
     if [[ "$verdict" == "RELEASE" ]]; then
       if [[ "$baseline" =~ ^[0-9]+$ ]]; then
         printf 'restore\t%s\t%s\t%s\t%s\t%s\tburn is at or under pace\n' "$id" "$name" "$mcr" "$eff_baseline" "$eff_baseline"
+        floor=$((floor + eff_baseline))
         if [[ "$write" == yes ]]; then
           apply_patch "$id" "$cfg" "$(restore_body "$cfg" "$eff_baseline")" || rc=1
         fi
       else
         printf 'nochange\t%s\t%s\t%s\t%s\t-\tnot braked, burn under pace\n' "$id" "$name" "$mcr" "$mcr"
+        floor=$((floor + mcr))
       fi
       continue
     fi
 
     if [[ "$want" == "$mcr" && "$baseline" =~ ^[0-9]+$ ]]; then
       printf 'nochange\t%s\t%s\t%s\t%s\t%s\talready at the %s cap\n' "$id" "$name" "$mcr" "$want" "$eff_baseline" "$verdict"
+      floor=$((floor + want))
       continue
     fi
 
     printf 'brake\t%s\t%s\t%s\t%s\t%s\t%s: %s of baseline\n' "$id" "$name" "$mcr" "$want" "$eff_baseline" "$verdict" "$want/$eff_baseline"
+    floor=$((floor + want))
     if [[ "$write" == yes ]]; then
       apply_patch "$id" "$cfg" "$(brake_body "$cfg" "$want" "$eff_baseline" "$verdict")" || rc=1
     fi
   done < <(printf '%s\n' "$roster")
+
+  # ---------------------------------------------------------------------------
+  # RULE 6 (TOG-477): A BRAKE THAT CANNOT REACH THE REQUIRED CONCURRENCY MUST
+  # SAY SO, NOT PRINT A PAGE OF `brake` LINES AND EXIT 0.
+  #
+  # This is rule 4 pointed at the tool's own effectiveness rather than at its
+  # inputs. Rule 4 stops the brake reading green when it MEASURED nothing; this
+  # stops it reading green when it measured correctly, wrote correctly, and
+  # still cannot bind. Measured on this company 2026-08-25: 47 agents, 45 of
+  # them brakeable at the default cap of 2. LEVEL3 — the hardest rung — takes
+  # the ceiling from 90 to 45. Observed in-flight during the incident was 47,
+  # and the 5-hour bucket affords ~11. So the strongest available brake removes
+  # about two runs from a load that is four times too heavy, and every line of
+  # its output says `brake`.
+  #
+  # Reported whenever the 5-hour term could be derived, because the affordable
+  # figure comes from that term's per-run coefficient. Exit 4 is distinct from
+  # 2 (refused), 3 (violation) and 5 (unmeasured): the plan is valid and was
+  # applied, it is simply insufficient, and the operator needs to know that
+  # before concluding the incident is handled.
+  local afford=""
+  if [[ "$fh_source" == "derived" ]]; then
+    afford="$(jq -r '.affordable_in_flight // ""' <<<"$fh")"
+  fi
+  if [[ -n "$afford" && "$afford" != "null" ]]; then
+    # The hardest thing this tool could ever do to this roster: every brakeable
+    # agent at the platform floor of 1, everything else untouched.
+    local min_floor=$((fixed + brakeable))
+    echo "ceiling: this plan leaves a company-wide floor of $floor concurrent runs" >&2
+    echo "         ($fixed on agents the brake may not touch + $brakeable brakeable agent(s))." >&2
+    echo "         the 5-hour bucket affords ~$afford at the measured per-run burn." >&2
+    if awk -v f="$min_floor" -v a="$afford" 'BEGIN{exit !(f > a)}'; then
+      echo "INSUFFICIENT: even at ONE run per brakeable agent the floor is $min_floor, above the ~$afford the" >&2
+      echo "         pool affords. maxConcurrentRuns is enforced PER AGENT and clamps at" >&2
+      echo "         HEARTBEAT_MAX_CONCURRENT_RUNS_MIN=1, and the run engine has no company-wide" >&2
+      echo "         equivalent — so NO rung of this ladder reaches the required concurrency." >&2
+      echo "         Reducing the roster's concurrent footprint is the only remaining lever, and it" >&2
+      echo "         is not one this tool holds. See docs/quota-brake.md 'the per-agent ceiling'." >&2
+      # Never mask a write failure: a partially-applied plan is the more urgent
+      # of the two facts, so rc wins when both are true.
+      (( rc == 0 )) && return 4
+    elif awk -v f="$floor" -v a="$afford" 'BEGIN{exit !(f > a)}'; then
+      # Over budget, but REACHABLE. Deliberately not exit 4: the ladder
+      # escalates on its own while burn stays high, and spending the operator's
+      # alarm on a condition that resolves itself is how the structural one
+      # ends up ignored.
+      echo "         this plan sits above that, but a harder rung reaches $min_floor — the ladder" >&2
+      echo "         escalates while burn stays high. Not insufficient." >&2
+    fi
+  fi
 
   return $rc
 }

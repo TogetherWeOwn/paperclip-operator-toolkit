@@ -416,16 +416,133 @@ entire roster healthy.
 | 0 | done, or quiet |
 | 2 | refused — a guard fired, or a required argument is missing |
 | 3 | `verify`: an agent is unwakeable. `refusals`: over threshold |
-| 4 | `pace`: the reading is a `reported` fallback, not a derivation |
+| 4 | `pace`: the reading is a `reported` fallback, not a derivation.<br>`plan`/`apply`: **INSUFFICIENT** — the plan is valid and was applied, and still cannot reach the concurrency the 5-hour bucket affords |
 | 5 | **could not measure.** Not clean. Nothing was written |
 
 Exit 5 is load-bearing. Zero agents braked out of zero examined is "never ran", not "nothing
 needed braking", and a brake that reads green while blind is the same silent failure this whole
 file is about.
 
+## The five-hour bucket (TOG-477)
+
+The weekly term is not the only ceiling, and on 2026-08-25 it was not the binding one. The
+company ran 47-wide and both accounts hard-429'd — `All 2 accounts exhausted` — while
+`unused_weekly_remaining` was still **0.31**. What ran out was the rolling **5-hour** bucket.
+
+That inverts the brake's own logic, which is why it needed a second term rather than a tuning
+change. Weekly burn can sit *at or under* pace — ratio ≤ 1.0, which is `RELEASE`, which
+**restores every baseline** — while a 5-hour bucket empties underneath it. Replayed from the
+pacer feed, the pooled bucket (the sum of each account's `five_hour`, against a capacity equal
+to the account count) went:
+
+```
+  08:58Z 0.34   09:29Z 0.42   09:44Z 0.71   09:59Z 0.97
+  10:14Z 1.29   10:29Z 1.67   10:44Z 1.98   <- of 2.00, then 429 at 10:48:50Z
+```
+
+Three things the derivation gets right on purpose:
+
+* **Pooled, not per-account.** Rotation moves traffic between accounts, so a per-account series
+  reads as "stopped burning" the instant the pacer rotates away from it. The pooled sum is
+  monotone under load.
+* **Only positive deltas are burn.** A negative step is the rolling window *expiring*, not quota
+  being returned by work that did not happen — measured at 15:00Z (1.99 → 1.00) and 15:45Z
+  (1.00 → 0.00) with **zero** runs in flight. Counting those would make the pool read healthiest
+  immediately after it had been drained.
+* **A short window, for the opposite reason `weekly` needs a long one.** `weekly` needs 24h
+  because 0.01 rounding cannot resolve the ladder over less. `five_hour` carries the same
+  rounding against a bucket that must be spent in 300 minutes, so the signal is ~20× denser per
+  unit time — and a 24h window would average an exhaustion event into the idle hours either side
+  of it and read comfortable.
+
+The two terms are combined **worst-of**, never averaged. They are independent ceilings and the
+pool dies at whichever it reaches first; averaging lets a comfortable weekly figure pull a
+saturated bucket back under the `RELEASE` rung and hand full concurrency into a hard 429.
+
+When the term cannot be derived it reports `unavailable` with a reason and the weekly term
+governs alone. It never contributes a fabricated `0` — rule 4 applies to it exactly as it applies
+to the roster.
+
+## The per-agent ceiling
+
+**The brake cannot reach the concurrency this incident required, and it now says so instead of
+printing a page of `brake` lines and exiting 0.**
+
+`maxConcurrentRuns` is enforced **per agent**. `startNextQueuedRunForAgent()` compares it against
+`countRunningRunsForAgent(agentId)` (`services/heartbeat.ts:13444-13446`), and there is no
+company-level equivalent anywhere in the run engine — the only company-wide lever,
+`resolveHeartbeatSchedulingSuppression()` at `:6552`, is driven by host process env
+(`PAPERCLIP_IN_WORKTREE`, `PAPERCLIP_DATABASE_RESTORE_IN_PROGRESS`), is not reachable from an
+agent or an API call, and is all-or-nothing.
+
+So the concurrency a plan actually produces is the **sum of the caps it leaves on the roster**,
+and because `HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1` (`:347`, clamped at `:2456`) the hardest
+possible brake still leaves one run per brakeable agent. Measured on this company:
+
+One reading, taken from an agent container at 2026-08-25T18:05Z. The exact floor moves as
+agents enter and leave the exempt set, and the affordable figure moves with the measured per-run
+burn; the gap between them does not.
+
+| | |
+|---|---|
+| roster (non-terminated) | 47 |
+| brakeable (idle/running/error, not exempt) | 42 |
+| floor at LEVEL3, the hardest rung | **45** (42 brakeable + 3 on exempt agents) |
+| what the 5-hour bucket affords | **~14** |
+| observed in flight during the incident | 47 |
+
+The strongest brake this tool can apply removes roughly two runs from a load that is four times
+too heavy. `plan` and `apply` therefore compute the floor, compare it against the affordable
+figure derived from the 5-hour term's per-run coefficient, and exit **4 INSUFFICIENT** when even
+one run per brakeable agent does not fit.
+
+The distinction the check draws matters: a floor the *ladder* has not reached yet resolves
+itself as burn stays high, and is reported without the alarm. Only a floor that no rung can
+clear — because it is made of the platform minimum plus agents the brake may not touch — is
+INSUFFICIENT. A ceiling check that fires on every plan is noise, and noise is how the real one
+gets ignored.
+
+**What this does not do is fix it.** Reducing the roster's concurrent footprint is the remaining
+lever and this tool does not hold it. Exit 4 is the honest report of a gap, not a repair.
+
+## Running it from an agent container (TOG-477)
+
+`lib/pcsql.sh` offers two backends, `podman` and `psql`, and an agent container has neither:
+
+```
+$ ./quota_brake.sh plan --explain
+lib/pcsql.sh: line 150: podman: command not found
+UNKNOWN: cannot read the roster. Nothing braked, nothing restored.
+$ echo $?
+5
+```
+
+Exit 5 was correct — it measured nothing — but it meant the brake built to shape a 47-wide surge
+was operator-only, and during the ramp from 3 to 47 in flight nothing capped concurrency and
+nothing could have. `pg_source.js` fills the seams the tool already publishes:
+
+```bash
+export ROSTER_SOURCE_CMD="$PWD/pg_source.js roster"
+export REFUSAL_SOURCE_CMD="$PWD/pg_source.js refusals --since-min 15"
+./quota_brake.sh plan --explain
+```
+
+It reads `DATABASE_URL` and the `pg` module inside the Paperclip server's own `node_modules`,
+and sets `default_transaction_read_only = on` before every query — the write path is unchanged
+and still goes through the API with `assert_policy_preserved` on the bytes.
+
+**The company filter is mandatory.** The operator's `roster_sql()` has no company predicate
+because `podman exec` reaches a database it assumes is this company's. That assumption does not
+hold here: two companies share this Postgres and agent names collide across them, so an
+unfiltered roster read would hand the brake another company's agents and the write path would
+accept them. A missing company id is a refusal, not a default.
+
 ## What is NOT built here, and why
 
-**This tool cannot be run by an agent.** Cross-agent `PATCH /api/agents/{id}` is refused:
+**An agent can now PLAN but still cannot APPLY.** The read half is solved — see "Running it from
+an agent container" above — so an agent can measure burn, read the roster, and produce the plan
+and its ceiling verdict. The *write* half is unchanged, because cross-agent
+`PATCH /api/agents/{id}` is refused:
 
 ```
 403 {"error":"Missing permission: agents:configure or agents:suggest-changes.",
@@ -433,9 +550,16 @@ file is about.
 ```
 
 Self-config is open (200), but an agent that is being braked is precisely the one that cannot
-be relied on to brake itself. So the brake is operator-side and needs a company-scope
-`agents:configure` token in `PAPERCLIP_ADMIN_TOKEN`; `apply` refuses with an explanatory error
-rather than a stack trace when it is absent.
+be relied on to brake itself. So applying still needs a company-scope `agents:configure` token in
+`PAPERCLIP_ADMIN_TOKEN`; `apply` refuses with an explanatory error rather than a stack trace when
+it is absent.
+
+This split is worth stating plainly rather than reading as a half-finished job: the diagnosis is
+the part that was missing during the incident. Nobody could see that the 5-hour bucket was four
+minutes from exhaustion, or that the strongest available brake would not have helped. An agent
+can now produce both findings on demand and escalate them. Handing an agent the write path would
+not have changed the outcome of 2026-08-25 — per the ceiling section, the brake had no rung that
+would have bound.
 
 **Dispatch-level throttling is not implemented here.** TOG-419 lists it as worth evaluating and
 it is the right *next* lever — `dispatcher.py` already refuses on `HOLD_5H`, and lowering the

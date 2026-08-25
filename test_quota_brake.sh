@@ -695,6 +695,143 @@ plan="$("$BRAKE" plan 2>/dev/null)"
 check "10d ...with the floor intact: a baseline-20 agent keeps 1 run, not 0" \
       "$(awk -F'\t' '$3=="Bulk Worker"{print $5}' <<<"$plan")" "1"
 
+# The default-target checks above deliberately unset PACE_TARGET. Restore the
+# ladder fixture before calling the sourced pure functions below: unlike a real
+# quota_brake.sh process, this suite shares one shell across every section.
+base_env
+
+# ===========================================================================
+echo
+echo "== 10. the five-hour bucket and the per-agent ceiling (TOG-477) =="
+#
+# The incident these assertions are cut from: on 2026-08-25 the company ran
+# 47-wide and both accounts' 5-hour buckets went from clear to exhausted in 89
+# minutes, hard-429ing a run mid-turn — while `unused_weekly_remaining` was
+# still 0.31 and the weekly term was comfortable throughout. Every fixture
+# below carries the real pooled `five_hour` series from that morning.
+
+# Pool = sum of the accounts' five_hour; capacity = the account count.
+# 0.34 -> 1.98 of 2.00 across 106 minutes at 1-47 runs in flight.
+cat > "$WORK/fh_incident.jsonl" <<'EOF'
+{"ts":"2026-08-25T08:58:00Z","runs_in_flight":1,"accounts":[{"name":"a","five_hour":0.34,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T09:29:00Z","runs_in_flight":16,"accounts":[{"name":"a","five_hour":0.42,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T09:44:00Z","runs_in_flight":28,"accounts":[{"name":"a","five_hour":0.71,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T09:59:00Z","runs_in_flight":26,"accounts":[{"name":"a","five_hour":0.97,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T10:14:00Z","runs_in_flight":37,"accounts":[{"name":"a","five_hour":0.98,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.31,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T10:29:00Z","runs_in_flight":41,"accounts":[{"name":"a","five_hour":0.98,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.69,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T10:44:00Z","runs_in_flight":47,"accounts":[{"name":"a","five_hour":0.99,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.99,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+EOF
+
+# The rolling window EXPIRING, at zero runs in flight. Measured 14:30Z-15:45Z:
+# the pool fell 1.99 -> 1.00 -> 0.00 in two cliffs while nothing was running.
+cat > "$WORK/fh_expiry.jsonl" <<'EOF'
+{"ts":"2026-08-25T14:30:00Z","runs_in_flight":0,"accounts":[{"name":"a","five_hour":0.99,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":1.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T15:00:00Z","runs_in_flight":0,"accounts":[{"name":"a","five_hour":0.00,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":1.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+{"ts":"2026-08-25T15:45:00Z","runs_in_flight":0,"accounts":[{"name":"a","five_hour":0.00,"weekly":0.62,"days_left":4.02,"burn_per_day":0.02},{"name":"b","five_hour":0.00,"weekly":0.10,"days_left":4.0,"burn_per_day":null}]}
+EOF
+
+FH="$(five_hour_ratio "$(cat "$WORK/fh_incident.jsonl")")"
+check "10a  the incident derives a 5h reading" "$(jq -r '.source' <<<"$FH")" "derived"
+check "10a2 ...pooled across BOTH accounts, not per-account" "$(jq -r '.pool_used' <<<"$FH")" "1.98"
+check "10a3 ...against a capacity equal to the account count" "$(jq -r '.pool_cap' <<<"$FH")" "2"
+# 0.31 pool-units per 15 min against a sustainable 0.10 — the issue's own
+# arithmetic ("~0.30/15min pooled, ~3x sustainable"), reproduced by the tool.
+check "10a4 ...burn is ~3x sustainable" "$(jq -r '.ratio' <<<"$FH")" "3.12"
+check "10a5 ...sustainable is DERIVED from the bucket period" "$(jq -r '.sustain_per_15m' <<<"$FH")" "0.1"
+# The 429 landed at 10:48:50Z; the last sample before it was 10:44Z.
+ex="$(jq -r '.minutes_to_exhaustion' <<<"$FH")"
+if [[ "$ex" =~ ^[0-9]+$ ]] && (( ex <= 5 )); then ok "10a6 ...exhaustion is minutes away at 10:44Z (got ${ex}m)"
+else bad "10a6 ...exhaustion is minutes away at 10:44Z" "got '$ex'"; fi
+
+# THE INVERSION, and the reason this term exists at all. The weekly figure in
+# this fixture is comfortable — burn 0.02/day against a need of 0.087 is ratio
+# 0.23, which is RELEASE, which RESTORES every baseline. Meanwhile the 5-hour
+# pool is at 1.98 of 2.00. A brake reading only the weekly term hands full
+# concurrency back four minutes before a hard 429.
+W_ONLY="$(pace_ratio "$(cat "$WORK/fh_incident.jsonl")")"
+check "10b  the weekly term alone says RELEASE" "$(verdict_for "$(jq -r '.ratio' <<<"$W_ONLY")")" "RELEASE"
+check "10b2 the 5h term alone does NOT" "$(verdict_for "$(jq -r '.ratio' <<<"$FH")")" "LEVEL2"
+
+plan="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; "$BRAKE" plan ) 2>/dev/null )"
+check "10b3 ...so the PLAN brakes rather than restoring" \
+  "$(awk -F'\t' '$3=="Bulk Worker"{print $1}' <<<"$plan")" "brake"
+explain="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; "$BRAKE" plan --explain ) 2>&1 >/dev/null )"
+case "$explain" in *"binding term : five_hour"*) ok "10b4 --explain names the binding term";; *) bad "10b4 --explain names the binding term" "$explain";; esac
+
+# NEGATIVE DELTAS ARE NOT BURN. The bucket rolling over is not quota returned
+# by work that did not happen; counting it would make the pool read healthiest
+# immediately after it had been drained.
+FHX="$(five_hour_ratio "$(cat "$WORK/fh_expiry.jsonl")")"
+check "10c  a window that only EXPIRES derives zero burn" "$(jq -r '.burn_per_15m' <<<"$FHX")" "0"
+check "10c2 ...and never a negative ratio" "$(jq -r '.ratio' <<<"$FHX")" "0"
+check "10c3 ...and reports no affordable figure from zero burn" "$(jq -r '.affordable_in_flight' <<<"$FHX")" "null"
+
+# RULE 4 APPLIES TO THIS TERM TOO: unmeasured is not "healthy".
+FHN="$(five_hour_ratio '{"ts":"2026-08-25T10:44:00Z","accounts":[{"name":"a","weekly":0.62,"days_left":4.02,"burn_per_day":0.6381}]}')"
+check "10d  a single sample cannot derive a 5h reading" "$(jq -r '.source' <<<"$FHN")" "unavailable"
+check "10d2 ...and fabricates NO ratio" "$(jq -r '.ratio // "none"' <<<"$FHN")" "none"
+case "$(jq -r '.reason' <<<"$FHN")" in *sample*) ok "10d3 ...and says why";; *) bad "10d3 ...and says why" "$(jq -r '.reason' <<<"$FHN")";; esac
+FHS="$(FIVE_HOUR_MIN_WINDOW_MIN=999 five_hour_ratio "$(cat "$WORK/fh_incident.jsonl")")"
+check "10d4 a too-short window is unavailable, not quiet" "$(jq -r '.source' <<<"$FHS")" "unavailable"
+
+# --- the ceiling: a brake that cannot bind must not exit 0 -----------------
+# `maxConcurrentRuns` is enforced PER AGENT and floors at 1, so the concurrency
+# a plan produces is the SUM of the caps it leaves behind. On the real roster
+# that sum (48) exceeds what the pool affords (~11) at every rung of the
+# ladder, and before this check the tool printed 42 `brake` lines and exited 0.
+out="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; "$BRAKE" plan ) 2>&1 >/dev/null )"
+rc=0; ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; "$BRAKE" plan ) >/dev/null 2>&1 || rc=$?
+case "$out" in *"company-wide floor of"*) ok "10e  the plan reports a company-wide floor";; *) bad "10e  the plan reports a company-wide floor" "$out";; esac
+case "$out" in *"affords"*) ok "10e2 ...next to what the 5h bucket affords";; *) bad "10e2 ...next to what the 5h bucket affords" "$out";; esac
+# THE STANDARD FIXTURE IS ITSELF INSUFFICIENT, and that is worth pinning
+# rather than working around: its Critical Holder is exempt at a cap of 20, so
+# 20 of the floor sits on an agent the brake may not touch and no rung clears
+# it. The verdict must blame the untouchable part, not the brakeable one.
+case "$out" in *"21 on agents the brake may not touch"*) ok "10e3 the floor names its untouchable part";; *) bad "10e3 the floor names its untouchable part" "$out";; esac
+
+# A roster that genuinely FITS must NOT cry insufficient. A ceiling check that
+# fires on every plan is noise, and noise is how the real one gets ignored.
+{ echo '#!/usr/bin/env bash'
+  for i in 1 2 3; do
+    printf "printf 'c%s\\tPlain %s\\tidle\\ttrue\\t2\\t\\t0\\t%%s\\n' '%s'\n" "$i" "$i" "$CFG_PLAIN"
+  done
+} > "$WORK/roster_fits.sh"; chmod +x "$WORK/roster_fits.sh"
+out="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_fits.sh"; "$BRAKE" plan ) 2>&1 >/dev/null )"
+rc=0; ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_fits.sh"; "$BRAKE" plan ) >/dev/null 2>&1 || rc=$?
+case "$out" in *INSUFFICIENT*) bad "10e3b a plan that FITS is not INSUFFICIENT" "$out";; *) ok "10e3b a plan that FITS is not INSUFFICIENT";; esac
+check "10e4 ...and exits 0" "$rc" "0"
+
+# A roster the brake provably cannot bind: 40 brakeable agents floor at 40
+# concurrent runs against a pool that affords ~11.
+{ echo '#!/usr/bin/env bash'
+  for i in $(seq 1 40); do
+    printf "printf 'b%s\\\\tWorker %s\\\\tidle\\\\ttrue\\\\t2\\\\t\\\\t0\\\\t%%s\\\\n' '%s'\n" "$i" "$i" "$CFG_PLAIN"
+  done
+} > "$WORK/roster_big.sh"; chmod +x "$WORK/roster_big.sh"
+
+rc=0; out="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_big.sh"; "$BRAKE" plan ) 2>&1 >/dev/null )"
+rc=0; ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_big.sh"; "$BRAKE" plan ) >/dev/null 2>&1 || rc=$?
+check "10f  a plan that cannot bind exits 4, not 0" "$rc" "4"
+case "$out" in *INSUFFICIENT*) ok "10f2 ...and says INSUFFICIENT";; *) bad "10f2 ...and says INSUFFICIENT" "$out";; esac
+case "$out" in *"PER AGENT"*) ok "10f3 ...naming per-agent enforcement as the reason";; *) bad "10f3 ...naming per-agent enforcement as the reason" "$out";; esac
+# Exit 4 is a REPORT, not a refusal: the plan is still correct and still
+# applied, so every agent must still appear in it.
+plan="$( ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_big.sh"; "$BRAKE" plan ) 2>/dev/null )"
+check "10f4 ...while still planning every agent" "$(grep -c '^brake' <<<"$plan")" "40"
+
+# A WRITE FAILURE MUST NOT BE MASKED BY THE CEILING REPORT. A partially applied
+# plan is the more urgent of the two facts, and exit 4 would hide it behind a
+# condition the operator can do nothing about.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$WORK/write_fail.sh"; chmod +x "$WORK/write_fail.sh"
+rc=0; ( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; ROSTER_SOURCE_CMD="$WORK/roster_big.sh"
+        AGENT_WRITE_CMD="$WORK/write_fail.sh"; "$BRAKE" apply --yes ) >/dev/null 2>&1 || rc=$?
+check "10g  a write failure outranks the ceiling report" "$rc" "1"
+
+# The 5h term must never reach the write path on its own account.
+: > "$WORK/captured.tsv"
+( base_env; PACE_SOURCE_CMD="cat $WORK/fh_incident.jsonl"; "$BRAKE" plan ) >/dev/null 2>&1
+check "10h  plan still writes no agent" "$(wc -l < "$WORK/captured.tsv" | tr -d ' ')" "0"
+
 # ===========================================================================
 echo
 echo "passed: $PASS   failed: $FAIL"
