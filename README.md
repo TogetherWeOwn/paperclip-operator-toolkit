@@ -84,7 +84,8 @@ operator-run.
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
 | `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
 | `docs/plugin-package-path.md` | Why `gh-token-broker` shipping from an agent workspace makes deploying code and re-declaring authority the same write (TOG-349), and the operator steps to move it to a host-owned path. |
-| `docs/upstream/` | Five unfiled defect reports against the **Paperclip host**. No agent can reach an upstream tracker; filing them is an operator action. |
+| `docs/upstream/` | Six unfiled defect reports against the **Paperclip host**. No agent can reach an upstream tracker; filing them is an operator action. Newest — `agent-run-credential-isolation.md` — is the one that blocks TOG-393's design: agent runs share a uid and a PID namespace, so no two-agent control on this box is technical. |
+| `docs/adr-root-action-runner.md` | **Design only — ships no executable path.** Whether to build a gated root-action runner (TOG-393). Concludes: build a read-only *unprivileged* host phase; do **not** build an agent-approved root write path, because two keys between two agents is not implementable on this box — one agent's live credentials are readable from another's `/proc`. Read § 4 before proposing any host-side execution. |
 | `docs/teamclaude-big-model-stall.md` | Why teamclaude `:3456` stalls (TOG-378). **Read this before sending anything to that endpoint:** one non-Haiku request blocks the model endpoint for every agent on the box for ~60 s, and giving up early does not release it. |
 
 ## Running the suites
