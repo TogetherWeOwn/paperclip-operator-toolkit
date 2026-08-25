@@ -107,6 +107,18 @@ const RESERVED_QUEUE_ENV = new Set(["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TEMPLATE_RE = /^[A-Za-z0-9_]{1,64}$/;
 const REQUEST_ID_RE = /^REQ-[0-9]{3,9}$/;
+// capability_gate.sh mints its ids with a CAP- prefix (REQ_ID_PREFIX="CAP"),
+// deliberately distinct from the queue's REQ- so a request id can never be
+// aimed at the wrong tool by accident. A capability tool that accepted a REQ-
+// id would forward it to a script that has no such request.
+const CAP_REQUEST_ID_RE = /^CAP-[0-9]{3,9}$/;
+// A capability KEY as capability_gate.sh classifies it, e.g. `github.token` or
+// `omniroute.key.self`. Dotted segments, no slashes, no spaces, no leading
+// dash. The registry decides whether it is KNOWN — this only keeps a
+// shell-hostile or identity-shaped value out of the argv.
+const CAPABILITY_KEY_RE = /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/;
+// The action verb (create, read, rotate, delete, …). Same hygiene.
+const CAPABILITY_ACTION_RE = /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/;
 
 // ---------------------------------------------------------------------------
 // Identity is never a tool argument.
@@ -140,6 +152,10 @@ const REQUEST_ID_RE = /^REQ-[0-9]{3,9}$/;
 const FORBIDDEN_ARGUMENT_NAMES = new Set([
   "requester", "requesterAgentId", "requester_agent_id",
   "reviewer", "reviewerAgentId", "reviewer_agent_id",
+  // The capability gate's third key. `custodian`/`decider` name principals the
+  // server derives from the authenticated session exactly as it does the other
+  // two; an argument by that name is the same attack wearing the custody hat.
+  "custodian", "custodianAgentId", "custodian_agent_id", "decider",
   "agent", "agent_id", "agentId",
   "company", "company_id", "companyId",
   "run", "run_id", "runId",
@@ -190,6 +206,15 @@ export function normalizeConfig(input, configPath = "(inline)") {
   if (typeof cfg.queueScript !== "string" || !path.isAbsolute(cfg.queueScript)) {
     problems.push("queueScript must be an absolute path to org_request_queue.sh");
   }
+  // capabilityScript is OPTIONAL: a deployment may front only the provisioning
+  // queue. When present it must be an absolute path, and main() asserts its
+  // basename is capability_gate.sh — the same guard queueScript gets. The
+  // handler fails closed if a capability tool is called on a server that never
+  // configured it, so a half-configured unit refuses rather than crashes.
+  if (cfg.capabilityScript !== undefined && cfg.capabilityScript !== null
+      && (typeof cfg.capabilityScript !== "string" || !path.isAbsolute(cfg.capabilityScript))) {
+    problems.push("capabilityScript, when set, must be an absolute path to capability_gate.sh");
+  }
   const port = Number(cfg.port ?? 8391);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     problems.push("port must be an integer 1-65535");
@@ -215,6 +240,7 @@ export function normalizeConfig(input, configPath = "(inline)") {
     companyId: cfg.companyId,
     bearerSha256: cfg.bearerSha256.toLowerCase(),
     queueScript: cfg.queueScript,
+    capabilityScript: typeof cfg.capabilityScript === "string" ? cfg.capabilityScript : null,
     port,
     dbContainer: typeof cfg.dbContainer === "string" ? cfg.dbContainer : "paperclip-db",
     // Corroborating (agent, run, company) against heartbeat_runs is the control
@@ -258,6 +284,29 @@ export function assertQueueScript(queueScript, realpathFn = realpathSync) {
     throw new Error(
       `queueScript resolves to ${base}; this transport fronts org_request_queue.sh and nothing else `
       + "(never the provisioner — the queue is the only entry point)",
+    );
+  }
+  return resolved;
+}
+
+// The capability tools front capability_gate.sh and nothing else — the sibling
+// of the queue, for asks whose object is a CAPABILITY rather than an org seat.
+// Same guarantee, same reason: pin the basename at startup so a misconfigured
+// unit refuses to launch rather than shelling out to whatever the path names.
+// Never the provisioner or any grant-effecting tool; the gate DECIDES, it does
+// not GRANT.
+export function assertCapabilityScript(capabilityScript, realpathFn = realpathSync) {
+  let resolved;
+  try {
+    resolved = realpathFn(capabilityScript);
+  } catch {
+    throw new Error(`capabilityScript ${capabilityScript} does not exist`);
+  }
+  const base = path.basename(resolved);
+  if (base !== "capability_gate.sh") {
+    throw new Error(
+      `capabilityScript resolves to ${base}; the capability tools front capability_gate.sh and nothing else `
+      + "(never the provisioner and never a grant-effecting tool — the gate decides, it does not grant)",
     );
   }
   return resolved;
@@ -447,11 +496,25 @@ export function _resetRunCheckCache() {
 }
 
 // ---------------------------------------------------------------------------
-// Tools — exactly two, and neither takes an identity.
+// Tools — none takes an identity.
+//
+// Two front org_request_queue.sh (provisioning — "seat me an agent"); three
+// front capability_gate.sh (capabilities — "hand me a token / an access").
+// Each tool carries a `script` field naming which CLI it forwards to; the
+// handler picks the runner and the arg-builder from it, and a tool with no
+// matching arm fails loudly rather than silently reaching the wrong script.
+//
+// The two scripts are SIBLINGS that differ in the only place that matters —
+// WHO DECIDES. Provisioning derives authority from the delegation ceiling;
+// capabilities from ownership of the domain plus a second custody key. Neither
+// authority rule is duplicated here: this file is authentication and input
+// hygiene, and the decision lives in the script. See capability_gate.sh's
+// header for why the third (countersign) key exists.
 // ---------------------------------------------------------------------------
 
 export const TOOLS = [
   {
+    script: "queue",
     name: "submit_provisioning_request",
     description:
       "Submit an approval-gated request to provision a new descendant agent. You are identified automatically "
@@ -480,6 +543,7 @@ export const TOOLS = [
     },
   },
   {
+    script: "queue",
     name: "review_provisioning_request",
     description:
       "Approve or reject a pending provisioning request. You are identified automatically by the Paperclip tool "
@@ -542,6 +606,113 @@ export const TOOLS = [
       },
     },
   },
+
+  // -------------------------------------------------------------------------
+  // Capability gate (capability_gate.sh, TOG-387). Three tools, mirroring the
+  // gate's three commands. The risk class is DERIVED FROM THE REGISTRY, never
+  // supplied here — there is no --risk field to declare and no way to assert an
+  // ask is routine. The requester supplies FACTS and REASONING; the registry
+  // supplies the CLASS; the gate keeps them apart. This transport supplies the
+  // PRINCIPAL, from the authenticated session, on every call.
+  // -------------------------------------------------------------------------
+  {
+    script: "capability",
+    name: "submit_capability_request",
+    description:
+      "Ask for a CAPABILITY you do not hold — a credential, an access, an org action — stating the facts and the "
+      + "reasoning. You are identified automatically by the Paperclip tool gateway; there is no way to ask on "
+      + "another agent's behalf. The risk class is derived from the capability registry, never from your request: "
+      + "there is no way to declare an ask routine, reversible, or owner-reserved. The gate routes it to the "
+      + "domain owner (and, for a credential, a custodian second key) or, for a reserved matter, stops it for the "
+      + "owner. Returns the request id (CAP-nnn) and who decides.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["capability", "action", "facts", "reasoning"],
+      properties: {
+        capability: {
+          type: "string",
+          description: "The capability key as the registry names it, e.g. github.token or omniroute.key.self.",
+          pattern: CAPABILITY_KEY_RE.source,
+          maxLength: 128,
+        },
+        action: {
+          type: "string",
+          description: "What you want to do with it, e.g. read, create, rotate, delete.",
+          pattern: CAPABILITY_ACTION_RE.source,
+          maxLength: 64,
+        },
+        facts: {
+          type: "string",
+          description:
+            "What is TRUE — what you tried, what failed, what you measured. Audited later, so state it so someone "
+            + "who was not there can check it. The gate enforces a minimum length.",
+          maxLength: 8000,
+        },
+        reasoning: {
+          type: "string",
+          description: "WHY this capability unblocks the work. The gate enforces a minimum length.",
+          maxLength: 8000,
+        },
+        title: { type: "string", description: "Short title for the ask.", maxLength: 200 },
+      },
+    },
+  },
+  {
+    script: "capability",
+    name: "review_capability_request",
+    description:
+      "Decide a pending capability request as its DOMAIN OWNER — the first of up to two keys. You are identified "
+      + "automatically by the Paperclip tool gateway; there is no way to decide as another agent, and authority is "
+      + "re-derived from live state, so a request is refused unless you own its domain and you can never decide "
+      + "your own request. For a credential this approval moves the request to awaiting_custody, where a different "
+      + "custodian must countersign; for a non-credential it is the only key. Every decision carries a reason, an "
+      + "approval as much as a denial.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["request_id", "decision", "reason"],
+      properties: {
+        request_id: { type: "string", description: "The request to decide, e.g. CAP-004.", pattern: CAP_REQUEST_ID_RE.source },
+        decision: { type: "string", enum: ["approve", "reject"], description: "The decision. Decisions are final." },
+        reason: {
+          type: "string",
+          description: "Why. Recorded in the grant log and readable by the requester. Required for approvals too.",
+          maxLength: 8000,
+        },
+      },
+    },
+  },
+  {
+    script: "capability",
+    name: "countersign_capability_request",
+    description:
+      "Countersign a capability request as its CUSTODIAN — the SECOND key, on a request the domain owner has "
+      + "already approved (status awaiting_custody). You are identified automatically by the Paperclip tool "
+      + "gateway; there is no way to countersign as another agent. Authority is re-derived from live state: you "
+      + "are refused unless you hold custody of the credential, and you can be neither the requester nor the "
+      + "domain owner — two keys means two principals. Every decision carries a reason.\n\n"
+      + "TRANSPORT LIMIT, STATED PLAINLY: this server authenticates each call independently, so it makes 'one "
+      + "shell typed both --reviewer and --custodian' impossible. It does NOT make the two authenticated agents "
+      + "two INDEPENDENT principals — on this host a run's gateway credential is readable by any same-uid run, so "
+      + "one actor can drive two corroborated sessions. The custody key is an organizational control on an absent "
+      + "technical boundary until per-run credential isolation lands. Say so in the record; do not read two rows "
+      + "as two keys.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["request_id", "decision", "reason"],
+      properties: {
+        request_id: { type: "string", description: "The request to countersign, e.g. CAP-004.", pattern: CAP_REQUEST_ID_RE.source },
+        decision: { type: "string", enum: ["approve", "reject"], description: "The decision. Decisions are final." },
+        reason: {
+          type: "string",
+          description: "Why. Recorded in the grant log alongside the domain owner's reason. Required for approvals too.",
+          maxLength: 8000,
+        },
+      },
+    },
+  },
 ];
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
@@ -580,6 +751,29 @@ function assertKnownArguments(tool, args) {
 }
 
 /**
+ * Refuse any argument that names a principal.
+ *
+ * Shared by both arg-builders so the rule lives in ONE place: `--requester`,
+ * `--reviewer` and `--custodian` are ALL written from the authenticated
+ * principal, and a tool argument by any of those names is the attack this whole
+ * file exists to stop. Specific before general — assertKnownArguments would
+ * also refuse these as undeclared keys, but only this refusal names the rule
+ * that makes them interesting, so the audit log can tell `requester` (someone
+ * trying to be somebody else) apart from `templat` (a typo).
+ */
+function assertNoIdentityArgument(args) {
+  const bad = Object.keys(args).find((key) => FORBIDDEN_ARGUMENT_NAMES.has(key));
+  if (bad) {
+    throw new HttpError(
+      400, "identity_argument_refused",
+      `'${bad}' is not an argument of this tool. Identity is taken from the authenticated Paperclip principal `
+      + "and can never be supplied as tool input; an identity the model can fill in voids every authorization "
+      + "check below this transport.",
+    );
+  }
+}
+
+/**
  * Translate validated tool arguments into an argv array for the queue script.
  *
  * The identity arguments are supplied HERE, from the authenticated principal,
@@ -593,18 +787,7 @@ export function buildQueueArgs(toolName, args, identity) {
     throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
   }
 
-  // Specific before general: both checks refuse the same key, but only this one
-  // names the rule that makes it interesting. See FORBIDDEN_ARGUMENT_NAMES.
-  const bad = Object.keys(args).find((key) => FORBIDDEN_ARGUMENT_NAMES.has(key));
-  if (bad) {
-    throw new HttpError(
-      400, "identity_argument_refused",
-      `'${bad}' is not an argument of this tool. Identity is taken from the authenticated Paperclip principal `
-      + "and can never be supplied as tool input; an identity the model can fill in voids every authorization "
-      + "check below this transport.",
-    );
-  }
-
+  assertNoIdentityArgument(args);
   assertKnownArguments(tool, args);
 
   if (toolName === "submit_provisioning_request") {
@@ -683,6 +866,85 @@ export function buildQueueArgs(toolName, args, identity) {
   // that adding a tool to TOOLS and forgetting its arm fails loudly instead of
   // returning undefined into execFile.
   throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
+}
+
+/**
+ * Translate validated tool arguments into an argv array for capability_gate.sh.
+ *
+ * Same contract as buildQueueArgs, one CLI over. The principal is written HERE
+ * from the authenticated session as `--requester` / `--reviewer` / `--custodian`
+ * and is structurally unreachable from tool input. capability_gate.sh's own
+ * submit REFUSES `--risk`/`--reversible`/`--reviewer` etc., so even a future
+ * regression here that tried to forward a class or a decider would be refused
+ * by the script — but the transport does not offer the model any such field in
+ * the first place.
+ */
+export function buildCapabilityArgs(toolName, args, identity) {
+  const tool = TOOLS_BY_NAME.get(toolName);
+  if (!tool) {
+    throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
+  }
+
+  assertNoIdentityArgument(args);
+  assertKnownArguments(tool, args);
+
+  if (toolName === "submit_capability_request") {
+    const capability = requireStringArg(args, "capability", CAPABILITY_KEY_RE, 128);
+    const action = requireStringArg(args, "action", CAPABILITY_ACTION_RE, 64);
+    const facts = requireStringArg(args, "facts", null, 8000);
+    const reasoning = requireStringArg(args, "reasoning", null, 8000);
+    // --requester is the authenticated principal, never an argument. The gate
+    // resolves it as an agent id (resolve_agent matches a.id::text as well as
+    // an orgRoleId), exactly as the queue does.
+    const argv = [
+      "submit", "--requester", identity.agentId,
+      "--capability", capability, "--action", action,
+      "--facts", facts, "--reasoning", reasoning,
+    ];
+    const title = optionalStringArg(args, "title", null, 200);
+    if (title) argv.push("--title", title);
+    return argv;
+  }
+
+  if (toolName === "review_capability_request") {
+    const requestId = requireStringArg(args, "request_id", CAP_REQUEST_ID_RE);
+    const decision = requireStringArg(args, "decision", /^(approve|reject)$/);
+    const reason = requireStringArg(args, "reason", null, 8000);
+    return [
+      "review", "--reviewer", identity.agentId, "--request", requestId,
+      decision === "approve" ? "--approve" : "--reject",
+      "--reason", reason,
+    ];
+  }
+
+  if (toolName === "countersign_capability_request") {
+    const requestId = requireStringArg(args, "request_id", CAP_REQUEST_ID_RE);
+    const decision = requireStringArg(args, "decision", /^(approve|reject)$/);
+    const reason = requireStringArg(args, "reason", null, 8000);
+    return [
+      "countersign", "--custodian", identity.agentId, "--request", requestId,
+      decision === "approve" ? "--approve" : "--reject",
+      "--reason", reason,
+    ];
+  }
+
+  // Unreachable while TOOLS_BY_NAME and the arms above agree. Same guard as
+  // buildQueueArgs: a capability tool added to TOOLS without an arm here fails
+  // loudly rather than returning undefined into execFile.
+  throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
+}
+
+// Route a tool to its arg-builder by the `script` field it declares. A tool
+// that names a script with no builder is a programming error, not a caller
+// error, so it throws a 500-class fault rather than a refusal.
+export function buildArgsForTool(toolName, args, identity) {
+  const tool = TOOLS_BY_NAME.get(toolName);
+  if (!tool) {
+    throw new HttpError(400, "unknown_tool", `unknown tool: ${toolName}`);
+  }
+  if (tool.script === "capability") return buildCapabilityArgs(toolName, args, identity);
+  if (tool.script === "queue") return buildQueueArgs(toolName, args, identity);
+  throw new Error(`tool ${toolName} declares no known script binding`);
 }
 
 function requireStringArg(args, name, pattern, maxLength) {
@@ -779,12 +1041,26 @@ function makeSerializer() {
   };
 }
 
-export function makeQueueRunner(cfg, exec = execFileAsync) {
+// A runner for ONE CLI. The queue and the capability gate each get their own
+// (they are separate append-only JSONL files, so each serialises against its
+// own next-id race and not the other's). The environment is built ONCE here so
+// there is a single place a config could ever misdirect tenancy — the queueEnv
+// ordering guarantee below is not duplicated per script.
+export function makeScriptRunner(scriptPath, cfg, exec = execFileAsync) {
   const serialize = makeSerializer();
-  return function runQueue(argv) {
+  return function runScript(argv) {
     return serialize(async () => {
+      if (!scriptPath) {
+        // Fail closed: a capability tool reached a server that never configured
+        // capabilityScript. Better an explicit refusal than execFile(undefined).
+        return {
+          ok: false,
+          text: "this transport is not configured to front that script (capabilityScript is unset in its config)",
+          exitCode: null,
+        };
+      }
       try {
-        const { stdout, stderr } = await exec(cfg.queueScript, argv, {
+        const { stdout, stderr } = await exec(scriptPath, argv, {
           timeout: CLI_TIMEOUT_MS,
           maxBuffer: CLI_MAX_BUFFER,
           // A deliberately minimal environment. The parent process holds
@@ -806,18 +1082,30 @@ export function makeQueueRunner(cfg, exec = execFileAsync) {
         });
         return { ok: true, text: (stdout + stderr).trim(), exitCode: 0 };
       } catch (error) {
-        // The queue's refusals are exit 2 with "REFUSED: ..." on stderr. Those
+        // The scripts' refusals are exit 2 with "REFUSED: ..." on stderr. Those
         // are a legitimate ANSWER, not a transport failure: the caller needs to
         // read them. Surface as an MCP tool error so the model sees the reason.
         const text = [error.stdout ?? "", error.stderr ?? ""].join("").trim();
         return {
           ok: false,
-          text: text || `the request queue failed: ${error.message}`,
+          text: text || `the request script failed: ${error.message}`,
           exitCode: typeof error.code === "number" ? error.code : null,
         };
       }
     });
   };
+}
+
+// Back-compat wrapper: the queue runner is a script runner bound to queueScript.
+// Kept as a named export because the suite and deps injection reference it.
+export function makeQueueRunner(cfg, exec = execFileAsync) {
+  return makeScriptRunner(cfg.queueScript, cfg, exec);
+}
+
+// The capability runner, bound to capabilityScript (which may be null; the
+// runner fails closed in that case).
+export function makeCapabilityRunner(cfg, exec = execFileAsync) {
+  return makeScriptRunner(cfg.capabilityScript, cfg, exec);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,8 +1146,13 @@ function rpcError(id, code, message, data) {
 
 export function createHandler(cfg, deps = {}) {
   const runQueue = deps.runQueue ?? makeQueueRunner(cfg);
+  const runCapability = deps.runCapability ?? makeCapabilityRunner(cfg);
   const corroborateRun = deps.corroborateRun ?? makeRunCorroborator(cfg);
   const audit = deps.audit ?? makeAuditor(cfg);
+  // Pick the runner by the tool's declared script binding. Kept beside the
+  // dispatch so a new script binding is one line in two places, not a switch
+  // scattered through the handler.
+  const runnerFor = (tool) => (tool.script === "capability" ? runCapability : runQueue);
 
   async function handleRpc(message, req) {
     const { id, method, params } = message;
@@ -871,8 +1164,9 @@ export function createHandler(cfg, deps = {}) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
         instructions:
-          "Two tools, both acting as YOU. Identity comes from the Paperclip tool gateway and is never an argument. "
-          + "Approval authority is decided by org_request_queue.sh, not by this transport.",
+          "Every tool acts as YOU. Identity comes from the Paperclip tool gateway and is never an argument. "
+          + "Provisioning authority is decided by org_request_queue.sh and capability authority by "
+          + "capability_gate.sh, not by this transport.",
       });
     }
 
@@ -888,14 +1182,16 @@ export function createHandler(cfg, deps = {}) {
       if (!isPlainObject(args)) {
         throw new HttpError(400, "invalid_argument", "params.arguments must be an object");
       }
-      if (!TOOLS.some((tool) => tool.name === toolName)) {
+      const tool = TOOLS_BY_NAME.get(toolName);
+      if (!tool) {
         // Named explicitly so nobody reads a typo as a missing capability, and
         // so an attempt to reach anything else is recorded rather than guessed.
         throw new HttpError(
           400, "unknown_tool",
-          `unknown tool '${toolName}'. This transport exposes exactly two: `
-          + TOOLS.map((tool) => tool.name).join(", ")
-          + ". There is no tool that runs the provisioner; the queue is the only entry point.",
+          `unknown tool '${toolName}'. This transport exposes: `
+          + TOOLS.map((t) => t.name).join(", ")
+          + ". There is no tool that runs the provisioner or effects a grant; the queue and the gate are the only "
+          + "entry points, and they DECIDE — they do not GRANT.",
         );
       }
 
@@ -905,16 +1201,16 @@ export function createHandler(cfg, deps = {}) {
       const identity = readIdentityHeaders(req.headers, cfg);
       await corroborateRun(identity);
 
-      const argv = buildQueueArgs(toolName, args, identity);
+      const argv = buildArgsForTool(toolName, args, identity);
       const started = Date.now();
-      const result = await runQueue(argv);
+      const result = await runnerFor(tool)(argv);
       audit({
         event: "tool.call",
         tool: toolName,
         agentId: identity.agentId,
         runId: identity.runId,
         correlationId: identity.correlationId,
-        // Keys only. Values live in the queue's own log, which is authoritative.
+        // Keys only. Values live in the script's own log, which is authoritative.
         argumentKeys: Object.keys(args).sort(),
         outcome: result.ok ? "success" : "refused_or_failed",
         exitCode: result.exitCode,
@@ -1117,6 +1413,10 @@ export async function main(argv) {
   assertConfigPermissions(configPath);
   const cfg = loadConfig(configPath);
   assertQueueScript(cfg.queueScript);
+  // Only assert the capability script's basename when one is configured. A
+  // deployment fronting only the provisioning queue leaves it null, and the
+  // handler fails closed if a capability tool is nonetheless called.
+  if (cfg.capabilityScript) assertCapabilityScript(cfg.capabilityScript);
 
   const server = createServer(cfg);
   await new Promise((resolve, reject) => {
@@ -1129,6 +1429,7 @@ export async function main(argv) {
     address: `${BIND_ADDRESS}:${cfg.port}`,
     companyId: cfg.companyId,
     queueScript: cfg.queueScript,
+    capabilityScript: cfg.capabilityScript,
     requireLiveRun: cfg.requireLiveRun,
     tools: TOOLS.map((tool) => tool.name),
   }) + "\n");

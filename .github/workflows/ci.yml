@@ -2221,6 +2221,37 @@ jobs:
             'const unknown = Object.keys(entry).find((key) => key !== "alternative" && key !== "why_it_failed");' \
             'const unknown = undefined;' || rc=1
 
+          # TOG-399. The capability tools carry the SAME identity boundary as the
+          # provisioning tools, one CLI over, so it gets the same mutation
+          # coverage. Each of these is a plausible regression that would let the
+          # transport record a principal the caller could influence.
+
+          # Forge the capability requester. The tempting "simplification" is to
+          # reuse a value already in scope; the acceptance test records the
+          # submitter's authenticated id and this breaks it. Leading space keeps
+          # the needle off the provisioning submit line, which is otherwise
+          # identical.
+          mcp_mutation_check "capability-requester-forged" \
+            ' "submit", "--requester", identity.agentId,' \
+            ' "submit", "--requester", "forged-principal",' || rc=1
+
+          # Forge the custody key. This is THE key the whole two-key rule turns
+          # on: if the countersigner's principal is anything but the
+          # authenticated session, "two keys" is theatre. The acceptance test
+          # asserts the recorded custodian is the authenticated countersigner.
+          mcp_mutation_check "capability-custodian-forged" \
+            '"countersign", "--custodian", identity.agentId, "--request", requestId,' \
+            '"countersign", "--custodian", "forged-principal", "--request", requestId,' || rc=1
+
+          # Drop the capability gate's own identity names from the denylist. They
+          # are already undeclared keys, so the general control still refuses
+          # them — but the SPECIFIC control is what names the rule in the audit
+          # log, telling `custodian` (an impersonation attempt) apart from a
+          # typo. The section-8 by-name test asserts the specific code.
+          mcp_mutation_check "capability-identity-names-dropped" \
+            '"custodian", "custodianAgentId", "custodian_agent_id", "decider",' \
+            '' || rc=1
+
           exit $rc
 
       # The transport must never grow a path to the provisioner. This is a

@@ -105,20 +105,35 @@ set -uo pipefail
 # approval path re-reads state before calling the provisioner.
 #
 # ===========================================================================
-# IDENTITY — THE GAP THIS TOOL INHERITS AND DOES NOT CLOSE
+# IDENTITY — THE GAP, AND WHAT TOG-399 CLOSED (AND DID NOT)
 # ===========================================================================
-# `--requester`, `--reviewer` and `--custodian` are UNAUTHENTICATED FLAGS, the
-# same as org_request_queue.sh's. Measured, not assumed: agent A0 submitted a
-# request as T0 and approved it as O1 in one shell session (TOG-387 verification
-# comment). Separation of duties held only because two different names were
-# typed; nothing can tell that one process typed both.
+# `--requester`, `--reviewer` and `--custodian` are UNAUTHENTICATED FLAGS on
+# this CLI, the same as org_request_queue.sh's. Measured, not assumed: agent A0
+# submitted a request as T0 and approved it as O1 in one shell session (TOG-387
+# verification comment). Separation of duties held only because two different
+# names were typed; nothing on the command line can tell that one process typed
+# both.
 #
-# THEREFORE: this tool is safe ONLY when run by the operator, or reached
-# through a transport that derives identity from an authenticated principal and
-# refuses to accept it as an argument. That transport exists — mcp/, TOG-196 —
-# and forwarding these three commands through it is TOG-387's follow-up, filed
-# as its own issue. Do not expose this tool to agents over any path that lets
-# the caller name itself.
+# THEREFORE: this tool is safe ONLY when run by the operator, or reached through
+# a transport that derives identity from an authenticated principal and refuses
+# to accept it as an argument. That transport is mcp/org-request-mcp.mjs, and
+# TOG-399 forwards these three commands through it: submit_capability_request,
+# review_capability_request, countersign_capability_request write --requester /
+# --reviewer / --custodian from the authenticated session, never from an
+# argument, corroborated against heartbeat_runs. Over that path one process can
+# no longer type two keys. Do not expose this CLI to agents over any OTHER path
+# that lets the caller name itself.
+#
+# WHAT THE TRANSPORT DOES NOT CLOSE — say it in the record. On this host,
+# concurrent agent runs share a uid and a PID namespace (no hidepid), so any run
+# can read another live run's gateway credential out of /proc (32 foreign runs
+# were readable, re-measured TOG-399). One actor can therefore drive TWO
+# corroborated sessions — two real principals to the database, one actor in
+# fact. The custody key is an ORGANIZATIONAL control on an absent TECHNICAL
+# boundary until per-run credential isolation lands
+# (docs/upstream/agent-run-credential-isolation.md). The only technical second
+# key today is the owner/board, whose credential is in no container. Two rows
+# with different principals are NOT proof of two keys; do not read them as such.
 #
 # TEST SEAMS (offline, no database — load-bearing for CI)
 #   ORG_SNAPSHOT  path to a TSV org snapshot used instead of the live database:

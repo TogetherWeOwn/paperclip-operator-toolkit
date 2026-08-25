@@ -26,16 +26,21 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   TOOLS,
   normalizeConfig,
   assertConfigPermissions,
   assertQueueScript,
+  assertCapabilityScript,
   bearerMatches,
   readIdentityHeaders,
   buildQueueArgs,
+  buildCapabilityArgs,
+  buildArgsForTool,
   makeQueueRunner,
+  makeCapabilityRunner,
   makeRunCorroborator,
   createServer,
   HttpError,
@@ -81,6 +86,62 @@ function recordedArgv(dir) {
   if (!existsSync(file)) return null;
   return readFileSync(file, "utf8").split("\n").filter((line) => line.length > 0);
 }
+
+// A stub capability_gate.sh — same discipline as stubQueue. It MUST be named
+// capability_gate.sh (the server refuses to front anything else), and it
+// records to cap-argv.txt so a config that stages BOTH stubs in one dir can
+// tell which script a call reached — that is how the routing test proves a
+// capability tool never lands on the queue and vice versa.
+function stubCapability(dir, body) {
+  const file = path.join(dir, "capability_gate.sh");
+  writeFileSync(
+    file,
+    body ?? `#!/bin/sh
+: > "$(dirname "$0")/cap-argv.txt"
+for a in "$@"; do printf '%s\\n' "$a" >> "$(dirname "$0")/cap-argv.txt"; done
+echo "SUBMITTED CAP-001"
+`,
+    { mode: 0o700 },
+  );
+  return file;
+}
+
+function recordedCapArgv(dir) {
+  const file = path.join(dir, "cap-argv.txt");
+  if (!existsSync(file)) return null;
+  return readFileSync(file, "utf8").split("\n").filter((line) => line.length > 0);
+}
+
+// A config fronting a stub capability_gate.sh (and the queue stub, since
+// queueScript is required). Used by the transport-contract tests, which assert
+// what reaches the CLI without needing the real gate's org resolution.
+function capabilityConfigFor(dir, { queueBody, capabilityBody, ...overrides } = {}) {
+  return normalizeConfig({
+    companyId: COMPANY,
+    bearerSha256: BEARER_SHA,
+    queueScript: stubQueue(dir, queueBody),
+    capabilityScript: stubCapability(dir, capabilityBody),
+    requireLiveRun: false,
+    ...overrides,
+  });
+}
+
+// The REAL capability_gate.sh, two directories up from this test. The
+// end-to-end acceptance drives it — not a stub — so the two-key record is
+// produced by the same code an operator runs.
+//
+// The CI mutation harness copies ONLY mcp/ into a staging dir and runs this
+// suite there, so the sibling gate is absent in that copy. The real-gate
+// acceptance skips when it is missing rather than failing the baseline — the
+// SAME assertions run for real in the primary `mcp-suite` job, where the whole
+// repo is checked out. The three capability mutations are caught by the
+// stub-based section-8 tests, which need no sibling file, so this skip does not
+// blind any mutation guard.
+const REAL_CAPABILITY_GATE = fileURLToPath(new URL("../../capability_gate.sh", import.meta.url));
+const GATE_PRESENT = existsSync(REAL_CAPABILITY_GATE);
+const skipIfNoGate = GATE_PRESENT
+  ? false
+  : "capability_gate.sh absent in this staging copy; the real-gate acceptance runs in the primary mcp-suite job";
 
 // `queueBody` rather than a `queueScript` override: both stubs write to the
 // same filename (they must — the server refuses to front anything not called
@@ -237,6 +298,18 @@ const EVERY_ARGUMENT = {
     no_safer_alternative: "nothing narrower reaches the connection API",
     alternatives_considered: [{ alternative: "read-only access", why_it_failed: "the drift is a write" }],
   },
+  submit_capability_request: {
+    capability: "github.token", action: "read",
+    facts: "measured on 2026-08-25 that the run has no GH_APP binding",
+    reasoning: "the audit cannot read check-runs without a token",
+    title: "read a scoped github token",
+  },
+  review_capability_request: {
+    request_id: "CAP-004", decision: "approve", reason: "the domain owner agrees",
+  },
+  countersign_capability_request: {
+    request_id: "CAP-004", decision: "approve", reason: "custody agrees",
+  },
 };
 
 // Every leaf string a fixture carries, in order. TOG-388 gave one tool array-
@@ -253,16 +326,20 @@ function leafStrings(value) {
   return [];
 }
 
-test("every property a schema advertises is actually read onto the queue's argv", () => {
+test("every property a schema advertises is actually read onto the argv", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   for (const tool of TOOLS) {
     const args = EVERY_ARGUMENT[tool.name];
+    assert.ok(args, `${tool.name} has no EVERY_ARGUMENT fixture; a new tool was added without one`);
     assert.deepEqual(
       Object.keys(args).sort(),
       Object.keys(tool.inputSchema.properties).sort(),
       `${tool.name}: the advertised schema and this fixture disagree; one of them was changed alone`,
     );
-    const argv = buildQueueArgs(tool.name, args, identity);
+    // Route through buildArgsForTool so each tool reaches the arg-builder for
+    // the script it binds to — a capability tool must not be built as a queue
+    // call, and vice versa.
+    const argv = buildArgsForTool(tool.name, args, identity);
     for (const [name, value] of Object.entries(args)) {
       // `decision` is the one property that becomes a flag rather than a value.
       const expected = name === "decision" ? ["--approve"] : leafStrings(value);
@@ -653,17 +730,43 @@ test("the tenancy the queue sees comes from the server, not from queueEnv", asyn
 });
 
 // ===========================================================================
-// 5. Exactly two tools, and never the provisioner.
+// 5. Exactly the sanctioned tools, and never the provisioner.
 // ===========================================================================
 
-test("tools/list advertises exactly the two sanctioned tools", async () => {
+test("tools/list advertises exactly the sanctioned tools, and each binds to a known script", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
     const response = await call(rpc("tools/list", {}));
     assert.equal(response.status, 200);
     const names = response.json.result.tools.map((tool) => tool.name).sort();
-    assert.deepEqual(names, ["review_provisioning_request", "submit_provisioning_request"]);
+    // Two provisioning tools (org_request_queue.sh) + three capability tools
+    // (capability_gate.sh). Pinned literally so a SIXTH tool appearing here is
+    // a deliberate edit to this line, never a silent addition.
+    assert.deepEqual(names, [
+      "countersign_capability_request",
+      "review_capability_request",
+      "review_provisioning_request",
+      "submit_capability_request",
+      "submit_provisioning_request",
+    ]);
+    // Every tool the catalogue advertises must bind to a script the handler
+    // knows how to run. A tool with no binding would reach the "no known script
+    // binding" fault at call time — better to catch it in discovery.
+    for (const tool of TOOLS) {
+      assert.ok(["queue", "capability"].includes(tool.script), `${tool.name} has no known script binding`);
+    }
   });
+});
+
+// The queue tools front org_request_queue.sh; the capability tools front
+// capability_gate.sh. This split is what the handler dispatches on, so pin it.
+test("each tool binds to the correct script", () => {
+  const byName = new Map(TOOLS.map((tool) => [tool.name, tool.script]));
+  assert.equal(byName.get("submit_provisioning_request"), "queue");
+  assert.equal(byName.get("review_provisioning_request"), "queue");
+  assert.equal(byName.get("submit_capability_request"), "capability");
+  assert.equal(byName.get("review_capability_request"), "capability");
+  assert.equal(byName.get("countersign_capability_request"), "capability");
 });
 
 test("no tool reaches the provisioner or the template controls", async () => {
@@ -917,7 +1020,15 @@ test("tools/list works WITHOUT identity headers, or the connection can never go 
     // here would make the connection permanently unhealthy.
     const response = await call(rpc("tools/list", {}), {});
     assert.equal(response.status, 200);
-    assert.equal(response.json.result.tools.length, 2);
+    // Pinned to the TOOLS export rather than a magic number, so adding a tool
+    // updates this in one place. The gateway must see the full catalogue with
+    // credential headers alone; requiring identity here would make the
+    // connection permanently unhealthy.
+    assert.deepEqual(
+      response.json.result.tools.map((tool) => tool.name).sort(),
+      TOOLS.map((tool) => tool.name).sort(),
+    );
+    assert.equal(response.json.result.tools.length, TOOLS.length);
   });
 });
 
@@ -1049,4 +1160,319 @@ echo ok
   assert.equal(marks.length, 10, "not every invocation ran");
   const expected = Array.from({ length: 5 }, () => ["start", "end"]).flat();
   assert.deepEqual(marks, expected, "queue invocations overlapped; ids counted from the queue file can collide");
+});
+
+// ===========================================================================
+// 8. Capability tools — the transport contract (TOG-399).
+//
+// The same property the provisioning tools carry, one CLI over: the principal
+// is the AUTHENTICATED session and is structurally unreachable from tool input.
+// These run against a STUB capability_gate.sh, so they assert exactly what
+// reaches the argv without needing the gate's org resolution. Section 9 then
+// drives the REAL gate end to end.
+// ===========================================================================
+
+test("TOG-399: submit_capability_request forwards --requester from the authenticated principal", async () => {
+  const dir = scratch();
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and there is none",
+          title: "read a scoped token",
+        },
+      }),
+      IDENTITY_HEADERS,
+    );
+    assert.equal(response.json.result.isError, false, response.json.result.content?.[0]?.text);
+    assert.deepEqual(recordedCapArgv(dir), [
+      "submit", "--requester", CALLER,
+      "--capability", "github.token", "--action", "read",
+      "--facts", "the audit run holds no GH_APP binding, measured 2026-08-25",
+      "--reasoning", "reading check-runs needs a scoped installation token and there is none",
+      "--title", "read a scoped token",
+    ]);
+    // The queue script must NOT have run — a capability call routes to the gate.
+    assert.equal(recordedArgv(dir), null, "a capability tool reached the provisioning queue");
+  });
+});
+
+test("TOG-399: review and countersign forward --reviewer / --custodian from the principal", async () => {
+  for (const [name, flag, verb] of [
+    ["review_capability_request", "--reviewer", "review"],
+    ["countersign_capability_request", "--custodian", "countersign"],
+  ]) {
+    const dir = scratch();
+    await withServer(capabilityConfigFor(dir), {}, async (call) => {
+      const response = await call(
+        rpc("tools/call", { name, arguments: { request_id: "CAP-004", decision: "approve", reason: "agrees" } }),
+        IDENTITY_HEADERS,
+      );
+      assert.equal(response.json.result.isError, false, response.json.result.content?.[0]?.text);
+      assert.deepEqual(recordedCapArgv(dir), [
+        verb, flag, CALLER, "--request", "CAP-004", "--approve", "--reason", "agrees",
+      ]);
+    });
+  }
+});
+
+test("TOG-399: a caller naming itself as custodian/decider is refused before the gate", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  // The three provisioning identity names PLUS the capability gate's own.
+  const names = ["custodian", "custodianAgentId", "custodian_agent_id", "decider", "requester", "reviewer"];
+  for (const name of names) {
+    for (const tool of ["submit_capability_request", "review_capability_request", "countersign_capability_request"]) {
+      const args = tool === "submit_capability_request"
+        ? { capability: "github.token", action: "read", facts: "x".repeat(40), reasoning: "y".repeat(40), [name]: VICTIM }
+        : { request_id: "CAP-004", decision: "approve", reason: "r", [name]: VICTIM };
+      assert.throws(
+        () => buildCapabilityArgs(tool, args, identity),
+        (error) => error.code === "identity_argument_refused" && error.message.includes(`'${name}'`),
+        `${tool} accepted an identity argument named '${name}'`,
+      );
+    }
+  }
+});
+
+test("TOG-399: a self-naming argument reaches the gate NOWHERE, over the wire", async () => {
+  const dir = scratch();
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read", facts: "x".repeat(40), reasoning: "y".repeat(40),
+          custodian: VICTIM,
+        },
+      }),
+      IDENTITY_HEADERS,
+    );
+    assert.equal(response.json.result.isError, true);
+    assert.match(response.json.result.content[0].text, /identity_argument_refused/);
+    assert.equal(recordedCapArgv(dir), null, "the gate ran despite a refused identity argument");
+  });
+});
+
+test("TOG-399: a capability request id must be CAP-nnn, never a queue REQ-nnn", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  for (const bad of ["REQ-004", "cap-004", "CAP-", "CAP-4", "004", "CAP-004; rm -rf /"]) {
+    assert.throws(
+      () => buildCapabilityArgs("review_capability_request", { request_id: bad, decision: "approve", reason: "r" }, identity),
+      (error) => error.code === "invalid_argument",
+      `review_capability_request accepted a malformed request id '${bad}'`,
+    );
+  }
+  // The valid shape builds.
+  const argv = buildCapabilityArgs(
+    "review_capability_request", { request_id: "CAP-004", decision: "reject", reason: "no" }, identity);
+  assert.deepEqual(argv, ["review", "--reviewer", CALLER, "--request", "CAP-004", "--reject", "--reason", "no"]);
+});
+
+test("TOG-399: capability tools fail CLOSED when the server never configured a capability script", async () => {
+  const dir = scratch();
+  // A config with NO capabilityScript. normalizeConfig makes it null; the
+  // handler must refuse rather than execFile(undefined).
+  const cfg = normalizeConfig({
+    companyId: COMPANY, bearerSha256: BEARER_SHA, queueScript: stubQueue(dir), requireLiveRun: false,
+  });
+  await withServer(cfg, {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: { capability: "github.token", action: "read", facts: "x".repeat(40), reasoning: "y".repeat(40) },
+      }),
+      IDENTITY_HEADERS,
+    );
+    // Still authenticated and built (the tool is known and identity is present),
+    // but the runner has no script to reach.
+    assert.equal(response.json.result.isError, true);
+    assert.match(response.json.result.content[0].text, /not configured to front that script/);
+  });
+});
+
+test("TOG-399: a provisioning call never reaches the capability gate", async () => {
+  const dir = scratch();
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_provisioning_request",
+        arguments: { template: "E4_AUDIT_ANALYST", title: "analyst" },
+      }),
+      IDENTITY_HEADERS,
+    );
+    assert.equal(response.json.result.isError, false, response.json.result.content?.[0]?.text);
+    // It reached the QUEUE stub, not the capability stub.
+    assert.ok(recordedArgv(dir), "the provisioning call did not reach the queue");
+    assert.equal(recordedCapArgv(dir), null, "a provisioning call reached the capability gate");
+  });
+});
+
+test("assertCapabilityScript refuses a script that is not capability_gate.sh", () => {
+  const dir = scratch();
+  const notTheGate = stubQueue(dir); // named org_request_queue.sh
+  assert.throws(
+    () => assertCapabilityScript(notTheGate),
+    (error) => /capability_gate\.sh and nothing else/.test(error.message),
+  );
+  // And accepts the real one, when it is present in this checkout.
+  if (GATE_PRESENT) {
+    assert.equal(path.basename(assertCapabilityScript(REAL_CAPABILITY_GATE)), "capability_gate.sh");
+  }
+});
+
+// ===========================================================================
+// 9. THE ACCEPTANCE (TOG-399): a request SUBMITTED by one authenticated agent
+//    and COUNTERSIGNED by a DIFFERENT authenticated agent, principals derived
+//    from the transport and unsuppliable by either caller — driven through the
+//    REAL capability_gate.sh, not a stub.
+// ===========================================================================
+
+// Three distinct principals. Each reaches the gate ONLY because a different set
+// of identity headers was on the wire; none of them is ever a tool argument.
+const REQUESTER  = "aaaaaaaa-0000-0000-0000-000000000001";  // asks
+const DOMAIN_OWNER = "bbbbbbbb-0000-0000-0000-000000000002"; // key 1 (orgRole T0)
+const CUSTODIAN  = "cccccccc-0000-0000-0000-000000000003";  // key 2 (B3_SECURITY_CHIEF)
+
+function headersFor(agentId) {
+  return { "x-paperclip-agent-id": agentId, "x-paperclip-company-id": COMPANY, "x-paperclip-run-id": RUN };
+}
+
+// A minimal org: a requester, the T0 domain owner of github.token, and the
+// B3_SECURITY_CHIEF custodian. Tab-separated: id, orgRoleId, template, status,
+// reportsTo, title — the format capability_gate.sh's ORG_SNAPSHOT seam reads.
+function writeOrgSnapshot(dir) {
+  const file = path.join(dir, "org.tsv");
+  const rows = [
+    [REQUESTER, "E4_ANALYST", "E4_AUDIT_ANALYST", "active", DOMAIN_OWNER, "Requester"],
+    [DOMAIN_OWNER, "T0", "T0_TECH_OWNER", "active", "", "Domain Owner"],
+    [CUSTODIAN, "B3", "B3_SECURITY_CHIEF", "active", DOMAIN_OWNER, "Custodian"],
+  ];
+  writeFileSync(file, rows.map((r) => r.join("\t")).join("\n") + "\n");
+  return file;
+}
+
+// Config fronting the REAL gate, with its offline seams (ORG_SNAPSHOT and
+// scratch queue/log paths) passed through queueEnv. requireLiveRun is off:
+// the corroboration leg is proven in section 4; here the point is that three
+// DIFFERENT header identities become three different recorded principals.
+function realGateConfig(dir) {
+  const queuePath = path.join(dir, "cap-queue.jsonl");
+  const logPath = path.join(dir, "cap-grant.jsonl");
+  const cfg = normalizeConfig({
+    companyId: COMPANY,
+    bearerSha256: BEARER_SHA,
+    queueScript: stubQueue(dir),
+    capabilityScript: REAL_CAPABILITY_GATE,
+    requireLiveRun: false,
+    queueEnv: {
+      ORG_SNAPSHOT: writeOrgSnapshot(dir),
+      CAPABILITY_QUEUE: queuePath,
+      CAPABILITY_LOG: logPath,
+    },
+  });
+  return { cfg, queuePath };
+}
+
+test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from the transport", { skip: skipIfNoGate }, async () => {
+  const dir = scratch();
+  const { cfg, queuePath } = realGateConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    // --- agent A submits, identified only by its headers -------------------
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured from /proc on 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and this run has none",
+        },
+      }),
+      headersFor(REQUESTER),
+    );
+    assert.equal(submit.json.result.isError, false, submit.json.result.content?.[0]?.text);
+    const text = submit.json.result.content[0].text;
+    const reqId = (/\b(CAP-\d{3,})\b/.exec(text) || [])[1];
+    assert.ok(reqId, `no CAP id in the submit response: ${text}`);
+    // Two keys, because github.token is a credential.
+    assert.match(text, /TWO KEYS/);
+
+    // --- agent B (the domain owner) turns key 1 ----------------------------
+    const review = await call(
+      rpc("tools/call", {
+        name: "review_capability_request",
+        arguments: { request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only" },
+      }),
+      headersFor(DOMAIN_OWNER),
+    );
+    assert.equal(review.json.result.isError, false, review.json.result.content?.[0]?.text);
+    assert.match(review.json.result.content[0].text, /awaiting_custody|KEY 1/i);
+
+    // --- agent C (the custodian) turns key 2 -------------------------------
+    const counter = await call(
+      rpc("tools/call", {
+        name: "countersign_capability_request",
+        arguments: { request_id: reqId, decision: "approve", reason: "custody agrees, scoped and revocable" },
+      }),
+      headersFor(CUSTODIAN),
+    );
+    assert.equal(counter.json.result.isError, false, counter.json.result.content?.[0]?.text);
+    assert.match(counter.json.result.content[0].text, /APPROVED|two keys/i);
+
+    // --- THE RECORD: principals are the transport's, and all three differ --
+    const rows = readFileSync(queuePath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const submitted = rows.find((r) => r.event === "request.submitted");
+    const reviewed = rows.find((r) => r.event === "request.reviewed");
+    const countersigned = rows.find((r) => r.event === "request.countersigned");
+
+    assert.equal(submitted.requesterAgentId, REQUESTER, "the recorded requester is not the authenticated submitter");
+    assert.equal(reviewed.reviewer, DOMAIN_OWNER, "the recorded domain-owner key is not the authenticated reviewer");
+    assert.equal(countersigned.custodian, CUSTODIAN, "the recorded custody key is not the authenticated countersigner");
+    assert.equal(countersigned.domainOwner, DOMAIN_OWNER);
+    assert.equal(countersigned.status, "approved");
+    // Two keys means two principals, and neither is the requester.
+    assert.notEqual(reviewed.reviewer, countersigned.custodian);
+    assert.notEqual(countersigned.custodian, submitted.requesterAgentId);
+  });
+});
+
+test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even authenticated", { skip: skipIfNoGate }, async () => {
+  const dir = scratch();
+  const { cfg } = realGateConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured on 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and this run has none",
+        },
+      }),
+      headersFor(REQUESTER),
+    );
+    const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+    // Domain owner turns key 1 so the request is awaiting_custody.
+    await call(
+      rpc("tools/call", {
+        name: "review_capability_request",
+        arguments: { request_id: reqId, decision: "approve", reason: "owner agrees" },
+      }),
+      headersFor(DOMAIN_OWNER),
+    );
+    // Now the REQUESTER tries to be the second key. The transport authenticates
+    // it as the requester (it cannot pretend otherwise), and the gate refuses
+    // on separation of duties — the reply carries the reason, not a 500.
+    const counter = await call(
+      rpc("tools/call", {
+        name: "countersign_capability_request",
+        arguments: { request_id: reqId, decision: "approve", reason: "let me approve my own ask" },
+      }),
+      headersFor(REQUESTER),
+    );
+    assert.equal(counter.json.result.isError, true, "the requester was allowed to countersign its own request");
+    assert.match(counter.json.result.content[0].text, /custodian|requester cannot|does not hold custody/i);
+  });
 });

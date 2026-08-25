@@ -1,15 +1,16 @@
 # `org-request-mcp` — the host-side MCP transport
 
-**Issue:** TOG-196 · **Epic:** TOG-194 · **Design evidence:** [`docs/transport-identity.md`](../docs/transport-identity.md)
+**Issue:** TOG-196 (provisioning) · TOG-399 (capability forwarding) · **Epic:** TOG-194 · **Design evidence:** [`docs/transport-identity.md`](../docs/transport-identity.md)
 
 A small HTTP MCP server that runs **on the host** as the operator user and forwards
-exactly two tool calls into `org_request_queue.sh`.
+tool calls into two sibling CLIs: `org_request_queue.sh` (provisioning — "seat me
+an agent") and `capability_gate.sh` (capabilities — "hand me a token / an access").
 
 It is a **transport**. It decides *who is calling*. It decides nothing about
-*what they may do* — that is `org_request_queue.sh`, and it is not duplicated
-here. If you are about to add a rule to this server that decides whether a
-caller *may* do something, it belongs in the queue. Two copies of an
-authorization rule drift, and then there are two places to get it wrong.
+*what they may do* — that is the two scripts, and it is not duplicated here. If
+you are about to add a rule to this server that decides whether a caller *may*
+do something, it belongs in the script. Two copies of an authorization rule
+drift, and then there are two places to get it wrong.
 
 ---
 
@@ -61,7 +62,7 @@ org-request-mcp
   against heartbeat_runs before running anything.
   │  execFile, argv array, no shell
   ▼
-org_request_queue.sh  ← every authorization decision happens here
+org_request_queue.sh / capability_gate.sh  ← every authorization decision here
 ```
 
 ### Three legs, and why the third exists
@@ -130,20 +131,58 @@ leaked* would go on working.
 
 ---
 
-## The two tools
+## The tools
 
-Exactly two, per the issue and condition 5 of the approval. Neither takes an
-identity, and there is no tool that runs the provisioner directly — the queue
-is the only entry point, and CI asserts the string `org_provisioner` never
-appears in the server source.
+Two front `org_request_queue.sh` (provisioning) and three front
+`capability_gate.sh` (capabilities). None takes an identity, and there is no
+tool that runs the provisioner or effects a grant directly — the two scripts
+are the only entry points, and they *decide*, they do not *grant*. CI asserts
+the string `org_provisioner` never appears in the server source.
 
 | Tool | Arguments | Becomes |
 |---|---|---|
 | `submit_provisioning_request` | `template`, `title`, `rationale?`, `supersedes?` | `submit --requester <authenticated agent> …` |
 | `review_provisioning_request` | `request_id`, `decision`, `reason?`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
+| `submit_capability_request` | `capability`, `action`, `facts`, `reasoning`, `title?` | `submit --requester <authenticated agent> …` |
+| `review_capability_request` | `request_id` (CAP-nnn), `decision`, `reason` | `review --reviewer <authenticated agent> …` |
+| `countersign_capability_request` | `request_id` (CAP-nnn), `decision`, `reason` | `countersign --custodian <authenticated agent> …` |
 
-`--requester` and `--reviewer` are written by the server from the authenticated
-principal, every time. They are structurally unreachable from tool input.
+`--requester`, `--reviewer` and `--custodian` are written by the server from
+the authenticated principal, every time. They are structurally unreachable from
+tool input. Each tool declares a `script` field naming which CLI it forwards
+to; the handler picks the runner from it, and the capability CLI is pinned to
+`capability_gate.sh` at startup exactly as the queue is pinned to
+`org_request_queue.sh`.
+
+**The capability gate derives risk from a registry, never from the request.**
+There is no `--risk` / `--reversible` field to declare and no way to assert an
+ask is routine — the requester supplies `facts` and `reasoning`, the registry
+supplies the class, and the gate keeps them apart. A credential ask needs a
+*second* key (the custodian's `countersign`); an owner-reserved ask stops for
+the owner and no reviewer flag decides it.
+
+### What forwarding the custody key does and does not close (TOG-399)
+
+The gap TOG-387 measured: `capability_gate.sh`'s `--requester`/`--reviewer`/
+`--custodian` are unauthenticated flags, so one shell session typed all three
+and "separation of duties" held only because three different names were typed.
+This transport closes that exactly: each call carries its own authenticated
+principal, derived from headers the model cannot set and corroborated against
+`heartbeat_runs`, so **one process can no longer type two keys**.
+
+It does **not** make the two authenticated agents two *independent* principals.
+Measured on this box (TOG-393, re-measured TOG-399): concurrent agent runs share
+a uid and a PID namespace with no `hidepid`, so any run can read another live
+run's `PAPERCLIP_API_KEY` out of `/proc` — 32 foreign runs were readable from an
+ordinary run. One actor holding a second agent's gateway credential produces two
+genuinely-corroborating sessions: two real principals from the database's side,
+one actor in fact. So the custody key is an **organizational** control sitting on
+an absent **technical** boundary until per-run credential isolation lands
+(`docs/upstream/agent-run-credential-isolation.md`). The `countersign` tool's
+own description says this to the model, and the audit record must not be read as
+"two keys" when it may be one actor wearing two hats. The only technical second
+key available today is the owner/board, whose credential is not in any
+container.
 
 **Safer-alternative-first (TOG-388).** The last three properties are not optional
 extras. The queue *refuses* a denial carrying neither `alternatives` nor
@@ -174,24 +213,26 @@ operator account is a supply-chain surface — so the check reads the same schem
 object `tools/list` hands out. Add a property to a schema and it is accepted;
 add it nowhere and it is refused. The two cannot drift.
 
-An argument named `requester`, `reviewer`, `reports_to`, `on_behalf_of` (and a
-dozen more) is **refused by name**. That denylist is now genuinely redundant for
-safety — every name on it is already an undeclared key — and load-bearing only
-for the *message*: `requester` and `templat` are both unknown keys, but only one
-of them is someone trying to be somebody else, and the audit log should say
-which. Before TOG-341 it was the other way round, and the header claimed
-otherwise.
+An argument named `requester`, `reviewer`, `custodian`, `decider`, `reports_to`,
+`on_behalf_of` (and a dozen more) is **refused by name**. That denylist is now
+genuinely redundant for safety — every name on it is already an undeclared key —
+and load-bearing only for the *message*: `custodian` and `templat` are both
+unknown keys, but only one of them is someone trying to be somebody else, and
+the audit log should say which. Before TOG-341 it was the other way round, and
+the header claimed otherwise.
 
 Either way the refusal is loud. A silent drop would let a caller believe it had
 acted as someone else right up until it read the audit log. CI mutates each of
 these controls out in turn and requires the suite to go red.
 
-The queue's own refusals (`REFUSED: template … is above the request ceiling`)
-come back as MCP tool errors with the text intact, not as transport failures —
-a denial the epic designed to be *answerable* must not arrive as an opaque 500.
+The scripts' own refusals (`REFUSED: template … is above the request ceiling`,
+or the gate's `the requester cannot countersign its own request`) come back as
+MCP tool errors with the text intact, not as transport failures — a denial the
+epic designed to be *answerable* must not arrive as an opaque 500.
 
-Deferred to a follow-up, deliberately: `list`, `who`, `thread`, `comment`. The
-issue says two tools initially and the approval repeats it.
+Deferred to a follow-up, deliberately: the read-side tools (`list`, `who`,
+`thread`, `comment`) for both scripts. Forwarding writes is what closes the
+identity gap; reads can follow.
 
 ---
 
