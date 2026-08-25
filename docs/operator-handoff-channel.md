@@ -209,6 +209,30 @@ If the repo ever renames `handoff-channel-README.md` without updating the table,
 **refuses** (exit 2) rather than rendering a verdict. That is TOG-357's rule applied here: a
 comparison that did not happen must never read as an answer.
 
+## The MCP install runbook (TOG-369)
+
+The second entry in that table, and the case that shows the runnable test has a blind spot the
+README's does not.
+
+`TOG-196-mcp-install-runbook.md` was a `.md` file with no shebang and no exec bit, so it was not
+runnable by any of the three tests and the sweep never saw it. It was also the only copy in
+existence — the *instructions* for a root install, telling the operator which files to trust, which
+assertions count as a pass, and when to stop. Rewriting it is a cheaper attack than rewriting any
+script it names, and it had already been silently wrong once: an early revision told the operator
+to write the bearer to `/etc/caddy/org-request-mcp.bearer`, which nothing read (corrected under
+TOG-341). Step 9 also carried an assertion that could not catch the bug it targeted (TOG-365).
+
+So the runbook moved into the repo, at `mcp/deploy/install-runbook.md`, and the channel keeps a
+**pointer** — `mcp/deploy/install-runbook-handoff-pointer.md`, listed in `REQUIRED_MIRRORS`. That
+choice matters: with the pointer required, replacing it with *anything*, including a plausible full
+copy of the runbook, reports as `NOT THE COMMITTED COPY`. Had the channel kept a full mirror
+instead, a subtly edited copy would still be caught, but only by reading a 400-line diff rather
+than by noticing that a signpost had turned into a document.
+
+The general rule this generalises to: **a document that tells the operator what to trust needs a
+tamper-evident home at least as much as the artifacts it names.** The runnable-file sweep will not
+find those documents. They have to be named.
+
 ## What this does not fix
 
 Detection, not prevention. An agent that can write the channel can also edit `channel_exempt.txt`,

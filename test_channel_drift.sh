@@ -90,6 +90,13 @@ Rules:
 - Writing here is a proposal, not a deployment.
 - A RUNNABLE file must be a MIRROR of something already committed.
 '
+# The second required mirror (TOG-369): the pointer that replaced the MCP
+# install runbook in the channel. Same reasoning as the README above — the real
+# repo path, because the table in channel_drift.sh is hardcoded.
+mk "$REPO/mcp/deploy/install-runbook-handoff-pointer.md" '# TOG-196 install runbook — MOVED TO GIT
+
+Read mcp/deploy/install-runbook.md on main. This file is a signpost.
+'
 git -C "$REPO" add -A >/dev/null
 git -C "$REPO" commit -qm fixtures
 git -C "$REPO" branch -M main
@@ -97,16 +104,29 @@ git -C "$REPO" branch -M main
 # An empty exemption file, so the suite never picks up the repo's real one.
 EX="$WORK/exempt.txt"; printf '# none\n' > "$EX"
 
-# The default fabricated world is a CORRECTLY INSTALLED channel: the required
-# README is present and byte-identical. Every "exits 0" assertion in this suite
+# The default fabricated world is a CORRECTLY INSTALLED channel: EVERY required
+# mirror is present and byte-identical. Every "exits 0" assertion in this suite
 # depends on that, and the required-mirror section below is the one place that
 # deliberately breaks it.
 # Loud on failure. A silent `cp` error here would leave every "exits 0"
 # assertion in the suite passing-or-failing for a reason that has nothing to do
 # with what it claims to test.
+#
+# Driven off a table rather than one `cp` per file: adding a REQUIRED_MIRRORS
+# entry to the tool without installing it here turns every "exits 0" assertion
+# red at once, which is loud but names the wrong thing (TOG-369 hit exactly
+# that). Keep this table in step with the tool's.
+REQUIRED_FIXTURES=(
+  "README.md=handoff-channel-README.md"
+  "TOG-196-mcp-install-runbook.md=mcp/deploy/install-runbook-handoff-pointer.md"
+)
 install_readme() {
-  cp "$REPO/handoff-channel-README.md" "$CHAN/README.md" \
-    || { echo "FIXTURE BROKEN: cannot install the canonical README into the channel" >&2; exit 2; }
+  local e b p
+  for e in "${REQUIRED_FIXTURES[@]}"; do
+    b="${e%%=*}"; p="${e#*=}"
+    cp "$REPO/$p" "$CHAN/$b" \
+      || { echo "FIXTURE BROKEN: cannot install the canonical $p into the channel" >&2; exit 2; }
+  done
 }
 reset_channel() { rm -rf "$CHAN"; mkdir -p "$CHAN"; install_readme; }
 # Run a check against the fabricated channel, from inside the fabricated repo.
@@ -304,6 +324,43 @@ else bad "fixture: the required README is NOT runnable by any of the three tests
 run
 want_rc 3 "a required mirror whose bytes are not the committed blob fails"
 want_out 'NOT THE COMMITTED COPY' "a tampered required mirror is not reported as UNVERSIONED"
+
+# --- the runbook pointer (TOG-369) -----------------------------------------
+# The specific case the second entry exists for, and it is NOT the same shape as
+# the README one above. The runbook was moved out of the channel because an
+# agent could rewrite the instructions for a root install; the attack that
+# matters is therefore replacing the pointer with a *plausible full runbook*,
+# not with obvious junk. To an operator that looks like the channel working as
+# intended. Pin that it reads as tampering.
+reset_channel
+mk "$CHAN/TOG-196-mcp-install-runbook.md" '# TOG-196 — install the host-side MCP transport
+
+**From:** CISO · **Epic:** TOG-194
+
+## 1. Place the code
+
+Looks entirely reasonable, and is in no commit.
+'
+run
+want_rc 3 "a full runbook restored over the channel pointer fails"
+want_out 'NOT THE COMMITTED COPY' "restoring the runbook over the pointer reads as tampering"
+want_out 'TOG-196-mcp-install-runbook.md' "the report names the runbook pointer"
+
+# Absent is its own finding, for the same reason it is for the README: the
+# operator installs this one, agents cannot be relied on to.
+reset_channel
+rm -f "$CHAN/TOG-196-mcp-install-runbook.md"
+run
+want_rc 3 "a missing runbook pointer fails"
+want_out 'MISSING' "an absent runbook pointer is reported as absence"
+
+# ...and the compliant case passes, or every assertion above is vacuous: they
+# would all fail against a table entry that can never be satisfied.
+reset_channel
+run
+want_rc 0 "the correctly installed runbook pointer passes"
+want_out 'TOG-196-mcp-install-runbook.md -> mcp/deploy/install-runbook-handoff-pointer.md' \
+         "the pointer is reported as mirroring its committed source"
 
 # An exemption is the one mute path, and it costs a stated reason and a
 # --strict failure, exactly as it does for a drop. No second escape hatch.

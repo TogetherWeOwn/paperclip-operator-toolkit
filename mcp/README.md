@@ -280,10 +280,21 @@ reason, which reads exactly like success.
 
 ## Install
 
-See [`../operator-handoff/TOG-196-mcp-install-runbook.md`](deploy/) — or
-`/paperclip/operator-handoff/TOG-196-mcp-install-runbook.md` on this box.
+The runbook is [`deploy/install-runbook.md`](deploy/install-runbook.md). Read it
+from a checkout you have diffed against `origin/main`, and not from a copy staged
+anywhere else.
+
+It used to live only at `/paperclip/operator-handoff/TOG-196-mcp-install-runbook.md`,
+which is agent-writable — so the document naming which files to trust was itself
+the one file with nothing to compare against. TOG-369 moved it here; what remains
+at that path is a pointer, checked by `channel_drift.sh` as a required mirror of
+[`deploy/install-runbook-handoff-pointer.md`](deploy/install-runbook-handoff-pointer.md).
+A full runbook reappearing at that path is a finding, not a convenience.
+
 Artifacts live in [`deploy/`](deploy/):
 
+- `install-runbook.md` — **the runbook.** Canonical copy; verify against `origin/main`
+- `install-runbook-handoff-pointer.md` — what the handoff channel is required to hold instead
 - `config.example.json` — the server config, and how to generate the bearer/digest pair
 - `Caddyfile.snippet` — TLS, bearer termination, source restriction
 - `org-request-mcp.service` — systemd unit, runs as the operator user

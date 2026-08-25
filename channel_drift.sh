@@ -90,8 +90,20 @@ RUNNABLE_EXTENSIONS=(sh bash py mjs cjs js)
 # So: "<channel basename>=<path in the ref>". Unlike a drop, a required mirror
 # is looked up by NAME, is a finding when ABSENT, and is checked whether or not
 # it is runnable. Content still decides; the name only says which blob to want.
+#
+# TOG-369 adds the second entry, for a related but distinct reason. The MCP
+# install runbook lived ONLY in the channel. It is a `.md` file with no shebang
+# and no exec bit, so it is not runnable by any of the three tests above and the
+# sweep never saw it — while being the document that tells the operator which
+# files to trust and what counts as a pass for a root install. Rewriting it is a
+# cheaper attack than rewriting any script it names, and it has already been
+# silently wrong once (TOG-341). It moved to `mcp/deploy/install-runbook.md`;
+# what stays in the channel is a pointer, named below so that replacing that
+# pointer with ANYTHING — including a convincing copy of the runbook — reports
+# as tampering rather than as a helpful convenience.
 REQUIRED_MIRRORS=(
   "README.md=handoff-channel-README.md"
+  "TOG-196-mcp-install-runbook.md=mcp/deploy/install-runbook-handoff-pointer.md"
 )
 
 is_runnable() {

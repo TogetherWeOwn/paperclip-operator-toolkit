@@ -34,8 +34,9 @@
 #      suite's config cannot quietly ship with it off.
 #
 # So: everything below the gateway is proven end to end. The gateway boundary
-# itself needs the install in `/paperclip/operator-handoff/`, and step 9 of that
-# runbook is where these same assertions get made against the live path.
+# itself needs the host install in `mcp/deploy/install-runbook.md`, and step 9 of
+# that runbook — `mcp/deploy/acceptance_live.sh` — is where these same assertions
+# get made against the live path.
 #
 # Usage:  PAPERCLIP_API_KEY=... PAPERCLIP_API_URL=... COMPANY_ID=... ./acceptance_transport.sh
 set -uo pipefail
