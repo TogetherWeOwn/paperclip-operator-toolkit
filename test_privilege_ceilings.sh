@@ -162,22 +162,11 @@ fi
 refuses_because "T0 (a chief) cannot seat a chief even though B* templates now exist" \
   "exceeds the delegation ceiling of" \
   create --caller T0 --template B4_FINANCE_CHIEF --title "TEST Chief From Chief"
-# NOTE — WHAT THESE TWO ACTUALLY PROVE, which is less than their names suggest.
-# org_provisioner.sh:367 and :370 are independent defence-in-depth assertions
-# ("only P1_PRESIDENT_COO may seat a functional chief", "owner and
-# enterprise-operator roles are never provisionable"), added so a future
-# CEILING_JSON edit cannot silently widen chief-seating authority. But the
-# ceiling check at :356 runs FIRST, and CEILING_JSON (:216) gives no template —
-# P1_PRESIDENT_COO included — a path to P0_* or P1_*, and no non-P1 template a
-# path to any B*. So every case above and below refuses at :356, and :367/:370
-# are unreachable from this suite. Pinning the reason is what makes that
-# visible; the previous must_refuse concealed it behind a green tick.
-#
-# They are therefore UNVERIFIED, not verified-and-passing. Reaching them needs
-# a seam that overrides CEILING_JSON, which org_provisioner.sh does not have.
-# Tracked as a follow-up rather than fixed here: adding such a seam to a tool
-# that creates and deletes agents is a change to the provisioner's own trust
-# boundary, and it does not belong in a test-honesty patch.
+# These live cases intentionally prove the ordinary ceiling fires first. The
+# independent chief-seat and enterprise-role gates are exercised offline by
+# test_provisioning_policy.sh with widened ceiling VALUES passed to the pure
+# create_policy_check function. The mutating provisioner itself has no ceiling
+# override and always supplies its literal catalog.
 refuses_because "no one may provision another enterprise operator" \
   "exceeds the delegation ceiling of" \
   create --caller O1 --template P1_PRESIDENT_COO --title "TEST Shadow President"

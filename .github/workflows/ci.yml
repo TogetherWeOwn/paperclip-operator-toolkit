@@ -16,6 +16,7 @@ name: CI
 #                                       guarded write is guarded — TOG-305
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_responsible_leader.sh        who may approve a provisioning request
+#     test_provisioning_policy.sh       create-policy gates under widened ceilings
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
 #                                       still say what was approved and why
 #     test_decision_notify.sh           whether the REQUESTER ever learns a
@@ -408,6 +409,68 @@ jobs:
       # changed the helper.
       - name: credential-chain pin gates (mutation-gated)
         run: ./test_credential_chain_pin_gate.sh
+
+      # TOG-439. The production ceiling makes two independent defence-in-depth
+      # gates unreachable: a non-P1 chief cannot seat a chief, and nobody may
+      # provision P0/P1. This suite passes widened ceiling VALUES to the same pure
+      # function the mutating CLI calls. The CLI has no environment override, so
+      # CI can reach those gates without widening the provisioner's trust boundary
+      # or touching a database, API, credential or agent.
+      - name: provisioner create-policy suite
+        run: ./test_provisioning_policy.sh
+
+      # The widened-catalog cases above are absence assertions: they also pass if
+      # their setup never reaches the named gate. Delete each independent guard
+      # from a staging copy, after a green baseline, and require its owning case
+      # to go red. Parse + cmp checks prevent a missed mutation from reading as a
+      # successful test.
+      - name: provisioner defence gates are load-bearing (mutation-gated)
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp org_provisioner.sh test_provisioning_policy.sh "$mut/"
+          mkdir -p "$mut/lib" && cp lib/*.sh "$mut/lib/"
+
+          if ! (cd "$mut" && ./test_provisioning_policy.sh > base.out 2>&1); then
+            echo "::error::the UNMUTATED staging copy is red; mutations prove nothing"
+            cat "$mut/base.out"; exit 2
+          fi
+          cp "$mut/lib/provisioning_policy.sh" "$mut/lib/.orig"
+
+          mutate() {
+            local label="$1" start="$2" finish="$3"
+            cp "$mut/lib/.orig" "$mut/lib/provisioning_policy.sh"
+            START="$start" FINISH="$finish" python3 -c '
+          import os, sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          start = source.find(os.environ["START"])
+          if start < 0:
+              raise SystemExit("mutation start anchor missing")
+          finish = source.find(os.environ["FINISH"], start)
+          if finish < 0:
+              raise SystemExit("mutation finish anchor missing")
+          finish += len(os.environ["FINISH"])
+          path.write_text(source[:start] + source[finish:])
+          ' "$mut/lib/provisioning_policy.sh"
+            bash -n "$mut/lib/provisioning_policy.sh" || {
+              echo "::error::$label mutant does not parse"; return 1; }
+            cmp -s "$mut/lib/.orig" "$mut/lib/provisioning_policy.sh" && {
+              echo "::error::$label mutation changed nothing"; return 1; }
+            if (cd "$mut" && ./test_provisioning_policy.sh > out.txt 2>&1); then
+              echo "::error::$label deletion left the suite green"
+              cat "$mut/out.txt"; return 1
+            fi
+            echo "  ok: $label deletion goes red"
+          }
+
+          mutate "chief-seating guard" \
+            '  if [[ "$template" == B[1-5]_*' \
+            '  fi'
+          mutate "enterprise-role guard" \
+            '  if [[ "$template" == P0_*' \
+            '  fi'
 
       # The authorization change from TOG-194: who may approve a provisioning
       # request. Runs here because it fabricates its whole world — a TSV org

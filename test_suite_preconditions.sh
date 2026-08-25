@@ -190,13 +190,10 @@ hdr "7. The two backend-dependent suites no longer define the any-refusal helper
 #     there cannot come from an absent dependency. It is entirely refusals and
 #     still honest. Verified: 91 passed / 0 failed in a container with neither
 #     podman nor psql.
-#   test_responsible_leader.sh keeps must_refuse() and runs offline on an
-#     ORG_SNAPSHOT fixture it writes itself, interleaved with 48 must_allow
-#     controls. Verified: 179 passed / 0 failed in the same container. Not
-#     vacuous, but the helper shape means a refusal from the wrong gate would
-#     still pass. That is a real residual weakness and it is filed separately
-#     rather than fixed here — rewriting 52 assertions in a green 784-line
-#     suite is a different change from making two dishonest suites honest.
+#   test_responsible_leader.sh used to keep must_refuse(), but TOG-439 converted
+#     every refusal to the same reason-pinned shape after the residual weakness
+#     was measured. It remains offline on an ORG_SNAPSHOT fixture it writes
+#     itself, interleaved with positive controls.
 #   acceptance_org_lib.sh is fixture machinery for the acceptance suites, which
 #     run against a stubbed provisioner and a real org snapshot.
 for s in test_request_queue.sh test_privilege_ceilings.sh; do
@@ -207,11 +204,17 @@ for s in test_request_queue.sh test_privilege_ceilings.sh; do
     ok "$s defines the reason-pinned refuses_because()"
   else bad "$s has no refuses_because()"; fi
 done
-# Adjacency control: the grep above must be capable of FINDING a definition,
-# or both assertions pass against a broken pattern.
+# The offline responsible-leader suite has now closed the residual gap too.
 if grep -qE '^\s*must_refuse\(\)' "$HERE/test_responsible_leader.sh"; then
-  ok "control — the pattern does detect a real must_refuse() definition"
-else bad "the must_refuse() pattern matches nothing anywhere; assertions above are vacuous"; fi
+  bad "test_responsible_leader.sh still defines the any-refusal must_refuse()"
+elif grep -qE '^\s*refuses_because\(\)' "$HERE/test_responsible_leader.sh"; then
+  ok "test_responsible_leader.sh defines only reason-pinned refusals"
+else bad "test_responsible_leader.sh has no refusal helper; the check measured nothing"; fi
+# Adjacency control: the definition pattern must still detect a known legitimate
+# must_refuse() in test_gh_token_dispatch.sh, or absence claims above are vacuous.
+if grep -qE '^\s*must_refuse\(\)' "$HERE/test_gh_token_dispatch.sh"; then
+  ok "control — the pattern still detects the intentional credential-dispatch helper"
+else bad "the must_refuse() pattern matches no known control; assertions above are vacuous"; fi
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

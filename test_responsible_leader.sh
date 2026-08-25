@@ -35,23 +35,12 @@ ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
-  if [[ $rc -ne 0 ]] && grep -q REFUSED <<<"$o"; then ok "$d"
-  else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -3; fi; }
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
-# must_refuse asserts only that SOMETHING refused. When two gates can both catch
-# the same input — which TOG-388 made common, since a bare --reject is now
-# missing a reason AND an alternative — that is not enough: the test passes off
-# the neighbour and survives the deletion of the control it names. This pins the
-# refusal to its own message.
-#
-# Hoisted here from section 13, where it was defined 300 lines below its first
-# useful call site, and tightened to require the REFUSED marker as well as the
-# pattern: without it a command that failed for an unrelated reason (a typo in
-# an argument, a missing fixture) satisfies any assertion whose pattern happens
-# to appear in the error text.
-must_refuse_with() { local d="$1" pat="$2"; shift 2; local o; o="$("$@" 2>&1)"; local rc=$?
+# A refusal from the WRONG gate is a failure. This requires the REFUSED marker
+# as well as the named message: without both, a typo, missing fixture, or
+# neighbouring fail-closed gate can satisfy a case it does not test.
+refuses_because() { local d="$1" pat="$2"; shift 2; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -ne 0 ]] && grep -q REFUSED <<<"$o" && grep -qi -- "$pat" <<<"$o"; then ok "$d"
   else bad "$d (rc=$rc, wanted a refusal matching /$pat/)"; sed 's/^/        /' <<<"$o" | head -5; fi; }
 eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (got '$2', wanted '$3')"; }
@@ -188,22 +177,22 @@ hdr "5. Review authority follows derivation"
 must_allow "MGR submits a specialist request" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Backend Engineer"
 REQ="$(last_sub)"
-must_refuse "T0 cannot decide it — an ancestor, but not the RESPONSIBLE one" \
-  "$Q" review --reviewer T0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
-must_refuse "S0 cannot decide it — a peer chief in another subtree" \
-  "$Q" review --reviewer S0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
-must_refuse "O2 Chief of Staff cannot decide it" \
-  "$Q" review --reviewer O2 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
-must_refuse "the requester cannot decide its own request" \
-  "$Q" review --reviewer MGR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "T0 cannot decide it — an ancestor, but not the RESPONSIBLE one" \
+  "not the responsible leader" "$Q" review --reviewer T0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "S0 cannot decide it — a peer chief in another subtree" \
+  "not the responsible leader" "$Q" review --reviewer S0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "O2 Chief of Staff cannot decide it" \
+  "not the responsible leader" "$Q" review --reviewer O2 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "the requester cannot decide its own request" \
+  "not the responsible leader" "$Q" review --reviewer MGR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "DIR — the responsible leader — approves" \
   "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "execution ran as the ORIGINAL REQUESTER, not the reviewer" \
    "$(grep -c -- '--caller MGR' "$CREATE_ARGV")" "1"
 eq "  ...and the reviewer could not redirect placement" \
    "$(grep -c -- '--caller DIR' "$CREATE_ARGV")" "0"
-must_refuse "an approved request cannot be re-decided" \
-  "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "an approved request cannot be re-decided" \
+  "decisions are final" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 
 hdr "6. Standing authority is a floor and a break-glass, and the bypass is recorded"
 reset
@@ -218,8 +207,8 @@ reset
 must_allow "O1 submits a request of its own (escalate mode)" \
   "$Q" submit --requester O1 --template E1_REVIEWER_COACH --title "TESTQ Exec Coach"
 REQ="$(last_sub)"
-must_refuse "O1 cannot approve its own request despite standing authority" \
-  "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "O1 cannot approve its own request despite standing authority" \
+  "requester cannot review its own request" "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "A0 can, as the escalation floor" \
   "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "a floor decision is NOT flagged as an override" \
@@ -237,8 +226,8 @@ rm -f "$QUEUE"
 must_allow "T0 submits a director request" \
   "$Q" submit --requester T0 --template C1_DIRECTOR_BUILDER --title "TESTQ Captive Test"
 REQ="$(last_sub)"
-must_refuse "the steward inside T0's subtree cannot approve T0's request" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "the steward inside T0's subtree cannot approve T0's request" \
+  "captive approver is not a reviewer" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "  ...and the refusal is logged with its reason" \
    "$(jq -r 'select(.reason=="reviewer_is_descendant_of_requester")|.reason' "$GRANT_LOG" | tail -1)" \
    "reviewer_is_descendant_of_requester"
@@ -256,7 +245,7 @@ REQ1="$(last_sub)"
 # deleted outright. The alternative is supplied so the ONLY thing missing is the
 # reason, and the message is matched so the neighbouring gate cannot answer for
 # this one.
-must_refuse_with "a denial without a reason is refused — the requester must know what to answer" \
+refuses_because "a denial without a reason is refused — the requester must know what to answer" \
   "must carry --reason" \
   "$Q" review --reviewer DIR --request "$REQ1" --reject --alternative "raise the per-agent concurrency cap first"
 must_allow "DIR denies with a reason and a safer alternative" \
@@ -272,16 +261,16 @@ must_allow "the requester answers on the record" \
   "$Q" comment --request "$REQ1" --author MGR --body "queue depth: 18/22/40 over three weeks"
 must_allow "the leader may ask for more without denying again" \
   "$Q" comment --request "$REQ1" --author DIR --body "that is enough, resubmit"
-must_refuse "an unrelated agent cannot comment on the exchange" \
-  "$Q" comment --request "$REQ1" --author S0 --body "me too"
-must_refuse "a different requester cannot supersede someone else's denial" \
-  "$Q" submit --requester DIR --template E0_SPECIALIST --title "TESTQ Hijack" --supersedes "$REQ1"
+refuses_because "an unrelated agent cannot comment on the exchange" \
+  "neither the requester nor the responsible leader" "$Q" comment --request "$REQ1" --author S0 --body "me too"
+refuses_because "a different requester cannot supersede someone else's denial" \
+  "only the original requester may supersede" "$Q" submit --requester DIR --template E0_SPECIALIST --title "TESTQ Hijack" --supersedes "$REQ1"
 must_allow "the original requester amends and resubmits" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Engineer, with numbers" \
               --rationale "queue depth 18/22/40" --supersedes "$REQ1"
 REQ2="$(last_sub)"
-must_refuse "a PENDING request cannot be superseded — no forking a live request" \
-  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Fork" --supersedes "$REQ2"
+refuses_because "a PENDING request cannot be superseded — no forking a live request" \
+  "only a rejected or expired request can be superseded" "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Fork" --supersedes "$REQ2"
 out="$("$Q" thread --request "$REQ2" 2>&1)"
 grep -q "show the queue depth per week first" <<<"$out" \
   && ok "thread shows the earlier denial, not just the latest request" \
@@ -344,8 +333,8 @@ REQUEST_TTL_DAYS=-1 "$Q" submit --requester MGR --template E0_SPECIALIST \
   --title "TESTQ Stale" >/dev/null 2>&1 && ok "a request can be submitted with an expiry in the past" \
   || bad "submit failed"
 REQ="$(last_sub)"
-must_refuse "the responsible leader cannot decide an expired request" \
-  "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "the responsible leader cannot decide an expired request" \
+  "expired at" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 # Filter to STATUS-BEARING events, not merely to the request id. The queue also
 # carries comments, acknowledgements and (since TOG-254) notifications for a
 # request; `tail -1` over all of them reads whichever row happens to be last.
@@ -356,24 +345,24 @@ eq "  ...it is marked expired, not escalated" \
    "$(jq -r --arg r "$REQ" 'select(.requestId==$r and (
         .event=="request.submitted" or .event=="request.reviewed" or .event=="request.expired"
       ))|.status' "$QUEUE" | tail -1)" "expired"
-must_refuse "standing authority cannot decide it either — expiry is not an escalation" \
-  "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
+refuses_because "standing authority cannot decide it either — expiry is not an escalation" \
+  "expired at" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 must_allow "it is answered by resubmitting, which returns to the SAME leader" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Fresh" --supersedes "$REQ"
 eq "  ...and that leader is still DIR" "$(who_f 2 MGR E0_SPECIALIST)" "DIR"
 
 hdr "11. Nothing above widened the submit-time ceiling"
 reset
-must_refuse "MGR still cannot request a director" \
-  "$Q" submit --requester MGR --template C1_DIRECTOR_BUILDER --title "TESTQ Over Ceiling"
-must_refuse "T0 still cannot request a President/COO" \
-  "$Q" submit --requester T0 --template P1_PRESIDENT_COO --title "TESTQ Shadow President"
-must_refuse "O2 still cannot request anything" \
-  "$Q" submit --requester O2 --template E0_SPECIALIST --title "TESTQ CoS Helper"
-must_refuse "reportsTo still cannot be supplied through the queue" \
-  "$Q" submit --requester T0 --template E0_SPECIALIST --title "TESTQ Escapee" --reports-to O2
-must_refuse "a chief still cannot disable a template" \
-  "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer T0
+refuses_because "MGR still cannot request a director" \
+  "above the request ceiling" "$Q" submit --requester MGR --template C1_DIRECTOR_BUILDER --title "TESTQ Over Ceiling"
+refuses_because "T0 still cannot request a President/COO" \
+  "above the request ceiling" "$Q" submit --requester T0 --template P1_PRESIDENT_COO --title "TESTQ Shadow President"
+refuses_because "O2 still cannot request anything" \
+  "above the request ceiling" "$Q" submit --requester O2 --template E0_SPECIALIST --title "TESTQ CoS Helper"
+refuses_because "reportsTo still cannot be supplied through the queue" \
+  "reportsTo is never caller-supplied" "$Q" submit --requester T0 --template E0_SPECIALIST --title "TESTQ Escapee" --reports-to O2
+refuses_because "a chief still cannot disable a template" \
+  "does not hold org.disable_template" "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer T0
 must_allow "the steward still can" \
   "$Q" disable-template C1_DIRECTOR_BUILDER --reviewer A0
 
@@ -387,14 +376,14 @@ must_allow "the steward still can" \
 # satisfy it for the wrong reason — so the exact-match cases below prove the
 # legitimate template still gets through, and the reason is asserted too.
 reset
-must_refuse "a wildcard template does not match the whole ceiling" \
-  "$Q" submit --requester MGR --template '.*' --title "TESTQ Regex Wildcard"
-must_refuse "  ...nor does an alternation smuggling a director past a specialist" \
-  "$Q" submit --requester MGR --template 'C1_DIRECTOR_BUILDER|E0_SPECIALIST' --title "TESTQ Regex Alternation"
-must_refuse "  ...nor a single-character wildcard standing in for the last letter" \
-  "$Q" submit --requester MGR --template 'E0_SPECIALIS.' --title "TESTQ Regex Dot"
-must_refuse "  ...nor a character class" \
-  "$Q" submit --requester MGR --template 'E0_SPECIALIS[T]' --title "TESTQ Regex Class"
+refuses_because "a wildcard template does not match the whole ceiling" \
+  "above the request ceiling" "$Q" submit --requester MGR --template '.*' --title "TESTQ Regex Wildcard"
+refuses_because "  ...nor does an alternation smuggling a director past a specialist" \
+  "above the request ceiling" "$Q" submit --requester MGR --template 'C1_DIRECTOR_BUILDER|E0_SPECIALIST' --title "TESTQ Regex Alternation"
+refuses_because "  ...nor a single-character wildcard standing in for the last letter" \
+  "above the request ceiling" "$Q" submit --requester MGR --template 'E0_SPECIALIS.' --title "TESTQ Regex Dot"
+refuses_because "  ...nor a character class" \
+  "above the request ceiling" "$Q" submit --requester MGR --template 'E0_SPECIALIS[T]' --title "TESTQ Regex Class"
 eq "all four refusals are on the ceiling, not on some incidental parse error" \
    "$(jq -r 'select(.event=="request.refused")|.reason' "$GRANT_LOG" | sort | uniq -c | tr -s ' ' | sed 's/^ //')" \
    "4 template_above_request_ceiling"
@@ -442,16 +431,16 @@ grep -q "UNREVIEWED" <<<"$out" \
 eq "check 10 of the access review gets machine-readable input" \
    "$("$Q" overrides --json | jq -r '.bypassedLeader')" "DIR"
 
-must_refuse "the steward that took it cannot clear it — standing authority is not audit authority" \
-  "$Q" ack-override --request "$REQ" --auditor A0 --note "fine by me"
-must_refuse "an agent without audit authority cannot clear it" \
-  "$Q" ack-override --request "$REQ" --auditor DIR --note "looks ok"
-must_refuse "an acknowledgement without a note is refused" \
-  "$Q" ack-override --request "$REQ" --auditor O3
+refuses_because "the steward that took it cannot clear it — standing authority is not audit authority" \
+  "does not hold override-acknowledgement authority" "$Q" ack-override --request "$REQ" --auditor A0 --note "fine by me"
+refuses_because "an agent without audit authority cannot clear it" \
+  "does not hold override-acknowledgement authority" "$Q" ack-override --request "$REQ" --auditor DIR --note "looks ok"
+refuses_because "an acknowledgement without a note is refused" \
+  "acknowledgement must carry a note" "$Q" ack-override --request "$REQ" --auditor O3
 must_allow "O3, the independent audit function, clears it with a note" \
   "$Q" ack-override --request "$REQ" --auditor O3 --note "DIR was dormant 6d; bypass justified"
-must_refuse "and it cannot be cleared twice" \
-  "$Q" ack-override --request "$REQ" --auditor O3 --note "again"
+refuses_because "and it cannot be cleared twice" \
+  "already acknowledged" "$Q" ack-override --request "$REQ" --auditor O3 --note "again"
 
 eq "the open list drains, so the report can return to green" "$(rc_of "$Q" overrides)" "0"
 eq "  ...but the override is still there under --all" \
@@ -471,8 +460,8 @@ grep -q "$REQ" <<<"$out" \
   || { bad "acknowledging dropped the request from the listing"; sed 's/^/        /' <<<"$out"; }
 grep -q "acked" <<<"$out" && ok "  ...and shows as acked rather than open" || bad "no acked marker"
 
-must_refuse "a request carrying no override cannot be acknowledged" \
-  "$Q" ack-override --request "${REQ}-nope" --auditor O3 --note "phantom"
+refuses_because "a request carrying no override cannot be acknowledged" \
+  "carries no standing-authority override" "$Q" ack-override --request "${REQ}-nope" --auditor O3 --note "phantom"
 
 # The not-your-own-override rule has to be exercised by an agent that would
 # OTHERWISE be allowed to clear it, or the test passes on the wrong check. A0
@@ -487,8 +476,8 @@ must_allow "O1 takes a break-glass decision of its own" \
   "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "  ...recorded as an override over DIR" \
    "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override.bypassedLeader' "$QUEUE")" "DIR"
-must_refuse "O1 cannot clear its OWN override, though it does hold acknowledgement authority" \
-  "$Q" ack-override --request "$REQ" --auditor O1 --note "I stand by it"
+refuses_because "O1 cannot clear its OWN override, though it does hold acknowledgement authority" \
+  "took this override; it cannot also clear it" "$Q" ack-override --request "$REQ" --auditor O1 --note "I stand by it"
 eq "  ...and the refused self-acknowledgement is itself logged" \
    "$(jq -r 'select(.reason=="self_acknowledgement")|.reason' "$GRANT_LOG" | tail -1)" "self_acknowledgement"
 must_allow "O3 clears it instead" \
@@ -520,9 +509,9 @@ must_allow "MGR submits, and the template is disabled while it is pending" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Frozen"
 REQ="$(last_sub)"
 must_allow "A0 disables E0_SPECIALIST" "$Q" disable-template E0_SPECIALIST --reviewer A0
-must_refuse_with "the responsible leader cannot approve a disabled template" \
+refuses_because "the responsible leader cannot approve a disabled template" \
   "currently disabled" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
-must_refuse_with "  ...and standing authority cannot approve it either" \
+refuses_because "  ...and standing authority cannot approve it either" \
   "currently disabled" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...the refusal is logged as template_disabled" \
    "$(jq -r 'select(.reason=="template_disabled")|.reason' "$GRANT_LOG" | tail -1)" "template_disabled"
@@ -537,7 +526,7 @@ must_allow "MGR submits, then is demoted before the decision" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Demoted"
 REQ="$(last_sub)"
 sed -i 's/^u-mgr\tMGR\tD1_MANAGER/u-mgr\tMGR\tE0_SPECIALIST/' "$ORG_SNAPSHOT"
-must_refuse_with "a demoted requester's pending request is refused at approval" \
+refuses_because "a demoted requester's pending request is refused at approval" \
   "ceiling changed" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...logged as ceiling_changed_since_submit" \
    "$(jq -r 'select(.reason=="ceiling_changed_since_submit")|.reason' "$GRANT_LOG" | tail -1)" \
@@ -550,7 +539,7 @@ must_allow "MGR submits, then is terminated before the decision" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Terminated"
 REQ="$(last_sub)"
 sed -i 's/^\(u-mgr\tMGR\tD1_MANAGER\t\)idle/\1terminated/' "$ORG_SNAPSHOT"
-must_refuse_with "a terminated requester's pending request is refused at approval" \
+refuses_because "a terminated requester's pending request is refused at approval" \
   "is terminated" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
@@ -563,7 +552,7 @@ must_allow "MGR submits, then is deleted outright" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Vanished"
 REQ="$(last_sub)"
 grep -v '^u-mgr	' "$ORG_SNAPSHOT" > "$ORG_SNAPSHOT.tmp" && mv "$ORG_SNAPSHOT.tmp" "$ORG_SNAPSHOT"
-must_refuse_with "a vanished requester's request is not executable by anyone" \
+refuses_because "a vanished requester's request is not executable by anyone" \
   "no longer exists" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
@@ -572,7 +561,7 @@ must_allow "MGR submits, then MGR is re-created as a different agent" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Impostor"
 REQ="$(last_sub)"
 sed -i 's/^u-mgr\tMGR\t/u-mgr2\tMGR\t/' "$ORG_SNAPSHOT"
-must_refuse_with "authority does not transfer to a new agent holding the same role id" \
+refuses_because "authority does not transfer to a new agent holding the same role id" \
   "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 
@@ -603,17 +592,17 @@ reset
 must_allow "MGR submits a request that will be denied" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Denied"
 D="$(last_sub)"
-must_refuse_with "a denial with a reason but NO alternative is refused" \
+refuses_because "a denial with a reason but NO alternative is refused" \
   "must leave the requester somewhere to go" \
   "$Q" review --reviewer DIR --request "$D" --reason "no" --reject
-must_refuse_with "a denial cannot both offer an alternative and find that none exists" \
+refuses_because "a denial cannot both offer an alternative and find that none exists" \
   "cannot both offer an alternative and find that none exists" \
   "$Q" review --reviewer DIR --request "$D" --reject --reason "no" \
               --alternative "do it another way" --no-safer-alternative "there is no other way"
-must_refuse_with "--no-safer-alternative cannot be an empty gesture" \
+refuses_because "--no-safer-alternative cannot be an empty gesture" \
   "needs the finding itself" \
   "$Q" review --reviewer DIR --request "$D" --reject --reason "no" --no-safer-alternative ""
-must_refuse_with "the approval-side flags are refused on a denial" \
+refuses_because "the approval-side flags are refused on a denial" \
   "belongs on an approval" \
   "$Q" review --reviewer DIR --request "$D" --reject --reason "no" \
               --considered "a smaller ask" --because "it would not help"
@@ -636,20 +625,20 @@ reset
 must_allow "T0 asks for a tooling admin — tools:admin, a risky ask" \
   "$Q" submit --requester T0 --template E2_TOOLING_ADMIN --title "TESTQ Tooling Admin"
 RISKY="$(last_sub)"
-must_refuse_with "granting it with a reason but no alternatives record is refused" \
+refuses_because "granting it with a reason but no alternatives record is refused" \
   "is a RISKY ask" \
   "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "they say they need it"
-must_refuse_with "  ...and the refusal is not something standing authority can shrug off" \
+refuses_because "  ...and the refusal is not something standing authority can shrug off" \
   "is a RISKY ask" \
   "$Q" review --reviewer A0 --request "$RISKY" --approve --reason "they say they need it"
 eq "  ...the refusal is logged as risky_grant_without_alternatives_record" \
    "$(jq -r 'select(.reason=="risky_grant_without_alternatives_record")|.reason' "$GRANT_LOG" | tail -1)" \
    "risky_grant_without_alternatives_record"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
-must_refuse_with "--considered without --because is refused; a list is not an analysis" \
+refuses_because "--considered without --because is refused; a list is not an analysis" \
   "must be followed immediately by --because" \
   "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "needed" --considered "broker it instead"
-must_refuse_with "--because cannot stand alone" \
+refuses_because "--because cannot stand alone" \
   "must follow a --considered" \
   "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "needed" --because "it did not work"
 must_allow "with the record, the risky ask is granted" \
@@ -668,13 +657,13 @@ eq "a granted risky ask is an open item on risk-record" "$(rc_of "$Q" risk-recor
 eq "  ...naming the grant and its risk factors" \
    "$("$Q" risk-record --json | jq -r '"\(.requestId) \(.kind) \(.riskFactors|join(","))"')" \
    "$RISKY grant tools:admin,tools:manage_connections,tools:manage_runtime"
-must_refuse_with "the reviewer cannot clear its own risk record" \
+refuses_because "the reviewer cannot clear its own risk record" \
   "cannot also clear its risk record" \
   "$Q" ack-risk --request "$RISKY" --auditor O1 --note "looks fine to me"
-must_refuse_with "an acknowledgement without a note is refused" \
+refuses_because "an acknowledgement without a note is refused" \
   "not a review finding" \
   "$Q" ack-risk --request "$RISKY" --auditor O3 --note ""
-must_refuse_with "a chief without audit authority cannot clear it" \
+refuses_because "a chief without audit authority cannot clear it" \
   "does not hold override-acknowledgement authority" \
   "$Q" ack-risk --request "$RISKY" --auditor T0 --note "fine"
 must_allow "O3, the independent audit function, closes it with a finding" \
@@ -682,12 +671,12 @@ must_allow "O3, the independent audit function, closes it with a finding" \
 eq "  ...so the open list drains and the report can return to green" "$(rc_of "$Q" risk-record)" "0"
 eq "  ...but the item is still there under --all" \
    "$("$Q" risk-record --all --json | jq -r '.requestId')" "$RISKY"
-must_refuse "and it cannot be cleared twice" \
-  "$Q" ack-risk --request "$RISKY" --auditor O1 --note "again"
+refuses_because "and it cannot be cleared twice" \
+  "already acknowledged" "$Q" ack-risk --request "$RISKY" --auditor O1 --note "again"
 out="$("$Q" thread --request "$RISKY" 2>&1)"
 grep -q "RISK-ACK   by O3" <<<"$out" \
   && ok "the acknowledgement joins the request's own thread" || bad "thread lost the risk acknowledgement"
-must_refuse_with "a routine approval has no risk record to acknowledge" \
+refuses_because "a routine approval has no risk record to acknowledge" \
   "carries no risky grant" \
   "$Q" ack-risk --request "$RISKY-nope" --auditor O3 --note "x"
 
@@ -720,10 +709,10 @@ must_allow "MGR submits against a template that is about to grow a new key" \
 UNC="$(last_sub)"
 ORIG_STUB="$(cat "$PROV")"
 sed -i 's/"E0_SPECIALIST": \[\]/"E0_SPECIALIST": [{"permissionKey":"secrets:read","self":false}]/' "$PROV"
-must_refuse_with "an UNCLASSIFIED permission key stops the decision, it does not pass it" \
+refuses_because "an UNCLASSIFIED permission key stops the decision, it does not pass it" \
   "on neither RISK_KEYS nor NONRISK_KEYS" \
   "$Q" review --reviewer DIR --request "$UNC" --approve --reason "would have sailed through under a denylist"
-must_refuse_with "  ...and it stops a denial too, not only a grant" \
+refuses_because "  ...and it stops a denial too, not only a grant" \
   "on neither RISK_KEYS nor NONRISK_KEYS" \
   "$Q" review --reviewer DIR --request "$UNC" --reject --reason "no" --alternative "something safer"
 eq "  ...logged as unclassified_permission_key naming the key" \
@@ -744,7 +733,7 @@ ORIG_STUB="$(cat "$PROV")"
 printf '#!/usr/bin/env bash\ncase "${1:-}" in ceiling) exec %q ceiling;; *) exit 91;; esac\n' "$TMP/real_stub.sh" > "$TMP/blind.sh"
 printf '%s\n' "$ORIG_STUB" > "$TMP/real_stub.sh"; chmod +x "$TMP/real_stub.sh" "$TMP/blind.sh"
 cp "$TMP/blind.sh" "$PROV"
-must_refuse_with "a catalog that cannot be read refuses the decision" \
+refuses_because "a catalog that cannot be read refuses the decision" \
   "refusing to decide an ask whose risk is unknown" \
   "$Q" review --reviewer O1 --request "$GONE" --approve --reason "risk unknown must not mean risk absent"
 eq "  ...logged as risk_unclassifiable" \

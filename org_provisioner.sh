@@ -80,6 +80,8 @@ GRANT_LOG="${GRANT_LOG:-$HERE/provisioner-grant-log.jsonl}"
 
 # shellcheck source=lib/pcsql.sh
 . "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+# shellcheck source=lib/provisioning_policy.sh
+. "$HERE/lib/provisioning_policy.sh" || { echo "ERROR: missing $HERE/lib/provisioning_policy.sh" >&2; exit 1; }
 
 # Depend on the binary the SELECTED backend needs, not on podman unconditionally
 # — demanding podman on a machine running the psql backend is a false failure.
@@ -343,31 +345,19 @@ cmd_create() {
   caller_template="$(cut -f2 <<<"$row")"
   [[ -n "$caller_template" ]] || die "caller has no permissionProfile; refusing to infer authority."
 
-  # Invariant 2 + 6: requested template must be within the caller's ceiling.
-  local allowed
-  allowed="$(jq -r --arg t "$caller_template" '.[$t] // [] | join(" ")' <<<"$CEILING_JSON")"
-  if ! jq -e --arg c "$caller_template" --arg r "$template" \
-        '(.[$c] // []) | index($r) != null' <<<"$CEILING_JSON" >/dev/null; then
-    echo "  caller template : $caller_template" >&2
-    echo "  requested       : $template" >&2
-    echo "  permitted       : ${allowed:-(none - this role may not provision)}" >&2
+  # Invariants 2 + 6 plus the independent chief/enterprise-role assertions.
+  # The function is pure and sourceable for tests; this mutating entry point has
+  # no environment seam and always supplies the literal catalogs above.
+  if ! create_policy_check "$caller_template" "$template" "$CEILING_JSON" "$TEMPLATES_JSON"; then
+    if [[ "$CREATE_POLICY_REASON" == "template_above_ceiling" ]]; then
+      echo "  caller template : $caller_template" >&2
+      echo "  requested       : $template" >&2
+      echo "  permitted       : ${CREATE_POLICY_ALLOWED:-(none - this role may not provision)}" >&2
+    fi
     log_event "$(jq -cn --arg c "$caller_template" --arg cid "$caller_id" --arg r "$template" \
-      '{event:"create.refused",reason:"template_above_ceiling",callerTemplate:$c,callerAgentId:$cid,requestedTemplate:$r}')"
-    die "template '$template' exceeds the delegation ceiling of '$caller_template'."
-  fi
-
-  jq -e --arg t "$template" 'has($t)' <<<"$TEMPLATES_JSON" >/dev/null \
-    || die "unknown role template: $template"
-
-  # Defence in depth: only the enterprise operator may seat a functional chief,
-  # and it may never seat another enterprise operator. The ceiling already says
-  # this; assert it independently so a future ceiling edit cannot silently
-  # widen chief-seating authority.
-  if [[ "$template" == B[1-5]_* && "$caller_template" != "P1_PRESIDENT_COO" ]]; then
-    die "only P1_PRESIDENT_COO may seat a functional chief (attempted by $caller_template)."
-  fi
-  if [[ "$template" == P0_* || "$template" == P1_* ]]; then
-    die "owner and enterprise-operator roles are never provisionable."
+      --arg reason "$CREATE_POLICY_REASON" \
+      '{event:"create.refused",reason:$reason,callerTemplate:$c,callerAgentId:$cid,requestedTemplate:$r}')"
+    die "$CREATE_POLICY_MESSAGE"
   fi
 
   # Create natively. Invariant 1/3: reportsTo is the CALLER, chosen here.
