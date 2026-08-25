@@ -5,7 +5,8 @@
 // ---------------------------------------------------------------------------
 // WHAT THIS IS
 //   A thin HTTP MCP server that runs ON THE HOST as the operator user and
-//   forwards exactly two tool calls into org_request_queue.sh. It exists
+//   forwards a fixed, enumerated set of tool calls into org_request_queue.sh
+//   and capability_gate.sh — see the TOOLS array, which is the surface. It exists
 //   because a `local_stdio` MCP server is spawned from the Paperclip server
 //   process, which runs INSIDE the container — a container with no podman
 //   socket and one mounted host path. It therefore cannot run the CLIs at all.
@@ -59,7 +60,8 @@
 //   headers. Requiring identity on tools/list would make the connection
 //   permanently unhealthy and unregisterable. Discovery is public-with-bearer;
 //   execution requires a principal. That asymmetry is deliberate, and it is
-//   safe because tools/list reveals only the two tool schemas.
+//   safe because tools/list reveals only the tool SCHEMAS. No request, no
+//   decision and no inbox is reachable without a corroborated principal.
 //
 // NO SECRET IN argv (/proc/*/cmdline is world-readable on a shared host) and
 // no secret in the config file either: the config stores the SHA-256 of the
@@ -498,8 +500,14 @@ export function _resetRunCheckCache() {
 // ---------------------------------------------------------------------------
 // Tools — none takes an identity.
 //
-// Two front org_request_queue.sh (provisioning — "seat me an agent"); three
+// Three front org_request_queue.sh (provisioning — "seat me an agent"); three
 // front capability_gate.sh (capabilities — "hand me a token / an access").
+//
+// FIVE ARE WRITES AND ONE IS A READ, and the read is not a rounding error in
+// that count: an agent principal has no shell on this host, so a surface of
+// writes alone makes the decision record write-only to the very party the
+// decision is about. See read_my_requests. (TOG-312)
+//
 // Each tool carries a `script` field naming which CLI it forwards to; the
 // handler picks the runner and the arg-builder from it, and a tool with no
 // matching arm fails loudly rather than silently reaching the wrong script.
@@ -641,6 +649,59 @@ export const TOOLS = [
         // a hard block on the only sanctioned agent path to the queue.
         ...saferAlternativeProperties(RISKY_TEMPLATE_CLAUSE),
       },
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // The READ (TOG-312). Every other tool on this transport is a write, and for
+  // an agent principal that made the decision record write-only.
+  //
+  // The premise of TOG-196 is that an agent has no shell on the queue host. So
+  // before this tool, `review_provisioning_request`'s own schema could promise
+  // that a reason is "recorded in the grant log and readable by the requester,
+  // who may answer it" while no tool on this transport could read it. TOG-198's
+  // deny-with-reason was, over this door, a conversation with one speaker: the
+  // denial reason, the approval and its seated agent id, and the expiry were
+  // not merely undelivered but UNREACHABLE.
+  //
+  // TWO PROPERTIES THIS TOOL MUST KEEP, both from the TOG-254 decision:
+  //
+  //   1. READING IS NOT ACKING. There is no ack in the queue and this tool
+  //      introduces none. A requester that never calls it cannot hold a request
+  //      open, and calling it grants nobody anything — so acking can never
+  //      become a precondition in the decision path.
+  //   2. DELIVERY IS NOT A SECURITY CONTROL. This reads a record that already
+  //      exists. It cannot block, alter, delay or re-target a decision: the
+  //      only subcommand it can reach is `inbox`, which appends no decision row
+  //      of any kind. (`inbox` does materialise elapsed expiry, exactly as
+  //      `list` has always done — a DERIVED fact the queue's request_state()
+  //      already computes whether or not it is written down, so it changes no
+  //      outcome for anyone. See reap_expired's own header.)
+  //
+  // NO ARGUMENTS AT ALL, which is the strongest available form of "identity is
+  // never a tool argument": the selector is the authenticated agent id and the
+  // schema offers the model nothing to fill in, so there is no shape this call
+  // can take that reads somebody else's decisions.
+  // -------------------------------------------------------------------------
+  {
+    script: "queue",
+    name: "read_my_requests",
+    description:
+      "Read the decisions on YOUR OWN provisioning requests — approved, rejected, expired or failed — each with "
+      + "the reviewer's reason, the safer alternatives they offered, and what you can do next. You are identified "
+      + "automatically by the Paperclip tool gateway: this tool takes NO arguments, so there is no way to read "
+      + "another agent's decisions and no way to ask for anything but your own. A request you submitted that is "
+      + "not listed here has not been decided yet. Reading is not acknowledging — calling this holds nothing "
+      + "open, closes nothing, and changes no decision.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: [],
+      // Deliberately empty, and asserted empty by the suite. A property here
+      // would be the only way this tool could ever be pointed at a principal
+      // other than the caller, so adding one has to be a visible edit that
+      // turns a named test red rather than a quiet convenience.
+      properties: {},
     },
   },
 
@@ -795,12 +856,19 @@ function assertKnownArguments(tool, args) {
   // probe reaches for first.
   const unknown = Object.keys(args).find((key) => !Object.hasOwn(declared, key));
   if (unknown === undefined) return;
+  // A tool may declare NO properties at all (read_my_requests), and "Accepted:"
+  // followed by nothing reads as a truncated message rather than as the whole
+  // answer. Say the actual thing: there is no argument to get right.
+  const accepted = Object.keys(declared);
   throw new HttpError(
     400, "unknown_argument",
     `'${unknown}' is not an argument of ${tool.name}. This tool declares `
     + `additionalProperties: false and that is enforced, not merely advertised: an unrecognised key is `
     + "refused rather than dropped, so a caller is never left believing it said something this transport "
-    + `never heard. Accepted: ${Object.keys(declared).join(", ")}.`,
+    + "never heard. "
+    + (accepted.length === 0
+      ? "This tool takes no arguments at all."
+      : `Accepted: ${accepted.join(", ")}.`),
   );
 }
 
@@ -927,6 +995,15 @@ export function buildQueueArgs(toolName, args, identity) {
     if (reason) argv.push("--reason", reason);
     appendSaferAlternativeArgs(argv, args);
     return argv;
+  }
+
+  if (toolName === "read_my_requests") {
+    // `--for` is the AUTHENTICATED principal, written here exactly as
+    // `--requester` is on submit. An inbox selector the model could fill in is
+    // a way to read another agent's decisions, so there is none: this tool
+    // declares no arguments, `args` is unread, and the subcommand is a literal.
+    // `inbox` and not `list` — `list` shows every request in the company.
+    return ["inbox", "--for", identity.agentId];
   }
 
   // Unreachable while TOOLS_BY_NAME and the arms above agree. It is here so

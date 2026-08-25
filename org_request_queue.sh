@@ -125,7 +125,7 @@ set -uo pipefail
 #                                       --note "..."
 #   ./org_request_queue.sh risk-record [--all] [--json] # exit 1 if any are open
 #   ./org_request_queue.sh ack-risk --request <ID> --auditor <ROLE> --note "..."
-#   ./org_request_queue.sh inbox   --for <ROLE> [--json]  # decisions on MY requests
+#   ./org_request_queue.sh inbox   --for <ROLE|AGENT_ID> [--json] # decisions on MY requests
 #   ./org_request_queue.sh notify  [--list|--drain] [--json]  # delivery outbox
 #   ./org_request_queue.sh log                       # org.read_grant_log
 #   ./org_request_queue.sh disable-template <T> --reviewer <ROLE>
@@ -1812,11 +1812,20 @@ cmd_inbox() {
       *) die "unknown argument: $1";;
     esac
   done
-  [[ -n "$who" ]] || die "usage: inbox --for <ROLE>"
+  [[ -n "$who" ]] || die "usage: inbox --for <ROLE|AGENT_ID>"
   [[ -f "$QUEUE" ]] || { echo "(no decisions)"; return 0; }
   reap_expired
 
-  local rows; rows="$(notify_states | jq -c --arg w "$who" 'select(.role==$w)')"
+  # Match the AGENT ID as well as the role. `--for` names ONE principal, but the
+  # queue records whichever spelling the submitter used: an operator at a shell
+  # types a role id (MGR), and the MCP transport — which has no role to type,
+  # only an authenticated session — passes the agent uuid. Both `role` and
+  # `agent` are written into the notify row at DECISION time from the submission
+  # record, never by whoever is reading, so accepting either widens nothing.
+  # What it stops is one agent's inbox being split in two by which door it
+  # happened to submit through, which would make a decision unreadable to the
+  # very principal it was addressed to. (TOG-312)
+  local rows; rows="$(notify_states | jq -c --arg w "$who" 'select(.role==$w or .agent==$w)')"
   if [[ "$json" == "yes" ]]; then printf '%s\n' "${rows:-}"; return 0; fi
   [[ -n "$rows" ]] || { echo "(no decisions for $who)"; return 0; }
 
