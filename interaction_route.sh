@@ -217,7 +217,7 @@ $(printf '  - %s\n' "${reasons[@]}")
 
 Send it as: kind=request_confirmation  resolverPolicy=board_only
             continuationPolicy=wake_assignee
-            supersedeOnUserComment=false   <-- see below, this one matters
+            payload.supersedeOnUserComment=false   <-- INSIDE payload. See below.
 
 Raise it as a DECISION BRIEF, never a raw question:
   - the decision in one sentence
@@ -228,7 +228,13 @@ Raise it as a DECISION BRIEF, never a raw question:
 
 WARNING: supersedeOnUserComment defaults to TRUE and fires on an OWNER comment,
 so the owner replying on your issue silently cancels the very question you
-asked them. Set it false explicitly.
+asked them. Set it false explicitly — and set it INSIDE payload.
+
+At the top level of the POST body the key is silently discarded: you get 201
+and a stored value of TRUE. Only payload.supersedeOnUserComment is ever read
+(server dist services/issue-thread-interactions.js:298-333). There is no PATCH
+route for it, so the only repair is withdraw + re-POST. Read the flag back off
+the 201 response and assert it took.
 EOF
     fi
     exit "$EX_RESERVED"
@@ -315,19 +321,22 @@ EOF
 VERDICT: AGENT-ROUTABLE — this does not need the owner.
 
 Envelope:
-  kind                    $kind
-  resolverPolicy          board_or_agents      <-- set this EXPLICITLY, always
-  addresseeAgentId        $addressee
-  continuationPolicy      wake_assignee
-  supersedeOnUserComment  false
-  payload.version         1
+  kind                            $kind
+  resolverPolicy                  board_or_agents  <-- set this EXPLICITLY, always
+  addresseeAgentId                $addressee
+  continuationPolicy              wake_assignee
+  payload.version                 1
+  payload.supersedeOnUserComment  false            <-- INSIDE payload, not beside it
 
 Preconditions the server will enforce (all currently satisfied):
   - the addressee is the issue assignee, or the issue is unassigned  (:2946)
   - the addressee did not author this ask                            (:2975)
   - a different run resolves it than created it                      (:2979)
 $( (( ${#warnings[@]} > 0 )) && printf 'Warnings:\n' && printf '  - %s\n' "${warnings[@]}" )
-Two shape traps that cost a round trip each:
+Three shape traps that cost a round trip each:
+  - the supersede flag set BESIDE payload instead of inside it is silently
+    discarded — 201, stored TRUE, no error. Nest it, then read it back off
+    the 201 and assert. Repair is withdraw + re-POST; there is no PATCH route.
   - payload.prompt is capped at 1000 characters. Put the substance in an issue
     comment and reference it.
   - ask_user_questions is multiple-choice ONLY. Every question needs both

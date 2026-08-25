@@ -229,9 +229,32 @@ assignee and is not the author, so B can accept or reject.
 
 ## When you must ask the owner
 
-Set **`supersedeOnUserComment: false`** explicitly. It defaults to `true` and fires on an **owner**
-comment — so the owner replying on your issue silently cancels the very question you asked them.
-This is the single largest cause of the 64% death rate above.
+Set **`payload.supersedeOnUserComment: false`** explicitly. It defaults to `true` and fires on an
+**owner** comment — so the owner replying on your issue silently cancels the very question you asked
+them. This is the single largest cause of the 64% death rate above.
+
+⚠️ **It must be nested inside `payload`.** Set beside `payload` at the top level of the POST body it
+is **silently discarded** — the server returns `201` and stores `true`. Only `input.payload` is ever
+read (`server dist services/issue-thread-interactions.js:298-333`; the write path applies
+`?? true` at `:305/:313/:321/:329` and the fire path tests `payload.supersedeOnUserComment === true`
+at `:296`). Nothing reads a top-level key in any build on the box.
+
+```jsonc
+// WRONG — 201, stored true, self-destruct armed
+{"kind": "...", "payload": {"version": 1, ...}, "supersedeOnUserComment": false}
+
+// RIGHT
+{"kind": "...", "payload": {"version": 1, ..., "supersedeOnUserComment": false}}
+```
+
+This is the general non-strict-envelope trap of correction 1, in its most expensive instance: the
+envelope is a non-strict zod object, so the top-level key is **stripped** before
+`normalizeCreateInteractionInput` runs, and the payload default then applies.
+[`interaction_envelope_lint.sh`](../interaction_envelope_lint.sh) already refuses this exact key —
+run it over the JSON before you POST.
+
+There is **no PATCH route** for the flag, so the only repair is withdraw + re-POST. Read the value
+back off the `201` and assert it took — a create that looks successful is not evidence that it did.
 
 Then raise a decision brief, never a raw question: the decision in one sentence · what you verified,
 cited to a `file:line` or a row count · real options with real costs · your recommendation and the

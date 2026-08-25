@@ -265,6 +265,63 @@ assert_exit "$EX_UNANSWERABLE" "source cmd feeds check (and --strict still fires
 assert_exit "$EX_USAGE" "a failing source cmd is an error, not an empty pass" -- \
   bash -c "INTERACTION_SOURCE_CMD=/nonexistent/nope '$TOOL' check"
 
+printf '\n== §12 the emitted call shape nests supersedeOnUserComment in payload ==\n'
+# The server reads ONLY input.payload.supersedeOnUserComment -- the write path
+# applies `?? true` at services/issue-thread-interactions.js:305/313/321/329 and
+# the fire path tests payload.supersedeOnUserComment === true at :296. No build
+# on the box reads a top-level key, so a top-level key is accepted with 201 and
+# silently dropped, leaving the card armed. Advice that prints the flag as an
+# envelope sibling therefore arms every card that follows it.
+#
+# This section asserts TEXT, like the refusal reasons in §7: here the text IS
+# the product. The tool's entire job is to tell an agent what to put in a POST.
+
+# A defect is the flag used as a *directive* without the payload. prefix.
+# Prose mentions ("supersedeOnUserComment defaults to TRUE") are allowed --
+# only an assignment a caller would copy misleads.
+BAD_SHAPE='(^|[^.])supersedeOnUserComment[[:space:]]*=?[[:space:]]*(false|true)'
+
+# Three outcomes, not two: empty output must not read green. A route that
+# emitted nothing has measured nothing, and "no bad shape found" would
+# otherwise pass for the wrong reason.
+assert_shape() {
+  local label="$1" out="$2"
+  if [[ -z "$out" ]]; then
+    bad "$label" "no advice emitted; this case measured nothing"
+  elif ! grep -q 'payload\.supersedeOnUserComment' <<<"$out"; then
+    bad "$label" "advice never names payload.supersedeOnUserComment"
+  elif grep -Eq "$BAD_SHAPE" <<<"$out"; then
+    bad "$label" "prints the flag as an envelope sibling: $(grep -Eo "$BAD_SHAPE" <<<"$out" | head -1)"
+  else
+    ok "$label"
+  fi
+}
+
+assert_shape "owner-reserved advice nests the flag" \
+  "$("$TOOL" route --spends-money --answer-type choice \
+       --addressee "$A_PEER" --issue-assignee "$A_PEER" --self "$A_SELF" 2>&1)"
+assert_shape "agent-routable advice nests the flag" \
+  "$("$TOOL" route --answer-type choice \
+       --addressee "$A_PEER" --issue-assignee "$A_PEER" --self "$A_SELF" 2>&1)"
+
+# Mutation: restore the pre-TOG-239 bare form and assert BAD_SHAPE fires. A
+# shape assertion that stays green against the shape it forbids asserts nothing.
+MUT2="$WORK/mutant-shape.sh"
+cp "$TOOL" "$MUT2"; chmod +x "$MUT2"
+sed -i 's/^  payload\.supersedeOnUserComment  false/  supersedeOnUserComment  false/' "$MUT2"
+if grep -qE '^  supersedeOnUserComment  false' "$MUT2"; then
+  ok "shape mutation applied"
+  mut_out="$("$MUT2" route --answer-type choice --addressee "$A_PEER" \
+               --issue-assignee "$A_PEER" --self "$A_SELF" 2>&1)"
+  if grep -Eq "$BAD_SHAPE" <<<"$mut_out"; then
+    ok "shape mutation is caught: the bare envelope form is detected"
+  else
+    bad "shape mutation is caught" "BAD_SHAPE missed the reverted form -- §12 is inert"
+  fi
+else
+  bad "shape mutation applied" "sed did not match; the shape mutation check is inert"
+fi
+
 printf '\n---------------------------------------------\n'
 printf 'passed: %d   failed: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
