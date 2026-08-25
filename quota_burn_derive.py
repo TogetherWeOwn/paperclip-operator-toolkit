@@ -8,8 +8,10 @@
 #
 # `quota_brake.sh` picks a brake level from `ratio = burn / sustainable`.
 # Until TOG-440 `burn` was the producer-side `burn_per_day` field in
-# quota-pacing.jsonl. That field is not a rate over a window. Measured across
-# the 217 samples in that file:
+# quota-pacing.jsonl. That field is not a rate over a window. Measured across a
+# 219-sample snapshot of that file, 2026-08-23T18:51:04Z -> 2026-08-25T17:18:13Z
+# — the same snapshot every figure in docs/quota-brake.md and in
+# quota_brake.sh's own header is taken from, so the three can be reconciled:
 #
 #   * 2026-08-25 11:59Z -> 14:30Z: `weekly` is FLAT at 0.86 — the account
 #     burned NOTHING for two and a half hours — while `burn_per_day` decays
@@ -21,9 +23,11 @@
 #   * It is also unstable sample to sample: 0.6381 at 09:29Z, 3.8355 at
 #     09:44Z, a 6x jump on a `weekly` delta of +0.04.
 #   * And it goes NULL under exactly the condition the brake most needs a
-#     reading: from 14:45Z to 17:00Z (the tail of the file) BOTH accounts
-#     report null, which makes `pace_ratio` return empty and the whole brake
-#     exit 5 UNKNOWN. A brake that cannot read its own input is not braking.
+#     reading: null on 203 of 438 account-samples (46%), and on 75 of the 219
+#     rows NO account had a value at all — the whole 14:45Z-17:00Z tail among
+#     others. `pace_ratio` returned empty on every one of those and the brake
+#     exited 5 UNKNOWN, so a third of the time it was not braking, it was
+#     blind. A brake that cannot read its own input is not braking.
 #
 # `weekly` is what the account itself reports and what the cap is enforced
 # against, so a difference of two `weekly` readings over a known interval IS
@@ -44,17 +48,23 @@
 # cannot resolve better than 0.01/dt per day, and each endpoint carries its own
 # +/-0.005, so the worst-case error on the rate is 0.01/dt:
 #
-#     window   resolution      as a multiple of today's sustainable (0.0297/day)
-#      2h      0.1200/day        4.04x      <- coarser than the whole ladder
-#      6h      0.0400/day        1.35x      <- straddles RELEASE|LEVEL1
-#     12h      0.0200/day        0.67x
-#     24h      0.0100/day        0.34x      <- resolves the ladder's first rung
-#     48h      0.0050/day        0.17x
+# Against the snapshot's own last sample (sustainable 0.0270/day), which is
+# where `--sweep` reads its irregular real cadence rather than round numbers:
+#
+#     window   resolution      x sustainable (0.0270/day)      level flips
+#      2h      0.1195/day        4.42x   <- coarser than the whole ladder    26
+#      6h      0.0399/day        1.48x   <- wider than the LEVEL1 band       15
+#     12h      0.0199/day        0.74x                                       17
+#     24h      0.0100/day        0.37x   <- resolves the ladder's rung 1     13
+#     48h      0.0052/day        0.19x                                       13
 #
 # The ladder's tightest decision is RELEASE|LEVEL1 at ratio 1.0. Below a 24h
 # window the quantization error alone can move a sample across that boundary,
-# so a shorter window does not measure faster — it measures noise faster.
-# `--sweep` prints this table against whatever data you give it.
+# so a shorter window does not measure faster — it measures noise faster. The
+# flip count is the second half of the argument: each level change is a PATCH
+# against every brakeable agent, and 2h chatters twice as often as 24h for a
+# reading it cannot resolve. `--sweep` prints this table against current data,
+# so the numbers above are reproducible rather than quoted.
 #
 # ---------------------------------------------------------------------------
 # RESETS. `weekly` returns to ~0 at `weekly_reset_utc`, so a window spanning a
@@ -89,8 +99,10 @@ WEEKLY_QUANTUM = 0.01
 RESET_DROP = 0.2
 
 # The ladder in quota_brake.sh verdict_for(). Kept here so `--series` can show
-# what the brake WOULD have done; test_quota_burn_derive.sh §4 pins these
-# against the thresholds actually compiled into the shell tool.
+# what the brake WOULD have done; test_quota_burn_derive.sh §6 pins these
+# against the thresholds actually compiled into the shell tool — matching
+# numbers with swapped labels would be a silent lie, so the names are pinned in
+# order too.
 LADDER = ((1.0, "RELEASE"), (2.0, "LEVEL1"), (5.0, "LEVEL2"))
 LADDER_TOP = "LEVEL3"
 
