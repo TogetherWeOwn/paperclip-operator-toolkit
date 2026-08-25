@@ -42,6 +42,18 @@
 # Two distinct gates, distinct messages, documented order. Confirmed with a
 # matched control rather than inferred from a single failure.
 #
+# TOG-395 extended that to :2971 with the same method:
+#   assignee, addressed to a peer -> 403 "Only the addressed agent or a board
+#                                         user may resolve this ..."
+#   assignee, no addressee        -> 403 "Agents cannot resolve interactions
+#                                         they created"
+# One field changed, so the field is demonstrably READ. But on an issue
+# assigned to someone else the refusal is :2946 instead, which fires first --
+# so addresseeAgentId can only ever NARROW the eligible set, never widen it.
+# The single exception is an UNASSIGNED issue, where :2792 returns early and
+# the addressee becomes the operative selector. That is the only zero-code
+# agent-to-agent routing path, and `check` used to report it as inert.
+#
 # THE MISTAKE THIS TOOL IS BUILT TO CATCH
 # ---------------------------------------
 # 42 of 49 pending interactions were created by the issue's own assignee. The
@@ -370,10 +382,26 @@ cmd_check() {
       | (($i.status // "pending") == "pending")                      as $pending
       | (($i.hasToolAction // false) | not)                          as $noTool
       | (($i.assigneeAgentId // null) == null)                       as $unassigned
-      | (($i.createdByAgentId // "") != ($i.assigneeAgentId // "~")) as $creatorNotAssignee
       | (($i.effectiveResolverPolicy // "") == "board_or_agents")    as $policyOk
-      | (($i.addresseeAgentId // null) == null
-         or ($i.addresseeAgentId == $i.assigneeAgentId))             as $addresseeOk
+      | (($i.addresseeAgentId // null))                              as $addr
+      # WHO would actually pass the gate. null here means "any agent" — only
+      # possible on an unassigned issue with no addressee. Deriving this once,
+      # instead of assuming the assignee, is what makes the creator bar below
+      # correct for an addressed ask.
+      | (if $addr != null then $addr
+         elif $unassigned then null
+         else ($i.assigneeAgentId // null) end)                      as $resolverId
+      # :2971 NARROWS, it never grants: an addressee only helps where the
+      # assignee gate would already have let them through — i.e. they are the
+      # assignee, or the issue is unassigned (:2792 returns early).
+      # MEASURED (TOG-395): unassigned + addressee refuses a non-addressee with
+      # "Only the addressed agent ... may resolve", NOT "cannot mutate another
+      # agents issue" -- so the assignee gate had already passed. Omitting
+      # $unassigned here reported that configuration as inert, and it is the one
+      # shape that routes an ask to a named agent with no platform change.
+      | ($addr == null or $unassigned
+         or ($addr == ($i.assigneeAgentId // null)))                 as $addresseeOk
+      | (($i.createdByAgentId // "") != ($resolverId // "~"))        as $creatorOk
       # Review eligibility FAILS CLOSED. "in_review + a confirmation" is NOT
       # sufficient: isIssueReviewVerdictInteraction (services/issue-review-
       # policy.js:42-49) additionally requires that this exact interaction was
@@ -389,22 +417,20 @@ cmd_check() {
       | (($i.isReviewVerdict // false)
          and ($i.issueStatus // "") == "in_review"
          and (($i.kind // "") | test("^request_(confirmation|checkbox_confirmation)$"))) as $reviewEligible
-      | ($pending and $noTool and $addresseeOk
-         and ($unassigned or $creatorNotAssignee)
+      | ($pending and $noTool and $addresseeOk and $creatorOk
          and ($policyOk or $reviewEligible))                         as $resolvable
       | {
           identifier: ($i.identifier // "?"),
           kind: ($i.kind // "?"),
           policy: ($i.effectiveResolverPolicy // "?"),
           resolvable: $resolvable,
-          resolver: (if $resolvable then
-                       (if $unassigned then "any agent" else ($i.assigneeAgentId // "?") end)
+          resolver: (if $resolvable then ($resolverId // "any agent")
                      else "nobody" end),
           reason: (
             if ($pending | not) then "not pending"
             elif ($noTool | not) then "tool-action confirmation: always board-only (:2952)"
-            elif (($unassigned or $creatorNotAssignee) | not) then "author IS the assignee: creator bar (:2975)"
-            elif ($addresseeOk | not) then "addressed to a non-assignee, who cannot pass :2946"
+            elif ($creatorOk | not) then "author IS the only eligible resolver: creator bar (:2975)"
+            elif ($addresseeOk | not) then "addressed to a non-assignee on an assigned issue, who cannot pass :2946"
             elif (($policyOk or $reviewEligible) | not) then "board_only and not a review verdict (:2962)"
             else "ok" end)
         }
@@ -413,10 +439,12 @@ cmd_check() {
   # jq -> awk directly. Do NOT round-trip through `IFS=$'\t' read`: tab is IFS
   # whitespace, so a leading empty field is swallowed and every column shifts
   # left, which surfaces as a wrong verdict rather than as a parse error.
-  printf '%-10s %-24s %-16s %-11s %s\n' ISSUE KIND POLICY RESOLVABLE REASON
+  # RESOLVER is the column the reader acts on: "resolvable" without a name is
+  # how an ask ends up owned by nobody. It was computed and then discarded.
+  printf '%-10s %-24s %-16s %-11s %-38s %s\n' ISSUE KIND POLICY RESOLVABLE RESOLVER REASON
   printf '%s\n' "$report" | jq -r '.[] |
-    [.identifier, .kind, .policy, (.resolvable|tostring), .reason] | @tsv' \
-    | awk -F'\t' '{printf "%-10s %-24s %-16s %-11s %s\n", $1,$2,$3,$4,$5}'
+    [.identifier, .kind, .policy, (.resolvable|tostring), .resolver, .reason] | @tsv' \
+    | awk -F'\t' '{printf "%-10s %-24s %-16s %-11s %-38s %s\n", $1,$2,$3,$4,$5,$6}'
 
   local total unresolvable
   total="$(printf '%s\n' "$report" | jq 'length')"

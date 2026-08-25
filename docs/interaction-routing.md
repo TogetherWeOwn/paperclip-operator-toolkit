@@ -88,6 +88,41 @@ owner, so nobody triages them as work.
 **Put those on the operator runbook** as numbered, copy-pasteable steps with a verification command
 and a rollback — one interaction covering the batch, not one per action.
 
+### 4. `addresseeAgentId` narrows. It never grants — except on an unassigned issue.
+
+**TOG-395**, measured by attempting all four combinations from one identity. Each row changes exactly
+one field from its neighbour, so every refusal is attributable.
+
+| issue assignee | `addresseeAgentId` | verbatim refusal to a non-addressee |
+|---|---|---|
+| me | a peer | `Only the addressed agent or a board user may resolve this issue-thread interaction` |
+| me | *null* | `Agents cannot resolve interactions they created` |
+| **another agent** | *null* | `Agent cannot mutate another agent's issue` |
+| **unassigned** | a peer | `Only the addressed agent or a board user may resolve this issue-thread interaction` |
+
+Rows 1–2 prove the field is **read, live** — change only the addressee and the refusal changes. Rows
+2–3 prove the assignee gate (`:2946`) fires **before** the addressee check (`:2971`) is ever reached,
+so **no value of `addresseeAgentId` can widen access on an assigned issue.** Rows 3–4 prove the one
+exception: `:2792` returns early when `assigneeAgentId is null`, so on an **unassigned** issue the
+addressee becomes the operative selector.
+
+> **The unassigned carrier issue is the cheapest agent-to-agent question channel we have.** Create an
+> unassigned issue, create the interaction there addressed to the agent you want, done. No grant, no
+> reassignment, no platform change. Creating it also wakes them (below).
+
+Two more facts from the same read, both of which contradict things previously assumed here:
+
+- **You *can* create an interaction on another agent's issue.** The create route passes
+  `allowVisibleIssueWrite: true` (`routes/issues.js:8406`) — a `201` on an issue assigned to someone
+  else is normal. Only `in_progress` issues are closed off, by the run lock at `:2801`. It is the
+  **respond** route that omits the flag, which is why resolution is assignee-scoped but creation is
+  not.
+- **The addressee wake is not gated on the addressee being able to answer.**
+  `routes/issues.js:8459-8490` fires `heartbeat.wakeup(addresseeAgentId, reason: "interaction_pending")`
+  **unconditionally** on create. So addressing an ask to a non-assignee on an assigned issue wakes an
+  agent the resolve gate will then refuse — a guaranteed-wasted run that presents as routed work.
+  Address a non-assignee only on an unassigned issue.
+
 ---
 
 ## The routing rule
@@ -100,7 +135,8 @@ org structure, reverse a stated owner preference, or commit us publicly?
 Does it need a human capability (root, org/instance admin, a card, a UI click)?
     └─ YES → NOT a question. Operator runbook line, with verification and rollback.
     └─ NO  ↓
-→ An agent answers it. board_or_agents, addressed to that agent, who must be the assignee.
+→ An agent answers it. board_or_agents, addressed to that agent — who must be the
+  assignee, OR the issue must be UNASSIGNED (§4 below). Those are the only two.
 ```
 
 **Spending quota is not spending money.** Claude traffic is subscription; unused weekly quota is
@@ -123,6 +159,10 @@ Exit `0` agent-routable · `3` owner-reserved · `4` would be inert · `5` not a
 
 `INTERACTION_SOURCE_CMD` supplies the rows where a DB is unreachable — neither `psql` nor `podman`
 exists in an agent container.
+
+The **RESOLVER** column names who would actually pass the gate — the addressee if one is set,
+otherwise the assignee, otherwise `any agent` on an unassigned issue. `resolvable: true` without a
+name is how an ask ends up owned by nobody, so act on this column rather than on the boolean.
 
 `isReviewVerdict` **fails closed**: unknown reads as "no". An earlier draft defaulted it to true and,
 against live data, reported a $1.40/month spend approval, a credential placement and a brand decision

@@ -167,6 +167,28 @@ mk '[{"identifier":"UNASSIGNED","issueStatus":"blocked","kind":"ask_user_questio
       "addresseeAgentId":null,"hasToolAction":false}]' unassigned
 assert_reason UNASSIGNED "ok" "$WORK/unassigned.json"
 
+# MEASURED (TOG-395, probe D, 2026-08-25): unassigned + an addressee is the ONE
+# configuration that hands a question to a named agent with no platform change,
+# and the checker used to call it inert. :2792 returns early on an unassigned
+# issue, so the assignee gate never fires and :2971 becomes the operative
+# selector. Proof, responding as a NON-assignee on an unassigned issue:
+#   403 "Only the addressed agent or a board user may resolve this
+#        issue-thread interaction"
+# i.e. the ADDRESSEE refusal -- not "Agent cannot mutate another agent's issue".
+# The matched control is the ADDR fixture above (same shape, issue assigned),
+# where the refusal really is :2946. Assignee is the only field that differs.
+mk '[{"identifier":"UNADDR","issueStatus":"blocked","kind":"ask_user_questions",
+      "status":"pending","effectiveResolverPolicy":"board_or_agents",
+      "createdByAgentId":"'"$A_SELF"'","assigneeAgentId":null,
+      "addresseeAgentId":"'"$A_PEER"'","hasToolAction":false}]' unaddr
+assert_reason UNADDR "ok" "$WORK/unaddr.json"
+
+# ...and the tool must name WHO. "any agent" is wrong once an addressee is set:
+# :2971 narrows an unassigned issue to exactly that agent. Reporting the ask as
+# open to anyone is how it ends up owned by nobody.
+assert_reason UNADDR "$A_PEER" "$WORK/unaddr.json"
+assert_reason UNASSIGNED "any agent" "$WORK/unassigned.json"
+
 printf '\n== §8 check: the review-verdict bypass, and its fail-closed default ==\n'
 # board_only + in_review + a confirmation + NAMED as reviewInteractionId
 # => resolvable, because :2956 skips the policy check at :2962.
