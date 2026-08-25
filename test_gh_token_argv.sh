@@ -341,11 +341,21 @@ else
   bad "config file modes were '${modes:-none observed}', expected exactly 600"
 fi
 
-# `check` makes three authenticated calls. If the config file were only removed
-# by the exit trap, the JWT from call one would sit on disk for the whole run.
+# `check` makes several authenticated calls. If the config file were only
+# removed by the exit trap, the JWT from call one would sit on disk for the
+# whole run, so the property is that the MAXIMUM number of config files alive
+# at once is 1 — never that some particular number of calls happened.
+#
+# The `-ge` is only a vacuity guard: with a single call, "max concurrent is 1"
+# is true by construction and proves nothing. Two calls is the smallest number
+# that can distinguish "removed between calls" from "removed at exit", so two
+# is the threshold. It was 3 until TOG-331, when `check` stopped fetching the
+# installation body twice — the count is an artefact of how many endpoints
+# `check` happens to consult, and pinning the artefact turned a saved API call
+# into a red test in a suite about argv.
 counts="$(grep '^CFGCOUNT' "$CFGLOG" | cut -f2 | sort -u | tr '\n' ',')"
 calls="$(grep -c '^CFGCOUNT' "$CFGLOG")"
-if [[ "$calls" -ge 3 && "$counts" == "1," ]]; then
+if [[ "$calls" -ge 2 && "$counts" == "1," ]]; then
   ok "across $calls calls, only the in-flight config file ever existed"
 else
   bad "config files accumulated during the run: $calls calls, concurrent counts seen: ${counts:-none}"

@@ -112,6 +112,13 @@ case "$url" in
   */access_tokens) printf 'ACCESS_TOKENS\t%s\n' "$url" >> "$STUB_REQLOG" ;;
   *)               printf 'OTHER\t%s\n' "$url" >> "$STUB_REQLOG" ;;
 esac
+# GitHub answers a rejected request with HTTP 200-shaped JSON as far as curl is
+# concerned — curl succeeds, the body is an error object. That is the `check`
+# failure mode of TOG-331: no pipeline in the chain returns non-zero.
+if [ -n "${STUB_ERROR_BODY:-}" ]; then
+  printf '{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}\n'
+  exit 0
+fi
 case "$url" in
   */access_tokens)
     printf '{"token":"%s","expires_at":"2099-01-01T00:00:00Z","permissions":{"contents":"write","organization_administration":"write"},"repository_selection":"all"}\n' "$STUB_MINT_CANARY"
@@ -127,24 +134,74 @@ REQLOG="$TMP/requests.log"
 : > "$REQLOG"
 mint_count() { grep -c '^ACCESS_TOKENS' "$REQLOG" 2>/dev/null || true; }
 
+# When set, the stub answers every call with an error object instead of a
+# plausible body. Section 6 uses it for the `check` arm. Empty by default.
+STUB_ERROR_BODY=""
+
+# --- stub openssl: signing fails, everything else does not (TOG-331) ----------
+# The reported bug is a PEM that is READABLE but unusable — truncated, in the
+# wrong format, or a key this OpenSSL build will not load. In that state
+# `openssl base64` keeps working and only `dgst -sign` fails, which is exactly
+# what makes the bug reachable: the header and payload encode cleanly, the
+# signature comes back empty, and the JWT is emitted with a trailing dot.
+#
+# So these stubs delegate to the REAL openssl for everything and intercept only
+# `-sign`. A stub that failed unconditionally would break b64url too, the tool
+# would die at the header/payload guard, and the suite would go green having
+# tested a different line. Section 6 asserts that specificity before using them.
+#
+# Two variants, because they fail differently and only one is caught by status:
+#   bin-badsign     -sign exits non-zero        pipefail sees it
+#   bin-silentsign  -sign exits 0, writes nothing   pipefail sees 0 all the way
+# The second is why `[[ -n "$sig" ]]` exists alongside the `||` in app_jwt.
+REAL_OPENSSL="$(command -v openssl)"
+export REAL_OPENSSL
+mkdir -p "$TMP/bin-badsign" "$TMP/bin-silentsign"
+cat > "$TMP/bin-badsign/openssl" <<'STUBSSL'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "-sign" ]; then
+    echo "openssl: unable to load key (test stub)" >&2
+    exit 1
+  fi
+done
+exec "$REAL_OPENSSL" "$@"
+STUBSSL
+cat > "$TMP/bin-silentsign/openssl" <<'STUBSSL'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "-sign" ]; then exit 0; fi
+done
+exec "$REAL_OPENSSL" "$@"
+STUBSSL
+chmod +x "$TMP/bin-badsign/openssl" "$TMP/bin-silentsign/openssl"
+
 # --- runner -------------------------------------------------------------------
 # `env -i` is the safety property, not tidiness. With a real GITHUB_APP_PEM
 # readable and an inherited environment, a regressed tool would mint a REAL
 # token while the suite ran.
 RC=0; OUT=""; ERR=""; MINTS=0
-run_tool() { # run_tool [--no-creds] <args...>
-  local creds="$TMP"
-  if [[ "${1:-}" == "--no-creds" ]]; then creds="$TMP/no-creds"; shift; fi
+run_tool() { # run_tool [--no-creds] [--bin <dir>] <args...>
+  local creds="$TMP" prefix=""
+  while :; do
+    case "${1:-}" in
+      --no-creds) creds="$TMP/no-creds"; shift ;;
+      --bin)      prefix="$2:"; shift 2 ;;
+      *)          break ;;
+    esac
+  done
   local before after
   before="$(mint_count)"
   OUT="$(env -i \
-    PATH="$TMP/bin:$PATH" \
+    PATH="$prefix$TMP/bin:$PATH" \
     HOME="$TMP" \
     TMPDIR="$TMP" \
     GITHUB_APP_PEM="$creds/fake-key.pem" \
     GITHUB_APP_ENV="$creds/fake.env" \
     STUB_REQLOG="$REQLOG" \
     STUB_MINT_CANARY="$MINT_CANARY" \
+    STUB_ERROR_BODY="$STUB_ERROR_BODY" \
+    REAL_OPENSSL="$REAL_OPENSSL" \
     bash "$TOOL" "$@" 2>"$TMP/stderr")"
   RC=$?
   ERR="$(cat "$TMP/stderr")"
@@ -287,6 +344,96 @@ used="$(env -i PATH="$TMP/bin:$PATH" HOME="$TMP" TMPDIR="$TMP" \
 [[ "$used" == "USED[$MINT_CANARY]" ]] \
   && ok 'tok="$(gh_token.sh token)" && use "$tok" — still works' \
   || bad "the real minting idiom broke: got [$(head -c 60 <<<"$used")]"
+
+# ------------------------------------------------------------------------------
+hdr "6. A PARTIAL failure must not exit 0 either (TOG-331)"
+# Sections 2-5 cover the total failure: the wrong subcommand. This section
+# covers the one TOG-201 explicitly left open — the RIGHT subcommand, reached,
+# doing its work badly. `jwt) app_jwt; echo ;;` returned echo's status, which
+# is 0 whatever happened above it, and app_jwt could not report a failed
+# signature anyway. So a readable-but-unusable PEM produced a JWT with an empty
+# signature, exit 0, and an operator debugging GitHub's 401 as a permissions
+# problem. Low severity — an unsigned JWT mints nothing — but it aimed the
+# reader at the wrong subsystem, which is the same cost as TOG-193 and TOG-201.
+
+# The fixture, before anything depends on it. "openssl fails" could mean "there
+# is no openssl at all", which breaks b64url too — the tool would then die at
+# the header/payload guard and every assertion below would pass while testing a
+# line other than the reported one. Assert the stub is specific to signing.
+if printf 'x' | "$TMP/bin-badsign/openssl" base64 -A >/dev/null 2>&1 \
+   && ! printf 'x' | "$TMP/bin-badsign/openssl" dgst -sha256 -sign "$TMP/fake-key.pem" -binary >/dev/null 2>&1; then
+  ok "fixture: the stub openssl still encodes, and refuses only to sign"
+else
+  bad "fixture: the failing-openssl stub is not specific to signing — section 6 is testing the wrong guard"
+fi
+# And the paired control: the same stub must leave a real signature alone, or
+# "signing failed" below could just be "this key never worked".
+if printf 'x' | openssl dgst -sha256 -sign "$TMP/fake-key.pem" -binary >/dev/null 2>&1; then
+  ok "fixture: the throwaway key does sign under an unstubbed openssl"
+else
+  bad "fixture: the throwaway key cannot sign at all — section 6 proves nothing"
+fi
+
+# must_fail_signing <desc> <bin-dir> <args...>
+must_fail_signing() {
+  local desc="$1" bin="$2"; shift 2
+  run_tool --bin "$bin" "$@"
+  [[ $RC -ne 0 ]] \
+    && ok "$desc: non-zero exit ($RC)" \
+    || bad "$desc: EXITED 0 with signing broken — this is the TOG-331 regression; a caller's \`&&\` would proceed"
+  [[ -z "$OUT" ]] \
+    && ok "$desc: stdout empty, so \$(...) captures no half-signed JWT" \
+    || bad "$desc: WROTE to stdout: [$(head -c 90 <<<"$OUT")]"
+  [[ -n "$ERR" ]] \
+    && ok "$desc: said why, on stderr" \
+    || bad "$desc: failed silently — nothing on stderr, so there is nothing to debug from"
+  [[ "$MINTS" -eq 0 ]] \
+    && ok "$desc: did not ask GitHub for a token" \
+    || bad "$desc: MINTED — an unsigned JWT was sent to GitHub anyway"
+  no_credential_emitted "$desc"
+}
+
+must_fail_signing "jwt, openssl -sign fails"           "$TMP/bin-badsign"    jwt
+# The variant a status check alone cannot catch: -sign exits 0 and writes
+# nothing, so pipefail sees success down the whole pipeline and $sig is empty.
+must_fail_signing "jwt, openssl -sign silently empty"  "$TMP/bin-silentsign" jwt
+# Everything authenticated goes through app_jwt. If the failure stops at the
+# function boundary, these arms send an empty bearer and GitHub's 401 sends the
+# reader to the App's install settings instead of to the key.
+must_fail_signing "check, signing broken"              "$TMP/bin-badsign"    check
+must_fail_signing "token, signing broken"              "$TMP/bin-badsign"    token
+must_fail_signing "meta, signing broken"               "$TMP/bin-badsign"    meta
+# `api` is the one where the guard is least visible in the source: mint_token's
+# failure path is `exit 1`, but it runs inside `tok="$(mint_token)"`, so that
+# exit ends the SUBSHELL. Without a check on the assignment the arm proceeds
+# with an empty bearer.
+must_fail_signing "api, signing broken"                "$TMP/bin-badsign"    api GET /app
+
+# The literal idiom from the bug report.
+used="$(env -i PATH="$TMP/bin-badsign:$TMP/bin:$PATH" HOME="$TMP" TMPDIR="$TMP" \
+  GITHUB_APP_PEM="$TMP/fake-key.pem" GITHUB_APP_ENV="$TMP/fake.env" \
+  STUB_REQLOG="$REQLOG" STUB_MINT_CANARY="$MINT_CANARY" REAL_OPENSSL="$REAL_OPENSSL" \
+  bash -c 'jwt="$("$0" jwt 2>/dev/null)" && printf "USED[%s]" "$jwt"' "$TOOL")"
+[[ -z "$used" ]] \
+  && ok 'jwt="$(gh_token.sh jwt)" && curl -H "Bearer $jwt" — the && is not taken' \
+  || bad "the caller proceeded with an unsigned JWT: $(head -c 120 <<<"$used")"
+
+# The `check` half. Nothing here fails at the process level: curl succeeds and
+# GitHub answers an error OBJECT, so `app_api ... | jq -r '...'` exited 0 and
+# printed a heading with an empty line under it. `gh_token.sh check && echo ok`
+# said ok while the report had answered nothing.
+STUB_ERROR_BODY=1
+run_tool check
+STUB_ERROR_BODY=""
+[[ $RC -ne 0 ]] \
+  && ok "check: an API error body exits non-zero ($RC)" \
+  || bad 'check: EXITED 0 on {"message":"Bad credentials"} — a report that answered nothing looked clean'
+[[ -z "$OUT" ]] \
+  && ok "check: printed no report it could not stand behind" \
+  || bad "check: printed a report anyway: [$(head -c 90 <<<"$OUT")]"
+[[ -n "$ERR" ]] \
+  && ok "check: said why, on stderr" \
+  || bad "check: reported the failure nowhere"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

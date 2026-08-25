@@ -221,6 +221,18 @@ These are load-bearing and were each learned by breaking something:
   to stderr with exit 2; only `help` / `--help` / `-h` succeed, and they answer *above* the
   credential preamble so asking a tool how to use it never requires the credentials it sets up.
   Pinned by `test_gh_token_dispatch.sh`, which asserts exit status and which stream — never wording.
+- **A step that half-worked exits non-zero too, and prints nothing.** The rule above is about the
+  *wrong* subcommand; TOG-331 is the *right* one failing quietly. `jwt) app_jwt; echo ;;` returned
+  `echo`'s status — always 0 — and `app_jwt` could not report a failed signature anyway, so a PEM
+  that was readable but unusable emitted a JWT with an empty signature and exited 0. GitHub answered
+  401 and the operator debugged authentication instead of the key. Same shape in `check`
+  (`app_api … | jq` exits 0 over `{"message":"Bad credentials"}`) and in `meta`. Two rules follow.
+  A command substitution's status must be *read* — `x="$(f)" || return 1` — because a trailing
+  `echo` and `local x="$(f)"` both swallow it. And validation must be a **predicate**: `jq -e -r
+  '"…\(.name)…"'` looks like a check and is not one, because the interpolated string is truthy
+  whatever `.name` held. Pinned by section 6 of `test_gh_token_dispatch.sh`, whose fixture is an
+  `openssl` stub that refuses only `-sign` — in two variants, one exiting non-zero and one exiting
+  **0 having written nothing**, because `pipefail` catches only the first.
 - **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
   `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
   Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a
