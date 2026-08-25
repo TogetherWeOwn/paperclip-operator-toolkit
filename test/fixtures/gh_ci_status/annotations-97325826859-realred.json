@@ -1,0 +1,26 @@
+[
+  {
+    "annotation_level": "warning",
+    "blob_href": "https://github.com/TogetherWeOwn/paperclip-ops-tooling/blob/4fd26c025c363e350cb36110af72f1b38d72e655/.github",
+    "end_column": null,
+    "end_line": 2,
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-node@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+    "path": ".github",
+    "raw_details": "",
+    "start_column": null,
+    "start_line": 2,
+    "title": ""
+  },
+  {
+    "annotation_level": "failure",
+    "blob_href": "https://github.com/TogetherWeOwn/paperclip-ops-tooling/blob/4fd26c025c363e350cb36110af72f1b38d72e655/.github",
+    "end_column": null,
+    "end_line": 56,
+    "message": "Process completed with exit code 1.",
+    "path": ".github",
+    "raw_details": "",
+    "start_column": null,
+    "start_line": 56,
+    "title": ""
+  }
+]

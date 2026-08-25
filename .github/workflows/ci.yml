@@ -258,9 +258,13 @@ jobs:
       - name: SQL backend seam suite
         run: ./test_sql_backend.sh
       # TOG-247: the CI status reader that must never report a denial or an
-      # empty result set as green. Offline — a stub GitHub API on 127.0.0.1
-      # serves a different permission/result case off each ref, so this needs no
-      # credential and no network.
+      # empty result set as green. TOG-381: nor a job GitHub never ran as a red
+      # build. Offline — a stub GitHub API on 127.0.0.1 serves a different
+      # permission/result case off each ref, so this needs no credential and no
+      # network. The TOG-381 cases are RECORDED responses replayed through that
+      # stub (test/fixtures/gh_ci_status/), because a non-start is identical to
+      # a real failure in every field and a hand-written fixture would only
+      # prove the reader agrees with whoever typed it.
       - name: fail-closed CI status suite
         run: ./test_gh_ci_status.sh
 
@@ -818,30 +822,136 @@ jobs:
       #   2. Drop the no-signal guard, so zero results from a readable source
       #      falls through to pass. That is the naive "all runs concluded
       #      success" predicate, which is vacuously true for an empty list.
+      #
+      # TOG-381 adds the third failure mode and its mutations. A job GitHub
+      # never ran reports `completed/failure` — identical to a real red in every
+      # field — so an Actions outage was read as "fix your code" for 21 minutes
+      # while four commits merged. The `non-started` verdict is what separates
+      # them, and each mutation below removes one load-bearing piece of it.
+      #
+      # This gate used to assert only "the suite failed", which is not
+      # attribution: a mutation that reddens some unrelated assertion looks
+      # identical to one the gate actually caught, and keeps looking identical
+      # after the assertion it was meant to pin has been DELETED. Per TOG-339 /
+      # TOG-200 it now requires, for every mutation:
+      #
+      #   * the UNMUTATED copy passes in the same staging directory, so a red
+      #     below is attributable to the mutation rather than to the staging;
+      #   * the named test is present and PASSING in that baseline — this suite
+      #     has no skip verb, so "present and green before" is its zero-skips
+      #     check, and it is what makes deleting the test fail the gate;
+      #   * the mutated run goes red ON THAT NAMED TEST, not merely somewhere.
       - name: Prove the CI status suite still detects a weakened refusal
         run: |
           set -uo pipefail
           rc=0
-          run_mutation() {
-            mut="$(mktemp -d)"
+          # ci_mutation <label> <sed-expr> <named test that must go red>
+          ci_mutation() {
+            local label="$1" expr="$2" expect="$3"
+            local mut; mut="$(mktemp -d)"
             cp gh_ci_status.sh test_gh_ci_status.sh "$mut/"
-            sed -i "$2" "$mut/gh_ci_status.sh"
+            # The TOG-381 cases are replayed from recorded API responses; without
+            # them the suite hard-errors rather than skipping, which is the point.
+            mkdir -p "$mut/test/fixtures"
+            cp -R test/fixtures/gh_ci_status "$mut/test/fixtures/"
+
+            local base
+            base="$(cd "$mut" && ./test_gh_ci_status.sh 2>&1)"
+            if [ $? -ne 0 ]; then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              printf '%s\n' "$base" | grep -a 'FAIL' | head -20; rm -rf "$mut"; return 1
+            fi
+            # Zero-skips equivalent for a suite with no skip verb: the assertion
+            # this mutation is aimed at must EXIST and be GREEN before we mutate.
+            # Delete the test and the gate fails here instead of reporting success.
+            if ! grep -aqE "PASS.*$expect" <<< "$base"; then
+              echo "::error::$label: no PASSING test matching /$expect/ in the baseline — the assertion this mutation pins has been renamed or deleted"
+              rm -rf "$mut"; return 1
+            fi
+
+            sed -i "$expr" "$mut/gh_ci_status.sh"
             if ! bash -n "$mut/gh_ci_status.sh"; then
-              echo "::error::the $1 mutation no longer parses; this guard is now blind, fix it"
-              rc=1; return
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
             fi
-            if diff -q gh_ci_status.sh "$mut/gh_ci_status.sh" >/dev/null; then
-              echo "::error::the $1 mutation changed nothing; the sed no longer matches, so this guard is blind"
-              rc=1; return
+            if cmp -s gh_ci_status.sh "$mut/gh_ci_status.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
             fi
-            if (cd "$mut" && ./test_gh_ci_status.sh >/dev/null 2>&1); then
-              echo "::error::the CI status suite PASSED against the $1 mutation"
-              rc=1; return
+
+            local out status
+            out="$(cd "$mut" && ./test_gh_ci_status.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the CI status suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
             fi
-            echo "suite correctly rejects the $1 mutation"
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
           }
-          run_mutation "unknown-exits-zero" 's/EXIT=3/EXIT=0/g'
-          run_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/'
+
+          # TOG-247: the two false greens.
+          ci_mutation "unknown-exits-zero" 's/EXIT=3/EXIT=0/g' \
+            'every source denied -> unknown, not pass' || rc=1
+          ci_mutation "no-signal-is-a-pass" 's/^elif \[\[ "\$SIGNALS" -eq 0 \]\]; then/elif false; then/' \
+            'readable but zero signals -> unknown, not pass' || rc=1
+
+          # TOG-381: the outage that read as a red build.
+          #
+          # 1. Delete the verdict outright. This is the shape of the bug as it
+          #    shipped, and it is what a revert would produce.
+          ci_mutation "nonstart-verdict-removed" \
+            's/^elif \[\[ -n "\$CHECKS_NONSTART" \&\& -z "\$CHECKS_FAIL" \&\& -z "\$EXT_FAILED" \]\]; then/elif false; then/' \
+            'a recorded account-block outage -> non-started, not fail' || rc=1
+          # 2. Keep the classification but fold it back onto exit 1. The verdict
+          #    string is then correct and every caller still branches to "fix
+          #    your code" — the distinction exists in the exit code or nowhere.
+          ci_mutation "nonstart-exits-as-a-red" 's/^  EXIT=5$/  EXIT=1/' \
+            'a recorded account-block outage -> non-started, not fail' || rc=1
+          # 3. Stop requiring the annotation text, leaving duration to decide.
+          #    This is THE tempting simplification — it deletes an API call and
+          #    looks right against the outage fixtures — and it misclassifies
+          #    every fast genuine red, including our own 2s `bash -n` scan.
+          ci_mutation "classified-by-duration-alone" \
+            "s/^NONSTART_ANNOTATION_RE=.*/NONSTART_ANNOTATION_RE=''/" \
+            'duration is not the classifier' || rc=1
+          # 4. Ignore the annotation LEVEL. A successful run carries annotations
+          #    too (24f0d30's are Node 20 deprecation warnings), so without the
+          #    level check the text alone is a much weaker claim than it reads as.
+          ci_mutation "annotation-level-ignored" \
+            's/select(.annotation_level == "failure")/select(true)/' \
+            'the billing text at warning level does not license non-started' || rc=1
+          # 5. Report a probe that never completed as a clean one. The verdict is
+          #    still correct here, so only the reporting assertion can catch it —
+          #    and a caller that trusts `nonStartedProbe` would be told the
+          #    question was asked and answered "no" when it was refused.
+          ci_mutation "failed-probe-reads-clean" \
+            's/NONSTART_PROBE="incomplete-\$acode"/NONSTART_PROBE="clean"/' \
+            'a probe that could not complete says so' || rc=1
+          # 6. Let a non-start outrank a genuine failure on the same commit.
+          #    Wrong in the UNSAFE direction: there is real code to fix and this
+          #    would report exit 5, "nothing here is your fault".
+          ci_mutation "nonstart-outranks-a-real-red" \
+            's/^elif \[\[ -n "\$CHECKS_NONSTART" \&\& -z "\$CHECKS_FAIL" \&\& -z "\$EXT_FAILED" \]\]; then/elif [[ -n "$CHECKS_NONSTART" ]]; then/' \
+            'a real failure alongside non-starts -> fail, not non-started' || rc=1
+          # 7. Tighten the duration prefilter to something that looks generous
+          #    against the 2-3s fixtures. The recorded outage also contains a
+          #    14-SECOND non-start, so a tight window silently stops classifying
+          #    — the failure mode that has no symptom until the next outage.
+          ci_mutation "prefilter-tightened" \
+            's/GH_CI_NONSTART_MAX_SECONDS:-60/GH_CI_NONSTART_MAX_SECONDS:-1/' \
+            'a recorded account-block outage -> non-started, not fail' || rc=1
+          # 8. Trust the check-run id from the response body. The classification
+          #    added a second authenticated call whose PATH contains a value the
+          #    remote supplied; an id that is a traversal normalises onto another
+          #    run's annotations, so the body gets to choose which annotations
+          #    are consulted and can turn a genuine red into "not your fault".
+          ci_mutation "check-run-id-trusted" \
+            's/^is_check_run_id() {/is_check_run_id() { return 0;/' \
+            'a check-run id that is not a number is never put in a request path' || rc=1
           exit $rc
 
       # Same discipline for the drift detector (TOG-212). Its whole value is
