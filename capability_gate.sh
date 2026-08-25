@@ -46,6 +46,45 @@ set -uo pipefail
 # capability to the registry — is a reviewed commit in this file rather than a
 # flag somebody can pass.
 #
+# ===========================================================================
+# SAFER ALTERNATIVE FIRST (TOG-388's model, applied here by TOG-403)
+# ===========================================================================
+# "Prefer a narrower alternative that still fully unblocks the work over a
+# broad grant that merely would." Encoded on BOTH keys:
+#
+#   ...to DENY, additionally one of:
+#       --alternative "<a safer route that still fully unblocks the work>"
+#                                                              (repeatable)
+#     or
+#       --no-safer-alternative "<what you looked at and why nothing works>"
+#
+#   ...to APPROVE a RISKY ask, at least one adjacent pair:
+#       --considered "<route weighed>" --because "<why it did not unblock>"
+#
+# The flags are exclusive BY DECISION DIRECTION. `--alternative` is a way
+# forward and belongs on a denial; `--considered/--because` is a rejected route
+# and belongs on an approval. Each wrong combination has its own refusal.
+#
+# THE IMPLEMENTATION IS NOT A COPY. Parsing, refusal wording and record shape
+# all come from `lib/reqrecord.sh`, byte-identical with org_request_queue.sh
+# and gated by `test_reqrecord_shared.sh`. Two copies of the owner's decision
+# model would become two decision models, and the divergence is invisible from
+# either side — both files still refuse things, just no longer the same things.
+#
+# WHICH ASKS ARE RISKY is NOT shared, because the two flows read different
+# facts: the queue reads a template's permission keys, this file reads the
+# registry's `class` and `rollback` (see capability_risk_factors). Both DERIVE
+# it; neither lets the decider declare it.
+#
+# THE COUNTERSIGNATURE IS ALWAYS RISKY, and that is the part TOG-388 had no
+# reason to think about. `countersign` only ever runs on a `custody` request,
+# which is only ever reached by `class: credential` — so there is no routine
+# branch and the alternatives record is unconditional. The denial side is the
+# one that matters most in the whole tool: a custodian's refusal is usually
+# "not in this form" — a narrower scope, a shorter TTL, a brokered mint rather
+# than the key — and a custody denial recording none of that leaves the
+# requester blocked by the one agent who already knows the safer shape.
+#
 # "DOMAIN OWNER DECIDES, CISO HOLDS CUSTODY, TWO KEYS ON THE OWNER LINE."
 # Read literally, and the third clause does real work. Where the two keys
 # would collapse into one agent — the CISO is the requester, or the CISO owns
@@ -94,9 +133,12 @@ set -uo pipefail
 #                                   --action <ACTION> --facts "..." \
 #                                   --reasoning "..." [--title "..."]
 #   ./capability_gate.sh review     --reviewer <ROLE> --request <ID> \
-#                                   (--approve|--reject) --reason "..."
+#                                   (--approve|--reject) --reason "..." \
+#                                   [safer-alternative flags, below]
 #   ./capability_gate.sh countersign --custodian <ROLE> --request <ID> \
-#                                   (--approve|--reject) --reason "..."
+#                                   (--approve|--reject) --reason "..." \
+#                                   [safer-alternative flags, below]
+#   ./capability_gate.sh comment    --request <ID> --author <ROLE> --body "..."
 #   ./capability_gate.sh list       [--status pending|awaiting_custody|approved|
 #                                             rejected|owner_reserved|expired|all]
 #   ./capability_gate.sh thread     --request <ID>
@@ -121,6 +163,15 @@ REQ_ID_PREFIX="CAP"
 REQRECORD_STATUS_EVENTS='{"request.submitted":true,"request.reviewed":true,"request.countersigned":true,"request.expired":true}'
 REQRECORD_TERMINAL_EVENTS='{"request.countersigned":true,"request.expired":true}'
 REQRECORD_OPEN_STATUSES='pending awaiting_custody'
+
+# The tail of the denial-floor refusal (TOG-403). SET, not inherited: the
+# library's default is org_request_queue.sh's, and it names `risk-record` —
+# a command this gate does not have. A refusal that tells a custodian to run
+# something that does not exist is a dead end wearing the costume of a next
+# step, which is the one thing the safer-alternative model exists to prevent.
+SAFERALT_NO_ALT_CONSEQUENCE='The second is always recorded on the thread, where `thread` renders it and the
+  requester can answer it with `comment`. This gate has no audit-drain command,
+  so the finding is read on the thread rather than queued for someone to close.'
 
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 
@@ -200,6 +251,54 @@ CUSTODY_TEMPLATE="${CUSTODY_TEMPLATE:-B3_SECURITY_CHIEF}"
 # owner asked it to answer.
 MIN_FACTS_LEN="${MIN_FACTS_LEN:-40}"
 MIN_REASONING_LEN="${MIN_REASONING_LEN:-40}"
+
+# ===========================================================================
+# WHICH ASKS ARE RISKY (TOG-403)
+# ===========================================================================
+# The owner's safer-alternative-first model says an approval of a RISKY ask
+# must record which safer routes were weighed and why each failed. That needs a
+# definition of risky, and it is derived from the REGISTRY — the same two facts
+# the registry already carries, read by the same rule for every ask. There is
+# no --risk flag here for the same reason there is no --reversible one.
+#
+# ALLOWLISTS, both of them, and not a `class == credential` test. A denylist
+# ("risky unless it is one of the safe ones") silently opts every class added
+# later into `routine`, which is the exact failure STATUS_EVENTS documents one
+# file over. A new class must be argued into one of these two lists or the gate
+# refuses to decide the ask at all.
+RISK_CLASSES='{"credential":true,"spend":true,"publish":true}'
+NONRISK_CLASSES='{"tool":true,"data":true,"infra":true}'
+
+# capability_risk_factors <capability>
+#   stdout: comma-separated factors, empty when routine
+#   exit:   0 risky · 1 routine · 2 unregistered · 3 a value in neither list
+#
+# Exit 2 and 3 are FAIL-CLOSED and the caller must refuse rather than default,
+# mirroring classify_risk's contract in org_request_queue.sh. In practice
+# neither should reach a reviewer — an unregistered capability is already
+# owner-reserved at submit — but "should not reach" is not a control.
+capability_risk_factors() {
+  local entry class rollback f=""
+  entry="$(jq -c --arg k "$1" '.[$k] // empty' <<<"$CAPABILITY_REGISTRY")"
+  [[ -n "$entry" ]] || { printf 'unregistered=%s' "$1"; return 2; }
+  class="$(jq -r '.class' <<<"$entry")"
+  rollback="$(jq -r '.rollback' <<<"$entry")"
+  if   jq -e --arg c "$class" '.[$c] // false' <<<"$RISK_CLASSES"    >/dev/null 2>&1; then f="class_$class"
+  elif jq -e --arg c "$class" '.[$c] // false' <<<"$NONRISK_CLASSES" >/dev/null 2>&1; then :
+  else printf 'class=%s' "$class"; return 3
+  fi
+  # Rollback that does not undo the effect. `none` never reaches a reviewer —
+  # rule no_rollback stops it for the owner — so in practice this is `partial`:
+  # the github.repo.push case, where the force-push is revertible and the
+  # secret that was in the history is not.
+  case "$rollback" in
+    full)         :;;
+    partial|none) f="${f:+$f,}rollback_$rollback";;
+    *) printf 'rollback=%s' "$rollback"; return 3;;
+  esac
+  printf '%s' "$f"
+  [[ -n "$f" ]]
+}
 
 # ===========================================================================
 # Org resolution — the same two seams org_request_queue.sh uses.
@@ -594,6 +693,11 @@ cmd_submit() {
 # review — the domain owner's key.
 cmd_review() {
   local reviewer="" rid="" decision="" reason=""
+  # The safer-alternative contract, from the SHARED implementation in
+  # lib/reqrecord.sh (TOG-403) — the same four flags, the same refusals and the
+  # same record shape as org_request_queue.sh, because it is the same decision
+  # model. A second copy here would be a second model within a quarter.
+  saferalt_reset
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --reviewer) reviewer="$2"; shift 2;;
@@ -601,7 +705,9 @@ cmd_review() {
       --approve)  decision="approved"; shift;;
       --reject)   decision="rejected"; shift;;
       --reason)   reason="$2";   shift 2;;
-      *) die "unknown argument: $1";;
+      *) saferalt_parse_arg "$@"
+         [[ $SAFERALT_SHIFT -gt 0 ]] || die "unknown argument: $1"
+         shift "$SAFERALT_SHIFT";;
     esac
   done
   [[ -n "$reviewer" && -n "$rid" && -n "$decision" ]] \
@@ -611,6 +717,12 @@ cmd_review() {
   # the one that historically went unguarded. Checked before anything is read,
   # so the refusal cannot depend on who is asking.
   [[ -n "$reason" ]] || die "every decision must carry --reason, an approval as much as a denial."
+  # Argument SHAPE, checked here for the same reason: it does not depend on
+  # which request was named, so it must not be reachable only for some of them.
+  # This is the half of the model that covers denials, and it is unconditional
+  # — a denial on this gate must leave the requester somewhere to go whether
+  # the ask was risky or routine.
+  saferalt_assert_direction "$decision"
 
   reap_expired
   reqrecord_assert_unambiguous "$rid"
@@ -685,39 +797,115 @@ cmd_review() {
            '{event:"review.refused",reason:"self_approval",requestId:$id,reviewer:$r}')"
          die "a requester cannot decide its own capability request ($rid)."; }
 
+  # --- is this a RISKY ask? (TOG-403) --------------------------------------
+  # Derived from the registry, never asked of the reviewer — the same rule the
+  # owner-reserved classification follows and for the same reason.
+  local risk_factors="" risky="no" rc_risk
+  risk_factors="$(capability_risk_factors "$cap")"; rc_risk=$?
+  case $rc_risk in
+    0) risky="yes";;
+    1) risky="no";;
+    2) log_event "$(jq -cn --arg id "$rid" --arg c "$cap" \
+         '{event:"review.refused",reason:"risk_unclassifiable",requestId:$id,capability:$c}')"
+       die "'$cap' is not in the registry, so its risk cannot be read; refusing to decide an ask whose risk is unknown.";;
+    3) log_event "$(jq -cn --arg id "$rid" --arg c "$cap" --arg k "$risk_factors" \
+         '{event:"review.refused",reason:"unclassified_registry_value",requestId:$id,capability:$c,value:$k}')"
+       die "'$cap' carries [$risk_factors], which is on neither the risky nor the non-risky list in capability_gate.sh. Somebody extended the registry without deciding whether the new value is risky; that decision is theirs to make, not a default's.";;
+  esac
+
+  # The alternatives record, on an approval of a risky ask. Placed AFTER the
+  # authority checks, which is the one place this diverges from
+  # org_request_queue.sh's ordering — deliberately. The queue checks it first
+  # so that its standing-authority override cannot shrug the refusal off; this
+  # gate has no override, so the domain-owner check is already absolute and
+  # putting the risk check ahead of it would only mean a stranger's malformed
+  # approval got told about the ask's risk class instead of being told it is
+  # not the decider. Each refusal stays pinned to its own gate.
+  if [[ "$decision" == "approved" && "$risky" == "yes" ]]; then
+    if [[ "$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")" -eq 0 ]]; then
+      log_event "$(jq -cn --arg id "$rid" --arg c "$cap" --arg r "$reviewer" --arg f "$risk_factors" \
+        '{event:"review.refused",reason:"risky_grant_without_alternatives_record",requestId:$id,capability:$c,reviewer:$r,riskFactors:($f|split(","))}')"
+      echo "  risk factors : $risk_factors" >&2
+    fi
+    saferalt_assert_grant_record "'$action $cap'" \
+      "review --reviewer $reviewer --request $rid --reject --reason \"...\" --alternative \"...\""
+  fi
+
+  local risk_json
+  risk_json="$(jq -cn --arg f "$risk_factors" \
+    '{risky:($f != ""), factors:(if $f=="" then [] else ($f|split(",")) end)}')"
+
   if [[ "$decision" == "rejected" ]]; then
     # Written as `request.countersigned` with key:"domain" so the
     # one-terminal-decision invariant covers exactly one event name. The row
     # says which key refused; nothing infers it.
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" --arg at "$(now_iso)" \
+      --argjson risk "$risk_json" --argjson sa "$(saferalt_decision_json)" \
       '{event:"request.countersigned",requestId:$id,status:"rejected",key:"domain",
-        reviewer:$rv,reason:$re,at:$at}')"
+        reviewer:$rv,reason:$re,at:$at,risk:$risk} + $sa')"
     echo "REJECTED $rid by $reviewer (domain owner) — $reason"
+    saferalt_announce "$reviewer" "$rid" "$rq_role" "$risk_factors"
     return 0
   fi
 
   if [[ "$mode" == "custody" ]]; then
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
       --arg cu "$cust" --arg at "$(now_iso)" \
+      --argjson risk "$risk_json" --argjson sa "$(saferalt_decision_json)" \
       '{event:"request.reviewed",requestId:$id,status:"awaiting_custody",key:"domain",
-        reviewer:$rv,reason:$re,awaitingCustodian:$cu,at:$at}')"
+        reviewer:$rv,reason:$re,awaitingCustodian:$cu,at:$at,risk:$risk} + $sa')"
     echo "KEY 1 of 2 — $rid approved by $reviewer (domain owner) — $reason"
+    saferalt_announce_grant "$reviewer" "$risk_factors"
     echo "  still needs the custodian's key:"
     echo "    ./capability_gate.sh countersign --custodian $cust --request $rid (--approve|--reject) --reason \"...\""
     return 0
   fi
 
   append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" --arg at "$(now_iso)" \
+    --argjson risk "$risk_json" --argjson sa "$(saferalt_decision_json)" \
     '{event:"request.countersigned",requestId:$id,status:"approved",key:"domain",
-      reviewer:$rv,reason:$re,at:$at}')"
+      reviewer:$rv,reason:$re,at:$at,risk:$risk} + $sa')"
   echo "APPROVED $rid by $reviewer (domain owner) — $reason"
+  saferalt_announce_grant "$reviewer" "$risk_factors"
   echo "  NOT YET EFFECTED: this is a decision record. Nothing has been granted."
+}
+
+# --------------------------------------------------------------------------
+# Surfacing. A record that is written and not shown is a record nobody reads —
+# the argument org_request_queue.sh's announce_override makes, reached here by
+# the same road. Both are said to the DECIDER's face, on stdout, at the moment
+# of the decision.
+saferalt_announce() {   # <decider> <requestId> <requesterRole> <riskFactors>
+  if [[ "$(jq -r 'length' <<<"$SAFERALT_ALTS")" -gt 0 ]]; then
+    echo "  safer alternatives offered:"
+    jq -r '.[] | "    - " + .' <<<"$SAFERALT_ALTS"
+  else
+    printf '\n  ** NO SAFER ALTERNATIVE FOUND **\n'
+    printf '  %s recorded that nothing safer would unblock this work:\n' "$1"
+    printf '    %s\n' "$SAFERALT_NO_ALT"
+    [[ -n "$4" ]] && printf '  This was a RISKY ask (%s).\n' "$4"
+    printf '\033[1;33mNO SAFER ALTERNATIVE\033[0m recorded on %s by %s.\n' "$2" "$1" >&2
+  fi
+  # This gate has no `--supersedes`, so "amend and resubmit" is a NEW request
+  # and the thread does not follow it. `comment` is therefore the only way to
+  # answer a denial on the record it was made on, which is why it exists.
+  echo "  the requester may answer on the record with:"
+  echo "    ./capability_gate.sh comment --request $2 --author $3 --body \"...\""
+}
+
+saferalt_announce_grant() {   # <decider> <riskFactors>
+  [[ -n "$2" ]] || return 0
+  printf '\n  ** RISKY ASK GRANTED ** (risk factors: %s)\n' "$2"
+  printf '  Safer alternatives considered, and why each failed:\n'
+  jq -r '.[] | "    - \(.alternative)\n        failed because: \(.whyItFailed)"' <<<"$SAFERALT_CONSIDERED"
+  printf '\033[1;33mRISKY ASK GRANTED\033[0m by %s (%s).\n' "$1" "$2" >&2
 }
 
 # ===========================================================================
 # countersign — the custodian's key.
 cmd_countersign() {
   local custodian="" rid="" decision="" reason=""
+  saferalt_reset
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --custodian) custodian="$2"; shift 2;;
@@ -725,12 +913,33 @@ cmd_countersign() {
       --approve)   decision="approved"; shift;;
       --reject)    decision="rejected"; shift;;
       --reason)    reason="$2";    shift 2;;
-      *) die "unknown argument: $1";;
+      *) saferalt_parse_arg "$@"
+         [[ $SAFERALT_SHIFT -gt 0 ]] || die "unknown argument: $1"
+         shift "$SAFERALT_SHIFT";;
     esac
   done
   [[ -n "$custodian" && -n "$rid" && -n "$decision" ]] \
     || die "usage: countersign --custodian <ROLE> --request <ID> (--approve|--reject) --reason \"...\""
   [[ -n "$reason" ]] || die "every decision must carry --reason, an approval as much as a denial."
+  saferalt_assert_direction "$decision"
+
+  # THE CUSTODIAN'S APPROVAL IS ALWAYS A RISKY GRANT, so the alternatives
+  # record is required unconditionally and is asserted here, before anything is
+  # read. cmd_review derives riskiness from the capability because a domain
+  # decision can be routine; a countersignature cannot. This command refuses
+  # any request that does not classify as `custody` a few lines down, and
+  # `custody` is reached only by `class: credential` — handing over a secret.
+  # There is deliberately no routine branch and no test for one.
+  #
+  # The denial side matters more here than anywhere else in either tool. A
+  # custodian's refusal is the one most likely to be "not in this form" rather
+  # than "no" — a narrower scope, a shorter TTL, a brokered mint instead of the
+  # key itself — and a custody denial that records none of that is the worst
+  # case of the whole class: the requester is blocked by the one agent who
+  # already knows the safer shape.
+  [[ "$decision" != "approved" ]] || saferalt_assert_grant_record \
+    "a countersignature always hands over a credential, which" \
+    "countersign --custodian $custodian --request $rid --reject --reason \"...\" --alternative \"<the narrower form>\""
 
   reap_expired
   reqrecord_assert_unambiguous "$rid"
@@ -794,19 +1003,112 @@ cmd_countersign() {
     'select(.requestId==$id and .event=="request.reviewed" and .status=="awaiting_custody")' "$QUEUE" | tail -1)"
   local key1_by; key1_by="$(jq -r '.reviewer // ""' <<<"$key1")"
 
+  # Every countersignature is a credential decision, so the risk record on the
+  # row is a constant, not a derivation. Written anyway, in the same shape
+  # cmd_review writes, so one query reads both keys' rows.
+  local risk_factors risk_json
+  risk_factors="$(capability_risk_factors "$cap")" || true
+  risk_json="$(jq -cn --arg f "$risk_factors" \
+    '{risky:($f != ""), factors:(if $f=="" then [] else ($f|split(",")) end)}')"
+
   append_queue "$(jq -cn --arg id "$rid" --arg cu "$custodian" --arg re "$reason" \
     --arg st "$decision" --arg k1 "$key1_by" --arg at "$(now_iso)" \
+    --argjson risk "$risk_json" --argjson sa "$(saferalt_decision_json)" \
     '{event:"request.countersigned",requestId:$id,status:$st,key:"custody",
-      custodian:$cu,reason:$re,domainOwner:$k1,at:$at}')"
+      custodian:$cu,reason:$re,domainOwner:$k1,at:$at,risk:$risk} + $sa')"
 
   if [[ "$decision" == "approved" ]]; then
     echo "APPROVED $rid — two keys: $key1_by (domain) + $custodian (custody)"
     echo "  custodian's reason: $reason"
+    saferalt_announce_grant "$custodian" "$risk_factors"
     echo "  NOT YET EFFECTED: this is a decision record. Nothing has been granted."
   else
     echo "REJECTED $rid by $custodian (custodian) — $reason"
     echo "  the domain owner had approved it; custody refused. Both are on the record."
+    local rq_role; rq_role="$(jq -r '.requester' <<<"$sub")"
+    saferalt_announce "$custodian" "$rid" "$rq_role" "$risk_factors"
   fi
+}
+
+# ===========================================================================
+# comment — how a decider asks for a fact without deciding, and how a requester
+# answers a denial (TOG-403).
+#
+# TOG-387 left this open and TOG-403 was asked to settle it: does the
+# alternatives model make `comment` unnecessary? It does not — it makes it
+# NECESSARY, and the argument runs the other way from the obvious one.
+#
+# The model now REQUIRES a denial to carry a way forward. A decider who is one
+# fact short of understanding the ask still has to produce one, so it will
+# produce the best alternative it can imagine from an incomplete picture. That
+# is a worse outcome than the old dead end, because a plausible wrong
+# alternative reads as diligence and the requester will go and try it. Forcing
+# an answer out of someone who has not finished reading the question
+# manufactures bad answers; the fix is to let them ask.
+#
+# It matters more here than in org_request_queue.sh for a second reason: that
+# tool has `--supersedes`, so a denied requester can amend against the same
+# thread. This one does not. Without `comment` the only move after a denial is
+# a brand-new CAP id that carries none of the exchange, so the reasoning the
+# owner asked to be recorded is scattered across ids nothing links.
+#
+# Restricted to the PARTIES — requester, domain owner, custodian — all derived
+# fresh, never read from the submission. And deliberately no standing-authority
+# arm: `review` refuses to let standing authority decide a capability, so
+# letting it write into the decision record would be the same override arriving
+# by a quieter door.
+cmd_comment() {
+  local rid="" author="" body=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --request) rid="$2";    shift 2;;
+      --author)  author="$2"; shift 2;;
+      --body)    body="$2";   shift 2;;
+      *) die "unknown argument: $1";;
+    esac
+  done
+  [[ -n "$rid" && -n "$author" && -n "$body" ]] \
+    || die "usage: comment --request <ID> --author <ROLE> --body \"...\""
+
+  reqrecord_assert_unambiguous "$rid"
+  local sub; sub="$(request_submission "$rid")" || die "no such request: $rid"
+  [[ -n "$sub" ]] || die "no such request: $rid"
+
+  local cap action rq_id
+  cap="$(jq -r '.capability' <<<"$sub")"
+  action="$(jq -r '.action' <<<"$sub")"
+  rq_id="$(jq -r '.requesterAgentId' <<<"$sub")"
+
+  local arow a_id; arow="$(resolve_agent "$author")"; [[ -n "$arow" ]] || die "author not found: $author"
+  a_id="$(f 1 "$arow")"
+  [[ "$(f 4 "$arow")" != "terminated" ]] || die "author $author is terminated."
+
+  # Derived fresh, exactly as the decision paths do. A party list cached at
+  # submit is the same TOCTOU bug those paths already refuse to repeat.
+  local c decider cust; c="$(classify_capability "$cap" "$action" "$rq_id")"
+  decider="$(f 2 "$c")"; cust="$(f 3 "$c")"
+
+  local ok="no"
+  [[ "$a_id" == "$rq_id" ]] && ok="yes"
+  if [[ -n "$decider" ]]; then
+    [[ "$a_id" == "$(f 1 "$(resolve_agent "$decider")")" ]] && ok="yes"
+  fi
+  if [[ -n "$cust" ]]; then
+    [[ "$a_id" == "$(f 1 "$(resolve_agent "$cust")")" ]] && ok="yes"
+  fi
+  [[ "$ok" == "yes" ]] || {
+    log_event "$(jq -cn --arg id "$rid" --arg a "$author" \
+      '{event:"comment.refused",reason:"not_a_party",requestId:$id,author:$a}')"
+    die "$author is not a party to $rid; the thread is the record of a decision, not a discussion board."
+  }
+
+  # `request.comment` is NOT in REQRECORD_STATUS_EVENTS and must never be. A
+  # comment that carried a status would land last and become the request's
+  # state, which is precisely the denylist failure lib/reqrecord.sh's header
+  # documents. It carries no `status` key at all.
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$author" --arg b "$body" --arg at "$(now_iso)" \
+    '{event:"request.comment",requestId:$id,author:$a,body:$b,at:$at}')"
+  echo "COMMENT recorded on $rid by $author"
 }
 
 # ===========================================================================
@@ -876,7 +1178,25 @@ cmd_thread() {
   # `thread` is the view that renders the record AS AUTHORITATIVE, so it is the
   # worst place to render a tampered one without complaint.
   reqrecord_assert_unambiguous "$rid"
-  jq -r --arg id "$rid" 'select(.requestId==$id) |
+  # The safer-alternatives record travels WITH the decision, on every row that
+  # carries one. An alternative the requester never reads is the same dead end
+  # as no alternative at all, and `thread` is where the requester reads.
+  jq -r --arg id "$rid" '
+    def saferalt:
+      (if ((.alternatives // []) | length) > 0
+       then "\n        safer alternatives offered:\n" +
+            ((.alternatives | map("          - " + .)) | join("\n"))
+       else "" end) +
+      (if (.noSaferAlternative // null) != null
+       then "\n        NO SAFER ALTERNATIVE: \(.noSaferAlternative)"
+       else "" end) +
+      (if ((.alternativesConsidered // []) | length) > 0
+       then "\n        alternatives considered and why each failed:\n" +
+            ((.alternativesConsidered
+              | map("          - \(.alternative)\n              failed because: \(.whyItFailed)"))
+             | join("\n"))
+       else "" end);
+    select(.requestId==$id) |
     if   .event=="request.submitted" then
       "\($id)  SUBMITTED  \(.requester) [\(.requesterTemplate)] asks to \(.action) \(.capability)  [\(.decisionMode)]" +
       "\n        FACTS     : \(.facts)" +
@@ -885,11 +1205,13 @@ cmd_thread() {
        then "\n        OWNER-RESERVED: " + (.ownerReservedRules | map("\(.rule) (\(.fact))") | join("; "))
        else "" end)
     elif .event=="request.reviewed" then
-      "\($id)  KEY 1/2    \(.reviewer) (domain) approved — \(.reason)\n        awaiting custodian \(.awaitingCustodian)"
+      "\($id)  KEY 1/2    \(.reviewer) (domain) approved — \(.reason)\n        awaiting custodian \(.awaitingCustodian)" + saferalt
     elif .event=="request.countersigned" then
       "\($id)  \(.status|ascii_upcase)   by \(.reviewer // .custodian) (\(.key)) — \(.reason)" +
       (if .status=="approved" and .key=="custody" then "\n        two keys: \(.domainOwner) (domain) + \(.custodian) (custody)" else "" end) +
-      (if .status=="approved" then "\n        NOT YET EFFECTED — decision record only" else "" end)
+      (if .status=="approved" then "\n        NOT YET EFFECTED — decision record only" else "" end) + saferalt
+    elif .event=="request.comment" then
+      "\($id)  COMMENT    \(.author): \(.body)"
     elif .event=="request.expired" then "\($id)  EXPIRED    undecided; resubmission required"
     else empty end' "$QUEUE"
 }
@@ -901,6 +1223,7 @@ case "${1:-}" in
   submit)      shift; cmd_submit "$@";;
   review)      shift; cmd_review "$@";;
   countersign) shift; cmd_countersign "$@";;
+  comment)     shift; cmd_comment "$@";;
   list)        shift; cmd_list "$@";;
   owner-queue) shift; cmd_owner_queue "$@";;
   thread)      shift; cmd_thread "$@";;

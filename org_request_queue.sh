@@ -190,6 +190,13 @@ die() { echo "REFUSED: $*" >&2; exit 2; }
 # `$ev|index(.event)` evaluates it against the array itself and errors out.
 STATUS_EVENTS='{"request.submitted":true,"request.reviewed":true,"request.expired":true}'
 
+# The tail of the denial-floor refusal in saferalt_assert_direction. This flow
+# turns a no-safer-alternative finding on a RISKY ask into an open audit item;
+# capability_gate.sh has no `risk-record` and sets its own line rather than
+# promise one that does not exist. See lib/reqrecord.sh's caller contract.
+SAFERALT_NO_ALT_CONSEQUENCE='The second is always recorded on the thread and sent to the requester, and on a
+  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it.'
+
 # Standing authority. This is the escalation floor when no leader can be
 # derived, and the break-glass path over a derived leader. It is no longer the
 # only way a request can be decided.
@@ -576,6 +583,129 @@ expired() {
   local exp="$1"
   [[ -n "$exp" && "$exp" != "null" ]] || return 1
   [[ "$(now_iso)" > "$exp" ]]
+}
+
+# --- the safer-alternative contract (TOG-388, factored out in TOG-403) ------
+# The owner's decision model, as ARGUMENT SHAPES: a denial must leave the
+# requester somewhere to go, and an approval of a risky ask must show which
+# safer routes were weighed and why each failed. It lives here because it is
+# the SAME model in both flows — seating an agent and handing over a credential
+# — and two copies of a decision model do not stay one model. The divergence is
+# invisible from either side: both files still refuse things, just no longer
+# the same things.
+#
+# STATE IN GLOBALS, NOT RETURN VALUES. These are built one argv word at a time
+# inside the caller's own parsing loop, and a function that returned them by
+# echo could not also `die` on a malformed pair — `die` inside `$(...)` exits
+# only the subshell, so the parse would carry on past its own refusal. Call
+# saferalt_reset once at the top of every decision command.
+#
+# CALLER CONTRACT
+#   SAFERALT_NO_ALT_CONSEQUENCE  one line appended to the denial-floor refusal,
+#                                naming what a recorded --no-safer-alternative
+#                                finding BECOMES in this flow. The two flows
+#                                genuinely differ: org_request_queue.sh turns a
+#                                risky one into an open audit item that
+#                                `ack-risk` drains; capability_gate.sh has no
+#                                such command and says so instead. One sentence
+#                                covering both would be false in one of them,
+#                                which is the exact failure this file exists to
+#                                prevent.
+saferalt_reset() {
+  SAFERALT_ALTS='[]'; SAFERALT_CONSIDERED='[]'; SAFERALT_NO_ALT=""; SAFERALT_SHIFT=0
+}
+
+# Consume one flag of the contract from the caller's argv. Sets SAFERALT_SHIFT
+# to how many words it took, or 0 if $1 is none of ours — so the caller's `*)`
+# arm offers this first and only then falls through to "unknown argument".
+saferalt_parse_arg() {
+  SAFERALT_SHIFT=0
+  case "${1:-}" in
+    # A safer route that still FULLY unblocks the requester's work. Repeatable.
+    --alternative)
+      [[ -n "${2:-}" ]] || die "--alternative needs a value."
+      SAFERALT_ALTS="$(jq -c --arg a "$2" '. + [$a]' <<<"$SAFERALT_ALTS")"
+      SAFERALT_SHIFT=2;;
+    # The explicit finding that there is no safer route. An escape hatch that
+    # is RECORDED and surfaced, not one that is free.
+    --no-safer-alternative)
+      [[ -n "${2:-}" ]] || die "--no-safer-alternative needs the finding itself, not a bare flag."
+      SAFERALT_NO_ALT="$2"
+      SAFERALT_SHIFT=2;;
+    # An alternative that was weighed and did not work, with the reason it did
+    # not. The two flags are a PAIR and are parsed as one unit: --because must
+    # immediately follow its --considered. Parsing them as two independent
+    # repeatable lists lets a mismatched count pair alternative 1 with reason 2
+    # and produce a record that is fully populated and entirely wrong, which is
+    # worse than a missing one because it reads as diligence.
+    --considered)
+      [[ -n "${2:-}" ]] || die "--considered needs a value."
+      [[ "${3:-}" == "--because" ]] \
+        || die "--considered \"$2\" must be followed immediately by --because \"<why it failed>\"; an alternative with no failure reason is a list, not an analysis."
+      [[ -n "${4:-}" ]] || die "--because needs a value."
+      SAFERALT_CONSIDERED="$(jq -c --arg a "$2" --arg w "$4" '. + [{alternative:$a,whyItFailed:$w}]' <<<"$SAFERALT_CONSIDERED")"
+      SAFERALT_SHIFT=4;;
+    --because) die "--because must follow a --considered; it cannot stand alone.";;
+  esac
+}
+
+# The two directions are not interchangeable, and each wrong combination gets
+# its OWN refusal. --alternative is a way forward and belongs on a denial;
+# --considered/--because is a rejected route and belongs on an approval. A
+# generic "bad flags" message would leave the reviewer guessing which half of
+# the model it had backwards, which is the half it is least able to guess.
+#
+# Callers run this BEFORE reading the request, for the same reason the --reason
+# check runs there: a refusal that depends on who is asking, or on which
+# request was named, is a refusal a reviewer can shop around.
+saferalt_assert_direction() {
+  local n_alt n_cons
+  n_alt="$(jq -r 'length' <<<"$SAFERALT_ALTS")"
+  n_cons="$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")"
+  if [[ "$1" == "rejected" ]]; then
+    [[ $n_cons -eq 0 ]] \
+      || die "--considered/--because records an alternative that FAILED, which belongs on an approval; on a denial the alternative is the way forward, so use --alternative."
+    [[ -z "$SAFERALT_NO_ALT" || $n_alt -eq 0 ]] \
+      || die "a denial cannot both offer an alternative and find that none exists; drop one."
+    [[ $n_alt -gt 0 || -n "$SAFERALT_NO_ALT" ]] || die \
+"a denial must leave the requester somewhere to go. Supply either:
+    --alternative \"<a safer route that still fully unblocks the work>\"   (repeatable)
+  or, if you have looked and there genuinely is none:
+    --no-safer-alternative \"<what you considered and why nothing works>\"
+  $SAFERALT_NO_ALT_CONSEQUENCE"
+  else
+    [[ $n_alt -eq 0 ]] \
+      || die "--alternative offers the requester a way forward instead of granting the ask; on an approval the ask IS granted, so record the routes you rejected with --considered/--because."
+    [[ -z "$SAFERALT_NO_ALT" ]] \
+      || die "--no-safer-alternative is a denial finding. On an approval, 'nothing safer worked' is exactly what --considered/--because has to show, one alternative at a time."
+  fi
+}
+
+# Only when no safer alternative exists may a risky ask be granted — and never
+# without recording which were considered and why each failed. That record is
+# the artifact the owner audits, so its absence is the thing that has to be
+# impossible. The ask label and the denial remedy are the CALLER's because the
+# command line differs per flow; the model does not, so the wording is here.
+saferalt_assert_grant_record() {
+  [[ "$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")" -gt 0 ]] || die \
+"$1 is a RISKY ask, so granting it needs the safer alternatives on the record.
+  Supply at least one pair:
+    --considered \"<a safer route you weighed>\" --because \"<why it did not fully unblock the work>\"
+  If a safer route DOES fully unblock it, this is a denial that offers it, not an approval:
+    $2"
+}
+
+# The record fields, as ONE SHAPE in both flows. Field names are what an
+# auditor's query binds to, and org_access_review.sh already reads
+# `alternativesConsidered` and `noSaferAlternative` by name. Two flows that
+# spelled them differently would each look correct read on its own, and the
+# cross-flow report would silently cover only one of them. Emitted as an object
+# the caller merges into its decision row with `+`, so the row keeps whatever
+# flow-specific fields it already had.
+saferalt_decision_json() {
+  jq -cn --argjson a "$SAFERALT_ALTS" --argjson c "$SAFERALT_CONSIDERED" --arg n "$SAFERALT_NO_ALT" \
+    '{alternatives:$a,alternativesConsidered:$c,
+      noSaferAlternative:(if $n=="" then null else $n end)}'
 }
 
 # Materialise expiry for every request that has aged out, so `thread` and `list`
@@ -1016,8 +1146,12 @@ cmd_who() {
 
 # --------------------------------------------------------------------------
 cmd_review() {
-  local reviewer="" rid="" decision="" reason="" no_alt=""
-  local alts='[]' considered='[]'
+  local reviewer="" rid="" decision="" reason=""
+  # The four safer-alternative flags are parsed by the SHARED contract in
+  # lib/reqrecord.sh (TOG-403), not inline here, so this flow and
+  # capability_gate.sh cannot end up enforcing two versions of the owner's
+  # model. Behaviour is unchanged; the definition moved.
+  saferalt_reset
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --reviewer) reviewer="$2"; shift 2;;
@@ -1025,28 +1159,9 @@ cmd_review() {
       --approve)  decision="approved"; shift;;
       --reject)   decision="rejected"; shift;;
       --reason)   reason="$2";   shift 2;;
-      # A safer route that still FULLY unblocks the requester's work. Repeatable.
-      --alternative) [[ -n "${2:-}" ]] || die "--alternative needs a value."
-                     alts="$(jq -c --arg a "$2" '. + [$a]' <<<"$alts")"; shift 2;;
-      # The explicit finding that there is no safer route. An escape hatch that
-      # is RECORDED and surfaced, not one that is free.
-      --no-safer-alternative) [[ -n "${2:-}" ]] || die "--no-safer-alternative needs the finding itself, not a bare flag."
-                     no_alt="$2"; shift 2;;
-      # An alternative that was weighed and did not work, with the reason it did
-      # not. The two flags are a PAIR and are parsed as one unit: --because must
-      # immediately follow its --considered. Parsing them as two independent
-      # repeatable lists lets a mismatched count pair alternative 1 with reason 2
-      # and produce a record that is fully populated and entirely wrong, which is
-      # worse than a missing one because it reads as diligence.
-      --considered)
-        [[ -n "${2:-}" ]] || die "--considered needs a value."
-        [[ "${3:-}" == "--because" ]] \
-          || die "--considered \"$2\" must be followed immediately by --because \"<why it failed>\"; an alternative with no failure reason is a list, not an analysis."
-        [[ -n "${4:-}" ]] || die "--because needs a value."
-        considered="$(jq -c --arg a "$2" --arg w "$4" '. + [{alternative:$a,whyItFailed:$w}]' <<<"$considered")"
-        shift 4;;
-      --because) die "--because must follow a --considered; it cannot stand alone.";;
-      *) die "unknown argument: $1";;
+      *) saferalt_parse_arg "$@"
+         [[ $SAFERALT_SHIFT -gt 0 ]] || die "unknown argument: $1"
+         shift "$SAFERALT_SHIFT";;
     esac
   done
   [[ -n "$reviewer" && -n "$rid" && -n "$decision" ]] \
@@ -1063,28 +1178,10 @@ cmd_review() {
   # Argument-shape checks run BEFORE the request is read, for the same reason
   # the --reason check does: a refusal that depends on who is asking, or on
   # which request was named, is a refusal a reviewer can shop around.
+  saferalt_assert_direction "$decision"
   local n_alt n_cons
-  n_alt="$(jq -r 'length' <<<"$alts")"
-  n_cons="$(jq -r 'length' <<<"$considered")"
-
-  if [[ "$decision" == "rejected" ]]; then
-    [[ $n_cons -eq 0 ]] \
-      || die "--considered/--because records an alternative that FAILED, which belongs on an approval; on a denial the alternative is the way forward, so use --alternative."
-    [[ -z "$no_alt" || $n_alt -eq 0 ]] \
-      || die "a denial cannot both offer an alternative and find that none exists; drop one."
-    [[ $n_alt -gt 0 || -n "$no_alt" ]] || die \
-"a denial must leave the requester somewhere to go. Supply either:
-    --alternative \"<a safer route that still fully unblocks the work>\"   (repeatable)
-  or, if you have looked and there genuinely is none:
-    --no-safer-alternative \"<what you considered and why nothing works>\"
-  The second is always recorded on the thread and sent to the requester, and on a
-  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it."
-  else
-    [[ $n_alt -eq 0 ]] \
-      || die "--alternative offers the requester a way forward instead of granting the ask; on an approval the ask IS granted, so record the routes you rejected with --considered/--because."
-    [[ -z "$no_alt" ]] \
-      || die "--no-safer-alternative is a denial finding. On an approval, 'nothing safer worked' is exactly what --considered/--because has to show, one alternative at a time."
-  fi
+  n_alt="$(jq -r 'length' <<<"$SAFERALT_ALTS")"
+  n_cons="$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")"
 
   reap_expired
   assert_unambiguous "$rid"
@@ -1139,12 +1236,8 @@ cmd_review() {
     log_event "$(jq -cn --arg id "$rid" --arg w "$template" --arg r "$reviewer" --arg f "$risk_factors" \
       '{event:"review.refused",reason:"risky_grant_without_alternatives_record",requestId:$id,template:$w,reviewer:$r,riskFactors:($f|split(","))}')"
     echo "  risk factors : $risk_factors" >&2
-    die \
-"'$template' is a RISKY ask, so granting it needs the safer alternatives on the record.
-  Supply at least one pair:
-    --considered \"<a safer route you weighed>\" --because \"<why it did not fully unblock the work>\"
-  If a safer route DOES fully unblock it, this is a denial that offers it, not an approval:
-    review --reviewer $reviewer --request $rid --reject --reason \"...\" --alternative \"...\""
+    saferalt_assert_grant_record "'$template'" \
+      "review --reviewer $reviewer --request $rid --reject --reason \"...\" --alternative \"...\""
   fi
 
   local rvrow rv_id rv_tpl
@@ -1234,16 +1327,14 @@ cmd_review() {
   if [[ "$decision" == "rejected" ]]; then
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
       --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
-      --argjson alts "$alts" --arg na "$no_alt" \
+      --argjson sa "$(saferalt_decision_json)" \
       '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov,
-        risk:$risk,
-        alternatives:$alts,
-        noSaferAlternative:(if $na=="" then null else $na end)}')"
+        risk:$risk} + $sa')"
     echo "REJECTED $rid by $reviewer — $reason"
     announce_override
     if [[ "$n_alt" -gt 0 ]]; then
       echo "  safer alternatives offered:"
-      jq -r '.[] | "    - " + .' <<<"$alts"
+      jq -r '.[] | "    - " + .' <<<"$SAFERALT_ALTS"
     else
       # Said to the reviewer's face, in the same shape as announce_override and
       # for the same reason: a finding recorded and not surfaced is a finding
@@ -1253,7 +1344,7 @@ cmd_review() {
       # requester, which is what stops it being a dead end.
       printf '\n  ** NO SAFER ALTERNATIVE FOUND **\n'
       printf '  %s recorded that nothing safer would unblock this work:\n' "$reviewer"
-      printf '    %s\n' "$no_alt"
+      printf '    %s\n' "$SAFERALT_NO_ALT"
       if [[ "$risky" == "yes" ]]; then
         printf '  This was a RISKY ask (%s), so it is now an OPEN item in the\n' "$risk_factors"
         printf '  standing access review until an auditor other than %s closes it:\n' "$reviewer"
@@ -1309,16 +1400,15 @@ cmd_review() {
   local new_id; new_id="$(grep -oE 'PROVISIONED [A-Z0-9_]+ -> [0-9a-f-]{36}' <<<"$out" | awk '{print $4}')"
   append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg n "$new_id" --arg re "$reason" \
     --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
-    --argjson cons "$considered" \
+    --argjson sa "$(saferalt_decision_json)" \
     '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,newAgentId:$n,reason:$re,at:$at,override:$ov,
-      risk:$risk,
-      alternativesConsidered:$cons}')"
+      risk:$risk} + $sa')"
   echo "APPROVED $rid by $reviewer"
   announce_override
   if [[ "$risky" == "yes" ]]; then
     printf '\n  ** RISKY ASK GRANTED ** (risk factors: %s)\n' "$risk_factors"
     printf '  Safer alternatives considered, and why each failed:\n'
-    jq -r '.[] | "    - \(.alternative)\n        failed because: \(.whyItFailed)"' <<<"$considered"
+    jq -r '.[] | "    - \(.alternative)\n        failed because: \(.whyItFailed)"' <<<"$SAFERALT_CONSIDERED"
     printf '  This is an OPEN item in the standing access review until an auditor other\n'
     printf '  than %s reads that record and closes it:\n' "$reviewer"
     printf '      ./org_request_queue.sh ack-risk --request %s --auditor <ROLE> --note "..."\n\n' "$rid"

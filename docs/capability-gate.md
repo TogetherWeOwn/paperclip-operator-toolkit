@@ -134,6 +134,75 @@ terminated, that custody vanished between the two keys, or that the ask now clas
 owner-reserved. A decider derived at submit and trusted at approval is the TOCTOU bug
 `org_request_queue.sh` already documents, arriving in a new file.
 
+### A denial must leave the requester somewhere to go
+
+The owner's safer-alternative-first model (TOG-388) applies to **both keys** here (TOG-403).
+
+| direction | required, in addition to `--reason` |
+|---|---|
+| **deny** (either key) | at least one `--alternative "<safer route that still fully unblocks the work>"`, **or** an explicit `--no-safer-alternative "<the finding>"` |
+| **approve a risky ask** | at least one adjacent pair `--considered "<route weighed>" --because "<why it did not fully unblock the work>"` |
+
+The flags are exclusive **by decision direction**. `--alternative` is a way forward and belongs
+on a denial; `--considered/--because` is a rejected route and belongs on an approval. Each wrong
+combination has its own refusal, because a generic *"bad flags"* would leave the decider
+guessing which half of the model it had backwards — the half it is least able to guess.
+
+`--considered` and `--because` are parsed as **one unit**: `--because` must immediately follow
+its `--considered`. Two independent repeatable lists let a mismatched count pair alternative 1
+with reason 2 and produce a record that is fully populated and entirely wrong, which is worse
+than a missing one because it reads as diligence.
+
+**Which asks are risky is derived from the registry**, never declared — `class` and `rollback`,
+read by the same rule for every ask. Both lists are **allowlists** (`RISK_CLASSES` /
+`NONRISK_CLASSES`): a class added later that is on neither is refused rather than defaulted to
+routine, because a denylist silently opts every future class into "safe".
+
+### The countersignature is always a risky grant
+
+`countersign` only ever runs on a `custody` request, and `custody` is only ever reached by
+`class: credential`. So there is no routine branch: the alternatives record is **unconditional**
+and is asserted before the request is even read.
+
+The denial side is the one that matters most in either tool. **A custodian's refusal is usually
+*"not in this form"* rather than *"no"*** — a narrower scope, a shorter TTL, a brokered mint
+instead of the key itself. A custody denial that records none of that is the worst case of the
+whole class: the requester is blocked by the one agent who already knows the safer shape.
+
+### The implementation is shared, not copied
+
+Parsing, refusal wording and record shape all come from **`lib/reqrecord.sh`**, byte-identical
+with `org_request_queue.sh` and gated by `test_reqrecord_shared.sh`. Two copies of the owner's
+decision model become two decision models, and the divergence is invisible from either side —
+both files still refuse things, just no longer the same things. `test_capability_gate.sh`
+section 10 proves the sharing is real rather than decorative: neutering the function *in the
+library* turns **both** flows' tests red in one edit.
+
+Deliberately *not* shared: the risk classifier — the two flows read different facts, permission
+keys versus registry entries — and `SAFERALT_NO_ALT_CONSEQUENCE`, the one line naming what a
+`no-safer-alternative` finding becomes. The queue opens an audit item that `ack-risk` drains;
+this gate has no such command and says so rather than promising one that does not exist.
+
+### `comment` — asking for a fact without deciding
+
+TOG-387 left open whether this gate needed a `comment`. It does, and the alternatives model is
+the reason rather than the objection: a decider one fact short must now produce a way forward
+anyway, so it will invent the best alternative it can from an incomplete picture — and a
+plausible wrong alternative reads as diligence and sends the requester somewhere wrong. Forcing
+an answer out of someone who has not finished reading the question manufactures bad answers.
+
+It matters more here than in `org_request_queue.sh` for a second reason: that tool has
+`--supersedes`, so a denied requester can amend against the same thread. **This one does not.**
+Without `comment` the only move after a denial is a fresh `CAP` id carrying none of the
+exchange, so the reasoning the owner asked to be recorded ends up scattered across ids nothing
+links.
+
+Restricted to the **parties** — requester, domain owner, custodian — all derived fresh, never
+read from the submission. There is deliberately no standing-authority arm: `review` refuses to
+let standing authority decide a capability, so letting it write into that decision's record
+would be the same override arriving by a quieter door. `request.comment` carries no `status`
+key and is not in `REQRECORD_STATUS_EVENTS`, so a comment can never become a request's state.
+
 ### An approval is not a grant
 
 `capability_gate.sh` does not grant anything. An approved request is a decision record with a
@@ -204,8 +273,19 @@ export ORG_SNAPSHOT=/path/to/org.tsv      # or offline, no database at all
 ./capability_gate.sh who --capability github.token --action grant --requester ENG
 ./capability_gate.sh submit --requester ENG --capability github.token --action grant \
     --facts "..." --reasoning "..."
-./capability_gate.sh review      --reviewer  T0 --request CAP-001 --approve --reason "..."
-./capability_gate.sh countersign --custodian S0 --request CAP-001 --approve --reason "..."
+# a decider one fact short asks, instead of guessing at an alternative
+./capability_gate.sh comment --request CAP-001 --author T0 --body "which repo, and does it outlive the run?"
+
+# approving a risky ask needs the routes you rejected, in adjacent pairs
+./capability_gate.sh review      --reviewer  T0 --request CAP-001 --approve --reason "..." \
+    --considered "broker it per run" --because "the broker refuses outside in_progress"
+./capability_gate.sh countersign --custodian S0 --request CAP-001 --approve --reason "..." \
+    --considered "a standing PAT" --because "it survives the run and nothing revokes it on failure"
+
+# denying needs a way forward — "not in this form, in that one"
+./capability_gate.sh countersign --custodian S0 --request CAP-001 --reject --reason "..." \
+    --alternative "scope it to one repo with a 10-minute TTL and I will countersign today"
+
 ./capability_gate.sh thread --request CAP-001
 ./capability_gate.sh owner-queue          # exit 1 while anything is waiting
 ```

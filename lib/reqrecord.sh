@@ -13,27 +13,42 @@
 # TOG-387 needed a second flow (capability requests), so the invariants moved
 # here instead of being copied. This file is sourced by `capability_gate.sh`.
 #
+# TOG-403 added a second thing worth sharing, one level up from the record's
+# integrity: what a decision must CONTAIN to be a valid record at all. The
+# owner's safer-alternative-first model (TOG-388) is not specific to org
+# provisioning either — it is more load-bearing on the capability side, where
+# the asks are riskier — so its argument shapes and its refusal wording live
+# here too, under the same byte-identity gate.
+#
 # ---------------------------------------------------------------------------
 # WHY org_request_queue.sh DOES NOT SOURCE THIS YET
 # ---------------------------------------------------------------------------
-# It should, and that is the intended end state. It does not today because
-# TOG-388 (safer-alternative-first review) and TOG-390 (reviewer liveness) are
-# both open against that file, and rewriting its record layer underneath two
-# live changes trades a duplication problem for a merge-conflict problem.
+# It should, and that is the intended end state. The original reason it did not
+# — TOG-388 and TOG-390 both open against that file — is GONE: both landed on
+# 2026-08-25 (978fbc1, 8dfc3e5). What remains is scope. Adopting the library
+# means renaming that file's `request_state`/`assert_unambiguous`/`next_id` at
+# every call site and resolving its own `now_iso`/`plus_days`/`tabulate`
+# against this file's, which is a large refactor of the most load-bearing file
+# in the repo and wants its own issue and its own red-to-green. Filed as
+# TOG-438, which also carries the two section-3 assertions that must be MOVED
+# rather than deleted with this file's gate. Until then the duplication stands,
+# gated.
 #
-# The duplication is therefore GATED, not tolerated: `test_reqrecord_shared.sh`
-# extracts the eight functions below from BOTH files and fails if they are not
+# The duplication is GATED, not tolerated: `test_reqrecord_shared.sh` extracts
+# the thirteen functions below from BOTH files and fails if they are not
 # byte-identical. Drift becomes a red build on the next push rather than a
-# divergence somebody finds later by reading two files side by side. When
-# TOG-388 and TOG-390 have landed, point the queue at this file and delete its
-# copies; the suite will then compare one definition against itself, which is
-# the signal to retire that half of it.
+# divergence somebody finds later by reading two files side by side. When the
+# queue adopts this file, delete its copies; the suite will then compare one
+# definition against itself, which is the signal to retire that half of it.
 #
 # WHAT IS SHARED AND WHAT IS DELIBERATELY NOT
 # -------------------------------------------
-# Shared (byte-identical, gated):
+# Shared (byte-identical, gated) — the record's integrity:
 #     die  log_event  append_queue  queue_lock  queue_unlock
 #     expired  submission_count  request_submission
+# ...and the decision's required content (TOG-403):
+#     saferalt_reset  saferalt_parse_arg  saferalt_assert_direction
+#     saferalt_assert_grant_record  saferalt_decision_json
 #
 # NOT shared, on purpose — these are parameterised here because the two flows
 # genuinely differ, so byte-identity would be a lie:
@@ -45,6 +60,18 @@
 #           the provisioning flow allocates `REQ-NNN`, the capability flow
 #           `CAP-NNN`, and mixing the two id spaces in one namespace is how a
 #           reviewer ends up deciding a request it did not read.
+#     SAFERALT_NO_ALT_CONSEQUENCE
+#           what a recorded "no safer alternative" finding BECOMES. The
+#           provisioning flow opens an audit item that `ack-risk` drains; the
+#           capability flow has no such command. Sharing one sentence would
+#           make it false in one of the two files.
+#     WHICH ASKS ARE RISKY
+#           not here at all, and deliberately. The provisioning flow derives it
+#           from a template's permission keys, the capability flow from the
+#           registry's class and rollback. Both derive it — neither lets the
+#           decider declare it — but they read different facts, and a shared
+#           classifier would have to be given both, which is a seam through
+#           which one flow's risk rules reach the other's.
 #
 # CALLER CONTRACT
 #     QUEUE       path to the append-only JSONL record  (required)
@@ -52,6 +79,7 @@
 #     REQ_ID_PREFIX             id prefix for reqrecord_next_id  (default REQ)
 #     REQRECORD_STATUS_EVENTS   JSON object; the events that CARRY a status
 #     REQRECORD_TERMINAL_EVENTS JSON object; the events that END a request
+#     SAFERALT_NO_ALT_CONSEQUENCE  one line; see saferalt_assert_direction
 #
 # Both event sets are ALLOWLISTS and must stay allowlists. See the long comment
 # on STATUS_EVENTS in org_request_queue.sh: as a denylist ("not a comment and
@@ -69,6 +97,11 @@ REQRECORD_STATUS_EVENTS="${REQRECORD_STATUS_EVENTS:-$(printf '%s' '{"request.sub
 REQRECORD_TERMINAL_EVENTS="${REQRECORD_TERMINAL_EVENTS:-$(printf '%s' '{"request.reviewed":true,"request.expired":true}')}"
 # Space-separated. Statuses from which a request can still age out.
 REQRECORD_OPEN_STATUSES="${REQRECORD_OPEN_STATUSES:-pending}"
+# The tail of the denial-floor refusal. Default is org_request_queue.sh's
+# literal, same convention as the event sets above; capability_gate.sh replaces
+# it because it has no `risk-record` and must not promise one.
+SAFERALT_NO_ALT_CONSEQUENCE="${SAFERALT_NO_ALT_CONSEQUENCE:-$(printf '%s' 'The second is always recorded on the thread and sent to the requester, and on a
+  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it.')}"
 
 # --- the eight shared definitions ------------------------------------------
 # Everything between the BEGIN/END markers is compared byte-for-byte against
@@ -110,6 +143,129 @@ submission_count() {
 request_submission() {
   [[ -f "$QUEUE" ]] || return 1
   jq -c --arg id "$1" 'select(.requestId==$id and .event=="request.submitted")' "$QUEUE" | tail -1
+}
+
+# --- the safer-alternative contract (TOG-388, factored out in TOG-403) ------
+# The owner's decision model, as ARGUMENT SHAPES: a denial must leave the
+# requester somewhere to go, and an approval of a risky ask must show which
+# safer routes were weighed and why each failed. It lives here because it is
+# the SAME model in both flows — seating an agent and handing over a credential
+# — and two copies of a decision model do not stay one model. The divergence is
+# invisible from either side: both files still refuse things, just no longer
+# the same things.
+#
+# STATE IN GLOBALS, NOT RETURN VALUES. These are built one argv word at a time
+# inside the caller's own parsing loop, and a function that returned them by
+# echo could not also `die` on a malformed pair — `die` inside `$(...)` exits
+# only the subshell, so the parse would carry on past its own refusal. Call
+# saferalt_reset once at the top of every decision command.
+#
+# CALLER CONTRACT
+#   SAFERALT_NO_ALT_CONSEQUENCE  one line appended to the denial-floor refusal,
+#                                naming what a recorded --no-safer-alternative
+#                                finding BECOMES in this flow. The two flows
+#                                genuinely differ: org_request_queue.sh turns a
+#                                risky one into an open audit item that
+#                                `ack-risk` drains; capability_gate.sh has no
+#                                such command and says so instead. One sentence
+#                                covering both would be false in one of them,
+#                                which is the exact failure this file exists to
+#                                prevent.
+saferalt_reset() {
+  SAFERALT_ALTS='[]'; SAFERALT_CONSIDERED='[]'; SAFERALT_NO_ALT=""; SAFERALT_SHIFT=0
+}
+
+# Consume one flag of the contract from the caller's argv. Sets SAFERALT_SHIFT
+# to how many words it took, or 0 if $1 is none of ours — so the caller's `*)`
+# arm offers this first and only then falls through to "unknown argument".
+saferalt_parse_arg() {
+  SAFERALT_SHIFT=0
+  case "${1:-}" in
+    # A safer route that still FULLY unblocks the requester's work. Repeatable.
+    --alternative)
+      [[ -n "${2:-}" ]] || die "--alternative needs a value."
+      SAFERALT_ALTS="$(jq -c --arg a "$2" '. + [$a]' <<<"$SAFERALT_ALTS")"
+      SAFERALT_SHIFT=2;;
+    # The explicit finding that there is no safer route. An escape hatch that
+    # is RECORDED and surfaced, not one that is free.
+    --no-safer-alternative)
+      [[ -n "${2:-}" ]] || die "--no-safer-alternative needs the finding itself, not a bare flag."
+      SAFERALT_NO_ALT="$2"
+      SAFERALT_SHIFT=2;;
+    # An alternative that was weighed and did not work, with the reason it did
+    # not. The two flags are a PAIR and are parsed as one unit: --because must
+    # immediately follow its --considered. Parsing them as two independent
+    # repeatable lists lets a mismatched count pair alternative 1 with reason 2
+    # and produce a record that is fully populated and entirely wrong, which is
+    # worse than a missing one because it reads as diligence.
+    --considered)
+      [[ -n "${2:-}" ]] || die "--considered needs a value."
+      [[ "${3:-}" == "--because" ]] \
+        || die "--considered \"$2\" must be followed immediately by --because \"<why it failed>\"; an alternative with no failure reason is a list, not an analysis."
+      [[ -n "${4:-}" ]] || die "--because needs a value."
+      SAFERALT_CONSIDERED="$(jq -c --arg a "$2" --arg w "$4" '. + [{alternative:$a,whyItFailed:$w}]' <<<"$SAFERALT_CONSIDERED")"
+      SAFERALT_SHIFT=4;;
+    --because) die "--because must follow a --considered; it cannot stand alone.";;
+  esac
+}
+
+# The two directions are not interchangeable, and each wrong combination gets
+# its OWN refusal. --alternative is a way forward and belongs on a denial;
+# --considered/--because is a rejected route and belongs on an approval. A
+# generic "bad flags" message would leave the reviewer guessing which half of
+# the model it had backwards, which is the half it is least able to guess.
+#
+# Callers run this BEFORE reading the request, for the same reason the --reason
+# check runs there: a refusal that depends on who is asking, or on which
+# request was named, is a refusal a reviewer can shop around.
+saferalt_assert_direction() {
+  local n_alt n_cons
+  n_alt="$(jq -r 'length' <<<"$SAFERALT_ALTS")"
+  n_cons="$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")"
+  if [[ "$1" == "rejected" ]]; then
+    [[ $n_cons -eq 0 ]] \
+      || die "--considered/--because records an alternative that FAILED, which belongs on an approval; on a denial the alternative is the way forward, so use --alternative."
+    [[ -z "$SAFERALT_NO_ALT" || $n_alt -eq 0 ]] \
+      || die "a denial cannot both offer an alternative and find that none exists; drop one."
+    [[ $n_alt -gt 0 || -n "$SAFERALT_NO_ALT" ]] || die \
+"a denial must leave the requester somewhere to go. Supply either:
+    --alternative \"<a safer route that still fully unblocks the work>\"   (repeatable)
+  or, if you have looked and there genuinely is none:
+    --no-safer-alternative \"<what you considered and why nothing works>\"
+  $SAFERALT_NO_ALT_CONSEQUENCE"
+  else
+    [[ $n_alt -eq 0 ]] \
+      || die "--alternative offers the requester a way forward instead of granting the ask; on an approval the ask IS granted, so record the routes you rejected with --considered/--because."
+    [[ -z "$SAFERALT_NO_ALT" ]] \
+      || die "--no-safer-alternative is a denial finding. On an approval, 'nothing safer worked' is exactly what --considered/--because has to show, one alternative at a time."
+  fi
+}
+
+# Only when no safer alternative exists may a risky ask be granted — and never
+# without recording which were considered and why each failed. That record is
+# the artifact the owner audits, so its absence is the thing that has to be
+# impossible. The ask label and the denial remedy are the CALLER's because the
+# command line differs per flow; the model does not, so the wording is here.
+saferalt_assert_grant_record() {
+  [[ "$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")" -gt 0 ]] || die \
+"$1 is a RISKY ask, so granting it needs the safer alternatives on the record.
+  Supply at least one pair:
+    --considered \"<a safer route you weighed>\" --because \"<why it did not fully unblock the work>\"
+  If a safer route DOES fully unblock it, this is a denial that offers it, not an approval:
+    $2"
+}
+
+# The record fields, as ONE SHAPE in both flows. Field names are what an
+# auditor's query binds to, and org_access_review.sh already reads
+# `alternativesConsidered` and `noSaferAlternative` by name. Two flows that
+# spelled them differently would each look correct read on its own, and the
+# cross-flow report would silently cover only one of them. Emitted as an object
+# the caller merges into its decision row with `+`, so the row keeps whatever
+# flow-specific fields it already had.
+saferalt_decision_json() {
+  jq -cn --argjson a "$SAFERALT_ALTS" --argjson c "$SAFERALT_CONSIDERED" --arg n "$SAFERALT_NO_ALT" \
+    '{alternatives:$a,alternativesConsidered:$c,
+      noSaferAlternative:(if $n=="" then null else $n end)}'
 }
 # <<< REQRECORD SHARED END
 
