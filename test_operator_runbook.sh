@@ -198,6 +198,51 @@ grep -q 'Runbook lines (capability requests) | 4' <<<"$doc" \
   && ok "summary table counts the runbook lines" || bad "summary count wrong"
 
 # ---------------------------------------------------------------------------
+section "5b. render — a line whose ONLY home is this document is marked as one"
+# A `moved` line has had its standing interaction withdrawn, so this document is
+# the last place the ask exists. Before this was generated it lived in a
+# hand-written preamble on the board card — which any regeneration silently
+# wiped, taking six asks with it. That is the exact failure this tool exists to
+# prevent, so the marking has to come from the data, not from a human remembering.
+grep -q 'ONLY HOME — no other card carries this ask' <<<"$doc" \
+  && ok "the moved line is tagged ONLY HOME inline" \
+  || bad "TOG-M is moved and must be tagged ONLY HOME on its own line" "$doc"
+grep -q 'only remaining home for this ask' <<<"$doc" \
+  && ok "the inline tag is explained, not just abbreviated" || bad "no explanation of ONLY HOME"
+grep -q 'Read this before you start' <<<"$doc" \
+  && ok "the up-front block that lists them is rendered" || bad "missing the up-front block"
+grep -q '1 of the lines below have no card anywhere else' <<<"$doc" \
+  && ok "the up-front block counts them" || bad "wrong count in the up-front block"
+# The line NUMBER must match where the line actually renders. TOG-M is blast 3,
+# so it sorts third. A reference to the wrong number is worse than none: it
+# sends the reader to a line that is not the one being flagged.
+grep -q '\*\*line 3 (TOG-M)\*\*' <<<"$doc" \
+  && ok "the reference carries the line's real rendered number (3)" \
+  || bad "expected '**line 3 (TOG-M)**' — reference drifted from the body" \
+         "$(grep -o 'line [0-9]* (TOG-[A-Z])' <<<"$doc" | tr '\n' ' ')"
+# Only the moved line may be tagged.
+n_tag="$(grep -c 'ONLY HOME — no other card carries this ask' <<<"$doc")"
+[[ "$n_tag" == "1" ]] && ok "exactly one line is tagged (not every line)" \
+                      || bad "expected 1 ONLY HOME tag, got $n_tag"
+
+# The empty case: with nothing moved, the block must VANISH, not render "0 of
+# the lines below have no card anywhere else" — which reads like a finding.
+CLS0="$TMP/cls_nomoved.json"
+jq 'del(.items["TOG-M"].moved)' "$CLS" > "$CLS0"
+doc0="$("$TOOL" render --classification "$CLS0" </dev/null 2>&1)"; rc=$?
+(( rc == 0 )) && ok "renders with nothing moved" || bad "render failed ($rc)" "$doc0"
+grep -q 'Read this before you start' <<<"$doc0" \
+  && bad "the block must be omitted entirely when no line is moved" "$doc0" \
+  || ok "no moved lines: the up-front block is omitted, not rendered as 0"
+grep -q 'ONLY HOME' <<<"$doc0" \
+  && bad "no line may be tagged ONLY HOME when none is moved" \
+  || ok "no moved lines: no inline tag"
+# ...and the document is otherwise intact, so the guard is not just blanking it.
+grep -qE '^### 3\. TOG-M' <<<"$doc0" \
+  && ok "the un-moved line still renders in its normal position" \
+  || bad "dropping the marker dropped the line itself"
+
+# ---------------------------------------------------------------------------
 section "6. mutation — each half of check must be load-bearing"
 STAGE="$TMP/stage"; mkdir -p "$STAGE"
 cp "$TOOL" "$STAGE/operator_runbook.sh"; chmod +x "$STAGE/operator_runbook.sh"

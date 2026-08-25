@@ -218,7 +218,13 @@ cmd_render() {
       "### \(n). \(id) — \(v.credential)\n"
       + "\n**Blast radius \(v.blast)**"
       + (if v.class == "MIXED" then "  ·  **MIXED — part of this is owner-reserved**" else "" end)
+      + (if v.moved == true then "  ·  **ONLY HOME — no other card carries this ask**" else "" end)
       + "\n\n"
+      + (if v.moved == true
+         then "> **This line is the only remaining home for this ask.** Its standing\n"
+            + "> interaction has been withdrawn, so if you skip it here, nothing else\n"
+            + "> will surface it.\n\n"
+         else "" end)
       + "**What it changes.** \(v.changes)\n\n"
       + (if (v.warning // "") != "" then "> ⚠️ **\(v.warning)**\n\n" else "" end)
       + "**Verify.** \(v.verify)\n\n"
@@ -233,6 +239,12 @@ cmd_render() {
     (.items | to_entries | sort_by(.value.blast, .key)) as $items
     | (.decisions | to_entries | sort_by(.key)) as $decisions
     | (.misrouted | to_entries | sort_by(.key)) as $misrouted
+    # The lines whose standing interaction has been WITHDRAWN. Numbered here,
+    # from the same sorted array the body is rendered from, so the reference
+    # cannot drift from the line it points at the way a hand-written list does.
+    | ($items | to_entries
+       | map(select(.value.value.moved == true))
+       | map("**line \(.key + 1) (\(.value.key))**")) as $only_home
     |
       "# Operator runbook — actions no agent can perform\n"
     + "\n"
@@ -251,11 +263,20 @@ cmd_render() {
     + "\n"
     + "| | count |\n|---|---|\n"
     + "| Runbook lines (capability requests) | \($items|length) |\n"
+    + "| — of those, whose ONLY home is this document | \($only_home|length) |\n"
     + "| Genuine decisions, correctly reserved | \($decisions|length) |\n"
     + "| Misrouted — an agent can answer these | \($misrouted|length) |\n"
     + "\n"
     + "\($note)\n"
     + "\n---\n\n"
+    + (if ($only_home|length) > 0
+       then "## Read this before you start\n\n"
+          + "**\($only_home|length) of the lines below have no card anywhere else.** Their standing\n"
+          + "interaction has been withdrawn, so the runbook line is the only remaining home for\n"
+          + "that ask — if you skip it here, nothing else will surface it:\n\n"
+          + "> \($only_home | join(", "))\n\n"
+          + "Each is also marked **ONLY HOME** on its own line below.\n\n---\n\n"
+       else "" end)
     + "## Runbook lines\n\n"
     + ([ $items | to_entries[] | line_block(.value.key; .value.value; .key + 1) ] | join("\n"))
     + "\n---\n\n"
