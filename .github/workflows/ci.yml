@@ -63,6 +63,10 @@ name: CI
 #                                       stops sending traffic to a quota-spent
 #                                       account, and whether a watcher that
 #                                       measured nothing says so — TOG-425
+#     test_approval_timeout_probe.sh    approval_timeout_probe.sh: whether the
+#                                       deadline stamped on a tool-approval
+#                                       request is enforced by anything, or is
+#                                       only displayed to the approver — TOG-400
 #     test_interaction_triage.sh        interaction_triage.sh: who can actually
 #                                       resolve each pending interaction, and
 #                                       which are dead on the board — TOG-423
@@ -730,6 +734,28 @@ jobs:
       # mktemp. No plugin host, no network, no credential.
       - name: plugin manifest authority-surface suite
         run: ./test_plugin_manifest_gate.sh
+
+      # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
+      # own. `tool_action_requests.expires_at` IS written — one hour out, by an
+      # UPDATE one statement after the insert that leaves it NULL — and it is
+      # published to the approver on the interaction card. Nothing enforces it:
+      # both expiry sites are lazy and fire only when the REQUESTER re-invokes
+      # the same tool with the same arguments on the same issue, and zero of the
+      # four bundle modules touching the table register a `setInterval`. So the
+      # approver is shown a deadline that no clock is holding.
+      #
+      # TOG-400 originally reported that the column "is never set", having read
+      # only the insert. Sending that fix upstream would have added a write that
+      # is already there and left the missing clock in place. The probe encodes
+      # the corrected finding so nobody re-derives the wrong one.
+      #
+      # Offline: the suite builds a synthetic bundle in mktemp and puts a fake
+      # `psql` on PATH, so it needs no Paperclip server and no database. Green
+      # here means the DETECTOR works — it is NOT a statement about the deployed
+      # server, which CI cannot see. Run `./approval_timeout_probe.sh` where
+      # /app/server/dist and the database are reachable.
+      - name: tool-approval deadline enforcement probe suite
+        run: ./test_approval_timeout_probe.sh
 
       # TOG-358. Whether the model endpoint the agents are about to be pointed
       # at can actually serve them. The suite stands up a stub Anthropic front
