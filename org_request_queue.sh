@@ -64,6 +64,11 @@ set -uo pipefail
 #   * A denial is not a dead end. It carries a reason, it can be answered with
 #     `comment`, and it can be amended by a NEW request that `--supersedes` it.
 #     `thread` renders the whole exchange, not just the final verdict.
+#   * SAFER ALTERNATIVES FIRST. A denial must additionally carry at least one
+#     alternative that still fully unblocks the work, or an explicit recorded
+#     finding that none exists; and granting a RISKY template requires the
+#     alternatives that were weighed and why each failed. See the TOG-388
+#     block below RISK_KEYS for what that control does and does not do.
 #   * One denial may be re-argued MAX_SUPERSEDE_CHAIN (5) times in total. The
 #     cap counts every amendment sharing a chain root, so it cannot be evaded
 #     by pointing many amendments at the same denial instead of chaining them.
@@ -102,11 +107,24 @@ set -uo pipefail
 #   ./org_request_queue.sh review  --reviewer <ROLE> --request <ID> \
 #                                  (--approve|--reject) --reason "..."
 #                                  # --reason is required on BOTH decisions
+#
+#     ...to DENY, additionally one of (safer-alternative-first, TOG-388):
+#                                  --alternative "<safer route that still
+#                                                 fully unblocks the work>"
+#                                                 # repeatable
+#                                  --no-safer-alternative "<the finding>"
+#
+#     ...to APPROVE a RISKY template, at least one pair:
+#                                  --considered "<route weighed>" \
+#                                  --because   "<why it did not unblock>"
+#
 #   ./org_request_queue.sh comment --request <ID> --author <ROLE> --body "..."
 #   ./org_request_queue.sh thread  --request <ID>
 #   ./org_request_queue.sh overrides [--all] [--json]   # exit 1 if any are open
 #   ./org_request_queue.sh ack-override --request <ID> --auditor <ROLE> \
 #                                       --note "..."
+#   ./org_request_queue.sh risk-record [--all] [--json] # exit 1 if any are open
+#   ./org_request_queue.sh ack-risk --request <ID> --auditor <ROLE> --note "..."
 #   ./org_request_queue.sh inbox   --for <ROLE> [--json]  # decisions on MY requests
 #   ./org_request_queue.sh notify  [--list|--drain] [--json]  # delivery outbox
 #   ./org_request_queue.sh log                       # org.read_grant_log
@@ -187,6 +205,118 @@ AUDIT_AUTHORITY='["P3_AUDIT_RISK","P1_PRESIDENT_COO"]'
 # Request ceiling = create ceiling, plus the report's explicit approval-gated
 # exception for the independent audit function.
 REQUEST_EXTRA='{"P3_AUDIT_RISK":["E4_AUDIT_ANALYST"]}'
+
+# ===========================================================================
+# SAFER-ALTERNATIVE-FIRST REVIEW (TOG-388)
+# ===========================================================================
+# The `Gated Autonomy` goal, quoting the owner's 2026-08-25 instruction:
+#
+#   "The responsible agent must then, when the ask is risky, propose safer
+#    alternatives that still FULLY unblock the work. Only when no safer
+#    alternative exists may the risky ask be granted — never lightly, never
+#    without recording which alternatives were considered and why each failed."
+#
+# TOG-194/TOG-198 already made a denial answerable: it carries a reason, it can
+# be answered with `comment`, and it can be amended with `--supersedes`. What
+# was missing is the THINKING. A denial could say "too risky" and stop, and an
+# approval of a capability that touches credentials or CI could be granted with
+# nothing on the record but "approved — needed". Both are now refused.
+#
+#   * A DENIAL must carry --reason AND either at least one --alternative or an
+#     explicit --no-safer-alternative finding. "No" without a next move is the
+#     dead end the whole system exists to avoid; "no, and here is nothing" is
+#     allowed, but it must be SAID and it becomes an open audit item.
+#   * An APPROVAL of a RISKY template must carry at least one
+#     --considered/--because pair. That is the record the owner audits later.
+#
+# WHAT THIS CONTROL CANNOT DO. It cannot tell a real alternative from the word
+# "none" typed into --alternative. No script can. What it CAN do is make the
+# omission impossible and the content NAMED, attributed and durable, so a
+# reviewer who skips the thinking has to write down that they skipped it, under
+# their own role id, in a record `risk-record` and org_access_review.sh both
+# read. That is the same trade the standing-authority override design already
+# made: convert a silent gap into a loud one. Stated plainly here because a
+# control whose limits are undocumented gets trusted for more than it does.
+
+# Permission keys whose grant makes an ask RISKY. Chosen against the owner line
+# in the `Gated Autonomy` goal — real money, credentials, anything published
+# outside the company, anything with no rollback — mapped onto this catalog:
+#
+#   tools:admin              administers the tool substrate for everyone; this
+#                            is the master-key shape the goal names directly.
+#   tools:manage_connections creates and edits credentialed tool connections.
+#   tools:manage_runtime     changes the runtime other agents execute in; there
+#                            is no clean rollback for work already run under it.
+#   environments:manage      environment writes, which are secret-adjacent.
+#   pipelines:write          CI/CD write is the path to anything published
+#                            outside the company.
+#   skills:create            a skill is code other agents execute. "Walls, not
+#                            rules" cuts both ways: authoring the instructions
+#                            a fleet runs is a capability, not a document.
+#   users:manage_permissions absent from today's catalog on purpose — it is the
+#                            master key, and it is listed here so that the day
+#                            it appears it is risky by default rather than by
+#                            somebody remembering.
+RISK_KEYS='["tools:admin","tools:manage_connections","tools:manage_runtime","environments:manage","pipelines:write","skills:create","users:manage_permissions"]'
+
+# Permission keys reviewed and judged NOT to make an ask risky. This list is not
+# decoration and it is not the complement of RISK_KEYS — it is the second half
+# of a TOTALITY CHECK. classify_risk refuses any template carrying a key on
+# NEITHER list.
+#
+# That is the anti-rot property, and it is the reason to spend a list on it: the
+# alternative shapes all fail the same way. A bare denylist silently opts every
+# NEW permission key into "safe", so the day someone adds `secrets:read` to a
+# template the classifier keeps answering "not risky" and the control quietly
+# stops applying to the one grant it most exists for. The queue already learned
+# this exact lesson once — see STATUS_EVENTS, where a denylist of event types
+# made every new event a decision. An unclassified key is a question nobody has
+# answered yet, and the honest answer to an unanswered question is to stop.
+NONRISK_KEYS='["agents:configure","agents:suggest-changes","tasks:assign_scope","tasks:manage_active_checkouts","skills:suggest-changes","tools:view_audit","tools:use","audit:view_agent_actions"]'
+
+# Template -> permission keys, read LIVE from the provisioner's catalog rather
+# than copied here. A copy would keep answering with yesterday's catalog after
+# the real one changed, which is the specific way a classifier goes quietly
+# wrong; test_responsible_leader.sh makes the same argument about its ceiling
+# stub. Emits the comma-joined key list, or nothing if the template is unknown.
+#
+# Deliberately `template-keys` and not `templates`: the human view is padded by
+# `column`, which is util-linux and is ABSENT in the paperclip container, where
+# it prints nothing at all rather than failing. A risk classifier reading an
+# empty catalog would answer "no keys, not risky" for every template on earth.
+template_keys() {
+  "$PROV" template-keys 2>/dev/null | awk -F'\t' -v t="$1" '$1==t{print $2; found=1} END{exit !found}'
+}
+
+# Is template $1 risky? Prints the comma-separated risk factors and returns 0
+# when it is, prints nothing and returns 1 when it is not.
+#
+# FAILS CLOSED IN BOTH DIRECTIONS, and the two failures are different:
+#   return 2 — the catalog could not be read, or the template is not in it. The
+#              classifier has no opinion, and "no opinion" must never render as
+#              "not risky".
+#   return 3 — the template carries a key on neither list. Someone extended the
+#              catalog without deciding whether the new grant is risky, and the
+#              decision belongs to them, not to a default.
+# Callers must distinguish >=2 from 1. Treating any non-zero as "not risky" is
+# precisely the bug this function is shaped to prevent.
+classify_risk() {
+  local keys factors
+  keys="$(template_keys "$1")" || return 2
+  [[ -n "$keys" ]] || return 1                 # a template with no grants at all
+  local unknown
+  unknown="$(jq -rn --arg k "$keys" --argjson r "$RISK_KEYS" --argjson s "$NONRISK_KEYS" \
+    '($k|split(",")) - $r - $s | join(",")')"
+  if [[ -n "$unknown" ]]; then
+    printf '%s\n' "$unknown"
+    return 3
+  fi
+  factors="$(jq -rn --arg k "$keys" --argjson r "$RISK_KEYS" \
+    '[($k|split(","))[] | select(. as $x | $r | index($x))] | join(",")')"
+  [[ -n "$factors" ]] || return 1
+  printf '%s\n' "$factors"
+  return 0
+}
 
 now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 plus_days() { date -u -d "+$1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
@@ -520,11 +650,35 @@ notify_already() {
 # so each terminal state carries its next move rather than just its verdict.
 notify_body() {
   local rid="$1" status="$2" role="$3" tpl="$4" title="$5" reason="$6" newid="$7" rv="$8"
+  # The decision row itself, so the safer-alternatives record travels WITH the
+  # decision instead of being something the requester has to go and look up.
+  # An alternative the requester never receives is the same dead end as no
+  # alternative at all — that is the whole argument TOG-254 made about reasons,
+  # and it applies with more force to the part that says what to do next.
+  local dec="${9:-}"
   printf 'Request %s (%s — "%s") is now %s.\n' "$rid" "$tpl" "$title" "$status"
   case "$status" in
     approved) printf 'Approved by %s. Seated agent id: %s\n' "$rv" "${newid:-unknown}"
-              printf 'Reason given: %s\n' "$reason";;
+              printf 'Reason given: %s\n' "$reason"
+              if jq -e '.risk.risky == true' <<<"${dec:-null}" >/dev/null 2>&1; then
+                printf '\nThis was a RISKY ask (%s). It was granted only after these safer\n' \
+                       "$(jq -r '.risk.factors|join(", ")' <<<"$dec")"
+                printf 'alternatives were weighed and found not to fully unblock the work:\n'
+                jq -r '.alternativesConsidered[]? | "  - \(.alternative)\n      failed because: \(.whyItFailed)"' <<<"$dec"
+              fi;;
     rejected) printf 'Denied by %s.\nReason given: %s\n\n' "$rv" "$reason"
+              if jq -e '(.alternatives // []) | length > 0' <<<"${dec:-null}" >/dev/null 2>&1; then
+                printf 'SAFER ALTERNATIVES OFFERED — each of these is meant to fully unblock\n'
+                printf 'the work you asked for. Try one before resubmitting:\n'
+                jq -r '.alternatives[] | "  - " + .' <<<"$dec"
+                printf '\n'
+              elif jq -e '(.noSaferAlternative // null) != null' <<<"${dec:-null}" >/dev/null 2>&1; then
+                printf 'NO SAFER ALTERNATIVE was found. The reviewer recorded this finding,\n'
+                printf 'and it is now an open item in the standing access review:\n'
+                printf '  %s\n' "$(jq -r '.noSaferAlternative' <<<"$dec")"
+                printf 'If you disagree, say so on the record with `comment` — that is what\n'
+                printf 'the auditor reading the open item will see.\n\n'
+              fi
               printf 'You can answer this. Either:\n'
               printf '  ./org_request_queue.sh comment --request %s --author %s --body "..."\n' "$rid" "$role"
               printf '  ./org_request_queue.sh submit --requester %s --template %s --title "%s" --supersedes %s\n' \
@@ -567,7 +721,18 @@ emit_notification() {
   title="$(jq -r '.title // ""' <<<"$sub")"
   nissue="$(jq -r '.notifyIssue // ""' <<<"$sub")"
 
-  local body; body="$(notify_body "$rid" "$status" "$role" "$tpl" "$title" "$reason" "$newid" "$rv")"
+  # Read back the decision row rather than threading its fields through five
+  # more positional parameters. Safe by ordering: cmd_review appends the row
+  # before it calls here, exactly as property 1 above requires. `expired` has
+  # no reviewed row and gets an empty string, which notify_body treats as "no
+  # record" rather than as an error.
+  local dec=""
+  if [[ -f "$QUEUE" ]]; then
+    dec="$(jq -c --arg id "$rid" \
+      'select(.event=="request.reviewed" and .requestId==$id)' "$QUEUE" 2>/dev/null | tail -1)"
+  fi
+
+  local body; body="$(notify_body "$rid" "$status" "$role" "$tpl" "$title" "$reason" "$newid" "$rv" "$dec")"
 
   # The field below is `decision`, NOT `status`: a notification is not a state
   # transition, and a row that merely LOOKS like one is indistinguishable from
@@ -851,7 +1016,8 @@ cmd_who() {
 
 # --------------------------------------------------------------------------
 cmd_review() {
-  local reviewer="" rid="" decision="" reason=""
+  local reviewer="" rid="" decision="" reason="" no_alt=""
+  local alts='[]' considered='[]'
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --reviewer) reviewer="$2"; shift 2;;
@@ -859,6 +1025,27 @@ cmd_review() {
       --approve)  decision="approved"; shift;;
       --reject)   decision="rejected"; shift;;
       --reason)   reason="$2";   shift 2;;
+      # A safer route that still FULLY unblocks the requester's work. Repeatable.
+      --alternative) [[ -n "${2:-}" ]] || die "--alternative needs a value."
+                     alts="$(jq -c --arg a "$2" '. + [$a]' <<<"$alts")"; shift 2;;
+      # The explicit finding that there is no safer route. An escape hatch that
+      # is RECORDED and surfaced, not one that is free.
+      --no-safer-alternative) [[ -n "${2:-}" ]] || die "--no-safer-alternative needs the finding itself, not a bare flag."
+                     no_alt="$2"; shift 2;;
+      # An alternative that was weighed and did not work, with the reason it did
+      # not. The two flags are a PAIR and are parsed as one unit: --because must
+      # immediately follow its --considered. Parsing them as two independent
+      # repeatable lists lets a mismatched count pair alternative 1 with reason 2
+      # and produce a record that is fully populated and entirely wrong, which is
+      # worse than a missing one because it reads as diligence.
+      --considered)
+        [[ -n "${2:-}" ]] || die "--considered needs a value."
+        [[ "${3:-}" == "--because" ]] \
+          || die "--considered \"$2\" must be followed immediately by --because \"<why it failed>\"; an alternative with no failure reason is a list, not an analysis."
+        [[ -n "${4:-}" ]] || die "--because needs a value."
+        considered="$(jq -c --arg a "$2" --arg w "$4" '. + [{alternative:$a,whyItFailed:$w}]' <<<"$considered")"
+        shift 4;;
+      --because) die "--because must follow a --considered; it cannot stand alone.";;
       *) die "unknown argument: $1";;
     esac
   done
@@ -871,6 +1058,33 @@ cmd_review() {
   # approval path was the unguarded one. Checked before anything is read so the
   # refusal cannot depend on who is asking.
   [[ -n "$reason" ]] || die "every decision must carry --reason: a denial so the requester can answer it, an approval so the record can answer 'why'."
+
+  # --- safer-alternative-first (TOG-388) -----------------------------------
+  # Argument-shape checks run BEFORE the request is read, for the same reason
+  # the --reason check does: a refusal that depends on who is asking, or on
+  # which request was named, is a refusal a reviewer can shop around.
+  local n_alt n_cons
+  n_alt="$(jq -r 'length' <<<"$alts")"
+  n_cons="$(jq -r 'length' <<<"$considered")"
+
+  if [[ "$decision" == "rejected" ]]; then
+    [[ $n_cons -eq 0 ]] \
+      || die "--considered/--because records an alternative that FAILED, which belongs on an approval; on a denial the alternative is the way forward, so use --alternative."
+    [[ -z "$no_alt" || $n_alt -eq 0 ]] \
+      || die "a denial cannot both offer an alternative and find that none exists; drop one."
+    [[ $n_alt -gt 0 || -n "$no_alt" ]] || die \
+"a denial must leave the requester somewhere to go. Supply either:
+    --alternative \"<a safer route that still fully unblocks the work>\"   (repeatable)
+  or, if you have looked and there genuinely is none:
+    --no-safer-alternative \"<what you considered and why nothing works>\"
+  The second is always recorded on the thread and sent to the requester, and on a
+  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it."
+  else
+    [[ $n_alt -eq 0 ]] \
+      || die "--alternative offers the requester a way forward instead of granting the ask; on an approval the ask IS granted, so record the routes you rejected with --considered/--because."
+    [[ -z "$no_alt" ]] \
+      || die "--no-safer-alternative is a denial finding. On an approval, 'nothing safer worked' is exactly what --considered/--because has to show, one alternative at a time."
+  fi
 
   reap_expired
   assert_unambiguous "$rid"
@@ -891,7 +1105,47 @@ cmd_review() {
   local cur; cur="$(jq -r '.status' <<<"$rec")"
   [[ "$cur" != "expired" ]] \
     || die "request $rid expired at $exp; resubmit it with --supersedes $rid."
-  [[ "$cur" == "pending" ]] || die "request $rid is already '$cur'; decisions are final."
+  # "Decisions are final" is a property of ONE REQUEST, not of the exchange. It
+  # exists so that a decided id cannot be re-decided into a different answer —
+  # the record must keep meaning what it meant. It is not a dead end: this same
+  # command prints the two ways forward on every denial, `comment` answers a
+  # denial on the record, and `--supersedes` amends and resubmits it. See the
+  # header, notify_body, and section 8 of test_responsible_leader.sh.
+  [[ "$cur" == "pending" ]] || die "request $rid is already '$cur'; decisions are final. To carry it forward: comment --request $rid --author <ROLE> --body \"...\", or submit ... --supersedes $rid."
+
+  # --- is this a RISKY ask? (TOG-388) --------------------------------------
+  # Derived from the template's own permission keys, never asked of the
+  # reviewer. A reviewer-declared risk level is a checkbox the reviewer can
+  # clear by declaring the ask safe, which makes the control optional for
+  # exactly the reviewer it is meant to bind.
+  local risk_factors="" risky="no" rc_risk
+  risk_factors="$(classify_risk "$template")"; rc_risk=$?
+  case $rc_risk in
+    0) risky="yes";;
+    1) risky="no";;
+    2) log_event "$(jq -cn --arg id "$rid" --arg w "$template" \
+         '{event:"review.refused",reason:"risk_unclassifiable",requestId:$id,template:$w}')"
+       die "cannot read the permission keys for template '$template' from $PROV; refusing to decide an ask whose risk is unknown.";;
+    3) log_event "$(jq -cn --arg id "$rid" --arg w "$template" --arg k "$risk_factors" \
+         '{event:"review.refused",reason:"unclassified_permission_key",requestId:$id,template:$w,keys:$k}')"
+       die "template '$template' grants permission key(s) [$risk_factors] that are on neither RISK_KEYS nor NONRISK_KEYS in org_request_queue.sh. Somebody extended the catalog without deciding whether the new grant is risky; that decision is theirs to make, not a default's.";;
+  esac
+
+  # Only when no safer alternative exists may the risky ask be granted — and
+  # never without recording which alternatives were considered and why each
+  # failed. That record is the artifact the owner audits, so its absence is the
+  # thing that has to be impossible.
+  if [[ "$decision" == "approved" && "$risky" == "yes" && $n_cons -eq 0 ]]; then
+    log_event "$(jq -cn --arg id "$rid" --arg w "$template" --arg r "$reviewer" --arg f "$risk_factors" \
+      '{event:"review.refused",reason:"risky_grant_without_alternatives_record",requestId:$id,template:$w,reviewer:$r,riskFactors:($f|split(","))}')"
+    echo "  risk factors : $risk_factors" >&2
+    die \
+"'$template' is a RISKY ask, so granting it needs the safer alternatives on the record.
+  Supply at least one pair:
+    --considered \"<a safer route you weighed>\" --because \"<why it did not fully unblock the work>\"
+  If a safer route DOES fully unblock it, this is a denial that offers it, not an approval:
+    review --reviewer $reviewer --request $rid --reject --reason \"...\" --alternative \"...\""
+  fi
 
   local rvrow rv_id rv_tpl
   rvrow="$(resolve_agent "$reviewer")"; [[ -n "$rvrow" ]] || die "reviewer not found: $reviewer"
@@ -967,12 +1221,49 @@ cmd_review() {
            "$rid" "$leader_role" >&2
   }
 
+  # Risk is recorded on EVERY decision, not only on the ones it gated. A denial
+  # of a risky ask and a denial of a routine one look identical afterwards
+  # otherwise, and "was this ask risky at the time it was decided" is a question
+  # the audit asks about the whole queue, not about the approvals it happened to
+  # stop. It also pins the classification to the decision: if RISK_KEYS changes
+  # next quarter, the record still says what was known when the call was made.
+  local risk_json
+  risk_json="$(jq -cn --arg f "$risk_factors" \
+    '{risky:($f != ""), factors:(if $f=="" then [] else ($f|split(",")) end)}')"
+
   if [[ "$decision" == "rejected" ]]; then
     append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
-      --arg at "$(now_iso)" --argjson ov "$override_json" \
-      '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov}')"
+      --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
+      --argjson alts "$alts" --arg na "$no_alt" \
+      '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov,
+        risk:$risk,
+        alternatives:$alts,
+        noSaferAlternative:(if $na=="" then null else $na end)}')"
     echo "REJECTED $rid by $reviewer — $reason"
     announce_override
+    if [[ "$n_alt" -gt 0 ]]; then
+      echo "  safer alternatives offered:"
+      jq -r '.[] | "    - " + .' <<<"$alts"
+    else
+      # Said to the reviewer's face, in the same shape as announce_override and
+      # for the same reason: a finding recorded and not surfaced is a finding
+      # nobody reads. It becomes an OPEN audit item only when the ask was risky
+      # — see the narrowing argument in cmd_risk_record. On a routine ask it is
+      # still recorded, still rendered by `thread`, and still reaches the
+      # requester, which is what stops it being a dead end.
+      printf '\n  ** NO SAFER ALTERNATIVE FOUND **\n'
+      printf '  %s recorded that nothing safer would unblock this work:\n' "$reviewer"
+      printf '    %s\n' "$no_alt"
+      if [[ "$risky" == "yes" ]]; then
+        printf '  This was a RISKY ask (%s), so it is now an OPEN item in the\n' "$risk_factors"
+        printf '  standing access review until an auditor other than %s closes it:\n' "$reviewer"
+        printf '      ./org_request_queue.sh ack-risk --request %s --auditor <ROLE> --note "..."\n\n' "$rid"
+        printf '\033[1;33mNO SAFER ALTERNATIVE\033[0m recorded on %s by %s — now an open audit item.\n' \
+               "$rid" "$reviewer" >&2
+      else
+        printf '  Recorded on the thread. The requester can dispute it with `comment`.\n\n'
+      fi
+    fi
     echo "  the requester may answer with: comment --request $rid --author $rq_role --body \"...\""
     echo "  or amend and resubmit with:    submit --requester $rq_role ... --supersedes $rid"
     # AFTER the decision row is durably appended and after the reviewer has
@@ -1017,10 +1308,23 @@ cmd_review() {
   fi
   local new_id; new_id="$(grep -oE 'PROVISIONED [A-Z0-9_]+ -> [0-9a-f-]{36}' <<<"$out" | awk '{print $4}')"
   append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg n "$new_id" --arg re "$reason" \
-    --arg at "$(now_iso)" --argjson ov "$override_json" \
-    '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,newAgentId:$n,reason:$re,at:$at,override:$ov}')"
+    --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
+    --argjson cons "$considered" \
+    '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,newAgentId:$n,reason:$re,at:$at,override:$ov,
+      risk:$risk,
+      alternativesConsidered:$cons}')"
   echo "APPROVED $rid by $reviewer"
   announce_override
+  if [[ "$risky" == "yes" ]]; then
+    printf '\n  ** RISKY ASK GRANTED ** (risk factors: %s)\n' "$risk_factors"
+    printf '  Safer alternatives considered, and why each failed:\n'
+    jq -r '.[] | "    - \(.alternative)\n        failed because: \(.whyItFailed)"' <<<"$considered"
+    printf '  This is an OPEN item in the standing access review until an auditor other\n'
+    printf '  than %s reads that record and closes it:\n' "$reviewer"
+    printf '      ./org_request_queue.sh ack-risk --request %s --auditor <ROLE> --note "..."\n\n' "$rid"
+    printf '\033[1;33mRISKY ASK GRANTED\033[0m on %s (%s) — now an open audit item.\n' \
+           "$rid" "$risk_factors" >&2
+  fi
   echo "$out"
   # The requester needs the seated agent's id, not just "yes" — that id is the
   # whole point of having asked.
@@ -1124,9 +1428,31 @@ cmd_thread() {
         "\($id)  \(.status|ascii_upcase)   by \(.reviewer)" +
         (if (.reason // "") != "" then " — \(.reason)" else "" end) +
         (if (.override // null) != null then "\n        (standing-authority override; bypassed \(.override.bypassedLeader))" else "" end) +
+        # The safer-alternatives record (TOG-388). `thread` is the view a
+        # reviewer reads before deciding an amendment and the view an audit
+        # reads afterwards, so what was OFFERED and what was RULED OUT has to
+        # appear here. Rendering only reasons would leave the amendment looking
+        # like a resubmission of the same ask rather than the answer to a
+        # specific alternative.
+        (if ((.risk.risky // false) == true)
+         then "\n        RISK: \(.risk.factors|join(", "))" else "" end) +
+        (if ((.alternatives // []) | length) > 0
+         then "\n        safer alternatives offered:\n" +
+              ((.alternatives | map("          - " + .)) | join("\n"))
+         else "" end) +
+        (if (.noSaferAlternative // null) != null
+         then "\n        NO SAFER ALTERNATIVE found: \(.noSaferAlternative)" else "" end) +
+        (if ((.alternativesConsidered // []) | length) > 0
+         then "\n        alternatives considered and why each failed:\n" +
+              ((.alternativesConsidered
+                | map("          - \(.alternative)\n              failed because: \(.whyItFailed)"))
+               | join("\n"))
+         else "" end) +
         (if (.newAgentId // "") != "" then "\n        provisioned \(.newAgentId)" else "" end)
       elif .event=="override.acknowledged" then
         "\($id)  OVERRIDE-ACK  by \(.auditor) — \(.note)"
+      elif .event=="risk.acknowledged" then
+        "\($id)  RISK-ACK   by \(.auditor) — \(.note)"
       else empty end' "$QUEUE"
   done
 }
@@ -1243,6 +1569,141 @@ cmd_ack_override() {
   append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg n "$note" --arg at "$(now_iso)" \
     '{event:"override.acknowledged",requestId:$id,auditor:$a,note:$n,at:$at}')"
   echo "ACKNOWLEDGED override on $rid by $auditor — $note"
+}
+
+# --------------------------------------------------------------------------
+# risk-record — the safer-alternatives record, as a list somebody is expected to
+# read (TOG-388). Two decision shapes land here, and they are the two the owner
+# said must never be taken lightly:
+#
+#   grant       a RISKY ask was approved. The record must show which safer
+#               alternatives were weighed and why each failed.
+#   no-safer    a denial recorded that nothing safer would unblock the work.
+#               That is the reviewer declining to offer a way forward, which is
+#               allowed but is the one case where a denial IS close to a dead
+#               end, so it is audited rather than trusted.
+#
+# Deliberately a SEPARATE command and a separate acknowledgement event from
+# `overrides`. They answer different questions — "who decided this" versus "was
+# a safer route looked for" — and a request can carry both at once. Folding
+# them together would also silently change the meaning of the exit status that
+# org_access_review.sh check 10 already gates on, which is how a working alarm
+# gets repurposed into a broken one.
+#
+# Same DB-free, `column`-free, exit-1-on-findings contract as `overrides`.
+cmd_risk_record() {
+  local want="open" fmt="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)  want="all";  shift;;
+      --json) fmt="json";  shift;;
+      *) die "usage: risk-record [--all] [--json]";;
+    esac
+  done
+  [[ -f "$QUEUE" ]] || { [[ "$fmt" == "text" ]] && echo "(queue empty — no risk record)"; return 0; }
+
+  local rows
+  rows="$(jq -s -c --arg w "$want" '
+    (map(select(.event=="risk.acknowledged"))
+     | map({key:.requestId, value:{auditor:.auditor, note:.note, at:.at}})
+     | from_entries) as $ack
+    | (map(select(.event=="request.submitted"))
+       | map({key:.requestId, value:{requester:.requester, template:.template, title:.title}})
+       | from_entries) as $sub
+    # Both classes are gated on the ask having been RISKY, and that is a
+    # deliberate narrowing of what lands in front of an auditor. Every denial
+    # must leave the requester somewhere to go — that duty is unconditional and
+    # cmd_review enforces it on routine and risky asks alike. But the owner
+    # instruction the audit item exists to serve is specifically about risky
+    # asks, and a list that also collected "no safer route to seat a specialist"
+    # would be mostly noise within a month. An open list nobody finishes reading
+    # is the same failure as no list, which is the argument cmd_ack_override
+    # already makes about acknowledgements draining.
+    | map(select(.event=="request.reviewed"
+                 and ((.risk.risky // false) == true)
+                 and (   (.status=="approved")
+                      or ((.noSaferAlternative // null) != null)))
+          | {requestId, status, reviewer, at,
+             kind: (if (.noSaferAlternative // null) != null then "no-safer" else "grant" end),
+             riskFactors: (.risk.factors // []),
+             noSaferAlternative: (.noSaferAlternative // null),
+             alternativesConsidered: (.alternativesConsidered // []),
+             requester: ($sub[.requestId].requester // "?"),
+             template:  ($sub[.requestId].template  // "?"),
+             title:     ($sub[.requestId].title     // ""),
+             ack:       ($ack[.requestId] // null)})
+    | map(select($w == "all" or .ack == null))
+    | .[]' "$QUEUE")"
+
+  if [[ "$fmt" == "json" ]]; then
+    [[ -n "$rows" ]] && printf '%s\n' "$rows"
+  elif [[ -z "$rows" ]]; then
+    echo "no unacknowledged risky grants or no-safer-alternative findings"
+  else
+    printf 'REQUEST\tKIND\tDECISION\tREVIEWER\tTEMPLATE\tRISK FACTORS\tWHEN\tACK\n'
+    jq -r '[.requestId, .kind, .status, .reviewer, .template,
+            (if (.riskFactors|length) > 0 then (.riskFactors|join(",")) else "-" end), .at,
+            (if .ack == null then "OPEN" else "acked by \(.ack.auditor)" end)] | @tsv' <<<"$rows"
+  fi
+
+  local open_n
+  open_n="$(jq -s 'map(select(.ack == null)) | length' <<<"$rows")"
+  [[ "${open_n:-0}" -eq 0 ]]
+}
+
+# --------------------------------------------------------------------------
+# ack-risk — an auditor reads the safer-alternatives record and closes it out.
+#
+# Same shape and the same reasoning as ack-override: the open list has to be
+# able to DRAIN or the report trains everyone to ignore it, and the bypasser
+# cannot be the one who clears it or the record is write-only. The auditor set
+# is AUDIT_AUTHORITY, not STANDING_AUTHORITY, for the reason stated there — a
+# control its own subject can retire is a log entry.
+cmd_ack_risk() {
+  local rid="" auditor="" note=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --request) rid="$2";     shift 2;;
+      --auditor) auditor="$2"; shift 2;;
+      --note)    note="$2";    shift 2;;
+      *) die "unknown argument: $1";;
+    esac
+  done
+  [[ -n "$rid" && -n "$auditor" ]] || die "usage: ack-risk --request <ID> --auditor <ROLE> --note \"...\""
+  [[ -n "$note" ]] || die "an acknowledgement must carry a note — 'seen' is not a review finding."
+  [[ -f "$QUEUE" ]] || die "no such request: $rid"
+
+  local item
+  item="$(jq -s -c --arg id "$rid" \
+        'map(select(.event=="request.reviewed" and .requestId==$id
+                    and (   ((.risk.risky // false) == true and .status=="approved")
+                         or ((.noSaferAlternative // null) != null)))) | .[-1] // empty' \
+        "$QUEUE")"
+  [[ -n "$item" ]] || die "$rid carries no risky grant or no-safer-alternative finding to acknowledge."
+
+  jq -e -s --arg id "$rid" 'any(.[]; .event=="risk.acknowledged" and .requestId==$id)' "$QUEUE" >/dev/null \
+    && die "$rid is already acknowledged."
+
+  local row a_id a_tpl a_status
+  row="$(resolve_agent "$auditor")"; [[ -n "$row" ]] || die "auditor $auditor not found."
+  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"
+  [[ "$a_status" != "terminated" ]] || die "auditor $auditor is terminated."
+  jq -e --arg t "$a_tpl" 'index($t) != null' <<<"$AUDIT_AUTHORITY" >/dev/null \
+    || die "$auditor [$a_tpl] does not hold override-acknowledgement authority."
+
+  local rv_role rv_row rv_id
+  rv_role="$(jq -r '.reviewer' <<<"$item")"
+  rv_row="$(resolve_agent "$rv_role")"
+  rv_id="$(f 1 "$rv_row")"
+  if [[ -n "$rv_id" && "$rv_id" == "$a_id" ]]; then
+    log_event "$(jq -cn --arg id "$rid" --arg a "$auditor" \
+      '{event:"risk.ack_refused",reason:"self_acknowledgement",requestId:$id,auditor:$a}')"
+    die "$auditor took this decision; it cannot also clear its risk record."
+  fi
+
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg n "$note" --arg at "$(now_iso)" \
+    '{event:"risk.acknowledged",requestId:$id,auditor:$a,note:$n,at:$at}')"
+  echo "ACKNOWLEDGED risk record on $rid by $auditor — $note"
 }
 
 # --------------------------------------------------------------------------
@@ -1391,6 +1852,8 @@ case "${1:-}" in
   list)             shift; cmd_list "$@";;
   overrides)        shift; cmd_overrides "$@";;
   ack-override)     shift; cmd_ack_override "$@";;
+  risk-record)      shift; cmd_risk_record "$@";;
+  ack-risk)         shift; cmd_ack_risk "$@";;
   inbox)            shift; cmd_inbox "$@";;
   notify)           shift; cmd_notify "$@";;
   log)              [[ -f "$GRANT_LOG" ]] && cat "$GRANT_LOG" || echo "(no log)";;

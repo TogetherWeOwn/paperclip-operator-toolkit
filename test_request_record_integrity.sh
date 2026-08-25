@@ -51,10 +51,17 @@ build_stub() {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
     sed -n "/^CEILING_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
+    # EXTRACTED, never copied — same rule as the ceiling above. The risk
+    # classifier added in TOG-388 reads this catalog to decide whether an ask is
+    # risky, and a stub holding its own copy would keep answering against
+    # yesterday's permission keys.
+    sed -n "/^TEMPLATES_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
     cat <<'STUB'
-[[ -n "${CEILING_JSON:-}" ]] || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${CEILING_JSON:-}" ]]   || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${TEMPLATES_JSON:-}" ]] || { echo "stub: failed to extract TEMPLATES_JSON" >&2; exit 90; }
 case "${1:-}" in
   ceiling) jq -r 'to_entries[] | "\(.key)\t\(.value|join(", "))"' <<<"$CEILING_JSON" ;;
+  template-keys) jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey)|join(","))"' <<<"$TEMPLATES_JSON" ;;
   create)
     shift
     caller=""; template=""; title=""
@@ -141,13 +148,13 @@ hdr "2. The resubmission cap counts amendments, not path depth"
 reset
 "$Q" submit --requester MGR --template E0_SPECIALIST --title "IRQ nag root" >/dev/null 2>&1
 ROOT="$(last_sub)"
-"$Q" review --reviewer DIR --request "$ROOT" --reject --reason "no" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$ROOT" --reject --reason "no" --no-safer-alternative "fixture denial; alternatives are exercised in their own section" >/dev/null 2>&1
 allowed=0; refused=0
 for i in 1 2 3 4 5 6 7 8; do
   if "$Q" submit --requester MGR --template E0_SPECIALIST --title "IRQ fanout $i" \
        --supersedes "$ROOT" >/dev/null 2>&1; then
     allowed=$((allowed+1))
-    "$Q" review --reviewer DIR --request "$(last_sub)" --reject --reason "still no" >/dev/null 2>&1
+    "$Q" review --reviewer DIR --request "$(last_sub)" --reject --reason "still no" --no-safer-alternative "fixture denial; alternatives are exercised in their own section" >/dev/null 2>&1
   else
     refused=$((refused+1))
   fi

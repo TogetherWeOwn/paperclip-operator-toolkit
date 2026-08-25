@@ -19,6 +19,9 @@
 #                          adapterConfig.env declaration that actually projects
 #  10. STANDING OVERRIDES — provisioning requests decided under break-glass
 #                          authority OVER the responsible leader, unacknowledged
+#  11. SAFER ALTERNATIVES — risky asks that were granted, and denials that
+#                          recorded no safer route, with nobody having read
+#                          the alternatives on the record (TOG-388)
 #
 # Read-only. Exits non-zero when findings exist, so it can be wired to CI,
 # a cron, or a routine.
@@ -307,6 +310,47 @@ else
       [[ -n "$ov" ]] || continue
       note "$(jq -r '"standing-authority override, unacknowledged: \(.reviewer) decided \(.requestId) over the responsible leader \(.bypassedLeader) at \(.at) (\(.requester) requesting \(.template)) — clear it with: org_request_queue.sh ack-override --request \(.requestId) --auditor <ROLE> --note \"...\""' <<<"$ov")"
     done <<<"$ov_json"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+hdr "11. Safer-alternative-first record on the provisioning queue"
+# TOG-388. The owner's rule is that a risky ask is met with safer alternatives
+# that still fully unblock the work, and is granted only when none exists —
+# never without recording which alternatives were considered and why each
+# failed. org_request_queue.sh makes that record impossible to omit. This check
+# is the other half: somebody independent has to READ it. A record that is
+# mandatory to write and optional to read is a filing cabinet, not a control.
+#
+# Two shapes land here, both only for RISKY asks:
+#   grant     — a risky template was approved. Read the alternatives and say
+#               whether the grant is really minimal.
+#   no-safer  — a denial recorded that nothing safer would unblock the work.
+#               That is the one case where a denial is close to a dead end, so
+#               it is audited rather than trusted.
+#
+# Deliberately separate from check 10. An override answers "who decided this";
+# this answers "was a safer route looked for". One request can carry both, and
+# clearing one must not clear the other. Same read-only, DB-free contract.
+if [[ ! -x "$QUEUE_CLI" ]]; then
+  note "org_request_queue.sh not found next to this script — the safer-alternatives record went UNREVIEWED"
+else
+  rr_json="$(COMPANY_ID="$COMPANY_ID" "$QUEUE_CLI" risk-record --json 2>/dev/null)"; rr_rc=$?
+  if [[ $rr_rc -gt 1 ]]; then
+    note "could not read the provisioning request queue (exit $rr_rc) — the safer-alternatives record went UNREVIEWED"
+  elif [[ -z "$rr_json" ]]; then
+    good "no unacknowledged risky grants or no-safer-alternative findings"
+  else
+    while IFS= read -r rr; do
+      [[ -n "$rr" ]] || continue
+      note "$(jq -r '
+        (if .kind == "grant"
+         then "RISKY ASK GRANTED, unread: \(.reviewer) approved \(.requestId) (\(.requester) requesting \(.template); risk: \(.riskFactors|join(", "))) at \(.at). Alternatives on the record: " +
+              ((.alternativesConsidered | map("\(.alternative) — failed because \(.whyItFailed)")) | join("; "))
+         else "NO SAFER ALTERNATIVE recorded, unread: \(.reviewer) denied \(.requestId) (\(.requester) requesting \(.template); risk: \(.riskFactors|join(", "))) at \(.at) finding: \(.noSaferAlternative)"
+         end) +
+        " — clear it with: org_request_queue.sh ack-risk --request \(.requestId) --auditor <ROLE> --note \"...\""' <<<"$rr")"
+    done <<<"$rr_json"
   fi
 fi
 

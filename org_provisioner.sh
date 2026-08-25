@@ -61,6 +61,9 @@ set -euo pipefail
 #   ./org_provisioner.sh access <ROLE_ID|AGENT_UUID>
 #   ./org_provisioner.sh tree
 #   ./org_provisioner.sh deactivate --caller <ROLE_ID> --target <ROLE_ID>
+#   ./org_provisioner.sh templates       # human view of the role template catalog
+#   ./org_provisioner.sh template-keys   # machine view: "<template>\t<key,...>"
+#   ./org_provisioner.sh ceiling         # who may provision what
 #   ./org_provisioner.sh selftest        # privilege-ceiling regression suite
 #
 # Kill switch: create the file .provisioner-disabled next to this script, or
@@ -468,13 +471,31 @@ FROM t ORDER BY sortkey;
 SQL
 }
 
+# `column` is util-linux and is NOT installed in the paperclip agent container.
+# It does not error there, it prints NOTHING — so a reader piped through it sees
+# an empty catalog rather than a failure. `ceiling` is read by
+# org_request_queue.sh's may_create(), which means on such a box every ceiling
+# check answered "not in the ceiling" and every request was refused at submit.
+# Fail-closed, so nothing was ever wrongly granted, but it is still a catalog
+# that silently reads as empty, and the risk classifier added in TOG-388 must
+# never inherit that failure mode. Ugly and complete beats pretty and absent.
+tabulate() { if command -v column >/dev/null 2>&1; then column -t -s$'\t'; else cat; fi; }
+
 case "${1:-}" in
   create)     shift; cmd_create "$@";;
   deactivate) shift; cmd_deactivate "$@";;
   access)     shift; read_effective_access "${1:?agent ref}" \
                 | awk -F'\t' 'NR==1{printf "%s  [%s]  parent=%s\n",$1,$2,$3} {printf "  %-30s %s\n",$4,$5}';;
   tree)       cmd_tree;;
-  templates)  jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey + (if .self then "(SELF)" else "" end))|join(", ")//"(no governance grants)")"' <<<"$TEMPLATES_JSON" | column -t -s$'\t';;
-  ceiling)    jq -r 'to_entries[] | "\(.key)\t\(.value|join(", ")//"(may not provision)")"' <<<"$CEILING_JSON" | column -t -s$'\t';;
+  templates)  jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey + (if .self then "(SELF)" else "" end))|join(", ")//"(no governance grants)")"' <<<"$TEMPLATES_JSON" | tabulate;;
+  ceiling)    jq -r 'to_entries[] | "\(.key)\t\(.value|join(", ")//"(may not provision)")"' <<<"$CEILING_JSON" | tabulate;;
+  # MACHINE-READABLE catalog: "<template>\t<key,key,...>", one row per template,
+  # never padded and never piped through anything optional. `templates` above is
+  # the human view and carries "(SELF)" markers and alignment; a parser must not
+  # have to strip either. A template with no governance grants emits an EMPTY
+  # second field rather than a placeholder word, so "no keys" and "a key called
+  # (no governance grants)" cannot be confused.
+  template-keys)
+    jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey)|join(","))"' <<<"$TEMPLATES_JSON";;
   *) sed -n '/^# USAGE/,/^# Kill switch/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//';;
 esac

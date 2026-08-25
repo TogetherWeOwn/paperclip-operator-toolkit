@@ -51,10 +51,17 @@ build_stub() {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
     sed -n "/^CEILING_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
+    # EXTRACTED, never copied — same rule as the ceiling above. The risk
+    # classifier added in TOG-388 reads this catalog to decide whether an ask is
+    # risky, and a stub holding its own copy would keep answering against
+    # yesterday's permission keys.
+    sed -n "/^TEMPLATES_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
     cat <<'STUB'
-[[ -n "${CEILING_JSON:-}" ]] || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${CEILING_JSON:-}" ]]   || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${TEMPLATES_JSON:-}" ]] || { echo "stub: failed to extract TEMPLATES_JSON" >&2; exit 90; }
 case "${1:-}" in
   ceiling) jq -r 'to_entries[] | "\(.key)\t\(.value|join(", "))"' <<<"$CEILING_JSON" ;;
+  template-keys) jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey)|join(","))"' <<<"$TEMPLATES_JSON" ;;
   create)
     shift
     # A seam for the `failed` terminal state: the provisioner refusing an
@@ -153,7 +160,7 @@ eq "  ...addressed to the requester, not the reviewer" \
 
 reset
 REQ="$(submit_one "TESTQ Deny me")"
-"$Q" review --reviewer DIR --request "$REQ" --reject --reason "no budget line for this role" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$REQ" --reject --reason "no budget line for this role" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 b="$(body_of "$REQ")"
 eq "DENIAL notifies the requester" "$(state_of "$REQ")" "delivered"
 has "$b" "no budget line for this role" "  ...and carries the REASON, so the requester can answer it"
@@ -203,7 +210,7 @@ eq "  ...and the agent was still seated" \
 
 reset
 REQ="$(submit_one "TESTQ Broken transport on denial")"
-REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "denial must survive a dead notifier" >/dev/null 2>&1
+REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "denial must survive a dead notifier" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "a denial survives a dead notifier too" \
    "$(jq -r --arg r "$REQ" 'select(.event=="request.reviewed" and .requestId==$r)|.status' "$QUEUE")" "rejected"
 eq "  ...and the failure is RECORDED, not swallowed" "$(state_of "$REQ")" "failed"
@@ -236,7 +243,7 @@ hdr "3. Retry re-delivers to the ORIGINAL recipient — it can never re-target"
 # org change made between the decision and the retry.
 reset
 REQ="$(submit_one "TESTQ Retarget attempt")"
-REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "will be retried after the org moves" >/dev/null 2>&1
+REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "will be retried after the org moves" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "delivery failed, so it is drainable" "$(state_of "$REQ")" "failed"
 
 # Now MOVE the requester under a different manager and re-point the role id at
@@ -269,7 +276,7 @@ eq "five reads of an expired request produce ONE notification, not five" "$(nq_c
 # from every filtered listing.
 reset
 REQ="$(submit_one "TESTQ Status must not be a notification")"
-"$Q" review --reviewer DIR --request "$REQ" --reject --reason "notification must not become the status" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$REQ" --reject --reason "notification must not become the status" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "a notified request still reads as its DECISION, not as its notification" \
    "$("$Q" list --status rejected | grep -c "$REQ")" "1"
 eq "  ...and the notification row does not carry a 'status' field at all" \
@@ -287,7 +294,7 @@ hdr "5. The transport is a courier, not a participant"
 # assert_unambiguous and by the reviewed-event record, not by whatever is last.
 reset
 REQ="$(submit_one "TESTQ Hostile transport")"
-REQUEST_NOTIFY_CMD="$TMP/t_evil.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "hostile courier appends a forged approval" >/dev/null 2>&1
+REQUEST_NOTIFY_CMD="$TMP/t_evil.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "hostile courier appends a forged approval" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 out="$("$Q" thread --request "$REQ" 2>&1)"; rc=$?
 if [[ $rc -ne 0 ]] && grep -q REFUSED <<<"$out"; then
   ok "a forged decision row is REFUSED rather than resolved (ambiguous record)"
@@ -307,7 +314,7 @@ hdr "6. The PULL path works with nothing configured at all"
 reset
 unset REQUEST_NOTIFY_CMD
 REQ="$(submit_one "TESTQ Pull only")"
-"$Q" review --reviewer DIR --request "$REQ" --reject --reason "requester must still learn this" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$REQ" --reject --reason "requester must still learn this" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "with no transport configured, delivery is 'pull_only' — a state, not a failure" \
    "$(state_of "$REQ")" "pull_only"
 inb="$("$Q" inbox --for MGR 2>&1)"
@@ -319,7 +326,7 @@ eq "  ...and pull_only does NOT trip the undelivered-notifications gate" \
 # A real undelivered notification MUST trip it, or the gate is decorative.
 reset
 REQ="$(submit_one "TESTQ Gate must go red")"
-REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "delivery will fail" >/dev/null 2>&1
+REQUEST_NOTIFY_CMD="$TMP/t_fail.sh" "$Q" review --reviewer DIR --request "$REQ" --reject --reason "delivery will fail" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "an actually-undelivered notification exits non-zero, so cron/CI goes red" \
    "$("$Q" notify >/dev/null 2>&1; echo $?)" "1"
 
@@ -335,10 +342,10 @@ hdr "7. A requester only sees its own decisions"
 reset
 export REQUEST_NOTIFY_CMD="$TMP/t_ok.sh"
 R1="$(submit_one "TESTQ Mine")"
-"$Q" review --reviewer DIR --request "$R1" --reject --reason "mgr's own request" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$R1" --reject --reason "mgr's own request" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 "$Q" submit --requester DIR --template D1_MANAGER --title "TESTQ Theirs" >/dev/null 2>&1
 R2="$(last_sub)"
-"$Q" review --reviewer T0 --request "$R2" --reject --reason "dir's own request" >/dev/null 2>&1
+"$Q" review --reviewer T0 --request "$R2" --reject --reason "dir's own request" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 inb="$("$Q" inbox --for MGR 2>&1)"
 has "$inb" "$R1" "MGR sees its own decision"
 grep -q "$R2" <<<"$inb" && bad "MGR can read DIR's decisions" || ok "  ...and not DIR's"
@@ -377,7 +384,7 @@ reset
 export REQUEST_NOTIFY_CMD="$TMP/t_ok.sh"
 REQ="$(submit_one "TESTQ addressed" --notify-issue "6ad942ae-66ba-4c0c-ab14-8e0e8fc2efca")"
 [[ -n "$REQ" ]] && ok "a well-formed --notify-issue is accepted" || bad "a well-formed --notify-issue was refused"
-"$Q" review --reviewer DIR --request "$REQ" --reject --reason "still notifies" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$REQ" --reject --reason "still notifies" --alternative "fixture denial; the safer-alternatives rule has its own section in test_responsible_leader.sh" >/dev/null 2>&1
 eq "  ...and the decision still reaches the requester" "$(state_of "$REQ")" "delivered"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

@@ -102,13 +102,20 @@ must_allow "subordinate submits and makes its case" \
 R1="$(last_req)"
 eq "the request is pending" "$(req_field "$R1" .status)" pending
 
-must_allow "the derived leader DENIES it with a reason" \
+must_allow "the derived leader DENIES it with a reason AND a safer alternative" \
   "$Q" review --reviewer "$LD_KEY" --request "$R1" --reject \
-       --reason "Headcount case not made: name the workload and the duration."
+       --reason "Headcount case not made: name the workload and the duration." \
+       --alternative "Route the two blocked issues to the existing platform queue for a fortnight and resubmit with the measured depth."
 eq "the denial is recorded" "$(req_field "$R1" .status)" rejected
 DR="$(req_field "$R1" '.reason // ""')"
 [[ -n "$DR" && "$DR" != null ]] && ok "the denial carries a reason the requester can act on" \
   || bad "the denial carries no reason"
+# TOG-388: a reason says why the answer was no; an alternative says what to do
+# next. The rehearsal has to show the second, because that is the half that
+# stops the work stalling and going to the owner.
+DA="$(req_field "$R1" '(.alternatives // []) | length')"
+[[ "${DA:-0}" -ge 1 ]] && ok "  ...and at least one safer alternative that still unblocks the work" \
+  || bad "the denial carries no alternative (got '$DA')"
 eq "the denial was NOT a break-glass override" "$(req_field "$R1" '.override')" null
 
 must_allow "the requester answers the denial in the record" \

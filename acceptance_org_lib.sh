@@ -61,10 +61,17 @@ build_stub() {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
     sed -n "/^CEILING_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
+    # EXTRACTED, never copied — same rule as the ceiling above. The risk
+    # classifier added in TOG-388 reads this catalog to decide whether an ask is
+    # risky, and a stub holding its own copy would keep answering against
+    # yesterday's permission keys.
+    sed -n "/^TEMPLATES_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
     cat <<'STUB'
-[[ -n "${CEILING_JSON:-}" ]] || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${CEILING_JSON:-}" ]]   || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${TEMPLATES_JSON:-}" ]] || { echo "stub: failed to extract TEMPLATES_JSON" >&2; exit 90; }
 case "${1:-}" in
   ceiling) jq -r 'to_entries[] | "\(.key)\t\(.value|join(", "))"' <<<"$CEILING_JSON" ;;
+  template-keys) jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey)|join(","))"' <<<"$TEMPLATES_JSON" ;;
   create)
     shift; printf '%s\n' "$*" >> "${CREATE_ARGV:?}"
     caller=""; template=""; title=""

@@ -3,8 +3,9 @@
 Design decision for TOG-194 / TOG-195. Decided 2026-08-23 by the CTO & Chief AI Officer.
 Status: **accepted**. Implemented by `org_request_queue.sh`; tested offline by `test_responsible_leader.sh`.
 
-This document also carries two later decisions on the same mechanism: *Deny is a conversation, not a
-dead end* (TOG-198 / TOG-253) and *How the requester learns a request was decided* (TOG-254).
+This document also carries three later decisions on the same mechanism: *Deny is a conversation, not
+a dead end* (TOG-198 / TOG-253), *Safer alternatives first* (TOG-388), and *How the requester learns
+a request was decided* (TOG-254).
 
 ## The question
 
@@ -224,6 +225,111 @@ audit trail has to show the exchange and not just the verdict.
   needed to make it true. Materialising expiry only as a side effect of an attempted review left an
   unread request permanently `pending`, which then refused the documented remedy (`--supersedes`) and
   left the requester with no move at all: a dead end, on the mechanism designed to prevent dead ends.
+
+## Safer alternatives first
+
+Decided 2026-08-25 for TOG-388. Status: **accepted**.
+
+The section above makes a denial *answerable*. It does not make it *useful*. A reviewer could write
+"too risky" and stop, and the requester's only move was to argue or to resubmit the same ask with
+more words. The owner's instruction, quoted in the `Gated Autonomy` goal:
+
+> A request must state FACTS and REASONING — what is blocked, what was measured, why this capability
+> is needed. The responsible agent must then, when the ask is risky, **propose safer alternatives
+> that still FULLY unblock the work**. Only when no safer alternative exists may the risky ask be
+> granted — never lightly, never without recording which alternatives were considered and why each
+> failed.
+
+### The two rules
+
+- **A denial must leave the requester somewhere to go.** `review --reject` now requires, in addition
+  to `--reason`, either one or more `--alternative "..."` or an explicit
+  `--no-safer-alternative "<finding>"`. The alternatives are written to the decision row, rendered by
+  `thread`, and **sent to the requester** in the notification body — an alternative the requester
+  never receives is the same dead end as no alternative at all.
+- **Granting a risky ask requires the record of what was ruled out.** `review --approve` on a risky
+  template requires at least one `--considered "<route>" --because "<why it did not unblock>"` pair.
+  The two flags are parsed as one unit and `--because` must immediately follow its `--considered`;
+  parsing them as two independent repeatable lists would let a mismatched count pair alternative 1
+  with reason 2 and produce a record that is fully populated and entirely wrong — worse than a
+  missing one, because it reads as diligence.
+
+The duty to leave a way forward is **unconditional**; the duty to record ruled-out alternatives
+attaches to **risky** asks, which is what the owner instruction is about.
+
+### What makes an ask "risky", and why the reviewer is not asked
+
+Risk is derived from the requested template's own permission keys, read live from
+`org_provisioner.sh template-keys`. It is never a reviewer-supplied classification: a reviewer-
+declared risk level is a checkbox the reviewer clears by declaring the ask safe, which makes the
+control optional for exactly the reviewer it is meant to bind.
+
+`RISK_KEYS` maps the owner line — real money, credentials, anything published outside the company,
+anything with no rollback — onto this catalog: `tools:admin`, `tools:manage_connections`,
+`tools:manage_runtime`, `environments:manage`, `pipelines:write`, `skills:create`, and
+`users:manage_permissions` (absent from today's catalog, listed so the day it appears it is risky by
+default rather than by somebody remembering). Today that makes four templates risky:
+`B2_TECH_CHIEF`, `C2_PLATFORM_DIRECTOR`, `E2_TOOLING_ADMIN`, `E3_PIPELINE_BUILDER`.
+
+**`NONRISK_KEYS` is not decoration and it is not the complement of `RISK_KEYS`.** It is the second
+half of a totality check: a template carrying a key on *neither* list makes the classifier **refuse
+the decision**. That is the anti-rot property and it is the reason to spend a second list on it. A
+bare denylist silently opts every new permission key into "safe", so the day someone adds
+`secrets:read` to a template the classifier keeps answering "not risky" and the control quietly stops
+applying to the one grant it most exists for. The queue already learned this exact lesson once — see
+`STATUS_EVENTS`, where a denylist of event types made every new event a decision.
+
+The classifier fails closed in **two distinguishable ways**, and callers must not collapse them:
+
+| return | meaning | behaviour |
+|---|---|---|
+| `0` | risky; prints the factors | the record is required |
+| `1` | not risky | decide normally |
+| `2` | catalog unreadable, or template absent from it | **refuse** — "risk unknown" must never render as "risk absent" |
+| `3` | template carries an unclassified key | **refuse**, naming the key; the decision belongs to whoever extended the catalog |
+
+Return 2 is not hypothetical. The provisioner's human `templates` view is piped through `column`,
+which is util-linux and is **absent in the paperclip container**, where it prints nothing at all
+rather than failing — a risk classifier reading that view would answer "no keys, not risky" for every
+template on earth. That is why the queue reads `template-keys`, which is never piped through anything
+optional, and why the same fix was applied to `ceiling` while we were there.
+
+### Reading the record
+
+`risk-record [--all] [--json]` lists the two shapes that need an independent read — a risky ask that
+was **granted**, and a denial that recorded **no safer alternative** — and exits 1 while any are
+unacknowledged. `ack-risk --request <ID> --auditor <ROLE> --note "..."` closes one out, under the
+same rules as `ack-override`: an auditor from `AUDIT_AUTHORITY`, a mandatory note, and never the
+reviewer who took the decision. `org_access_review.sh` check 11 surfaces the open list.
+
+This is deliberately a **separate** command, event and acknowledgement from `overrides`. They answer
+different questions — "who decided this" versus "was a safer route looked for" — a request can carry
+both at once, and clearing one must not clear the other. Folding them together would also silently
+change the meaning of the exit status check 10 already gates on, which is how a working alarm gets
+repurposed into a broken one.
+
+Only **risky** asks land on that list. Every denial must still leave the requester somewhere to go,
+but a list that also collected "no safer route to seat a specialist" would be mostly noise within a
+month, and an open list nobody finishes reading is the same failure as no list.
+
+### What this control cannot do
+
+It cannot tell a real alternative from the word "none" typed into `--alternative`. No script can.
+What it can do is make the omission impossible and the content named, attributed and durable, so a
+reviewer who skips the thinking has to write down that they skipped it, under their own role id, in a
+record that an independent auditor is prompted to read. That is the same trade the standing-authority
+override design already made: convert a silent gap into a loud one. It is written down here because a
+control whose limits are undocumented gets trusted for more than it does.
+
+### On "decisions are final"
+
+TOG-388 was filed on the reading that `decisions are final` left a rejected requester with no path
+forward. It does not, and it did not before this change. That refusal is scoped to **re-deciding one
+request id**, which is what keeps the record binding to what was decided; the same command prints the
+two ways forward on every denial, and TOG-194/TOG-198 built `comment` and `--supersedes` for exactly
+that. The genuine gap was never the finality rule — it was that a denial could be *empty of a next
+move*, and that a risky grant could be recorded without the thinking behind it. Those are what this
+section closes.
 
 ## How the requester learns a request was decided
 

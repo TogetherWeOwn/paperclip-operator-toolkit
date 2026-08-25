@@ -40,6 +40,20 @@ must_refuse() { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -3; fi; }
 must_allow()  { local d="$1"; shift; local o; o="$("$@" 2>&1)"; local rc=$?
   if [[ $rc -eq 0 ]]; then ok "$d"; else bad "$d (rc=$rc)"; sed 's/^/        /' <<<"$o" | head -4; fi; }
+# must_refuse asserts only that SOMETHING refused. When two gates can both catch
+# the same input — which TOG-388 made common, since a bare --reject is now
+# missing a reason AND an alternative — that is not enough: the test passes off
+# the neighbour and survives the deletion of the control it names. This pins the
+# refusal to its own message.
+#
+# Hoisted here from section 13, where it was defined 300 lines below its first
+# useful call site, and tightened to require the REFUSED marker as well as the
+# pattern: without it a command that failed for an unrelated reason (a typo in
+# an argument, a missing fixture) satisfies any assertion whose pattern happens
+# to appear in the error text.
+must_refuse_with() { local d="$1" pat="$2"; shift 2; local o; o="$("$@" 2>&1)"; local rc=$?
+  if [[ $rc -ne 0 ]] && grep -q REFUSED <<<"$o" && grep -qi -- "$pat" <<<"$o"; then ok "$d"
+  else bad "$d (rc=$rc, wanted a refusal matching /$pat/)"; sed 's/^/        /' <<<"$o" | head -5; fi; }
 eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (got '$2', wanted '$3')"; }
 # For commands whose exit STATUS is the contract (findings=1) rather than
 # refusal (=2), so the two cannot be conflated.
@@ -53,14 +67,24 @@ build_stub() {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
     sed -n "/^CEILING_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
+    # Same rule as the ceiling: EXTRACTED, never copied. The risk classifier
+    # added in TOG-388 reads this catalog to decide whether an ask is risky, so
+    # a stub carrying its own copy would keep classifying against yesterday's
+    # permission keys — and would go on reporting "not risky" after somebody
+    # added a credential-touching grant to a template.
+    sed -n "/^TEMPLATES_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
     cat <<'STUB'
-[[ -n "${CEILING_JSON:-}" ]] || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${CEILING_JSON:-}" ]]   || { echo "stub: failed to extract CEILING_JSON" >&2; exit 90; }
+[[ -n "${TEMPLATES_JSON:-}" ]] || { echo "stub: failed to extract TEMPLATES_JSON" >&2; exit 90; }
 case "${1:-}" in
   ceiling)
     # Deliberately not piped through `column`: the real provisioner runs on a
     # VPS that has util-linux, a CI runner may not, and ceiling_for only ever
     # splits on whitespace anyway.
     jq -r 'to_entries[] | "\(.key)\t\(.value|join(", "))"' <<<"$CEILING_JSON"
+    ;;
+  template-keys)
+    jq -r 'to_entries[] | "\(.key)\t\(.value|map(.permissionKey)|join(","))"' <<<"$TEMPLATES_JSON"
     ;;
   create)
     shift; printf '%s\n' "$*" >> "$CREATE_ARGV"
@@ -225,13 +249,25 @@ must_allow "MGR submits a request that will be denied" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Denied Engineer" \
               --rationale "backlog is 40 issues deep"
 REQ1="$(last_sub)"
-must_refuse "a denial without a reason is refused — the requester must know what to answer" \
-  "$Q" review --reviewer DIR --request "$REQ1" --reject
-must_allow "DIR denies with a reason" \
-  "$Q" review --reviewer DIR --request "$REQ1" --reject --reason "show the queue depth per week first"
+# EXACTLY ONE input is omitted, and the refusal is pinned to its own message.
+# Since TOG-388 a bare `--reject` is missing two required things — the reason
+# and the alternative — so a plain must_refuse here would go green off whichever
+# gate happens to run first, and would stay green if the reason gate were
+# deleted outright. The alternative is supplied so the ONLY thing missing is the
+# reason, and the message is matched so the neighbouring gate cannot answer for
+# this one.
+must_refuse_with "a denial without a reason is refused — the requester must know what to answer" \
+  "must carry --reason" \
+  "$Q" review --reviewer DIR --request "$REQ1" --reject --alternative "raise the per-agent concurrency cap first"
+must_allow "DIR denies with a reason and a safer alternative" \
+  "$Q" review --reviewer DIR --request "$REQ1" --reject --reason "show the queue depth per week first" \
+              --alternative "raise MGR's concurrency cap for two weeks and re-measure"
 eq "the reason is in the record"  \
    "$(jq -r --arg r "$REQ1" 'select(.requestId==$r and .status=="rejected")|.reason' "$QUEUE")" \
    "show the queue depth per week first"
+eq "  ...and so is the alternative that was offered" \
+   "$(jq -r --arg r "$REQ1" 'select(.requestId==$r and .status=="rejected")|.alternatives[0]' "$QUEUE")" \
+   "raise MGR's concurrency cap for two weeks and re-measure"
 must_allow "the requester answers on the record" \
   "$Q" comment --request "$REQ1" --author MGR --body "queue depth: 18/22/40 over three weeks"
 must_allow "the leader may ask for more without denying again" \
@@ -268,7 +304,7 @@ reset
 "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag original" >/dev/null 2>&1
 prev="$(last_sub)"
 [[ -n "$prev" ]] && ok "the original request is submitted" || bad "the original submit failed"
-"$Q" review --reviewer DIR --request "$prev" --reject --reason "no" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$prev" --reject --reason "no" --no-safer-alternative "fixture denial; alternatives are exercised in their own section" >/dev/null 2>&1
 capped=""
 for i in 1 2 3 4 5 6; do
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ nag $i" \
@@ -277,7 +313,7 @@ for i in 1 2 3 4 5 6; do
   if [[ $i -le 5 ]]; then
     [[ $rc -eq 0 ]] || { bad "amendment $i of 5 should be allowed"; break; }
     prev="$(last_sub)"
-    "$Q" review --reviewer DIR --request "$prev" --reject --reason "still no" >/dev/null 2>&1
+    "$Q" review --reviewer DIR --request "$prev" --reject --reason "still no" --no-safer-alternative "fixture denial; alternatives are exercised in their own section" >/dev/null 2>&1
   else
     [[ $rc -ne 0 ]] && capped=yes
   fi
@@ -294,7 +330,7 @@ grep -q supersede_chain_exhausted "$GRANT_LOG" \
 reset
 "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ fan root" >/dev/null 2>&1
 ROOT="$(last_sub)"
-"$Q" review --reviewer DIR --request "$ROOT" --reject --reason "no" >/dev/null 2>&1
+"$Q" review --reviewer DIR --request "$ROOT" --reject --reason "no" --no-safer-alternative "fixture denial; alternatives are exercised in their own section" >/dev/null 2>&1
 fan_allowed=0
 for i in 1 2 3 4 5 6 7 8; do
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ fan $i" \
@@ -476,9 +512,6 @@ hdr "13. Approval-time re-validation, offline"
 # left this suite green, which means nothing automated was holding them. These
 # cases close that: the org fixture is mutated BETWEEN submit and review, which
 # is exactly the window the defence exists for.
-must_refuse_with() { local d="$1" pat="$2"; shift 2; local o; o="$("$@" 2>&1)"; local rc=$?
-  if [[ $rc -ne 0 ]] && grep -qi -- "$pat" <<<"$o"; then ok "$d"
-  else bad "$d (rc=$rc, wanted /$pat/)"; sed 's/^/        /' <<<"$o" | head -3; fi; }
 provisioned_count() { [[ -f "$CREATE_ARGV" ]] && wc -l < "$CREATE_ARGV" | tr -d ' ' || echo 0; }
 
 # --- template disabled after submit -----------------------------------------
@@ -495,7 +528,8 @@ eq "  ...the refusal is logged as template_disabled" \
    "$(jq -r 'select(.reason=="template_disabled")|.reason' "$GRANT_LOG" | tail -1)" "template_disabled"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
 must_allow "a disabled template does not trap the request — it can still be denied" \
-  "$Q" review --reviewer DIR --request "$REQ" --reject --reason "template frozen; withdraw"
+  "$Q" review --reviewer DIR --request "$REQ" --reject --reason "template frozen; withdraw" \
+              --alternative "the steward re-enables E0_SPECIALIST, or resubmit against E1_REVIEWER_COACH which is not frozen"
 
 # --- requester demoted after submit ------------------------------------------
 reset
@@ -541,6 +575,210 @@ sed -i 's/^u-mgr\tMGR\t/u-mgr2\tMGR\t/' "$ORG_SNAPSHOT"
 must_refuse_with "authority does not transfer to a new agent holding the same role id" \
   "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+
+hdr "14. Safer-alternative-first review (TOG-388)"
+# The owner instruction quoted in the `Gated Autonomy` goal: a risky ask must be
+# met with safer alternatives that still FULLY unblock the work, and may be
+# granted only when none exists — never without recording what was tried.
+#
+# Every refusal below is pinned to its OWN message. These gates sit next to two
+# others that catch overlapping inputs (the --reason gate, and the finality
+# gate), and an exit-code-only assertion would go green off either.
+reset
+
+# --- risk classification is derived from the catalog, not from the reviewer ---
+# Read through the queue's own `who`-free path: submit and try to decide. A
+# direct unit call is not available from outside, so risk is observed the only
+# way a caller can observe it — by what the queue refuses.
+must_allow "MGR submits a routine (non-risky) specialist request" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Routine"
+ROUTINE="$(last_sub)"
+must_allow "a routine ask is approved without any alternatives record" \
+  "$Q" review --reviewer DIR --request "$ROUTINE" --approve --reason "backlog is real and the template grants nothing"
+eq "  ...and the record says plainly that it was not risky" \
+   "$(jq -r --arg r "$ROUTINE" 'select(.requestId==$r and .status=="approved")|.risk.risky' "$QUEUE")" "false"
+
+# --- a denial must leave the requester somewhere to go -----------------------
+reset
+must_allow "MGR submits a request that will be denied" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Denied"
+D="$(last_sub)"
+must_refuse_with "a denial with a reason but NO alternative is refused" \
+  "must leave the requester somewhere to go" \
+  "$Q" review --reviewer DIR --request "$D" --reason "no" --reject
+must_refuse_with "a denial cannot both offer an alternative and find that none exists" \
+  "cannot both offer an alternative and find that none exists" \
+  "$Q" review --reviewer DIR --request "$D" --reject --reason "no" \
+              --alternative "do it another way" --no-safer-alternative "there is no other way"
+must_refuse_with "--no-safer-alternative cannot be an empty gesture" \
+  "needs the finding itself" \
+  "$Q" review --reviewer DIR --request "$D" --reject --reason "no" --no-safer-alternative ""
+must_refuse_with "the approval-side flags are refused on a denial" \
+  "belongs on an approval" \
+  "$Q" review --reviewer DIR --request "$D" --reject --reason "no" \
+              --considered "a smaller ask" --because "it would not help"
+must_allow "a denial carrying two alternatives is accepted" \
+  "$Q" review --reviewer DIR --request "$D" --reject --reason "the backlog is scheduling, not headcount" \
+              --alternative "raise MGR's concurrency cap for two weeks" \
+              --alternative "move the three blocked issues to the platform queue"
+eq "  ...and both survive in the record, in order" \
+   "$(jq -r --arg r "$D" 'select(.requestId==$r and .status=="rejected")|.alternatives|join(" | ")' "$QUEUE")" \
+   "raise MGR's concurrency cap for two weeks | move the three blocked issues to the platform queue"
+out="$("$Q" inbox --for MGR 2>&1)"
+grep -q "raise MGR's concurrency cap for two weeks" <<<"$out" \
+  && ok "  ...and they REACH THE REQUESTER, not just the log" \
+  || { bad "the alternatives never reached the requester's inbox"; sed 's/^/        /' <<<"$out" | head -8; }
+
+# --- granting a risky ask requires the record --------------------------------
+# T0 [B2_TECH_CHIEF] may request E2_TOOLING_ADMIN (tools:admin) and its leader
+# is O1. This is the case the owner instruction is actually about.
+reset
+must_allow "T0 asks for a tooling admin — tools:admin, a risky ask" \
+  "$Q" submit --requester T0 --template E2_TOOLING_ADMIN --title "TESTQ Tooling Admin"
+RISKY="$(last_sub)"
+must_refuse_with "granting it with a reason but no alternatives record is refused" \
+  "is a RISKY ask" \
+  "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "they say they need it"
+must_refuse_with "  ...and the refusal is not something standing authority can shrug off" \
+  "is a RISKY ask" \
+  "$Q" review --reviewer A0 --request "$RISKY" --approve --reason "they say they need it"
+eq "  ...the refusal is logged as risky_grant_without_alternatives_record" \
+   "$(jq -r 'select(.reason=="risky_grant_without_alternatives_record")|.reason' "$GRANT_LOG" | tail -1)" \
+   "risky_grant_without_alternatives_record"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+must_refuse_with "--considered without --because is refused; a list is not an analysis" \
+  "must be followed immediately by --because" \
+  "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "needed" --considered "broker it instead"
+must_refuse_with "--because cannot stand alone" \
+  "must follow a --considered" \
+  "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "needed" --because "it did not work"
+must_allow "with the record, the risky ask is granted" \
+  "$Q" review --reviewer O1 --request "$RISKY" --approve --reason "measured: three outages, no narrower grant covers connection CREATE" \
+              --considered "broker each edit through the steward" --because "the steward cannot create a connection on another agent's behalf" \
+              --considered "E3_PIPELINE_BUILDER instead" --because "pipelines:write does not reach tool connections at all"
+eq "  ...the risk factors are pinned to the decision" \
+   "$(jq -r --arg r "$RISKY" 'select(.requestId==$r and .status=="approved")|.risk.factors|join(",")' "$QUEUE")" \
+   "tools:admin,tools:manage_connections,tools:manage_runtime"
+eq "  ...and each alternative is paired with the reason it failed" \
+   "$(jq -r --arg r "$RISKY" 'select(.requestId==$r and .status=="approved")|.alternativesConsidered[1].whyItFailed' "$QUEUE")" \
+   "pipelines:write does not reach tool connections at all"
+
+# --- the record is an OPEN audit item until an independent auditor reads it ---
+eq "a granted risky ask is an open item on risk-record" "$(rc_of "$Q" risk-record)" "1"
+eq "  ...naming the grant and its risk factors" \
+   "$("$Q" risk-record --json | jq -r '"\(.requestId) \(.kind) \(.riskFactors|join(","))"')" \
+   "$RISKY grant tools:admin,tools:manage_connections,tools:manage_runtime"
+must_refuse_with "the reviewer cannot clear its own risk record" \
+  "cannot also clear its risk record" \
+  "$Q" ack-risk --request "$RISKY" --auditor O1 --note "looks fine to me"
+must_refuse_with "an acknowledgement without a note is refused" \
+  "not a review finding" \
+  "$Q" ack-risk --request "$RISKY" --auditor O3 --note ""
+must_refuse_with "a chief without audit authority cannot clear it" \
+  "does not hold override-acknowledgement authority" \
+  "$Q" ack-risk --request "$RISKY" --auditor T0 --note "fine"
+must_allow "O3, the independent audit function, closes it with a finding" \
+  "$Q" ack-risk --request "$RISKY" --auditor O3 --note "both alternatives verified against the connection API; the grant is minimal"
+eq "  ...so the open list drains and the report can return to green" "$(rc_of "$Q" risk-record)" "0"
+eq "  ...but the item is still there under --all" \
+   "$("$Q" risk-record --all --json | jq -r '.requestId')" "$RISKY"
+must_refuse "and it cannot be cleared twice" \
+  "$Q" ack-risk --request "$RISKY" --auditor O1 --note "again"
+out="$("$Q" thread --request "$RISKY" 2>&1)"
+grep -q "RISK-ACK   by O3" <<<"$out" \
+  && ok "the acknowledgement joins the request's own thread" || bad "thread lost the risk acknowledgement"
+must_refuse_with "a routine approval has no risk record to acknowledge" \
+  "carries no risky grant" \
+  "$Q" ack-risk --request "$RISKY-nope" --auditor O3 --note "x"
+
+# --- risk-record and overrides stay SEPARATE alarms ---------------------------
+# A request can carry both. Folding them into one list would silently change the
+# meaning of the exit status org_access_review.sh check 10 already gates on.
+reset
+must_allow "T0 asks for a pipeline builder" \
+  "$Q" submit --requester T0 --template E3_PIPELINE_BUILDER --title "TESTQ Pipelines"
+BOTH="$(last_sub)"
+must_allow "A0 grants it under break-glass, with the alternatives record" \
+  "$Q" review --reviewer A0 --request "$BOTH" --approve --reason "CI is down and O1 is dormant" \
+              --considered "wait for O1" --because "CI has been red for six hours"
+eq "it is an open OVERRIDE"    "$("$Q" overrides   --json | jq -r '.requestId')" "$BOTH"
+eq "and an open RISK RECORD"   "$("$Q" risk-record --json | jq -r '.requestId')" "$BOTH"
+must_allow "clearing the override does not clear the risk record" \
+  "$Q" ack-override --request "$BOTH" --auditor O3 --note "dormant leader confirmed"
+eq "  ...overrides drains"     "$(rc_of "$Q" overrides)"   "0"
+eq "  ...risk-record does NOT" "$(rc_of "$Q" risk-record)" "1"
+
+# --- the classifier fails CLOSED, in both of its two distinct ways ------------
+# This is the anti-rot property. A permission key on neither RISK_KEYS nor
+# NONRISK_KEYS is somebody extending the catalog without deciding whether the
+# new grant is risky, and the honest answer to an undecided question is to stop
+# — NOT to default to "not risky", which is how a denylist quietly retires a
+# control. Same lesson the queue already learned in STATUS_EVENTS.
+reset
+must_allow "MGR submits against a template that is about to grow a new key" \
+  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Unclassified"
+UNC="$(last_sub)"
+ORIG_STUB="$(cat "$PROV")"
+sed -i 's/"E0_SPECIALIST": \[\]/"E0_SPECIALIST": [{"permissionKey":"secrets:read","self":false}]/' "$PROV"
+must_refuse_with "an UNCLASSIFIED permission key stops the decision, it does not pass it" \
+  "on neither RISK_KEYS nor NONRISK_KEYS" \
+  "$Q" review --reviewer DIR --request "$UNC" --approve --reason "would have sailed through under a denylist"
+must_refuse_with "  ...and it stops a denial too, not only a grant" \
+  "on neither RISK_KEYS nor NONRISK_KEYS" \
+  "$Q" review --reviewer DIR --request "$UNC" --reject --reason "no" --alternative "something safer"
+eq "  ...logged as unclassified_permission_key naming the key" \
+   "$(jq -r 'select(.reason=="unclassified_permission_key")|.keys' "$GRANT_LOG" | tail -1)" "secrets:read"
+printf '%s\n' "$ORIG_STUB" > "$PROV"; chmod +x "$PROV"
+must_allow "  ...and the same decision succeeds once the key is gone again" \
+  "$Q" review --reviewer DIR --request "$UNC" --approve --reason "catalog restored"
+
+# An UNREADABLE catalog is the other failure, and it must not read as "no keys,
+# so not risky" — which is exactly what would happen if the queue asked the
+# provisioner's human `templates` view, since that is piped through `column` and
+# `column` is absent in the paperclip container.
+reset
+must_allow "T0 submits a risky ask" \
+  "$Q" submit --requester T0 --template E2_TOOLING_ADMIN --title "TESTQ Catalog Gone"
+GONE="$(last_sub)"
+ORIG_STUB="$(cat "$PROV")"
+printf '#!/usr/bin/env bash\ncase "${1:-}" in ceiling) exec %q ceiling;; *) exit 91;; esac\n' "$TMP/real_stub.sh" > "$TMP/blind.sh"
+printf '%s\n' "$ORIG_STUB" > "$TMP/real_stub.sh"; chmod +x "$TMP/real_stub.sh" "$TMP/blind.sh"
+cp "$TMP/blind.sh" "$PROV"
+must_refuse_with "a catalog that cannot be read refuses the decision" \
+  "refusing to decide an ask whose risk is unknown" \
+  "$Q" review --reviewer O1 --request "$GONE" --approve --reason "risk unknown must not mean risk absent"
+eq "  ...logged as risk_unclassifiable" \
+   "$(jq -r 'select(.reason=="risk_unclassifiable")|.reason' "$GRANT_LOG" | tail -1)" "risk_unclassifiable"
+eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
+printf '%s\n' "$ORIG_STUB" > "$PROV"; chmod +x "$PROV"
+
+# --- and the whole acceptance path, in one place -----------------------------
+# TOG-388's acceptance: a denial that carries alternatives, a revision, and a
+# subsequent approval, all visible in the audit log.
+reset
+must_allow "1. T0 asks for tools:admin" \
+  "$Q" submit --requester T0 --template E2_TOOLING_ADMIN --title "TESTQ Admin" \
+              --rationale "three tool outages this week"
+A1="$(last_sub)"
+must_allow "2. O1 denies it and offers a narrower route" \
+  "$Q" review --reviewer O1 --request "$A1" --reject --reason "tools:admin is the whole substrate; the outages are pipeline drift" \
+              --alternative "E3_PIPELINE_BUILDER covers the drift you measured without tools:admin"
+must_allow "3. T0 answers the alternative on the record" \
+  "$Q" comment --request "$A1" --author T0 --body "checked: E3 covers two of the three outages"
+must_allow "4. T0 revises against the same thread" \
+  "$Q" submit --requester T0 --template E3_PIPELINE_BUILDER --title "TESTQ Pipelines" \
+              --rationale "narrowed per $A1" --supersedes "$A1"
+A2="$(last_sub)"
+must_allow "5. and it is approved, with what was ruled out on the record" \
+  "$Q" review --reviewer O1 --request "$A2" --approve --reason "narrowed to the measured cause and revertible" \
+              --considered "broker each edit through the steward" --because "two of three edits need a connection CREATE"
+out="$("$Q" thread --request "$A2" 2>&1)"
+for want in "safer alternatives offered" "E3_PIPELINE_BUILDER covers the drift" \
+            "checked: E3 covers two of the three outages" "supersedes $A1" \
+            "alternatives considered and why each failed" "two of three edits need a connection CREATE"; do
+  grep -qF -- "$want" <<<"$out" && ok "audit log carries: $want" \
+    || { bad "audit log is missing: $want"; sed 's/^/        /' <<<"$out" | head -20; }
+done
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
