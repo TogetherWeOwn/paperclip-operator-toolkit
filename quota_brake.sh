@@ -142,7 +142,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # REQUEST_NOTIFY_CMD in the queue suites: the three things that need a
 # database, a host file or a credential are injectable, which is what lets the
 # suite run in CI with none of them.
-PACE_SOURCE_CMD="${PACE_SOURCE_CMD:-}"      # stdout: one JSON pace sample
+PACE_SOURCE_CMD="${PACE_SOURCE_CMD:-}"      # stdout: pace samples, one JSON object per line
 ROSTER_SOURCE_CMD="${ROSTER_SOURCE_CMD:-}"  # stdout: roster TSV (see read_roster)
 AGENT_WRITE_CMD="${AGENT_WRITE_CMD:-}"      # argv: <agent_id> <json_body>
 REFUSAL_SOURCE_CMD="${REFUSAL_SOURCE_CMD:-}" # stdout: refusal TSV
@@ -153,6 +153,49 @@ PACE_TARGET="${PACE_TARGET:-0.97}"
 REFUSAL_WINDOW_MIN="${REFUSAL_WINDOW_MIN:-15}"
 REFUSAL_ALARM_THRESHOLD="${REFUSAL_ALARM_THRESHOLD:-10}"
 
+# --- the derivation window (TOG-440) ----------------------------------------
+# 24h, not 12h, and the reason is arithmetic rather than taste. `weekly` is
+# emitted rounded to 0.01, so a rate derived over dt days cannot resolve finer
+# than 0.01/dt per day. Against today's sustainable burn (0.0270/day) that is:
+#
+#      2h  0.1195/day = 4.42x sustainable   <- coarser than the entire ladder
+#      6h  0.0399/day = 1.48x               <- wider than the whole LEVEL1 band
+#     12h  0.0199/day = 0.74x
+#     24h  0.0100/day = 0.37x               <- first window that resolves rung 1
+#     48h  0.0052/day = 0.19x
+#
+# The ladder's tightest decision is RELEASE|LEVEL1 at ratio 1.0. Below 24h the
+# quantization error alone can carry a sample across it, so a shorter window
+# does not measure faster, it measures noise faster. Measured level FLIPS over
+# the 218-sample history agree: 26 flips at 2h against 13 at 24h for the busy
+# account — and every flip is a PATCH against every brakeable agent.
+# `quota_burn_derive.py --sweep` reprints this table against current data.
+PACE_WINDOW_HOURS="${PACE_WINDOW_HOURS:-24}"
+
+# Below this span the window is declared too short to derive from and the
+# reported field is used instead — LABELLED, never silently. 2h is one
+# quantum-step's worth of signal; anything shorter is pure rounding.
+PACE_MIN_WINDOW_HOURS="${PACE_MIN_WINDOW_HOURS:-2}"
+
+# `weekly` returns to ~0 at the weekly reset. A window spanning one yields a
+# large NEGATIVE delta, which would read as "burning nothing" at exactly the
+# moment a fresh week starts. Any drop bigger than this truncates the window at
+# the reset. 0.2 is far above the 0.01 rounding jitter that shows up as a real
+# -0.01 step in the history (2026-08-25T10:44:23Z) and far below a reset, which
+# drops the full week's usage at once.
+PACE_RESET_DROP="${PACE_RESET_DROP:-0.2}"
+
+# Bound the read so a year-old pacing file cannot turn `plan` into a full-file
+# parse. 2000 samples at the producer's 15-minute cadence is ~20 days, which is
+# three weekly resets — comfortably more than any window can use.
+PACE_MAX_LINES="${PACE_MAX_LINES:-2000}"
+
+# When set, a plan that could not DERIVE its burn exits 5 UNKNOWN instead of
+# falling back to the reported field. Off by default so a freshly-rotated
+# pacing file still brakes; on for the monitor path, where "I braked on the
+# field TOG-440 measured as wrong" must not read as a measurement.
+PACE_REQUIRE_DERIVED="${PACE_REQUIRE_DERIVED:-}"
+
 die() { echo "ERROR: $*" >&2; exit 2; }
 unknown() { echo "UNKNOWN: $*" >&2; exit 5; }
 
@@ -160,15 +203,21 @@ usage() {
   cat <<'EOF'
 quota_brake.sh — hold weekly quota to pace without ever disabling an agent.
 
-  plan      [--explain]        compute the concurrency plan   (0 ok, 5 unmeasured)
-  apply     --yes [--explain]  apply it                       (0 ok, 2 refused, 5 unmeasured)
+  plan      [--explain] [--require-derived]   the concurrency plan (0 ok, 5 unmeasured)
+  apply     --yes [--explain] [--require-derived]   apply it   (0 ok, 2 refused, 5 unmeasured)
   restore   --yes              return every braked agent to baseline (state-free)
   verify                       assert no agent is unwakeable  (0 ok, 3 VIOLATION, 5 unmeasured)
   refusals  [--since-min N]    the loud metric                (0 quiet, 3 ALARM, 5 unmeasured)
   throttled [--out FILE]       export the braked set as JSON  (0 ok, 5 unmeasured)
+  pace                         the burn reading as JSON, and where it came from
 
 `plan` is the default and NOTHING WRITES WITHOUT --yes. `throttled` is a read;
 `--out` writes only the export file it is given, never an agent.
+
+Burn is DERIVED from the trailing `weekly` series, not read from the producer's
+`burn_per_day` field — see the TOG-440 block above read_pace_window(). Every
+reading carries a `source`: `derived` (measured) or `reported` (fallback).
+`--require-derived` turns a fallback into exit 5 instead of a brake.
 
 Environment:
   PACE_SOURCE_CMD / ROSTER_SOURCE_CMD / AGENT_WRITE_CMD / REFUSAL_SOURCE_CMD
@@ -176,6 +225,11 @@ Environment:
   QUOTA_PACING_FILE         pace samples (default /paperclip/operator-handoff/quota-pacing.jsonl)
   EXEMPT_FILE               agents never braked (default ./quota_brake_exempt.txt)
   PACE_TARGET               fraction of weekly quota to aim at (default 0.97)
+  PACE_WINDOW_HOURS         trailing window the burn is derived over (default 24)
+  PACE_MIN_WINDOW_HOURS     below this, fall back to the reported field (default 2)
+  PACE_RESET_DROP           `weekly` drop that counts as a week reset (default 0.2)
+  PACE_MAX_LINES            most pacing lines read (default 2000, ~20 days)
+  PACE_REQUIRE_DERIVED      set to refuse a reported-field fallback
   PAPERCLIP_API_URL / PAPERCLIP_ADMIN_TOKEN   default write path
   REFUSAL_WINDOW_MIN        refusal metric window in minutes (default 15)
   REFUSAL_ALARM_THRESHOLD   refusals in that window before ALARM (default 10)
@@ -229,39 +283,165 @@ assert_policy_preserved() {
 }
 
 # ---------------------------------------------------------------------------
-# The pace signal.
-read_pace() {
+# THE PACE SIGNAL — A WINDOW, NOT A LINE. (TOG-440.)
+#
+# This used to be `tail -1`, and the brake keyed on the producer's
+# `burn_per_day` field in that one line. That field is not a rate over a
+# window. Measured across a 219-sample snapshot of the real pacing file,
+# 2026-08-23T18:51:04Z -> 2026-08-25T17:18:13Z:
+#
+#  * IT REPORTS BURN ON AN ACCOUNT THAT IS BURNING NOTHING. 2026-08-25 11:59Z
+#    to 14:30Z, `weekly` is FLAT at 0.86 — zero consumption for two and a half
+#    hours — while `burn_per_day` decays 0.9568, 0.6383, 0.4788, 0.3827,
+#    0.3190, 0.2733, 0.2392, 0.2126, 0.1914, 0.1741, 0.1595. A fixed numerator
+#    over a growing elapsed time: cumulative-since-an-anchor, not a rate. Every
+#    one of those ten idle samples selected LEVEL2 or LEVEL3.
+#  * IT IS UNSTABLE BETWEEN ADJACENT SAMPLES. 0.6381 at 09:29Z and 3.8355 at
+#    09:44Z, a 6x jump on a `weekly` delta of +0.04.
+#  * AND IT IS OFTEN ABSENT: null on 203 of 438 account-samples (46%), and on
+#    75 of the 219 rows (34%) NO account had a readable value at all — the
+#    whole tail from 14:45Z to 17:00Z, among others. `pace_ratio` returned
+#    empty on every one of those, so the brake exited 5 UNKNOWN and did
+#    nothing. A third of the time the brake was not braking, it was blind.
+#    THIS, not the 7.4x overstatement in TOG-440, is the field's worst defect:
+#    an overstatement still brakes, an absence does not.
+#
+# Replayed over the same snapshot (`quota_burn_derive.py --series`), the level
+# the reported field selects agrees with the derived level on 73 of 235
+# comparable account-samples — 31%. And on the second account the reported
+# field never once selected LEVEL1 or LEVEL2: its distribution is bimodal,
+# RELEASE (64) or LEVEL3 (28), so half the ladder was unreachable through it.
+# That is the exposure TOG-440 describes — moderate burn cannot be answered
+# with a moderate brake if the input never reports moderate burn.
+#
+# `weekly` is what the ACCOUNT reports and what the cap is enforced against, so
+# the difference of two `weekly` readings over a known interval IS the burn,
+# with no producer logic in between. Derived that way the series integrates
+# back to `weekly` exactly (err 0.000000 over 46.4h, both accounts).
+read_pace_window() {
   local out
   if [[ -n "$PACE_SOURCE_CMD" ]]; then
+    # The seam may emit one object or many lines; both are a window.
     out="$($PACE_SOURCE_CMD 2>/dev/null)" || return 1
   else
     [[ -r "$QUOTA_PACING_FILE" ]] || return 1
-    out="$(grep -v '^[[:space:]]*$' "$QUOTA_PACING_FILE" 2>/dev/null | tail -1)" || return 1
+    out="$(grep -v '^[[:space:]]*$' "$QUOTA_PACING_FILE" 2>/dev/null | tail -n "$PACE_MAX_LINES")" || return 1
   fi
   [[ -n "$out" ]] || return 1
-  printf '%s' "$out" | jq -e . >/dev/null 2>&1 || return 1
+  # A partially-flushed tail line is normal on a file the producer appends to,
+  # so drop unparseable lines rather than failing the whole read — but the
+  # window is only usable if SOMETHING parsed.
+  out="$(jq -c . <<<"$out" 2>/dev/null)" || true
+  [[ -n "$out" ]] || return 1
   printf '%s' "$out"
+}
+
+# The latest snapshot out of a window. Kept as its own function because
+# "current weekly / days_left / account list" and "burn over time" are two
+# different questions and only the second one needs history.
+read_pace() {
+  local w; w="$(read_pace_window)" || return 1
+  printf '%s' "$w" | tail -1
 }
 
 # Ratio of actual burn to what the remaining week can afford.
 #
 # Taken across ACCOUNTS, worst-first: the pool is only as healthy as the
-# account currently serving traffic, and an account with `burn_per_day: null`
-# (no traffic yet) must not average the hot one back down to comfortable. Any
-# account whose burn cannot be read is skipped, not treated as zero.
+# account currently serving traffic, and an idle account must not average the
+# hot one back down to comfortable. An account whose burn can be neither
+# derived nor read is SKIPPED, never treated as zero.
+#
+# Emits one object with an explicit `source`:
+#   derived   — burn = Δweekly / Δt over the trailing window. A measurement.
+#   reported  — burn = the producer's `burn_per_day`. A fallback, used only
+#               when the window is too short to derive from, and labelled here
+#               so that do_plan can warn on it and --require-derived can refuse
+#               it. A silent fallback is indistinguishable from a measurement,
+#               which is the whole reason this field exists.
+# `reason` says which of the three fallback conditions fired, so "why did it
+# not derive" is answerable from the output rather than by re-deriving by hand.
 pace_ratio() {
-  local sample="$1"
-  jq -r --arg target "$PACE_TARGET" '
-    [ .accounts[]?
-      | select(.burn_per_day != null and .days_left != null and .weekly != null)
-      | ($target|tonumber) as $t
-      | (($t - .weekly) / (if .days_left <= 0 then 0.0001 else .days_left end)) as $need
-      | { name: .name,
-          burn: .burn_per_day,
-          need: $need,
-          ratio: (if $need <= 0 then 999 else (.burn_per_day / $need) end) }
-    ] | if length == 0 then empty else (max_by(.ratio)) end
-  ' <<<"$sample" 2>/dev/null
+  local window="$1"
+  jq -s -r \
+    --arg target "$PACE_TARGET" \
+    --arg win "$PACE_WINDOW_HOURS" \
+    --arg minwin "$PACE_MIN_WINDOW_HOURS" \
+    --arg drop "$PACE_RESET_DROP" '
+    ($target|tonumber) as $t
+    | ($win|tonumber)    as $w
+    | ($minwin|tonumber) as $mw
+    | ($drop|tonumber)   as $rd
+    | (map(select(type == "object")) | sort_by(.ts // "")) as $rows
+    | ($rows | last)     as $now
+    | if ($now | type) != "object" then empty else
+      [ $now.accounts[]?
+        | select(.days_left != null and .weekly != null)
+        | . as $acc
+        # The per-account weekly series, oldest first, restricted to rows that
+        # actually carry a parseable ts. A fixture with no ts (the pre-TOG-440
+        # single-sample shape) yields a one-element series and therefore the
+        # labelled `reported` fallback — old inputs keep working, and they say
+        # out loud that they were not measured.
+        | [ $rows[]
+            | select(.ts != null)
+            | { ts: (try (.ts | fromdateiso8601) catch null),
+                weekly: ( [ .accounts[]? | select(.name == $acc.name) | .weekly ][0] ) }
+            | select(.ts != null and .weekly != null) ] as $series
+        # RESET TRUNCATION. Walk back from the newest sample and stop at the
+        # first step where `weekly` DROPS by more than $rd — that is the week
+        # rolling over, and pairing across it reads a fresh week as an idle
+        # one. Small negative steps are rounding and must not truncate.
+        | ( [ range(1; ($series|length))
+              | select($series[.].weekly < ($series[. - 1].weekly - $rd)) ] | last // 0 ) as $floor
+        | $series[$floor:] as $week
+        # `// 0` on every timestamp read below, not for tidiness: jq binds an
+        # `as` expression EAGERLY, so on a ts-less fixture (the pre-TOG-440
+        # single-sample shape, still used by callers and by the suite) an
+        # unguarded `$end.ts - ...` raises "null and number cannot be
+        # subtracted" and takes the whole reading down before the
+        # `($week|length) < 2` branch below ever gets to choose the fallback.
+        | ($week | last) as $end
+        | ( [ $week[] | select(.ts <= (($end.ts // 0) - ($w * 3600))) ] | last ) as $cut
+        # No sample old enough for the full window? Use the oldest sample still
+        # in this week — a partial window is still a measurement, it is just a
+        # shorter one, and $mw below decides whether it is long enough.
+        | ( if $cut != null then $cut else ($week | first) end ) as $start
+        | ((($end.ts // 0) - ($start.ts // 0)) / 86400.0) as $dt_days
+        | (($t - $acc.weekly) / (if $acc.days_left <= 0 then 0.0001 else $acc.days_left end)) as $need
+        | ( if ($week | length) < 2 then
+              { source: "reported", reason: "only one sample in this week; nothing to difference against" }
+            elif $dt_days <= 0 then
+              { source: "reported", reason: "window has no elapsed time" }
+            elif (($dt_days * 24) < $mw) then
+              { source: "reported",
+                reason: "window spans \(($dt_days * 24 * 100 | round) / 100)h, under the \($mw)h minimum" }
+            else
+              # NEGATIVE CLAMP. `weekly` is rounded to 0.01, so a flat account
+              # can step -0.01 and derive a negative rate. Negative burn is not
+              # a thing; report 0 and keep the raw delta visible so the clamp
+              # is inspectable rather than silent.
+              { source: "derived",
+                reason: "\(($dt_days * 24 * 100 | round) / 100)h, \($week|length) samples",
+                burn: ( [ 0, (($end.weekly - $start.weekly) / $dt_days) ] | max ),
+                dweekly: ($end.weekly - $start.weekly),
+                window_h: (($dt_days * 24 * 100 | round) / 100),
+                resolution: ((0.01 / $dt_days * 10000 | round) / 10000) }
+            end ) as $d
+        | ( if $d.source == "derived" then $d.burn else $acc.burn_per_day end ) as $burn
+        | select($burn != null)
+        | { name: $acc.name,
+            burn: $burn,
+            need: $need,
+            ratio: (if $need <= 0 then 999 else ($burn / $need) end),
+            source: $d.source,
+            reason: $d.reason,
+            weekly: $acc.weekly,
+            dweekly: ($d.dweekly // null),
+            window_h: ($d.window_h // null),
+            resolution: ($d.resolution // null) }
+      ] | if length == 0 then empty else (max_by(.ratio)) end
+      end
+  ' <<<"$window" 2>/dev/null
 }
 
 # The ladder. Each level names the fraction of baseline concurrency a
@@ -414,15 +594,32 @@ restore_body() {
 # ---------------------------------------------------------------------------
 # plan / apply share all of their logic; `apply` is `plan` with writes on.
 do_plan() {
-  local write="$1" explain="$2"
+  local write="$1" explain="$2" require_derived="${3:-no}"
   need jq; need awk
 
-  local sample worst ratio verdict
-  sample="$(read_pace)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE). Nothing braked, nothing restored."
-  worst="$(pace_ratio "$sample")"
-  [[ -n "$worst" ]] || unknown "pace sample has no account with a readable burn_per_day. Refusing to guess."
+  local window worst ratio verdict source
+  window="$(read_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE). Nothing braked, nothing restored."
+  worst="$(pace_ratio "$window")"
+  [[ -n "$worst" ]] || unknown "no account in the pace window has a burn that can be derived from \`weekly\` or read from \`burn_per_day\`. Refusing to guess."
   ratio="$(jq -r '.ratio' <<<"$worst")"
+  source="$(jq -r '.source' <<<"$worst")"
   verdict="$(verdict_for "$ratio")"
+
+  # RULE 5 (TOG-440): A FALLBACK IS NOT A MEASUREMENT, AND MUST NOT LOOK LIKE
+  # ONE. `burn_per_day` was measured to disagree with the derived level on 162
+  # of 235 comparable samples (69%) and to sit at null on 46% of them. When the
+  # brake has had to fall back to it, that is stated on every run — not only
+  # under --explain, because the operator who most needs to know is the one who
+  # did not ask for detail. --require-derived turns it into exit 5.
+  if [[ "$source" != "derived" ]]; then
+    if [[ -n "$PACE_REQUIRE_DERIVED" || "$require_derived" == yes ]]; then
+      unknown "burn could not be DERIVED ($(jq -r '.reason' <<<"$worst")) and --require-derived is set. Nothing braked, nothing restored."
+    fi
+    echo "WARNING: burn was NOT derived — falling back to the reported burn_per_day field." >&2
+    echo "         reason: $(jq -r '.reason' <<<"$worst")" >&2
+    echo "         That field overstated burn and disagreed with the measured level on 69% of" >&2
+    echo "         historical samples (TOG-440). Treat this plan as an estimate." >&2
+  fi
 
   local roster
   roster="$(read_roster)" || unknown "cannot read the roster. Nothing braked, nothing restored."
@@ -432,6 +629,14 @@ do_plan() {
     {
       echo "  pace account : $(jq -r '.name' <<<"$worst")"
       echo "  burn/day     : $(jq -r '.burn' <<<"$worst")"
+      echo "  burn source  : $source   ($(jq -r '.reason' <<<"$worst"))"
+      if [[ "$source" == "derived" ]]; then
+        echo "  dweekly      : $(jq -r '.dweekly' <<<"$worst") over $(jq -r '.window_h' <<<"$worst")h"
+        # The resolution is printed next to the ratio on purpose: a ratio of
+        # 1.1 means something different when the reading is +/-0.4 wide than
+        # when it is +/-0.05, and the RELEASE|LEVEL1 rung sits at 1.0.
+        echo "  resolution   : +/-$(jq -r '.resolution' <<<"$worst")/day (weekly is rounded to 0.01)"
+      fi
       echo "  sustainable  : $(jq -r '.need' <<<"$worst")   [(${PACE_TARGET} - weekly) / days_left]"
       echo "  ratio        : $ratio"
       echo "  verdict      : $verdict"
@@ -544,24 +749,50 @@ do_plan() {
 }
 
 cmd_plan() {
-  local explain=no
+  local explain=no derived=no
   while [[ $# -gt 0 ]]; do
-    case "$1" in --explain) explain=yes; shift;; *) die "unknown argument: $1";; esac
+    case "$1" in
+      --explain) explain=yes; shift;;
+      --require-derived) derived=yes; shift;;
+      *) die "unknown argument: $1";;
+    esac
   done
-  do_plan no "$explain"
+  do_plan no "$explain" "$derived"
 }
 
 cmd_apply() {
-  local yes=no explain=no
+  local yes=no explain=no derived=no
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --yes) yes=yes; shift;;
       --explain) explain=yes; shift;;
+      --require-derived) derived=yes; shift;;
       *) die "unknown argument: $1";;
     esac
   done
   [[ "$yes" == yes ]] || die "apply needs --yes. Run \`plan\` first and read it; this tool is dry-run by default."
-  do_plan yes "$explain"
+  do_plan yes "$explain" "$derived"
+}
+
+# ---------------------------------------------------------------------------
+# pace — the burn reading on its own, as JSON, on STDOUT.
+#
+# Two jobs. First, a monitor needs the `source` field on a machine-readable
+# surface: the warning in do_plan goes to stderr, which is exactly where an
+# automated caller drops it. Second, this is the shape
+# `test_quota_burn_derive.sh` diffs against `quota_burn_derive.py --json`, so
+# the shell derivation and the Python one cannot drift apart without a red
+# test — two implementations of one formula is the price of the production
+# path needing only bash+jq while the analysis path needs to replay history.
+cmd_pace() {
+  need jq
+  local window worst
+  window="$(read_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE)."
+  worst="$(pace_ratio "$window")"
+  [[ -n "$worst" ]] || unknown "no account in the pace window has a derivable or readable burn."
+  jq -c --arg v "$(verdict_for "$(jq -r '.ratio' <<<"$worst")")" '. + {verdict: $v}' <<<"$worst"
+  [[ "$(jq -r '.source' <<<"$worst")" == "derived" ]] || return 4
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -807,6 +1038,7 @@ case "${1:-plan}" in
   verify)   shift || true; cmd_verify "$@";;
   refusals) shift; cmd_refusals "$@";;
   throttled) shift; cmd_throttled "$@";;
+  pace)     shift || true; cmd_pace "$@";;
   -h|--help|help) usage;;
   *) usage; exit 2;;
 esac

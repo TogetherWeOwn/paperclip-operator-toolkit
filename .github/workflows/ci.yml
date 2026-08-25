@@ -66,6 +66,13 @@ name: CI
 #     test_interaction_triage.sh        interaction_triage.sh: who can actually
 #                                       resolve each pending interaction, and
 #                                       which are dead on the board — TOG-423
+#     test_quota_burn_derive.sh         quota_burn_derive.py: whether quota burn
+#                                       is DERIVED from the weekly series rather
+#                                       than read from a producer field that was
+#                                       absent a third of the time, and whether
+#                                       the jq copy of that formula inside
+#                                       quota_brake.sh still agrees with it —
+#                                       TOG-440
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -483,8 +490,30 @@ jobs:
       #
       # Offline: pace signal, roster, refusal counts and the write path all
       # arrive through *_CMD seams, so there is no database and no credential.
+      #
+      # §9 is TOG-440's half. The brake used to key on the producer's
+      # `burn_per_day` field; measured over a 219-sample snapshot of the real
+      # pacing file that field was null on 46% of account-samples — and on 75 of
+      # the 219 rows NO account had a value, so the brake exited 5 and did
+      # nothing a third of the time. Where it WAS present it picked a different
+      # ladder level from the measured burn on 69% of comparable samples. The
+      # worst shape is an idle account: 11:59Z-14:30Z `weekly` was flat (zero
+      # consumption) while the field decayed 0.9568 -> 0.1595 and reported 34.1x
+      # down to 5.5x — LEVEL3/LEVEL2 on an account burning nothing. Underrunning
+      # the weekly quota is the expensive failure mode here, so that is not a
+      # fail-safe error, it is the error. §9c pins it.
       - name: quota brake suite
         run: ./test_quota_brake.sh
+
+      # TOG-440. The offline derivation tool, and — §5 — the cross-check that
+      # keeps it in step with the jq copy inside quota_brake.sh. Two
+      # implementations of one formula is the price of the production path
+      # needing only bash+jq+awk while the analysis path has to replay history
+      # and sweep windows; what makes it survivable is that they are diffed on
+      # every build rather than during the next incident.
+      - name: quota burn derivation suite
+        run: ./test_quota_burn_derive.sh
+
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
       # wrong way round, "please run these three root commands" renders as a
@@ -1938,6 +1967,95 @@ jobs:
           rotation_mutation "delta-spans-whole-feed" \
             "$(printf 'spent_d = weekly_delta(samples, lo, hi, spent)\x1fspent_d = weekly_delta(samples, 0, len(samples)-1, spent)')" || rc=1
           exit $rc
+
+      # TOG-440. The brake's INPUT, which is the half TOG-419 got right in
+      # mechanism and wrong in measurement. Every mutation below is the shortest
+      # path back to a shipped defect, and each names the test that must go red
+      # — a bare "the suite failed" is not attribution, and §6's four exit-5
+      # gates already proved in this repo that an exit-code-only assertion can
+      # be satisfied by the gate standing next to the one being tested.
+      - name: Prove the brake still derives its burn rather than reading it
+        run: |
+          set -uo pipefail
+          rc=0
+          brake_mutation() {
+            local label="$1" expect="$2"; shift 2
+            local mut; mut="$(mktemp -d)"
+            cp quota_brake.sh test_quota_brake.sh quota_brake_exempt.txt "$mut/"
+
+            # Baseline first. Without it "the mutated suite failed" is
+            # unattributable, which is how two gates in this repo sat vacuous
+            # for months before TOG-253 found them.
+            if ! (cd "$mut" && ./test_quota_brake.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_quota_brake.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
+            fi
+
+            # "old<US>new" with a literal 0x1f separator, applied by python3 -c
+            # and NOT a heredoc: a heredoc terminator has to sit at column 0,
+            # which closes this YAML block scalar early and silently truncates
+            # the step. Same reason as the rotation gate above.
+            local e
+            for e in "$@"; do
+              python3 -c 'import sys; p, ex = sys.argv[1], sys.argv[2]; o, n = ex.split("\x1f", 1); s = open(p).read(); open(p, "w").write(s.replace(o, n))' "$mut/quota_brake.sh" "$e"
+            done
+            if cmp -s quota_brake.sh "$mut/quota_brake.sh"; then
+              echo "::error::$label: the edit changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! bash -n "$mut/quota_brake.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            local out status
+            out="$(cd "$mut" && ./test_quota_brake.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the brake suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # 1. THE REVERT. Read the producer's field instead of the derived
+          #    rate. This is precisely what shipped in #65, and it is what
+          #    anyone reaches for who finds the jq hard to follow. On an idle
+          #    account it selects LEVEL3 — concurrency 1 across the roster while
+          #    nothing is burning.
+          brake_mutation "burn-read-not-derived" 'RELEASES instead of flooring' \
+            "$(printf '( if $d.source == "derived" then $d.burn else $acc.burn_per_day end ) as $burn\x1f( $acc.burn_per_day // $d.burn ) as $burn')" || rc=1
+          # 2. THE SILENT FALLBACK. Keep the derivation, delete the label. The
+          #    plan is then identical whether it was measured or estimated,
+          #    which is the state TOG-440 exists to end: an estimate that reads
+          #    as a measurement is worse than a loud estimate.
+          brake_mutation "fallback-is-silent" 'warns that this was not measured' \
+            "$(printf 'if [[ "$source" != "derived" ]]; then\x1fif false; then')" || rc=1
+          # 3. --require-derived NEUTERED. The monitor path's only hard gate.
+          brake_mutation "require-derived-is-a-noop" 'require-derived on a fallback is exit 5' \
+            "$(printf 'if [[ -n "$PACE_REQUIRE_DERIVED" || "$require_derived" == yes ]]; then\x1fif false; then')" || rc=1
+          # 4. RESET TRUNCATION REMOVED. A window spanning the weekly reset then
+          #    derives a large negative rate, clamps to 0 and RELEASES the brake
+          #    at the exact moment a fresh week's quota is all in front of you.
+          brake_mutation "reset-not-truncated" 'spanning a reset derives from the NEW week only' \
+            "$(printf '| select($series[.].weekly < ($series[. - 1].weekly - $rd)) ] | last // 0 ) as $floor\x1f| select(false) ] | last // 0 ) as $floor')" || rc=1
+          # 5. THE NEGATIVE CLAMP REMOVED. `weekly` is rounded to 0.01, so a
+          #    flat account steps -0.01 and derives a negative burn — which
+          #    beats every positive account in max_by and reports the pool as
+          #    healthier than its worst member.
+          brake_mutation "negative-burn-allowed" 'rounding step clamps to zero burn' \
+            "$(printf 'burn: ( [ 0, (($end.weekly - $start.weekly) / $dt_days) ] | max ),\x1fburn: (($end.weekly - $start.weekly) / $dt_days),')" || rc=1
+          # 6. THE MINIMUM WINDOW REMOVED. Any two adjacent samples are then
+          #    "derived", and at a 15-minute gap the 0.01 quantum is +/-0.96/day
+          #    — 32x sustainable. That is not a measurement, it is the reported
+          #    field's instability re-created in our own code.
+          brake_mutation "min-window-ignored" 'cannot derive; it falls back' \
+            "$(printf 'elif (($dt_days * 24) < $mw) then\x1felif false then')" || rc=1
+          exit $rc
+
       # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
       # strict mode. That is the tempting simplification here — it reads as
       # "something was requested, so this is scoped" — and it silently reinstates

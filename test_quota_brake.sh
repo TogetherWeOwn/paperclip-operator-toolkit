@@ -359,6 +359,203 @@ rc=0; (REFUSAL_SOURCE_CMD="true" "$BRAKE" refusals) >/dev/null 2>&1 || rc=$?
 check "8d  zero refusals from a WORKING source is exit 0" "$rc" "0"
 
 # ===========================================================================
+# 9. TOG-440 — BURN IS DERIVED FROM `weekly`, AND A FALLBACK SAYS SO.
+#
+# Everything above §9 feeds the tool a SINGLE ts-less sample, which is the
+# pre-TOG-440 shape. Those fixtures now exercise the labelled fallback, which
+# is worth pinning — but it means the suite would otherwise never run the
+# derived path at all, and the derived path is the one that decides how fast
+# this company is allowed to work.
+#
+# The case that matters most is 9c. From 2026-08-25T11:59Z to 14:30Z the real
+# account burned NOTHING — `weekly` flat at 0.86 — while `burn_per_day` decayed
+# from 0.9568 to 0.1595 and reported ratios of 34.1x down to 5.5x. Every one of
+# those samples selected LEVEL2 or LEVEL3: concurrency 1 across the roster, on
+# an account that was idle. Underrunning the weekly quota is the expensive
+# failure mode here (unused quota is destroyed at reset), so a brake that
+# floors the company while nothing is burning is not "fail-safe", it is the
+# failure. 9c pins that this window now RELEASES.
+echo "== 9. TOG-440: burn is derived from the weekly series =="
+
+# A window is JSONL, oldest first.
+mkwin() { printf '%s\n' "$@" > "$WORK/$WIN"; }
+
+# --- 9a/9b: a real climb derives the rate, exactly -------------------------
+# weekly 0.52 -> 0.62 over exactly 24h => 0.10/day against
+# need=(0.97-0.62)/4.02=0.08706 => ratio 1.1486 => LEVEL1. Note what this
+# shows: the SAME account, hour and reported field that §4's fixture puts at
+# 7.3x is a 1.1x when measured. That gap is the whole issue — LEVEL1 halves
+# concurrency, LEVEL3 floors it to 1.
+WIN=win_climb.jsonl
+mkwin \
+ '{"ts":"2026-08-24T09:29:00Z","accounts":[{"name":"hot@example.com","burn_per_day":0.6381,"weekly":0.52,"days_left":5.02}]}' \
+ '{"ts":"2026-08-24T21:29:00Z","accounts":[{"name":"hot@example.com","burn_per_day":0.6381,"weekly":0.57,"days_left":4.52}]}' \
+ '{"ts":"2026-08-25T09:29:00Z","accounts":[{"name":"hot@example.com","burn_per_day":0.6381,"weekly":0.62,"days_left":4.02}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+check "9a  a window with history reports source=derived" "$(jq -r '.source' <<<"$pace")" "derived"
+check "9b  burn is dweekly/dt to 4dp, NOT burn_per_day" "$(jq -r '.burn*10000|round/10000' <<<"$pace")" "0.1"
+check "9b2 ...and is not the reported 0.6381" "$(jq -r '.burn == 0.6381' <<<"$pace")" "false"
+check "9b3 the derived ratio selects LEVEL1, not LEVEL3" "$(jq -r '.verdict' <<<"$pace")" "LEVEL1"
+plan="$("$BRAKE" plan 2>/dev/null)"
+check "9b4 ...so a baseline-20 agent is halved, not floored" \
+      "$(awk -F'\t' '$3=="Bulk Worker"{print $5}' <<<"$plan")" "10"
+
+# --- 9c: THE REGRESSION. flat weekly, decaying reported burn ---------------
+# Lifted from the real file: 11:59Z-14:30Z, weekly pinned at 0.86 while
+# burn_per_day decays. Derived burn is 0 => RELEASE. Reported burn 0.1595
+# against need=(0.97-0.86)/3.81=0.02887 is 5.52x => LEVEL3.
+WIN=win_flat.jsonl
+mkwin \
+ '{"ts":"2026-08-25T11:59:40Z","accounts":[{"name":"idle@example.com","burn_per_day":0.9568,"weekly":0.86,"days_left":3.92}]}' \
+ '{"ts":"2026-08-25T13:14:57Z","accounts":[{"name":"idle@example.com","burn_per_day":0.2733,"weekly":0.86,"days_left":3.86}]}' \
+ '{"ts":"2026-08-25T14:30:10Z","accounts":[{"name":"idle@example.com","burn_per_day":0.1595,"weekly":0.86,"days_left":3.81}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+check "9c  an idle account derives zero burn" "$(jq -r '.burn' <<<"$pace")" "0"
+check "9c2 ...and RELEASES instead of flooring the roster" "$(jq -r '.verdict' <<<"$pace")" "RELEASE"
+# Prove the OLD input really would have gone the other way on this SAME
+# fixture. Without this the case only shows the new answer, not that it
+# differs — and "the fix changed nothing" is the outcome to catch.
+need_flat="$(jq -r '.need' <<<"$pace")"
+check "9c3 the reported field on this same window says LEVEL3" \
+      "$(awk -v b=0.1595 -v n="$need_flat" 'BEGIN{r=b/n; print (r<=1?"RELEASE":(r<=2?"LEVEL1":(r<=5?"LEVEL2":"LEVEL3")))}')" \
+      "LEVEL3"
+plan="$("$BRAKE" plan 2>/dev/null)"
+check "9c4 an unbraked agent is left alone" \
+      "$(awk -F'\t' '$3=="Bulk Worker"{print $1}' <<<"$plan")" "nochange"
+
+# --- 9d: a window too short to derive falls back, LOUDLY -------------------
+WIN=win_short.jsonl
+mkwin \
+ '{"ts":"2026-08-25T09:29:00Z","accounts":[{"name":"hot@example.com","burn_per_day":0.6381,"weekly":0.62,"days_left":4.02}]}' \
+ '{"ts":"2026-08-25T09:44:00Z","accounts":[{"name":"hot@example.com","burn_per_day":0.6381,"weekly":0.62,"days_left":4.02}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+check "9d  a 15m window cannot derive; it falls back" "$(jq -r '.source' <<<"$pace")" "reported"
+check "9d2 ...to the reported value, not to zero" "$(jq -r '.burn' <<<"$pace")" "0.6381"
+case "$(jq -r '.reason' <<<"$pace")" in
+  *"under the 2h minimum"*) ok "9d3 ...and the reason names the minimum it missed";;
+  *) bad "9d3 ...and the reason names the minimum it missed" "$(jq -r '.reason' <<<"$pace")";;
+esac
+# The warning is on EVERY plan, not only --explain. An operator who did not ask
+# for detail is exactly the one who will otherwise read an estimate as a
+# measurement.
+err="$("$BRAKE" plan 2>&1 >/dev/null)"
+case "$err" in
+  *"burn was NOT derived"*) ok "9d4 a plain \`plan\` warns that this was not measured";;
+  *) bad "9d4 a plain \`plan\` warns that this was not measured" "$err";;
+esac
+# And the converse, which is what makes 9d4 mean anything: the warning must be
+# ABSENT when the reading really was derived. A warning printed unconditionally
+# would pass 9d4 while telling the operator nothing.
+export PACE_SOURCE_CMD="cat $WORK/win_climb.jsonl"
+err="$("$BRAKE" plan 2>&1 >/dev/null)"
+case "$err" in
+  *"burn was NOT derived"*) bad "9d5 a DERIVED plan does not warn" "$err";;
+  *) ok "9d5 a DERIVED plan does not warn";;
+esac
+
+# --- 9e: --require-derived refuses the fallback ----------------------------
+export PACE_SOURCE_CMD="cat $WORK/win_short.jsonl"
+rc=0; out="$("$BRAKE" plan --require-derived 2>&1)" || rc=$?
+check "9e  --require-derived on a fallback is exit 5" "$rc" "5"
+case "$out" in *"could not be DERIVED"*) ok "9e2 ...naming derivation as the reason";; *) bad "9e2 ...naming derivation as the reason" "$out";; esac
+rc=0; ("$BRAKE" apply --yes --require-derived) >/dev/null 2>&1 || rc=$?
+check "9e3 ...and a refused apply is also exit 5" "$rc" "5"
+check "9e4 ...having written NOTHING" "$(wc -l < "$CAPTURE_FILE" | tr -d ' ')" "0"
+# The env spelling must work too — the monitor path sets it once, globally,
+# rather than remembering a flag at every call site.
+rc=0; (PACE_REQUIRE_DERIVED=1 "$BRAKE" plan) >/dev/null 2>&1 || rc=$?
+check "9e5 PACE_REQUIRE_DERIVED=1 refuses the same way" "$rc" "5"
+# ...and must NOT refuse a derived reading. An env var that refuses everything
+# would pass 9e5 and silently take the brake off the air.
+rc=0; (PACE_REQUIRE_DERIVED=1 PACE_SOURCE_CMD="cat $WORK/win_climb.jsonl" "$BRAKE" plan) >/dev/null 2>&1 || rc=$?
+check "9e6 ...but allows a DERIVED plan through" "$rc" "0"
+
+# --- 9f: a weekly reset inside the window is not "burning nothing" ---------
+# weekly runs 0.90 -> 0.95, resets to 0.02, then climbs to 0.12 over 12h.
+# Naive end-minus-start across the reset gives (0.12-0.90)/1d = -0.78/day,
+# which clamps to 0 and RELEASES the brake at the start of a fresh week.
+# Truncating at the reset gives (0.12-0.02)/0.5d = +0.20/day.
+WIN=win_reset.jsonl
+mkwin \
+ '{"ts":"2026-08-24T09:00:00Z","accounts":[{"name":"roll@example.com","burn_per_day":null,"weekly":0.90,"days_left":0.5}]}' \
+ '{"ts":"2026-08-24T18:00:00Z","accounts":[{"name":"roll@example.com","burn_per_day":null,"weekly":0.95,"days_left":0.2}]}' \
+ '{"ts":"2026-08-24T21:00:00Z","accounts":[{"name":"roll@example.com","burn_per_day":null,"weekly":0.02,"days_left":7.0}]}' \
+ '{"ts":"2026-08-25T09:00:00Z","accounts":[{"name":"roll@example.com","burn_per_day":null,"weekly":0.12,"days_left":6.5}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+check "9f  a window spanning a reset derives from the NEW week only" \
+      "$(jq -r '.burn*10000|round/10000' <<<"$pace")" "0.2"
+check "9f2 ...and never reads a reset as negative burn" "$(jq -r '.burn >= 0' <<<"$pace")" "true"
+check "9f3 ...using only the post-reset samples" "$(jq -r '.dweekly*100|round/100' <<<"$pace")" "0.1"
+
+# --- 9g: rounding jitter clamps to zero, it does not go negative -----------
+# The real file steps -0.01 at 2026-08-25T10:44:23Z on a flat account. `weekly`
+# is rounded to 0.01, so this is quantization, not a refund. It is also well
+# under PACE_RESET_DROP, so it must NOT be mistaken for a week reset.
+WIN=win_jitter.jsonl
+mkwin \
+ '{"ts":"2026-08-24T09:00:00Z","accounts":[{"name":"jit@example.com","burn_per_day":1.5882,"weekly":0.71,"days_left":4.98}]}' \
+ '{"ts":"2026-08-24T21:00:00Z","accounts":[{"name":"jit@example.com","burn_per_day":1.5882,"weekly":0.71,"days_left":4.48}]}' \
+ '{"ts":"2026-08-25T09:00:00Z","accounts":[{"name":"jit@example.com","burn_per_day":1.5882,"weekly":0.70,"days_left":3.97}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+check "9g  a -0.01 rounding step clamps to zero burn" "$(jq -r '.burn' <<<"$pace")" "0"
+check "9g2 ...but the raw dweekly stays visible" "$(jq -r '.dweekly*100|round/100' <<<"$pace")" "-0.01"
+check "9g3 ...and the verdict is RELEASE, not a negative ratio" "$(jq -r '.verdict' <<<"$pace")" "RELEASE"
+check "9g4 ...and it was NOT treated as a week reset" "$(jq -r '.window_h' <<<"$pace")" "24"
+
+# --- 9h: the worst account still decides, on derived input -----------------
+# §4quater pins this for the reported field. It has to hold for the derived one
+# too: an idle account averaging a hot one down is the failure that lets a
+# burning pool read comfortable.
+WIN=win_mixed.jsonl
+mkwin \
+ '{"ts":"2026-08-24T09:29:00Z","accounts":[{"name":"idle@example.com","burn_per_day":null,"weekly":0.10,"days_left":5.00},{"name":"hot@example.com","burn_per_day":null,"weekly":0.20,"days_left":5.02}]}' \
+ '{"ts":"2026-08-25T09:29:00Z","accounts":[{"name":"idle@example.com","burn_per_day":null,"weekly":0.10,"days_left":4.00},{"name":"hot@example.com","burn_per_day":null,"weekly":0.62,"days_left":4.02}]}'
+base_env; export PACE_SOURCE_CMD="cat $WORK/$WIN"
+pace="$("$BRAKE" pace 2>/dev/null)"
+# hot: 0.20 -> 0.62 over 24h = 0.42/day against need=(0.97-0.62)/4.02=0.08706
+# => 4.82x => LEVEL2.  idle: flat 0.10 => 0/day => RELEASE.
+check "9h  the hot account is the one reported" "$(jq -r '.name' <<<"$pace")" "hot@example.com"
+check "9h2 ...at LEVEL2, undiluted by the idle one" "$(jq -r '.verdict' <<<"$pace")" "LEVEL2"
+# The assertion that gives 9h2 its meaning: the idle account ALONE reads
+# RELEASE, so the pool verdict came from taking the worst rather than from
+# every account happening to agree.
+WIN=win_idle_only.jsonl
+mkwin \
+ '{"ts":"2026-08-24T09:29:00Z","accounts":[{"name":"idle@example.com","burn_per_day":null,"weekly":0.10,"days_left":5.00}]}' \
+ '{"ts":"2026-08-25T09:29:00Z","accounts":[{"name":"idle@example.com","burn_per_day":null,"weekly":0.10,"days_left":4.00}]}'
+check "9h3 ...the idle account on its own is RELEASE" \
+      "$(PACE_SOURCE_CMD="cat $WORK/$WIN" "$BRAKE" pace 2>/dev/null | jq -r '.verdict')" "RELEASE"
+
+# --- 9i: THE BLINDNESS FIX --------------------------------------------------
+# Every account in win_mixed reports burn_per_day:null — the shape of 75 of the
+# 219 rows in the real file, including its entire 14:45Z-17:00Z tail. The
+# pre-TOG-440 tool returned empty from pace_ratio on exactly this and exited 5
+# UNKNOWN: no brake, no restore, nothing. A third of the samples.
+rc=0; ("$BRAKE" plan) >/dev/null 2>&1 || rc=$?
+check "9i  an all-null-burn window now PLANS instead of exiting 5" "$rc" "0"
+# The floor still holds: a window with neither a derivable series nor a
+# reported value is still exit 5. Deriving must not turn "no data" into a
+# confident zero — that would brake nothing during a real burn.
+WIN=win_blank.jsonl
+mkwin '{"ts":"2026-08-25T09:29:00Z","accounts":[{"name":"x@example.com","burn_per_day":null,"weekly":0.62,"days_left":4.02}]}'
+rc=0; out="$(PACE_SOURCE_CMD="cat $WORK/$WIN" "$BRAKE" plan 2>&1)" || rc=$?
+check "9i2 a single null-burn sample is still exit 5, not zero burn" "$rc" "5"
+case "$out" in *"Refusing to guess"*) ok "9i3 ...refusing to guess";; *) bad "9i3 ...refusing to guess" "$out";; esac
+
+# --- 9j: `pace` is the machine-readable surface ----------------------------
+# The do_plan warning goes to stderr, which is where an automated caller drops
+# it. A monitor needs the source on stdout AND in the exit code.
+rc=0; PACE_SOURCE_CMD="cat $WORK/win_climb.jsonl" "$BRAKE" pace >/dev/null 2>&1 || rc=$?
+check "9j  \`pace\` exits 0 on a derived reading" "$rc" "0"
+rc=0; PACE_SOURCE_CMD="cat $WORK/win_short.jsonl" "$BRAKE" pace >/dev/null 2>&1 || rc=$?
+check "9j2 ...and exits 4 on a fallback" "$rc" "4"
+
+# ===========================================================================
 echo
 echo "== 9. the throttled export (TOG-401) =="
 #
@@ -449,5 +646,5 @@ echo "passed: $PASS   failed: $FAIL"
 (( FAIL == 0 )) || exit 1
 # A suite that asserted nothing must not report success — the same rule the
 # tool under test enforces on itself.
-(( PASS >= 60 )) || { echo "REFUSED: only $PASS assertions ran; the suite did not execute." >&2; exit 1; }
+(( PASS >= 95 )) || { echo "REFUSED: only $PASS assertions ran; the suite did not execute." >&2; exit 1; }
 echo "ALL GREEN"

@@ -88,11 +88,78 @@ cannot starve an agent even if a bug hands it `0` or `-5`; the platform refuses.
 `wakeOnDemand` is a bare boolean with no floor, which is exactly why one bad sweep took the
 company off the air.
 
+## Burn is derived, not read (TOG-440)
+
+The brake originally keyed on `burn_per_day`, a producer-side field in `quota-pacing.jsonl`. It
+does not survive contact with its own history. Measured over a 219-sample snapshot,
+`2026-08-23T18:51:04Z → 2026-08-25T17:18:13Z`:
+
+| symptom | measurement |
+|---|---|
+| **absent** | `null` on **203 of 438** account-samples (46%). On **75 of 219 rows** *no* account had a value, so `pace_ratio` returned empty and the brake exited `5 UNKNOWN` — **a third of the time it was not braking, it was blind** |
+| **not a rate** | `11:59Z→14:30Z`: `weekly` flat at 0.86 (zero consumption) while the field decayed `0.9568 → 0.1595`. A fixed numerator over a growing elapsed time — cumulative-since-an-anchor. All ten idle samples selected `LEVEL2`/`LEVEL3` |
+| **unstable** | `0.6381` at `09:29Z`, `3.8355` at `09:44Z` — 6× on a `weekly` delta of `+0.04` |
+| **wrong rung** | agrees with the measured level on **73 of 235** comparable samples (31%). On the second account it never once selected `LEVEL1` or `LEVEL2`: bimodal `RELEASE` (64) or `LEVEL3` (28), so half the ladder was unreachable through it |
+
+`weekly` is what the **account** reports and what the cap is enforced against, so the difference
+of two `weekly` readings over a known interval *is* the burn, with no producer logic in between:
+
+```
+burn = Δweekly / Δt        over a 24h trailing window
+```
+
+Derived that way the series integrates back to `weekly` exactly — `sum(rate·dt)` against the
+observed `Δweekly`, error `0.000000` over 46.5h on both accounts (`quota_burn_derive.py
+--series`). A rate that cannot be reconciled against the thing it was derived from is not a
+measurement of it, which is the check the old field would have failed.
+
+**The window is 24h for an arithmetic reason.** `weekly` is emitted rounded to `0.01`, so a rate
+over `dt` days cannot resolve finer than `0.01/dt` per day:
+
+| window | resolution | × sustainable (0.0270/day) | level flips over the history |
+|---|---|---|---|
+| 2h | 0.1195/day | 4.42× — coarser than the whole ladder | 26 |
+| 6h | 0.0399/day | 1.48× — wider than the whole `LEVEL1` band | 15 |
+| 12h | 0.0199/day | 0.74× | 17 |
+| **24h** | **0.0100/day** | **0.37× — first window that resolves rung 1** | **13** |
+| 48h | 0.0052/day | 0.19× | 13 |
+
+The ladder's tightest decision is `RELEASE|LEVEL1` at ratio 1.0. Below 24h the quantization
+error alone can carry a sample across it, so a shorter window does not measure faster — it
+measures noise faster, and every level flip is a `PATCH` against every brakeable agent.
+`quota_burn_derive.py --sweep` reprints this table against current data.
+
+Two edges the naive version gets wrong, both pinned by `test_quota_brake.sh` §9f/§9g:
+
+- **Week resets truncate the window.** `weekly` returns to ~0 at reset; a window spanning one
+  yields a large negative delta that clamps to zero and would *lift* the brake at the exact
+  moment a fresh week's quota is all in front of you. Any drop over `PACE_RESET_DROP` (0.2)
+  cuts the window there.
+- **Rounding jitter clamps to zero, not negative.** A flat account steps `−0.01` — it does, at
+  `10:44:23Z`. Negative burn is not a thing, and a negative rate would also beat every positive
+  account in `max_by`, reporting the pool as healthier than its worst member.
+
+### A fallback is never silent
+
+When the window is too short to derive from, the brake falls back to `burn_per_day` — and says
+so on **every** run, not only under `--explain`:
+
+```
+$ ./quota_brake.sh pace
+{"name":"…","burn":0.4974,"ratio":20.45,"source":"derived","reason":"24.13h, 219 samples", …}
+```
+
+`source` is `derived` (a measurement) or `reported` (an estimate), with a `reason` naming which
+of the three fallback conditions fired. `pace` exits `0` on derived and `4` on a fallback, so a
+monitor can branch on it without parsing stderr. `--require-derived` /
+`PACE_REQUIRE_DERIVED=1` turns a fallback into exit `5` and writes nothing. An estimate that
+reads as a measurement is worse than a loud estimate — that is what the field is for.
+
 ## The ladder
 
-`sustainable = (PACE_TARGET − weekly_used) / days_left`, `ratio = burn_per_day / sustainable`,
-taken from the **worst** account rather than the average — an account with no traffic yet
-(`burn_per_day: null`) must not dilute the one actually burning.
+`sustainable = (PACE_TARGET − weekly_used) / days_left`, `ratio = burn / sustainable`, taken
+from the **worst** account rather than the average — an idle account must not dilute the one
+actually burning.
 
 | ratio | verdict | brakeable agents keep |
 |---|---|---|
@@ -100,6 +167,27 @@ taken from the **worst** account rather than the average — an account with no 
 | ≤ 2.0 | `LEVEL1` | ½ of baseline, rounded up |
 | ≤ 5.0 | `LEVEL2` | ¼ of baseline, rounded up |
 | > 5.0 | `LEVEL3` | 1 — never 0 |
+
+**These thresholds were unmeasured when they shipped, and TOG-440 asked whether they still are.
+They are not — and they also did not need to change.** Replayed over the 219-sample history at a
+24h window, the derived input reaches all four rungs on both accounts:
+
+| account | RELEASE | LEVEL1 | LEVEL2 | LEVEL3 |
+|---|---|---|---|---|
+| `1856877+Rick7C2@users.noreply.github.com` | 17 | 45 | 124 | 32 |
+| `pisnrzrs@two.gg` | 33 | 13 | 71 | 101 |
+
+That spread is the property you want from a ladder, and it is exactly what the *reported* input
+could not produce (`LEVEL1=0, LEVEL2=0` on the second account). The defect was in the input, and
+fixing the input fixed the ladder's behaviour without moving a threshold. Re-derive this table
+with `quota_burn_derive.py --series` before changing a number here.
+
+**What is still open is `PACE_TARGET`, and it is not ours.** 0.97 is a safety margin somebody
+picked, not a target pace. The thresholds shape the *response curve*; `PACE_TARGET` sets the
+*line being defended*, and that line is the CFO's — it decides how much of a paid-for
+subscription this company is allowed to consume, against a quota that is destroyed unused at
+reset. Substituting one arbitrary threshold for another while the line itself is unowned would
+be motion, not progress. Tracked separately; see the TOG-440 thread.
 
 `PACE_TARGET` is 0.97, not 1.0, so the week lands just under the cap. Unused weekly quota is
 destroyed at reset, so *underrunning is the expensive failure mode* and aiming low wastes the
@@ -237,6 +325,7 @@ entire roster healthy.
 | 0 | done, or quiet |
 | 2 | refused — a guard fired, or a required argument is missing |
 | 3 | `verify`: an agent is unwakeable. `refusals`: over threshold |
+| 4 | `pace`: the reading is a `reported` fallback, not a derivation |
 | 5 | **could not measure.** Not clean. Nothing was written |
 
 Exit 5 is load-bearing. Zero agents braked out of zero examined is "never ran", not "nothing
