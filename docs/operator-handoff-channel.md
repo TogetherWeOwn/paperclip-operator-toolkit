@@ -49,6 +49,55 @@ The three that remain — `TOG-151-dropchannel_scan.sh`, `TOG-178-apply.sh`,
 `TOG-196-identity-probe.mjs` — are still unreviewed code an operator can run, and `STALE` is still
 `REFERENCE-org_provisioner.sh`. **These counts move; do not quote them as current.** Run the check.
 
+### The last three (TOG-372)
+
+Those three were the CISO's own, and TOG-372 resolved them: two landed, one was deleted. The split
+used TOG-371's two questions — *is there a live consumer*, and *does a byte-identical copy survive
+anywhere else* — and the interesting result is that **not one byte was written to the channel.**
+
+- `dropchannel_scan.sh` **landed unchanged.** It is the channel's other control (see below).
+- `omniroute/TOG-178-apply.sh` **landed unchanged**, deliberately — its SHA-256 manifest is published
+  in the TOG-178 thread and gates the operator's run. `omniroute/README.md` has the full argument.
+- `TOG-196-identity-probe.mjs` **was deleted.** It could not do its job here: registering it fails at
+  `422 remote_http_private_endpoint` before it observes anything, so it was staged code that had
+  never run and never could. Its question was answered from the other direction, in-process against
+  the real gateway, as a regression test rather than a one-off — and `docs/transport-identity.md`
+  had already recommended deleting it "along with `whoami_spoof`", the argument-supplied identity
+  control that must never exist outside a probe. Nothing unique was lost; the design carried into
+  `mcp/org-request-mcp.mjs`, and the runbook stays in the channel as evidence.
+
+Both landings were compliant the moment the PR merged, because compliance is content-addressed and
+the committed blob *is* the staged file. That is the cheapest possible version of this rule, and it
+is only available if you resist editing the file on its way in.
+
+## The channel's second control: is anything staged here a *credential*?
+
+`channel_drift.sh` asks whether a staged file was ever reviewed. `dropchannel_scan.sh` (TOG-151) asks
+whether it is a secret. The channel is world-readable to every agent on the box, so a credential
+written here is disclosed instance-wide the moment it lands — and the sticky bit does not help,
+because 47 of 55 files are owned by uid 1000 and *every agent is uid 1000*.
+
+```bash
+./dropchannel_scan.sh scan --root /paperclip/operator-handoff
+./dropchannel_scan.sh selftest        # what CI runs
+```
+
+Exit `0` clean · `1` a hit · `2` refused. It never prints a matched value — findings carry a rule id,
+a length and a fingerprint prefix, because a scanner that echoes the secret it found turns a cron
+mail into a second copy of the leak. It never follows a symlink, and it fails **closed**: an
+unreadable or oversized file is a `FAIL`, never a silent skip.
+
+Measured 2026-08-25: **1 FAIL, 8 REVIEW** across 55 files. The `FAIL` is a false positive — the
+`secret-assignment` rule firing on `x-api-key : http=200`, a row in a probe *result* table — filed as
+its own issue rather than tuned inline, because loosening a credential rule to quiet one line is how
+these controls stop working. The channel-level `REVIEW` is not a false positive and cannot be fixed
+from inside the channel: the only integrity control for a file here is comparing its SHA-256 against
+a value published in a Paperclip thread before trusting it. That is exactly what TOG-178's manifest
+is for, and why it was worth protecting.
+
+As with `channel_drift.sh`, **CI green never means the channel is clean** — Actions has no view of
+`/paperclip`. Green means the detector works. Run the scan where the channel is mounted.
+
 ## The rule
 
 > **A runnable file in the handoff channel must be byte-identical to a blob committed on `main`.**

@@ -286,6 +286,27 @@ jobs:
       - name: handoff-channel unversioned-drop suite
         run: ./test_channel_drift.sh
 
+      # TOG-151/TOG-372. The channel's OTHER question. channel_drift.sh asks
+      # whether a staged file was ever reviewed; this asks whether anything
+      # staged there is a credential. The channel is the one path agents write
+      # and the operator reads, and every agent on the box shares uid 1000, so
+      # a secret landing there is disclosed instance-wide the moment it lands.
+      #
+      # The suite is the scanner's own `selftest`, which is why there is no
+      # separate test_*.sh: every rule gets a positive case, the false-positive
+      # corpus is the repo's own text, and two of the checks scan THIS FILE —
+      # once asserting it comes back clean, once with a planted secret asserting
+      # it comes back red. Offline: fixtures are mktemp, and DROPSCAN_PASSWD_FILE
+      # feeds the shared-uid detector a fixture instead of the runner's own
+      # /etc/passwd, so the verdict does not depend on where it runs.
+      #
+      # Same caveat as its sibling above, and it is the important one: green
+      # here means the DETECTOR works. It is NOT a scan of the channel — GitHub
+      # Actions has no view of /paperclip. Run `dropchannel_scan.sh scan` where
+      # the channel is mounted; on 2026-08-25 that run was not clean.
+      - name: handoff-channel credential-scanner selftest
+        run: ./dropchannel_scan.sh selftest
+
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
       # difference changes what the plugin is ALLOWED TO DO. The host adopts a
