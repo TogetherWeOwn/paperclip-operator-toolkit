@@ -207,6 +207,49 @@ Artifacts live in [`deploy/`](deploy/):
 - `Caddyfile.snippet` — TLS, bearer termination, source restriction
 - `org-request-mcp.service` — systemd unit, runs as the operator user
 - `tool-connection.example.json` — the registration payload, with the `forward` list
+- `acceptance_live.sh` — **runbook step 9, as a script.** Run it on the VPS
+  after step 8. See below.
+- `acceptance_live_selftest.sh` — proves that script is not vacuous. Runs in CI.
+
+### Step 9 — `acceptance_live.sh` (TOG-365)
+
+```sh
+sudo -v
+./mcp/deploy/acceptance_live.sh --url https://MCP_HOSTNAME/mcp
+```
+
+Three things make it a script rather than the four pasted `curl`s the runbook
+originally carried.
+
+**The refusal codes do not discriminate.** Step 9(1) sends a call with *no*
+identity headers and asserts `403` / `identity_header_missing`. The missing-agent,
+missing-company and missing-run arms all raise that one code, so the assertion
+holds even against a server that resolves a missing agent id to some principal —
+which is the exact bug the container suite found by mutation. Phase 3 of the
+self-test reproduces that: the old assertion stays green against the mutant.
+Section 3 of the new suite omits **exactly one** header and asserts on the
+message.
+
+**Every negative needs a positive control.** With `requireLiveRun` ON, a control
+call needs a real `(agent, run, company)` triple that `heartbeat_runs` will
+corroborate, so section 1 queries the database for a RUNNING one instead of
+inventing it. Section 2 then proves that call is *admitted* — note "admitted",
+not "created": a queue-level authorization refusal arrives as HTTP 200 and means
+the transport let the call through, which is what makes sections 3 and 6
+attributable. If the baseline is red the suite stops rather than reporting
+refusals that would have happened anyway.
+
+**Ordering.** The `requester`-argument refusal lives in `buildQueueArgs`, which
+runs *after* identity and *after* corroboration. Sent without valid headers it
+would be refused earlier and the "appends nothing" line count would hold for a
+reason unrelated to argument handling — so section 4 carries the full live
+identity, and checks the spoofed id appears nowhere in the queue as well as
+checking the count.
+
+Sections 8 (Caddy's `remote_ip` restriction, needs a different host) and 9 (the
+gateway stamping the header, needs an agent with a real session) are reported as
+`SKIP` and never as `PASS`; the summary names them. Any *other* skip exits
+non-zero — an assertion that could not run must not read as one that passed.
 
 ---
 

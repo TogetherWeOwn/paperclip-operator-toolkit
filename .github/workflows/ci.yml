@@ -101,7 +101,11 @@ jobs:
           # lib/*.sh is included explicitly. It is sourced by five tools, so a
           # parse error there breaks all of them, and a bare `*.sh` glob does
           # not descend into it.
-          for f in *.sh lib/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # mcp/deploy/*.sh is included for the same reason as lib/: a bare
+          # `*.sh` glob does not descend, and acceptance_live.sh is a script the
+          # OPERATOR runs on the VPS — a parse error there surfaces in front of
+          # a human doing an install, which is the worst place to find one.
+          for f in *.sh lib/*.sh mcp/deploy/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
@@ -245,6 +249,19 @@ jobs:
       # needs no credential, no network and no quota.
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
+
+      # TOG-365. acceptance_live.sh can only ever run on the VPS, so the
+      # operator would otherwise be the first person to execute it — against a
+      # fresh install, with no way to tell "these assertions passed" from "these
+      # assertions never looked at anything". This runs the real transport on a
+      # real socket with requireLiveRun ON (podman and sudo substituted through
+      # the seams the suite already exposes), proves the suite green, then
+      # removes each of its four controls in turn and requires the OWNING
+      # section to go red. Phase 3 additionally reproduces the vacuous form of
+      # the assertion this replaces, so the rationale in the file header stays
+      # a measurement rather than a claim.
+      - name: live-path acceptance self-test (mutation-gated)
+        run: ./mcp/deploy/acceptance_live_selftest.sh
 
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
