@@ -339,6 +339,32 @@ jobs:
       - name: interaction routing suite
         run: ./test_interaction_route.sh
 
+      # TOG-419. The quota brake, after it took the company off the air: a
+      # sweep set heartbeat.wakeOnDemand=false on 44 of 47 agents nine seconds
+      # after the owner created a task, and the owner's own Chief of Staff was
+      # then refused 68 times in 17 minutes while every wake returned HTTP 202.
+      #
+      # The owner's requirement — "the brake must never disable an agent" — is
+      # one edit away from being untrue at any time, and the edit that breaks
+      # it looks reasonable, because setting a boolean is the shortest path to
+      # a hard stop. §1 of this suite tests the guard DIRECTLY with hand-built
+      # bodies rather than only through the planner, since a guard exercised
+      # solely via its caller is only ever fed inputs the caller already gets
+      # right.
+      #
+      # §6 is the one to read if this ever goes red confusingly. Its four
+      # "could not measure" gates all exit 5, so an exit-code-only assertion is
+      # satisfied by whichever gate fires first — measured: neutering the
+      # unreadable-roster gate left the whole section GREEN because the
+      # empty-roster gate downstream caught the same input. Each assertion
+      # therefore pins its own cause by message. Do not "simplify" those back
+      # to a bare exit-code check.
+      #
+      # Offline: pace signal, roster, refusal counts and the write path all
+      # arrive through *_CMD seams, so there is no database and no credential.
+      - name: quota brake suite
+        run: ./test_quota_brake.sh
+
       # TOG-387. lib/reqrecord.sh holds the decision record's invariants, and
       # org_request_queue.sh still holds its own copy of eight of them because
       # TOG-388 and TOG-390 are open against that file. This gate is the price
