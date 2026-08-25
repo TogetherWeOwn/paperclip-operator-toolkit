@@ -73,7 +73,7 @@ operator-run.
 | `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh`, `test_credential_chain_pin_gate.sh` |
 | `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
-| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh` |
+| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. `api` takes the JSON request body as argument 3; extra `curl` arguments go after `--`. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh`, `test_gh_token_api_body.sh` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
@@ -201,7 +201,14 @@ These are load-bearing and were each learned by breaking something:
   inherited environment, never on `argv` — `/proc/*/cmdline` is world-readable and every company on
   this box shares the host. A bearer token that must reach `curl` goes into a 0600 `curl --config`
   file, never `-H`. `gh_token.sh` violated this until TOG-200; `test_gh_token_argv.sh` now asserts it
-  from `/proc` rather than trusting the source to keep reading correctly.
+  from `/proc` rather than trusting the source to keep reading correctly. Request **bodies** go the
+  same way, for the same reason — they carry review text, secret values and head SHAs (TOG-305).
+- **A guard the caller asked for must be applied, or the call must fail.** `gh_token.sh api` dropped
+  the request body on the floor and sent the write anyway, so a `sha` head guard silently did not
+  exist and a requested squash silently became a merge commit. This is the same class as a
+  skipped auth check, and it is why the `api` grammar now REFUSES an ambiguous argument instead of
+  guessing which slot it belongs to. `test_gh_token_api_body.sh` asserts the body reaches the
+  request, byte for byte, and that the exit status is the request's (TOG-305).
 - **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
   version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
 - **A catch-all arm refuses, and refusing means a non-zero exit.** `gh_token.sh` printed usage on

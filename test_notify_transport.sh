@@ -71,7 +71,10 @@ payload() {
 
 # ===========================================================================
 hdr "1. The credential never reaches argv"
-# gh_token.sh:75-131 established this for the whole repo under TOG-200:
+# gh_token.sh's "credentials never reach argv" note established this for the
+# whole repo under TOG-200. Cited by NAME, not by line: the numbers it used to
+# carry had already drifted onto the wrong block, and a stale citation still
+# reads like a citation.
 # /proc/<pid>/cmdline is world-readable and this box is shared between
 # companies. The notifier shipped with -H "Authorization: Bearer $KEY", which
 # is the exact pattern that note forbids.

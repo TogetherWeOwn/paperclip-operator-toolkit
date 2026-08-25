@@ -291,13 +291,29 @@ no_creds_in_argv "api"
 credential_did_arrive "api" token
 # The `api` subcommand forwards the caller's extra curl arguments. Those are
 # not credentials and must keep working, or the fix breaks real usage.
-run_tool api GET /orgs/stub-org/repos --max-time 7
+#
+# They moved behind a literal `--` in TOG-305: argument 3 is now the request
+# body, because it used to be read as an extra curl argument and so the body
+# never reached the request. See test_gh_token_api_body.sh for that contract;
+# what this suite still owns is only that forwarding them leaks no credential.
+run_tool api GET /orgs/stub-org/repos -- --max-time 7
 if grep -q '^--max-time$' "$CMDLOG" && grep -q '^7$' "$CMDLOG"; then
   ok "caller-supplied curl arguments still reach curl"
 else
   bad "api dropped the caller's extra curl arguments"
 fi
 no_creds_in_argv "api with extra args"
+
+# A request body is not a credential, but it can carry one — a secret value
+# being written, a token being rotated. TOG-200's rule is about argv, so the
+# body belongs under it too, and this is the suite that reads /proc.
+run_tool api PUT /repos/stub-org/repo/pulls/1/merge '{"sha":"deadbeefdeadbeefdeadbeefdeadbeef0000ffff"}'
+if grep -q 'deadbeefdeadbeef' "$CMDLOG"; then
+  bad "api: the request body reached curl's argv"
+else
+  ok "api: the request body did not reach curl's argv"
+fi
+no_creds_in_argv "api with a body"
 
 hdr "5. 'meta'"
 run_tool meta

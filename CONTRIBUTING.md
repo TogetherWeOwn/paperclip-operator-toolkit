@@ -47,6 +47,7 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 ./test_gh_app_token.sh              # credential-minter regression suite
 ./test_gh_token_argv.sh             # gh_token.sh: no credential on argv
 ./test_gh_token_dispatch.sh         # gh_token.sh: unknown subcommands refuse, non-zero
+./test_gh_token_api_body.sh         # gh_token.sh: `api` sends the body AS the body, not on argv
 ./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
 ./test_responsible_leader.sh        # who may approve a provisioning request
 ./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql

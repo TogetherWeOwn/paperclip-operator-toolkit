@@ -10,6 +10,10 @@ name: CI
 #     test_gh_app_token.sh              the credential-minter regression suite
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     test_gh_token_dispatch.sh         gh_token.sh: refuses unknown subcommands
+#     test_gh_token_api_body.sh         gh_token.sh: the request body reaches the
+#                                       REQUEST rather than curl's argv, so a
+#                                       `sha` head guard is actually sent and a
+#                                       guarded write is guarded — TOG-305
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
@@ -878,6 +882,143 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
+
+      # TOG-305. The third property of gh_token.sh's `api` path, and the one
+      # that was wrong: the request BODY must reach the request. It did not.
+      # curl_authed's body slot was hardcoded empty and the caller's JSON was
+      # passed positionally instead, so curl parsed it as a URL and the write
+      # went out with no body — dropping a `sha` head guard from a real merge
+      # and turning a requested squash into a merge commit, silently, while
+      # reporting failure for a write that had actually succeeded.
+      #
+      # Same seams as the two suites above: a stub curl on PATH, a fabricated
+      # credential environment, `env -i`. No network, no credential.
+      - name: gh_token.sh api request-body suite
+        run: ./test_gh_token_api_body.sh
+
+      # Its mutation guard. Two mutations, because the fix has two halves that
+      # fail independently and a single mutation would leave one of them
+      # ungated:
+      #
+      #   body-slot-collision   restores the original call — body slot empty,
+      #                         JSON passed positionally. Surgical: the
+      #                         argument PARSING is left alone, so sections
+      #                         5/7/8/10 stay green and only the assertions
+      #                         about the body and the exit status can go red.
+      #                         That is the point — it proves those assertions
+      #                         carry this suite, not the parsing around them.
+      #   unchecked-mint        restores `tok="$(mint_token)"` with no status
+      #                         check. mint_token runs in a command
+      #                         substitution, so its `exit 1` ends only the
+      #                         subshell and the request went out with an empty
+      #                         bearer. Both lines of the guard are removed:
+      #                         leaving the `-n "$tok"` check in place would let
+      #                         a NEIGHBOURING gate satisfy the test, which is
+      #                         how assertions in this repo have gone green for
+      #                         the wrong reason before.
+      #
+      # Each mutation asserts red on the NAMED assertions it should break, not
+      # merely on a non-zero exit. "The suite failed" is satisfied by a suite
+      # that failed to start.
+      - name: Prove the api-body suite still detects a dropped request body
+        run: |
+          set -uo pipefail
+          mut="$(mktemp -d)"
+          cp gh_token.sh test_gh_token_api_body.sh "$mut/"
+          chmod +x "$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh"
+
+          # TOG-253's rule: the UNMUTATED copy must pass in this same staging
+          # directory FIRST, or "the mutated suite failed" is not attributable
+          # to the mutation.
+          if ! GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh" > "$mut/base.txt" 2>&1; then
+            echo "::error::the UNMUTATED copy of test_gh_token_api_body.sh already fails in the staging dir — this gate proves nothing"
+            tail -30 "$mut/base.txt"
+            exit 1
+          fi
+
+          plain() { sed 's/\x1B\[[0-9;]*m//g' "$1"; }
+
+          # A mutant must go red on the assertion that NAMES the defect. A
+          # mutant that merely exits non-zero could be failing at startup.
+          require_red() {
+            local out="$1"; shift
+            local a
+            for a in "$@"; do
+              if plain "$out" | grep -qF "FAIL  $a"; then
+                echo "    red on: $a"
+              else
+                echo "::error::mutant did not go red on '$a' — that assertion is not carrying this gate"
+                plain "$out" | tail -30
+                exit 1
+              fi
+            done
+          }
+
+          run_mutant() {
+            local label="$1" out="$mut/$1.txt"
+            bash -n "$mut/gh_token.sh"
+            if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh" > "$out" 2>&1; then
+              echo "::error::the api-body suite PASSED against mutation '$label'"
+              plain "$out"
+              exit 1
+            fi
+            echo "  mutation '$label' correctly rejected:"
+          }
+
+          # --- mutation 1: body-slot-collision ---------------------------------
+          cp "$mut/gh_token.sh" "$mut/gh_token.orig"
+          before='    curl_authed "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          after='    curl_authed "$tok" "$method" "https://api.github.com${path}" "" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+            echo "::error::could not find the curl_authed call in the api arm to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          # awk, not sed: the replacement is full of characters sed would treat
+          # as syntax, and a mutation that silently does nothing is the one
+          # failure mode this step exists to avoid.
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          run_mutant body-slot-collision
+          require_red "$mut/body-slot-collision.txt" \
+            "the body did not reach the request as given" \
+            "the request body reached curl's argv" \
+            "the 'sha' head guard never reached GitHub" \
+            "'merge_method' was dropped" \
+            "a successful write reported failure"
+          # The surgical half: the parsing sections must still pass, or this
+          # mutation is proving something broader than it claims.
+          for still_green in \
+            "caller-supplied curl arguments still reach curl" \
+            "a bare curl flag in the body slot is a usage error (exit 2)" \
+            "a non-JSON body is a usage error (exit 2)"; do
+            if ! plain "$mut/body-slot-collision.txt" | grep -qF "PASS  $still_green"; then
+              echo "::error::mutation 'body-slot-collision' also broke '$still_green' — it is not surgical, so it does not isolate the body assertions"
+              exit 1
+            fi
+          done
+
+          # --- mutation 2: unchecked-mint --------------------------------------
+          cp "$mut/gh_token.orig" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          b1='    tok="$(mint_token)" || exit $?'
+          b2='    [[ -n "$tok" ]] || { echo "ERROR: minted an empty token; refusing to send the request" >&2; exit 1; }'
+          a1='    tok="$(mint_token)"'
+          for t in "$b1" "$b2"; do
+            if ! grep -qxF "$t" "$mut/gh_token.sh"; then
+              echo "::error::could not find the mint guard line to mutate; this guard is now blind, fix it"
+              echo "  wanted: $t"
+              exit 2
+            fi
+          done
+          awk -v b1="$b1" -v b2="$b2" -v a1="$a1" \
+            '$0 == b1 { print a1; next } $0 == b2 { next } { print }' \
+            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          run_mutant unchecked-mint
+          require_red "$mut/unchecked-mint.txt" \
+            "a failed mint exited 0" \
+            "the request went out anyway"
 
       # TOG-201. The other half of gh_token.sh's contract: an unrecognised
       # subcommand printed usage on STDOUT and exited 0, so
