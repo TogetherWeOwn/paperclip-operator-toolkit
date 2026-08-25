@@ -216,7 +216,7 @@ refuses_because "the pending request is refused — stale requester, authority n
 
 hdr "9. Audit trail completeness"
 for ev in request.refused review.refused template.disabled template.enabled create.applied; do
-  n="$(jq -r --arg e "$ev" 'select(.event==$e)|.event' "$HERE/provisioner-grant-log.jsonl" 2>/dev/null | wc -l)"
+  n="$(jq -r --arg e "$ev" 'select(.event==$e)|.event' "${GRANT_LOG:-$HERE/provisioner-grant-log.jsonl}" 2>/dev/null | wc -l)"
   [[ "$n" -gt 0 ]] && ok "grant log records '$ev' ($n)" || bad "grant log missing '$ev'"
 done
 

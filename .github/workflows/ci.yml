@@ -103,14 +103,14 @@ name: CI
 #     gh-event-capture                  see the `capture-suite` job below
 #     mcp/                              see the `mcp-suite` job below
 #
-#   CANNOT RUN HERE:
+#   RUN IN THE `privilege-suites` JOB BELOW:
 #     test_privilege_ceilings.sh
 #     test_request_queue.sh
-#   Both CREATE AND DELETE REAL AGENTS in a company as their method, and giving
-#   a GitHub runner credentials to the production company database would be a
-#   far worse trade than the coverage is worth. They stay operator-run, on the
-#   VPS, before a release. `bash -n` below at least proves they still parse,
-#   which catches the most common way a shell suite rots.
+#   They create and delete agents in a throwaway Postgres service through the
+#   dumb recording CLI under test/fixtures/orgdb. No production credential is
+#   present. This proves the provisioner's POLICY; it does not prove the real
+#   Paperclip API contract. The operator's VPS pre-release run therefore stays
+#   mandatory, but is now specifically the create/update/terminate contract run.
 #
 #   AND, since TOG-402, test_suite_preconditions.sh proves rather more than
 #   that: it drives both of them through a stub backend and checks they refuse
@@ -184,12 +184,15 @@ name: CI
 #   same shape as tool_drift.sh and channel_drift.sh: fingerprint on the VPS,
 #   compare in a clone. Do not commit the dump without it.
 #
-#   Until the stub and the fixture exist, these two stay excluded. A suite that
-#   is present and failing for an environmental reason gets muted, and a muted
-#   suite is indistinguishable from a deleted one.
+#   The stub and fixture now exist. test_orgdb_fixture.sh tests their offline
+#   contract, and `privilege-suites` runs both suites against Postgres. The
+#   production comparison still cannot run here: schema_drift.sh fingerprints
+#   the VPS database and compares that fingerprint against a clone loaded from
+#   this fixture. Green CI proves the detector and fixture work, never that the
+#   deployed schema has not drifted.
 #
-#   NOT A SUITE: org_access_review.sh is read-only and needs no API server, so
-#   it clears blocker 3 — but it still needs 1 and 2, so it is excluded too.
+#   NOT YET RUN HERE: org_access_review.sh. It is read-only and the six required
+#   tables are now present, but its wider report semantics are outside TOG-480.
 #
 #   READ THIS BEFORE TRUSTING THE DRIFT SUITE'S GREEN (TOG-212). CI runs
 #   test_tool_drift.sh, which proves the DETECTOR works. It does NOT and cannot
@@ -213,6 +216,62 @@ permissions:
   contents: read
 
 jobs:
+  privilege-suites:
+    name: Privilege ceiling suites
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: org_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d org_fixture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: org_fixture
+      PAPERCLIP_SQL_BACKEND: psql
+      COMPANY_ID: 00000000-0000-4000-8000-000000000480
+      PAPERCLIP_API_URL: http://recording-stub.invalid
+      PAPERCLIP_CLI: ${{ github.workspace }}/test/fixtures/orgdb/paperclipai
+      PAPERCLIP_STUB_LOG: ${{ runner.temp }}/paperclip-stub.jsonl
+      GRANT_LOG: ${{ github.workspace }}/provisioner-grant-log.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Postgres client and jq
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client jq
+      - name: Fixture and recording-stub contract
+        run: ./test_orgdb_fixture.sh
+      - name: Run privilege ceiling suite
+        run: |
+          ./test/fixtures/orgdb/reset.sh
+          rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+          ./test_privilege_ceilings.sh
+      - name: Run request queue suite
+        run: |
+          ./test/fixtures/orgdb/reset.sh
+          rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+          ./test_request_queue.sh
+      - name: Schema fixture fingerprint is stable
+        run: |
+          ./schema_drift.sh fingerprint > expected.fp
+          ./test/fixtures/orgdb/reset.sh
+          ./schema_drift.sh compare expected.fp
+      - name: Privilege invariants are named and mutation-gated
+        run: ./verification/tog-480-mutation-gate.sh
+      # CI verifies policy through the dumb stub. It deliberately cannot prove
+      # what the real API now does with reportsTo, permissions, or termination;
+      # the operator's VPS pre-release pass remains the API-contract coverage.
+
   offline-suites:
     name: Offline suites
     runs-on: ubuntu-latest
