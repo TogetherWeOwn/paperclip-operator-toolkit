@@ -163,7 +163,8 @@ EOF
 run_chain() { "$AUDIT" "${AUDIT_ARGS[@]}" --home "$HOMEDIR" --system "$TMP/no-system" --pins "$1" 2>&1; }
 
 PINFILE="$TMP/pins.txt"
-sha256sum "$TMP/helper.js" | awk '{print $1"  fixture helper"}' > "$PINFILE"
+helper_sha() { sha256sum "$TMP/helper.js" | cut -d' ' -f1; }
+printf 'expected  %s  fixture helper\n' "$(helper_sha)" > "$PINFILE"
 
 out="$(run_chain "$PINFILE")"
 if grep -qF "$TMP/helper.js" <<<"$out" && grep -q 'helper program' <<<"$out"; then
@@ -188,27 +189,133 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-hdr "6. Hash pinning"
+hdr "6. Hash pinning -- 'is this the EXPECTED build', not 'have we seen it'"
+# The distinction these assertions defend, and why it is not pedantry: the pin
+# file's first form was a flat known-good list, and the incident it was written
+# for -- the 2026-08-24 03:32 helper swap -- installed 49cfcd95, a real build
+# this repo had shipped and reviewed.  A flat list scores that OK.  Downgrade IS
+# the attack: revert the helper to a build predating a fix and the fix is gone
+# with every hash still checking out.
 
-if grep -q 'pin: matches known-good' <<<"$out"; then
-  ok "a pinned helper reports as matching"
+# pin_row <pins-file> -- the pin verdict line, ANSI stripped, verdict first.
+pin_row() { run_chain "$1" | sed 's/\x1b\[[0-9;]*m//g' | grep -F 'pin:' | head -1; }
+
+row_pin="$(pin_row "$PINFILE")"
+if grep -q 'OK' <<<"$row_pin" && grep -q 'matches the expected build' <<<"$row_pin"; then
+  ok "the expected build reports OK"
 else
-  bad "pinned helper did not match" "$out"
+  bad "expected build did not report OK" "$row_pin"
+fi
+
+# A build this repo shipped once, running where a different one should be.  It
+# must be a finding, and it must be distinguishable from a file nobody has ever
+# reviewed, because the remedy differs: a rollback/lagging deploy versus an
+# unknown binary in the credential path.
+{ printf 'expected  %s  a build that is NOT live\n' "$(printf 'not-the-live-one' | sha256sum | cut -d' ' -f1)"
+  printf 'reviewed  %s  the live fixture, shipped once, now superseded\n' "$(helper_sha)"
+} > "$TMP/pins-downgrade.txt"
+row_stale="$(pin_row "$TMP/pins-downgrade.txt")"
+if grep -q 'HOLE' <<<"$row_stale" && grep -q 'pin: STALE' <<<"$row_stale"; then
+  ok "a downgrade to a previously reviewed build is a HOLE, not OK"
+else
+  bad "a downgrade to a previously reviewed build is a HOLE, not OK" "$row_stale"
 fi
 
 printf 'console.log("tampered");\n' >> "$TMP/helper.js"
-out_drift="$(run_chain "$PINFILE")"
-if grep -q 'pin: DRIFT' <<<"$out_drift"; then
+row_drift="$(pin_row "$PINFILE")"
+if grep -q 'HOLE' <<<"$row_drift" && grep -q 'pin: DRIFT' <<<"$row_drift"; then
   ok "editing the helper is reported as DRIFT"
 else
-  bad "helper tampering was not detected" "$out_drift"
+  bad "helper tampering was not detected" "$row_drift"
 fi
+# ...and DRIFT and STALE must not be the same word, or the report cannot tell an
+# unreviewed file from a superseded one.
+if grep -q 'pin: STALE' <<<"$row_drift"; then
+  bad "an unreviewed build was reported as STALE" "$row_drift"
+else
+  ok "an unreviewed build is DRIFT, not STALE"
+fi
+printf 'expected  %s  fixture helper\n' "$(helper_sha)" > "$PINFILE"   # re-pin the tampered fixture
 
 out_nopins="$(run_chain "$TMP/pins-that-do-not-exist.txt")"
 if grep -q 'pin: no pin file' <<<"$out_nopins"; then
   ok "a missing pin file is indeterminate, not a silent pass"
 else
   bad "missing pin file did not register" "$out_nopins"
+fi
+
+# Every way of not being able to answer must land on INDETERMINATE.  A pin file
+# the audit cannot make sense of has told it nothing about the live helper, and
+# "nothing" must not be spelled the same way as "fine" -- these are the shapes a
+# half-finished edit to the real pin file leaves behind.
+pins_indet() {
+  local desc="$1" want="$2" file="$3" r
+  r="$(pin_row "$file")"
+  if grep -q 'INDET' <<<"$r" && grep -qF "$want" <<<"$r"; then ok "$desc"
+  else bad "$desc" "$r"; fi
+}
+
+printf 'reviewed  %s  no expected line anywhere\n' "$(helper_sha)" > "$TMP/pins-no-expected.txt"
+pins_indet "a pin file with no expected build is INDETERMINATE, not a pass" \
+  "no expected build declared" "$TMP/pins-no-expected.txt"
+
+{ printf 'expected  %s  one\n' "$(helper_sha)"
+  printf 'expected  %s  two\n' "$(printf 'other' | sha256sum | cut -d' ' -f1)"
+} > "$TMP/pins-two-expected.txt"
+pins_indet "two expected builds is ambiguous, and refused rather than picked" \
+  "pin file unusable" "$TMP/pins-two-expected.txt"
+
+printf 'blessed  %s  unknown state word\n' "$(helper_sha)" > "$TMP/pins-bad-state.txt"
+pins_indet "an unknown state word is refused, not ignored" \
+  "pin file unusable" "$TMP/pins-bad-state.txt"
+
+# The old flat format, exactly as it was before this change.  It must not be
+# silently accepted: read as <state><sha>, its first field is a hash and its
+# second is prose, so accepting it leniently would mean a file that pins
+# nothing reads as a file that pins everything.
+printf '%s  bare hash, pre-2026-08-25 format\n' "$(helper_sha)" > "$TMP/pins-legacy.txt"
+pins_indet "the superseded flat format is refused, not read as expected" \
+  "pin file unusable" "$TMP/pins-legacy.txt"
+
+# ---------------------------------------------------------------------------
+hdr "6b. The pin file shipped in this repo must stay in step with the helper"
+# This is the assertion that stops the control dying of false positives.
+# TOG-238 changed gh-app-token.js and merged without repinning; when that build
+# was deployed the audit reported DRIFT against the reviewed tip of main --
+# a red verdict on the correct state, which is how a detector gets muted.
+# tool_drift.sh's header names the general rule: a committed hash list "would be
+# wrong the first time anyone landed a PR, and a drift detector that cries wolf
+# gets muted."  CI is what keeps this list from being that: a PR that changes
+# the helper without moving the `expected` line fails here, in the PR that
+# caused it, not weeks later on someone else's console.
+REAL_PINS="$HERE/credential_chain_pins.txt"
+REAL_HELPER="$HERE/gh-app-token.js"
+if [[ -r "$REAL_PINS" && -r "$REAL_HELPER" ]]; then
+  exp_line="$(grep -c '^expected  ' "$REAL_PINS")"
+  if [[ "$exp_line" == "1" ]]; then
+    ok "credential_chain_pins.txt declares exactly one expected build"
+  else
+    bad "credential_chain_pins.txt declares exactly one expected build" \
+      "declares $exp_line"
+  fi
+  exp_sha="$(awk '$1=="expected"{print $2}' "$REAL_PINS" | head -1)"
+  repo_sha="$(sha256sum "$REAL_HELPER" | cut -d' ' -f1)"
+  if [[ "$exp_sha" == "$repo_sha" ]]; then
+    ok "the expected pin is the sha256 of gh-app-token.js in this checkout"
+  else
+    bad "the expected pin is the sha256 of gh-app-token.js in this checkout" \
+      "gh-app-token.js changed and the pin did not -- repin it in THIS PR:
+  expected pin: ${exp_sha:-<none>}
+  repo helper:  $repo_sha"
+  fi
+  malformed="$(awk '!/^#/ && NF { if ($1 != "expected" && $1 != "reviewed") print NR": "$1; else if ($2 !~ /^[0-9a-f]{64}$/) print NR": "$2 }' "$REAL_PINS")"
+  if [[ -z "$malformed" ]]; then
+    ok "every line of credential_chain_pins.txt parses as <state> <sha256>"
+  else
+    bad "every line of credential_chain_pins.txt parses as <state> <sha256>" "$malformed"
+  fi
+else
+  bad "credential_chain_pins.txt or gh-app-token.js is missing from the checkout"
 fi
 
 # ---------------------------------------------------------------------------

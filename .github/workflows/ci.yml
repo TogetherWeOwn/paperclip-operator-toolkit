@@ -181,6 +181,22 @@ jobs:
       - name: credential-chain audit regression suite
         run: ./test_credential_chain_audit.sh
 
+      # The pin half of that audit is a DETECTOR, not a boundary: the pin file
+      # sits next to the helper, in reach of the same uid, so anyone who can
+      # swap the helper can rewrite the pin. All it buys is that a swap has to
+      # be loud — which makes "can this still go loud" the only property worth
+      # asserting, and not one that reading the code establishes.
+      #
+      # This step also carries the assertion that keeps the pin file honest:
+      # the sha256 of gh-app-token.js in the checkout must be the `expected`
+      # line. TOG-238 changed the helper and merged without repinning, so once
+      # that build was deployed the audit reported DRIFT against the reviewed
+      # tip of main — a red verdict on the correct state, which is how a
+      # detector gets muted instead of fixed. Now that goes red in the PR that
+      # changed the helper.
+      - name: credential-chain pin gates (mutation-gated)
+        run: ./test_credential_chain_pin_gate.sh
+
       # The authorization change from TOG-194: who may approve a provisioning
       # request. Runs here because it fabricates its whole world — a TSV org
       # fixture through ORG_SNAPSHOT, a stub provisioner through PROV — so it

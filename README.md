@@ -49,7 +49,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
 | `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
-| `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh` |
+| `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh`, `test_credential_chain_pin_gate.sh` |
 | `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh` |
@@ -147,6 +147,18 @@ in this container. No mode bit substitutes for that: there is no directory here 
 `DRIFT` when one stops matching its source. That is detection, not prevention — an agent that can
 edit the mirror can edit the manifest too. Its value is that a swap has to be loud, which is
 precisely what was missing when the live credential helper was silently replaced on 2026-08-24.
+
+`credential_chain_pins.txt` is the same kind of control for the helper itself, and it asks one
+question: **is the live build the one that is supposed to be running** — not "have we reviewed this
+build at some point". The difference is the whole control. The 03:32 swap installed `49cfcd95`, a
+build this repo had shipped and reviewed, so a flat known-good list scores that incident clean;
+downgrade *is* the attack. One `expected` line names the build that should be live, `reviewed` lines
+name superseded ones so the report can say which wrong build is running (`STALE`) rather than
+confusing it with a file nobody has ever seen (`DRIFT`). CI asserts the `expected` line is the
+sha256 of `gh-app-token.js` in the checkout, so changing the helper without repinning fails in the
+PR that changed it — the alternative is a detector that cries wolf on the correct state and gets
+muted. `test_credential_chain_pin_gate.sh` re-introduces each of those defects into throwaway copies
+and requires the named assertions to go red.
 
 ## Non-negotiables
 
