@@ -233,6 +233,15 @@ jobs:
       - name: credential-chain audit regression suite
         run: ./test_credential_chain_audit.sh
 
+      # TOG-392. secret_exposure_audit.sh enumerates the platform credentials a
+      # run holds (master key, full-DB DATABASE_URL, the two signing secrets).
+      # Offline by construction: every case fabricates its own environment with
+      # `env -i` plus fakes and a throwaway key file, so no real secret is read;
+      # one case feeds sentinels and asserts they never reach stdout, which is
+      # the property that keeps an exposure audit from becoming a disclosure.
+      - name: secret-exposure audit regression suite
+        run: ./test_secret_exposure_audit.sh
+
       # The pin half of that audit is a DETECTOR, not a boundary: the pin file
       # sits next to the helper, in reach of the same uid, so anyone who can
       # swap the helper can rewrite the pin. All it buys is that a swap has to
