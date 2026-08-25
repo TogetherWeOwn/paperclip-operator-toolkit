@@ -21,6 +21,9 @@ name: CI
 #                                       podman/psql binaries — see TOG-202
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
 #                                       is the copy that is REVIEWED — TOG-212
+#     test_channel_drift.sh             channel_drift.sh: whether a runnable file
+#                                       staged for the operator was ever
+#                                       committed at all — TOG-356
 #     test_agent_endpoint_preflight.sh  agent_endpoint_preflight.sh: whether the
 #                                       model endpoint the agents are about to be
 #                                       pointed at can serve them — TOG-358
@@ -257,6 +260,21 @@ jobs:
       # See the header for what this suite's green does NOT mean.
       - name: running-vs-reviewed drift suite
         run: ./test_tool_drift.sh
+
+      # TOG-356. The OTHER direction. tool_drift.sh asks whether the operator's
+      # copy drifted ahead of the repo; measured 2026-08-24 it had not. This
+      # asks whether an agent staged a RUNNABLE file for the operator that
+      # exists in no commit — measured 2026-08-25, 11 of the 14 runnable
+      # artifacts in /paperclip/operator-handoff/ did not. Same fabricated-world
+      # trick: a throwaway git repo and a fake channel in mktemp, so no
+      # /paperclip mount, no VPS, no network, no credential.
+      #
+      # Read the header of channel_drift.sh for what this green does NOT mean.
+      # CI cannot run `channel_drift.sh check` — GitHub Actions has no view of
+      # /paperclip. Green here means the DETECTOR works, never that the channel
+      # is clean. The real check runs where the channel is mounted.
+      - name: handoff-channel unversioned-drop suite
+        run: ./test_channel_drift.sh
 
       # TOG-358. Whether the model endpoint the agents are about to be pointed
       # at can actually serve them. The suite stands up a stub Anthropic front
@@ -950,6 +968,144 @@ jobs:
             exit 1
           fi
           grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the source-gate mutant"
+
+      # TOG-356 mutation guard, with a BASELINE and NAMED expected failures.
+      #
+      # Three rungs, because the first two have both been passed vacuously in
+      # this repo before:
+      #
+      #   1. BASELINE — the unmutated copy must pass in the same staging dir.
+      #      Without it, a staging dir that breaks the suite for an unrelated
+      #      reason (a lost +x, a missing sibling) produces the same red as a
+      #      working detector, and "the mutant failed" is unattributable.
+      #   2. THE NAMED TEST MUST EXIST — each expected-red assertion has to be
+      #      present as a PASS in the baseline output before it is allowed to
+      #      count as a FAIL after. Rung 1 alone is satisfied by DELETING the
+      #      assertion: the baseline still passes, the mutant still fails (for
+      #      some other reason), and the gate reports success while the thing
+      #      it guards is gone.
+      #   3. THE NAMED TEST MUST GO RED — not merely "the suite failed". A
+      #      mutation that breaks the tool in some unrelated way also fails the
+      #      suite, and would otherwise be indistinguishable from the detector
+      #      catching the regression it was written for.
+      #
+      # Every mutation below is something a reasonable person would actually
+      # write. None is a strawman.
+      - name: Prove the channel suite still detects each way to blind it
+        run: |
+          set -uo pipefail
+          rc=0
+
+          stage() { cp channel_drift.sh test_channel_drift.sh "$1/"; chmod +x "$1"/*.sh; }
+
+          # The suite colours its PASS/FAIL markers, so the raw line is
+          # "  <ESC>[32mPASS<ESC>[0m  <name>" and a literal grep for "PASS  x"
+          # never matches. Strip the escapes before any assertion reads them —
+          # NOT by loosening the greps, which would let "PASS" anywhere on the
+          # line satisfy a check meant to be about one named assertion.
+          plain() { sed -e 's/\x1b\[[0-9;]*m//g' "$1"; }
+
+          # chan_mutation_check <label> <before-line> <after-line> <expected-red-test>...
+          chan_mutation_check() {
+            local label="$1" before="$2" after="$3"; shift 3
+            local mut; mut="$(mktemp -d)"; stage "$mut"
+
+            # Rung 1: baseline.
+            if ! (cd "$mut" && ./test_channel_drift.sh > base.txt 2>&1); then
+              echo "::error::$label: the UNMUTATED suite already fails in the staging dir; this gate proves nothing"
+              cat "$mut/base.txt"; rm -rf "$mut"; return 1
+            fi
+            # ...and a baseline with no assertions in it is not a baseline.
+            local npass; npass="$(plain "$mut/base.txt" | grep -c 'PASS' || true)"
+            if [ "${npass:-0}" -lt 10 ]; then
+              echo "::error::$label: the baseline reports only ${npass:-0} passing assertions; the suite has been gutted"
+              cat "$mut/base.txt"; rm -rf "$mut"; return 1
+            fi
+
+            # Rung 2: the assertions this mutation is supposed to trip must be
+            # THERE, and green, before the mutation is applied.
+            local t
+            for t in "$@"; do
+              if ! plain "$mut/base.txt" | grep -qF "PASS  $t"; then
+                echo "::error::$label: the baseline has no PASSING assertion named '$t' — it was renamed or deleted, and this guard is now blind"
+                cat "$mut/base.txt"; rm -rf "$mut"; return 1
+              fi
+            done
+
+            # awk on an exact line, not sed: these anchors are full of
+            # characters sed reads as syntax, and a mutation that silently does
+            # nothing is the single failure mode this step exists to avoid.
+            if ! grep -qxF "$before" "$mut/channel_drift.sh"; then
+              echo "::error::$label: could not find the anchor line in channel_drift.sh; the code moved and this guard is now blind, fix it"
+              rm -rf "$mut"; return 1
+            fi
+            awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+              "$mut/channel_drift.sh" > "$mut/m" && mv "$mut/m" "$mut/channel_drift.sh"
+            chmod +x "$mut/channel_drift.sh"
+            if ! bash -n "$mut/channel_drift.sh"; then
+              echo "::error::$label: the mutant does not parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s channel_drift.sh "$mut/channel_drift.sh"; then
+              echo "::error::$label: the mutation changed nothing"
+              rm -rf "$mut"; return 1
+            fi
+
+            # Rung 3: the suite must fail, AND on the named assertions.
+            if (cd "$mut" && ./test_channel_drift.sh > out.txt 2>&1); then
+              echo "::error::$label: test_channel_drift.sh PASSED against the mutant"
+              cat "$mut/out.txt"; rm -rf "$mut"; return 1
+            fi
+            for t in "$@"; do
+              if ! plain "$mut/out.txt" | grep -qF "FAIL  $t"; then
+                echo "::error::$label: the suite went red, but NOT on '$t' — the red is not attributable to this mutation"
+                cat "$mut/out.txt"; rm -rf "$mut"; return 1
+              fi
+            done
+            rm -rf "$mut"
+            echo "  ok  $label"
+          }
+
+          # 1. Regress into tool_drift.sh's path matching. This is the change
+          #    TOG-356 originally proposed ("point tool_drift.sh compare at the
+          #    channel"), and it is wrong in both directions at once: it passes
+          #    a tampered file that kept its name, and it fails a compliant drop
+          #    the repo has since renamed. The whole reason this tool exists is
+          #    that it matches on content.
+          chan_mutation_check "match-on-path-not-content" \
+            '    if [ -n "${BY_HASH[$hash]:-}" ]; then' \
+            '    if [ -n "${BY_BASE[$(strip_prefix "$base")]:-}" ]; then' \
+            'a renamed drop matching a blob at another path passes' \
+            'a same-size, different-content drop fails' || rc=1
+
+          # 2. Drop the shebang test from the runnable classifier, keeping the
+          #    exec bit and the extension list. Reads as a simplification. It
+          #    means anything named like evidence is never checked, and
+          #    `bash TOG-nnn-findings.md` still runs it.
+          chan_mutation_check "shebang-test-removed" \
+            "  case \"\$(head -c 2 \"\$f\" 2>/dev/null)\" in '#!') return 0 ;; esac" \
+            '  :' \
+            'a shebang alone makes a file runnable, whatever it is named' || rc=1
+
+          # 3. Honour an exemption that states no reason instead of refusing.
+          #    The tempting lenient default, and it turns the exemption file
+          #    into a mute button: one line, no explanation, detector silenced.
+          chan_mutation_check "unreasoned-exemption-honoured" \
+            '        die "$exempt:$lineno: exemption for '"'"'$name'"'"' has no reason (want '"'"'<basename><TAB><reason>'"'"')"' \
+            '        reason="(unspecified)"' \
+            'an exemption with no reason is REFUSED, not honoured' || rc=1
+
+          # 4. Demote STALE to a warning, failing only on UNVERSIONED. Reads as
+          #    noise reduction. STALE is the case where a mirror STOPPED
+          #    mirroring — a file the operator installed from, edited in place
+          #    or swapped, and it is strictly more dangerous than one that was
+          #    never imported, because it looks reviewed.
+          chan_mutation_check "stale-demoted-to-warning" \
+            '  if [ "$unver" -gt 0 ] || [ "$stale" -gt 0 ]; then' \
+            '  if [ "$unver" -gt 0 ]; then' \
+            'a same-size, different-content drop fails' || rc=1
+
+          exit $rc
 
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).

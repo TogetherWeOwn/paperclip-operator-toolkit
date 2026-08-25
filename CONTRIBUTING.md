@@ -52,6 +52,7 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 ./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
 ./test_agent_endpoint_preflight.sh  # model-endpoint cutover gate, against a stub front
 ./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
+./test_channel_drift.sh             # channel_drift.sh: staged-but-never-committed detection
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Live org, no database — needs a Paperclip API key and COMPANY_ID, nothing else,
@@ -96,7 +97,11 @@ So drift has two directions here, not one, and the second is the one actually ha
   on it.
 - **Outbound** — an agent writes a newer tool into the handoff channel, the operator installs it
   from there, and nobody reviews it because it never becomes a PR. Measured the same day,
-  **9 of the 11 executables in that channel existed in no git repo at all.**
+  **9 of the 11 executables in that channel existed in no git repo at all.** Re-measured
+  2026-08-25 by `channel_drift.sh`, it was **11 of 14** — one new unversioned tool had arrived
+  overnight, and the first count had missed a `0644` `.mjs` that is run by `node` rather than by
+  `./`. The channel got worse in a day. **Hand cleanup loses to the arrival rate**, which is why
+  TOG-356's fix is a rule and not a tidy-up.
 
 Read the drop channel's own `README.md` before treating anything in it as evidence of what runs:
 "Writing here is a proposal, not a deployment." A file there is an agent's outbound claim, not a
@@ -135,6 +140,33 @@ Two design points, both deliberate and both worth keeping:
 **CI cannot run the actual comparison** and never will: the thing to compare against is a directory
 no runner can reach. A green badge means the detector works, not that there is no drift. Only
 running step 1 on the VPS answers that.
+
+### And the outbound half — `channel_drift.sh`
+
+`tool_drift.sh` cannot answer the outbound question, and pointing it at the handoff channel — which
+is what TOG-356 originally proposed — does not work. `compare` matches on **path**, and channel drops
+are named for their issue, so every drop reports `UNVERSIONED` *including the compliant ones*; and
+`--strict` fails when the ref holds files the source does not, which the channel is designed to do
+(14 artifacts against 86 tracked blobs). It would be red forever, and a detector that cries wolf gets
+muted. So there is a second tool:
+
+```bash
+./channel_drift.sh check                  # /paperclip/operator-handoff vs main
+```
+
+The rule it enforces: **a runnable file staged for the operator must be byte-identical to a blob
+committed on `main`.** Content, not path — the repo may rename its own files; changing a byte breaks
+it. Runnable is a union of the exec bit, a script extension, and a shebang on line 1, because each
+of those alone has a hole the other two cover. Evidence documents are not runnable and are not
+covered. Exit `0` clean · `2` refused · `3` unversioned or stale.
+
+This one needs no operator: the channel and a clone are both visible from any agent container, so
+**run it on yourself before dropping a file.** Land the PR first, then drop the mirror, and quote the
+commit sha. Full rationale, the measurement, and the canonical channel README in
+[docs/operator-handoff-channel.md](docs/operator-handoff-channel.md).
+
+The same caveat applies as above and for the same reason: CI runs `test_channel_drift.sh`, which
+proves the detector works. It cannot run `check` — GitHub has no view of `/paperclip`.
 
 `test_responsible_leader.sh` needs `jq` and nothing else. It fabricates the whole world it tests:
 a TSV org fixture read through the `ORG_SNAPSHOT` seam instead of the database, and a stub
