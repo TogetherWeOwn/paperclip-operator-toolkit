@@ -154,6 +154,8 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 ./test_agent_endpoint_preflight.sh  # model-endpoint cutover gate, against a stub front
 ./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
 ./test_channel_drift.sh             # channel_drift.sh: staged-but-never-committed detection
+./test_cold_start_detector.sh       # cold_start_detector.sh: cold-with-headroom detection
+./verification/tog-487-mutation-gate.sh   # ...and proof those refusals are not vacuous
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
 # Live org, no database — needs a Paperclip API key and COMPANY_ID, nothing else,

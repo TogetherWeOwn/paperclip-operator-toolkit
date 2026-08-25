@@ -84,6 +84,11 @@ name: CI
 #                                       whether permission_pins.txt still
 #                                       describes this checkout's default —
 #                                       TOG-346
+#     test_cold_start_detector.sh       cold_start_detector.sh: whether the company
+#                                       is STOPPED while the quota it was waiting
+#                                       for is already back — and whether a null
+#                                       five-hour reading is ever scored as
+#                                       headroom — TOG-487
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -638,6 +643,33 @@ jobs:
             || { echo "::error::the restored copy is red; the staging dir was corrupted"; cat "$mut/restored.txt"; exit 2; }
           echo "restored copy is green again"
 
+      # TOG-487. The companion question to the brake above: the brake decides
+      # when to SLOW DOWN, this decides when the company has failed to START
+      # again. On 2026-08-25 an 89-minute quota drain became a 5.5-hour outage
+      # because 202 runs died `429 All 2 accounts exhausted`, ZERO scheduled a
+      # retry, and nothing noticed that the quota had been back since 15:15Z.
+      #
+      # The platform has both the retry path and a classifier for that exact
+      # failure body, and neither fired: `readHeartbeatRunErrorFamily` at
+      # services/heartbeat.ts:548-566 recognises only `errorCode` values the ACP
+      # lane never emits, so the family stayed null and the retry never armed.
+      # That is `/app/server/src`, not this repo — hence a detector here rather
+      # than a fix there.
+      #
+      # THE CASE TO READ IF THIS GOES RED is §2. The real pacer feed carries
+      # `five_hour: null` twice inside the recovery window, and `[[ "" -eq 0 ]]`
+      # is TRUE in bash, so the shortest possible headroom test fires 45 minutes
+      # early on missing data. §2 pins that a null is not a zero in BOTH
+      # directions — the all-null sample must not read as headroom, and a
+      # sample with one null and one genuine zero must still fire. Rejecting
+      # every record containing any null would pass the first and fail the
+      # second, and would have delayed the real alarm by 15 minutes.
+      #
+      # Offline: the pace window and the recovery actions both arrive through
+      # *_CMD seams, so there is no database and no host file.
+      - name: cold-start detector suite
+        run: ./test_cold_start_detector.sh
+
       # TOG-387. lib/reqrecord.sh holds the decision record's invariants, and
       # org_request_queue.sh still holds its own copy of eight of them because
       # TOG-388 and TOG-390 are open against that file. This gate is the price
@@ -753,6 +785,23 @@ jobs:
       # were named for, and passed until this gate said which limb they covered.
       - name: dropchannel_scan narrowing is not vacuous (mutation-gated)
         run: ./verification/tog-385-mutation-gate.sh
+
+      # TOG-487. Same shape, same reason. Every refusal in the cold-start
+      # detector is a limb a reasonable person would simplify away — coalescing
+      # a null five_hour to zero, defaulting a missing runs_in_flight to zero,
+      # letting an unreadable source fall through to "nothing stranded". Each
+      # is removed here one at a time from a staged copy, and the suite must go
+      # red ON THE CASE THAT NAMES IT, not merely somewhere.
+      #
+      # It earned its place while being written, twice. It first reported five
+      # cases whose failure label differed from their success label, so a red
+      # could not be attributed at all; and then it found that the
+      # empty-leading-TSV-field case was asserting on the verdict, which
+      # survives the corruption — `date -u -d 1` parses, so a column-shifted row
+      # still ages as stale and still fires. The assertion now pins the OWNER
+      # the plan names, which is what the shift actually breaks.
+      - name: cold-start detector refusals are not vacuous (mutation-gated)
+        run: ./verification/tog-487-mutation-gate.sh
 
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
