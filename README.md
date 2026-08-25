@@ -103,9 +103,13 @@ node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_credential_chain_audit.sh
 ./test_plugin_manifest_gate.sh
 ./test_sql_backend.sh
+./test_suite_preconditions.sh
 (cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
+# Both exit 3 ("could not run") if the backend is unreachable, rather than
+# reporting refusals that came from the missing database as enforcement. See
+# TOG-402 and test_suite_preconditions.sh.
 export COMPANY_ID=<uuid>
 ./test_privilege_ceilings.sh
 ./test_request_queue.sh

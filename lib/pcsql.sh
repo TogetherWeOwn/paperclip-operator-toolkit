@@ -177,6 +177,51 @@ pcsql_run() {
     "$@" -f -
 }
 
+# --- reachability -----------------------------------------------------------
+
+# pcsql_preflight — can the SELECTED backend actually answer a query?
+#
+# For a REGRESSION SUITE this is a precondition, not a nicety. Without it a
+# suite that cannot reach its subject still runs, and every assertion whose
+# expected outcome is a refusal goes green for the wrong reason: the tool dies
+# on "requester not found" long before the ceiling check the assertion names.
+# (TOG-402 measured 15 of 31 such green ticks in test_request_queue.sh against
+# no database at all.) A suite that cannot reach its subject must say so.
+#
+# `command -v podman` is NOT sufficient, and that is the trap worth naming: a
+# host with podman installed but no paperclip-db container, or a psql pointed
+# at a dead host, passes a binary check and then fails in the middle of the
+# suite — the same partially-green run, arrived at differently. So this does a
+# real round-trip and requires the answer back.
+#
+# Returns 0 reachable · 2 not reachable (diagnosis on stderr).
+pcsql_preflight() {
+  local backend bin out
+  backend="$(pcsql_backend)" || return 2
+  bin="$(pcsql_required_bin)" || return 2
+
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "REFUSED: PAPERCLIP_SQL_BACKEND=$backend needs '$bin' on PATH, and it is not there." >&2
+    return 2
+  fi
+
+  if ! out="$(pcsql_run -Atq -v ON_ERROR_STOP=1 <<<'SELECT 1;' 2>&1)"; then
+    echo "REFUSED: the '$backend' backend is on PATH but did not answer 'SELECT 1':" >&2
+    sed 's/^/  /' <<<"$out" >&2
+    return 2
+  fi
+
+  # Trailing noise (a podman warning on stderr, say) is tolerated; a missing
+  # answer is not. An empty reply here is precisely the failure mode that makes
+  # `[[ "$count" -eq 0 ]]` read as a pass, because bash scores "" as 0.
+  if ! grep -qx '1' <<<"$out"; then
+    echo "REFUSED: the '$backend' backend answered 'SELECT 1' with no usable row:" >&2
+    sed 's/^/  /' <<<"$out" >&2
+    return 2
+  fi
+  return 0
+}
+
 # Sourcing helper: `. "$HERE/lib/pcsql.sh"` fails loudly rather than leaving a
 # tool with an undefined pcsql_run to trip over several hundred lines later.
 pcsql_loaded() { return 0; }

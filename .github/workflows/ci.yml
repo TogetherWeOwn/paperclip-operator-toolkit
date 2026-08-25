@@ -33,6 +33,11 @@ name: CI
 #                                       org_request_queue.sh has drifted — TOG-387
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
+#     test_suite_preconditions.sh       whether the two suites CI CANNOT run
+#                                       refuse to score themselves when they
+#                                       cannot reach a database, and whether
+#                                       their refusal assertions name the gate
+#                                       they claim to test — TOG-402
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
 #                                       is the copy that is REVIEWED — TOG-212
 #     test_channel_drift.sh             channel_drift.sh: whether a runnable file
@@ -58,6 +63,15 @@ name: CI
 #   far worse trade than the coverage is worth. They stay operator-run, on the
 #   VPS, before a release. `bash -n` below at least proves they still parse,
 #   which catches the most common way a shell suite rots.
+#
+#   AND, since TOG-402, test_suite_preconditions.sh proves rather more than
+#   that: it drives both of them through a stub backend and checks they refuse
+#   to run when the database is unreachable, and that their refusal assertions
+#   fail when the refusal comes from the wrong gate. CI still cannot verify what
+#   these two assert about the org; it can now verify that they do not lie when
+#   they cannot reach it. That distinction was the whole finding — an operator's
+#   pre-release run is the last gate before a provisioning change lands, and a
+#   partially-green run is more dangerous than a red one.
 #
 #   WHAT IS STILL MISSING, precisely (TOG-202). The first blocker is gone: as of
 #   lib/pcsql.sh the tools no longer hard-wire `podman exec paperclip-db`, so
@@ -343,6 +357,23 @@ jobs:
       # credential, no network.
       - name: SQL backend seam suite
         run: ./test_sql_backend.sh
+
+      # TOG-402. The two suites CI cannot run are the two whose green ticks
+      # nobody here can check, and they were scoring themselves against nothing:
+      # with COMPANY_ID set and no podman, test_request_queue.sh reported
+      # 15 passed / 16 failed, because a `grep -q REFUSED` assertion is
+      # satisfied by "requester not found" from an absent database just as well
+      # as by the ceiling check it names.
+      #
+      # This suite is the part of that CI CAN run. It stubs a psql on PATH in
+      # three modes and drives the real suites through it, so it proves both
+      # guards: that they refuse to run at all when the backend is unreachable,
+      # and — with a backend that answers the preflight but returns no rows —
+      # that their reason-pinned assertions FAIL a refusal from the wrong gate.
+      # The second is the one that needs a seam: once the preflight works, the
+      # reason-pinning never executes anywhere else CI can see it.
+      - name: suite-precondition and wrong-gate refusal suite
+        run: ./test_suite_preconditions.sh
       # TOG-247: the CI status reader that must never report a denial or an
       # empty result set as green. TOG-381: nor a job GitHub never ran as a red
       # build. Offline — a stub GitHub API on 127.0.0.1 serves a different
@@ -920,6 +951,114 @@ jobs:
               echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
             fi
           done
+      # TOG-402. Three mutations, each the tempting simplification rather than
+      # invented nonsense, and each one restores a specific undeserved green:
+      #
+      #   1. binary-check-preflight — replace the SELECT 1 round-trip with
+      #      `command -v`. This is what someone reaches for when the preflight
+      #      looks slow or noisy. It passes a podman with no paperclip-db
+      #      container, so the suite runs anyway and fails halfway through.
+      #   2. any-refusal — make refuses_because ignore its reason argument. The
+      #      first time a gate's wording is edited and a suite goes red, this is
+      #      the one-character-looking fix, and it restores TOG-402 exactly.
+      #   3. empty-is-zero — put back `[[ "$left" -eq 0 ]]`. Reads as a harmless
+      #      tidy-up; bash scores "" as 0, so the teardown reports a company it
+      #      never looked at as clean.
+      #
+      # The BASELINE below is not ceremony. "The mutated suite failed" is
+      # unattributable on its own — a copy that fails for an unrelated staging
+      # reason looks identical. So the unmutated copy must pass in the same
+      # directory first, and each mutant must go red on a NAMED assertion, not
+      # merely somewhere.
+      - name: Prove the precondition suite still detects each undeserved green
+        run: |
+          set -uo pipefail
+          rc=0
+
+          base="$(mktemp -d)"
+          tar -cf - --exclude=.git . | (cd "$base" && tar -xf -)
+          if ! "$base/test_suite_preconditions.sh" > "$base/out.txt" 2>&1; then
+            echo "::error::BASELINE FAILED — the unmutated suite does not pass in a staging copy, so every mutant result below is unattributable"
+            cat "$base/out.txt"; exit 1
+          fi
+          echo "baseline: $(grep -c 'PASS' "$base/out.txt") assertions passed in a staging copy"
+
+          for m in binary-check-preflight any-refusal empty-is-zero; do
+            mut="$(mktemp -d)"
+            tar -cf - --exclude=.git . | (cd "$mut" && tar -xf -)
+            anchor2=""; repl2=""
+            case "$m" in
+              binary-check-preflight)
+                # Both conditions, so the mutant ACCEPTS on a bare binary check.
+                # Disabling only the round-trip leaves the row check reading an
+                # empty $out, which makes preflight refuse EVERYTHING — the
+                # opposite mistake, and it reds the positive control instead of
+                # the assertion this mutant is meant to expose.
+                target="$mut/lib/pcsql.sh"
+                anchor='  if ! out="$(pcsql_run -Atq -v ON_ERROR_STOP=1 <<<'"'"'SELECT 1;'"'"' 2>&1)"; then'
+                repl='  if false; then'
+                anchor2='  if ! grep -qx '"'"'1'"'"' <<<"$out"; then'
+                repl2='  if false; then'
+                want="accepted an erroring backend" ;;
+              any-refusal)
+                target="$mut/test_request_queue.sh"
+                anchor='  if grep -qF -- "$why" <<<"$o"; then ok "$d"'
+                repl='  if true; then ok "$d"'
+                want="T0 cannot request a President/COO" ;;
+              empty-is-zero)
+                # BOTH halves, or the mutant is not the pre-TOG-402 code: gutting
+                # qnum alone leaves `[[ "(no result)" -eq 0 ]]`, which trips
+                # `set -u` and produces an unrelated red. Restoring the raw read
+                # AND the arithmetic comparison is what reinstates the actual
+                # false green, because bash scores "" as 0.
+                target="$mut/test_request_queue.sh"
+                anchor='qnum() { local v; v="$(q "$@")"; [[ "$v" =~ ^[0-9]+$ ]] && printf '"'"'%s'"'"' "$v" || printf '"'"'(no result)'"'"'; }'
+                repl='qnum() { q "$@"; }'
+                anchor2='if [[ "$left" == "0" ]]; then ok "no TESTQ-provisioned agents remain active"'
+                repl2='if [[ "$left" -eq 0 ]]; then ok "no TESTQ-provisioned agents remain active"'
+                want="teardown absence claim still passes" ;;
+            esac
+            # NOTE: $want must appear in the FAILURE text the suite prints, which
+            # is the bad() message, not the ok() one. They are deliberately
+            # different sentences, so matching the ok() wording here silently
+            # makes every mutant read as unattributable.
+
+            for a in "$anchor" "$anchor2"; do
+              [[ -n "$a" ]] || continue
+              if ! grep -qF -- "$a" "$target"; then
+                echo "::error::could not find a '$m' anchor in $target; this guard is now blind, fix it"
+                exit 2
+              fi
+            done
+            node -e '
+              var fs = require("fs");
+              var p = process.argv[1], s = fs.readFileSync(p, "utf8");
+              for (var i = 2; i + 1 < process.argv.length; i += 2) {
+                var a = process.argv[i], r = process.argv[i + 1];
+                if (!a) continue;
+                if (s.indexOf(a) < 0) { console.error("::error::anchor vanished: " + a); process.exit(2); }
+                s = s.replace(a, r);
+              }
+              fs.writeFileSync(p, s);
+            ' "$target" "$anchor" "$repl" "$anchor2" "$repl2" || exit 2
+            bash -n "$target" || { echo "::error::the '$m' mutant does not parse"; exit 2; }
+
+            # empty-is-zero re-mutates a file the previous loop left alone, so
+            # each mutant is applied to a fresh copy — never stacked.
+            if "$mut/test_suite_preconditions.sh" > "$mut/out.txt" 2>&1; then
+              echo "::error::the precondition suite PASSED against the '$m' mutant"
+              cat "$mut/out.txt"; rc=1
+              continue
+            fi
+            if grep -qF "FAIL" "$mut/out.txt" && grep -F "FAIL" "$mut/out.txt" | grep -qF -- "$want"; then
+              echo "$m: suite correctly went red on its named assertion (\"$want\")"
+            else
+              echo "::error::the '$m' mutant made the suite fail, but NOT on \"$want\" — the red is unattributable"
+              cat "$mut/out.txt"; rc=1
+            fi
+          done
+          exit $rc
+
       # Same discipline for the CI status reader (TOG-247). Its entire value is
       # the refusal to call an unobserved CI green, so a suite that cannot
       # detect that refusal being weakened is decoration. Both mutations below

@@ -64,6 +64,13 @@ for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check 
 # Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
 # They create and delete real agents in that company as their method, so run them
 # on the VPS, before a release, and read the teardown output.
+#
+# Both now REFUSE TO RUN when the backend is unreachable, exiting 3 instead of
+# scoring themselves. Exit 3 means "could not run"; exit 1 means "ran and
+# failed". Do not read a 3 as a pass — and do not read it as a regression
+# either, it means you are not where you think you are. (TOG-402: before this,
+# an unreachable database gave test_request_queue.sh 15 undeserved passes,
+# because "requester not found" satisfied assertions naming the ceiling check.)
 export COMPANY_ID=<uuid>
 ./test_privilege_ceilings.sh
 ./test_request_queue.sh

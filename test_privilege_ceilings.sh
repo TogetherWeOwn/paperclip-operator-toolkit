@@ -4,6 +4,16 @@
 # with decreasing authority at every level and no upward/lateral creation.
 #
 # Creates a temporary test subtree under T0 and removes it at the end.
+#
+# NEEDS THE LIVE COMPANY DATABASE. org_provisioner.sh has no ORG_SNAPSHOT seam,
+# so there is no offline mode for this suite and CI cannot run it. See the
+# pcsql_preflight guard below, and the header of test_request_queue.sh for the
+# measurement that motivated both (TOG-402): a refusal-shaped assertion accepts
+# ANY refusal, so a tool that dies at "caller not found" satisfies a case that
+# names the delegation ceiling. Here that produced 2 undeserved passes out of
+# 36 with no podman present; the sibling suite produced 15 of 31.
+#
+# refuses_because pins each case to the words of the gate it names.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,15 +26,19 @@ ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# must_refuse <desc> <args...>
-must_refuse() {
-  local desc="$1"; shift
+# refuses_because <desc> <reason-substring> <args...>
+# A refusal from the WRONG gate is a FAIL. Same helper as
+# test_capability_gate.sh:41 and test_request_queue.sh, less the $PROV prefix
+# which every case in this suite shares.
+refuses_because() {
+  local desc="$1" why="$2"; shift 2
   local out; out="$("$PROV" "$@" 2>&1)"; local rc=$?
-  if [[ $rc -ne 0 ]] && grep -q 'REFUSED' <<<"$out"; then
-    ok "$desc"
-  else
-    bad "$desc  (rc=$rc, expected refusal)"; sed 's/^/        /' <<<"$out" | head -3
+  if [[ $rc -eq 0 ]]; then bad "$desc — was ALLOWED (rc=0)"; return; fi
+  if ! grep -q 'REFUSED' <<<"$out"; then
+    bad "$desc — non-zero but not a refusal (rc=$rc)"; sed 's/^/        /' <<<"$out" | head -3; return
   fi
+  if grep -qF -- "$why" <<<"$out"; then ok "$desc"
+  else bad "$desc — refused by the WRONG gate; wanted '$why'"; sed 's/^/        /' <<<"$out" | head -4; fi
 }
 
 # must_allow <desc> <varname> <args...>
@@ -42,9 +56,30 @@ must_allow() {
 # shellcheck source=lib/pcsql.sh
 . "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
 
+# PRECONDITION — exit 3 ("could not run"), distinct from 1 ("ran and failed").
+if ! pcsql_preflight; then
+  cat >&2 <<EOF
+
+ERROR: test_privilege_ceilings.sh cannot reach the company database, so it did not run.
+
+  This suite provisions and tears down real agents through org_provisioner.sh.
+  Running it without a reachable backend reports "caller not found" refusals as
+  if they were ceiling enforcement. See the header, and TOG-402.
+
+  Backend selection: PAPERCLIP_SQL_BACKEND=${PAPERCLIP_SQL_BACKEND:-podman} (podman|psql)
+    podman: needs podman on PATH and container \${PAPERCLIP_DB_CTR:-paperclip-db} running
+    psql:   needs psql on PATH and DATABASE_URL or libpq PG* variables
+EOF
+  exit 3
+fi
+
 q() { # scalar SQL helper: q <sql> [agent_id]
   PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="${2:-}" pcsql_run -Atq <<<"$1"
 }
+
+# A count that refuses to be mistaken for zero when the query returned nothing:
+# bash evaluates `[[ "" -eq 0 ]]` as TRUE. See test_request_queue.sh.
+qnum() { local v; v="$(q "$@")"; [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v" || printf '(no result)'; }
 
 grant_count() { q "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
 grant_keys()  { q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
@@ -55,27 +90,36 @@ protected()   { q "SELECT CASE WHEN permissions->'authorizationPolicy'->'assignm
 parent_of()   { q "SELECT COALESCE(p.metadata->>'orgRoleId', p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'agent_id'::uuid;" "$1"; }
 
 hdr "1. Upward and lateral creation must be impossible"
-must_refuse "T0 (tech chief) cannot create another President/COO" \
+refuses_because "T0 (tech chief) cannot create another President/COO" \
+  "exceeds the delegation ceiling of" \
   create --caller T0 --template P1_PRESIDENT_COO --title "Shadow President"
-must_refuse "T0 cannot create a peer functional chief (lateral)" \
+refuses_because "T0 cannot create a peer functional chief (lateral)" \
+  "exceeds the delegation ceiling of" \
   create --caller T0 --template B1_FUNCTION_CHIEF --title "Shadow Chief"
-must_refuse "T0 cannot create a security chief (lateral, other function)" \
+refuses_because "T0 cannot create a security chief (lateral, other function)" \
+  "exceeds the delegation ceiling of" \
   create --caller T0 --template B3_SECURITY_CHIEF --title "Shadow CISO"
-must_refuse "caller cannot supply its own reportsTo (subtree escape)" \
+refuses_because "caller cannot supply its own reportsTo (subtree escape)" \
+  "reportsTo cannot be supplied by the caller" \
   create --caller T0 --template E0_SPECIALIST --title "Escapee" --reports-to O2
 
 hdr "2. Roles with no team-building authority must not provision"
-must_refuse "O2 Chief of Staff has no hiring authority" \
+refuses_because "O2 Chief of Staff has no hiring authority" \
+  "exceeds the delegation ceiling of" \
   create --caller O2 --template E0_SPECIALIST --title "CoS Helper"
-must_refuse "O3 Audit cannot directly create audit specialists (approval-gated)" \
+refuses_because "O3 Audit cannot directly create audit specialists (approval-gated)" \
+  "exceeds the delegation ceiling of" \
   create --caller O3 --template E4_AUDIT_ANALYST --title "Audit Analyst"
-must_refuse "A0 Provisioning Steward cannot bypass its own ceiling" \
+refuses_because "A0 Provisioning Steward cannot bypass its own ceiling" \
+  "exceeds the delegation ceiling of" \
   create --caller A0 --template E0_SPECIALIST --title "Steward Helper"
 
 hdr "3. Function-specific exceptions stay inside their function"
-must_refuse "F0 Finance cannot mint a tools:admin holder (E2_TOOLING_ADMIN)" \
+refuses_because "F0 Finance cannot mint a tools:admin holder (E2_TOOLING_ADMIN)" \
+  "exceeds the delegation ceiling of" \
   create --caller F0 --template E2_TOOLING_ADMIN --title "Finance Tooling Admin"
-must_refuse "F0 Finance cannot create a platform director" \
+refuses_because "F0 Finance cannot create a platform director" \
+  "exceeds the delegation ceiling of" \
   create --caller F0 --template C2_PLATFORM_DIRECTOR --title "Finance Platform Dir"
 
 hdr "4. The legitimate chain must work: Chief -> Director -> Manager -> Specialist"
@@ -87,13 +131,17 @@ must_allow "Manager creates a Specialist (E0_SPECIALIST)" SPEC \
   create --caller "${MGR:-none}" --template E0_SPECIALIST --title "TEST AI Engineer"
 
 hdr "5. Each new level must not exceed its own ceiling"
-must_refuse "Manager cannot create a peer Manager" \
+refuses_because "Manager cannot create a peer Manager" \
+  "exceeds the delegation ceiling of" \
   create --caller "${MGR:-none}" --template D1_MANAGER --title "TEST Peer Manager"
-must_refuse "Manager cannot create a Director (upward)" \
+refuses_because "Manager cannot create a Director (upward)" \
+  "exceeds the delegation ceiling of" \
   create --caller "${MGR:-none}" --template C1_DIRECTOR_BUILDER --title "TEST Upward Director"
-must_refuse "Specialist cannot create anything at all" \
+refuses_because "Specialist cannot create anything at all" \
+  "exceeds the delegation ceiling of" \
   create --caller "${SPEC:-none}" --template E0_SPECIALIST --title "TEST Sub-specialist"
-must_refuse "Director cannot create a chief (upward)" \
+refuses_because "Director cannot create a chief (upward)" \
+  "exceeds the delegation ceiling of" \
   create --caller "${DIR:-none}" --template B2_TECH_CHIEF --title "TEST Upward Chief"
 
 hdr "5b. Chief seating is reserved to the enterprise operator"
@@ -104,16 +152,37 @@ if [[ -n "${CHIEF:-}" ]]; then
   [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
     && ok "seated chief holds exactly the B1_FUNCTION_CHIEF template" \
     || bad "seated chief grants are '$keys'"
-  must_refuse "a seated chief cannot seat a peer chief" \
+  refuses_because "a seated chief cannot seat a peer chief" \
+    "exceeds the delegation ceiling of" \
     create --caller "$CHIEF" --template B1_FUNCTION_CHIEF --title "TEST Peer Chief"
-  must_refuse "a seated chief cannot seat a tech chief either" \
+  refuses_because "a seated chief cannot seat a tech chief either" \
+    "exceeds the delegation ceiling of" \
     create --caller "$CHIEF" --template B2_TECH_CHIEF --title "TEST Peer Tech Chief"
 fi
-must_refuse "T0 (a chief) cannot seat a chief even though B* templates now exist" \
+refuses_because "T0 (a chief) cannot seat a chief even though B* templates now exist" \
+  "exceeds the delegation ceiling of" \
   create --caller T0 --template B4_FINANCE_CHIEF --title "TEST Chief From Chief"
-must_refuse "no one may provision another enterprise operator" \
+# NOTE — WHAT THESE TWO ACTUALLY PROVE, which is less than their names suggest.
+# org_provisioner.sh:367 and :370 are independent defence-in-depth assertions
+# ("only P1_PRESIDENT_COO may seat a functional chief", "owner and
+# enterprise-operator roles are never provisionable"), added so a future
+# CEILING_JSON edit cannot silently widen chief-seating authority. But the
+# ceiling check at :356 runs FIRST, and CEILING_JSON (:216) gives no template —
+# P1_PRESIDENT_COO included — a path to P0_* or P1_*, and no non-P1 template a
+# path to any B*. So every case above and below refuses at :356, and :367/:370
+# are unreachable from this suite. Pinning the reason is what makes that
+# visible; the previous must_refuse concealed it behind a green tick.
+#
+# They are therefore UNVERIFIED, not verified-and-passing. Reaching them needs
+# a seam that overrides CEILING_JSON, which org_provisioner.sh does not have.
+# Tracked as a follow-up rather than fixed here: adding such a seam to a tool
+# that creates and deletes agents is a change to the provisioner's own trust
+# boundary, and it does not belong in a test-honesty patch.
+refuses_because "no one may provision another enterprise operator" \
+  "exceeds the delegation ceiling of" \
   create --caller O1 --template P1_PRESIDENT_COO --title "TEST Shadow President"
-must_refuse "no one may provision the human owner role" \
+refuses_because "no one may provision the human owner role" \
+  "exceeds the delegation ceiling of" \
   create --caller O1 --template P0_OWNER --title "TEST Shadow Owner"
 
 hdr "6. Authority must strictly taper down the new chain"
@@ -124,22 +193,28 @@ for pair in "T0:$T0_ID" "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPE
   printf '        %-11s grants=%-2s  parent=%-9s  keys=%s\n' \
     "$lbl" "$(grant_count "$id")" "$(parent_of "$id")" "$(grant_keys "$id")"
 done
-c_t0="$(grant_count "$T0_ID")"; c_d="$(grant_count "${DIR:-}")"
-c_m="$(grant_count "${MGR:-}")"; c_s="$(grant_count "${SPEC:-}")"
-if [[ "$c_t0" -ge "$c_d" && "$c_d" -gt "$c_m" && "$c_m" -gt "$c_s" ]]; then
+c_t0="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$T0_ID")"
+c_d="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "${DIR:-}")"
+c_m="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "${MGR:-}")"
+c_s="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "${SPEC:-}")"
+if [[ "$c_t0$c_d$c_m$c_s" == *"(no result)"* ]]; then
+  bad "cannot compare grant breadth — a count query returned nothing: chief=$c_t0 director=$c_d manager=$c_m specialist=$c_s"
+elif [[ "$c_t0" -ge "$c_d" && "$c_d" -gt "$c_m" && "$c_m" -gt "$c_s" ]]; then
   ok "grant breadth decreases: chief($c_t0) >= director($c_d) > manager($c_m) > specialist($c_s)"
 else
   bad "taper violated: chief=$c_t0 director=$c_d manager=$c_m specialist=$c_s"
 fi
-[[ "$c_s" -eq 0 ]] && ok "specialist has ZERO organizational-governance grants" \
-                  || bad "specialist holds $c_s grants, expected 0"
+# `-eq 0` on an empty string is TRUE in bash, so this ZERO-grants claim used to
+# pass against no database at all. String-compare the digits instead.
+[[ "$c_s" == "0" ]] && ok "specialist has ZERO organizational-governance grants" \
+                   || bad "specialist grant count is '$c_s', expected 0"
 
 hdr "7. No descendant inherited the server's default company-wide tasks:assign"
 for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
-  n="$(companywide "$id")"
-  [[ "$n" -eq 0 ]] && ok "$lbl holds no company-wide privileged grant" \
-                   || bad "$lbl holds $n company-wide privileged grant(s)"
+  n="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:create','users:manage_permissions','joins:approve','agents:configure');" "$id")"
+  [[ "$n" == "0" ]] && ok "$lbl holds no company-wide privileged grant" \
+                    || bad "$lbl company-wide privileged grant count is '$n', expected 0"
 done
 
 hdr "8. SELF scopes bind to the agent's own subtree, not the caller's"
@@ -158,19 +233,31 @@ for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
 done
 
 hdr "10. Deactivation is descendant-only"
-must_refuse "Manager cannot deactivate its own Director (upward)" \
+refuses_because "Manager cannot deactivate its own Director (upward)" \
+  "is not inside" \
   deactivate --caller "${MGR:-none}" --target "${DIR:-none}"
-must_refuse "Director cannot deactivate a chief in another function" \
+refuses_because "Director cannot deactivate a chief in another function" \
+  "is not inside" \
   deactivate --caller "${DIR:-none}" --target S0
-must_refuse "Director cannot deactivate the President/COO" \
+refuses_because "Director cannot deactivate the President/COO" \
+  "is not inside" \
   deactivate --caller "${DIR:-none}" --target O1
 
 hdr "11. Owner/Board kill switch"
 touch "$HERE/.provisioner-disabled"
-must_refuse "all provisioning refused while kill switch engaged" \
+refuses_because "all provisioning refused while kill switch engaged" \
+  "kill switch is engaged" \
   create --caller T0 --template E0_SPECIALIST --title "TEST Killswitch"
 rm -f "$HERE/.provisioner-disabled"
-ok "kill switch released"
+# This used to be a bare `ok "kill switch released"` — an unconditional PASS
+# that asserted nothing and counted itself anyway, so it read green in an
+# environment with no database at all. Assert the release instead:
+# assert_enabled runs at org_provisioner.sh:323, ahead of the ceiling check at
+# :356, so a create that comes back refused by the CEILING proves the switch is
+# no longer engaged — and provisions nothing while proving it.
+refuses_because "kill switch released — provisioning refuses on merit again, not on the switch" \
+  "exceeds the delegation ceiling of" \
+  create --caller T0 --template P1_PRESIDENT_COO --title "TEST Killswitch Released"
 
 hdr "12. Teardown — remove the test subtree"
 for pair in "SPECIALIST:${SPEC:-}:${MGR:-}" "MANAGER:${MGR:-}:${DIR:-}" "DIRECTOR:${DIR:-}:T0" "CHIEF:${CHIEF:-}:O1"; do
@@ -182,8 +269,11 @@ for pair in "SPECIALIST:${SPEC:-}:${MGR:-}" "MANAGER:${MGR:-}:${DIR:-}" "DIRECTO
     bad "$lbl teardown failed (agent $id may still exist)"
   fi
 done
-left="$(q "SELECT count(*) FROM agents WHERE company_id=:'company_id'::uuid AND metadata->>'provisionedBy'='org_provisioner' AND status <> 'terminated' AND title LIKE 'TEST%';")"
-[[ "$left" -eq 0 ]] && ok "no TEST-provisioned agents remain active" || bad "$left test agent(s) still active"
+# An ABSENCE claim, so the one most able to go green for free. See qnum().
+left="$(qnum "SELECT count(*) FROM agents WHERE company_id=:'company_id'::uuid AND metadata->>'provisionedBy'='org_provisioner' AND status <> 'terminated' AND title LIKE 'TEST%';")"
+if [[ "$left" == "0" ]]; then ok "no TEST-provisioned agents remain active"
+elif [[ "$left" == "(no result)" ]]; then bad "cannot confirm teardown — the database stopped answering mid-run"
+else bad "$left test agent(s) still active"; fi
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
