@@ -63,6 +63,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
 | `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
+| `docs/teamclaude-big-model-stall.md` | Why teamclaude `:3456` stalls (TOG-378). **Read this before sending anything to that endpoint:** one non-Haiku request blocks the model endpoint for every agent on the box for ~60 s, and giving up early does not release it. |
 
 ## Running the suites
 
