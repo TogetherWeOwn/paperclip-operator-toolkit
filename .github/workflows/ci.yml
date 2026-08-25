@@ -271,6 +271,53 @@ jobs:
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
+      # TOG-290. The selftest must prove the TOOL, not the config it happened to run
+      # under. It used to report 181/0 with COMBO_OWNED_PREFIX unset and 178/3 with any
+      # other value, because its fixtures hardcoded the default 'two/' namespace — so an
+      # operator who followed the documented flow (export the prefix, run selftest first)
+      # saw three red lines in a containment proof and no way to tell a fixture bug from
+      # a real regression. Worse, the refuse-fixtures went green for the WRONG reason:
+      # 'two/x' under prefix 'pc/' is refused by the namespace gate before the gate each
+      # case actually names ever runs.
+      #
+      # This step is what stops that coming back. Identical pass/fail counts across a
+      # spread of prefixes is the assertion — a count that MOVES is the bug, so the two
+      # runs are compared to each other, not to a number pinned here that would need
+      # updating every time an assertion is added.
+      - name: omniroute selftest is hermetic w.r.t. COMBO_OWNED_PREFIX
+        run: |
+          set -uo pipefail
+          # -e OFF deliberately: the selftest EXITS 1 when it fails, and under the
+          # runner's default `bash -e` that would abort the assignment below before the
+          # ::error:: line ever prints. The result is still red, but red with no reason.
+          # Every outcome is checked explicitly instead.
+          set +e
+          # 2>&1 is LOAD-BEARING: the selftest writes its per-case lines and its
+          # summary to STDERR. Without it $out is empty, the summary scrolls past on
+          # the console, and the comparison below reads '' == '' and passes having
+          # measured nothing.
+          run_at() { # prefix('' = unset) -> full selftest output, colour stripped
+            if [ -z "$1" ]; then env -u COMBO_OWNED_PREFIX ./omniroute_combo_cli.sh selftest 2>&1
+            else COMBO_OWNED_PREFIX="$1" ./omniroute_combo_cli.sh selftest 2>&1; fi \
+              | sed -e 's/\x1b\[[0-9;]*m//g'
+          }
+          base_out="$(run_at '')"; base="$(printf '%s\n' "$base_out" | tail -1)"
+          echo "unset:  $base"
+          case "$base" in
+            *" passed, 0 failed") : ;;
+            *) echo "::error::selftest is not green with COMBO_OWNED_PREFIX unset: '$base'"
+               printf '%s\n' "$base_out" | grep -E 'FAIL|selftest:'; exit 1 ;;
+          esac
+          for p in pc/ two/ acme-team/ x.y_z/deep/; do
+            out="$(run_at "$p")"; got="$(printf '%s\n' "$out" | tail -1)"
+            echo "$p:  $got"
+            if [ "$got" != "$base" ]; then
+              echo "::error::selftest result depends on COMBO_OWNED_PREFIX. unset='$base' but '$p'='$got'. Fixtures that name a combo we own must build the name from \$COMBO_OWNED_PREFIX, not hardcode 'two/'. See TOG-290."
+              printf '%s\n' "$out" | grep -E 'FAIL' ; exit 1
+            fi
+          done
+          echo "selftest is prefix-independent: $base across 5 prefixes"
+
       # The TOG-226 standing gate. Offline: the board and GitHub reads are
       # redirected to fixtures, and the argv assertions use a stub curl that
       # never opens a socket. It covers the two ways this check can be wrong

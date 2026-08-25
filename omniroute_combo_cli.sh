@@ -1903,17 +1903,70 @@ EOF
   _scase "typo 'fillfirst' (would coerce!)"     refuse "fillfirst"
   _scase "typo 'least_used' (would coerce!)"    refuse "least_used"
 
+  # ------------------------------------------------------- owned-namespace fixtures
+  # [TOG-290] Every fixture below that is SUPPOSED to name a combo we own builds its
+  # name from $OWN — the ambient COMBO_OWNED_PREFIX — instead of hardcoding 'two/'.
+  #
+  # Hardcoding it broke the suite in both directions the moment an operator configured
+  # a different prefix, which the usage text tells them to do:
+  #   - allow-fixtures went red, because assert_mutable_combo_name reads the ambient
+  #     prefix while the fixture said 'two/'. Three unexplained red lines in the
+  #     containment proof, indistinguishable from a real containment regression;
+  #   - refuse-fixtures stayed GREEN FOR THE WRONG REASON. 'two/x' under prefix 'pc/'
+  #     is refused by the namespace gate before the nested-combo / tripwire /
+  #     empty-models gate each case actually names ever runs. A test satisfied by its
+  #     neighbour proves nothing about the gate in its title.
+  # Names that are meant to be refused BY namespace or BY protected glob stay literal,
+  # and the cases that pin the namespace gate itself set an explicit prefix rather than
+  # trusting the ambient one — see _npcase.
+  local OWN="$COMBO_OWNED_PREFIX"
+
+  # Precondition. If the configured prefix cannot name a mutable combo at all, say so
+  # ONCE, by name, rather than letting it surface as a scatter of unexplained failures
+  # further down. The two ways it can fail are the two the guards below apply: the
+  # prefix sits inside a protected namespace, or it is not name-shaped.
+  echo "owned-namespace precondition (COMBO_OWNED_PREFIX=${OWN}):"
+  local _probe="${OWN}selftest-probe" _prc=0
+  ( assert_mutable_combo_name "$_probe" ) >/dev/null 2>&1 || _prc=$?
+  if [ "$_prc" -eq 0 ] && [[ "$_probe" =~ ^[A-Za-z0-9._/-]{1,120}$ ]]; then
+    pass=$((pass+1)); printf '  PASS  %-46s %s\n' "prefix can name a mutable combo" "$_probe"
+  else
+    fail=$((fail+1))
+    c_red "  FAIL  COMBO_OWNED_PREFIX='${OWN}' cannot name a mutable combo: '${_probe}' is rejected by this tool's own guards (it matches a protected pattern, or falls outside [A-Za-z0-9._/-]{1,120}). Every owned-namespace fixture below is built from this prefix, so the failures that follow are your CONFIGURATION, not a containment regression. Fix the prefix and re-run."
+  fi
+
   echo "combo-name protection:"
   _ncase() { local nm="$1" expect="$2" n="$3" rc=0
     ( assert_mutable_combo_name "$n" ) >/dev/null 2>&1 || rc=$?
     local got=allow; [ "$rc" -ne 0 ] && got=refuse
     if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
     else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got"; fi; }
-  _ncase "our namespace"                        allow  "two/go-rotation"
+  _ncase "our namespace"                        allow  "${OWN}go-rotation"
   _ncase "protected hindsight/*"                refuse "hindsight/retain"
   _ncase "protected auto/*"                     refuse "auto/claude-opus"
   _ncase "internal qtSd/*"                      refuse "qtSd/abc123"
-  _ncase "foreign namespace"                    refuse "someoneelse/thing"
+
+  # [TOG-290] The namespace gate itself, pinned to an EXPLICIT prefix in each case.
+  # These are the assertions the ambient-prefix fixtures above cannot make: "a foreign
+  # namespace is refused" is only meaningful against a prefix you name, because under
+  # COMBO_OWNED_PREFIX=someoneelse/ the foreign name is no longer foreign. Pinning the
+  # prefix here is what makes the property hold for EVERY ambient value, including the
+  # exotic ones, rather than for the one the suite happened to run under.
+  _npcase() { local nm="$1" expect="$2" pfx="$3" n="$4" rc=0
+    ( COMBO_OWNED_PREFIX="$pfx"; assert_mutable_combo_name "$n" ) >/dev/null 2>&1 || rc=$?
+    local got=allow; [ "$rc" -ne 0 ] && got=refuse
+    if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
+    else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got (prefix='$pfx' name='$n')"; fi; }
+  _npcase "default prefix admits two/"          allow  "two/" "two/go-rotation"
+  _npcase "default prefix refuses foreign"      refuse "two/" "someoneelse/thing"
+  _npcase "gate FOLLOWS a reconfigured prefix"  allow  "pc/"  "pc/go-rotation"
+  _npcase "reconfigured prefix refuses two/"    refuse "pc/"  "two/go-rotation"
+  _npcase "reconfigured prefix refuses foreign" refuse "pc/"  "someoneelse/thing"
+  # Protection is not something a prefix can opt out of: pointing COMBO_OWNED_PREFIX at
+  # a protected namespace must not make that namespace mutable. The glob loop runs
+  # first, and this is what holds it there.
+  _npcase "protected glob beats owned prefix"   refuse "auto/" "auto/claude-opus"
+  _npcase "protected glob beats owned prefix 2" refuse "qtSd/" "qtSd/abc123"
 
   echo "scope confinement:"
   _pcase() { local nm="$1" expect="$2" p="$3"; local got=refuse
@@ -1939,40 +1992,40 @@ EOF
     if [ "$got" = "$expect" ]; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "$got"
     else fail=$((fail+1)); c_red "  FAIL  $nm expected=$expect got=$got (rc=$rc)"; fi; }
   _vcase "well-formed spec"  allow \
-    '{"name":"two/ok","strategy":"fill-first","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
+    '{"name":"'"$OWN"'ok","strategy":"fill-first","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
   _vcase "nested auto/ combo member"            refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"auto/claude-opus","providerId":"combo"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"auto/claude-opus","providerId":"combo"}]}'
   _vcase "nested hindsight/ combo member"       refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"hindsight/retain","providerId":"combo"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"hindsight/retain","providerId":"combo"}]}'
   _vcase "hidden Claude member (aug/opus4.8)"   refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"aug/opus4.8","providerId":"auggie"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"aug/opus4.8","providerId":"auggie"}]}'
   # connectionId: accepted when UUID-shaped (it is a real field of the management
   # API's step object), refused when malformed. 'c1' is the value the OLD test
   # asserted must be refused — it still is, but now for the right reason.
   _vcase "connectionId, valid UUID, accepted"   allow \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":"aaaaaaaa-1111-4222-8333-444455556666"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":"aaaaaaaa-1111-4222-8333-444455556666"}]}'
   _vcase "connectionId, not UUID-shaped"        refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":"c1"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":"c1"}]}'
   _vcase "connectionId, wrong JSON type"        refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":123}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go","connectionId":123}]}'
   # A connectionId must not become a way to smuggle a member past containment: the
   # gates key off .model, so a Claude leg stays refused regardless.
   _vcase "connectionId does not bypass tripwire" refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"aug/opus4.8","providerId":"auggie","connectionId":"aaaaaaaa-1111-4222-8333-444455556666"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"aug/opus4.8","providerId":"auggie","connectionId":"aaaaaaaa-1111-4222-8333-444455556666"}]}'
   _vcase "empty models array"                   refuse \
-    '{"name":"two/x","strategy":"priority","models":[]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[]}'
   _vcase "missing strategy (no silent default)" refuse \
-    '{"name":"two/x","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
+    '{"name":"'"$OWN"'x","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
   _vcase "unrecognised top-level key"           refuse \
-    '{"name":"two/x","strategy":"priority","evil":1,"models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","evil":1,"models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
   _vcase "protected combo name"                 refuse \
     '{"name":"hindsight/retain","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
   # These two prove the catalogue gates are reached through validate_spec, not only
   # when called directly. A gate that is unit-tested but unwired is worse than none.
   _vcase "spec with a WITHDRAWN member"         refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"ocgo/glm-5-deprecated","providerId":"opencode-go"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"ocgo/glm-5-deprecated","providerId":"opencode-go"}]}'
   _vcase "spec with a BLENDED member (prism-b)" refuse \
-    '{"name":"two/x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"aug/prism-b","providerId":"auggie"}]}'
+    '{"name":"'"$OWN"'x","strategy":"priority","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"},{"kind":"model","model":"aug/prism-b","providerId":"auggie"}]}'
 
   # ------------------------------------------- connection-binding drop-guard
   # The guard that stops an update from silently rebinding a leg. Tested through
@@ -2254,7 +2307,7 @@ PYFIX
   : > "$COMBO_ALLOWLIST_FILE"
   _case  "empty allowlist, previously-ok id"    refuse "ocgo/glm-5"
   _vcase "empty allowlist, previously-ok spec"  refuse \
-    '{"name":"two/ok","strategy":"fill-first","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
+    '{"name":"'"$OWN"'ok","strategy":"fill-first","models":[{"kind":"model","model":"ocgo/glm-5","providerId":"opencode-go"}]}'
 
   # ---------------------------------------------------------------- [RESOLVED-3]
   # Envelope handling. Asserted on EXIT STATUS, never on printed text: json_list_strict
