@@ -18,8 +18,15 @@ Tool: [`interaction_route.sh`](../interaction_route.sh) · Suite: `test_interact
 | **died without an answer** | **120** | **64%** |
 | answered or accepted | 18 | **9.6%** |
 
-Of the 49 pending right now, **46 cannot be resolved by any agent** — and only 3 of those 46 are
-blocked by the thing everyone assumed.
+Of the 49 pending right now, **36 cannot be resolved by any agent** — and most of those are blocked
+by something other than the thing everyone assumed.
+
+> This figure read **46** until 2026-08-25. That number predates correction 4 below (TOG-395): an
+> **unassigned** issue returns early at `:2792` and passes the assignee gate, so the 13 pending
+> `board_or_agents` rows sitting on unassigned issues are resolvable by an agent today. Re-derived
+> two independent ways, both giving 13 resolvable / 36 not: `interaction_route.sh check` run against
+> the live board, and a direct `jq` pass over all 189 interaction rows (TOG-396). **The tool was
+> right and this paragraph was stale** — if they disagree again, re-run the tool and fix the prose.
 
 ## The three corrections
 
@@ -49,6 +56,12 @@ came back with `effectiveResolverPolicy: board_or_agents`.
 ⚠️ The input field is **`resolverPolicy`**. It is *not* `requestedResolverPolicy` — that is the name
 the API *returns*, and passing it as input is **silently ignored with no validation error**, leaving
 you on the default.
+
+That trap is not specific to one key name: the create envelope is validated by a **non-strict** zod
+object, so *every* unknown key is stripped without an error. Run
+[`interaction_envelope_lint.sh`](../interaction_envelope_lint.sh) over the JSON before you POST it
+and it refuses the envelope instead. Root cause, live reproduction and the measured backlog impact
+are in [`interaction-envelope-strictness.md`](interaction-envelope-strictness.md) (TOG-396).
 
 ### 2. The gate that actually blocks us is the assignee gate, and it fires first.
 
