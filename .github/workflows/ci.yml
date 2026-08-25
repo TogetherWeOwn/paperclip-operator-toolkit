@@ -32,6 +32,10 @@ name: CI
 #                                       agent, or an operator runbook; and
 #                                       whether it could be answered at all
 #                                       once created — TOG-389
+#     test_operator_runbook.sh          whether a capability-bound ask was
+#                                       filed as a decision, and whether the
+#                                       runbook still matches the live owner
+#                                       queue — TOG-434
 #     test_reqrecord_shared.sh          whether the record layer duplicated
 #                                       between lib/reqrecord.sh and
 #                                       org_request_queue.sh has drifted — TOG-387
@@ -380,6 +384,33 @@ jobs:
       # arrive through *_CMD seams, so there is no database and no credential.
       - name: quota brake suite
         run: ./test_quota_brake.sh
+      # TOG-434. The rule: an action only a human can perform is a RUNBOOK
+      # LINE; a judgement only the owner may make is a DECISION. Filed the
+      # wrong way round, "please run these three root commands" renders as a
+      # decision awaiting judgement, nobody triages it as work, and it expires
+      # — 47 of 189 interactions have died that way. Of the 35 pending
+      # owner-only asks swept for TOG-434, 21 were requests for hands.
+      #
+      # The load-bearing half is `check`, not the rendering: it is what stops a
+      # new capability-bound ask joining the owner's queue unclassified. It
+      # fails silently if it is wrong, so §4 pins the fail-open case (empty or
+      # malformed input must NEVER read as a clean board — that bug was real
+      # and is fixed) and §6 deletes each branch of `check` from a staging copy
+      # to prove the test naming it goes red, baseline asserted first.
+      #
+      # This gate does NOT reach the board. `render` is a pure function of the
+      # checked-in classification file; `check` needs a live snapshot and is
+      # run by hand.
+      - name: operator runbook suite
+        run: ./test_operator_runbook.sh
+
+      # The committed runbook must be the one the generator produces. A
+      # hand-edit to docs/OPERATOR-RUNBOOK.md would otherwise drift away from
+      # the classification file that CI actually validates.
+      - name: operator runbook is regenerated, not hand-edited
+        run: |
+          ./operator_runbook.sh render > /tmp/runbook.regenerated.md
+          diff -u docs/OPERATOR-RUNBOOK.md /tmp/runbook.regenerated.md
 
       # TOG-387. lib/reqrecord.sh holds the decision record's invariants, and
       # org_request_queue.sh still holds its own copy of eight of them because
