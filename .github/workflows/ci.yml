@@ -368,6 +368,20 @@ jobs:
       - name: handoff-channel credential-scanner selftest
         run: ./dropchannel_scan.sh selftest
 
+      # TOG-385. The selftest above gained a block of cases that assert a
+      # credential rule DOES NOT fire. Those are the dangerous kind: a negative
+      # case is green both when the narrowing works and when the narrowing was
+      # never applied, so on its own it measures nothing. This step removes each
+      # limb of that narrowing from a throwaway copy and requires the NAMED case
+      # to go red — after asserting the unmutated copy is green in the same
+      # staging directory, without which the reds are unattributable.
+      #
+      # It earned its place while being written: two of the new positive cases
+      # were being satisfied by the guard NEXT DOOR rather than the one they
+      # were named for, and passed until this gate said which limb they covered.
+      - name: dropchannel_scan narrowing is not vacuous (mutation-gated)
+        run: ./verification/tog-385-mutation-gate.sh
+
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
       # difference changes what the plugin is ALLOWED TO DO. The host adopts a

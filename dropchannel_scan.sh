@@ -315,6 +315,22 @@ _aiza = "AI" + "za"
 _oma  = "o" + "ma_"
 _pem  = "-----" + "BEGIN"
 
+# The credential-named key half of the secret-assignment rule, named once because TWO
+# places need to agree on it: the rule itself, and the nested-value guard in
+# noncredential_value() below. Two copies of this alternation would drift, and the
+# direction it drifts in is silent: the guard stops recognising a key the rule still
+# matches, and a nested assignment under that key goes quiet without anyone deciding it.
+# No leading \b: the boundary is the bug. In `management_password` the char before
+# `pass` is `_`, which IS a word char, so \b never matched and the single most likely
+# real-world spelling sailed straight through. Caught by the selftest.
+CRED_KEY = (r"(?:pass(?:word|wd|phrase)|secret|api[_\-]?key|access[_\-]?key"
+            r"|private[_\-]?key|client[_\-]?secret|auth[_\-]?token|refresh[_\-]?token"
+            r"|id[_\-]?token|session[_\-]?token|credential)s?")
+CRED_ASSIGN_RE = re.compile(
+    r"(?i)" + CRED_KEY + r"(?![A-Za-z0-9])\s*[:=]\s*"
+    r"[\"']?(?P<val>[^\s\"',;]{8,})[\"']?")
+CRED_KEY_RE = re.compile(r"(?i)^" + CRED_KEY + r"$")
+
 RULES = [
     # id, tier, regex, description
     ("pem-private-key", "FAIL",
@@ -353,17 +369,7 @@ RULES = [
     ("bearer-header", "FAIL",
      re.compile(r"(?i)authorization\s*:\s*(?:bearer|basic)\s+" + B64S + r"{16,}"),
      "inline Authorization header with a value"),
-    ("secret-assignment", "FAIL",
-     # No leading \b: the boundary is the bug. In `management_password` the char before
-     # `pass` is `_`, which IS a word char, so \b never matched and the single most
-     # likely real-world spelling sailed straight through. Caught by the selftest.
-     re.compile(
-         r"(?i)(?:pass(?:word|wd|phrase)|secret|api[_\-]?key|access[_\-]?key"
-         r"|private[_\-]?key|client[_\-]?secret|auth[_\-]?token|refresh[_\-]?token"
-         r"|id[_\-]?token|session[_\-]?token|credential)s?"
-         r"(?![A-Za-z0-9])"
-         r"\s*[:=]\s*"
-         r"[\"']?(?P<val>[^\s\"',;]{8,})[\"']?"),
+    ("secret-assignment", "FAIL", CRED_ASSIGN_RE,
      "assignment to a credential-named key"),
 ]
 
@@ -437,6 +443,105 @@ def is_identifier(tok: str) -> bool:
         return False
     return True
 
+# --- value-shape gating for secret-assignment (TOG-385) -------------------------------
+# The rule fires on a credential-NAMED key followed by a value. The trigger is right —
+# `management_password` must fire — but "there is a value after the colon" is not the
+# same claim as "that value is a credential". A row in a probe RESULT table,
+#
+#     cc-headers + x-api-key            : http=200
+#
+# is a credential-named key, a colon, and an 8-character value, and there has never been
+# a secret on that line. It was the ONE FAIL on the live channel. FAIL is the exit-1
+# verdict the operator's cron reads, so the scanner was permanently red over a line with
+# nothing in it — and a detector that is always red is a muted detector.
+#
+# THE INVARIANT, and the reason the compound cases below are written as RECURSION rather
+# than as more patterns in PLACEHOLDER:
+#
+#     a compound value is exempt only when its PAYLOAD is exempt by the same base
+#     predicate — i.e. only when a direct assignment of that payload was already exempt.
+#
+# `x-api-key: http=200` goes quiet because `x-api-key: 200` was always quiet.
+# `x-api-key: token=<real key>` stays red because `x-api-key: <real key>` is red. No
+# case below can open a hole the base predicate did not already have, which is the whole
+# difference between narrowing a credential rule and weakening one.
+#
+# Deliberately NOT an exclusion by path, filename or extension. A real key pasted into a
+# findings document is precisely the disclosure this scanner exists to catch, so nothing
+# here may turn on "it is a markdown file".
+VARREF_RE = re.compile(r"^\$\{?[A-Za-z_]")
+# A k=v pair carried as a value: `http=200`, `rc=0`, `status=ok`. The payload group is
+# `.+` and not `.*` on purpose: with `.*`, base64 padding (`...c2VjcmV0=`) would parse as
+# a k=v with an EMPTY payload, and an empty payload is exempt — so every padded base64
+# secret would have exempted itself. That is the one way this shape could have gone
+# wrong, and it is pinned in the selftest.
+INNER_KV_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_.\-]{0,31})=(.+)$")
+URL_RE      = re.compile(r"(?i)^(?:https?|ftp|ftps|git|ssh|file|wss?)://(.+)$")
+# `@` is a URL delimiter and belongs in this split. It also keeps the userinfo guard
+# below HONEST: without it, `user:<pw>@host` stays one segment, no base case admits an
+# `@`, so that segment is credential-shaped whatever it holds and the guard would be
+# unreachable dead code that still reads like a control.
+URL_SEG_RE  = re.compile(r"[/?&#;=:@]")
+
+
+def noncredential_value(val: str, depth: int = 0) -> bool:
+    """True when this value is structurally incapable of being the secret the rule is
+    looking for. Read the invariant above before adding a case."""
+    if depth > 3:
+        # Fail closed. Nesting this deep is not a shape we are prepared to vouch for,
+        # and an unbounded recursion is its own denial-of-service.
+        return False
+    if len(val) < 8:
+        # Below the rule's own floor: the regex will not accept a value shorter than
+        # this at the top level, so a nested payload shorter than this cannot be what
+        # the rule would have caught either. At depth 0 this is unreachable.
+        return True
+
+    # --- base cases: unchanged behaviour, moved here so the compound cases can reuse it
+    if PLACEHOLDER.match(val) or PROSE.match(val):
+        return True
+    # A value that is itself a path or a bare word is documentation, not a credential.
+    # Both appear constantly in these runbooks.
+    if PATHY_RE.match(val) and not TOKEN_RE.fullmatch(val):
+        return True
+    if WORDY_RE.match(val):
+        return True
+    # `KEY="${KEY}"` — a reference to a value, not the value.
+    if VARREF_RE.match(val):
+        return True
+
+    # --- compound case: the value is itself an assignment
+    m = INNER_KV_RE.match(val)
+    if m:
+        inner_key, inner_val = m.group(1), m.group(2)
+        if CRED_KEY_RE.match(inner_key):
+            # A nested assignment whose OWN key is credential-named. The outer match has
+            # already consumed it, so finditer will never report it a second time, and
+            # recursing normally would drop that payload through the 8-char floor and
+            # lose it. Only a structural non-value is exempt here.
+            return bool(PLACEHOLDER.match(inner_val) or PROSE.match(inner_val)
+                        or VARREF_RE.match(inner_val))
+        return noncredential_value(inner_val, depth + 1)
+
+    # --- compound case: the value is a URL
+    m = URL_RE.match(val)
+    if m:
+        rest = m.group(1)
+        # maxsplit by KEYWORD: positional is deprecated in 3.13 and the warning goes to
+        # stderr, i.e. straight into the operator's cron mail, mid-report.
+        if "@" in re.split(r"[/?#]", rest, maxsplit=1)[0]:
+            # userinfo. `https://user:<token>@host` is a credential in a URL's clothing.
+            return False
+        if CRED_ASSIGN_RE.search(rest):
+            # `?access_token=...`. The outer match swallowed the whole URL, so this is
+            # the only chance to see it — finditer will not report it a second time.
+            return False
+        return all(noncredential_value(seg, depth + 1)
+                   for seg in URL_SEG_RE.split(rest) if seg)
+
+    return False
+
+
 def shannon(s: str) -> float:
     if not s:
         return 0.0
@@ -467,18 +572,8 @@ def scan_text(path, text, is_binary):
         for rule_id, tier, rx, desc in RULES:
             for m in rx.finditer(line):
                 val = m.groupdict().get("val") or m.group(0)
-                if rule_id == "secret-assignment":
-                    if PLACEHOLDER.match(val) or PROSE.match(val):
-                        continue
-                    # A value that is itself a path or a bare word is documentation,
-                    # not a credential. Both appear constantly in these runbooks.
-                    if PATHY_RE.match(val) and not TOKEN_RE.fullmatch(val):
-                        continue
-                    if WORDY_RE.match(val):
-                        continue
-                    # `KEY="${KEY}"` — a reference to a value, not the value.
-                    if re.match(r"^\$\{?[A-Za-z_]", val):
-                        continue
+                if rule_id == "secret-assignment" and noncredential_value(val):
+                    continue
                 record(tier, path, loc, rule_id, desc, val)
 
         # --- entropy sweep (REVIEW tier) ---------------------------------------------
@@ -888,6 +983,10 @@ cmd_selftest() {
   D10="$(printf '%s' {0..9})"
   local SK="s""k-" ANT="s""k-ant-" EY="e""yJ" GH="g""h" XOX="x""ox" AK="AK""IA" AZ="AI""za" OM="o""ma_"
   local PEMB="-----""BEGIN" AUTHZ="Authoriz""ation" PASSW="pass""word"
+  # TOG-385 fixtures. The KEY is what has to be fragmented here, not the value: a
+  # positive case for secret-assignment is by construction a live assignment, so spelling
+  # the key literally makes this file flag itself and breaks the self-scan pair below.
+  local XAK="x-api-""key" APIK="api_""key" CSEC="client_""secret" STOK="session_""token"
   local BLOB="${A26U:0:8}${D10:2:5}${A26:9:9}${A26U:14:6}${D10:0:4}"   # 32 chars, high entropy
 
   _rule "openai-style key"        openai-style-key       "OPENAI_KEY=${SK}${A26}${D10:0:6}"
@@ -929,6 +1028,44 @@ cmd_selftest() {
         "blob ${A26U:0:1}${A26:16:1}${A26:23:1}${A26U:25:1}${A26:1:1}${A26U:22:1}${A26:15:1}${A26U:11:1}${A26:13:1}${A26U:17:1}${A26:19:1}${A26U:21:1}${A26:2:1}${A26U:24:1}${A26:20:1}${A26U:8:1}${A26:14:1}${A26U:15:1}${A26:3:1}${A26U:5:1}${A26:7:1}${A26U:9:1}${A26:10:1}${A26U:12:1}${A26:11:1}"
   _rule "secret glued to a word by _ still fires"    openai-style-key \
         "prefix_${SK}${A26}${D10:0:6}"
+
+  echo "=== TOG-385: value shape, not just key name — the false positive ==="
+  # The literal line from TOG-153-teamclaude-omniroute-findings.md:102 that made the
+  # channel cron permanently red. A probe RESULT table, not an assignment.
+  _clean "probe result table: x-api-key : http=200" \
+         "cc-headers + x-api-key            : http=200"
+  _clean "k=v value with a word payload"    "api_key: status=notfound"
+  _clean "bare number value"                "client_secret: 1234567890"
+  _clean "URL value with a port"            "x-api-key : https://omniroute.internal:20129/v1/models"
+  _clean "URL value with a benign query"    "access_key: https://h.example/v1/list?page=2&sort=name"
+
+  echo "=== TOG-385: ...and the narrowing must not cost a single real catch ==="
+  # This half is the point. Every case below is a shape the narrowing COULD have
+  # swallowed, and each is written so that ONLY secret-assignment can produce the
+  # verdict — the payloads are under the entropy sweep's 24-char floor and match no
+  # prefix rule, so a green here cannot be the neighbouring rule covering for this one.
+  _rule "the reported key itself, with a real value" secret-assignment \
+        "${XAK}: hunter2-correct-horse"
+  _rule "k=v whose payload IS credential-shaped"     secret-assignment \
+        "${XAK} : token=hunter2-correct"
+  _rule "inner key is credential-named too"          secret-assignment \
+        "credential: ${PASSW}=hunter2"
+  _rule "base64 padding is not an empty k=v"         secret-assignment \
+        "${CSEC}: dGhpc2lzYTZzZWNyZXQ="
+  # These two payloads are deliberately PURE ALPHABETIC, which the base predicate
+  # exempts (WORDY_RE) and the entropy sweep ignores at under 24 chars. That is the
+  # point: with a payload the base predicate already catches, these cases would be
+  # satisfied by the segment recursion next door and would prove nothing about the two
+  # guards they are named for. Position is the whole signal here — userinfo and a
+  # credential-named query parameter are credentials whatever shape they arrive in.
+  _rule "URL carrying a token query parameter"       secret-assignment \
+        "${APIK}: https://h.example/cb?${STOK}=correcthorsebattery"
+  _rule "URL with userinfo is a credential in a URL" secret-assignment \
+        "${APIK}: https://user:correcthorse@h.example/v1"
+  _rule "URL carrying an opaque query parameter"     secret-assignment \
+        "${XAK} : https://h.example/cb?t=hunter2-correct"
+  _rule "nesting past the depth cap fails CLOSED"    secret-assignment \
+        "${XAK} : a=b=c=d=e=hunter2-correct"
 
   echo "=== fail-closed behaviour — an unreadable or oversized file is a FAIL ==="
   local d1="$tmp/unreadable"; mkdir -p "$d1"; echo "harmless" > "$d1/secret.txt"; chmod 0000 "$d1/secret.txt"
