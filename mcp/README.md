@@ -140,10 +140,30 @@ appears in the server source.
 | Tool | Arguments | Becomes |
 |---|---|---|
 | `submit_provisioning_request` | `template`, `title`, `rationale?`, `supersedes?` | `submit --requester <authenticated agent> …` |
-| `review_provisioning_request` | `request_id`, `decision`, `reason?` | `review --reviewer <authenticated agent> …` |
+| `review_provisioning_request` | `request_id`, `decision`, `reason?`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
 
 `--requester` and `--reviewer` are written by the server from the authenticated
 principal, every time. They are structurally unreachable from tool input.
+
+**Safer-alternative-first (TOG-388).** The last three properties are not optional
+extras. The queue *refuses* a denial carrying neither `alternatives` nor
+`no_safer_alternative`, and refuses to grant a risky template without
+`alternatives_considered`. They are declared here because this transport enforces
+its own schema — an undeclared key is refused, not dropped — so leaving them out
+would leave every agent reviewer hitting a refusal it had no way to satisfy: fail
+closed, but a hard block on the only sanctioned agent path to the queue.
+
+`alternatives_considered` is an array of `{alternative, why_it_failed}` **objects**
+rather than two parallel arrays, and the server emits each pair adjacently as
+`--considered X --because Y`. That shape is the control: two parallel arrays could
+arrive at different lengths and silently pair alternative 1 with reason 2,
+producing a record that is fully populated and entirely wrong — worse than a
+missing one, because it reads as diligence to the auditor whose job is to read it.
+
+This layer validates **shape** (type, length, pairing, no leading `-`, no NUL);
+`org_request_queue.sh` validates **policy**. Re-implementing the policy here would
+give the queue two enforcement points that can disagree, and the one an agent
+reaches would be the weaker of the two.
 
 **Unknown arguments are refused, not dropped.** Each schema says
 `additionalProperties: false`, and since TOG-341 that is *enforced* rather than

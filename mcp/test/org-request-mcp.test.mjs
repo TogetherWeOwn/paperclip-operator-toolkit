@@ -226,8 +226,32 @@ const EVERY_ARGUMENT = {
   submit_provisioning_request: {
     template: "E4_AUDIT_ANALYST", title: "audit analyst", rationale: "because", supersedes: "REQ-004",
   },
-  review_provisioning_request: { request_id: "REQ-004", decision: "approve", reason: "fine" },
+  review_provisioning_request: {
+    request_id: "REQ-004", decision: "approve", reason: "fine",
+    // TOG-388. These are policy-exclusive at the CLI — a denial cannot carry
+    // both `alternatives` and `no_safer_alternative`, and an approval carries
+    // neither — but buildQueueArgs deliberately enforces SHAPE and not POLICY,
+    // so one fixture carrying all of them is the right way to prove that every
+    // advertised property reaches the argv.
+    alternatives: ["broker it instead"],
+    no_safer_alternative: "nothing narrower reaches the connection API",
+    alternatives_considered: [{ alternative: "read-only access", why_it_failed: "the drift is a write" }],
+  },
 };
+
+// Every leaf string a fixture carries, in order. TOG-388 gave one tool array-
+// and object-valued properties, and the flat `argv.includes(value)` this used
+// to do would have compared an argv of strings against an Array and an Object
+// — never equal, so the assertion would have failed for the wrong reason, or
+// (had it been written with a truthiness guard) passed without checking
+// anything. Flattening keeps the question the same: did every value the caller
+// supplied actually reach the command line, or was some of it silently dropped?
+function leafStrings(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(leafStrings);
+  if (value !== null && typeof value === "object") return Object.values(value).flatMap(leafStrings);
+  return [];
+}
 
 test("every property a schema advertises is actually read onto the queue's argv", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
@@ -241,13 +265,108 @@ test("every property a schema advertises is actually read onto the queue's argv"
     const argv = buildQueueArgs(tool.name, args, identity);
     for (const [name, value] of Object.entries(args)) {
       // `decision` is the one property that becomes a flag rather than a value.
-      const expected = name === "decision" ? "--approve" : value;
+      const expected = name === "decision" ? ["--approve"] : leafStrings(value);
       assert.ok(
-        argv.includes(expected),
-        `${tool.name} advertises '${name}' but nothing puts it on the argv — it is silently dropped`,
+        expected.length > 0,
+        `${tool.name}: the fixture for '${name}' carries no string to look for, so this case checks nothing`,
       );
+      for (const leaf of expected) {
+        assert.ok(
+          argv.includes(leaf),
+          `${tool.name} advertises '${name}' but '${leaf}' never reaches the argv — it is silently dropped`,
+        );
+      }
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// TOG-388: the safer-alternatives arguments, and the one property of them that
+// a flat "did it reach the argv" check cannot see.
+//
+// The CLI requires `--because` to IMMEDIATELY follow its `--considered`. If
+// this transport emitted the alternatives and the reasons as two runs of flags,
+// every value would still be present on the argv — the test above would pass —
+// and the queue would pair alternative 1 with reason 2. That produces a record
+// that is fully populated and entirely wrong, which is worse than a missing one
+// because it reads as diligence. Adjacency is therefore asserted directly.
+test("TOG-388: considered/because pairs reach the argv ADJACENTLY, never as two runs", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  const argv = buildQueueArgs("review_provisioning_request", {
+    request_id: "REQ-009", decision: "approve", reason: "measured",
+    alternatives_considered: [
+      { alternative: "alt-one", why_it_failed: "why-one" },
+      { alternative: "alt-two", why_it_failed: "why-two" },
+    ],
+  }, identity);
+  const tail = argv.slice(argv.indexOf("--considered"));
+  assert.deepEqual(tail, [
+    "--considered", "alt-one", "--because", "why-one",
+    "--considered", "alt-two", "--because", "why-two",
+  ], "the pairs must interleave; two runs of flags would mis-pair every entry after the first");
+});
+
+test("TOG-388: a denial's alternatives and no-safer finding reach the argv", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  assert.deepEqual(
+    buildQueueArgs("review_provisioning_request", {
+      request_id: "REQ-010", decision: "reject", reason: "too broad",
+      alternatives: ["narrower template", "broker the operation"],
+    }, identity),
+    ["review", "--reviewer", CALLER, "--request", "REQ-010", "--reject", "--reason", "too broad",
+     "--alternative", "narrower template", "--alternative", "broker the operation"],
+  );
+  assert.deepEqual(
+    buildQueueArgs("review_provisioning_request", {
+      request_id: "REQ-011", decision: "reject", reason: "no route",
+      no_safer_alternative: "every narrower grant leaves the work blocked",
+    }, identity),
+    ["review", "--reviewer", CALLER, "--request", "REQ-011", "--reject", "--reason", "no route",
+     "--no-safer-alternative", "every narrower grant leaves the work blocked"],
+  );
+});
+
+test("TOG-388: a malformed alternatives_considered entry is refused, not partially built", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  const build = (considered) => () => buildQueueArgs("review_provisioning_request", {
+    request_id: "REQ-012", decision: "approve", reason: "r", alternatives_considered: considered,
+  }, identity);
+  // The nested schema also says additionalProperties:false, and nothing else
+  // walks into the array to enforce that claim.
+  assert.throws(build([{ alternative: "a", why_it_failed: "b", reviewer: "someone-else" }]), /not a field/);
+  assert.throws(build([{ alternative: "a" }]), /required/);
+  assert.throws(build([{ why_it_failed: "b" }]), /required/);
+  assert.throws(build(["a string, not a pair"]), /must be an object/);
+  assert.throws(build("not an array"), /must be an array/);
+  assert.throws(build(Array.from({ length: 11 }, () => ({ alternative: "a", why_it_failed: "b" }))), /at most 10/);
+});
+
+test("TOG-388: a flag-shaped value in the new fields is refused, like every other free-text field", () => {
+  // The transport's existing free-text rule — a value may not begin with '-' —
+  // has to reach INSIDE the new array and object properties, not just the flat
+  // string ones. It does, because they route through checkStringArg like
+  // everything else; this pins that they were not given a private path around
+  // it. Two layers agree here and the redundancy is deliberate: execFile takes
+  // the argv array directly so nothing is re-parsed by a shell, and the CLI
+  // consumes the token after each flag positionally — but relying on a
+  // downstream parser's `shift 2` is a load-bearing assumption about someone
+  // else's code, which is the reason the rule exists at all.
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  const build = (args) => () => buildQueueArgs("review_provisioning_request",
+    { request_id: "REQ-013", decision: "reject", reason: "r", ...args }, identity);
+  assert.throws(build({ alternatives: ["--approve"] }), /may not begin with '-'/);
+  assert.throws(build({ no_safer_alternative: "--approve" }), /may not begin with '-'/);
+  assert.throws(
+    build({ alternatives_considered: [{ alternative: "--approve", why_it_failed: "b" }] }),
+    /may not begin with '-'/,
+  );
+  assert.throws(
+    build({ alternatives_considered: [{ alternative: "a", why_it_failed: "--approve" }] }),
+    /may not begin with '-'/,
+  );
+  // And the NUL rule reaches in too — bash reads NUL-terminated argv, so an
+  // embedded NUL would truncate the alternative the requester is meant to read.
+  assert.throws(build({ alternatives: ["safe er"] }), /NUL byte/);
 });
 
 test("review is invoked with the authenticated principal as --reviewer", async () => {

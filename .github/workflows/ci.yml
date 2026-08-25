@@ -1899,6 +1899,37 @@ jobs:
             "PAPERCLIP_DB_CTR: cfg.dbContainer," \
             "PAPERCLIP_DB_CTR: cfg.dbContainer, ...cfg.queueEnv," || rc=1
 
+          # TOG-388. Pair each alternative with the NEXT entry's failure reason.
+          # This is the mutation the obvious test cannot see: every value the
+          # caller supplied still reaches the argv, so a "did anything get
+          # dropped" assertion stays green, and the queue records alternative 1
+          # as having failed for reason 2. The result is a safer-alternatives
+          # record that is fully populated and entirely wrong — worse than a
+          # missing one, because it reads as diligence to the auditor whose
+          # whole job is to read it.
+          mcp_mutation_check "considered-paired-with-the-wrong-reason" \
+            'argv.push("--considered", alternative, "--because", whyItFailed);' \
+            'argv.push("--considered", alternative, "--because", considered[(index + 1) % considered.length].why_it_failed);' || rc=1
+
+          # Drop the safer-alternatives arguments on the floor. Their absence is
+          # INVISIBLE at this layer: the queue refuses the decision either way,
+          # so the transport looks fine while every agent reviewer is simply
+          # unable to decide anything. Both halves of the denial path, because
+          # they fail independently.
+          mcp_mutation_check "safer-alternatives-never-reach-the-cli" \
+            'argv.push("--alternative", alternative);' \
+            'void alternative;' || rc=1
+          mcp_mutation_check "no-safer-finding-dropped" \
+            'if (noSafer) argv.push("--no-safer-alternative", noSafer);' \
+            'if (false) argv.push("--no-safer-alternative", noSafer);' || rc=1
+
+          # The nested schema also says additionalProperties:false, and nothing
+          # else walks into the array to enforce it — the top-level
+          # assertKnownArguments only sees `alternatives_considered` itself.
+          mcp_mutation_check "nested-additionalProperties-unenforced" \
+            'const unknown = Object.keys(entry).find((key) => key !== "alternative" && key !== "why_it_failed");' \
+            'const unknown = undefined;' || rc=1
+
           exit $rc
 
       # The transport must never grow a path to the provisioner. This is a

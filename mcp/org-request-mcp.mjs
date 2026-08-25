@@ -498,6 +498,47 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log and readable by the requester, who may answer it.",
           maxLength: 4000,
         },
+        // SAFER-ALTERNATIVE-FIRST (TOG-388). These are not optional extras: the
+        // queue REFUSES a denial that carries neither `alternatives` nor
+        // `no_safer_alternative`, and refuses to grant a risky template without
+        // `alternatives_considered`. They are declared here because this
+        // transport enforces its own inputSchema — a key it does not declare is
+        // refused, not dropped — so omitting them would leave every agent
+        // reviewer hitting a refusal it had no way to satisfy. Fail-closed, but
+        // a hard block on the only sanctioned agent path to the queue.
+        alternatives: {
+          type: "array",
+          maxItems: 10,
+          items: { type: "string", maxLength: 4000 },
+          description:
+            "REJECT only. Safer routes that still FULLY unblock the requester's work. A denial must carry at "
+            + "least one of these or `no_safer_alternative`. These reach the requester, so write them as "
+            + "instructions someone can act on, not as categories.",
+        },
+        no_safer_alternative: {
+          type: "string",
+          maxLength: 4000,
+          description:
+            "REJECT only, and mutually exclusive with `alternatives`. The explicit finding that nothing safer "
+            + "would unblock this work — what you considered and why none of it works. On a risky ask this "
+            + "becomes an OPEN audit item until an independent auditor closes it.",
+        },
+        alternatives_considered: {
+          type: "array",
+          maxItems: 10,
+          description:
+            "APPROVE only. Required when the requested template is risky. Each entry is a safer route you "
+            + "weighed and the reason it did not fully unblock the work. This is the record the owner audits.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["alternative", "why_it_failed"],
+            properties: {
+              alternative:    { type: "string", maxLength: 4000, description: "The safer route you weighed." },
+              why_it_failed:  { type: "string", maxLength: 4000, description: "Why it did not fully unblock the work." },
+            },
+          },
+        },
       },
     },
   },
@@ -586,6 +627,55 @@ export function buildQueueArgs(toolName, args, identity) {
     ];
     const reason = optionalStringArg(args, "reason", null, 4000);
     if (reason) argv.push("--reason", reason);
+
+    // --- safer-alternative-first (TOG-388) --------------------------------
+    // Passed through to the CLI, which is where the RULE lives. Nothing here
+    // decides whether a decision is allowed: this transport validates SHAPE
+    // (string, length, pairing) and the queue validates POLICY (a denial needs
+    // one of the two, a risky grant needs the considered list). Re-implementing
+    // the policy here would give the queue two enforcement points that can
+    // disagree, and the one an agent reaches would be the weaker of the two.
+    //
+    // Values are never interpolated into a shell — execFile takes this argv
+    // array directly — so an entry beginning with `--` is consumed as the value
+    // of the flag that precedes it, not as a flag of its own.
+    for (const alternative of optionalStringArrayArg(args, "alternatives", 10, 4000)) {
+      argv.push("--alternative", alternative);
+    }
+    const noSafer = optionalStringArg(args, "no_safer_alternative", null, 4000);
+    if (noSafer) argv.push("--no-safer-alternative", noSafer);
+
+    // The pair is emitted ADJACENTLY because the CLI requires it: `--because`
+    // must immediately follow its `--considered`. Building the argv from one
+    // list of objects is what makes a mismatched pairing unrepresentable rather
+    // than merely discouraged — two parallel arrays over the wire could arrive
+    // at different lengths and silently pair alternative 1 with reason 2.
+    const considered = args.alternatives_considered;
+    if (considered !== undefined && considered !== null) {
+      if (!Array.isArray(considered)) {
+        throw new HttpError(400, "invalid_argument", "'alternatives_considered' must be an array");
+      }
+      if (considered.length > 10) {
+        throw new HttpError(400, "invalid_argument", "'alternatives_considered' accepts at most 10 entries");
+      }
+      considered.forEach((entry, index) => {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+          throw new HttpError(400, "invalid_argument",
+            `'alternatives_considered[${index}]' must be an object with 'alternative' and 'why_it_failed'`);
+        }
+        // Same rule as assertKnownArguments, one level down: the nested schema
+        // also says additionalProperties:false, and that claim is enforced here
+        // because nothing else walks into the array to enforce it.
+        const unknown = Object.keys(entry).find((key) => key !== "alternative" && key !== "why_it_failed");
+        if (unknown !== undefined) {
+          throw new HttpError(400, "unknown_argument",
+            `'${unknown}' is not a field of alternatives_considered[${index}]. Accepted: alternative, why_it_failed.`);
+        }
+        const alternative = requireStringArg(entry, "alternative", null, 4000);
+        const whyItFailed = requireStringArg(entry, "why_it_failed", null, 4000);
+        argv.push("--considered", alternative, "--because", whyItFailed);
+      });
+    }
     return argv;
   }
 
@@ -610,6 +700,27 @@ function optionalStringArg(args, name, pattern, maxLength) {
     throw new HttpError(400, "invalid_argument", `'${name}' must be a string`);
   }
   return checkStringArg(name, value, pattern, maxLength);
+}
+
+// An optional array of strings, validated element by element. Returns [] when
+// absent, so callers can iterate unconditionally. Bounded on BOTH axes: an
+// unbounded array is an unbounded argv, and execve has a hard limit that would
+// surface as an opaque E2BIG from the CLI rather than as an argument error here.
+function optionalStringArrayArg(args, name, maxItems, maxLength) {
+  const value = args[name];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new HttpError(400, "invalid_argument", `'${name}' must be an array of strings`);
+  }
+  if (value.length > maxItems) {
+    throw new HttpError(400, "invalid_argument", `'${name}' accepts at most ${maxItems} entries`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.length === 0) {
+      throw new HttpError(400, "invalid_argument", `'${name}[${index}]' must be a non-empty string`);
+    }
+    return checkStringArg(`${name}[${index}]`, entry, null, maxLength);
+  });
 }
 
 function checkStringArg(name, value, pattern, maxLength) {
