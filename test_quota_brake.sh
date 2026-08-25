@@ -360,6 +360,91 @@ check "8d  zero refusals from a WORKING source is exit 0" "$rc" "0"
 
 # ===========================================================================
 echo
+echo "== 9. the throttled export (TOG-401) =="
+#
+# This is what makes `throttled` distinguishable from `disabled` outside the
+# operator's host. `queue_liveness.sh` consumes it, so two properties are
+# load-bearing and neither is obvious from the happy path:
+#
+#   * an EMPTY export is a positive claim ("nobody is braked") that licenses
+#     the consumer to report a dormant agent as deliberately disabled, so it
+#     may only ever be produced by a source that actually answered; and
+#   * a FAILED read must therefore leave no export behind at all, including
+#     any export a previous run wrote.
+
+# A braked agent (baseline present) alongside three that are not. `a4` is
+# dormant-but-unbraked, which is exactly the row the consumer will call
+# `disabled` on the strength of this export.
+cat > "$WORK/roster_mixed.sh" <<EOF
+#!/usr/bin/env bash
+printf 'a1\tBulk Worker\tidle\ttrue\t1\t20\t0\t%s\n' '$CFG_BRAKED'
+printf 'a2\tChief of Staff to Owner\trunning\ttrue\t1\t\t0\t%s\n' '$CFG_COS'
+printf 'a4\tDormant One\tpaused\tfalse\t20\t\t0\t%s\n' '$CFG_PLAIN'
+EOF
+chmod +x "$WORK/roster_mixed.sh"
+
+out="$(ROSTER_SOURCE_CMD="$WORK/roster_mixed.sh" "$BRAKE" throttled 2>/dev/null)"; rc=$?
+check "9a  export exits 0" "$rc" "0"
+check "9b  ONLY the agent with a baseline is exported" "$(jq -r 'keys|join(",")' <<<"$out")" "a1"
+check "9c  the exported entry carries the level"      "$(jq -r '.a1.level' <<<"$out")" "LEVEL3"
+check "9d  ...and the baseline, as a NUMBER"          "$(jq -r '.a1.baseline|tostring + ":" + type' <<<"$out")" "20:number"
+check "9e  ...and the current cap"                    "$(jq -r '.a1.cap' <<<"$out")" "1"
+# The shape queue_liveness.sh parses: an object keyed by agent id.
+check "9f  the document is an object keyed by agent id" "$(jq -r 'type' <<<"$out")" "object"
+
+# The marker is the BASELINE, not a low cap. `a2` sits at maxConcurrentRuns=1
+# — identical to a LEVEL3 cap — but was never braked, and must not appear.
+# Without this, an agent legitimately configured at 1 reads throttled forever.
+case "$(jq -r 'has("a2")' <<<"$out")" in
+  false) ok "9g  a low cap WITHOUT a baseline is not throttled" ;;
+  *)     bad "9g  a low cap WITHOUT a baseline is not throttled" "$out" ;;
+esac
+
+# BASELINE for 9b/9g: a roster with nothing braked yields a real empty answer,
+# not an error. This is the state the whole board is in most of the time, and
+# it is what lets the consumer say `disabled` instead of `undetermined`.
+out="$(ROSTER_SOURCE_CMD="$WORK/roster_std.sh" "$BRAKE" throttled 2>/dev/null)"; rc=$?
+check "9h  BASELINE nothing braked is exit 0..." "$rc" "0"
+check "9h2 ...and an empty OBJECT, not an error" "$out" "{}"
+
+# THE ONE THAT MATTERS. An unreadable roster must be exit 5 with no document.
+# Emitting `{}` here would tell the consumer "nobody is throttled" on the
+# strength of a failed read, and every dormant agent on the board would harden
+# from `undetermined` into `disabled`.
+out="$(ROSTER_SOURCE_CMD="false" "$BRAKE" throttled 2>/dev/null)"; rc=$?
+check "9i  an unreadable roster is exit 5 (UNKNOWN)" "$rc" "5"
+check "9i2 ...and emits NOTHING, never '{}'" "$out" ""
+
+# A source that exits 0 with no rows is the same failure wearing a better
+# face: it did not read the roster either.
+out="$(ROSTER_SOURCE_CMD="true" "$BRAKE" throttled 2>/dev/null)"; rc=$?
+check "9j  an EMPTY roster is exit 5, not 'nobody is braked'" "$rc" "5"
+check "9j2 ...and emits NOTHING" "$out" ""
+
+# --out, and the same refusal through it. A stale export left behind by a
+# failed run is worse than no export: it is confidently wrong.
+EXPORT="$WORK/throttled_export.json"
+ROSTER_SOURCE_CMD="$WORK/roster_mixed.sh" "$BRAKE" throttled --out "$EXPORT" >/dev/null 2>&1
+check "9k  --out writes the document" "$(jq -r 'keys|join(",")' "$EXPORT" 2>/dev/null)" "a1"
+ROSTER_SOURCE_CMD="false" "$BRAKE" throttled --out "$EXPORT" >/dev/null 2>&1
+check "9l  a FAILED --out leaves the previous export untouched" "$(jq -r 'keys|join(",")' "$EXPORT" 2>/dev/null)" "a1"
+case "$(ls "$WORK"/throttled_export.json.tmp.* 2>/dev/null)" in
+  '') ok "9m  no temp file is left behind" ;;
+  *)  bad "9m  no temp file is left behind" "$(ls "$WORK"/throttled_export.json.tmp.* 2>/dev/null)" ;;
+esac
+
+# The export is a READ. It must never reach the agent write path, whatever the
+# pace signal says — `plan`/`apply` are the only things allowed to write agents.
+: > "$WORK/captured.tsv"
+PACE_SOURCE_CMD="cat $WORK/pace_hot.json" AGENT_WRITE_CMD="$WORK/capture.sh" CAPTURE_FILE="$WORK/captured.tsv" \
+  ROSTER_SOURCE_CMD="$WORK/roster_mixed.sh" "$BRAKE" throttled >/dev/null 2>&1
+check "9n  the export writes no agent" "$(wc -l < "$WORK/captured.tsv" | tr -d ' ')" "0"
+
+rc=0; (ROSTER_SOURCE_CMD="$WORK/roster_mixed.sh" "$BRAKE" throttled --bogus) >/dev/null 2>&1 || rc=$?
+check "9o  an unknown flag is refused (exit 2)" "$rc" "2"
+
+# ===========================================================================
+echo
 echo "passed: $PASS   failed: $FAIL"
 (( FAIL == 0 )) || exit 1
 # A suite that asserted nothing must not report success — the same rule the

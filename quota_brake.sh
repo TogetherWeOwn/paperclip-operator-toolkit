@@ -165,8 +165,10 @@ quota_brake.sh — hold weekly quota to pace without ever disabling an agent.
   restore   --yes              return every braked agent to baseline (state-free)
   verify                       assert no agent is unwakeable  (0 ok, 3 VIOLATION, 5 unmeasured)
   refusals  [--since-min N]    the loud metric                (0 quiet, 3 ALARM, 5 unmeasured)
+  throttled [--out FILE]       export the braked set as JSON  (0 ok, 5 unmeasured)
 
-`plan` is the default and NOTHING WRITES WITHOUT --yes.
+`plan` is the default and NOTHING WRITES WITHOUT --yes. `throttled` is a read;
+`--out` writes only the export file it is given, never an agent.
 
 Environment:
   PACE_SOURCE_CMD / ROSTER_SOURCE_CMD / AGENT_WRITE_CMD / REFUSAL_SOURCE_CMD
@@ -595,6 +597,99 @@ cmd_restore() {
 }
 
 # ---------------------------------------------------------------------------
+# throttled — the export TOG-401 asked for, from the source TOG-419 created.
+#
+# TOG-401 was filed against the OLD brake, which disabled agents and kept its
+# restore list in `~/.paperclip/quota-pacer-throttled.json` on the operator's
+# host. Nothing in an agent container could read that file, so `throttled` and
+# `disabled` were indistinguishable and `queue_liveness.sh` had to report
+# `undetermined` for every dormant agent on the board.
+#
+# The issue offered two fixes and preferred the second: "the pacer recording
+# the CAUSE on the record that already exists rather than in a second source
+# that has to be joined." Rule 2 of this tool did exactly that for a different
+# reason — the baseline had to survive a crash, so it went into the agent's own
+# `runtime_config.heartbeat.quotaBrake`. That makes the throttled set already
+# durable, already per-agent, and already readable by anything that can read an
+# agent. This subcommand does not create a new source of truth; it PROJECTS the
+# existing one into the shape the consumer already parses.
+#
+# `quotaBrake.baseline` is the marker, not `level` and not the cap:
+#   * it is written by the same PATCH that lowers `maxConcurrentRuns`, and
+#   * it is DELETED by `restore_body()` the moment the agent is put back.
+# So its presence means "braked and not yet restored" with no clock, no TTL and
+# nothing to expire. A cap that merely happens to equal a low number is not
+# evidence of anything — an agent legitimately configured at 1 would read as
+# throttled forever.
+#
+# THE FAILURE MODE THIS GUARDS. An empty export is a LOAD-BEARING claim: it
+# tells the consumer "nobody is throttled", which licenses it to report a
+# dormant agent as deliberately `disabled`. So an unreadable roster must exit 5
+# and write NOTHING — never `{}`. Emitting an empty object on a failed read
+# would harden every dormant agent into "someone switched this off", which is
+# the precise mislabelling TOG-390 refused to make in the first place.
+cmd_throttled() {
+  local out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out) out="${2:-}"; [[ -n "$out" ]] || die "--out needs a path"; shift 2;;
+      *) die "unknown argument: $1";;
+    esac
+  done
+  need jq
+  local roster
+  roster="$(read_roster)" || unknown "cannot read the roster; exported nothing. An absent export is 'unknown'; an EMPTY one would be read as 'nobody is throttled'."
+  [[ -n "$roster" ]] || unknown "roster empty; exported nothing. Zero throttled out of zero examined is 'never ran', not 'nobody is braked'."
+
+  local body n
+  body="$(throttled_json "$roster")" || unknown "could not render the throttled set; exported nothing."
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$body" \
+    || unknown "rendered export is not a JSON object; exported nothing."
+  n="$(jq -r 'length' <<<"$body")"
+
+  if [[ -n "$out" ]]; then
+    # Atomic: a consumer polling this path sees the old set or the new one,
+    # never a half-written file that jq would reject as `undetermined`. Same
+    # directory, so the rename cannot cross a filesystem boundary.
+    local tmp="$out.tmp.$$"
+    printf '%s\n' "$body" > "$tmp" || die "cannot write $tmp"
+    mv -f "$tmp" "$out" || die "cannot install $out"
+    echo "wrote $out" >&2
+  else
+    printf '%s\n' "$body"
+  fi
+  echo "throttled: $n" >&2
+  return 0
+}
+
+# Pure function over the roster TSV, so the suite can test the projection
+# without a roster source at all. Emits an object keyed by agent id — the
+# `type=="object"` shape `queue_liveness.sh` already accepts.
+throttled_json() {
+  local roster="$1"
+  local id name status wod mcr baseline crit cfg line level
+  {
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      IFS=$'\x1f' read -r id name status wod mcr baseline crit cfg <<<"${line//$'\t'/$'\x1f'}"
+      # Not braked, or a baseline this tool did not write. Either way it is not
+      # in the set, and a non-numeric baseline is skipped rather than guessed.
+      [[ "$baseline" =~ ^[0-9]+$ ]] || continue
+      level="$(jq -r '.heartbeat.quotaBrake.level // ""' <<<"${cfg:-\{\}}" 2>/dev/null)" || level=""
+      jq -nc --arg id "$id" --arg name "$name" --arg level "$level" \
+             --arg cap "$mcr" --arg baseline "$baseline" --arg status "$status" '
+        { ($id): { agentId: $id,
+                   name: $name,
+                   status: $status,
+                   level: $level,
+                   cap: ($cap | if . == "" then null else (tonumber? // null) end),
+                   baseline: ($baseline | tonumber),
+                   tool: "quota_brake.sh" } }' || return 1
+    done < <(printf '%s\n' "$roster")
+  } | jq -s 'add // {}'
+}
+
+# ---------------------------------------------------------------------------
 # verify — the acceptance check the issue asks for: "query wakeOnDemand across
 # the roster while the brake is engaged".
 #
@@ -711,6 +806,7 @@ case "${1:-plan}" in
   restore)  shift; cmd_restore "$@";;
   verify)   shift || true; cmd_verify "$@";;
   refusals) shift; cmd_refusals "$@";;
+  throttled) shift; cmd_throttled "$@";;
   -h|--help|help) usage;;
   *) usage; exit 2;;
 esac

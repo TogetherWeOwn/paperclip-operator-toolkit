@@ -39,6 +39,15 @@ PASS=0; FAIL=0
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# HERMETIC BY DEFAULT (TOG-401). The tool's second discriminator defaults to
+# `quota_brake.sh throttled`, which reaches for Postgres. Left at its default,
+# every `QUOTA_PACER_THROTTLE_FILE=/nonexistent` assertion below would be
+# asserting "undetermined" only because THIS box has no database — and would
+# quietly start answering, and possibly flipping, on a box that does. Pinned
+# empty here so "no file" really means "no discriminator at all"; §3b sets it
+# deliberately and is the only place it is non-empty.
+export THROTTLE_SOURCE_CMD=""
+
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 
@@ -116,6 +125,95 @@ assert_verdict "no pacer file => 'undetermined', NOT 'disabled'" 4 dormant undet
 printf 'not json at all\n' > "$THROTTLE"
 out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE="$THROTTLE" "$TOOL" probe --agent A9)"; rc=$?
 assert_verdict "an unparseable pacer file => 'undetermined'" 4 dormant undetermined "$out" "$rc"
+
+echo "== 3b. the second discriminator: the brake's own throttle export (TOG-401) =="
+
+# A stand-in for `quota_brake.sh throttled`. The real one is exercised by
+# test_quota_brake.sh §9; what is pinned HERE is that queue_liveness consumes
+# the shape, honours the precedence, and degrades the right way.
+mk_throttle_cmd() {
+  local f="$WORK/throttlecmd_$$_$RANDOM.sh"
+  { echo '#!/usr/bin/env bash'; printf '%s\n' "$1"; } > "$f"
+  chmod +x "$f"; printf '%s' "$f"
+}
+
+OBJ='{"A20":{"agentId":"A20","name":"Braked One","level":"LEVEL3","cap":1,"baseline":20,"tool":"quota_brake.sh"}}'
+
+# THE ACCEPTANCE CRITERION, first half. With no host pacer file at all — the
+# state every agent container is in — a throttled agent is now named as
+# throttled instead of reading `undetermined`.
+TCMD="$(mk_throttle_cmd "printf '%s\n' '$OBJ'")"
+SRC="$(mk_source false 2026-08-24T04:00:00Z 10 10)"
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A20)"; rc=$?
+assert_verdict "3b1 a disabled agent IN the brake export is 'throttled'" 4 dormant throttled "$out" "$rc"
+
+# THE ACCEPTANCE CRITERION, second half — and the one that has to be earned.
+# `disabled` is only allowed because a source ANSWERED and did not name this
+# agent. Same command, same shape, different agent.
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A21)"; rc=$?
+assert_verdict "3b2 a disabled agent ABSENT from a working export is 'disabled'" 4 dormant disabled "$out" "$rc"
+
+# THE FAILURE THAT MATTERS MOST. A source that exits non-zero must NOT be read
+# as an empty set — an empty set means "nobody is throttled", which licenses
+# 3b2's `disabled`. A broken brake must produce `undetermined`, i.e. it must be
+# indistinguishable from having no source at all.
+TCMD_DEAD="$(mk_throttle_cmd 'echo "boom" >&2; exit 5')"
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD_DEAD" "$TOOL" probe --agent A22)"; rc=$?
+assert_verdict "3b3 a FAILING export is 'undetermined', never 'disabled'" 4 dormant undetermined "$out" "$rc"
+
+# A source that exits 0 with nothing on stdout is the same claim as a crash:
+# it did not answer. Distinct from 3b5, where it answered "nobody".
+TCMD_MUTE="$(mk_throttle_cmd 'exit 0')"
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD_MUTE" "$TOOL" probe --agent A23)"; rc=$?
+assert_verdict "3b4 a SILENT export (exit 0, no output) is 'undetermined'" 4 dormant undetermined "$out" "$rc"
+
+# BASELINE for 3b3/3b4, so those two cannot pass merely because everything in
+# this section reads undetermined. An explicit empty object is a real answer.
+TCMD_EMPTY="$(mk_throttle_cmd "printf '{}\n'")"
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD_EMPTY" "$TOOL" probe --agent A24)"; rc=$?
+assert_verdict "3b5 BASELINE an EMPTY export is a real answer: 'disabled'" 4 dormant disabled "$out" "$rc"
+
+# PRECEDENCE. A readable file wins, so the seam the acceptance criterion names
+# as the integration point still overrides everything. The file says this agent
+# is not throttled; the command says it is. The file must win.
+PFILE="$WORK/precedence.json"
+printf '["SOMEONE_ELSE"]\n' > "$PFILE"
+out="$(LIVENESS_SOURCE_CMD="$SRC" QUOTA_PACER_THROTTLE_FILE="$PFILE" THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A20)"; rc=$?
+assert_verdict "3b6 a readable FILE outranks the command" 4 dormant disabled "$out" "$rc"
+
+echo "== 3c. throttling is no longer dormancy (TOG-419 changed the mechanism) =="
+
+# THE SHAPE THAT ACTUALLY OCCURS NOW. The brake may not write
+# wakeOnDemand=false; it lowers maxConcurrentRuns and leaves the agent
+# wakeable. So a throttled agent has wakeOnDemand=true, and the tool must call
+# it REACHABLE — its wakes are queued and drained, not refused — while still
+# naming the cause `throttled` so nobody reassigns its work over a quota brake.
+SRC_OK="$(mk_source true 2026-08-25T04:00:00Z 0 12)"
+out="$(LIVENESS_SOURCE_CMD="$SRC_OK" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A20)"; rc=$?
+assert_verdict "3c1 a concurrency-throttled agent is REACHABLE, cause 'throttled'" 0 reachable throttled "$out" "$rc"
+
+# BASELINE: the same wakeable agent absent from the export is unremarkable. If
+# 3c1 passed because every wakeable agent now reads `throttled`, this fails.
+out="$(LIVENESS_SOURCE_CMD="$SRC_OK" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A25)"; rc=$?
+assert_verdict "3c2 BASELINE a wakeable agent NOT in the export is unremarkable" 0 reachable wake_on_demand_enabled "$out" "$rc"
+
+# Recorded refusals still outrank everything, including a throttle marker. An
+# agent the brake claims it is merely pacing, which the platform is in fact
+# refusing to wake, is dormant. The throttle lookup must not launder that.
+SRC_REFUSED="$(mk_source true 2026-08-24T04:00:00Z 500 500)"
+out="$(LIVENESS_SOURCE_CMD="$SRC_REFUSED" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A20)"; rc=$?
+assert_verdict "3c3 observed refusals outrank a 'throttled' marker" 4 dormant refused_despite_enabled_flag "$out" "$rc"
+
+# --explain must not silently lose the distinction it exists to draw.
+out="$(LIVENESS_SOURCE_CMD="$SRC_OK" QUOTA_PACER_THROTTLE_FILE=/nonexistent THROTTLE_SOURCE_CMD="$TCMD" "$TOOL" probe --agent A20 --explain 2>&1)"
+case "$out" in
+  *"still REACHABLE"*) ok "3c4 --explain says a throttled agent is still reachable" ;;
+  *) bad "3c4 --explain says a throttled agent is still reachable" "$out" ;;
+esac
+case "$out" in
+  *"LEVEL3"*) ok "3c5 --explain surfaces the brake level from the export" ;;
+  *) bad "3c5 --explain surfaces the brake level from the export" "$out" ;;
+esac
 
 echo "== 4. the alarm fires on a request routed at a dormant reviewer =="
 

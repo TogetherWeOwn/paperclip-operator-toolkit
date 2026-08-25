@@ -37,12 +37,27 @@
 #    A throttled agent and a switched-off agent are byte-identical in
 #    `agent_wakeup_requests`: same reason, same status=skipped, same
 #    trigger_detail=system, and no payload key distinguishes them (measured
-#    across all 51,837 rows). The only discriminator is the pacer's throttle
-#    file, which lives on the host and is NOT readable from an agent
-#    container. So when that file is absent the cause is reported
-#    `undetermined` and never guessed. Calling a throttled agent "disabled"
-#    invites someone to reassign its work permanently because a quota brake
-#    tripped for ten minutes.
+#    across all 51,837 rows). So the cause is read from a throttle source or
+#    reported `undetermined` — never guessed. Calling a throttled agent
+#    "disabled" invites someone to reassign its work permanently because a
+#    quota brake tripped for ten minutes.
+#
+#    TOG-401 CLOSED THE GAP BY MOVING THE BRAKE, NOT BY LOOSENING THIS RULE.
+#    When this file shipped, the only discriminator was the host pacer's
+#    `~/.paperclip/quota-pacer-throttled.json`, unreadable from a container, so
+#    every dormant agent read `undetermined`. TOG-419 then replaced that pacer
+#    with a brake that (a) may not disable an agent at all and (b) records its
+#    throttle marker in the agent's own `runtime_config`. `quota_brake.sh
+#    throttled` projects that set into the same JSON shape, and
+#    `THROTTLE_SOURCE_CMD` reads it. Two consequences worth stating plainly:
+#      * `disabled` is now a MEASURED cause. It fires only when a source
+#        answered and did not name the agent — and since the brake is barred
+#        from writing `wakeOnDemand=false`, that means a human turned it off.
+#      * `throttled` now normally arrives on a REACHABLE agent, because
+#        throttling lowers concurrency instead of refusing wakes. See the
+#        `true` branch of probe.
+#    `undetermined` did not go away and must not: both sources silent still
+#    means we could not tell, and that is still not a synonym for "disabled".
 #
 # 3. A CHECK THAT MEASURED NOTHING MUST NOT EXIT GREEN.
 #    If the liveness source cannot be reached, `alarm` exits 5 (UNKNOWN), not
@@ -102,12 +117,27 @@ WAKE_LOOKBACK_HOURS="${WAKE_LOOKBACK_HOURS:-24}"
 # rather than a default — see probe_verdict.
 LIVENESS_SOURCE_CMD="${LIVENESS_SOURCE_CMD:-}"
 
-# The throttled/disabled discriminator. The quota pacer writes the set of
-# agents it has throttled and intends to restore; without it the two states
-# cannot be told apart (see rule 2). Host-side path, so it is a seam and its
-# absence is a supported, honest state — not an error, and not a licence to
-# guess.
+# The throttled/disabled discriminator (TOG-401). Two sources, file first.
+#
+# The FILE is the original seam: the old host-side pacer's restore list at
+# `~/.paperclip/quota-pacer-throttled.json`. It is kept, first, and unchanged —
+# an operator who has such a file, or a monitor fed a snapshot of one, must
+# keep working, and pointing this variable at any producer of the same JSON is
+# still the whole integration.
+#
+# The COMMAND is the source that actually exists on this company now. That
+# host-side pacer stopped disabling agents at 2026-08-25T09:27:55Z (measured:
+# zero `heartbeat.wakeOnDemand.disabled` rows since, and zero non-terminated
+# agents carrying `wakeOnDemand=false`); TOG-419 replaced it with a brake that
+# writes its throttle marker into each agent's OWN record. `quota_brake.sh
+# throttled` projects that into this file's shape.
+#
+# File first, deliberately: an explicitly configured discriminator outranks a
+# derived one, and it keeps the seam the acceptance criterion names as the
+# integration point. A source that is unreadable, unparseable, or absent still
+# yields `undetermined` — see rule 2. Neither source is ever a licence to guess.
 QUOTA_PACER_THROTTLE_FILE="${QUOTA_PACER_THROTTLE_FILE:-$HOME/.paperclip/quota-pacer-throttled.json}"
+THROTTLE_SOURCE_CMD="${THROTTLE_SOURCE_CMD:-$HERE/quota_brake.sh throttled}"
 
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 
@@ -156,27 +186,69 @@ read_liveness() {
 }
 
 # ---------------------------------------------------------------------------
-# Is this agent one the pacer throttled — i.e. expected back — or is it off?
+# The throttle document, from the file if there is one, otherwise from the
+# command. Fails (non-zero, no output) when neither can produce anything.
+#
+# MEMOISED ON DISK, not in a variable. `throttle_state` is called from inside
+# `$( )` in the probe, and the probe itself runs once per agent under `alarm`
+# and `precondition` — a shell variable set in a subshell is discarded, so a
+# 47-agent alarm would shell out to the brake (and through it to Postgres) 47
+# times. The cache is keyed on `$$`, which bash keeps pointing at the top-level
+# process even inside command substitution, so every subshell of one invocation
+# shares one read. An empty cache file is a NEGATIVE result cached: both
+# sources already failed once and re-asking cannot change that within a run.
+THROTTLE_CACHE="${TMPDIR:-/tmp}/.queue_liveness_throttle.$$"
+trap 'rm -f "$THROTTLE_CACHE"' EXIT
+
+throttle_json() {
+  if [[ ! -e "$THROTTLE_CACHE" ]]; then
+    if [[ -n "$QUOTA_PACER_THROTTLE_FILE" && -r "$QUOTA_PACER_THROTTLE_FILE" ]]; then
+      cat "$QUOTA_PACER_THROTTLE_FILE" > "$THROTTLE_CACHE" 2>/dev/null || : > "$THROTTLE_CACHE"
+    elif [[ -n "$THROTTLE_SOURCE_CMD" ]]; then
+      # stderr is dropped: the brake reports its own counts there, and a
+      # discriminator lookup must not narrate over the probe's output.
+      $THROTTLE_SOURCE_CMD 2>/dev/null > "$THROTTLE_CACHE" || : > "$THROTTLE_CACHE"
+    else
+      : > "$THROTTLE_CACHE"
+    fi
+  fi
+  [[ -s "$THROTTLE_CACHE" ]] || return 1
+  cat "$THROTTLE_CACHE"
+}
+
+# Is this agent one the brake throttled — i.e. expected back — or is it off?
 #
 # Returns: throttled | not_throttled | undetermined
 # `undetermined` is load-bearing. See rule 2.
 throttle_state() {
-  local aid="$1"
-  [[ -n "$QUOTA_PACER_THROTTLE_FILE" && -r "$QUOTA_PACER_THROTTLE_FILE" ]] || { echo undetermined; return 0; }
-  # Accept either a bare array of ids or an object keyed by id; both shapes
-  # have been described and neither has been verifiable from here. A file we
-  # cannot parse is undetermined, NOT not_throttled — an unreadable
-  # discriminator must not silently harden into "definitely disabled".
+  local aid="$1" doc
+  doc="$(throttle_json)" || { echo undetermined; return 0; }
+  # Accept either a bare array of ids or an object keyed by id. The array
+  # shape was the old host pacer's; `quota_brake.sh throttled` emits the
+  # object. A document we cannot parse is undetermined, NOT not_throttled — an
+  # unreadable discriminator must not silently harden into "definitely
+  # disabled".
   local hit
   hit="$(jq -r --arg a "$aid" '
       if type=="array" then (map(select(. == $a or (type=="object" and .agentId == $a))) | length)
       elif type=="object" then (if has($a) then 1 else 0 end)
-      else "x" end' "$QUOTA_PACER_THROTTLE_FILE" 2>/dev/null)"
+      else "x" end' <<<"$doc" 2>/dev/null)"
   case "$hit" in
     0) echo not_throttled ;;
     ''|x|null) echo undetermined ;;
     *) if [[ "$hit" =~ ^[0-9]+$ ]] && (( hit > 0 )); then echo throttled; else echo undetermined; fi ;;
   esac
+}
+
+# The human-readable half of the same lookup, for --explain only. Empty when
+# there is nothing to say; never affects a verdict.
+throttle_detail() {
+  local aid="$1" doc
+  doc="$(throttle_json)" || return 0
+  jq -r --arg a "$aid" '
+      if type=="object" and (has($a)) and ((.[$a]|type) == "object") then
+        (.[$a] | "level=\(.level // "?") cap=\(.cap // "?") baseline=\(.baseline // "?")")
+      else "" end' <<<"$doc" 2>/dev/null || return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -221,7 +293,27 @@ cmd_probe() {
   local verdict cause
   case "$wod" in
     true)
-      verdict=reachable; cause=wake_on_demand_enabled ;;
+      verdict=reachable; cause=wake_on_demand_enabled
+      # TOG-401. A throttled agent arrives HERE now, not in the `false` branch.
+      # The brake that disabled agents is gone; TOG-419's replacement lowers
+      # `maxConcurrentRuns` and is mechanically forbidden from touching
+      # wakeability (`assert_policy_preserved`, quota_brake.sh). So throttling
+      # no longer looks like dormancy at all.
+      #
+      # The verdict stays `reachable`, and that is not a downgrade of the
+      # finding — it is the finding. A concurrency-throttled agent's wakes are
+      # QUEUED, not refused (`enqueueWakeup` returns `{kind:"queued"}`), and
+      # they drain when a slot frees. Routing a decision at it works. Calling
+      # that `dormant` would be the same false alarm as calling a throttled
+      # agent `disabled`, pointed the other way, and it would make `alarm`
+      # scream every time the brake did its job.
+      #
+      # The CAUSE still changes to `throttled`, because "reachable, but its
+      # work is being paced — expect latency, not silence" is a different
+      # operational fact from "reachable and running free", and it is the one
+      # TOG-401 exists to surface.
+      [[ "$(throttle_state "$agent")" == throttled ]] && cause=throttled
+      ;;
     false)
       verdict=dormant
       case "$(throttle_state "$agent")" in
@@ -265,12 +357,23 @@ cmd_probe() {
       echo "  verdict          : $verdict ($cause)"
       case "$cause" in
         undetermined)
-          echo "  NOTE: cannot tell throttled from disabled. The discriminator is the pacer's"
-          echo "        throttle file ($QUOTA_PACER_THROTTLE_FILE), which is not readable here."
+          echo "  NOTE: cannot tell throttled from disabled. Neither discriminator answered —"
+          echo "        file  : $QUOTA_PACER_THROTTLE_FILE (absent or unparseable)"
+          echo "        source: ${THROTTLE_SOURCE_CMD:-<unset>} (produced nothing)"
           echo "        Reporting 'undetermined' rather than guessing 'disabled'." ;;
+        disabled)
+          echo "  NOTE: the throttle source answered, and this agent is NOT in it. The brake is"
+          echo "        mechanically barred from writing wakeOnDemand=false, so this was set"
+          echo "        deliberately — it will not lift on its own. 'disabled' here is measured,"
+          echo "        not assumed: an unreadable source would have said 'undetermined'." ;;
         throttled)
-          echo "  NOTE: the quota brake throttled this agent and intends to restore it."
-          echo "        Do NOT reassign its work permanently on the strength of this." ;;
+          local td; td="$(throttle_detail "$agent")"
+          echo "  NOTE: the quota brake throttled this agent and intends to restore it.${td:+  [$td]}"
+          echo "        Do NOT reassign its work permanently on the strength of this."
+          if [[ "$verdict" == reachable ]]; then
+            echo "        It is still REACHABLE: throttling now lowers maxConcurrentRuns, so wakes"
+            echo "        are queued and drained, never refused. Expect latency, not silence."
+          fi ;;
       esac
     } >&2
   fi
@@ -435,7 +538,10 @@ queue_liveness.sh — is the agent we are about to route a decision at able to r
 
 Environment:
   LIVENESS_SOURCE_CMD        override the liveness reader (test seam; agent id on argv, TSV out)
-  QUOTA_PACER_THROTTLE_FILE  throttled-vs-disabled discriminator; absent => cause 'undetermined'
+  QUOTA_PACER_THROTTLE_FILE  throttled-vs-disabled discriminator, tried FIRST
+  THROTTLE_SOURCE_CMD        fallback discriminator when that file is absent
+                             (default: ./quota_brake.sh throttled). Both silent
+                             => cause 'undetermined'; neither is ever guessed at
   STALL_HOURS                default stall threshold (12)
   WAKE_LOOKBACK_HOURS        window for counting refused wakes (24)
   QUEUE                      request queue jsonl

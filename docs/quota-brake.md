@@ -141,6 +141,59 @@ memory of having braked, because the restore target travels with the object it d
 agent bakes the throttled value in as "normal", and each cycle then ratchets the agent
 permanently downward — invisible in a single run and fatal over a week.
 
+## The throttle export: telling "throttled" from "disabled" (TOG-401)
+
+TOG-401 was filed against the *old* brake and asked for the throttled set to be published
+somewhere an agent could read, because a throttled agent and a switched-off one were
+byte-identical in `agent_wakeup_requests` — same `reason`, same `status=skipped`, same
+`trigger_detail`, across all 51,837 rows. The only discriminator was the host pacer's state
+file above, unreadable from a container, so `queue_liveness.sh` reported `undetermined` for
+every dormant agent on the board.
+
+The issue offered two fixes and preferred the second — *"the pacer recording the cause on the
+record that already exists rather than in a second source that has to be joined."* State-free
+restoration had already done exactly that, for an unrelated reason. So the throttled set is
+**already** durable, per-agent, and readable by anything that can read an agent; `throttled`
+does not create a new source of truth, it projects the existing one into the shape
+`queue_liveness.sh` already parses:
+
+```console
+$ quota_brake.sh throttled
+{"a1":{"agentId":"a1","name":"Bulk Worker","status":"idle",
+       "level":"LEVEL3","cap":1,"baseline":20,"tool":"quota_brake.sh"}}
+```
+
+`--out FILE` writes it atomically (temp + rename) for a consumer that polls a path.
+
+**`quotaBrake.baseline` is the marker — not the level, and not a low cap.** It is written by the
+same PATCH that lowers concurrency and *deleted* by `restore`, so its presence means "braked and
+not yet restored" with no clock and nothing to expire. Keying on a low `maxConcurrentRuns`
+instead would read an agent legitimately configured at 1 as throttled forever.
+
+**An empty export is a positive claim, so it may only come from a source that answered.** `{}`
+tells the consumer "nobody is braked", which licenses it to report a dormant agent as
+deliberately `disabled`. An unreadable or empty roster therefore exits 5 and writes *nothing* —
+never `{}`, and never over a previous export. Pinned by §9i–9l of the suite.
+
+### What changed for the consumer
+
+`queue_liveness.sh` tries `QUOTA_PACER_THROTTLE_FILE` first — unchanged, so an operator holding
+a real pacer file keeps working — and falls back to `THROTTLE_SOURCE_CMD`, default
+`quota_brake.sh throttled`. Three consequences:
+
+- **`disabled` became a measured cause.** It fires only when a source answered and did not name
+  the agent. Since `assert_policy_preserved` bars the brake from writing `wakeOnDemand=false`,
+  that now means a human switched it off and it will not lift on its own.
+- **`throttled` normally arrives on a `reachable` agent.** Throttling lowers concurrency instead
+  of refusing wakes, so a braked agent's wakes are queued and drained. The verdict stays
+  `reachable` — calling it `dormant` would make `alarm` scream every time the brake did its job
+  — while the cause says `throttled`, i.e. *expect latency, not silence*.
+- **`undetermined` did not go away.** Both sources silent still means we could not tell, and
+  that is still not a synonym for `disabled`.
+
+Recorded refusals continue to outrank a throttle marker: an agent the brake claims it is merely
+pacing, whose wakes the platform is in fact discarding, is reported `dormant`.
+
 ## `runtimeConfig` is REPLACED, not merged
 
 Measured during development, because the obvious assumption is the opposite:
