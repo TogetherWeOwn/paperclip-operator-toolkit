@@ -8,9 +8,25 @@
 #
 #     409 Refusing to mint: no repository scope could be derived
 #
-# which is harmless while `GH_APP_TOKEN_SOURCE=auto` still falls back to the
-# PEM, and terminal the moment the PEM is unbound. TOG-226 item 3 says to
-# "re-run the count before each unbind". This is that count, as a command.
+# That 409 is TERMINAL RIGHT NOW, not "once the PEM is unbound". This header
+# used to say it was "harmless while GH_APP_TOKEN_SOURCE=auto still falls back
+# to the PEM". That is false and it has cost two issues (TOG-246, TOG-394)
+# their premise. A 409 is a definitive refusal, and `acquire()` in
+# gh-app-token.js retries only `retryable` broker failures — `res.status === 404
+# || res.status >= 500`. On a 409 it dies with "This is a definitive refusal,
+# not an outage, so the GH_APP_PRIVATE_KEY fallback is deliberately not
+# attempted." Measured 2026-08-25 against a stub broker, with a 503 control that
+# DID reach the fallback branch, so the 409 is attributably the cause.
+#
+# Read that consequence carefully, because it inverts the usual reading of this
+# script's output: residue is a set of issues that are ALREADY BROKEN, not a
+# list of things that will break at the next unbind. Do not defer it to the
+# unbind window. Correspondingly, this count does not gate
+# `GH_APP_TOKEN_SOURCE=broker` — that pin lives on the project env and there is
+# no company-level env layer, so a project-less run never reads it and the pin
+# cannot make this worse. The count gates the UNBIND, which is what TOG-226
+# item 3 actually says: "re-run the count before each unbind". This is that
+# count, as a command.
 #
 # IT IS A STANDING CHECK, NOT A ONE-OFF. The 2026-08-23 sweep drove the
 # residue to zero. Within five hours it was four again — TOG-289 and TOG-290
