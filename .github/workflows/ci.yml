@@ -108,8 +108,18 @@ jobs:
           # `*.sh` glob does not descend, and acceptance_live.sh is a script the
           # OPERATOR runs on the VPS — a parse error there surfaces in front of
           # a human doing an install, which is the worst place to find one.
-          for f in *.sh lib/*.sh mcp/deploy/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # omniroute/*.sh is included for exactly that reason and no other
+          # (TOG-371). Every script in there is operator-run against a management
+          # surface no runner can reach, so this parse gate is the ONLY automated
+          # check they will ever get. Do not read a green build as "a
+          # registration would succeed"; see omniroute/README.md.
+          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
+          # The repo's first Python. Same argument as the shell gate above: these
+          # are operator-run and have no suite, so a parse error would otherwise
+          # be found by a human mid-install.
+          for f in omniroute/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          rm -rf omniroute/__pycache__
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
           for f in mcp/*.mjs mcp/test/*.mjs; do
