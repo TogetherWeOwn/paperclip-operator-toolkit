@@ -26,6 +26,69 @@ breaking something.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once. Tests pin exit codes; they must not pin human-readable message text, which drifts.
 
+## Before you implement, and again before you push: check for a sibling run
+
+**Run `./sibling_guard.sh <ISSUE-KEY>` twice — once before writing anything, once immediately before
+every `git push`. Treat a non-zero exit as a stop.**
+
+```bash
+./sibling_guard.sh TOG-345                     # before you implement
+./sibling_guard.sh TOG-345 --phase=prepush     # immediately before every push
+```
+
+| exit | meaning | what to do |
+|---|---|---|
+| 0 | clear — all three detectors ran, none found a sibling | carry on |
+| 1 | a sibling was found | read the report; do not implement or push |
+| 3 | **indeterminate** — a detector could not run | **not a pass.** Fix what it names, or proceed knowing you are unguarded |
+| 2 | usage error | fix the invocation |
+
+**Why this is a required step and not a suggestion.** Two runs of one agent have implemented one
+issue end to end, independently, twice: TOG-253 (PRs #15 and #16) and TOG-258 (PRs #27 and #28). In
+both cases one PR merged and the other was closed as a duplicate. Each incident cost a full
+implementation and a full CI cycle.
+
+**Why "I checked" was not enough on TOG-258.** The losing run did check. It used the two signals a
+shell in this container makes obvious, and both of them lie:
+
+- `ps -eo pid,etime,args` **returns nothing in the agent container** — not even the calling process.
+  Sibling runs live in other containers. An empty process list carries no information at all, and
+  reads exactly like "no sibling running". This is the main trap, and the reason `sibling_guard.sh`
+  never consults the process table.
+- **Worktree file mtimes** were minutes old. That is normal for a live run parked on a CI poll or a
+  model call — which is precisely what it was. A `+` marker in `git worktree list` does not
+  discriminate either: a dead run leaves one behind.
+
+**Why once is not enough.** At the moment the losing run started, the winning run had not pushed
+anything. A correct start-time check would still have come back clear. The sibling landed *during*
+the loser's CI wait, so the check has to be repeated immediately before pushing — that is what
+`--phase=prepush` is for, and it adds the test that matters most at that point: is your work already
+an ancestor of `origin/main`?
+
+**Why three detectors.** None of them sees the whole picture:
+
+- **control-plane** — `GET /api/issues/{id}/runs`. The only *leading* signal: it reports a sibling
+  that has committed nothing, pushed nothing and opened nothing. Note that this route is **not
+  issue-exclusive** (measured 2026-08-25: a run holding the shared workspace's environment lease
+  appears in the run list of every issue in the company), so the guard filters on `agentId` and
+  reports a foreign agent's run without calling it a duplicate.
+- **local refs** — branch refs are shared across every worktree of one clone, so a sibling's commits
+  are visible the moment they commit. This is the only signal for work that is *finished but never
+  pushed*; on TOG-339 the complete fix sat as a local commit while the remote said nothing existed.
+- **remote** — pushed branch, open PR, and the already-landed ancestor test. Lagging, but the only
+  one that survives the sibling working in a different clone.
+
+**The checkout claim is not one of them, and does not make this unnecessary.** A `PATCH
+/api/issues/{id}` that 409s naming the holder is a real oracle for *another agent's* run. It does not
+cover this case: a newer run of the same agent takes the checkout from the older one and the older
+run keeps executing, so the newer run reads its own id and sees nothing wrong. That is half-blind in
+exactly the direction that produced TOG-258.
+
+**When the guard finds one.** Verify what already exists rather than re-implementing it. If a
+sibling's commit is correct, push *that exact SHA* — a late push from the sibling is then a no-op
+fast-forward rather than a conflict. Do not open a second PR for work an open PR already covers: diff
+against it and contribute the difference, or nothing.
+
 ## Branch and review
 
 Work on a branch, open a pull request, never push to `main`.

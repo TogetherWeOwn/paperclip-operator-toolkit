@@ -658,6 +658,19 @@ jobs:
       - name: fail-closed CI status suite
         run: ./test_gh_ci_status.sh
 
+      # TOG-345. Whether two runs of one agent can implement one issue twice.
+      # They can, and did — TOG-253 (#15/#16) and TOG-258 (#27/#28), each a full
+      # wasted implementation plus a full CI cycle. The losing run on TOG-258
+      # had checked: `ps` is silently empty in the agent container for every
+      # process including the caller's own, and worktree mtimes lag a live run
+      # parked on a CI poll. Both said "nothing", and "nothing" was read as
+      # "nothing found". So most of this suite is about the guard refusing to
+      # report CLEAR while any detector could not run. Offline: real git against
+      # a local bare origin, plus one stub on 127.0.0.1 serving both the
+      # Paperclip and the GitHub API. No credential, nothing leaves loopback.
+      - name: sibling-run guard suite
+        run: ./test_sibling_guard.sh
+
       # TOG-212. Whether the copy of a tool that RUNS is the copy that is
       # REVIEWED. The suite fabricates a throwaway git repo and a "deployed"
       # directory in mktemp, so it needs no VPS, no network and no credential.
@@ -2114,6 +2127,85 @@ jobs:
           #    field's instability re-created in our own code.
           brake_mutation "min-window-ignored" 'cannot derive; it falls back' \
             "$(printf 'elif (($dt_days * 24) < $mw) then\x1felif false then')" || rc=1
+          exit $rc
+
+      # TOG-345. The sibling guard's whole value is the THIRD exit state. Two
+      # states — found / not found — is what the losing run on TOG-258 had, and
+      # it reported "not found" from two signals that carry no information in
+      # this container. Every mutation below reintroduces one way of collapsing
+      # that back to two, or of making the guard so noisy it gets skipped, and
+      # each names the assertion that must go red — a bare "the suite failed" is
+      # not attribution.
+      #
+      # `blind-reads-clear` is the one that matters: it is the original defect
+      # exactly, moved into a script where it would be trusted rather than
+      # doubted. `any-live-run-is-a-sibling` is the opposite failure and just as
+      # fatal in practice — measured 2026-08-25, /api/issues/{id}/runs is NOT
+      # issue-exclusive (a run holding the shared workspace's environment lease
+      # shows up on every issue in the company), so without the agentId filter
+      # the guard fires everywhere and nobody runs it twice.
+      - name: Prove the sibling guard still detects each undeserved green
+        run: |
+          set -uo pipefail
+          rc=0
+          sibling_mutation() {
+            local label="$1" expect="$2"; shift 2
+            local mut; mut="$(mktemp -d)"
+            cp sibling_guard.sh test_sibling_guard.sh "$mut/"
+
+            # Baseline first. Without it "the mutated suite failed" is
+            # unattributable, which is how two gates in this repo sat vacuous
+            # for months before TOG-253 found them.
+            if ! (cd "$mut" && ./test_sibling_guard.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_sibling_guard.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/sibling_guard.sh"; done
+            if cmp -s sibling_guard.sh "$mut/sibling_guard.sh"; then
+              echo "::error::$label: the edit changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! bash -n "$mut/sibling_guard.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            local out status
+            out="$(cd "$mut" && ./test_sibling_guard.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the sibling guard suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # 1. THE ORIGINAL DEFECT. A detector that could not run scored as a
+          #    pass. This is `ps` returning nothing, in a script.
+          sibling_mutation "blind-reads-clear" 'missing PAPERCLIP_API_KEY exits 3, not 0' \
+            's/VERDICT="indeterminate"; CODE=3/VERDICT="indeterminate"; CODE=0/' || rc=1
+          # 2. A found sibling downgraded to "inconclusive" because something
+          #    else was blind. Exit 3 reads as "try again", and try-again is a
+          #    push.
+          sibling_mutation "blindness-outranks-a-finding" 'sibling found while another detector is blind still exits 1' \
+            's/^if \[\[ "${#FINDINGS\[@\]}" -gt 0 \]\]; then VERDICT="sibling"; CODE=1; fi$/if [[ "${#FINDINGS[@]}" -gt 0 ]]; then VERDICT="sibling"; CODE=1; fi; if [[ "${#BLIND[@]}" -gt 0 ]]; then VERDICT="indeterminate"; CODE=3; fi/' || rc=1
+          # 3. The agentId filter dropped: fires on the workspace-lease row,
+          #    i.e. on every issue in the company, i.e. gets turned off.
+          sibling_mutation "any-live-run-is-a-sibling" 'live run on my issue is not a sibling verdict' \
+            's/const kind = (r.agentId === myAgent) ? "SIBLING" : "FOREIGN"/const kind = "SIBLING"/' || rc=1
+          # 4. History counted as a sibling. A cancelled row carries a null
+          #    finishedAt, so "not finished" alone is not the liveness test.
+          sibling_mutation "terminal-status-ignored" 'terminal status with a null finishedAt is not a sibling' \
+            's/const TERMINAL = new Set(\[[^]]*\])/const TERMINAL = new Set([])/' || rc=1
+          # 5. The already-landed test run at start, where HEAD sits on
+          #    origin/main by definition. Fires on everything; gets skipped.
+          sibling_mutation "ancestor-test-at-start" 'at start, a HEAD sitting on origin/main is not already-landed' \
+            's/^  if \[\[ "$PHASE" == "prepush" \]\]; then$/  if true; then/' || rc=1
           exit $rc
 
       # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
