@@ -186,25 +186,121 @@ against live data, reported a $1.40/month spend approval, a credential placement
 as agent-resolvable. An over-permissive verdict here does not cost a 403 — it invites an agent to
 approve something owner-reserved.
 
-## The unused path worth adopting: agent-to-agent review approval
+## The path to use for every PR approval: agent-to-agent review approval
 
 `:2956` bypasses the `board_or_agents` check, so **a `board_only` `request_confirmation` IS
-agent-resolvable** when all of:
+agent-resolvable** — this is the platform's built-in code-review approval flow, and it had been used
+**twice, ever** before TOG-433. It is what "approve my green PR" should use instead of a confirmation
+the owner cannot evaluate, and merging your own green, revertible work is explicitly not
+owner-reserved in the first place.
 
-- `issue.status == "in_review"`, and
-- the confirmation was named as `reviewInteractionId` on the transition into `in_review` — it must be
-  a pending non-tool confirmation created by that same run (`routes/issues.js:2356-2369`), and
-- the resolver is the assignee and is not the author, and
-- `issue.reviewPolicy` allows it: `anyone` (default) · `not_creator` · `human_only`
+There are two halves, enforced in different files. Get the first half wrong and the second half can
+never pass, for anyone, forever.
+
+### Half 1 — arming, at the transition into `in_review`
+
+`assertAgentInReviewReviewPath`, `routes/issues.js:2348-2374`. The named confirmation must satisfy:
+
+```js
+interaction.id               === input.reviewInteractionId
+interaction.status           === "pending"
+interaction.kind             === "request_confirmation" || "request_checkbox_confirmation"
+interaction.createdByAgentId === input.actorAgentId   // same agent, and
+interaction.sourceRunId      === input.actorRunId     // ...the SAME RUN
+&& no `toolAction` key in the payload
+```
+
+Two consequences that decide how you must work:
+
+- ⚠️ **The function returns early at `:2352` when `existing.status === "in_review"`.** Arming is a
+  *transition*, not a state. An issue already sitting in `in_review` cannot be armed in place — you
+  must move it out and back in.
+- ⚠️ **`sourceRunId === actorRunId` means a stale approval card is dead, not slow.** Once the run
+  that created it has ended, *no actor can ever bind it* — not another agent, not the board, not its
+  own author on a later run. It can only expire. If you find a pending `board_only` confirmation left
+  by an earlier run, do not wait on it and do not re-route it: withdraw it and re-cut, or it sits
+  there looking like a pending decision until it times out.
+
+On success the binding is persisted **only as an activity-log row** — `issue.updated` carrying
+`details.reviewInteractionId` (`:7217-7242`). There is no column on the issue and no field on the
+interaction. That is why the check below reads the activity log.
+
+### Half 2 — resolving
+
+`isIssueReviewVerdictInteraction` → `findReviewRequester`, `services/issue-review-policy.js:5-49`.
+It selects the **most recent** `issue.updated` row whose status changed *into* `in_review` from
+something else, then requires `details.reviewInteractionId == interaction.id` **and** the
+interaction's creator to be that transition's actor.
+
+Because it takes the *most recent* such transition, a later unarmed bounce through `in_review`
+silently disarms an armed card. Do not cycle the status after arming.
+
+The ordinary gates still apply — the bypass skips only the policy check:
+
+- resolver is the **assignee**, or the issue is unassigned (`:2946`);
+- addressee unset or == resolver; **creator != resolver**; `sourceRunId` != resolver's run (`:2971-2979`);
+- `issue.reviewPolicy`: `anyone` (default, and `null` counts) · `not_creator` · `human_only`
   (`services/issue-review-policy.js:50-81`).
 
-This is the platform's built-in code-review approval flow. **It has been used twice, ever.** It is
-what "approve my green PR" should use instead of a confirmation the owner cannot evaluate — and
-merging your own green, revertible work is explicitly not owner-reserved in the first place.
+### The working shape — steps 1-3 in ONE run
 
-The working shape, because the creator bar still applies: agent A finishes, creates the confirmation
-and moves the issue to `in_review` naming it, **then hands the issue to reviewer B**. B is now the
-assignee and is not the author, so B can accept or reject.
+The creator bar dictates the order. **The author can never be the approver**, so handing the issue
+away is the step that makes it answerable, not a step that risks it.
+
+```
+1. PATCH status -> todo        # must LEAVE in_review first; skip this and arming silently no-ops
+2. POST the request_confirmation           (same agent, same run as step 3)
+3. PATCH status -> in_review
+        + reviewInteractionId = <the card>
+        + assigneeAgentId     = THE REVIEWER, not you
+4. the reviewer accepts or rejects         (different run, different agent)
+```
+
+Accepting auto-assigns the issue back to you and wakes you, so step 4 carries its own continuation.
+
+### Verify the binding took — do not trust the 200
+
+The `PATCH` returns `200` whether or not the card bound, because an unbound transition is still a
+valid transition. Assert it with the server's own predicate:
+
+```sql
+select actor_type, actor_id, details->>'reviewInteractionId' as rid
+from activity_log
+where company_id = :company and entity_type = 'issue' and entity_id = :issue
+  and action = 'issue.updated'
+  and ( (details->>'status' = 'in_review'
+         and details->'_previous'->>'status' is not null
+         and details->'_previous'->>'status' <> 'in_review')
+     or (details->'changes'->'status'->>'to' = 'in_review'
+         and details->'changes'->'status'->>'from' is not null
+         and details->'changes'->'status'->>'from' <> 'in_review') )
+order by created_at desc, id desc limit 1;
+```
+
+`rid` must equal your card id and `actor_id` must be you. A null `rid` means the card did not bind —
+the usual cause is that the issue was already `in_review` at step 3.
+
+### Worked example — TOG-18, 2026-08-25
+
+A `board_only` merge approval that had sat on the owner's queue for days. Its original card was
+created by a run that had ended, so it was unresolvable by every agent including its own author. It
+was withdrawn (not stranded), re-cut, armed, and handed to the Code Reviewer:
+
+```
+latest into-in_review transition : actor=CTO, reviewInteractionId=5e576d07  ✓
+card                             : pending, board_only, addressee=null, creator=CTO
+issue                            : in_review, assignee=Code Reviewer, reviewPolicy=null
+=> board_only card agent-resolvable by the Code Reviewer
+```
+
+Cutting it `board_only` rather than `board_or_agents` is deliberate: if an agent resolves it, the
+bypass at `:2956` is the only thing that can explain it. `board_or_agents` would also have passed the
+ordinary policy check and so would have proved nothing about the review path.
+
+**Withdraw before you re-cut.** Replacement-supersession keys on `createdByAgentId`, so a card you cut
+does *not* supersede one someone else cut — you would strand a permanent duplicate. Withdrawal
+requires you to be the interaction's creator **or the issue's assignee** (`:3025`), so on an
+unassigned issue, assign it to yourself first.
 
 ## Two shape traps
 
