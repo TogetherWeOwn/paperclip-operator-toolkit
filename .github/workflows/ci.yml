@@ -41,6 +41,10 @@ name: CI
 #     test_agent_endpoint_preflight.sh  agent_endpoint_preflight.sh: whether the
 #                                       model endpoint the agents are about to be
 #                                       pointed at can serve them — TOG-358
+#     test_quota_rotation_watch.sh      quota_rotation_watch.py: whether teamclaude
+#                                       stops sending traffic to a quota-spent
+#                                       account, and whether a watcher that
+#                                       measured nothing says so — TOG-425
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -132,8 +136,12 @@ jobs:
           # The repo's first Python. Same argument as the shell gate above: these
           # are operator-run and have no suite, so a parse error would otherwise
           # be found by a human mid-install.
-          for f in omniroute/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
-          rm -rf omniroute/__pycache__
+          # Root *.py is included too (TOG-425). quota_rotation_watch.py DOES
+          # have a suite, but the glob must cover the directory rather than that
+          # one file, or the next root-level Python lands here unparsed and
+          # nobody notices until it is in front of an operator.
+          for f in omniroute/*.py *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          rm -rf omniroute/__pycache__ __pycache__
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
           for f in mcp/*.mjs mcp/test/*.mjs; do
@@ -430,6 +438,16 @@ jobs:
       # needs no credential, no network and no quota.
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
+
+      # TOG-425. Whether teamclaude stops sending traffic to a quota-spent
+      # Claude account, read out of the pacer's jsonl. Every case is a
+      # synthetic feed in a temp dir, so this needs no quota, no network and no
+      # credential. It exists mainly to hold two things still: that the verdict
+      # follows BURN DELTA and not the `is_current` field (which was measured
+      # pointing at the idle account for an hour), and that a feed in which
+      # nothing ever reached the threshold exits 4 rather than reading green.
+      - name: teamclaude rotation watcher suite
+        run: ./test_quota_rotation_watch.sh
 
       # TOG-365. acceptance_live.sh can only ever run on the VPS, so the
       # operator would otherwise be the first person to execute it — against a
@@ -1286,6 +1304,79 @@ jobs:
           # request, ever. This mutation adds a second probe call.
           preflight_mutation "retries-on-auth-failure" \
             's|^CURL_EXIT=0$|curl -sS -o /dev/null -H "@$HDRS" -d "$REQ" --max-time "$TIMEOUT" "$BASE/v1/messages" >/dev/null 2>\&1\nCURL_EXIT=0|' || rc=1
+          exit $rc
+
+      # TOG-425. This watcher answers a question that expires: the evidence for
+      # whether teamclaude rotates off a spent account exists only while the
+      # pacer feed still holds an exhaustion episode. A watcher that quietly
+      # reports the wrong answer is therefore not merely wrong, it is
+      # unfalsifiable later.
+      #
+      # `verdict-from-is_current` is the mutation that matters. TOG-425 as
+      # written asked for exactly that field, and it was MEASURED pointing at
+      # the idle account for an hour on 2026-08-24 while the other account
+      # burned 0.28 -> 0.38. The first version of the suite passed against this
+      # mutation, because in that fixture burn and is_current happened to agree;
+      # the case now pins a feed where they contradict each other. Keep it.
+      #
+      # Baseline first, as everywhere else here: the unmutated copy must pass in
+      # the same staging directory, or a red below is unattributable.
+      - name: Prove the rotation watcher still detects a wrong verdict
+        run: |
+          set -uo pipefail
+          rc=0
+          rotation_mutation() {
+            local label="$1"; shift
+            local mut; mut="$(mktemp -d)"
+            cp quota_rotation_watch.py test_quota_rotation_watch.sh "$mut/"
+
+            if ! (cd "$mut" && ./test_quota_rotation_watch.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_quota_rotation_watch.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
+            fi
+
+            # Each mutation is "old<US>new" — a literal 0x1f separator, so the
+            # patterns can carry newlines and quotes without escaping. Done with
+            # `python3 -c` and NOT a heredoc on purpose: a heredoc terminator has
+            # to sit at column 0, which would close this YAML block scalar early
+            # and silently truncate the step.
+            local e
+            for e in "$@"; do
+              python3 -c 'import sys; p, ex = sys.argv[1], sys.argv[2]; o, n = ex.split("\x1f", 1); s = open(p).read(); open(p, "w").write(s.replace(o, n))' "$mut/quota_rotation_watch.py" "$e"
+            done
+            if cmp -s quota_rotation_watch.py "$mut/quota_rotation_watch.py"; then
+              echo "::error::$label: the edit changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! python3 -m py_compile "$mut/quota_rotation_watch.py"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if (cd "$mut" && ./test_quota_rotation_watch.sh >/dev/null 2>&1); then
+              echo "::error::$label: the rotation suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # The lying field: decide rotation from is_current instead of burn.
+          rotation_mutation "verdict-from-is_current" \
+            "$(printf '    elif best > epsilon:\n        verdict = "ROTATED"\x1f    elif not (samples[hi]["accounts"].get(spent) or {}).get("is_current"):\n        verdict = "ROTATED"')" || rc=1
+          # Watching OUR pause gate and calling it teamclaude's rotation.
+          rotation_mutation "threshold-is-our-gate" \
+            "$(printf 'SWITCH_THRESHOLD = 0.98\x1fSWITCH_THRESHOLD = 0.95')" || rc=1
+          # Measured nothing, reported success — the failure this repo exists for.
+          rotation_mutation "nothing-observed-reads-green" \
+            "$(printf 'overall, code = "NOT_OBSERVED", 4\x1foverall, code = "ROTATED", 0')" || rc=1
+          # An idle fleet counted as proof that rotation works.
+          rotation_mutation "idle-counts-as-rotation" \
+            "$(printf 'verdict = "INCONCLUSIVE_IDLE"\x1fverdict = "ROTATED"')" || rc=1
+          # A null bucket splits one episode into two undersized halves.
+          rotation_mutation "null-breaks-episode" \
+            "$(printf '        if val is None:\n            continue\x1f        if val is None:\n            val = 0.0')" || rc=1
+          # Burn measured across the whole feed instead of within the episode.
+          rotation_mutation "delta-spans-whole-feed" \
+            "$(printf 'spent_d = weekly_delta(samples, lo, hi, spent)\x1fspent_d = weekly_delta(samples, 0, len(samples)-1, spent)')" || rc=1
           exit $rc
       # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
       # strict mode. That is the tempting simplification here — it reads as
