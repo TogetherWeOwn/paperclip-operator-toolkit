@@ -103,9 +103,58 @@ name: CI
 #        service container alone does not make these suites run; it makes them
 #        fail later, at the first `pc agent create`, which is a worse failure
 #        mode than today's honest exclusion.
-#   Do not wire these two into CI until 3 is answered. A suite that is present
-#   and failing for an environmental reason gets muted, and a muted suite is
-#   indistinguishable from a deleted one.
+#
+#   BLOCKER 3 IS ANSWERED (TOG-300). The call: a RECORDING STUB behind the
+#   CLI seam, not a live server. Three reasons, in order of weight.
+#
+#   First, the seam is already there and this was not known when the question
+#   was framed. org_provisioner.sh:91 honours PAPERCLIP_CLI and every API call
+#   goes through pc() at :98, so this is not "a design change to a tool that
+#   provisions real agents" — the change is confined to the test fixture. The
+#   tool is untouched. test_suite_preconditions.sh:64 already drives it this way.
+#
+#   Second, the API surface is exactly three calls, all in org_provisioner.sh:
+#   `agent create` (:389), `agent permissions:update` (:395), `agent terminate`
+#   (:437). Nothing else in the provisioner reaches the API.
+#
+#   Third, a live server needs the Paperclip image and an ADMIN credential on a
+#   GitHub runner. That is the same trade this file rejects eight lines above,
+#   arrived at from the other direction, and the image is not ours to publish.
+#
+#   WHAT THE STUB MUST NOT BECOME, because this is the way it fails. The suites
+#   would then assert on rows the stub itself wrote, so a stub that computes
+#   anything makes the suite grade the stub instead of the provisioner — the
+#   TOG-402 failure again, one level down. Two constraints follow, and they are
+#   the whole reason this is safe:
+#     * THE STUB IS DUMB. It stores the payload it was handed, verbatim, and
+#       derives nothing. Then `dormant()` asserting heartbeat.enabled=false is
+#       asserting that THE PROVISIONER SENT false, which is the policy coverage
+#       actually wanted here.
+#     * EVERY CEILING INVARIANT CARRIES A MUTATION GUARD, so a policy change in
+#       the provisioner reddens a NAMED test. Same pattern as the mutation jobs
+#       below. Without this, "make the stub agree" is the cheapest way to fix a
+#       red build, and it silently deletes the coverage.
+#
+#   WHAT THIS BUYS AND WHAT IT DOES NOT. It buys the provisioner's POLICY: the
+#   ceilings, the grant replacement, the refusals. It does NOT buy the API
+#   contract — if the server changes what `agent create` does with reportsTo,
+#   CI stays green and only the VPS run catches it. So the operator's
+#   pre-release pass does not go away; it stops being the only coverage and
+#   becomes specifically the API-contract coverage. Say so when it is wired in.
+#
+#   AND A FOURTH BLOCKER, found while answering the third: THE SCHEMA ROTS.
+#   Blocker 1's dump is platform schema (agents, principal_permission_grants,
+#   company_memberships, company_secret_bindings, budget_policies,
+#   heartbeat_runs) vendored into this repo. It is a snapshot, and nothing here
+#   moves when the platform migrates — so a fixture that has drifted goes green
+#   against a schema production no longer has. That is a muted suite again,
+#   one level further down. The dump therefore ships with a drift check, the
+#   same shape as tool_drift.sh and channel_drift.sh: fingerprint on the VPS,
+#   compare in a clone. Do not commit the dump without it.
+#
+#   Until the stub and the fixture exist, these two stay excluded. A suite that
+#   is present and failing for an environmental reason gets muted, and a muted
+#   suite is indistinguishable from a deleted one.
 #
 #   NOT A SUITE: org_access_review.sh is read-only and needs no API server, so
 #   it clears blocker 3 — but it still needs 1 and 2, so it is excluded too.
@@ -1210,15 +1259,41 @@ jobs:
       #    This reads as a convenience and silently retargets the PROVISIONER —
       #    which creates and deletes real agents — at whatever that variable
       #    points to.
+      #
+      # THE COPY LIST IS PART OF THE GUARD, and TOG-300 proved it the hard way.
+      # The suite reads every tool it makes assertions about, so a tool missing
+      # from this staging directory fails the suite for a STAGING reason. The
+      # job then reports "the mutant was correctly detected" — because the
+      # suite did fail — while being completely blind to whether the mutation
+      # had any effect at all. Adding gh_access.sh and skills.sh to section 10
+      # did exactly that, silently, until the baseline below was written.
+      # A tool added to test_sql_backend.sh must be added here too.
       - name: Prove the SQL backend suite still detects both unsafe shortcuts
         run: |
           set -uo pipefail
           rc=0
+          stage() { # stage <dir> — the suite's full subject list, in one place
+            cp -r lib "$1/"
+            cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
+               org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh \
+               gh_access.sh skills.sh "$1/"
+          }
+
+          # BASELINE FIRST, in the same staging directory the mutants use. Not
+          # ceremony: "the mutated suite failed" is unattributable on its own,
+          # because a copy that fails for a staging reason fails identically.
+          # This is the assertion that says the staging is complete, and it is
+          # the one that catches a copy list that has fallen behind the suite.
+          base="$(mktemp -d)"; stage "$base"
+          if ! "$base/test_sql_backend.sh" > "$base/out.txt" 2>&1; then
+            echo "::error::the UNMUTATED suite fails in the staging directory, so this job cannot attribute anything to a mutation. Most likely the copy list above has fallen behind test_sql_backend.sh."
+            cat "$base/out.txt"; exit 2
+          fi
+          echo "baseline: the unmutated suite passes in the staging directory"
+
           for m in uri-on-argv sniff-database-url; do
             mut="$(mktemp -d)"
-            cp -r lib "$mut/"
-            cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
-               org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh "$mut/"
+            stage "$mut"
             node -e '
               var fs = require("fs");
               var p = process.argv[1], which = process.argv[2];
@@ -1243,6 +1318,13 @@ jobs:
               echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
             fi
           done
+          # Without this the job is decorative. `set -e` is deliberately not on
+          # (a mutant is EXPECTED to fail its suite), so the block's status is
+          # the status of `done` — which is the last `echo`, always 0. rc was
+          # being set and then dropped, so a mutation that the suite failed to
+          # detect printed ::error:: and left the build green. The sibling
+          # dispatch guard above has always had this line; this one did not.
+          exit $rc
       # TOG-402. Three mutations, each the tempting simplification rather than
       # invented nonsense, and each one restores a specific undeserved green:
       #

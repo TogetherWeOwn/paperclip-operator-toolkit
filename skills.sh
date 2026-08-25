@@ -60,6 +60,9 @@ PAPERCLIP_DB_CTR="${PAPERCLIP_DB_CTR:-paperclip-db}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_LOG="${SKILL_LOG:-$HERE/skill-grant-log.jsonl}"
 
+# shellcheck source=lib/pcsql.sh
+. "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
+
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 resolve_cli() {
   [[ -n "${PAPERCLIP_CLI:-}" ]] && { echo "$PAPERCLIP_CLI"; return; }
@@ -78,8 +81,15 @@ assert_enabled() {
   return 0
 }
 
-sql() { podman exec -i -e C="$COMPANY_ID" -e A="${1:-}" -e B="${2:-}" "$PAPERCLIP_DB_CTR" sh -c \
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atq -F"|" -v cid="$C" -v a="$A" -v b="$B" -f -' <<<"$3"; }
+# Reaches PostgreSQL through lib/pcsql.sh rather than one hard-wired container,
+# so this tool can be pointed at a throwaway database (TOG-202, TOG-300). The
+# flags and the :cid/:a/:b bindings are the ones this tool always used and the
+# podman command pcsql_run builds is the one that was here; only the choice of
+# transport moved. Note this tool never set ON_ERROR_STOP and still does not —
+# turning it on here would change which failures abort a run, which is a
+# behaviour change and not part of a transport conversion.
+sql() { PGV_COMPANY_ID="$COMPANY_ID" PGV_A="${1:-}" PGV_B="${2:-}" \
+        pcsql_run -Atq -F'|' <<<"$3"; }
 
 # "<id>\t<template>\t<title>" for a role id or uuid
 agent_row() {

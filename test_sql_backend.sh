@@ -46,7 +46,17 @@ cat >"$WORK/bin/psql" <<'FAKE'
 env | grep -E '^PG' | sort > "$REC/psql.env"
 cat > "$REC/psql.stdin"
 FAKE
-chmod +x "$WORK/bin/podman" "$WORK/bin/psql"
+# skills.sh resolves a paperclipai CLI at startup and exits 1 if it finds none,
+# before it ever queries. Without this stub section 11 could not drive it at
+# all and would report "reached no backend" for a reason that has nothing to do
+# with the backend. PAPERCLIP_CLI is that tool's own documented seam. The stub
+# is never expected to run: section 11 only drives read-only subcommands.
+cat >"$WORK/bin/paperclipai" <<'FAKE'
+#!/usr/bin/env bash
+echo "STUB CLI INVOKED: $*" >&2
+exit 9
+FAKE
+chmod +x "$WORK/bin/podman" "$WORK/bin/psql" "$WORK/bin/paperclipai"
 export PATH="$WORK/bin:$PATH"
 
 # Each case gets a clean recording directory, and every invocation runs in a
@@ -204,17 +214,92 @@ done
 
 hdr "10. The tools actually source the helper"
 # Cheap, but it is the assertion that catches someone reintroducing a
-# hardcoded `podman exec` in one tool while the others move on.
-for f in org_provisioner.sh org_request_queue.sh org_access_review.sh \
-         test_privilege_ceilings.sh test_request_queue.sh; do
+# hardcoded `podman exec` in one tool while the others move on. gh_access.sh
+# and skills.sh joined this list in TOG-300; they were the last two holdouts.
+CONVERTED="org_provisioner.sh org_request_queue.sh org_access_review.sh
+           test_privilege_ceilings.sh test_request_queue.sh
+           gh_access.sh skills.sh"
+for f in $CONVERTED; do
   if grep -q 'lib/pcsql.sh' "$HERE/$f"; then ok "$f sources lib/pcsql.sh"
   else bad "$f does not source lib/pcsql.sh"; fi
-  if grep -qE '^[^#]*podman exec' "$HERE/$f"; then
-    bad "$f still open-codes a podman exec"
+  # Narrower than the old blanket "no podman exec anywhere in this file",
+  # because gh_access.sh legitimately probes the SERVER container and that is
+  # not a database call. The repo-wide allowlist sweep immediately below is
+  # what keeps this from being a loosening: no file here is allowlisted for a
+  # database-container site, so any of them reintroducing one still fails, and
+  # the sweep additionally covers files nobody remembered to add to this list.
+  if grep -E '^[^#]*podman exec' "$HERE/$f" | grep -qE 'PAPERCLIP_DB_CTR|paperclip-db'; then
+    bad "$f still open-codes a podman exec into the database container"
   else
-    ok "$f has no open-coded podman exec"
+    ok "$f has no open-coded podman exec into the database container"
   fi
 done
+
+hdr "10b. Every surviving 'podman exec' in the repo root is named and justified"
+# An ALLOWLIST, not a denylist. A per-file check only ever inspects the files
+# someone remembered to list, so a NEW tool that open-codes the transport is
+# invisible to it. This sweeps every shell script in the repo root and requires
+# each surviving site to be named here with its reason. lib/ is deliberately
+# out of scope: lib/pcsql.sh is the one sanctioned `podman exec` in the repo.
+podman_site_allowed() { # <file> <line>
+  case "$1" in
+    # This suite quotes the string in its own fakes, assertions and messages.
+    test_sql_backend.sh) return 0 ;;
+    gh_access.sh)
+      # The SERVER container, not the database: a `test -x` probe for the
+      # credential-helper binary. lib/pcsql.sh is not the seam for that, and
+      # accepting it under a database-backend gate would let the assertion
+      # above be satisfied by something it does not test.
+      [[ "$2" == *PAPERCLIP_SERVER_CTR* ]] && return 0 ;;
+  esac
+  return 1
+}
+unlisted=0; swept=0
+for p in "$HERE"/*.sh; do
+  f="$(basename "$p")"
+  while IFS= read -r line; do
+    swept=$((swept+1))
+    podman_site_allowed "$f" "$line" \
+      || { unlisted=$((unlisted+1)); printf '        %s: %s\n' "$f" "$(sed 's/^[[:space:]]*//' <<<"${line:0:88}")"; }
+  done < <(grep -hE '^[^#]*podman exec' "$p")
+done
+# Three outcomes, not two. A sweep that matched nothing at all has not proved
+# the repo is clean, it has proved the sweep is broken — and this file alone
+# guarantees at least one site, so zero is impossible unless the walk failed.
+if [[ "$swept" -eq 0 ]]; then
+  bad "the sweep matched no 'podman exec' anywhere, not even in this file — it did not run"
+elif [[ "$unlisted" -eq 0 ]]; then
+  ok "all $swept 'podman exec' site(s) in the repo root are on the allowlist"
+else
+  bad "$unlisted of $swept 'podman exec' site(s) are not on the allowlist"
+fi
+
+hdr "11. The converted tools reach the backend the caller SELECTED"
+# Section 10 proves the text changed. It does not prove the tool reaches the
+# backend at all: a tool can source the helper and still never call it, and a
+# tool that kept a private psql path would pass every grep above. So drive each
+# one for real and see which fake it actually talked to.
+#
+# The fakes answer nothing, so each tool then fails for its own reasons further
+# down. That is irrelevant and deliberately NOT asserted here — the subject of
+# this section is which binary the tool selected, nothing else.
+drives_selected_backend() {
+  local desc="$1" tool="$2"; shift 2
+  run_case
+  ( export PAPERCLIP_SQL_BACKEND=psql DATABASE_URL='postgres://u:p@h/d'
+    export COMPANY_ID=00000000-0000-0000-0000-000000000000
+    export PAPERCLIP_CLI="$WORK/bin/paperclipai"
+    "$HERE/$tool" "$@" ) >/dev/null 2>&1
+  if called podman; then
+    bad "$desc — went to podman despite PAPERCLIP_SQL_BACKEND=psql"
+  elif called psql; then
+    ok "$desc"
+  else
+    bad "$desc — reached NO backend; the tool never queried, so this proves nothing"
+  fi
+}
+drives_selected_backend "gh_access.sh show queries through lib/pcsql.sh" gh_access.sh show T0
+drives_selected_backend "skills.sh show queries through lib/pcsql.sh"    skills.sh    show T0
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
