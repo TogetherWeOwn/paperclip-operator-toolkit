@@ -77,6 +77,13 @@ name: CI
 #                                       the jq copy of that formula inside
 #                                       quota_brake.sh still agrees with it —
 #                                       TOG-440
+#     test_gh_permission_pin_audit.sh   gh_permission_pin_audit.sh: whether a
+#                                       change to DEFAULT_PERMISSION_PROFILE
+#                                       that reaches none of the 7 pinned
+#                                       projects can still pass silently — and
+#                                       whether permission_pins.txt still
+#                                       describes this checkout's default —
+#                                       TOG-346
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
@@ -337,6 +344,25 @@ jobs:
       # failure-open that only appeared at production board size.
       - name: scope-residue gate regression suite
         run: ./test_gh_scope_residue.sh
+
+      # TOG-346. The broker takes a project's profile as
+      # `projectPermissions ?? defaultPermissions` — `??`, so a project's
+      # GH_APP_PERMISSIONS REPLACES DEFAULT_PERMISSION_PROFILE. TOG-296 pinned
+      # the last five unpinned projects, so it is 7 of 7 and the default is now
+      # reached by nothing: editing it is a no-op everywhere, silently. The
+      # direction that matters is removal, where a narrowed default would look
+      # shipped and change no grant at all.
+      #
+      # This suite proves the detector, offline: every case builds its own
+      # registry, its own scope module and its own project list, so no board is
+      # read and no credential is needed. Its last section then points the real
+      # gh_permission_pin_audit.sh at the real permission_pins.txt and this
+      # checkout's real scope.js, which is the assertion that keeps the registry
+      # honest — a PR that edits DEFAULT_PERMISSION_PROFILE without re-auditing
+      # the pins goes red here as well as in `broker-suite`. Two readers, two
+      # jobs, two runtimes: satisfying one by accident does not satisfy both.
+      - name: permission-pin drift suite
+        run: ./test_gh_permission_pin_audit.sh
 
       # TOG-310. Audits every link in git's credential-helper chain for
       # substitutability by the shared agent uid — the helper program, its

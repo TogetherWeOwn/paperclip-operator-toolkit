@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { pluginManifestV1Schema } from "@paperclipai/shared";
 
@@ -126,6 +127,233 @@ test("actions is excluded from the default profile, deliberately", () => {
     DEFAULT_PERMISSION_PROFILE.actions,
     undefined,
     "actions:read also grants workflow log download; TOG-247 refused it",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The pin registry (TOG-346).
+//
+// `resolveScope` takes the profile as `projectPermissions ?? defaultPermissions`
+// — `??`, so a project's GH_APP_PERMISSIONS REPLACES this default rather than
+// extending it. TOG-296 pinned the last five unpinned projects so the hardened
+// GH_APP_SCOPE_STRICT AND-gate could pass, which makes it 7 of 7: no project in
+// the company reaches DEFAULT_PERMISSION_PROFILE at mint time any more.
+//
+// So every test above this line asserts something about a value that is not
+// consulted in production. Editing the default is a no-op everywhere, and the
+// dangerous direction is REMOVAL — narrowing it for a security reason would
+// look shipped and change nothing. TOG-247 already paid the additive half of
+// that bill: a CI-visibility grant added to the default reached every project
+// except the one repo it was written for, because that repo was the pinned one.
+//
+// permission_pins.txt is the fan-out list, and these tests are the tripwire on
+// it. Change DEFAULT_PERMISSION_PROFILE without re-auditing the registry and
+// the first test below goes red in the PR that caused it — which is the point,
+// because the alternative is finding out at some later mint, on a project
+// nobody was looking at.
+//
+// This suite cannot assert anything about the LIVE control plane: project env
+// is an API read, and CI asserts this suite passes with GH_APP_* empty and no
+// credential. That half is gh_permission_pin_audit.sh. This half asserts the
+// registry is internally honest and still describes THIS default.
+// ---------------------------------------------------------------------------
+
+const REGISTRY_URL = new URL("../../../permission_pins.txt", import.meta.url);
+const REGISTRY_STATES = ["verbatim", "delta", "inherit"];
+
+/**
+ * Parse permission_pins.txt.
+ *
+ * Mirrors the parser in gh_permission_pin_audit.sh and, like it, REFUSES a line
+ * it cannot read instead of skipping it. A silently skipped registry line turns
+ * "this project is audited" into "this project is not audited" with no change
+ * in the output — the fail-open direction, and the one the credential-chain pin
+ * gate exists to catch on its own file.
+ */
+function parseRegistry(text) {
+  const projects = [];
+  const seen = new Set();
+  let baseline = null;
+
+  text.split("\n").forEach((raw, index) => {
+    const line = raw.replace(/\r$/, "");
+    if (/^\s*(#|$)/.test(line)) return;
+    const where = `permission_pins.txt:${index + 1}`;
+    const [state, projectId, slug, delta, ...rest] = line.trim().split(/\s+/);
+    const note = rest.join(" ");
+
+    if (state === "baseline") {
+      assert.equal(baseline, null, `${where}: a second baseline line`);
+      baseline = delta;
+      return;
+    }
+    assert.ok(REGISTRY_STATES.includes(state), `${where}: unknown state "${state}"`);
+    assert.match(projectId, /^[0-9a-f-]{8,}$/, `${where}: not a project id`);
+    assert.ok(!seen.has(projectId), `${where}: project listed twice`);
+    seen.add(projectId);
+
+    if (state === "delta") {
+      assert.notEqual(delta, "-", `${where}: state "delta" with no delta is "verbatim"`);
+    } else {
+      assert.equal(delta, "-", `${where}: state "${state}" must have delta "-"`);
+    }
+    // A divergence with no stated reason is indistinguishable from a mistake,
+    // and the next person to read it will helpfully "fix" it back.
+    if (state !== "verbatim") {
+      assert.ok(note && note !== "-", `${where}: state "${state}" requires a note`);
+    }
+    projects.push({ state, projectId, slug, delta, note, where });
+  });
+
+  assert.ok(baseline, "permission_pins.txt has no baseline line");
+  assert.ok(projects.length > 0, "permission_pins.txt registers no project");
+  return { baseline, projects };
+}
+
+/** `a=read,b=write` → object, through the broker's own parser. */
+function specToProfile(spec) {
+  const parsed = parsePermissionSpec(spec);
+  assert.ok(parsed, `not a permission spec: ${spec}`);
+  return parsed;
+}
+
+/**
+ * Canonical, order-insensitive form. The live pins are hand-written and their
+ * key order differs between projects — Ops Tooling has workflows in the middle
+ * of the list, Community Platform has it at the end — so a string comparison
+ * would report drift on two correct values and get muted within a week.
+ */
+function canon(profile) {
+  return Object.keys(profile)
+    .sort()
+    .map((key) => `${key}=${profile[key]}`)
+    .join(",");
+}
+
+/** Apply `+name=level` / `-name` tokens to a copy of the baseline. */
+function applyDelta(baselineProfile, delta) {
+  const out = { ...baselineProfile };
+  if (delta === "-" || !delta) return out;
+  for (const token of delta.split(",").filter(Boolean)) {
+    if (token.startsWith("+")) {
+      const [name, level] = token.slice(1).split("=");
+      assert.ok(name && level, `malformed delta token: ${token}`);
+      out[name] = level;
+    } else if (token.startsWith("-")) {
+      const name = token.slice(1);
+      assert.ok(name in out, `delta removes "${name}", which is not in the baseline`);
+      delete out[name];
+    } else {
+      assert.fail(`delta token "${token}" must start with + or -`);
+    }
+  }
+  return out;
+}
+
+const REGISTRY = parseRegistry(readFileSync(REGISTRY_URL, "utf8"));
+const REGISTRY_BASELINE = specToProfile(REGISTRY.baseline);
+
+/** The registry line for a project id, or undefined. */
+function registered(projectId) {
+  return REGISTRY.projects.find((p) => p.projectId === projectId);
+}
+
+// THE TRIPWIRE. If you are reading this because it went red, you changed
+// DEFAULT_PERMISSION_PROFILE. That change reaches NO project on its own — all
+// seven pin their own set. Update the `baseline` line in permission_pins.txt,
+// decide per project whether the change should reach it, and run
+// `./gh_permission_pin_audit.sh --fanout-plan` for the value each project must
+// now carry. Do not "fix" this by deleting the assertion: the silence it
+// replaces is exactly what let TOG-247 ship to six of seven projects.
+test("the pin registry's baseline is the default profile", () => {
+  assert.deepEqual(
+    REGISTRY_BASELINE,
+    { ...DEFAULT_PERMISSION_PROFILE },
+    "permission_pins.txt was audited against a different DEFAULT_PERMISSION_PROFILE; " +
+      "a change to the default is a deliberate fan-out, not an edit",
+  );
+});
+
+test("every registered pin resolves through the broker to the profile the registry claims", () => {
+  for (const project of REGISTRY.projects) {
+    if (project.state === "inherit") {
+      // A registered non-pin: the broker must fall through to the default AND
+      // say that it did. `profileSource` is the field that tells the two apart,
+      // so assert it rather than only the permissions.
+      const scope = resolveScope({
+        projectEnv: { GH_APP_REPOS: { type: "plain", value: "nntune" } },
+      });
+      assert.equal(scope.profileSource, "default", project.where);
+      assert.deepEqual(scope.permissions, { ...DEFAULT_PERMISSION_PROFILE }, project.where);
+      continue;
+    }
+
+    const expected = applyDelta(REGISTRY_BASELINE, project.delta);
+    const scope = resolveScope({
+      projectEnv: {
+        GH_APP_REPOS: { type: "plain", value: "nntune" },
+        GH_APP_PERMISSIONS: { type: "plain", value: canon(expected) },
+      },
+    });
+    // Round-tripped through resolveScope rather than compared as objects: a
+    // delta that empties the profile, or names a level the broker rejects, is a
+    // registry line describing a mint that would raise.
+    assert.equal(scope.profileSource, "project", project.where);
+    assert.deepEqual(scope.permissions, expected, project.where);
+  }
+});
+
+test("a registered divergence actually diverges, and says why", () => {
+  const deltas = REGISTRY.projects.filter((p) => p.state === "delta");
+  assert.ok(deltas.length > 0, "the registry claims no divergence at all");
+  for (const project of deltas) {
+    assert.notEqual(
+      canon(applyDelta(REGISTRY_BASELINE, project.delta)),
+      canon(REGISTRY_BASELINE),
+      `${project.where}: state "delta" but the delta resolves to the baseline — ` +
+        "a later change to the default would fan out to it as if it were verbatim",
+    );
+    assert.ok(project.note.length > 10, `${project.where}: the reason is not a reason`);
+  }
+});
+
+// workflows:write is the only divergence in the registry today, and it is not a
+// preference: GitHub refuses a MERGE whose diff touches `.github/workflows/**`
+// unless the token holds it (403 at merge time, not at push time). Any other
+// permission diverging is worth a second look, so adding one has to be a
+// deliberate edit here rather than a line nobody reviews.
+test("the only permission any project diverges on is workflows", () => {
+  for (const project of REGISTRY.projects.filter((p) => p.state === "delta")) {
+    const added = Object.keys(applyDelta(REGISTRY_BASELINE, project.delta))
+      .filter((key) => !(key in REGISTRY_BASELINE))
+      .sort();
+    assert.deepEqual(added, ["workflows"], project.where);
+  }
+});
+
+test("a registry line the parser cannot read is refused, not skipped", () => {
+  // The fail-open direction. A parser that skipped these lines would report the
+  // same clean result on a file that registers nothing at all.
+  const BASE = "baseline - - contents=write reviewed\n";
+  assert.throws(
+    () => parseRegistry(`${BASE}nonsense 88f949ff-1111 x - why\n`),
+    /unknown state "nonsense"/,
+  );
+  assert.throws(
+    () => parseRegistry("verbatim 88f949ff-1111 x - -\n"),
+    /no baseline line/,
+  );
+  assert.throws(
+    () => parseRegistry(`${BASE}delta 88f949ff-1111 x +workflows=write -\n`),
+    /requires a note/,
+  );
+  assert.throws(
+    () => parseRegistry(`${BASE}delta 88f949ff-1111 x - why\n`),
+    /state "delta" with no delta/,
+  );
+  assert.throws(
+    () => parseRegistry(`${BASE}verbatim 88f949ff-1111 x - -\nverbatim 88f949ff-1111 y - -\n`),
+    /listed twice/,
   );
 });
 
@@ -281,14 +509,29 @@ test("a project that grants workflows:write passes it through", () => {
 // tests pin the tagged form so that cannot recur.
 // ---------------------------------------------------------------------------
 
-/** The Ops Tooling project's env, verbatim, as the API returns it. */
+const OPS_TOOLING_ID = "f2dc52a4-256f-4766-aec5-52a94ca387e2";
+
+/**
+ * The Ops Tooling project's env, verbatim, as the API returned it 2026-08-25.
+ *
+ * This literal was stale until TOG-346 and nothing noticed: it was copied in
+ * before TOG-247 added `checks`/`statuses` to the default, so the fixture named
+ * a five-permission pin while the live project carried seven. The suite stayed
+ * green because it only ever asserted `workflows` and `contents` — a fixture
+ * claiming to be "the live env" that had quietly stopped being it, which is a
+ * small instance of the exact failure this card is about.
+ *
+ * The test below now checks it against permission_pins.txt rather than against
+ * a memory of what it used to say.
+ */
 const OPS_TOOLING_ENV = {
   GH_APP_ID: { type: "secret_ref", secretId: "5e2ca78e", version: "latest" },
   GH_APP_ORG: { type: "secret_ref", secretId: "237ae9ac", version: "latest" },
   GH_APP_REPOS: { type: "plain", value: "paperclip-ops-tooling" },
   GH_APP_PERMISSIONS: {
     type: "plain",
-    value: "contents=write,pull_requests=write,issues=write,metadata=read,workflows=write",
+    value:
+      "contents=write,pull_requests=write,issues=write,metadata=read,workflows=write,checks=read,statuses=read",
   },
   GH_APP_PRIVATE_KEY: { type: "secret_ref", secretId: "86b28441", version: "latest" },
   GH_APP_SCOPE_STRICT: { type: "plain", value: "1" },
@@ -306,6 +549,19 @@ test("the live Ops Tooling env resolves its repo and keeps workflows:write", () 
   assert.equal(scope.permissions.workflows, "write");
   assert.equal(scope.permissions.contents, "write");
   assert.equal(scope.profileSource, "project");
+});
+
+// The assertion that keeps the fixture above honest (TOG-346). Spot-asserting
+// two keys is how it drifted for a month; this compares the whole set against
+// the registry, so a change to the default or to the pin lands here too.
+test("the Ops Tooling fixture is the pin the registry registers for it", () => {
+  const line = registered(OPS_TOOLING_ID);
+  assert.ok(line, `${OPS_TOOLING_ID} is not in permission_pins.txt`);
+  assert.equal(line.state, "delta");
+  assert.equal(
+    canon(specToProfile(OPS_TOOLING_ENV.GH_APP_PERMISSIONS.value)),
+    canon(applyDelta(REGISTRY_BASELINE, line.delta)),
+  );
 });
 
 // ---------------------------------------------------------------------------

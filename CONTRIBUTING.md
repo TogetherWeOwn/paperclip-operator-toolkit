@@ -22,6 +22,15 @@ breaking something.
   `currentScope()`, re-run the mutation check in `test_gh_app_token.sh` §6: restore the old
   `Object.keys(scope).length > 0` condition and confirm the suite goes red. A strict-mode test that
   stays green against that mutation is asserting nothing.
+- **Changing `DEFAULT_PERMISSION_PROFILE` is a fan-out, not an edit.** A project's
+  `GH_APP_PERMISSIONS` **replaces** the broker default (`projectPermissions ?? defaultPermissions`),
+  and since TOG-296 all **7 of 7** projects pin one — so editing the default changes no grant
+  anywhere and nothing says so. Adding a permission that way disappoints; *removing* one for a
+  security reason looks shipped and does nothing. Update the `baseline` line in
+  `permission_pins.txt` in the same commit, then `./gh_permission_pin_audit.sh --fanout-plan` for
+  the value each project must now carry, and re-run the audit with no flags once they are applied.
+  Two suites go red if you skip this — `broker-suite` and `test_gh_permission_pin_audit.sh` — and
+  neither is satisfied by deleting the other.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once. Tests pin exit codes; they must not pin human-readable message text, which drifts.

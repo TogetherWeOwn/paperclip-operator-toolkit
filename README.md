@@ -76,6 +76,7 @@ operator-run.
 | `quota_burn_derive.py` | The offline half of the brake's input: replays `quota-pacing.jsonl`, derives `burn = Δweekly/Δt`, and shows which ladder rung the derived and reported inputs each select (`--series`), the quantization floor per window size (`--sweep`), and an integral check that the derived series reconstructs `weekly`. Deterministic — no network, no credentials, no clock read. The brake carries its own jq copy of the same formula; `test_quota_burn_derive.sh` §5 diffs the two so drift is a red build. | `test_quota_burn_derive.sh` (offline) |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh`, `test_credential_chain_pin_gate.sh` |
+| `gh_permission_pin_audit.sh` | Whether each project's `GH_APP_PERMISSIONS` is still the pin `permission_pins.txt` registers, and whether that registry's baseline is still the broker's `DEFAULT_PERMISSION_PROFILE`. A project's pin **replaces** the default rather than extending it, and all **7 of 7** projects pin one — so a change to the default reaches nothing, silently, and the dangerous direction is *removal* (TOG-346). `--fanout-plan` prints the spec each project must then carry. Read-only; exits `1` on drift and `3` when it could not measure, never `0`. | `test_gh_permission_pin_audit.sh` (offline), `plugins/gh-token-broker/test/` |
 | `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. `api` takes the JSON request body as argument 3; extra `curl` arguments go after `--`. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh`, `test_gh_token_api_body.sh` |
@@ -111,6 +112,7 @@ node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_credential_chain_audit.sh
+./test_gh_permission_pin_audit.sh
 ./test_plugin_manifest_gate.sh
 ./test_sql_backend.sh
 ./test_suite_preconditions.sh
