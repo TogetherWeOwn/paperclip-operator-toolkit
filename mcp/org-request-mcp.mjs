@@ -512,6 +512,75 @@ export function _resetRunCheckCache() {
 // header for why the third (countersign) key exists.
 // ---------------------------------------------------------------------------
 
+/**
+ * The three safer-alternative arguments (TOG-388, extended to the capability
+ * gate by TOG-403), declared once and reused by every tool that fronts a
+ * DECISION rather than a request.
+ *
+ * SHARED, NOT COPIED, for the same reason TOG-403 factored the gate functions
+ * instead of duplicating them: two copies of a decision surface become two
+ * surfaces, and the divergence is invisible from either side. Here the copy
+ * would also be caught mechanically — ci.yml's mutation gate requires each of
+ * its needles to match `mcp/org-request-mcp.mjs` EXACTLY once, so a second
+ * pasted copy of the argv-building block turns that gate red rather than blind.
+ *
+ * Only the approve-side clause differs, because only the approve-side RULE
+ * differs: the queue reads a template's permission keys, `review` reads the
+ * capability registry's class, and `countersign` is risky by construction.
+ */
+// The approve-side clause for each of the three decision tools, NAMED rather
+// than inlined so that each call site below is a distinct single line. That is
+// not cosmetic: ci.yml's mutation gate requires every needle to match this file
+// exactly once, and two identical `...saferAlternativeProperties(` lines could
+// not be mutated independently — the gate would silently report on whichever
+// one came first, which is the blindness TOG-341 added the uniqueness check to
+// catch. Same reason the capability-requester needle carries a leading space.
+const RISKY_TEMPLATE_CLAUSE = "Required when the requested template is risky.";
+const RISKY_CAPABILITY_CLAUSE =
+  "Required when the requested capability is risky — class credential, spend or publish, derived "
+  + "from the registry and never declared by the caller.";
+const RISKY_COUNTERSIGN_CLAUSE =
+  "ALWAYS required on an approval. A countersignature only ever hands over a credential, so there "
+  + "is no routine branch — the record is unconditional.";
+
+function saferAlternativeProperties(approveClause) {
+  return {
+    alternatives: {
+      type: "array",
+      maxItems: 10,
+      items: { type: "string", maxLength: 4000 },
+      description:
+        "REJECT only. Safer routes that still FULLY unblock the requester's work. A denial must carry at "
+        + "least one of these or `no_safer_alternative`. These reach the requester, so write them as "
+        + "instructions someone can act on, not as categories.",
+    },
+    no_safer_alternative: {
+      type: "string",
+      maxLength: 4000,
+      description:
+        "REJECT only, and mutually exclusive with `alternatives`. The explicit finding that nothing safer "
+        + "would unblock this work — what you considered and why none of it works. On a risky ask this "
+        + "becomes an OPEN audit item until an independent auditor closes it.",
+    },
+    alternatives_considered: {
+      type: "array",
+      maxItems: 10,
+      description:
+        "APPROVE only. " + approveClause + " Each entry is a safer route you "
+        + "weighed and the reason it did not fully unblock the work. This is the record the owner audits.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["alternative", "why_it_failed"],
+        properties: {
+          alternative:    { type: "string", maxLength: 4000, description: "The safer route you weighed." },
+          why_it_failed:  { type: "string", maxLength: 4000, description: "Why it did not fully unblock the work." },
+        },
+      },
+    },
+  };
+}
+
 export const TOOLS = [
   {
     script: "queue",
@@ -570,39 +639,7 @@ export const TOOLS = [
         // refused, not dropped — so omitting them would leave every agent
         // reviewer hitting a refusal it had no way to satisfy. Fail-closed, but
         // a hard block on the only sanctioned agent path to the queue.
-        alternatives: {
-          type: "array",
-          maxItems: 10,
-          items: { type: "string", maxLength: 4000 },
-          description:
-            "REJECT only. Safer routes that still FULLY unblock the requester's work. A denial must carry at "
-            + "least one of these or `no_safer_alternative`. These reach the requester, so write them as "
-            + "instructions someone can act on, not as categories.",
-        },
-        no_safer_alternative: {
-          type: "string",
-          maxLength: 4000,
-          description:
-            "REJECT only, and mutually exclusive with `alternatives`. The explicit finding that nothing safer "
-            + "would unblock this work — what you considered and why none of it works. On a risky ask this "
-            + "becomes an OPEN audit item until an independent auditor closes it.",
-        },
-        alternatives_considered: {
-          type: "array",
-          maxItems: 10,
-          description:
-            "APPROVE only. Required when the requested template is risky. Each entry is a safer route you "
-            + "weighed and the reason it did not fully unblock the work. This is the record the owner audits.",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["alternative", "why_it_failed"],
-            properties: {
-              alternative:    { type: "string", maxLength: 4000, description: "The safer route you weighed." },
-              why_it_failed:  { type: "string", maxLength: 4000, description: "Why it did not fully unblock the work." },
-            },
-          },
-        },
+        ...saferAlternativeProperties(RISKY_TEMPLATE_CLAUSE),
       },
     },
   },
@@ -680,6 +717,17 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log and readable by the requester. Required for approvals too.",
           maxLength: 8000,
         },
+        // TOG-467. Without these the gate is UNREACHABLE through this transport
+        // on every path but one: `capability_gate.sh` refuses a denial that
+        // carries neither `alternatives` nor `no_safer_alternative`, and
+        // refuses to grant a risky ask — class credential, spend or publish —
+        // without `alternatives_considered`. Measured against the real gate:
+        // approve-non-risky was the only one of five decision paths that got
+        // through. A schema this server enforces (`additionalProperties: false`
+        // is real here, not a claim) is a schema an agent cannot work around,
+        // so an undeclared argument is not an inconvenience — it is a closed
+        // door with no handle on the agent's side.
+        ...saferAlternativeProperties(RISKY_CAPABILITY_CLAUSE),
       },
     },
   },
@@ -710,6 +758,12 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log alongside the domain owner's reason. Required for approvals too.",
           maxLength: 8000,
         },
+        // TOG-467, and this arm is the unconditional one. A countersignature
+        // only ever runs on a custody request and custody is only ever reached
+        // by class credential, so the ask is risky BY CONSTRUCTION: there is no
+        // routine branch here, and an approval without the considered record is
+        // refused every time, not sometimes.
+        ...saferAlternativeProperties(RISKY_COUNTERSIGN_CLAUSE),
       },
     },
   },
@@ -774,6 +828,67 @@ function assertNoIdentityArgument(args) {
 }
 
 /**
+ * Append the safer-alternative-first arguments (TOG-388) to a decision's argv.
+ *
+ * Passed through to the CLI, which is where the RULE lives. Nothing here
+ * decides whether a decision is allowed: this transport validates SHAPE
+ * (string, length, pairing) and the script validates POLICY (a denial needs
+ * one of the two, a risky grant needs the considered list). Re-implementing
+ * the policy here would give the script two enforcement points that can
+ * disagree, and the one an agent reaches would be the weaker of the two.
+ *
+ * Values are never interpolated into a shell — execFile takes this argv
+ * array directly — so an entry beginning with `--` is consumed as the value
+ * of the flag that precedes it, not as a flag of its own.
+ *
+ * SHARED by the queue's `review` and the capability gate's `review` and
+ * `countersign` (TOG-467). The two scripts parse these flags with the same
+ * five functions out of lib/reqrecord.sh — TOG-403 factored them there rather
+ * than copying them — so the transport side is factored to match. One shape,
+ * one place, whichever door the decision arrives at.
+ */
+function appendSaferAlternativeArgs(argv, args) {
+  for (const alternative of optionalStringArrayArg(args, "alternatives", 10, 4000)) {
+    argv.push("--alternative", alternative);
+  }
+  const noSafer = optionalStringArg(args, "no_safer_alternative", null, 4000);
+  if (noSafer) argv.push("--no-safer-alternative", noSafer);
+
+  // The pair is emitted ADJACENTLY because the CLI requires it: `--because`
+  // must immediately follow its `--considered`. Building the argv from one
+  // list of objects is what makes a mismatched pairing unrepresentable rather
+  // than merely discouraged — two parallel arrays over the wire could arrive
+  // at different lengths and silently pair alternative 1 with reason 2.
+  const considered = args.alternatives_considered;
+  if (considered !== undefined && considered !== null) {
+    if (!Array.isArray(considered)) {
+      throw new HttpError(400, "invalid_argument", "'alternatives_considered' must be an array");
+    }
+    if (considered.length > 10) {
+      throw new HttpError(400, "invalid_argument", "'alternatives_considered' accepts at most 10 entries");
+    }
+    considered.forEach((entry, index) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new HttpError(400, "invalid_argument",
+          `'alternatives_considered[${index}]' must be an object with 'alternative' and 'why_it_failed'`);
+      }
+      // Same rule as assertKnownArguments, one level down: the nested schema
+      // also says additionalProperties:false, and that claim is enforced here
+      // because nothing else walks into the array to enforce it.
+      const unknown = Object.keys(entry).find((key) => key !== "alternative" && key !== "why_it_failed");
+      if (unknown !== undefined) {
+        throw new HttpError(400, "unknown_argument",
+          `'${unknown}' is not a field of alternatives_considered[${index}]. Accepted: alternative, why_it_failed.`);
+      }
+      const alternative = requireStringArg(entry, "alternative", null, 4000);
+      const whyItFailed = requireStringArg(entry, "why_it_failed", null, 4000);
+      argv.push("--considered", alternative, "--because", whyItFailed);
+    });
+  }
+  return argv;
+}
+
+/**
  * Translate validated tool arguments into an argv array for the queue script.
  *
  * The identity arguments are supplied HERE, from the authenticated principal,
@@ -810,55 +925,7 @@ export function buildQueueArgs(toolName, args, identity) {
     ];
     const reason = optionalStringArg(args, "reason", null, 4000);
     if (reason) argv.push("--reason", reason);
-
-    // --- safer-alternative-first (TOG-388) --------------------------------
-    // Passed through to the CLI, which is where the RULE lives. Nothing here
-    // decides whether a decision is allowed: this transport validates SHAPE
-    // (string, length, pairing) and the queue validates POLICY (a denial needs
-    // one of the two, a risky grant needs the considered list). Re-implementing
-    // the policy here would give the queue two enforcement points that can
-    // disagree, and the one an agent reaches would be the weaker of the two.
-    //
-    // Values are never interpolated into a shell — execFile takes this argv
-    // array directly — so an entry beginning with `--` is consumed as the value
-    // of the flag that precedes it, not as a flag of its own.
-    for (const alternative of optionalStringArrayArg(args, "alternatives", 10, 4000)) {
-      argv.push("--alternative", alternative);
-    }
-    const noSafer = optionalStringArg(args, "no_safer_alternative", null, 4000);
-    if (noSafer) argv.push("--no-safer-alternative", noSafer);
-
-    // The pair is emitted ADJACENTLY because the CLI requires it: `--because`
-    // must immediately follow its `--considered`. Building the argv from one
-    // list of objects is what makes a mismatched pairing unrepresentable rather
-    // than merely discouraged — two parallel arrays over the wire could arrive
-    // at different lengths and silently pair alternative 1 with reason 2.
-    const considered = args.alternatives_considered;
-    if (considered !== undefined && considered !== null) {
-      if (!Array.isArray(considered)) {
-        throw new HttpError(400, "invalid_argument", "'alternatives_considered' must be an array");
-      }
-      if (considered.length > 10) {
-        throw new HttpError(400, "invalid_argument", "'alternatives_considered' accepts at most 10 entries");
-      }
-      considered.forEach((entry, index) => {
-        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-          throw new HttpError(400, "invalid_argument",
-            `'alternatives_considered[${index}]' must be an object with 'alternative' and 'why_it_failed'`);
-        }
-        // Same rule as assertKnownArguments, one level down: the nested schema
-        // also says additionalProperties:false, and that claim is enforced here
-        // because nothing else walks into the array to enforce it.
-        const unknown = Object.keys(entry).find((key) => key !== "alternative" && key !== "why_it_failed");
-        if (unknown !== undefined) {
-          throw new HttpError(400, "unknown_argument",
-            `'${unknown}' is not a field of alternatives_considered[${index}]. Accepted: alternative, why_it_failed.`);
-        }
-        const alternative = requireStringArg(entry, "alternative", null, 4000);
-        const whyItFailed = requireStringArg(entry, "why_it_failed", null, 4000);
-        argv.push("--considered", alternative, "--because", whyItFailed);
-      });
-    }
+    appendSaferAlternativeArgs(argv, args);
     return argv;
   }
 
@@ -910,22 +977,24 @@ export function buildCapabilityArgs(toolName, args, identity) {
     const requestId = requireStringArg(args, "request_id", CAP_REQUEST_ID_RE);
     const decision = requireStringArg(args, "decision", /^(approve|reject)$/);
     const reason = requireStringArg(args, "reason", null, 8000);
-    return [
+    const argv = [
       "review", "--reviewer", identity.agentId, "--request", requestId,
       decision === "approve" ? "--approve" : "--reject",
       "--reason", reason,
     ];
+    return appendSaferAlternativeArgs(argv, args);
   }
 
   if (toolName === "countersign_capability_request") {
     const requestId = requireStringArg(args, "request_id", CAP_REQUEST_ID_RE);
     const decision = requireStringArg(args, "decision", /^(approve|reject)$/);
     const reason = requireStringArg(args, "reason", null, 8000);
-    return [
+    const argv = [
       "countersign", "--custodian", identity.agentId, "--request", requestId,
       decision === "approve" ? "--approve" : "--reject",
       "--reason", reason,
     ];
+    return appendSaferAlternativeArgs(argv, args);
   }
 
   // Unreachable while TOOLS_BY_NAME and the arms above agree. Same guard as

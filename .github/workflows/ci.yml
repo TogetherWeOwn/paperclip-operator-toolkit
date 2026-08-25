@@ -2518,6 +2518,30 @@ jobs:
             '"custodian", "custodianAgentId", "custodian_agent_id", "decider",' \
             '' || rc=1
 
+          # TOG-467. Take the safer-alternative arguments back off a capability
+          # tool's schema. This is the regression that turned `main` red, and it
+          # is the most tempting one in the file because it LOOKS like removing
+          # something unused: no arm of the builder needs the key, and the gate
+          # is one process away. What it actually does is shut the gate. This
+          # transport enforces additionalProperties:false, so an argument the
+          # schema does not declare is refused rather than dropped, and
+          # capability_gate.sh refuses a denial with no way forward and a risky
+          # grant with no considered record. Measured before the fix, with an
+          # approve-a-non-risky-ask control that passed: four of the five
+          # decision paths were unreachable. A door with no handle on the
+          # agent's side does not report itself as broken — it reports as a
+          # refusal the agent assumes it deserved.
+          #
+          # Rejected by `every property a schema advertises is actually read
+          # onto the argv`, which needs no capability_gate.sh in the staging
+          # directory — the acceptance tests do, and they skip there.
+          mcp_mutation_check "capability-review-loses-safer-alternatives" \
+            '...saferAlternativeProperties(RISKY_CAPABILITY_CLAUSE),' \
+            '' || rc=1
+          mcp_mutation_check "countersign-loses-safer-alternatives" \
+            '...saferAlternativeProperties(RISKY_COUNTERSIGN_CLAUSE),' \
+            '' || rc=1
+
           exit $rc
 
       # The transport must never grow a path to the provisioner. This is a

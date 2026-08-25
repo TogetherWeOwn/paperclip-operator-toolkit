@@ -306,9 +306,16 @@ const EVERY_ARGUMENT = {
   },
   review_capability_request: {
     request_id: "CAP-004", decision: "approve", reason: "the domain owner agrees",
+    // TOG-467. Same three, same shape-not-policy reasoning as the queue above.
+    alternatives: ["grant github.repo.read instead"],
+    no_safer_alternative: "nothing narrower mints an installation token",
+    alternatives_considered: [{ alternative: "reuse the cached token", why_it_failed: "it expired mid-run" }],
   },
   countersign_capability_request: {
     request_id: "CAP-004", decision: "approve", reason: "custody agrees",
+    alternatives: ["hand over a single-repo token"],
+    no_safer_alternative: "the audit sweeps every repo in the installation",
+    alternatives_considered: [{ alternative: "a 5 minute lease", why_it_failed: "the sweep takes 20 minutes" }],
   },
 };
 
@@ -1400,10 +1407,21 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
     assert.match(text, /TWO KEYS/);
 
     // --- agent B (the domain owner) turns key 1 ----------------------------
+    // github.token is class credential, so this grant is RISKY and the gate
+    // requires the considered record (TOG-403). It travels as a tool argument
+    // because TOG-467 declared one; before that this call was unsatisfiable
+    // over this transport at any argument list, which is what turned `main`
+    // red rather than merely turning this test red.
     const review = await call(
       rpc("tools/call", {
         name: "review_capability_request",
-        arguments: { request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only" },
+        arguments: {
+          request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only",
+          alternatives_considered: [{
+            alternative: "have the audit run read check-runs through the existing gh-event-capture mirror",
+            why_it_failed: "the mirror lags by a poll interval and the run needs the head SHA's status now",
+          }],
+        },
       }),
       headersFor(DOMAIN_OWNER),
     );
@@ -1411,10 +1429,17 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
     assert.match(review.json.result.content[0].text, /awaiting_custody|KEY 1/i);
 
     // --- agent C (the custodian) turns key 2 -------------------------------
+    // Unconditional here: a countersignature only ever runs on a credential.
     const counter = await call(
       rpc("tools/call", {
         name: "countersign_capability_request",
-        arguments: { request_id: reqId, decision: "approve", reason: "custody agrees, scoped and revocable" },
+        arguments: {
+          request_id: reqId, decision: "approve", reason: "custody agrees, scoped and revocable",
+          alternatives_considered: [{
+            alternative: "mint the token against a single repository instead of the installation",
+            why_it_failed: "the audit sweeps every repo in the installation, so a single-repo token covers none of it",
+          }],
+        },
       }),
       headersFor(CUSTODIAN),
     );
@@ -1435,6 +1460,162 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
     // Two keys means two principals, and neither is the requester.
     assert.notEqual(reviewed.reviewer, countersigned.custodian);
     assert.notEqual(countersigned.custodian, submitted.requesterAgentId);
+  });
+});
+
+// ===========================================================================
+// TOG-467. The four decision paths that `main` proved were unreachable.
+//
+// Measured against the real gate before the fix, with an approve-a-non-risky-
+// ask control that passed: review-deny, review-approve-risky, countersign-
+// approve and countersign-deny were ALL refused, because capability_gate.sh
+// requires safer-alternative arguments that these tools did not declare — and
+// this transport enforces `additionalProperties: false`, so the caller could
+// not send them anyway. Four of five paths shut, which is why the failure
+// surfaced as a red acceptance test rather than as a bug report: nobody could
+// get far enough to file one.
+//
+// The approve pair is covered by the acceptance test above. These cover the
+// denials, which is the half that matters more — a custodian's refusal is
+// usually "not in this form", and a denial recording none of that leaves the
+// requester blocked by the one agent who already knows the safer shape.
+// ===========================================================================
+
+test("TOG-467 ACCEPTANCE: a denial carries its safer alternative over the wire into the record", { skip: skipIfNoGate }, async () => {
+  const dir = scratch();
+  const { cfg, queuePath } = realGateConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured from /proc on 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and this run has none",
+        },
+      }),
+      headersFor(REQUESTER),
+    );
+    const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+
+    const WAY_FORWARD = "read the check-run status off the gh-event-capture mirror, which needs no token";
+    const review = await call(
+      rpc("tools/call", {
+        name: "review_capability_request",
+        arguments: {
+          request_id: reqId, decision: "reject", reason: "not in this form",
+          alternatives: [WAY_FORWARD],
+        },
+      }),
+      headersFor(DOMAIN_OWNER),
+    );
+    assert.equal(review.json.result.isError, false, review.json.result.content?.[0]?.text);
+
+    const rows = readFileSync(queuePath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const decided = rows.find((r) => r.status === "rejected");
+    assert.ok(decided, "the denial reached the gate but was never recorded");
+    assert.equal(decided.key, "domain");
+    assert.equal(decided.reviewer, DOMAIN_OWNER, "the recorded principal is not the authenticated denier");
+    // The point of the whole exercise: the way forward is IN the record, not
+    // merely accepted by the parser and dropped on the way to the CLI.
+    assert.deepEqual(decided.alternatives, [WAY_FORWARD]);
+  });
+});
+
+test("TOG-467 ACCEPTANCE: a custodian's no_safer_alternative finding reaches the record", { skip: skipIfNoGate }, async () => {
+  const dir = scratch();
+  const { cfg, queuePath } = realGateConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured from /proc on 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and this run has none",
+        },
+      }),
+      headersFor(REQUESTER),
+    );
+    const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+
+    const key1 = await call(
+      rpc("tools/call", {
+        name: "review_capability_request",
+        arguments: {
+          request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only",
+          alternatives_considered: [{
+            alternative: "read the status off the gh-event-capture mirror",
+            why_it_failed: "the mirror lags a poll interval and the run needs the head SHA now",
+          }],
+        },
+      }),
+      headersFor(DOMAIN_OWNER),
+    );
+    assert.equal(key1.json.result.isError, false, key1.json.result.content?.[0]?.text);
+
+    const FINDING = "every narrower token still mints against the whole installation; there is no repo-scoped mint";
+    const key2 = await call(
+      rpc("tools/call", {
+        name: "countersign_capability_request",
+        arguments: {
+          request_id: reqId, decision: "reject", reason: "not in this form",
+          no_safer_alternative: FINDING,
+        },
+      }),
+      headersFor(CUSTODIAN),
+    );
+    assert.equal(key2.json.result.isError, false, key2.json.result.content?.[0]?.text);
+
+    const rows = readFileSync(queuePath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const decided = rows.find((r) => r.status === "rejected");
+    assert.ok(decided, "the countersigned denial was never recorded");
+    assert.equal(decided.key, "custody");
+    // `custodian` on a custody key, `reviewer` on a domain key — the record
+    // names the ROLE that decided, so asserting the wrong one would pass
+    // against `undefined` if the assertion were a truthiness check.
+    assert.equal(decided.custodian, CUSTODIAN, "the recorded principal is not the authenticated custodian");
+    assert.equal(decided.domainOwner, DOMAIN_OWNER);
+    assert.notEqual(decided.custodian, decided.domainOwner, "two keys means two principals");
+    assert.equal(decided.noSaferAlternative, FINDING);
+  });
+});
+
+test("TOG-467: the transport forwards the arguments and does NOT decide the policy", { skip: skipIfNoGate }, async () => {
+  const dir = scratch();
+  const { cfg } = realGateConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: {
+          capability: "github.token", action: "read",
+          facts: "the audit run holds no GH_APP binding, measured from /proc on 2026-08-25",
+          reasoning: "reading check-runs needs a scoped installation token and this run has none",
+        },
+      }),
+      headersFor(REQUESTER),
+    );
+    const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+
+    // EXACTLY ONE input omitted — the alternatives — against a call that is
+    // otherwise complete and would otherwise be approved. Omitting more than
+    // one over-determines the refusal: it would still be refused with the
+    // policy gone, and the test would keep passing after the thing it guards
+    // had been deleted.
+    const denied = await call(
+      rpc("tools/call", {
+        name: "review_capability_request",
+        arguments: { request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only" },
+      }),
+      headersFor(DOMAIN_OWNER),
+    );
+    assert.equal(denied.json.result.isError, true, "declaring the arguments must not make the gate's rule optional");
+    const text = denied.json.result.content[0].text;
+    // Named by the rule that fired, so a refusal from the neighbouring gate
+    // (authority, class, custody) cannot satisfy this assertion.
+    assert.match(text, /RISKY ask/);
+    assert.match(text, /--considered/);
   });
 });
 

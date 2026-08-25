@@ -144,8 +144,8 @@ the string `org_provisioner` never appears in the server source.
 | `submit_provisioning_request` | `template`, `title`, `rationale?`, `supersedes?` | `submit --requester <authenticated agent> …` |
 | `review_provisioning_request` | `request_id`, `decision`, `reason?`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
 | `submit_capability_request` | `capability`, `action`, `facts`, `reasoning`, `title?` | `submit --requester <authenticated agent> …` |
-| `review_capability_request` | `request_id` (CAP-nnn), `decision`, `reason` | `review --reviewer <authenticated agent> …` |
-| `countersign_capability_request` | `request_id` (CAP-nnn), `decision`, `reason` | `countersign --custodian <authenticated agent> …` |
+| `review_capability_request` | `request_id` (CAP-nnn), `decision`, `reason`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
+| `countersign_capability_request` | `request_id` (CAP-nnn), `decision`, `reason`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `countersign --custodian <authenticated agent> …` |
 
 `--requester`, `--reviewer` and `--custodian` are written by the server from
 the authenticated principal, every time. They are structurally unreachable from
@@ -199,8 +199,28 @@ arrive at different lengths and silently pair alternative 1 with reason 2,
 producing a record that is fully populated and entirely wrong — worse than a
 missing one, because it reads as diligence to the auditor whose job is to read it.
 
+**Both gates, not just the queue (TOG-467).** TOG-403 applied the same model to
+`capability_gate.sh`, but the three capability tools kept declaring only
+`request_id`/`decision`/`reason` — so the arguments the gate had begun requiring
+were unsendable, and `additionalProperties: false` meant a caller that tried was
+refused rather than tolerated. Measured against the real gate, with an
+approve-a-non-risky-ask control that passed: **four of the five decision paths
+were unreachable** — review-deny, review-approve-risky, countersign-approve
+(risky by construction; custody is only reached by class `credential`) and
+countersign-deny. It surfaced as a red acceptance test on `main` rather than as a
+bug report, because nobody could get far enough to file one.
+
+The three properties are therefore declared once, by `saferAlternativeProperties`,
+and appended to the argv once, by `appendSaferAlternativeArgs` — shared by the
+queue's `review` and the gate's `review` and `countersign`. Shared rather than
+copied for the reason TOG-403 gives for factoring the five shell functions into
+`lib/reqrecord.sh`: two copies of a decision surface become two surfaces, and the
+divergence is invisible from either side. Here the copy is also caught
+mechanically, since ci.yml's mutation needles must each match the file exactly
+once.
+
 This layer validates **shape** (type, length, pairing, no leading `-`, no NUL);
-`org_request_queue.sh` validates **policy**. Re-implementing the policy here would
+`org_request_queue.sh` and `capability_gate.sh` validate **policy**. Re-implementing the policy here would
 give the queue two enforcement points that can disagree, and the one an agent
 reaches would be the weaker of the two.
 
