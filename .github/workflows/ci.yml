@@ -2694,14 +2694,49 @@ jobs:
           #   PARSE      A mutation that no longer parses fails the suite for
           #              the wrong reason, which reads exactly like success.
           #
+          #   WHOLE      A baseline that PASSES can still be the wrong baseline.
+          #   SUITE      The staging dir used to hold `mcp/` alone, and the
+          #              suite skips its real-gate sections when
+          #              capability_gate.sh / org_request_queue.sh / lib/ are
+          #              absent — so `node --test` reported "0 failed" while
+          #              quietly running FEWER tests than CI did, and every
+          #              mutation below was judged by whichever assertions
+          #              happened to survive the copy. Measured on this branch
+          #              (TOG-399): `cp -r mcp` alone ran 60 of 65, and the 5 it
+          #              dropped included BOTH TOG-399 acceptance tests — the
+          #              ones that drive the real gate end to end and are the
+          #              only place a forged capability principal is caught.
+          #              Copying the scripts costs a few seconds per mutation
+          #              and puts the real gate behind all of them.
+          #
+          #              The skip assertion is what keeps that true. A skipped
+          #              test is not a failed one, so without it this regresses
+          #              in silence the next time the suite grows a section with
+          #              a precondition. Three outcomes, deliberately: the count
+          #              must be FOUND and be zero — a missing line means the
+          #              reporter changed and the check has stopped measuring,
+          #              which must not read as "nothing skipped".
+          #
           #   REJECTED   And then, finally, the thing being asserted.
           mcp_mutation_check() {
             label="$1"; needle="$2"; repl="$3"
             mut="$(mktemp -d)"
-            cp -r mcp "$mut/"
+            cp -r mcp lib "$mut/"
+            cp capability_gate.sh org_request_queue.sh "$mut/"
             if ! node --test "$mut/mcp/test/org-request-mcp.test.mjs" > "$mut/base.txt" 2>&1; then
               echo "::error::$label: the UNMUTATED copy of the mcp suite already fails in the staging dir — this gate proves nothing"
               tail -25 "$mut/base.txt"
+              return 1
+            fi
+            skipped="$(sed -n 's/^[^0-9]*skipped \([0-9][0-9]*\)$/\1/p' "$mut/base.txt" | tail -1)"
+            if [ -z "$skipped" ]; then
+              echo "::error::$label: could not read a skipped count out of the staged suite's summary; the reporter format changed and this gate has stopped measuring coverage"
+              tail -25 "$mut/base.txt"
+              return 1
+            fi
+            if [ "$skipped" -ne 0 ]; then
+              echo "::error::$label: the staged copy SKIPPED $skipped test(s), so this mutation is judged by a smaller suite than CI runs. Stage whatever those tests need — a skipped assertion cannot reject a mutation."
+              grep -F "﹣" "$mut/base.txt" | head -10
               return 1
             fi
             node -e '
@@ -2841,7 +2876,9 @@ jobs:
           #
           # Rejected by `every property a schema advertises is actually read
           # onto the argv`, which needs no capability_gate.sh in the staging
-          # directory — the acceptance tests do, and they skip there.
+          # directory. The acceptance tests do need it, and they used to skip
+          # there — see WHOLE SUITE above; the staging dir now carries the
+          # scripts, so both rejections are live rather than one.
           mcp_mutation_check "capability-review-loses-safer-alternatives" \
             '...saferAlternativeProperties(RISKY_CAPABILITY_CLAUSE),' \
             '' || rc=1
