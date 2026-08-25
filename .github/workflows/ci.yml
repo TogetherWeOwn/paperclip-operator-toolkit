@@ -21,6 +21,12 @@ name: CI
 #                                       that can actually receive it, and
 #                                       whether a queue that has stopped
 #                                       deciding says so — TOG-390
+#     test_capability_gate.sh           who may decide a CAPABILITY request, and
+#                                       which four asks stop for the owner
+#                                       whatever any agent says — TOG-387
+#     test_reqrecord_shared.sh          whether the record layer duplicated
+#                                       between lib/reqrecord.sh and
+#                                       org_request_queue.sh has drifted — TOG-387
 #     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
 #                                       podman/psql binaries — see TOG-202
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
@@ -275,6 +281,31 @@ jobs:
       # assertable artifact. No network, no credential.
       - name: notification-transport suite
         run: ./test_notify_transport.sh
+
+      # TOG-387. The capability gate — the sibling of the provisioning queue,
+      # for asks whose object is a CAPABILITY rather than an org seat. It runs
+      # here for the same reason the three above do: it fabricates its whole
+      # world through ORG_SNAPSHOT and touches no database, no credential and
+      # no network. The part of it worth reading is how it asserts: every
+      # refusal is pinned to the REASON that identifies which gate fired, never
+      # to exit status alone, because a fail-closed neighbour catching the same
+      # input is how assertions on this repo have gone green for the wrong
+      # reason. Its section 10 then deletes each gate in a staging copy — after
+      # a baseline on the UNMUTATED copy in the same directory — and requires
+      # the test that names that gate to go red.
+      - name: capability gate suite
+        run: ./test_capability_gate.sh
+
+      # TOG-387. lib/reqrecord.sh holds the decision record's invariants, and
+      # org_request_queue.sh still holds its own copy of eight of them because
+      # TOG-388 and TOG-390 are open against that file. This gate is the price
+      # of that duplication: it extracts each shared function from both files
+      # and fails on a single byte of drift. When the queue adopts the library
+      # the extraction will come back empty and this suite goes red ON PURPOSE
+      # — that is the signal to DELETE it, not to loosen it, because a
+      # comparison whose inputs have gone empty reads exactly like a clean one.
+      - name: shared record-layer drift gate
+        run: ./test_reqrecord_shared.sh
 
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts

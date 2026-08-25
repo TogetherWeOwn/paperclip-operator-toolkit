@@ -41,12 +41,30 @@ retried into a different recipient, and `inbox --for <ROLE>` works with no trans
 and no network. Push makes a decision timely; pull is what makes it reliable. See
 [docs/responsible-leader.md](docs/responsible-leader.md) and `notify_paperclip_issue.sh`.
 
+**Capabilities are a different question with a different answer (TOG-387).** The queue above brokers
+org seats and derives authority from the delegation ceiling. `capability_gate.sh` brokers
+*capabilities* — a credential, a tool scope, a root action — and no ceiling says who may hand out a
+GitHub token, so it derives authority from **ownership of the domain**, with the CISO's
+countersignature as an independent second key on anything credential-class. It has **no break-glass
+path**, deliberately: the queue's override is bounded (an agent seated a level early), a capability's
+is not. Four classes of ask — real money, deleting or rotating a credential, anything published
+outside the company, anything with no rollback — stop for the owner and no agent may decide them,
+including the President & COO. The class is derived from a registry in the file and cannot be
+declared by the requester. See [docs/capability-gate.md](docs/capability-gate.md).
+
+**That tool inherits the same identity gap, and it is not closed yet.** `--requester`, `--reviewer`
+and `--custodian` are unauthenticated flags, measured rather than assumed: in one shell session an
+agent submitted a request as the CTO and approved it as the President & COO. Both tools are safe
+only behind the transport described above. Until `capability_gate.sh` is reachable through it, it is
+operator-run.
+
 ## What is here
 
 | Tool | Purpose | Suite |
 |---|---|---|
 | `org_provisioner.sh` | Constrained agent provisioning. Enforces the report §8.2 privilege invariants. | `test_privilege_ceilings.sh` |
 | `org_request_queue.sh` | Approval-gated `org.request_descendant` / `org.review_request`, decided by the responsible leader, and the decision is delivered back to the requester. | `test_responsible_leader.sh`, `test_request_record_integrity.sh`, `test_decision_notify.sh` (offline), `test_request_queue.sh` (live) |
+| `capability_gate.sh` | The sibling of the queue above, for asks whose object is a **capability** rather than an org seat. Domain owner decides, the CISO countersigns anything credential-class, and four classes of ask stop for the owner whatever any agent says. The risk class is derived from a registry in the file, never declared by the requester — there is no `--risk` flag and passing one is a refusal. Approving is a **decision record, not a grant**. See [`docs/capability-gate.md`](docs/capability-gate.md). | `test_capability_gate.sh`, `test_reqrecord_shared.sh` (offline) |
 | `notify_paperclip_issue.sh` | Reference `REQUEST_NOTIFY_CMD` transport: posts a decision to the requester as an issue comment. Treats its payload as untrusted: two of its fields are written by the requester. | `test_notify_transport.sh` |
 | `queue_liveness.sh` | Whether the agent a request was routed at can actually receive the decision, and whether a queue has stopped deciding. Read-only, distinct exit codes (`3` alarm, `4` do-not-route, `5` **could not measure — not clean**) — cron/CI-able. Reports `undetermined` rather than guessing when it cannot tell a throttled agent from a disabled one. | `test_queue_liveness.sh` |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
