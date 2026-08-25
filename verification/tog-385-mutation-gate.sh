@@ -98,7 +98,7 @@ mutate "k=v exemption removed" \
 
 # M2 — the guard that stops a nested CREDENTIAL-NAMED key from being exempted.
 mutate "credential-named inner-key guard removed" \
-  '        if CRED_KEY_RE.match(inner_key):' \
+  '        if CRED_KEY_RE.search(inner_key):' \
   '        if False:' \
   "inner key is credential-named too"
 
@@ -149,9 +149,82 @@ mutate "depth cap flipped to fail-OPEN" \
 # M9 — the shared key alternation. Two copies would drift; prove there is only one, by
 # breaking it and watching BOTH the rule and the guard lose the same key.
 mutate "credential-key alternation narrowed" \
-  '|id[_\-]?token|session[_\-]?token|credential)s?")' \
-  '|id[_\-]?token|session[_\-]?token)s?")' \
+  'r"(?:pass(?:word|wd|phrase)|secret|credential"' \
+  'r"(?:pass(?:word|wd|phrase)|secret"' \
   "inner key is credential-named too"
+
+# =====================================================================================
+# TOG-406 — the alternation stopped being a hand-written list and became a cross-product,
+# and the guard stopped being anchored. Both are limbs; both get mutated here.
+#
+# The reason these are not one mutation: three of the new cases could all be satisfied
+# by the cross-product limb as a whole, and then "a case per key name" would be a claim
+# the suite never actually tests. So the limb is removed once, and then each half of the
+# product is narrowed by ONE word with only the case that names it required to go red.
+# =====================================================================================
+
+# M10 — the cross-product limb itself. If removing it entirely leaves the suite green,
+# every case below is being satisfied by something else and none of them mean anything.
+mutate "generated key cross-product removed" \
+  'r"|" + CRED_PRE + r"[_\-]?" + CRED_SUF + r")s?")' \
+  'r")s?")' \
+  "access_token is a credential key" \
+  "secret_key is a credential key" \
+  "bearer_token is a credential key"
+
+# M11 — one PREFIX word. Attributes the bearer_token case to `bearer` and nothing else.
+mutate "prefix word 'bearer' removed" \
+  '|bearer|client' \
+  '|client' \
+  "bearer_token is a credential key"
+
+# M12 — one PREFIX word, for the spelling that READ as covered. `secret` is still in the
+# alternation as a bare alternative after this mutation, which is the entire point of
+# the bug: bare `secret` cannot carry `secret_key`, and a green here would mean the case
+# is being satisfied by the alternative that never covered it.
+mutate "prefix word 'secret' removed" \
+  '|refresh|secret|session' \
+  '|refresh|session' \
+  "secret_key is a credential key"
+
+# M13 — one SUFFIX word.
+mutate "suffix word 'token' removed" \
+  'CRED_SUF = r"(?:key|token|secret)"' \
+  'CRED_SUF = r"(?:key|secret)"' \
+  "access_token is a credential key" \
+  "bearer_token is a credential key"
+
+# M14 — the guard's left anchor, put back. This is the bug TOG-406 found in the guard:
+# with `^` restored the guard recognises only EXACT credential names, a prefixed inner
+# key takes the recursion path, and the 8-char floor swallows the payload.
+#
+# Only the `x-api-key` case is listed. The api_secret case is NOT, and the omission is
+# deliberate — the gate found it: that spelling is reachable by TWO independent limbs
+# (the bare `secret` alternative sitting at the tail of the key once the guard's `^` is
+# gone, and `api`x`secret` inside the product), so no single-limb mutation can redden
+# it and listing it here would have been a coverage claim the gate cannot honour. It
+# stays in the selftest as a regression pin — it did go CLEAN -> FAIL with this change —
+# but the ANCHOR is attributed by `x-api-key`, which no other limb can carry.
+mutate "guard re-anchored at the left" \
+  'CRED_KEY_RE = re.compile(r"(?i)" + CRED_KEY + r"$")' \
+  'CRED_KEY_RE = re.compile(r"(?i)^" + CRED_KEY + r"$")' \
+  "prefixed nested key is credential-named"
+
+# M15 — the same anchor by the other route. `.match` re-imposes `^` no matter what the
+# pattern says, so dropping the `^` and leaving `.match` in place would look like a fix
+# and change nothing. Two literals, one behaviour: both have to be caught.
+mutate "guard reverted to .match (implicit ^)" \
+  '        if CRED_KEY_RE.search(inner_key):' \
+  '        if CRED_KEY_RE.match(inner_key):' \
+  "prefixed nested key is credential-named"
+
+# M16 — the inverse direction, and the only one here that WIDENS. `app` was measured
+# against this repository and produced a false positive on a log line; the negative case
+# that records that is worthless if it would stay green with the prefix put back.
+mutate "removed prefix 'app' put back" \
+  '(?:access|api|auth' \
+  '(?:access|api|app|auth' \
+  "a log line whose tool name ends in a token"
 
 echo
 if [ "$fail" -eq 0 ]; then

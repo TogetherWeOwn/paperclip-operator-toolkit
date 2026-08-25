@@ -323,13 +323,55 @@ _pem  = "-----" + "BEGIN"
 # No leading \b: the boundary is the bug. In `management_password` the char before
 # `pass` is `_`, which IS a word char, so \b never matched and the single most likely
 # real-world spelling sailed straight through. Caught by the selftest.
-CRED_KEY = (r"(?:pass(?:word|wd|phrase)|secret|api[_\-]?key|access[_\-]?key"
-            r"|private[_\-]?key|client[_\-]?secret|auth[_\-]?token|refresh[_\-]?token"
-            r"|id[_\-]?token|session[_\-]?token|credential)s?")
+#
+# TOG-406 — why this is a CROSS-PRODUCT and not a longer hand-written list.
+#   The list used to be eleven spellings written out one by one, and four of the most
+#   common credential key names in the world were not among them: `access_token`,
+#   `secret_key`, `bearer_token`, `auth_key`. `secret_key` is the instructive one — it
+#   READS as covered, because `secret` is in the list. It is not: after `secret` the
+#   rule needs `\s*[:=]`, gets `_key`, and no other alternative can start a match on
+#   that string. Enumerating the four reported names would have left 31 more of exactly
+#   the same shape; measured over <prefix>_<suffix> spellings, 35 of 56 missed.
+#   So the alternation is now generated: a credential-CONTEXT word, then `key`, `token`
+#   or `secret`. Every spelling the old list had is still produced by it.
+#
+#   What is deliberately NOT here is the other half of the cross-product. Bare `key`,
+#   `token` and `id` are not alternatives and must not become alternatives: `key: value`,
+#   `tokens_input = 41234` and `client_id = ...` are ordinary runbook lines, and `id` as
+#   a SUFFIX is an identifier, never a secret. `public` is not a prefix for the same
+#   reason — a public key is publishable by definition. Each of those is pinned by a
+#   negative case in the selftest, because with no left boundary (above) this rule
+#   matches mid-word and a careless prefix is how it would start firing on prose.
+#   `app` is NOT in this list, and it is the one prefix that was tried and REMOVED. It
+#   was measured against this repository as a second corpus and produced exactly one new
+#   FAIL: a WARNING line in test_gh_app_token.sh, where the tool's own name supplies
+#   `app_token`, the log's colon supplies the separator, and the next word supplies an
+#   8-character "value". Nothing was ever secret there. `app_key` is a real credential
+#   spelling, but it is a rare one, and this repo says the tool's own name will collide
+#   with it in prose forever. A permanently-red scanner is a muted scanner — that is the
+#   whole lesson of TOG-385 one section down. Pinned by a negative case in the selftest.
+CRED_PRE = (r"(?:access|api|auth|bearer|client|consumer|encryption|id|master"
+            r"|oauth|private|refresh|secret|session|signing|token)")
+CRED_SUF = r"(?:key|token|secret)"
+CRED_KEY = (r"(?:pass(?:word|wd|phrase)|secret|credential"
+            r"|" + CRED_PRE + r"[_\-]?" + CRED_SUF + r")s?")
 CRED_ASSIGN_RE = re.compile(
     r"(?i)" + CRED_KEY + r"(?![A-Za-z0-9])\s*[:=]\s*"
     r"[\"']?(?P<val>[^\s\"',;]{8,})[\"']?")
-CRED_KEY_RE = re.compile(r"(?i)^" + CRED_KEY + r"$")
+# No leading `^`, for the same reason the rule has no leading \b — and it is the same
+# bug: this guard was anchored at BOTH ends while the rule it is supposed to agree with
+# was anchored at neither, so the guard silently stopped recognising every PREFIXED
+# spelling the rule still matched. Measured: it missed `x-api-key`, `api_secret` and
+# `AWS_SECRET_ACCESS_KEY` — 48 of the same 56 spellings. That is not cosmetic. A key
+# the guard does not recognise takes the recursion path instead of the strict one, and
+# the recursion re-applies the 8-char floor, so an `x-api-key` nested one level under a
+# `credential` key and carrying a seven-character payload scanned CLEAN. Described here
+# rather than quoted: the example line IS a live assignment, and this file scans itself
+# (see the header note on pattern self-reference). It is quoted where it belongs, as a
+# runtime-assembled selftest case. Probed, not reasoned. The trailing `$` stays:
+# the rule requires the credential name to sit immediately before the separator, so the
+# key must END with it. `.search`, not `.match` — `.match` re-imposes the `^`.
+CRED_KEY_RE = re.compile(r"(?i)" + CRED_KEY + r"$")
 
 RULES = [
     # id, tier, regex, description
@@ -514,7 +556,7 @@ def noncredential_value(val: str, depth: int = 0) -> bool:
     m = INNER_KV_RE.match(val)
     if m:
         inner_key, inner_val = m.group(1), m.group(2)
-        if CRED_KEY_RE.match(inner_key):
+        if CRED_KEY_RE.search(inner_key):
             # A nested assignment whose OWN key is credential-named. The outer match has
             # already consumed it, so finditer will never report it a second time, and
             # recursing normally would drop that payload through the 8-char floor and
@@ -987,6 +1029,10 @@ cmd_selftest() {
   # positive case for secret-assignment is by construction a live assignment, so spelling
   # the key literally makes this file flag itself and breaks the self-scan pair below.
   local XAK="x-api-""key" APIK="api_""key" CSEC="client_""secret" STOK="session_""token"
+  # TOG-406 fixtures, same rule: the key is what must be fragmented. The doubled quote
+  # is load-bearing — `bearer_""token` does not match `bearer[_\-]?token`, so this file
+  # keeps scanning itself clean while the assembled value does fire.
+  local ATOK="access_""token" SKEY="secret_""key" BTOK="bearer_""token" ASEC="api_""secret"
   local BLOB="${A26U:0:8}${D10:2:5}${A26:9:9}${A26U:14:6}${D10:0:4}"   # 32 chars, high entropy
 
   _rule "openai-style key"        openai-style-key       "OPENAI_KEY=${SK}${A26}${D10:0:6}"
@@ -1066,6 +1112,50 @@ cmd_selftest() {
         "${XAK} : https://h.example/cb?t=hunter2-correct"
   _rule "nesting past the depth cap fails CLOSED"    secret-assignment \
         "${XAK} : a=b=c=d=e=hunter2-correct"
+
+  echo "=== TOG-406: the credential key names the alternation did not know ==="
+  # Payloads are 21 chars: over the rule's 8-char floor, under the entropy sweep's
+  # 24-char floor, and matching no prefix rule — so a green here can only be
+  # secret-assignment, never a neighbouring rule covering for it.
+  _rule "access_token is a credential key"           secret-assignment \
+        "${ATOK} = hunter2-correct-horse"
+  _rule "secret_key is a credential key"             secret-assignment \
+        "${SKEY} = hunter2-correct-horse"
+  _rule "bearer_token is a credential key"           secret-assignment \
+        "${BTOK} = hunter2-correct-horse"
+  # api_secret is NOT a fourth case of the same kind, and writing it as one would have
+  # been vacuous. A DIRECT assignment to `api_secret` ALREADY fired before TOG-406 (not
+  # written out: it would be a live assignment in a file that scans itself). The rule
+  # has no left boundary, so the bare `secret` alternative matches the tail of it. The
+  # issue's table is wrong on that row. Where that spelling was genuinely uncovered is
+  # the GUARD, which was anchored `^...$` and so recognised none of the prefixed
+  # spellings — measured on this file. Hence an inner-key case, which is the shape that
+  # actually changes behaviour: it went CLEAN -> FAIL with TOG-406.
+  # It is a regression pin and NOT a coverage claim. The mutation gate says why: this
+  # spelling is now reachable by two independent limbs, so no single mutation can redden
+  # it, and it is the only case here the gate does not list. The anchor limb it exercises
+  # is attributed by the `x-api-key` case below, which nothing else can carry.
+  _rule "api_secret as a nested credential key"      secret-assignment \
+        "credential: ${ASEC}=hunter2"
+  _rule "prefixed nested key is credential-named"    secret-assignment \
+        "credential: ${XAK}=hunter2"
+
+  echo "=== TOG-406: ...and the widened alternation must not fire on these ==="
+  # Every value here is the SAME 21-char payload the cases above fire on, so a green is
+  # a statement about the key name and nothing else. These are the halves of the
+  # cross-product that were deliberately left out; without them the prefix and suffix
+  # lists could be widened later with nothing to say it had gone too far.
+  _clean "public_key is publishable by definition" "public_key = hunter2-correct-horse"
+  _clean "client_id is an identifier, not a secret" "client_id = hunter2-correct-horse"
+  _clean "next_token is pagination"                 "next_token = hunter2-correct-horse"
+  _clean "partition_key is a database key"          "partition_key = hunter2-correct-horse"
+  _clean "bare key= is not a credential name"       "key = hunter2-correct-horse"
+  # The measured cost of the `app` prefix, kept as a case so re-adding it goes red here
+  # rather than in the operator's cron mail. This is a log line, not an assignment: the
+  # tool's own name ends in a credential-shaped word and the log's colon separates it
+  # from the next word. Assembled at runtime like every other fixture.
+  _clean "a log line whose tool name ends in a token" \
+         "test_gh_""app_""token: WARNING: could not attribute the seeded cache"
 
   echo "=== fail-closed behaviour — an unreadable or oversized file is a FAIL ==="
   local d1="$tmp/unreadable"; mkdir -p "$d1"; echo "harmless" > "$d1/secret.txt"; chmod 0000 "$d1/secret.txt"
