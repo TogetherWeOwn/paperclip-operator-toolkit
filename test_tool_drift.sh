@@ -58,9 +58,26 @@ mk "$REPO/lib/util.sh"  'util() { :; }
 '
 mk "$REPO/docs/x.md"    '# doc
 '
+# The tools are EXECUTABLE and that mode is load-bearing, not cosmetic: the
+# coverage gate (TOG-357) tells "matched a tool" from "matched a README" by the
+# mode git recorded. Fixtures that are all mode 644 give that gate nothing to
+# fire on, and it would sit here untested while looking covered.
+chmod +x "$REPO/alpha.sh" "$REPO/beta.js" "$REPO/lib/util.sh"
 git -C "$REPO" add -A >/dev/null
 git -C "$REPO" commit -qm "fixtures"
 git -C "$REPO" branch -M main
+
+# A second ref with the SAME content at mode 644. This exists to isolate the
+# two halves of the coverage gate from each other: against `main` an empty
+# fingerprint is caught by the executable check as well as the emptiness check,
+# so a test using only `main` passes even with the emptiness check deleted —
+# it is covered by its neighbour, which is not coverage. Against `noexec` the
+# executable check cannot fire (there are none to match), so the emptiness
+# check is the only thing standing between a wrong directory and a green.
+git -C "$REPO" checkout -q -b noexec
+git -C "$REPO" update-index --chmod=-x alpha.sh beta.js lib/util.sh
+git -C "$REPO" commit -qm "same content, no executables"
+git -C "$REPO" checkout -q main
 
 # The deployed copy starts identical.
 cp -r "$REPO" "$SRC"; rm -rf "$SRC/.git"
@@ -190,6 +207,105 @@ fp > "$WORK/space.fp"
 grep -q 'a file.sh' "$WORK/space.fp" && ok "a spaced path is fingerprinted" || bad "spaced path missing"
 run "$WORK/space.fp"
 [ "$RC" -eq 3 ] && ok "a spaced path is compared as one path" || bad "spaced path compare exit $RC, want 3"
+
+# ---------------------------------------------------------------------------
+# THE COVERAGE GATE (TOG-357). The failure being pinned here is not a missed
+# drift — it is a comparison that never happened reporting itself as clean.
+#
+# Before this gate, fingerprinting a directory that held none of these tools
+# produced identical:0 drifted:0 unversioned:0, which fell through every
+# condition to "no drift" and exit 0. TOG-212's operator searched the wrong
+# directory and found nothing, so the wrong directory is the BASE case for this
+# ask, and a false green there re-arms the exact assumption the tool exists to
+# retire. Exit 2 (refused: we did not measure) not 3 (drift: we measured and it
+# differed) — the two want different next actions from whoever reads the code.
+hdr "coverage gate — a comparison that measured nothing must never read green"
+
+EMPTY="$WORK/emptydir"; mkdir -p "$EMPTY"
+( cd "$EMPTY" && "$DRIFT" fingerprint . ) > "$WORK/empty.fp"
+[ "$(grep -cv '^#' "$WORK/empty.fp" || true)" -eq 0 ] && ok "an empty dir fingerprints to no entries" \
+                                                      || bad "the empty fixture was not empty"
+run "$WORK/empty.fp"
+[ "$RC" -eq 2 ] && ok "an empty fingerprint refuses (exit 2)" \
+                || bad "an empty fingerprint exited $RC, want 2 — a measurement that never happened read as clean"
+[ "$RC" -ne 0 ] && ok "an empty fingerprint is never exit 0" || bad "an empty fingerprint exited 0"
+
+# Against a ref with no executables, the emptiness check is UNASSISTED. Without
+# this the assertion above is satisfied by the executable check next to it, and
+# deleting the emptiness check entirely leaves this suite green — which is the
+# same "passes for the wrong reason" defect the gate itself exists to stop.
+run "$WORK/empty.fp" --ref noexec
+[ "$RC" -eq 2 ] && ok "an empty fingerprint refuses even when the ref has no executables" \
+                || bad "empty fp vs a no-executable ref exited $RC, want 2 — the emptiness check is not carrying its own weight"
+
+# The near miss that survives the emptiness check: a directory sharing a path
+# with the ref, but only a documentation path. Non-zero entries, a genuine
+# match, still not the directory the tools run from.
+DOCONLY="$WORK/doconly"; mkdir -p "$DOCONLY"
+mk "$DOCONLY/docs/x.md" '# doc
+'
+( cd "$DOCONLY" && "$DRIFT" fingerprint . ) > "$WORK/doconly.fp"
+[ "$(grep -cv '^#' "$WORK/doconly.fp" || true)" -eq 1 ] && ok "the doc-only fixture has exactly one entry" \
+                                                        || bad "the doc-only fixture is not one entry"
+run "$WORK/doconly.fp"
+[ "$RC" -eq 2 ] && ok "matching only a non-executable refuses (exit 2)" \
+                || bad "doc-only match exited $RC, want 2 — a README made a wrong directory read as clean"
+grep -q 'identical: 1' <<< "$OUT" && ok "the doc-only match really did match a path" \
+                                  || bad "the doc-only fixture never matched, so the gate fired for the wrong reason"
+
+# And the gate must not be a blunt instrument: a real deployment holds the
+# tools but legitimately not every doc, and that is the case this whole tool
+# exists to report on. If this goes red the gate is refusing honest work.
+DEPLOYED="$WORK/exec-no-docs"; mkdir -p "$DEPLOYED"
+# Built from the ref, not from $SRC: earlier sections deliberately mutate $SRC,
+# so copying from it would seed this fixture with real drift and the assertion
+# below would fail for a reason that has nothing to do with the coverage gate.
+git -C "$REPO" show "main:alpha.sh" > "$DEPLOYED/alpha.sh"
+git -C "$REPO" show "main:beta.js"  > "$DEPLOYED/beta.js"
+( cd "$DEPLOYED" && "$DRIFT" fingerprint . ) > "$WORK/execonly.fp"
+run "$WORK/execonly.fp"
+[ "$RC" -eq 0 ] && ok "executables present, docs absent: still exit 0" \
+                || bad "a legitimate partial deployment exited $RC, want 0 — the gate over-refuses"
+grep -q 'coverage:' <<< "$OUT" && ok "compare reports coverage on every run" \
+                               || bad "no coverage line in the report"
+
+# ---------------------------------------------------------------------------
+# manifest / locate (TOG-357). TOG-212 asked an operator to fingerprint "the
+# directory the tools run from" and they could not find one — the ask assumed
+# the answer to the question it was asking. These two subcommands are that
+# search, split along the same seam as the rest: manifest needs the clone,
+# locate needs only bash and coreutils.
+hdr "manifest — the names locate searches for"
+MAN="$WORK/tools.manifest"
+( cd "$REPO" && "$DRIFT" manifest ) > "$MAN"; man_rc=$?
+[ "$man_rc" -eq 0 ] && ok "manifest exits 0 in a checkout" || bad "manifest exited $man_rc"
+grep -qx 'alpha.sh' "$MAN" && ok "manifest lists an executable tool" || bad "manifest missed alpha.sh"
+grep -qx 'util.sh'  "$MAN" && ok "manifest lists a nested executable by basename" || bad "manifest missed lib/util.sh"
+grep -qx 'x.md'     "$MAN" && bad "manifest listed a non-executable doc" || ok "manifest omits non-executables"
+[ "$( ( cd "$WORK" && "$DRIFT" manifest >/dev/null 2>&1 ); echo $? )" -eq 2 ] \
+  && ok "manifest outside a checkout: exit 2" || bad "manifest outside a checkout: wrong code"
+
+hdr "locate — find the directory before fingerprinting it"
+loc() { ( cd "${2:-$WORK}" && "$DRIFT" locate $1 2>&1 ); }
+LOC_OUT="$( "$DRIFT" locate "$MAN" "$SRC" 2>&1 )"; LOC_RC=$?
+[ "$LOC_RC" -eq 0 ] && ok "locate exits 0 when it finds a candidate" || bad "locate exited $LOC_RC, want 0"
+head -n 20 <<< "$LOC_OUT" | grep -qE "^[0-9]+	$SRC$" \
+  && ok "locate names the deployed directory" || bad "locate did not name $SRC"
+# Ranking is the whole output: the operator fingerprints the top line.
+TOP="$(grep -vE '^#|^$' <<< "$LOC_OUT" | grep -E '^[0-9]+	' | head -1 | cut -f2)"
+[ "$TOP" = "$SRC" ] && ok "the deployed directory ranks first" || bad "top-ranked was '$TOP', want $SRC"
+
+BARE="$WORK/nothing-here"; mkdir -p "$BARE"
+"$DRIFT" locate "$MAN" "$BARE" >/dev/null 2>&1
+[ $? -eq 3 ] && ok "locate finds nothing: exit 3, not 0" || bad "locate on an empty root did not exit 3"
+
+printf '# only comments\n' > "$WORK/empty.manifest"
+[ "$( "$DRIFT" locate "$WORK/empty.manifest" "$SRC" >/dev/null 2>&1; echo $? )" -eq 2 ] \
+  && ok "an all-comment manifest refuses (exit 2)" || bad "an empty manifest did not refuse"
+[ "$( "$DRIFT" locate >/dev/null 2>&1; echo $? )" -eq 2 ] \
+  && ok "locate with no manifest: exit 2" || bad "locate with no manifest: wrong code"
+[ "$( "$DRIFT" locate "$WORK/nosuch.manifest" >/dev/null 2>&1; echo $? )" -eq 2 ] \
+  && ok "locate with an unreadable manifest: exit 2" || bad "locate unreadable manifest: wrong code"
 
 # ---------------------------------------------------------------------------
 printf '\n'

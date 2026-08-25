@@ -153,38 +153,74 @@ cmd_compare() {
   # fingerprint never looks at (.gitignore, LICENSE, anything extensionless)
   # reports as NOT DEPLOYED on every single run — permanent noise in a report
   # whose only value is that a line in it means something.
+  # Mode travels with the hash. It is what lets this command tell "the source
+  # holds none of our executables" (wrong directory) apart from "the source
+  # matches" — see the coverage gate below. Path is emitted LAST so that a path
+  # containing whitespace still parses with a fixed field count.
   local repo; repo="$(mktemp)" || die "mktemp failed"
   local ext_re; ext_re="$(IFS='|'; printf '\\.(%s)$' "${FP_EXTENSIONS[*]}")"
   git ls-tree -r "$ref" \
-    | awk '$2=="blob"{ h=$3; sub(/^[^\t]*\t/,""); print h "\t" $0 }' \
+    | awk '$2=="blob"{ mode=$1; h=$3; sub(/^[^\t]*\t/,""); print mode "\t" h "\t" $0 }' \
     | grep -E "$ext_re" > "$repo"
 
-  local drift=0 only_src=0 only_repo=0 same=0
+  local drift=0 only_src=0 only_repo=0 same=0 matched_exec=0 ref_exec=0
   local -a L_DRIFT=() L_SRC=() L_REPO=()
 
+  ref_exec="$(awk -F'\t' '$1=="100755"' "$repo" | wc -l)"
+
   # Walk the fingerprint side.
-  local h rel rh
+  local h rel rh rmode
   while IFS=$'\t' read -r h rel; do
     case "$h" in '#'*|'') continue ;; esac
     [ -n "$rel" ] || continue
-    rh="$(awk -F'\t' -v p="$rel" '$2==p{print $1; exit}' "$repo")"
+    rh="$(  awk -F'\t' -v p="$rel" '$3==p{print $2; exit}' "$repo")"
+    rmode="$(awk -F'\t' -v p="$rel" '$3==p{print $1; exit}' "$repo")"
     if [ -z "$rh" ]; then
       only_src=$((only_src+1)); L_SRC+=("$rel")
-    elif [ "$rh" != "$h" ]; then
-      drift=$((drift+1)); L_DRIFT+=("$rel")
     else
-      same=$((same+1))
+      # Matched a path in the ref, drifted or not. An executable match is the
+      # evidence that this fingerprint came from a directory that actually
+      # holds these tools.
+      [ "$rmode" = "100755" ] && matched_exec=$((matched_exec+1))
+      if [ "$rh" != "$h" ]; then
+        drift=$((drift+1)); L_DRIFT+=("$rel")
+      else
+        same=$((same+1))
+      fi
     fi
   done < "$input"
 
   # And the repo side, for things that exist here and were not fingerprinted.
-  while IFS=$'\t' read -r h rel; do
+  local rmode2
+  while IFS=$'\t' read -r rmode2 h rel; do
     [ -n "$rel" ] || continue
     if ! awk -F'\t' -v p="$rel" '$2==p{found=1; exit} END{exit !found}' "$input"; then
       only_repo=$((only_repo+1)); L_REPO+=("$rel")
     fi
   done < "$repo"
   rm -f "$repo" "$input"
+
+  # ---- coverage gate: did we measure the right directory at all? -----------
+  # THE FAILURE THIS EXISTS TO STOP (TOG-357). Fingerprint a directory that
+  # holds none of these tools — /home/ubuntu, a home dir, an empty dir — and
+  # every counter above lands on zero except not-deployed. The verdict below
+  # would then print "no drift" and exit 0, because nothing drifted: nothing
+  # was compared. Green, from a measurement that never happened.
+  #
+  # That is not a hypothetical. TOG-212's operator searched /home/ubuntu and
+  # found nothing, so picking the wrong directory is the BASE case here, not
+  # the edge case — and this tool's whole job is to retire an assumption, which
+  # a false green re-arms instead.
+  #
+  # Refusal (2), not drift (3): we did not fail to match, we failed to measure,
+  # and those want different next actions from whoever reads the exit code.
+  local fp_entries=$(( same + drift + only_src ))
+  if [ "$fp_entries" -eq 0 ]; then
+    c_red "REFUSED — the fingerprint holds no entries at all."
+    c_red "The fingerprinted directory contained no file this tool looks at."
+    c_red "Run \`$ME locate\` to find the directory the tools actually run from."
+    return $EXIT_REFUSED
+  fi
 
   local p
   printf 'tool drift vs %s (%s)\n\n' "$ref" "$(git rev-parse --short "$ref")"
@@ -204,6 +240,21 @@ cmd_compare() {
 
   printf 'identical: %d   drifted: %d   unversioned: %d   not-deployed: %d\n' \
     "$same" "$drift" "$only_src" "$only_repo"
+  printf 'coverage:  matched %d of %d executables in %s\n' \
+    "$matched_exec" "$ref_exec" "$ref"
+
+  # Second half of the coverage gate. Zero entries was caught above; this is the
+  # near miss that survives it — a directory holding a stray README.md or a
+  # LICENSE that happens to share a path with the ref, matching on documentation
+  # while containing not one of the tools whose deployment is the question.
+  # Checked BEFORE the drift verdict on purpose: if we measured the wrong
+  # directory, "drift" and "no drift" are equally meaningless answers.
+  if [ "$ref_exec" -gt 0 ] && [ "$matched_exec" -eq 0 ]; then
+    c_red "REFUSED — matched 0 of $ref_exec executables in $ref."
+    c_red "This fingerprint is not from a directory that runs these tools."
+    c_red "Run \`$ME locate\` there to find the one that does."
+    return $EXIT_REFUSED
+  fi
 
   # NOT-DEPLOYED is informational by default: the VPS legitimately does not hold
   # every test file. --strict makes it count, for a release check.
@@ -216,9 +267,125 @@ cmd_compare() {
   c_grn "no drift"; return $EXIT_OK
 }
 
+# ---------------------------------------------------------------------------
+# manifest / locate — answering "which directory do I even fingerprint?"
+#
+# TOG-212 asked an operator to run the fingerprint "in the directory the tools
+# run from" and the operator could not find one; they searched /home/ubuntu and
+# reported nothing. The ask assumed the answer to the question it was asking.
+#
+# So the search is a command now, and it splits along the same seam the rest of
+# this file does: `manifest` runs in a clone and knows the names, `locate` runs
+# on the box and needs bash + coreutils only. The manifest is generated from the
+# ref, never committed — a checked-in list of tool names would be wrong the
+# first time anyone added a tool, which is the argument this file already makes
+# about hashes.
+# ---------------------------------------------------------------------------
+cmd_manifest() {
+  local ref="main"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ref) ref="${2:-}"; [ -n "$ref" ] || die "--ref needs a value"; shift 2 ;;
+      -*)    die "unknown option: $1" ;;
+      *)     die "manifest takes no positional arguments" ;;
+    esac
+  done
+  git rev-parse --git-dir >/dev/null 2>&1 || die "manifest must run inside a git checkout"
+  git rev-parse --verify --quiet "$ref^{tree}" >/dev/null || die "no such ref: $ref"
+
+  printf '# tool_drift manifest v1\n'
+  printf '# ref: %s (%s)\n' "$ref" "$(git rev-parse --short "$ref")"
+  # Executables only. A directory is identified as "where the tools run" by
+  # holding the tools, not by holding a README that shares a name with ours.
+  git ls-tree -r "$ref" \
+    | awk '$2=="blob" && $1=="100755"{ sub(/^[^\t]*\t/,""); n=split($0,a,"/"); print a[n] }' \
+    | sort -u
+}
+
+cmd_locate() {
+  local mf="" depth=6
+  local -a roots=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --depth) depth="${2:-}"; case "$depth" in ''|*[!0-9]*) die "--depth needs a number" ;; esac; shift 2 ;;
+      -)       [ -z "$mf" ] || die "locate takes one manifest"; mf="-"; shift ;;
+      -*)      die "unknown option: $1" ;;
+      *)       if [ -z "$mf" ]; then mf="$1"; else roots+=("$1"); fi; shift ;;
+    esac
+  done
+  [ -n "$mf" ] || die "locate needs a manifest file (or - for stdin); generate it with: $ME manifest"
+
+  local mtmp; mtmp="$(mktemp)" || die "mktemp failed"
+  DRIFT_TMP="$mtmp"
+  if [ "$mf" = "-" ]; then cat > "$mtmp"
+  else [ -r "$mf" ] || die "cannot read manifest: $mf"; cat "$mf" > "$mtmp"; fi
+
+  local want_n; want_n="$(grep -cvE '^\s*(#|$)' "$mtmp" || true)"
+  [ "${want_n:-0}" -gt 0 ] || die "manifest lists no names: $mf"
+
+  # Deliberately conservative defaults. This walks a live box, so it stays out
+  # of /proc, /sys and the filesystem at large; a bounded set of plausible roots
+  # is worth more than an unbounded scan the operator kills halfway through.
+  [ ${#roots[@]} -eq 0 ] && roots=( "${HOME:-/root}" /opt /srv /usr/local /root /home )
+  local -a keep=() r
+  for r in "${roots[@]}"; do [ -d "$r" ] && keep+=("$r"); done
+  [ ${#keep[@]} -gt 0 ] || die "none of the candidate roots exist: ${roots[*]}"
+
+  local prune=() first=1 d
+  for d in "${FP_PRUNE_DIRS[@]}"; do
+    [ $first -eq 1 ] && { prune+=( '(' -name "$d" ); first=0; } || prune+=( -o -name "$d" )
+  done
+  prune+=( ')' -prune -o )
+
+  printf '# tool_drift locate v1\n'
+  printf '# looking for %d executable name(s) under: %s\n' "$want_n" "${keep[*]}"
+  printf '# host: %s\n' "$(hostname 2>/dev/null || echo unknown)"
+  printf '#\n# matches\tdirectory\n'
+
+  local out; out="$(
+    find "${keep[@]}" "${prune[@]}" -type f -print 2>/dev/null \
+      | awk -v mfile="$mtmp" '
+          BEGIN {
+            while ((getline l < mfile) > 0) {
+              sub(/[\r\n]+$/, "", l)
+              if (l ~ /^[ \t]*#/ || l ~ /^[ \t]*$/) continue
+              want[l] = 1
+            }
+          }
+          {
+            i = match($0, /\/[^\/]*$/)
+            if (i == 0) next
+            base = substr($0, i + 1); dir = substr($0, 1, i - 1)
+            if (dir == "") dir = "/"
+            if (base in want) c[dir]++
+          }
+          END { for (d in c) printf "%d\t%s\n", c[d], d }' \
+      | sort -rn
+  )"
+  rm -f "$mtmp"; DRIFT_TMP=""
+
+  if [ -z "$out" ]; then
+    c_red "no directory under ${keep[*]} holds any of the $want_n executables."
+    c_red "Either the tools live somewhere else, or they are not on this host."
+    return $EXIT_DRIFT
+  fi
+  printf '%s\n' "$out"
+  echo
+  c_grn "fingerprint the top directory next:  $ME fingerprint <directory> > /tmp/vps.fp"
+  return $EXIT_OK
+}
+
 usage() {
   cat <<EOF
 $ME — compare the tools that RUN against the tools that are REVIEWED.
+
+  $ME manifest [--ref R]       emit the executable tool names in a ref, for
+                               locate to search for. Run inside a clone.
+
+  $ME locate FILE [root...]    find directories holding those executables.
+                               Run this on the box. Needs bash + coreutils.
+                               FILE may be '-' to read stdin.
+                               --depth N bounds the walk (default 6).
 
   $ME fingerprint [dir]        emit content fingerprints. Run this where the
                                tools run. Needs bash + coreutils; no git, no
@@ -229,11 +396,21 @@ $ME — compare the tools that RUN against the tools that are REVIEWED.
                                FILE may be '-' to read stdin.
                                --strict also fails when the ref holds files
                                the fingerprinted source does not.
+                               REFUSES rather than reporting "no drift" when
+                               the fingerprint matched none of the ref's
+                               executables — that means the wrong directory
+                               was measured, not that nothing drifted.
 
-Exit: 0 no drift · 2 refused · 3 drift detected.
+Exit: 0 ok · 2 refused · 3 drift detected (locate: nothing found).
 
-Typical use, from the VPS tooling directory:
-  ./$ME fingerprint > /tmp/vps.fp     # then bring that file to a clone
+Typical use. In a clone:
+  ./$ME manifest > /tmp/tools.manifest
+
+Then on the box, to find the directory and fingerprint it:
+  ./$ME locate /tmp/tools.manifest
+  ./$ME fingerprint <the top directory> > /tmp/vps.fp
+
+Then back in the clone:
   ./$ME compare /tmp/vps.fp
 EOF
 }
@@ -243,6 +420,8 @@ main() {
   case "$mode" in
     fingerprint) shift; cmd_fingerprint "$@" ;;
     compare)     shift; cmd_compare "$@" ;;
+    manifest)    shift; cmd_manifest "$@" ;;
+    locate)      shift; cmd_locate "$@" ;;
     -h|--help|help) usage; exit $EXIT_OK ;;
     # Default is refusal. An unrecognised subcommand must never fall through to
     # a success exit — that is the TOG-201 defect, and it is a repo-wide rule.

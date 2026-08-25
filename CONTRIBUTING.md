@@ -114,9 +114,13 @@ That is not a detection mechanism.
 `tool_drift.sh` is. Run this whenever you have shell on the VPS, and before any release:
 
 ```bash
-# 1. On the VPS, in the directory the tools actually run from.
-#    Needs bash + coreutils only — no git, no clone, no network, no credential.
-./tool_drift.sh fingerprint > /tmp/vps.fp
+# 0. In a clone: which executables are we even looking for?
+./tool_drift.sh manifest --ref main > /tmp/tools.manifest
+
+# 1. On the VPS. Needs bash + coreutils only — no git, no clone, no network,
+#    no credential. `locate` finds the directory; do not guess it.
+./tool_drift.sh locate /tmp/tools.manifest
+./tool_drift.sh fingerprint <the top-ranked directory> > /tmp/vps.fp
 
 # 2. Bring /tmp/vps.fp to a clone, and compare against the ref you believe in.
 ./tool_drift.sh compare /tmp/vps.fp --ref main
@@ -127,7 +131,20 @@ the one that should stop you: **DRIFT** (same path, different content), **UNVERS
 the source that was never imported at all), and **NOT DEPLOYED** (informational — the VPS has no
 reason to hold every test file; `--strict` makes it count).
 
-Two design points, both deliberate and both worth keeping:
+**Step 0 is not optional ceremony.** TOG-212 asked an operator to run step 1 "in the directory the
+tools run from"; they searched `/home/ubuntu`, found nothing, and the question stayed open for three
+days. The ask assumed the answer to the question it was asking. `locate` is that search, and it runs
+under the same no-git constraint as `fingerprint`.
+
+Three design points, all deliberate and all worth keeping:
+
+- **`compare` refuses rather than reporting a clean run it did not earn.** Fingerprint a directory
+  holding none of these tools and every counter lands on zero except not-deployed — which, before
+  TOG-357, fell through to `no drift` and exit `0`. Green, from a measurement that never happened,
+  on the base case: the operator who is in the wrong directory. It now exits `2` (refused: nothing
+  was measured) rather than `0` or `3`, and every run prints a `coverage:` line saying how many of
+  the ref's executables the fingerprint actually matched. **If that line reads `0 of N`, you are not
+  in the tooling directory and no other line in the report means anything.**
 
 - **It compares content, not counts or sizes.** A count collides and drifts innocently, which is
   precisely why 114-vs-156 sat unnoticed. The fingerprint is the git blob hash, computed with

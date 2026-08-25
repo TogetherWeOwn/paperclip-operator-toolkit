@@ -827,8 +827,15 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
+          # Third argument is the NAMED test that must go red. A bare "the suite
+          # failed" is not attribution: a mutation that reddens some unrelated
+          # assertion looks identical to one the gate actually caught, and stays
+          # looking identical after the assertion it was meant to pin is
+          # deleted. TOG-357 hit exactly that — an empty-fingerprint mutation
+          # reddened nothing, because the assertion covering it was being
+          # satisfied by the check standing next to it.
           drift_mutation() {
-            local label="$1" expr="$2"
+            local label="$1" expr="$2" expect="$3"
             local mut; mut="$(mktemp -d)"
             cp tool_drift.sh test_tool_drift.sh "$mut/"
 
@@ -846,17 +853,42 @@ jobs:
               echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
               rm -rf "$mut"; return 1
             fi
-            if (cd "$mut" && ./test_tool_drift.sh >/dev/null 2>&1); then
+
+            local out status
+            out="$(cd "$mut" && ./test_tool_drift.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
               echo "::error::$label: the drift suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
               rm -rf "$mut"; return 1
             fi
             rm -rf "$mut"; echo "  ok  $label"
           }
 
           drift_mutation "size-not-content" \
-            's|^  { printf .blob %d\\0. "\$len"; cat "\$f"; } . sha1sum . cut -d. . -f1$|  printf "%040d" "$len"|' || rc=1
-          drift_mutation "drift-exits-zero"      's/EXIT_DRIFT=3/EXIT_DRIFT=0/' || rc=1
-          drift_mutation "secrets-fingerprinted" 's/^is_secretish() {/is_secretish() { return 1;/' || rc=1
+            's|^  { printf .blob %d\\0. "\$len"; cat "\$f"; } . sha1sum . cut -d. . -f1$|  printf "%040d" "$len"|' \
+            'disagrees with git hash-object' || rc=1
+          drift_mutation "drift-exits-zero"      's/EXIT_DRIFT=3/EXIT_DRIFT=0/' \
+            'content change exits 0, want 3' || rc=1
+          drift_mutation "secrets-fingerprinted" 's/^is_secretish() {/is_secretish() { return 1;/' \
+            'a secret-shaped file was fingerprinted' || rc=1
+
+          # TOG-357. The two coverage-gate mutations. Both restore a comparison
+          # that measured the wrong directory reporting itself as clean, which
+          # is worse than no detector: it retires the assumption it was supposed
+          # to test, in the wrong direction.
+          drift_mutation "empty-fp-reads-green" \
+            's/if \[ "\$fp_entries" -eq 0 \]; then/if false; then/' \
+            'emptiness check is not carrying its own weight' || rc=1
+          drift_mutation "no-exec-reads-green" \
+            's/if \[ "\$ref_exec" -gt 0 \] \&\& \[ "\$matched_exec" -eq 0 \]; then/if false; then/' \
+            'a README made a wrong directory read as clean' || rc=1
+          drift_mutation "manifest-includes-nonexec" \
+            's/\$2=="blob" \&\& \$1=="100755"/$2=="blob"/' \
+            'manifest listed a non-executable doc' || rc=1
           exit $rc
 
       # TOG-358. The preflight's whole job is to refuse to say "ok" about an
