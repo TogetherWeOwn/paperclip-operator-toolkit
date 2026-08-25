@@ -38,7 +38,22 @@ set -uo pipefail
 # container start, and the symptom — every agent failing to reach its model —
 # looks nothing like "we changed a URL".
 #
-# So: whoever opens that port must be able to prove it is open from here, and
+# WHERE OMNIROUTE ACTUALLY IS (TOG-362, 2026-08-25). The table above reads as
+# "a port needs opening on the host". It does not. OmniRoute is not a host
+# service at all — it is a SIBLING CONTAINER on the same podman network, and
+# podman's DNS already resolves it:
+#
+#     http://omniroute:20129        ->  10.89.1.3, answers today
+#     http://host.containers.internal:20129  ->  refused, and always will be
+#
+# `host.containers.internal` is the host's public address; OmniRoute publishes
+# on the host's loopback. Neither is where it lives for us. So the value for
+# step 4 is `http://omniroute:20129`, nothing needs to be bound or firewalled,
+# and binding :20129 (or :8317, whose /v0/management/* routes hand out live API
+# keys in plaintext) to this box's public address would add exposure to buy
+# reachability we already have. See docs/omniroute-agent-reachability.md.
+#
+# So: whoever changes that URL must be able to prove it answers from here, and
 # this is the proof. Exit 0 is the only value that clears the flip.
 #
 # WHAT IT CHECKS, in order, each gating the next
@@ -113,13 +128,23 @@ QUIET=0
 die() { echo "agent_endpoint_preflight: $*" >&2; exit 7; }
 say() { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*"; }
 
+# --help prints the header block verbatim. The end is FOUND, not hardcoded: this
+# was `sed -n '4,105p'` until TOG-362 added a section and silently truncated the
+# help mid exit-code table. A line number that has to be updated by hand every
+# time the comment above grows is a line number that will be wrong.
+show_help() {
+  awk 'NR<4 { next }
+       NR>4 && /^# ={10,}/ { exit }
+       { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)      [[ $# -ge 2 ]] || die "--model needs a value"; MODEL="$2"; shift 2;;
     --timeout)    [[ $# -ge 2 ]] || die "--timeout needs a value"; TIMEOUT="$2"; shift 2;;
     --allow-payg) ALLOW_PAYG=1; shift;;
     --quiet|-q)   QUIET=1; shift;;
-    -h|--help)    sed -n '4,105p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help)    show_help; exit 0;;
     -*)           die "unknown flag $1";;
     *)            break;;
   esac
