@@ -286,6 +286,26 @@ jobs:
       - name: handoff-channel unversioned-drop suite
         run: ./test_channel_drift.sh
 
+      # TOG-349. A THIRD drift question, and the one a hash cannot answer.
+      # tool_drift.sh asks whether two copies differ; this asks whether the
+      # difference changes what the plugin is ALLOWED TO DO. The host adopts a
+      # plugin's manifest from its package directory at activation with no
+      # capability-escalation check (refreshPluginManifestFromPackage does what
+      # upgradePlugin refuses to), and the broker's package directory is
+      # agent-writable — so "deploy new worker code" and "re-declare the
+      # plugin's authority" are currently the same write.
+      #
+      # Measured 2026-08-25: the deployed broker differed from origin/main in
+      # three files by content hash and in ZERO authority-bearing fields. Every
+      # one of those differences was a comment. That is the distinction this
+      # gate draws and a hash cannot, in both directions — it must not shout at
+      # a docstring, and it must not stay quiet about a changed `auth`.
+      #
+      # Offline: the suite fabricates a git repo and a package directory in
+      # mktemp. No plugin host, no network, no credential.
+      - name: plugin manifest authority-surface suite
+        run: ./test_plugin_manifest_gate.sh
+
       # TOG-358. Whether the model endpoint the agents are about to be pointed
       # at can actually serve them. The suite stands up a stub Anthropic front
       # on 127.0.0.1 that serves a different failure off each path prefix —
@@ -889,6 +909,98 @@ jobs:
           drift_mutation "manifest-includes-nonexec" \
             's/\$2=="blob" \&\& \$1=="100755"/$2=="blob"/' \
             'manifest listed a non-executable doc' || rc=1
+          exit $rc
+
+      # TOG-349. The authority gate. Its whole value is drawing a line a content
+      # hash cannot draw, and it can fail in BOTH directions: shout at a comment
+      # (and get muted, which is a deleted detector), or stay quiet about a
+      # changed `auth` (and green-light a privilege escalation at the next
+      # activation). Every mutation below is one of those two.
+      #
+      # Two of these caught real vacuity in the suite while it was being
+      # written, and both were the same shape: the test was satisfied by the
+      # gate standing NEXT to the one it named. Dropping `auth` from the
+      # authority allowlist made the leaf UNCLASSIFIED, which also exits 4, so
+      # an exit-code-only assertion stayed green while the field was no longer
+      # recognised as authority-bearing at all. The suite now asserts the
+      # verdict PAIRED WITH ITS OWN LEAF by adjacency, which is what makes
+      # `auth-not-authority` and `pointer-not-authority` below able to go red.
+      # A third — `routes-indexed-not-keyed` — was uncoverable because the
+      # fixture's route swap was silently a no-op, so the case had been passing
+      # without reordering anything.
+      - name: Prove the authority gate still detects a weakened comparison
+        run: |
+          set -uo pipefail
+          rc=0
+          # Third argument is the NAMED test that must go red. A bare "the suite
+          # failed" is not attribution: a mutation that reddens some unrelated
+          # assertion looks identical to one the gate actually caught.
+          gate_mutation() {
+            local label="$1" expr="$2" expect="$3"
+            local mut; mut="$(mktemp -d)"
+            cp plugin_manifest_gate.sh test_plugin_manifest_gate.sh "$mut/"
+
+            if ! (cd "$mut" && ./test_plugin_manifest_gate.sh >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && ./test_plugin_manifest_gate.sh 2>&1 | tail -20); rm -rf "$mut"; return 1
+            fi
+
+            sed -i "$expr" "$mut/plugin_manifest_gate.sh"
+            if ! bash -n "$mut/plugin_manifest_gate.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s plugin_manifest_gate.sh "$mut/plugin_manifest_gate.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+
+            local out status
+            out="$(cd "$mut" && ./test_plugin_manifest_gate.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the authority suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # Quiet about a real escalation.
+          gate_mutation "escalation-exits-zero" \
+            's/EXIT_ESCALATION=4/EXIT_ESCALATION=0/' \
+            'an added capability is an escalation' || rc=1
+          gate_mutation "auth-not-authority" \
+            's/(routeKey|method|path|auth|capability|checkoutPolicy)/(routeKey|method|path|capability|checkoutPolicy)/' \
+            'a changed route auth is an escalation' || rc=1
+          gate_mutation "pointer-not-authority" \
+            "s|^  '\\^#packageManifestPath\\$'\$|  '^#never-matches-anything$'|" \
+            'a repointed package.json manifest is an escalation' || rc=1
+          # The allowlist turned into a denylist. This is the slow failure: a
+          # future host version honours a new manifest key and the gate keeps
+          # printing OK about it because nobody taught it the name.
+          gate_mutation "unknown-reads-clean" \
+            's/^  echo UNCLASSIFIED$/  echo NONAUTHORITY/' \
+            'an unclassified manifest field is an escalation' || rc=1
+          # Zero-vs-zero reading as clean.
+          gate_mutation "no-authority-leaf-guard" \
+            's/if \[ "\$ref_auth" -eq 0 \]; then/if false; then/' \
+            'contentless manifests' || rc=1
+          # Crying wolf. Both of these turn a reorder into a false ESCALATION,
+          # which is how a detector gets muted and then ignored.
+          gate_mutation "caps-indexed-not-set" \
+            's/node.every((e) => typeof e === "string")/false/' \
+            'capability reordering is not a change' || rc=1
+          gate_mutation "routes-indexed-not-keyed" \
+            's/typeof e.routeKey === "string"/false/' \
+            'route reordering is not a change' || rc=1
+          # Narrowing scored as escalation — the other way to cry wolf.
+          gate_mutation "narrowing-scored-as-escalation" \
+            's/verdict="NARROWING   removed"/verdict="ESCALATION  removed"/' \
+            'a removed capability is narrowing' || rc=1
           exit $rc
 
       # TOG-358. The preflight's whole job is to refuse to say "ok" about an

@@ -56,6 +56,7 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
+| `plugin_manifest_gate.sh` | Does activating a plugin package change what it is **allowed to do**? Compares the evaluated authorization surface — `capabilities`, and each route's `auth` / `checkoutPolicy` / `companyResolution` — against a reviewed git ref, so comments and formatting are invisible to it and a changed `auth` is not. Unrecognised manifest keys fail closed. Run it before any activation; see `docs/plugin-package-path.md` for why. | `test_plugin_manifest_gate.sh` |
 | `gh_ci_status.sh` | Three-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed. | `test_gh_ci_status.sh` |
 | `agent_endpoint_preflight.sh` | Cutover gate for the agents' model endpoint (TOG-358). Run it **from inside an agent container** before repointing `ANTHROPIC_BASE_URL`: exit 0 only if the endpoint is reachable *from there*, authorized, speaks the Anthropic messages dialect, still reports cache accounting, and is not a pay-per-token lane. | `test_agent_endpoint_preflight.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
@@ -63,6 +64,8 @@ and no network. Push makes a decision timely; pull is what makes it reliable. Se
 | `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
 | `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
+| `docs/plugin-package-path.md` | Why `gh-token-broker` shipping from an agent workspace makes deploying code and re-declaring authority the same write (TOG-349), and the operator steps to move it to a host-owned path. |
+| `docs/upstream/` | Five unfiled defect reports against the **Paperclip host**. No agent can reach an upstream tracker; filing them is an operator action. |
 | `docs/teamclaude-big-model-stall.md` | Why teamclaude `:3456` stalls (TOG-378). **Read this before sending anything to that endpoint:** one non-Haiku request blocks the model endpoint for every agent on the box for ~60 s, and giving up early does not release it. |
 
 ## Running the suites
@@ -77,6 +80,7 @@ node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_credential_chain_audit.sh
+./test_plugin_manifest_gate.sh
 ./test_sql_backend.sh
 (cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 
