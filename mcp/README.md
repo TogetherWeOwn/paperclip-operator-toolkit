@@ -133,26 +133,68 @@ leaked* would go on working.
 
 ## The tools
 
-Two front `org_request_queue.sh` (provisioning) and three front
+Three front `org_request_queue.sh` (provisioning) and three front
 `capability_gate.sh` (capabilities). None takes an identity, and there is no
 tool that runs the provisioner or effects a grant directly — the two scripts
 are the only entry points, and they *decide*, they do not *grant*. CI asserts
 the string `org_provisioner` never appears in the server source.
 
+**Five are writes and one is a read**, and the read is not an afterthought in
+that count. An agent principal has no shell on this host — that is the whole
+premise of TOG-196 — so a surface of writes alone left the decision record
+write-only to the one party the decision is about.
+`review_provisioning_request` promised in its own shipped schema that a reason
+is *"recorded in the grant log and readable by the requester, who may answer
+it"*, and until TOG-312 nothing on this transport could read it: the denial
+reason, the approval with its seated agent id, and the expiry alike were not
+merely undelivered but **unreachable**.
+
 | Tool | Arguments | Becomes |
 |---|---|---|
 | `submit_provisioning_request` | `template`, `title`, `rationale?`, `supersedes?` | `submit --requester <authenticated agent> …` |
 | `review_provisioning_request` | `request_id`, `decision`, `reason?`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
+| `read_my_requests` | **none at all** | `inbox --for <authenticated agent>` |
 | `submit_capability_request` | `capability`, `action`, `facts`, `reasoning`, `title?` | `submit --requester <authenticated agent> …` |
 | `review_capability_request` | `request_id` (CAP-nnn), `decision`, `reason`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `review --reviewer <authenticated agent> …` |
 | `countersign_capability_request` | `request_id` (CAP-nnn), `decision`, `reason`, `alternatives?`, `no_safer_alternative?`, `alternatives_considered?` | `countersign --custodian <authenticated agent> …` |
 
-`--requester`, `--reviewer` and `--custodian` are written by the server from
-the authenticated principal, every time. They are structurally unreachable from
-tool input. Each tool declares a `script` field naming which CLI it forwards
-to; the handler picks the runner from it, and the capability CLI is pinned to
-`capability_gate.sh` at startup exactly as the queue is pinned to
+`--requester`, `--reviewer`, `--custodian` and `--for` are written by the server
+from the authenticated principal, every time. They are structurally unreachable
+from tool input. Each tool declares a `script` field naming which CLI it
+forwards to; the handler picks the runner from it, and the capability CLI is
+pinned to `capability_gate.sh` at startup exactly as the queue is pinned to
 `org_request_queue.sh`.
+
+### The read tool, and the two things it must never become (TOG-312)
+
+`read_my_requests` declares **no arguments at all**. That is the strongest
+available form of "identity is never a tool argument": with nothing to fill in,
+there is no shape the call can take that reads somebody else's decisions. A
+property on that schema would be the only way it could ever select another
+principal, so the suite asserts the property list is empty and CI mutates one in
+to prove the assertion is load-bearing.
+
+It stays a read of a record that already exists, which the TOG-254 decision
+requires in two specific ways:
+
+* **Reading is not acking.** The queue has no ack and this adds none, so a
+  requester that never calls it cannot hold a request open, and acking can never
+  become a precondition anywhere in the decision path.
+* **Delivery is not a security control.** The only subcommand this tool can name
+  is `inbox` — never `list` (which renders the whole company's queue) and never
+  anything that appends a decision. It cannot block, alter, delay or re-target a
+  decision. `inbox` does materialise elapsed expiry exactly as `list` always
+  has; that is a *derived* fact the queue's `request_state()` already computes
+  whether or not it is written down, so it changes no outcome for anybody.
+  `test_decision_notify.sh` measures this by hashing the decision rows either
+  side of a read.
+
+The queue's `inbox --for` matches the **agent id as well as the role**. One
+principal, two spellings: an operator at a shell types `MGR`, and this transport
+has no role to type — it authenticates a session and knows only the agent uuid.
+Matching one alone would split an agent's inbox in half and return the empty
+half through the only door the agent has, which is indistinguishable from *"not
+decided yet"*.
 
 **The capability gate derives risk from a registry, never from the request.**
 There is no `--risk` / `--reversible` field to declare and no way to assert an

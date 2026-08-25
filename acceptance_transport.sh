@@ -202,15 +202,36 @@ eq "GET is 405 — there is no streaming leg to open" "$CODE" "405"
 CODE="$(rpc "-" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')"
 eq "tools/list answers anonymously (the gateway health check)" "$CODE" "200"
 TOOLS="$(jq -r '.result.tools[].name' "$RESP" | sort | tr '\n' ' ')"
-eq "exactly two tools, and no provisioner tool" "$TOOLS" "review_provisioning_request submit_provisioning_request "
+# Pinned literally, so a new tool on a DEPLOYED server is a deliberate edit
+# here and never a silent addition. Three front org_request_queue.sh and three
+# front capability_gate.sh; this line said "exactly two" until TOG-312, having
+# been left behind by TOG-387 and TOG-399, which is how an assertion becomes a
+# comment. There is still no provisioner tool and there never may be.
+eq "exactly the six sanctioned tools, and no provisioner tool" "$TOOLS" \
+   "countersign_capability_request read_my_requests review_capability_request review_provisioning_request submit_capability_request submit_provisioning_request "
+# TOG-312. Five of the six are writes. A transport of writes alone makes the
+# decision record write-only to the agent it is about, because an agent
+# principal has no shell on this host — see section 4b, which reads a real
+# denial back over the wire.
+READS="$(jq -r '[.result.tools[].name | select(startswith("read_"))] | length' "$RESP")"
+eq "the surface includes a READ, or a requester can never reach a decision" "$READS" "1"
 # The schema is the contract the model reads. If identity appears here as an
 # input, every check below the transport is decorative.
 IDENT_PROPS="$(jq -r '[.result.tools[].inputSchema.properties | keys[]] | map(select(
-    . == "requester" or . == "reviewer" or . == "agent_id" or . == "caller" or . == "on_behalf_of"))
+    . == "requester" or . == "reviewer" or . == "agent_id" or . == "caller" or . == "on_behalf_of"
+    or . == "for" or . == "custodian" or . == "decider"))
     | length' "$RESP")"
 eq "no tool advertises an identity argument" "$IDENT_PROPS" "0"
+# Counted against the tool count rather than a literal, because a literal that
+# rots reads as a pass: `2` stayed green through TOG-387 and TOG-399 by
+# measuring two of five schemas and ignoring the rest.
+N_TOOLS="$(jq -r '.result.tools | length' "$RESP")"
 CLOSED="$(jq -r '[.result.tools[].inputSchema.additionalProperties] | map(select(. == false)) | length' "$RESP")"
-eq "both schemas are additionalProperties:false" "$CLOSED" "2"
+eq "EVERY schema is additionalProperties:false" "$CLOSED" "$N_TOOLS"
+# The read tool's guarantee is that there is nothing to fill in. Asserted
+# against the deployed catalogue, not the source.
+READ_PROPS="$(jq -r '[.result.tools[] | select(.name=="read_my_requests") | .inputSchema.properties | keys[]] | length' "$RESP")"
+eq "the read tool advertises NO argument at all, so none can name a principal" "$READ_PROPS" "0"
 
 SUBMIT_RPC='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_provisioning_request","arguments":{"template":"E0_SPECIALIST","title":"anonymous"}}}'
 BEFORE="$(queue_lines)"
@@ -259,7 +280,9 @@ eq "the request is pending" "$(req_field "$R1" .status)" pending
 eq "the recorded requester is the authenticated caller" "$(req_field "$R1" .requester)" "$RQ_ID"
 
 ok_call "the derived leader DENIES it with a reason" "$LD_ID" review_provisioning_request \
-  "$(jq -nc --arg r "$R1" '{request_id:$r,decision:"reject",reason:"Headcount case not made: name the workload and the duration."}')"
+  "$(jq -nc --arg r "$R1" '{request_id:$r,decision:"reject",
+      reason:"Headcount case not made: name the workload and the duration.",
+      alternatives:["Route the release-queue work through the existing E0 specialist until the workload is named."]}')"
 eq "the denial is recorded" "$(req_field "$R1" .status)" rejected
 DR="$(req_field "$R1" '.reason // ""')"
 [[ -n "$DR" && "$DR" != null ]] && ok "the denial carries a reason the requester can act on" \
@@ -283,6 +306,56 @@ TH="$("$Q" thread --request "$R2" </dev/null 2>&1)"
 grep -q "$R1" <<<"$TH" && ok "the thread follows the supersedes link back to the denial" \
   || bad "the thread does not follow the supersedes link back"
 [[ -n "${TRANSPORT_SHOW_THREAD:-}" ]] && { printf '\n'; sed 's/^/      /' <<<"$TH"; printf '\n'; }
+
+# ---------------------------------------------------------------------------
+hdr "4b. The requester READS the decision back — over the same wire (TOG-312)"
+# ---------------------------------------------------------------------------
+# Everything above this line is a write. Until TOG-312 the run ended here, and
+# the requester — which has no shell on this host, the whole premise of the
+# epic — had no way to learn any of it. review_provisioning_request's schema
+# says the reason is "readable by the requester, who may answer it"; this
+# section is the assertion that makes that sentence true instead of aspirational.
+INBOX="$(call "$RQ_ID" read_my_requests '{}')"
+if [[ "$(call_err)" == "true" ]]; then
+  bad "the requester cannot read its own decisions (http=$(call_code))"
+  sed 's/^/        /' <<<"$INBOX" | head -3
+else
+  ok "the requester reads its own inbox with no argument to supply"
+  grep -q "$R1" <<<"$INBOX" && ok "  ...and the DENIAL is in it" || bad "  ...but the denial is not in it"
+  grep -q "Headcount case not made" <<<"$INBOX" \
+    && ok "  ...carrying the reviewer's reason, verbatim, over the transport" \
+    || bad "  ...without the reason, so TOG-198's deny-with-reason is still write-only here"
+  grep -q "$R2" <<<"$INBOX" && ok "  ...and the APPROVAL of the amended request" \
+    || bad "  ...but the approval is missing"
+fi
+
+# The other half, and the one worth an adversarial check: it is MY inbox. The
+# reviewer reading its own must not see the requester's decisions, or a
+# per-principal read is a company-wide one wearing a per-principal name.
+LD_INBOX="$(call "$LD_ID" read_my_requests '{}')"
+if grep -q "Headcount case not made" <<<"$LD_INBOX"; then
+  bad "the REVIEWER's inbox carries the requester's denial — the read is not scoped to the caller"
+else
+  ok "the reviewer's own inbox does not carry the requester's decisions"
+fi
+
+# A read must not be able to move a decision. Constraint 2 of the TOG-254
+# decision, measured the only honest way on an append-only file: the decision
+# rows either side of the reads above are byte-identical.
+DEC_BEFORE="$(jq -c 'select(.event=="request.submitted" or .event=="request.reviewed")' "$QUEUE" | md5sum)"
+call "$RQ_ID" read_my_requests '{}' >/dev/null
+call "$RQ_ID" read_my_requests '{}' >/dev/null
+DEC_AFTER="$(jq -c 'select(.event=="request.submitted" or .event=="request.reviewed")' "$QUEUE" | md5sum)"
+eq "reading changes no decision row — reading is not acking, and not a control" "$DEC_AFTER" "$DEC_BEFORE"
+
+# And there is no way to ask for somebody else's. The schema declares nothing,
+# so both the identity-named key and the innocuous one are refused, not dropped.
+BEFORE="$(queue_lines)"
+refused_call "naming another agent in the read is refused, not honoured" \
+  "$RQ_ID" read_my_requests "$(jq -nc --arg v "$LD_ID" '{requester:$v}')"
+refused_call "  ...and so is an argument that merely looks harmless" \
+  "$RQ_ID" read_my_requests '{"for":"anyone"}'
+eq "  ...and neither refusal appended anything" "$(queue_lines)" "$BEFORE"
 
 # ---------------------------------------------------------------------------
 hdr "5. Forging a requester, over the wire"

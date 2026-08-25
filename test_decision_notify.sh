@@ -350,6 +350,47 @@ inb="$("$Q" inbox --for MGR 2>&1)"
 has "$inb" "$R1" "MGR sees its own decision"
 grep -q "$R2" <<<"$inb" && bad "MGR can read DIR's decisions" || ok "  ...and not DIR's"
 
+# --- TOG-312: the same inbox, reached by AGENT ID rather than by role --------
+# The MCP transport has no role to pass. It authenticates a session and knows
+# exactly one thing about its caller: the agent uuid. If `inbox` matched only
+# the role string the submitter happened to type, an agent's decisions would be
+# split across two spellings of one principal, and the half it could reach
+# through the transport would be silently empty — which looks exactly like "no
+# decision yet" and is the failure TOG-312 exists to close.
+#
+# u-mgr IS MGR in the fixture org, and these requests were submitted with the
+# role. Both must therefore be the same inbox.
+inb_by_id="$("$Q" inbox --for u-mgr 2>&1)"
+has "$inb_by_id" "$R1" "the same decision is reachable by agent id, not only by role"
+has "$inb_by_id" "mgr's own request" "  ...with the reason, which is the whole point of reading it"
+# And the isolation must hold on the id path too, or the fix widened the read.
+grep -q "$R2" <<<"$inb_by_id" && bad "reading by agent id leaks DIR's decisions" \
+  || ok "  ...and still not DIR's"
+# The other principal's id must not open MGR's inbox either — matching two
+# fields must not mean matching them across rows.
+inb_other="$("$Q" inbox --for u-dir 2>&1)"
+grep -q "$R1" <<<"$inb_other" && bad "DIR's agent id reads MGR's decisions" \
+  || ok "  ...and DIR's agent id does not read MGR's"
+has "$inb_other" "$R2" "  ...while DIR does still see its own by agent id"
+# An id belonging to nobody in this queue reads EMPTY, not everything. A
+# selector that falls back to "show all" when it matches nothing is how a
+# personal inbox becomes a company-wide read.
+inb_none="$("$Q" inbox --for u-nobody 2>&1)"
+grep -qE "$R1|$R2" <<<"$inb_none" && bad "an unmatched selector fell back to showing every decision" \
+  || ok "an unmatched selector reads empty rather than falling back to everything"
+
+# --- TOG-312: reading is a READ — it writes no decision ---------------------
+# Constraint 2 of the TOG-254 decision: delivery is not a security control, so
+# the read path must not be able to block, alter, delay or re-target a decision.
+# Measured rather than asserted by inspection: take the decision rows before and
+# after a read and require them byte-identical.
+before="$(jq -c 'select(.event=="request.reviewed" or .event=="request.submitted" or .event=="request.expired")' "$QUEUE" | md5sum)"
+"$Q" inbox --for u-mgr >/dev/null 2>&1
+"$Q" inbox --for MGR   >/dev/null 2>&1
+after="$(jq -c 'select(.event=="request.reviewed" or .event=="request.submitted" or .event=="request.expired")' "$QUEUE" | md5sum)"
+eq "reading changes no decision row — not the decision, not the status, not the expiry" \
+   "$after" "$before"
+
 # ===========================================================================
 hdr "8. A delivery address a transport could be steered by is never RECORDED"
 # ===========================================================================

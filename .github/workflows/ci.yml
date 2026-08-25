@@ -1086,6 +1086,28 @@ jobs:
           mutation_check "notify-issue-unvalidated-at-submit" test_decision_notify.sh skip \
             's|^  if \[\[ -n "\$notify_issue" && ! "\$notify_issue" =~.*$|  if false; then|' || rc=1
 
+          # TOG-312, and the two directions this one selector can fail in.
+          #
+          # NARROWED — back to matching the role string alone. This is the
+          # tempting revert ("--for takes a ROLE, it always has"), and it is
+          # invisible from a shell, where a role is what anyone types. It is
+          # only visible from the MCP transport, which has no role to type: it
+          # authenticates a session and knows exactly one thing about its
+          # caller, the agent uuid. Narrowed, an agent's own decisions read back
+          # EMPTY through the only door it has — indistinguishable from "not
+          # decided yet", which is the dead end TOG-312 was filed about.
+          mutation_check "inbox-matches-role-only" test_decision_notify.sh skip \
+            's/select(.role==$w or .agent==$w)/select(.role==$w)/' || rc=1
+
+          # WIDENED — the same line failing the other way. An inbox that stops
+          # filtering is not a broken inbox; it is a company-wide read of every
+          # decision, reached from a per-principal tool, and it LOOKS like a
+          # working feature from the caller's side because their own rows are
+          # all still there. Both halves matter: the mutation above proves the
+          # fix does something, this one proves it does not do too much.
+          mutation_check "inbox-matches-everyone" test_decision_notify.sh skip \
+            's/select(.role==$w or .agent==$w)/select(true)/' || rc=1
+
           # --- the transport's own gates (TOG-198 review) ---------------------
           # Separate helper because these mutate notify_paperclip_issue.sh, not
           # org_request_queue.sh, and the suite reaches it through NOTIFY_SH
@@ -3071,6 +3093,41 @@ jobs:
           mcp_mutation_check "countersign-loses-safer-alternatives" \
             '...saferAlternativeProperties(RISKY_COUNTERSIGN_CLAUSE),' \
             '' || rc=1
+
+          # TOG-312. The read tool is the only tool here that is not a write,
+          # and the three mutations below are the three ways it stops being a
+          # read OF THE CALLER'S OWN RECORD while still looking like one — none
+          # of them raises an error, changes a status code, or fails a health
+          # check. Every one returns a cheerful 200 with the wrong contents.
+
+          # Scope the read by the RUN instead of the AGENT. Reads like a tidy-up
+          # (both are on `identity`, both are uuids, the run is "more precise"),
+          # and the queue matches neither role nor agent against a run id — so
+          # the requester's inbox is empty FOREVER, which is exactly what "no
+          # decision yet" looks like. The bug TOG-312 fixes, restored in the
+          # very tool that fixes it.
+          mcp_mutation_check "read-scoped-by-run-not-agent" \
+            '"--for", identity.agentId' \
+            '"--for", identity.runId' || rc=1
+
+          # Turn the read of MY requests into a read of EVERY request. `list`
+          # is one subcommand over and renders the whole company queue —
+          # requesters, templates, titles, reviewers, override records. From the
+          # caller's side it looks like a working, generous inbox: their own
+          # rows are all present. Pinned by an exact-argv assertion, because
+          # "did my rows come back" cannot see this and never will.
+          mcp_mutation_check "read-returns-every-agents-requests" \
+            'return ["inbox", "--for", identity.agentId];' \
+            'return ["list", "--status", "all"];' || rc=1
+
+          # Give the read tool a property. The tool declares NONE, and that is
+          # the whole of its identity guarantee: with no argument there is no
+          # shape this call can take that names another principal. A single
+          # innocuous-looking property is the entire distance between "reads
+          # your decisions" and "reads anyone's".
+          mcp_mutation_check "read-tool-grows-an-argument" \
+            'properties: {},' \
+            'properties: { for_agent: { type: "string", description: "whose inbox" } },' || rc=1
 
           exit $rc
 

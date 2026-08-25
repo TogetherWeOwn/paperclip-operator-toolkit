@@ -245,6 +245,115 @@ test("DoD: the queue is invoked with the AUTHENTICATED principal as --requester"
   });
 });
 
+// ===========================================================================
+// 1b. TOG-312 — the READ, and the two properties it must not acquire.
+//
+// Every other tool here is a write. An agent principal has no shell on the
+// queue host (that is the premise of TOG-196), so before this tool the denial
+// reason, the approval with its seated agent id, and the expiry were not merely
+// undelivered but unreachable: review_provisioning_request's own schema said a
+// reason is "readable by the requester", and nothing on this transport could
+// read it.
+//
+// The tool is a read of the caller's OWN record, and these tests pin the two
+// ways that could quietly stop being true — it reads somebody else's record, or
+// it stops being a read.
+// ===========================================================================
+
+test("TOG-312: the read tool is scoped by the AUTHENTICATED principal, and takes no arguments", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", { name: "read_my_requests", arguments: {} }),
+      IDENTITY_HEADERS,
+    );
+    assert.equal(response.json.result.isError, false, response.json.result.content?.[0]?.text);
+    // EXACT argv, deliberately. `inbox` and not `list`: `list` renders every
+    // request in the company, which would turn a personal inbox into a company
+    // -wide read the moment somebody "generalised" it. And `--for` carries the
+    // authenticated agent id, which is the only selector that exists.
+    assert.deepEqual(recordedArgv(dir), ["inbox", "--for", CALLER]);
+    assert.ok(!recordedArgv(dir).includes(VICTIM), "the victim's id must appear nowhere in the argv");
+  });
+});
+
+test("TOG-312: the read tool declares no properties at all, so there is nothing to point elsewhere", () => {
+  const tool = TOOLS.find((candidate) => candidate.name === "read_my_requests");
+  assert.ok(tool, "read_my_requests is gone; the transport is write-only again");
+  assert.deepEqual(
+    Object.keys(tool.inputSchema.properties),
+    [],
+    "read_my_requests grew a property — the ONLY way this tool could ever select a principal other than the caller",
+  );
+  assert.equal(tool.inputSchema.additionalProperties, false);
+  assert.deepEqual(tool.inputSchema.required ?? [], []);
+});
+
+test("TOG-312: naming another agent in the read tool's arguments is refused, never honoured", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    // Both shapes: an identity-named key (the specific refusal) and an
+    // innocuous-looking one (the general schema refusal). Neither may reach
+    // the CLI, and neither may be silently dropped and the call run anyway —
+    // a caller must never believe it read the victim's inbox when it did not,
+    // nor believe it read its own when the transport heard something else.
+    for (const args of [{ requester: VICTIM }, { for: VICTIM }, { agent_id: VICTIM }, { json: true }]) {
+      const response = await call(
+        rpc("tools/call", { name: "read_my_requests", arguments: args }),
+        IDENTITY_HEADERS,
+      );
+      assert.equal(
+        response.json.result.isError, true,
+        `read_my_requests accepted ${JSON.stringify(args)}`,
+      );
+      assert.match(
+        response.json.result.content[0].text,
+        /identity_argument_refused|unknown_argument/,
+      );
+      assert.equal(recordedArgv(dir), null, "the queue script ran for a refused read");
+    }
+  });
+});
+
+test("TOG-312: the read tool's message says there is no argument, rather than trailing off after 'Accepted:'", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  assert.throws(
+    () => buildQueueArgs("read_my_requests", { since: "yesterday" }, identity),
+    (error) => error.code === "unknown_argument" && /takes no arguments at all/.test(error.message),
+    "a zero-property tool must say so; 'Accepted: ' with nothing after it reads as a truncated message",
+  );
+});
+
+test("TOG-312: reading is not acking — the read reaches no subcommand that writes a decision", () => {
+  const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+  const argv = buildQueueArgs("read_my_requests", {}, identity);
+  // Constraint 1 of the TOG-254 decision: acking must never be a precondition
+  // in the decision path, so this tool must not be able to ack. Constraint 2:
+  // delivery is not a security control, so it must not be able to block, alter,
+  // delay or re-target a decision. Both reduce to the same mechanical check —
+  // the ONLY subcommand this tool can name is `inbox`.
+  assert.equal(argv[0], "inbox");
+  for (const forbidden of [
+    "submit", "review", "countersign", "list", "ack", "ack-risk", "ack-override",
+    "notify", "--drain", "--approve", "--reject", "disable-template", "enable-template",
+  ]) {
+    assert.ok(!argv.includes(forbidden), `the read tool reaches '${forbidden}', which is not a read`);
+  }
+});
+
+test("TOG-312: an unauthenticated read is refused exactly as an unauthenticated write is", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    // The read is per-principal, so anonymity is not "harmless discovery" here
+    // — an anonymous read would be a read of whoever the queue defaulted to.
+    // Same 403 as a write, on the same missing header.
+    const response = await call(rpc("tools/call", { name: "read_my_requests", arguments: {} }), {});
+    assert.equal(response.status, 403);
+    assert.equal(response.json.error.code, "identity_header_missing");
+    assert.equal(recordedArgv(dir), null);
+  });
+});
+
 test("every identity-shaped argument name is refused by name, on both tools", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   const names = [
@@ -298,6 +407,12 @@ const EVERY_ARGUMENT = {
     no_safer_alternative: "nothing narrower reaches the connection API",
     alternatives_considered: [{ alternative: "read-only access", why_it_failed: "the drift is a write" }],
   },
+  // TOG-312. The read tool declares no properties, so its fixture is empty ON
+  // PURPOSE — and the deepEqual below is what makes that a real assertion:
+  // adding a property to the schema without adding it here fails on the very
+  // tool where a new property would be most dangerous, because a property is
+  // the only way this tool could ever be pointed at another principal.
+  read_my_requests: {},
   submit_capability_request: {
     capability: "github.token", action: "read",
     facts: "measured on 2026-08-25 that the run has no GH_APP binding",
@@ -337,7 +452,10 @@ test("every property a schema advertises is actually read onto the argv", () => 
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   for (const tool of TOOLS) {
     const args = EVERY_ARGUMENT[tool.name];
-    assert.ok(args, `${tool.name} has no EVERY_ARGUMENT fixture; a new tool was added without one`);
+    // `!== undefined`, not truthiness: a zero-argument tool's fixture is `{}`,
+    // and `assert.ok({})` happens to pass for the wrong reason. Say which
+    // question is being asked — "is there a fixture", not "is it non-empty".
+    assert.notEqual(args, undefined, `${tool.name} has no EVERY_ARGUMENT fixture; a new tool was added without one`);
     assert.deepEqual(
       Object.keys(args).sort(),
       Object.keys(tool.inputSchema.properties).sort(),
@@ -746,16 +864,26 @@ test("tools/list advertises exactly the sanctioned tools, and each binds to a kn
     const response = await call(rpc("tools/list", {}));
     assert.equal(response.status, 200);
     const names = response.json.result.tools.map((tool) => tool.name).sort();
-    // Two provisioning tools (org_request_queue.sh) + three capability tools
-    // (capability_gate.sh). Pinned literally so a SIXTH tool appearing here is
-    // a deliberate edit to this line, never a silent addition.
+    // Three provisioning tools (org_request_queue.sh) + three capability tools
+    // (capability_gate.sh). Pinned literally so a SEVENTH tool appearing here
+    // is a deliberate edit to this line, never a silent addition.
     assert.deepEqual(names, [
       "countersign_capability_request",
+      "read_my_requests",
       "review_capability_request",
       "review_provisioning_request",
       "submit_capability_request",
       "submit_provisioning_request",
     ]);
+    // TOG-312, asserted as a PROPERTY and not left implicit in the list above.
+    // The defect was not a missing name — it was a transport on which every
+    // tool was a write, which made the decision record unreadable to the one
+    // principal it was about. A future edit that removes the read must fail on
+    // a line that says why.
+    assert.ok(
+      names.some((name) => name.startsWith("read_")),
+      "the transport exposes no read tool, so a requester can never reach a decision made about it",
+    );
     // Every tool the catalogue advertises must bind to a script the handler
     // knows how to run. A tool with no binding would reach the "no known script
     // binding" fault at call time — better to catch it in discovery.
@@ -771,6 +899,7 @@ test("each tool binds to the correct script", () => {
   const byName = new Map(TOOLS.map((tool) => [tool.name, tool.script]));
   assert.equal(byName.get("submit_provisioning_request"), "queue");
   assert.equal(byName.get("review_provisioning_request"), "queue");
+  assert.equal(byName.get("read_my_requests"), "queue");
   assert.equal(byName.get("submit_capability_request"), "capability");
   assert.equal(byName.get("review_capability_request"), "capability");
   assert.equal(byName.get("countersign_capability_request"), "capability");
