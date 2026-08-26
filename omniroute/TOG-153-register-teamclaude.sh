@@ -275,13 +275,41 @@ combo_id_by_name() {
         | map(select(.name==$n)) | .[0].id // empty'
 }
 
+COMBO_SPEC='claude-opus|claude-opus-5
+claude-sonnet|claude-sonnet-5
+claude-haiku|claude-haiku-4-5-20251001
+claude-fable|claude-fable-5'
+
+# TC_CATCHALL=1 also builds a DEDICATED catch-all combo whose leg is byte-for-byte
+# the claude-sonnet leg. The duplication is the point and it is not redundancy:
+# OmniRoute emits NO log line when a model->combo mapping matches
+# (resolveComboForModel, src/lib/db/modelComboMappings.ts:216-248, and its caller
+# getComboForModel, src/sse/services/model.ts:397-413, both log nothing and the
+# caller additionally swallows errors in a bare `catch {}`). The only durable
+# evidence a substitution happened is the call_logs row. If the catch-all pointed
+# at `claude-sonnet`, a substituted call and a legitimate Sonnet call would both
+# land as combo_name='claude-sonnet' and be indistinguishable without an
+# allowlist of known-good ids. Pointing it at its own combo makes
+#   combo_name='claude-catchall'  ==  a substitution occurred, requested_model = what was asked for
+# a single-predicate query with no allowlist to maintain. Costs nothing: same
+# node, same connection, same model, same lane.
+if [[ "${TC_CATCHALL:-0}" == "1" ]]; then
+  COMBO_SPEC+='
+claude-catchall|claude-sonnet-5'
+fi
+
 while IFS='|' read -r combo_name model_id; do
   [[ -z "$combo_name" ]] && continue
+  if [[ "$combo_name" == "claude-catchall" ]]; then
+    combo_desc="TOG-153 CATCH-ALL: an unknown claude-* id was contained on-lane and answered by Sonnet. A call_logs row bearing this combo_name IS a silent-substitution event; requested_model on that row is the id the caller actually asked for."
+  else
+    combo_desc="TOG-153: Claude via teamclaude pool. Single leg by design; add a PAYG leg here to allow PAYG."
+  fi
   payload="$(jq -nc \
     --arg name "$combo_name" --arg model "$model_id" \
-    --arg pid "$NODE_ID" --arg cid "$CONN_ID" \
+    --arg pid "$NODE_ID" --arg cid "$CONN_ID" --arg desc "$combo_desc" \
     '{name:$name, strategy:"priority",
-      description:"TOG-153: Claude via teamclaude pool. Single leg by design; add a PAYG leg here to allow PAYG.",
+      description:$desc,
       models:[{kind:"model", model:$model, providerId:$pid, connectionId:$cid, weight:1}]}')"
   echo "  combo $combo_name -> $model_id"
   if [[ $APPLY -eq 1 ]]; then
@@ -299,12 +327,7 @@ while IFS='|' read -r combo_name model_id; do
   else
     COMBO_ID[$combo_name]="<combo-id:$combo_name>"
   fi
-done <<'COMBOS'
-claude-opus|claude-opus-5
-claude-sonnet|claude-sonnet-5
-claude-haiku|claude-haiku-4-5-20251001
-claude-fable|claude-fable-5
-COMBOS
+done <<<"$COMBO_SPEC"
 
 # ------------------------------------------------- 4. model → combo mappings --
 step "4. Model-combo mappings (this is what makes a BARE claude id stay on-lane)"
@@ -343,8 +366,12 @@ step "4. Model-combo mappings (this is what makes a BARE claude id stay on-lane)
 
 MAP_PRIORITY="${MAP_PRIORITY:-100}"
 
+# getModelComboMappings() returns {items,total} (modelComboMappings.ts:68-91);
+# older/other shapes wrap as .mappings or .data, or return a bare array. Accept
+# all of them — reading the wrong key yields an EMPTY list, which would silently
+# turn every add_mapping below into a duplicate-create attempt.
 existing_patterns="$(mgmt GET /api/model-combo-mappings | sed '$d' \
-  | jq -r '(if type=="array" then . else (.mappings // .data // []) end)
+  | jq -r '(if type=="array" then . else (.items // .mappings // .data // []) end)
       | map(.pattern) | .[]' 2>/dev/null || true)"
 
 add_mapping() {
@@ -378,17 +405,29 @@ add_mapping 'claude-fable*'  claude-fable  "$MAP_PRIORITY" 'TOG-153: bare Claude
 # family that does not exist yet (say `claude-neptune-6`) matches none of them,
 # falls through to provider resolution, and LEAKS OFF-LANE exactly as measured.
 #
-# TC_CATCHALL=1 adds a lowest-priority `claude-*` -> claude-sonnet mapping that
+# TC_CATCHALL=1 adds a lowest-priority `claude-*` -> claude-catchall mapping that
 # closes that hole. The trade is explicit and it is not free:
 #   containment  an unknown Claude id is served on-lane, never off it
 #   cost         it is silently answered by Sonnet, NOT by the model requested
-# Substituting a model without telling the caller is its own hazard, so this is
-# deliberately OFF by default and is an owner/CTO decision, not a script default.
+#
+# DECIDED 2026-08-24 (Chief of Staff, on-issue): turn it ON. Off-lane leakage
+# fails twice — wrong family answers, AND the traffic escapes the teamclaude
+# subscription we are trying to spend to 100%. A substituted answer is a quality
+# problem you can find later; leaked quota is simply spent. The decision was made
+# CONDITIONAL on the substitution being observable, which is why the catch-all
+# now points at its own combo rather than at claude-sonnet (see step 3) and why
+# TOG-153-verify.sh section B4 asserts that separation. Detection query:
+#   SELECT timestamp, requested_model, model, status FROM call_logs
+#    WHERE combo_name = 'claude-catchall' ORDER BY timestamp DESC;
+# NOTE this is a PULL, not a push: nothing alerts. call_logs is trimmed at the
+# first of 7 days / 100k rows (CALL_LOG_RETENTION_DAYS, CALL_LOGS_TABLE_MAX_ROWS,
+# src/lib/logEnv.ts:5-9), so an unqueried fire ages out. Frequent fires mean the
+# fix is a new family combo, not living on the catch-all.
 # Priority 1 keeps it strictly below the exact patterns above.
 if [[ "${TC_CATCHALL:-0}" == "1" ]]; then
   echo "  TC_CATCHALL=1 — adding the lowest-priority catch-all."
-  add_mapping 'claude-*' claude-sonnet 1 \
-    'TOG-153 catch-all: unknown Claude ids are contained on-lane and answered by Sonnet. See step 4.'
+  add_mapping 'claude-*' claude-catchall 1 \
+    'TOG-153 catch-all: unknown Claude ids are contained on-lane and answered by Sonnet. Rows with this combo_name are substitution events.'
 else
   echo "  catch-all: NOT added (TC_CATCHALL=1 to enable — see the comment above)."
   echo "  An unrecognised claude-* id will still resolve OFF-lane until this is decided."

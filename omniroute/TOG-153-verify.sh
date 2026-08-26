@@ -172,6 +172,50 @@ if [[ -n "${OMNIROUTE_MGMT_TOKEN:-}" ]]; then
     [[ "$st" == "active" ]] && ok "combo '$c' present and active" \
                             || bad "combo '$c' is ${st:-unreadable} — TOG-249 lifted the Haiku-only restriction; all four ship active"
   done
+
+  # ---- B4. the catch-all must stay observable -------------------------------
+  #
+  # The CoS approved TC_CATCHALL on one condition: that a silent substitution can
+  # be found after the fact. OmniRoute gives us no help here — a model->combo
+  # mapping match emits NO log line at any level (resolveComboForModel,
+  # modelComboMappings.ts:216-248; getComboForModel, sse/services/model.ts:397-413,
+  # which also swallows errors in a bare `catch {}`). The ONLY durable trace is
+  # the call_logs row, which carries requested_model, model and combo_name
+  # (schema: src/lib/db/core.ts:348-385).
+  #
+  # That trace is only unambiguous if the catch-all owns a combo nobody else uses.
+  # Pointed at 'claude-sonnet' it would be indistinguishable from ordinary Sonnet
+  # traffic. So: if the catch-all mapping exists at all, it MUST point at
+  # 'claude-catchall'. This check is what keeps the approval condition true.
+  # Envelope note: getModelComboMappings() returns {items,total}
+  # (modelComboMappings.ts:68-91) and rowToMapping camelCases combo_name ->
+  # comboName (:46-58), but the HTTP layer may re-wrap. Accept every plausible
+  # envelope rather than betting on one, and treat an UNPARSEABLE body as a FAIL:
+  # silently reading it as "no mapping" would be a false pass on exactly the
+  # property this section exists to prove.
+  maps_json="$(mgmt /api/model-combo-mappings)"
+  maps_arr="$(jq -c 'if type=="array" then . else (.items // .mappings // .data // null) end' \
+      <<<"$maps_json" 2>/dev/null)"
+  if [[ -z "$maps_arr" || "$maps_arr" == "null" ]]; then
+    bad "could not parse /api/model-combo-mappings (envelope not array/.items/.mappings/.data) — catch-all observability is UNVERIFIED, do not assume it is off"
+    catchall_combo=""
+  else
+    catchall_combo="$(jq -r 'map(select(.pattern=="claude-*"))
+        | .[0] | (.comboName // .combo_name // empty)' <<<"$maps_arr" 2>/dev/null)"
+    if [[ -z "$catchall_combo" ]]; then
+      ok "no 'claude-*' catch-all mapping present (TC_CATCHALL off — unknown ids resolve OFF-lane by design)"
+    elif [[ "$catchall_combo" == "claude-catchall" ]]; then
+      ok "catch-all maps to its own combo 'claude-catchall' (substitutions are queryable by combo_name)"
+      st="$(jq -r '(if type=="array" then . else (.combos // .data // []) end)
+          | map(select(.name=="claude-catchall")) | .[0]
+          | if . == null then "missing" elif (.isActive == false) then "inactive" else "active" end' \
+          <<<"$combos_json" 2>/dev/null)"
+      [[ "$st" == "active" ]] && ok "combo 'claude-catchall' present and active" \
+                              || bad "catch-all maps to 'claude-catchall' but that combo is ${st:-unreadable} — unknown ids will fail instead of being contained"
+    else
+      bad "catch-all maps to '${catchall_combo}', not 'claude-catchall' — a substituted call becomes indistinguishable from legitimate '${catchall_combo}' traffic in call_logs, which voids the condition TC_CATCHALL was approved under"
+    fi
+  fi
 else
   echo "  SKIP  OMNIROUTE_MGMT_TOKEN not set (an agent key gets 403; this needs a management token)"
 fi

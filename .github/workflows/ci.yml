@@ -15,6 +15,9 @@ name: CI
 #                                       `sha` head guard is actually sent and a
 #                                       guarded write is guarded — TOG-305
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
+#     test_tog153_artifacts.sh          TOG-153 register/verify artifact contract:
+#                                       fail-loud argv, dedicated catch-all,
+#                                       .items envelope and verifier B4 — TOG-519
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     test_provisioning_policy.sh       create-policy gates under widened ceilings
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
@@ -226,11 +229,10 @@ jobs:
           # `*.sh` glob does not descend, and acceptance_live.sh is a script the
           # OPERATOR runs on the VPS — a parse error there surfaces in front of
           # a human doing an install, which is the worst place to find one.
-          # omniroute/*.sh is included for exactly that reason and no other
-          # (TOG-371). Every script in there is operator-run against a management
-          # surface no runner can reach, so this parse gate is the ONLY automated
-          # check they will ever get. Do not read a green build as "a
-          # registration would succeed"; see omniroute/README.md.
+          # omniroute/*.sh is included because every script there is operator-run
+          # against a management surface no runner can reach (TOG-371). TOG-519
+          # added a narrow stubbed contract suite for the two TOG-153 artifacts,
+          # but no CI job performs a real registration. See omniroute/README.md.
           for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           # The repo's first Python. Same argument as the shell gate above: these
@@ -288,6 +290,14 @@ jobs:
           fi
           echo "credential-source suite: passes with GH_APP_*/PAPERCLIP_* empty"
           rm -f out.txt
+
+      # TOG-519. These operator scripts cannot reach their live management
+      # surface in CI, but the catch-all contract is still testable with a stub:
+      # unknown argv refuses, TC_CATCHALL creates its own observable combo, the
+      # mappings reader accepts the live .items envelope, and verifier B4 rejects
+      # the old claude-* -> claude-sonnet target. The suite never sends inference.
+      - name: TOG-153 operator artifact suite
+        run: ./test_tog153_artifacts.sh
 
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
