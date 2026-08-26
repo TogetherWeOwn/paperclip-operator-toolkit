@@ -619,6 +619,17 @@ jobs:
       - name: quota burn derivation suite
         run: ./test_quota_burn_derive.sh
 
+      # TOG-454. blocked_audit.sh reassigns and re-statuses real issues from an
+      # explicitly supplied audit table in bounded batches. Three properties
+      # are load-bearing and not visible by reading successful output: there is
+      # no default snapshot to go stale, a board already matching the supplied
+      # table is a no-op, and an ambiguous agent-id prefix must REFUSE rather
+      # than bind whichever agent sorted first — two companies share one
+      # database here, so a wrong bind assigns a real issue to a stranger. Each
+      # property is asserted; the latter two were also mutation-checked.
+      - name: blocked-issue audit applier suite
+        run: ./test_blocked_audit.sh
+
       # TOG-434. The rule: an action only a human can perform is a RUNBOOK
       # LINE; a judgement only the owner may make is a DECISION. Filed the
       # wrong way round, "please run these three root commands" renders as a
