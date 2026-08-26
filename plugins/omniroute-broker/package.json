@@ -1,0 +1,20 @@
+{
+  "name": "paperclip-plugin-omniroute-broker",
+  "version": "0.1.0",
+  "description": "Performs narrow, audited OmniRoute management operations for agent runs so the management key never enters an agent address space.",
+  "type": "module",
+  "private": true,
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "scripts": {
+    "test": "node --test test/broker.test.mjs"
+  },
+  "peerDependencies": {
+    "@paperclipai/plugin-sdk": "*"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "2026.817.0"
+  }
+}

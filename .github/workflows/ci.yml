@@ -92,6 +92,7 @@ name: CI
 #                                       headroom — TOG-487
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
+#     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
 #     mcp/                              see the `mcp-suite` job below
 #
@@ -2757,6 +2758,59 @@ jobs:
           fi
           echo "broker suite: passes with GH_APP_* empty, no key in output"
           rm -f out.txt
+
+  # ---------------------------------------------------------------------------
+  # OmniRoute management-operation broker (TOG-391 / TOG-473 / TOG-537).
+  #
+  # This is an Ops Tooling plugin, not Model Router product code. Its native
+  # suite proves the exact operation allowlist, secret resolution, redaction,
+  # audit ordering and two-agent approval protocol. The calibration suite then
+  # mutates the committed catalogue and mapping plan to prove the mapping guard
+  # still goes red for an unseen Claude-bearing id, a wildcard, a missing
+  # priority and a protected-family mapping.
+  #
+  # Both are offline: no credential, no network and no host. The LIVE catalogue
+  # check stays operator-run because a fixture certifies only the fixture.
+  omniroute-broker-suite:
+    name: omniroute-broker suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Broker security suite
+        run: node --test plugins/omniroute-broker/test/broker.test.mjs
+
+      - name: Mapping-guard calibration mutation suite
+        run: node --test test_tog473_mapping_guard.mjs
+
+      - name: Prove credential and key-management surfaces stay absent
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { VERBS, resolveVerb } from './plugins/omniroute-broker/dist/verbs.js'
+          const forbiddenNames = [
+            'keys.create', 'keys.reveal', 'keys.regenerate', 'keys.rotate',
+            'cli.tokens.create', 'cli.tokens.mint',
+          ]
+          for (const name of forbiddenNames) {
+            if (Object.hasOwn(VERBS, name)) throw new Error(`forbidden verb exists: ${name}`)
+            try { resolveVerb(name); throw new Error(`forbidden verb resolved: ${name}`) }
+            catch (error) { if (error.status !== 404) throw error }
+          }
+          const forbiddenPaths = ['/api/keys', '/api/cli/tokens']
+          for (const [name, verb] of Object.entries(VERBS)) {
+            for (const path of forbiddenPaths) {
+              if (verb.path === path || verb.path.startsWith(`${path}/`)) {
+                throw new Error(`${name} reaches forbidden credential path ${verb.path}`)
+              }
+            }
+          }
+          console.log('credential mint, reveal and regeneration surfaces: absent')
+          NODE
 
   # ---------------------------------------------------------------------------
   # gh-event-capture (TOG-289 / TOG-244).

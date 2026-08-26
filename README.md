@@ -84,6 +84,7 @@ operator-run.
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
+| `plugins/omniroute-broker` | Narrow OmniRoute management-operation broker. Resolves the existing management credential host-side and exposes only exact allowlisted verbs; key mint, reveal and regeneration surfaces are absent. This Ops Tooling path is authoritative (TOG-537), not Model Router. | `plugins/omniroute-broker/test/broker.test.mjs`, `test_tog473_mapping_guard.mjs` |
 | `plugin_manifest_gate.sh` | Does activating a plugin package change what it is **allowed to do**? Compares the evaluated authorization surface — `capabilities`, and each route's `auth` / `checkoutPolicy` / `companyResolution` — against a reviewed git ref, so comments and formatting are invisible to it and a changed `auth` is not. Unrecognised manifest keys fail closed. Run it before any activation; see `docs/plugin-package-path.md` for why. | `test_plugin_manifest_gate.sh` |
 | `gh_ci_status.sh` | Four-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed, and `non-started` (exit 5) when GitHub reports `completed/failure` for jobs it never actually ran. That last one is an **escalation, not a red build**: there is nothing in the diff to fix, and no CI-enforced gate in this repo is being enforced while it lasts. | `test_gh_ci_status.sh` |
 | `sibling_guard.sh` | Whether another run is already implementing your issue. Two runs of one agent have implemented one issue end to end twice (TOG-253 #15/#16, TOG-258 #27/#28). Three detectors, because none of them is sufficient alone: the **control plane** (`/api/issues/{id}/runs` — the only signal that sees a sibling which has committed nothing, filtered on `agentId` because that route is not issue-exclusive), **local refs** (the only signal for work that is finished but never pushed), and the **remote** (pushed branch, open PR, already-an-ancestor-of-main). Exits **3 — indeterminate, not a pass** — when any detector could not run: `ps` is silently empty in the agent container and reading that as "no sibling" is the whole incident. Run it before implementing **and** again with `--phase=prepush` before every push; on TOG-258 the sibling landed during the loser's CI wait, so a start-time check alone would still have said clear. | `test_sibling_guard.sh` (offline) |
@@ -118,6 +119,11 @@ node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 ./test_sql_backend.sh
 ./test_suite_preconditions.sh
 (cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
+node --test plugins/omniroute-broker/test/broker.test.mjs
+node --test test_tog473_mapping_guard.mjs
+
+# Live catalogue calibration — read-only inference key, but not CI/offline.
+OMNIROUTE_API_KEY=<read-key> node scripts/tog473-mapping-guard-calibration.mjs
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
 # Both exit 3 ("could not run") if the backend is unreachable, rather than

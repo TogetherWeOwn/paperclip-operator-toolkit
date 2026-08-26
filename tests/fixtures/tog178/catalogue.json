@@ -1,0 +1,1446 @@
+{
+"_source": "trimmed from GET /v1/models 2026-08-25; allowlisted leaves + all Claude-family ids + protected prefixes",
+"object": "list",
+"data": [
+{
+"id": "auto/best-coding"
+},
+{
+"id": "auto/best-reasoning"
+},
+{
+"id": "auto/best-fast"
+},
+{
+"id": "auto/best-vision"
+},
+{
+"id": "auto/best-chat"
+},
+{
+"id": "auto/best-coding-fast"
+},
+{
+"id": "auto/pro-coding"
+},
+{
+"id": "auto/pro-reasoning"
+},
+{
+"id": "auto/pro-vision"
+},
+{
+"id": "auto/pro-chat"
+},
+{
+"id": "auto/pro-fast"
+},
+{
+"id": "auto/coding"
+},
+{
+"id": "auto/fast"
+},
+{
+"id": "auto/chat"
+},
+{
+"id": "auto/cheap"
+},
+{
+"id": "auto/offline"
+},
+{
+"id": "auto/smart"
+},
+{
+"id": "auto/claude-opus"
+},
+{
+"id": "auto/claude-sonnet"
+},
+{
+"id": "auto/best-free"
+},
+{
+"id": "auto/best-chaos"
+},
+{
+"id": "auto/chaos"
+},
+{
+"id": "auto/coding:fast"
+},
+{
+"id": "auto/coding:cheap"
+},
+{
+"id": "auto/coding:free"
+},
+{
+"id": "auto/coding:pro"
+},
+{
+"id": "auto/coding:reliable"
+},
+{
+"id": "auto/reasoning"
+},
+{
+"id": "auto/reasoning:pro"
+},
+{
+"id": "auto/vision"
+},
+{
+"id": "auto/multimodal"
+},
+{
+"id": "auto/glm"
+},
+{
+"id": "auto/minimax"
+},
+{
+"id": "auto/mimo"
+},
+{
+"id": "auto/zai"
+},
+{
+"id": "auto/gemma"
+},
+{
+"id": "auto/llama"
+},
+{
+"id": "auto/gemini"
+},
+{
+"id": "hindsight/retain"
+},
+{
+"id": "hindsight/reflect"
+},
+{
+"id": "hindsight/consolidation"
+},
+{
+"id": "ddgw/claude-haiku-4-5"
+},
+{
+"id": "aug/sonnet4.6"
+},
+{
+"id": "aug/fable-5"
+},
+{
+"id": "aug/haiku4.5"
+},
+{
+"id": "aug/sonnet4.5"
+},
+{
+"id": "aug/sonnet4.6-500k"
+},
+{
+"id": "aug/sonnet5-high"
+},
+{
+"id": "aug/sonnet5-500k"
+},
+{
+"id": "aug/opus4.5"
+},
+{
+"id": "aug/opus4.6"
+},
+{
+"id": "aug/opus4.6-500k"
+},
+{
+"id": "aug/opus4.7"
+},
+{
+"id": "aug/opus4.7-500k"
+},
+{
+"id": "aug/opus4.8"
+},
+{
+"id": "opencode-go/glm-5.2-high"
+},
+{
+"id": "opencode-go/glm-5.2-max"
+},
+{
+"id": "opencode-go/kimi-k3-max"
+},
+{
+"id": "opencode-go/mimo-v2.5-high"
+},
+{
+"id": "opencode-go/mimo-v2.5-max"
+},
+{
+"id": "opencode-go/qwen3.7-max-high"
+},
+{
+"id": "opencode-go/qwen3.7-max-max"
+},
+{
+"id": "opencode-go/qwen3.7-plus-high"
+},
+{
+"id": "opencode-go/qwen3.7-plus-max"
+},
+{
+"id": "opencode-go/qwen3.6-plus-high"
+},
+{
+"id": "opencode-go/qwen3.6-plus-max"
+},
+{
+"id": "opencode-go/hy3-none"
+},
+{
+"id": "opencode-go/hy3-low"
+},
+{
+"id": "opencode-go/hy3-high"
+},
+{
+"id": "opencode-go/grok-4.5-low"
+},
+{
+"id": "opencode-go/grok-4.5-medium"
+},
+{
+"id": "opencode-go/grok-4.5-high"
+},
+{
+"id": "opencode-go/deepseek-v4-pro-low"
+},
+{
+"id": "opencode-go/deepseek-v4-pro-medium"
+},
+{
+"id": "opencode-go/deepseek-v4-pro-high"
+},
+{
+"id": "opencode-go/deepseek-v4-pro-max"
+},
+{
+"id": "opencode-go/deepseek-v4-flash-high"
+},
+{
+"id": "opencode-go/deepseek-v4-flash-max"
+},
+{
+"id": "tllm/CLAUDE_4_6_OPUS"
+},
+{
+"id": "tllm/CLAUDE_4_6_SONNET"
+},
+{
+"id": "tllm/CLAUDE_4_5_HAIKU"
+},
+{
+"id": "tllm/claude_opus_4"
+},
+{
+"id": "tllm/claude_sonnet_4"
+},
+{
+"id": "tllm/claude_haiku_3_5"
+},
+{
+"id": "opencode-go/minimax-m3"
+},
+{
+"id": "opencode-go/minimax-m2.7"
+},
+{
+"id": "opencode-go/minimax-m2.5"
+},
+{
+"id": "opencode-go/kimi-k3"
+},
+{
+"id": "opencode-go/kimi-k2.7-code"
+},
+{
+"id": "opencode-go/kimi-k2.6"
+},
+{
+"id": "opencode-go/kimi-k2.5"
+},
+{
+"id": "opencode-go/glm-5.2"
+},
+{
+"id": "opencode-go/glm-5.3"
+},
+{
+"id": "opencode-go/ox-alpha-free"
+},
+{
+"id": "opencode-go/glm-5.1"
+},
+{
+"id": "opencode-go/glm-5"
+},
+{
+"id": "opencode-go/deepseek-v4-pro"
+},
+{
+"id": "opencode-go/deepseek-v4-flash"
+},
+{
+"id": "opencode-go/deepseek-v4-flash-vision-exp"
+},
+{
+"id": "opencode-go/qwen3.7-max"
+},
+{
+"id": "opencode-go/qwen3.8-max"
+},
+{
+"id": "opencode-go/qwen3.7-plus"
+},
+{
+"id": "opencode-go/qwen3.6-plus"
+},
+{
+"id": "opencode-go/qwen3.5-plus"
+},
+{
+"id": "opencode-go/mimo-v2-pro"
+},
+{
+"id": "opencode-go/mimo-v2-omni"
+},
+{
+"id": "opencode-go/mimo-v2.5-pro"
+},
+{
+"id": "opencode-go/mimo-v2.5"
+},
+{
+"id": "opencode-go/hy3"
+},
+{
+"id": "opencode-go/hy3-preview"
+},
+{
+"id": "opencode-go/gpt-5.6-luna"
+},
+{
+"id": "opencode-go/grok-4.5"
+},
+{
+"id": "opencode-go/muse-spark-1.2-contributor"
+},
+{
+"id": "oc/claude-fable-5"
+},
+{
+"id": "opencode/claude-fable-5"
+},
+{
+"id": "oc/claude-opus-5"
+},
+{
+"id": "opencode/claude-opus-5"
+},
+{
+"id": "oc/claude-opus-4-8"
+},
+{
+"id": "opencode/claude-opus-4-8"
+},
+{
+"id": "oc/claude-opus-4-7"
+},
+{
+"id": "opencode/claude-opus-4-7"
+},
+{
+"id": "oc/claude-opus-4-6"
+},
+{
+"id": "opencode/claude-opus-4-6"
+},
+{
+"id": "oc/claude-opus-4-5"
+},
+{
+"id": "opencode/claude-opus-4-5"
+},
+{
+"id": "oc/claude-sonnet-5"
+},
+{
+"id": "opencode/claude-sonnet-5"
+},
+{
+"id": "oc/claude-sonnet-4-6"
+},
+{
+"id": "opencode/claude-sonnet-4-6"
+},
+{
+"id": "oc/claude-sonnet-4-5"
+},
+{
+"id": "opencode/claude-sonnet-4-5"
+},
+{
+"id": "oc/claude-sonnet-4"
+},
+{
+"id": "opencode/claude-sonnet-4"
+},
+{
+"id": "oc/claude-haiku-4-5"
+},
+{
+"id": "opencode/claude-haiku-4-5"
+},
+{
+"id": "openrouter/meta/muse-spark-1.2-contributor"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-flash-vision-exp"
+},
+{
+"id": "openrouter/stealth/ox-alpha"
+},
+{
+"id": "openrouter/z-ai/glm-5.3"
+},
+{
+"id": "openrouter/qwen/qwen3.8-max"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-fast"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5:batch"
+},
+{
+"id": "openrouter/moonshotai/kimi-k3"
+},
+{
+"id": "openrouter/openai/gpt-5.6-luna"
+},
+{
+"id": "openrouter/x-ai/grok-4.5"
+},
+{
+"id": "openrouter/tencent/hy3"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5:batch"
+},
+{
+"id": "openrouter/z-ai/glm-5.2"
+},
+{
+"id": "openrouter/moonshotai/kimi-k2.7-code"
+},
+{
+"id": "openrouter/~anthropic/claude-fable-latest"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5:batch"
+},
+{
+"id": "openrouter/qwen/qwen3.7-plus"
+},
+{
+"id": "openrouter/minimax/minimax-m3"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-fast"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8:batch"
+},
+{
+"id": "openrouter/qwen/qwen3.7-max"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-fast"
+},
+{
+"id": "openrouter/~anthropic/claude-haiku-latest"
+},
+{
+"id": "openrouter/~anthropic/claude-sonnet-latest"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-pro"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-flash"
+},
+{
+"id": "openrouter/tencent/hy3-preview"
+},
+{
+"id": "openrouter/xiaomi/mimo-v2.5-pro"
+},
+{
+"id": "openrouter/xiaomi/mimo-v2.5"
+},
+{
+"id": "openrouter/~anthropic/claude-opus-latest"
+},
+{
+"id": "openrouter/moonshotai/kimi-k2.6"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7:batch"
+},
+{
+"id": "openrouter/z-ai/glm-5.1"
+},
+{
+"id": "openrouter/qwen/qwen3.6-plus"
+},
+{
+"id": "openrouter/minimax/minimax-m2.7"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6:batch"
+},
+{
+"id": "openrouter/minimax/minimax-m2.5"
+},
+{
+"id": "openrouter/z-ai/glm-5"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6:batch"
+},
+{
+"id": "openrouter/moonshotai/kimi-k2.5"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.5"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.5:batch"
+},
+{
+"id": "openrouter/anthropic/claude-haiku-4.5"
+},
+{
+"id": "openrouter/anthropic/claude-haiku-4.5:batch"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.5"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.5:batch"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.1"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.1:batch"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4"
+},
+{
+"id": "openrouter/anthropic/claude-3-haiku"
+},
+{
+"id": "oc/claude-fable-5-low"
+},
+{
+"id": "oc/claude-fable-5-medium"
+},
+{
+"id": "oc/claude-fable-5-high"
+},
+{
+"id": "oc/claude-fable-5-xhigh"
+},
+{
+"id": "opencode/claude-fable-5-low"
+},
+{
+"id": "opencode/claude-fable-5-medium"
+},
+{
+"id": "opencode/claude-fable-5-high"
+},
+{
+"id": "opencode/claude-fable-5-xhigh"
+},
+{
+"id": "oc/claude-opus-5-low"
+},
+{
+"id": "oc/claude-opus-5-medium"
+},
+{
+"id": "oc/claude-opus-5-high"
+},
+{
+"id": "oc/claude-opus-5-xhigh"
+},
+{
+"id": "opencode/claude-opus-5-low"
+},
+{
+"id": "opencode/claude-opus-5-medium"
+},
+{
+"id": "opencode/claude-opus-5-high"
+},
+{
+"id": "opencode/claude-opus-5-xhigh"
+},
+{
+"id": "oc/claude-opus-4-8-low"
+},
+{
+"id": "oc/claude-opus-4-8-medium"
+},
+{
+"id": "oc/claude-opus-4-8-high"
+},
+{
+"id": "oc/claude-opus-4-8-xhigh"
+},
+{
+"id": "opencode/claude-opus-4-8-low"
+},
+{
+"id": "opencode/claude-opus-4-8-medium"
+},
+{
+"id": "opencode/claude-opus-4-8-high"
+},
+{
+"id": "opencode/claude-opus-4-8-xhigh"
+},
+{
+"id": "oc/claude-opus-4-7-low"
+},
+{
+"id": "oc/claude-opus-4-7-medium"
+},
+{
+"id": "oc/claude-opus-4-7-high"
+},
+{
+"id": "oc/claude-opus-4-7-xhigh"
+},
+{
+"id": "opencode/claude-opus-4-7-low"
+},
+{
+"id": "opencode/claude-opus-4-7-medium"
+},
+{
+"id": "opencode/claude-opus-4-7-high"
+},
+{
+"id": "opencode/claude-opus-4-7-xhigh"
+},
+{
+"id": "oc/claude-opus-4-6-low"
+},
+{
+"id": "oc/claude-opus-4-6-medium"
+},
+{
+"id": "oc/claude-opus-4-6-high"
+},
+{
+"id": "opencode/claude-opus-4-6-low"
+},
+{
+"id": "opencode/claude-opus-4-6-medium"
+},
+{
+"id": "opencode/claude-opus-4-6-high"
+},
+{
+"id": "oc/claude-opus-4-5-low"
+},
+{
+"id": "oc/claude-opus-4-5-medium"
+},
+{
+"id": "oc/claude-opus-4-5-high"
+},
+{
+"id": "opencode/claude-opus-4-5-low"
+},
+{
+"id": "opencode/claude-opus-4-5-medium"
+},
+{
+"id": "opencode/claude-opus-4-5-high"
+},
+{
+"id": "oc/claude-sonnet-5-low"
+},
+{
+"id": "oc/claude-sonnet-5-medium"
+},
+{
+"id": "oc/claude-sonnet-5-high"
+},
+{
+"id": "oc/claude-sonnet-5-xhigh"
+},
+{
+"id": "opencode/claude-sonnet-5-low"
+},
+{
+"id": "opencode/claude-sonnet-5-medium"
+},
+{
+"id": "opencode/claude-sonnet-5-high"
+},
+{
+"id": "opencode/claude-sonnet-5-xhigh"
+},
+{
+"id": "oc/claude-sonnet-4-6-low"
+},
+{
+"id": "oc/claude-sonnet-4-6-medium"
+},
+{
+"id": "oc/claude-sonnet-4-6-high"
+},
+{
+"id": "opencode/claude-sonnet-4-6-low"
+},
+{
+"id": "opencode/claude-sonnet-4-6-medium"
+},
+{
+"id": "opencode/claude-sonnet-4-6-high"
+},
+{
+"id": "oc/claude-sonnet-4-5-low"
+},
+{
+"id": "oc/claude-sonnet-4-5-medium"
+},
+{
+"id": "oc/claude-sonnet-4-5-high"
+},
+{
+"id": "opencode/claude-sonnet-4-5-low"
+},
+{
+"id": "opencode/claude-sonnet-4-5-medium"
+},
+{
+"id": "opencode/claude-sonnet-4-5-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-fast-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-fast-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-fast-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-fast-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-5:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5-low"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5-medium"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5-high"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-5:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5-low"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5-medium"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5-high"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-fable-5:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-fast-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-fast-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-fast-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-fast-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6-low"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6-medium"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6-high"
+},
+{
+"id": "openrouter/anthropic/claude-haiku-4.5-low"
+},
+{
+"id": "openrouter/anthropic/claude-haiku-4.5-medium"
+},
+{
+"id": "openrouter/anthropic/claude-haiku-4.5-high"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.5-low"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.5-medium"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.5-high"
+},
+{
+"id": "no-think/oc/claude-opus-5"
+},
+{
+"id": "no-think/opencode/claude-opus-5"
+},
+{
+"id": "no-think/oc/claude-opus-4-8"
+},
+{
+"id": "no-think/opencode/claude-opus-4-8"
+},
+{
+"id": "no-think/oc/claude-opus-4-7"
+},
+{
+"id": "no-think/opencode/claude-opus-4-7"
+},
+{
+"id": "no-think/oc/claude-opus-4-6"
+},
+{
+"id": "no-think/opencode/claude-opus-4-6"
+},
+{
+"id": "no-think/oc/claude-opus-4-5"
+},
+{
+"id": "no-think/opencode/claude-opus-4-5"
+},
+{
+"id": "no-think/oc/claude-sonnet-5"
+},
+{
+"id": "no-think/opencode/claude-sonnet-5"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-6"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-6"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-5"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-5"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-fast"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5:batch"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5:batch"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-fast"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.7"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.6"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.6"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-haiku-4.5"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.5"
+},
+{
+"id": "no-think/oc/claude-opus-5-low"
+},
+{
+"id": "no-think/oc/claude-opus-5-medium"
+},
+{
+"id": "no-think/oc/claude-opus-5-high"
+},
+{
+"id": "no-think/oc/claude-opus-5-xhigh"
+},
+{
+"id": "no-think/opencode/claude-opus-5-low"
+},
+{
+"id": "no-think/opencode/claude-opus-5-medium"
+},
+{
+"id": "no-think/opencode/claude-opus-5-high"
+},
+{
+"id": "no-think/opencode/claude-opus-5-xhigh"
+},
+{
+"id": "no-think/oc/claude-opus-4-8-low"
+},
+{
+"id": "no-think/oc/claude-opus-4-8-medium"
+},
+{
+"id": "no-think/oc/claude-opus-4-8-high"
+},
+{
+"id": "no-think/oc/claude-opus-4-8-xhigh"
+},
+{
+"id": "no-think/opencode/claude-opus-4-8-low"
+},
+{
+"id": "no-think/opencode/claude-opus-4-8-medium"
+},
+{
+"id": "no-think/opencode/claude-opus-4-8-high"
+},
+{
+"id": "no-think/opencode/claude-opus-4-8-xhigh"
+},
+{
+"id": "no-think/oc/claude-opus-4-7-low"
+},
+{
+"id": "no-think/oc/claude-opus-4-7-medium"
+},
+{
+"id": "no-think/oc/claude-opus-4-7-high"
+},
+{
+"id": "no-think/oc/claude-opus-4-7-xhigh"
+},
+{
+"id": "no-think/opencode/claude-opus-4-7-low"
+},
+{
+"id": "no-think/opencode/claude-opus-4-7-medium"
+},
+{
+"id": "no-think/opencode/claude-opus-4-7-high"
+},
+{
+"id": "no-think/opencode/claude-opus-4-7-xhigh"
+},
+{
+"id": "no-think/oc/claude-opus-4-6-low"
+},
+{
+"id": "no-think/oc/claude-opus-4-6-medium"
+},
+{
+"id": "no-think/oc/claude-opus-4-6-high"
+},
+{
+"id": "no-think/opencode/claude-opus-4-6-low"
+},
+{
+"id": "no-think/opencode/claude-opus-4-6-medium"
+},
+{
+"id": "no-think/opencode/claude-opus-4-6-high"
+},
+{
+"id": "no-think/oc/claude-opus-4-5-low"
+},
+{
+"id": "no-think/oc/claude-opus-4-5-medium"
+},
+{
+"id": "no-think/oc/claude-opus-4-5-high"
+},
+{
+"id": "no-think/opencode/claude-opus-4-5-low"
+},
+{
+"id": "no-think/opencode/claude-opus-4-5-medium"
+},
+{
+"id": "no-think/opencode/claude-opus-4-5-high"
+},
+{
+"id": "no-think/oc/claude-sonnet-5-low"
+},
+{
+"id": "no-think/oc/claude-sonnet-5-medium"
+},
+{
+"id": "no-think/oc/claude-sonnet-5-high"
+},
+{
+"id": "no-think/oc/claude-sonnet-5-xhigh"
+},
+{
+"id": "no-think/opencode/claude-sonnet-5-low"
+},
+{
+"id": "no-think/opencode/claude-sonnet-5-medium"
+},
+{
+"id": "no-think/opencode/claude-sonnet-5-high"
+},
+{
+"id": "no-think/opencode/claude-sonnet-5-xhigh"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-6-low"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-6-medium"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-6-high"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-6-low"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-6-medium"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-6-high"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-5-low"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-5-medium"
+},
+{
+"id": "no-think/oc/claude-sonnet-4-5-high"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-5-low"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-5-medium"
+},
+{
+"id": "no-think/opencode/claude-sonnet-4-5-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-fast-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-fast-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-fast-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-fast-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5:batch-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5:batch-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5:batch-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-5:batch-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5:batch-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5:batch-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5:batch-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-5:batch-xhigh"
+},
+{
+"id": "openrouter/moonshotai/kimi-k3-xhigh"
+},
+{
+"id": "openrouter/x-ai/grok-4.5-high"
+},
+{
+"id": "openrouter/x-ai/grok-4.5-medium"
+},
+{
+"id": "openrouter/x-ai/grok-4.5-low"
+},
+{
+"id": "openrouter/tencent/hy3-high"
+},
+{
+"id": "openrouter/tencent/hy3-low"
+},
+{
+"id": "openrouter/tencent/hy3-none"
+},
+{
+"id": "openrouter/z-ai/glm-5.2-xhigh"
+},
+{
+"id": "openrouter/z-ai/glm-5.2-high"
+},
+{
+"id": "openrouter/~anthropic/claude-fable-latest-xhigh"
+},
+{
+"id": "openrouter/~anthropic/claude-fable-latest-high"
+},
+{
+"id": "openrouter/~anthropic/claude-fable-latest-medium"
+},
+{
+"id": "openrouter/~anthropic/claude-fable-latest-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.8:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-fast-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-fast-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-fast-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7-fast-low"
+},
+{
+"id": "openrouter/~anthropic/claude-sonnet-latest-xhigh"
+},
+{
+"id": "openrouter/~anthropic/claude-sonnet-latest-high"
+},
+{
+"id": "openrouter/~anthropic/claude-sonnet-latest-medium"
+},
+{
+"id": "openrouter/~anthropic/claude-sonnet-latest-low"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-pro-xhigh"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-pro-high"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-flash-xhigh"
+},
+{
+"id": "openrouter/deepseek/deepseek-v4-flash-high"
+},
+{
+"id": "openrouter/~anthropic/claude-opus-latest-xhigh"
+},
+{
+"id": "openrouter/~anthropic/claude-opus-latest-high"
+},
+{
+"id": "openrouter/~anthropic/claude-opus-latest-medium"
+},
+{
+"id": "openrouter/~anthropic/claude-opus-latest-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.7:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-sonnet-4.6:batch-low"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6:batch-xhigh"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6:batch-high"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6:batch-medium"
+},
+{
+"id": "openrouter/anthropic/claude-opus-4.6:batch-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-fast-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-fast-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-fast-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-fast-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.8-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.7-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.7-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.7-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.7-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.6-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.6-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.6-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-sonnet-4.6-low"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.6-xhigh"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.6-high"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.6-medium"
+},
+{
+"id": "no-think/openrouter/anthropic/claude-opus-4.6-low"
+}
+]
+}

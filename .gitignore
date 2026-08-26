@@ -44,3 +44,9 @@ secure-drop/
 # node_modules` shows up as an untracked `?? node_modules` ready to commit.
 node_modules
 node_modules/
+
+# omniroute-broker's dist/ is hand-written source and is the plugin entrypoint,
+# not generated output. Keep this explicit so a future blanket dist/ rule cannot
+# silently make the authoritative broker disappear from a fresh clone or CI.
+!plugins/omniroute-broker/dist/
+!plugins/omniroute-broker/dist/*.js
