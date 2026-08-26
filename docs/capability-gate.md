@@ -32,9 +32,10 @@ Two other things follow from that and are not cosmetic:
   the other way. A dormant domain owner makes the request expire, and an expired capability
   request is a delay. A break-glass path is a standing way around every rule above it.
 
-The shared half — the append-only record's invariants — moved to
-[`lib/reqrecord.sh`](../lib/reqrecord.sh) rather than being copied. See that file's header,
-and `test_reqrecord_shared.sh` for the gate that keeps the remaining duplication honest.
+The shared half — the append-only record's invariants — lives in
+[`lib/reqrecord.sh`](../lib/reqrecord.sh) rather than being copied. Both request flows source
+that one implementation; `test_capability_gate.sh` mutates the library to prove the gate
+actually depends on it.
 
 ---
 
@@ -171,12 +172,12 @@ whole class: the requester is blocked by the one agent who already knows the saf
 
 ### The implementation is shared, not copied
 
-Parsing, refusal wording and record shape all come from **`lib/reqrecord.sh`**, byte-identical
-with `org_request_queue.sh` and gated by `test_reqrecord_shared.sh`. Two copies of the owner's
-decision model become two decision models, and the divergence is invisible from either side —
-both files still refuse things, just no longer the same things. `test_capability_gate.sh`
-section 10 proves the sharing is real rather than decorative: neutering the function *in the
-library* turns **both** flows' tests red in one edit.
+Parsing, refusal wording and record shape all come from **`lib/reqrecord.sh`**, which both
+request flows source. Two copies of the owner's decision model become two decision models, and
+the divergence is invisible from either side — both files still refuse things, just no longer
+the same things. `test_capability_gate.sh` section 10 proves the sharing is real rather than
+decorative: neutering the function *in the library* turns the capability flow's named tests
+red, while the provisioning suites exercise the same sourced implementation.
 
 Deliberately *not* shared: the risk classifier — the two flows read different facts, permission
 keys versus registry entries — and `SAFERALT_NO_ALT_CONSEQUENCE`, the one line naming what a

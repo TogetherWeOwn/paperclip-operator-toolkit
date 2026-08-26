@@ -66,10 +66,10 @@ set -uo pipefail
 # and belongs on an approval. Each wrong combination has its own refusal.
 #
 # THE IMPLEMENTATION IS NOT A COPY. Parsing, refusal wording and record shape
-# all come from `lib/reqrecord.sh`, byte-identical with org_request_queue.sh
-# and gated by `test_reqrecord_shared.sh`. Two copies of the owner's decision
-# model would become two decision models, and the divergence is invisible from
-# either side — both files still refuse things, just no longer the same things.
+# all come from `lib/reqrecord.sh`, which org_request_queue.sh now sources too.
+# Two copies of the owner's decision model would become two decision models,
+# and the divergence is invisible from either side — both files still refuse
+# things, just no longer the same things.
 #
 # WHICH ASKS ARE RISKY is NOT shared, because the two flows read different
 # facts: the queue reads a template's permission keys, this file reads the

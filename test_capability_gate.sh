@@ -53,6 +53,9 @@ says() { local d="$1" want="$2"; shift 2
   local o; o="$("$@" 2>&1)"
   if grep -qF -- "$want" <<<"$o"; then ok "$d"
   else bad "$d — output did not contain '$want'"; sed 's/^/        /' <<<"$o" | head -4; fi; }
+readvar() {  # <file> <NAME> — a single-quoted assignment, possibly multi-line
+  sed -n "/^$2='/,/'\$/p" "$1" | sed "1s/^$2='//; \$s/'\$//"
+}
 
 # The safer-alternatives record a risky approval carries (TOG-403). Every test
 # outside section 11 is about a DIFFERENT gate — authority, state, expiry,
@@ -100,6 +103,29 @@ eq "the registry is non-empty" "$(jq 'length > 0' <<<"$("$G" registry --json)")"
 eq "every registry entry carries a domain, class, rollback and note" \
    "$(jq '[to_entries[]|select(.value.domain and .value.class and .value.rollback and .value.note)]|length' <<<"$("$G" registry --json)")" \
    "$(jq 'length' <<<"$("$G" registry --json)")"
+
+# These two parameters deliberately diverge from the provisioning defaults in
+# lib/reqrecord.sh. They used to live in the byte-identity suite that guarded a
+# duplicated library; keep asserting the divergence now that the queue sources
+# the library and that suite has no second implementation left to compare.
+base_status="$(bash -c 'QUEUE=/dev/null GRANT_LOG=/dev/null . '"$HERE/lib/reqrecord.sh"' >/dev/null 2>&1; printf "%s" "$REQRECORD_STATUS_EVENTS"')"
+cap_status="$(grep -m1 "^REQRECORD_STATUS_EVENTS=" "$G" | sed "s/^REQRECORD_STATUS_EVENTS='//; s/'$//")"
+if jq -e --argjson base "$base_status" 'to_entries|map(.key) as $mine
+     | ($base|to_entries|map(.key)) as $need
+     | ($need - $mine) | length == 0' <<<"$cap_status" >/dev/null 2>&1; then
+  ok "the capability STATUS_EVENTS is a superset of the shared default"
+else
+  bad "the capability gate dropped a status-bearing event from the shared default"
+fi
+
+cap_cons="$(readvar "$G" SAFERALT_NO_ALT_CONSEQUENCE)"
+if [[ -z "$cap_cons" ]]; then
+  bad "the capability gate does not set SAFERALT_NO_ALT_CONSEQUENCE; it would inherit wording for a command it does not have"
+elif grep -q 'risk-record' <<<"$cap_cons"; then
+  bad "the capability gate's SAFERALT_NO_ALT_CONSEQUENCE points at \`risk-record\`, which only the provisioning queue implements"
+else
+  ok "the capability gate sets its own SAFERALT_NO_ALT_CONSEQUENCE without promising the queue's audit command"
+fi
 
 # ---------------------------------------------------------------------------
 hdr "1. The owner's four rules — each fires on its own"
@@ -410,7 +436,7 @@ hdr "11. Safer alternative first, on the domain owner's key (TOG-403)"
 # The contract itself, not the gates that happen to sit near it. Enforced by
 # the SHARED implementation in lib/reqrecord.sh, so these assertions and
 # test_responsible_leader.sh's are asserting one implementation from two sides;
-# test_reqrecord_shared.sh is what keeps that true.
+# both suites therefore exercise the same sourced implementation.
 reset
 allows "ENG asks for read-only clone access — tool, full rollback: a ROUTINE ask" \
   "$G" submit --requester ENG --capability github.repo.read --action read --facts "$FACTS" --reasoning "$WHY"

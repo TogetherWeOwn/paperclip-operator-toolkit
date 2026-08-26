@@ -18,32 +18,17 @@
 # owner's safer-alternative-first model (TOG-388) is not specific to org
 # provisioning either — it is more load-bearing on the capability side, where
 # the asks are riskier — so its argument shapes and its refusal wording live
-# here too, under the same byte-identity gate.
+# here too.
 #
-# ---------------------------------------------------------------------------
-# WHY org_request_queue.sh DOES NOT SOURCE THIS YET
-# ---------------------------------------------------------------------------
-# It should, and that is the intended end state. The original reason it did not
-# — TOG-388 and TOG-390 both open against that file — is GONE: both landed on
-# 2026-08-25 (978fbc1, 8dfc3e5). What remains is scope. Adopting the library
-# means renaming that file's `request_state`/`assert_unambiguous`/`next_id` at
-# every call site and resolving its own `now_iso`/`plus_days`/`tabulate`
-# against this file's, which is a large refactor of the most load-bearing file
-# in the repo and wants its own issue and its own red-to-green. Filed as
-# TOG-438, which also carries the two section-3 assertions that must be MOVED
-# rather than deleted with this file's gate. Until then the duplication stands,
-# gated.
-#
-# The duplication is GATED, not tolerated: `test_reqrecord_shared.sh` extracts
-# the thirteen functions below from BOTH files and fails if they are not
-# byte-identical. Drift becomes a red build on the next push rather than a
-# divergence somebody finds later by reading two files side by side. When the
-# queue adopts this file, delete its copies; the suite will then compare one
-# definition against itself, which is the signal to retire that half of it.
+# TOG-438 completed the extraction: both `org_request_queue.sh` and
+# `capability_gate.sh` source this file. The former byte-identity suite was
+# deleted because, with one implementation, it would compare zero copied
+# functions and report a clean run that measured nothing. Flow-specific
+# parameters remain explicit in each caller and are tested where they diverge.
 #
 # WHAT IS SHARED AND WHAT IS DELIBERATELY NOT
 # -------------------------------------------
-# Shared (byte-identical, gated) — the record's integrity:
+# Shared — the record's integrity:
 #     die  log_event  append_queue  queue_lock  queue_unlock
 #     expired  submission_count  request_submission
 # ...and the decision's required content (TOG-403):
@@ -103,10 +88,7 @@ REQRECORD_OPEN_STATUSES="${REQRECORD_OPEN_STATUSES:-pending}"
 SAFERALT_NO_ALT_CONSEQUENCE="${SAFERALT_NO_ALT_CONSEQUENCE:-$(printf '%s' 'The second is always recorded on the thread and sent to the requester, and on a
   RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it.')}"
 
-# --- the eight shared definitions ------------------------------------------
-# Everything between the BEGIN/END markers is compared byte-for-byte against
-# org_request_queue.sh by test_reqrecord_shared.sh. Do not reformat one side.
-# >>> REQRECORD SHARED BEGIN
+# --- shared definitions -----------------------------------------------------
 die() { echo "REFUSED: $*" >&2; exit 2; }
 
 log_event()    { printf '%s\n' "$1" >> "$GRANT_LOG"; chmod 0600 "$GRANT_LOG" 2>/dev/null || true; }
@@ -267,8 +249,6 @@ saferalt_decision_json() {
     '{alternatives:$a,alternativesConsidered:$c,
       noSaferAlternative:(if $n=="" then null else $n end)}'
 }
-# <<< REQRECORD SHARED END
-
 # --- parameterised: the same invariants, over a caller-supplied event set ---
 
 QUEUE_LOCK="${QUEUE_LOCK:-${QUEUE}.lock}"

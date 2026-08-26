@@ -75,7 +75,7 @@ set -uo pipefail
 #   * A request id names exactly one submission. Ids are allocated under a
 #     lock, and a record where one id names two submissions is refused rather
 #     than resolved — a decision that does not bind to what was decided is not
-#     a decision. See assert_unambiguous.
+#     a decision. See reqrecord_assert_unambiguous.
 #   * A pending request past its expiry is expired everywhere it is read, with
 #     no review attempt needed to make that true.
 #   * A decision REACHES THE REQUESTER. Every terminal transition — approved,
@@ -141,6 +141,19 @@ DISABLED_TEMPLATES="${DISABLED_TEMPLATES:-$HERE/.provisioner-disabled-templates}
 GRANT_LOG="${GRANT_LOG:-$HERE/provisioner-grant-log.jsonl}"
 ORG_SNAPSHOT="${ORG_SNAPSHOT:-}"
 
+# The record layer reads its caller parameters at source time. Set every
+# provisioning-specific value before loading it; capability_gate.sh overrides
+# the same parameters for its CAP id space and two-key status model.
+REQ_ID_PREFIX="REQ"
+REQRECORD_STATUS_EVENTS='{"request.submitted":true,"request.reviewed":true,"request.expired":true}'
+REQRECORD_TERMINAL_EVENTS='{"request.reviewed":true,"request.expired":true}'
+REQRECORD_OPEN_STATUSES='pending'
+SAFERALT_NO_ALT_CONSEQUENCE='The second is always recorded on the thread and sent to the requester, and on a
+  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it.'
+# Preserve the queue's historical non-overridable lock path. The library accepts
+# an override for other callers, but this flow has always derived it from QUEUE.
+QUEUE_LOCK="${QUEUE}.lock"
+
 # A reporting chain deeper than this is a data error, not an org.
 MAX_CHAIN_DEPTH="${MAX_CHAIN_DEPTH:-16}"
 # A pending request that nobody decides expires. It does NOT escalate.
@@ -168,34 +181,11 @@ REQUEST_NOTIFY_TIMEOUT="${REQUEST_NOTIFY_TIMEOUT:-10}"
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 [[ -x "$PROV" ]] || { echo "ERROR: org_provisioner.sh not found/executable" >&2; exit 1; }
 
+# shellcheck source=lib/reqrecord.sh
+. "$HERE/lib/reqrecord.sh" || { echo "ERROR: missing $HERE/lib/reqrecord.sh" >&2; exit 1; }
 # shellcheck source=lib/pcsql.sh
 . "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
 
-die() { echo "REFUSED: $*" >&2; exit 2; }
-
-# The ONLY events that carry a request's status. Every "what state is this
-# request in" query filters on this allowlist.
-#
-# It used to be a denylist — "not a comment and not an acknowledgement" — and
-# that shape generates bugs: every new event type is silently opted IN to being
-# read as a decision, and a row that lands as `last` without a real status
-# gives the request a null state that drops it from every filtered listing.
-# The code already carried a written warning about exactly that. Adding
-# notification events in TOG-254 proved the warning right — notify rows were
-# read as decisions — so the filter is now stated positively. "An event is a
-# status unless listed" is wrong; "an event is a status only if listed" is right.
-#
-# A SET, not an array, for the reason cmd_list already documents about $acked:
-# `$ev[.event]` evaluates .event against the row being filtered, whereas
-# `$ev|index(.event)` evaluates it against the array itself and errors out.
-STATUS_EVENTS='{"request.submitted":true,"request.reviewed":true,"request.expired":true}'
-
-# The tail of the denial-floor refusal in saferalt_assert_direction. This flow
-# turns a no-safer-alternative finding on a RISKY ask into an open audit item;
-# capability_gate.sh has no `risk-record` and sets its own line rather than
-# promise one that does not exist. See lib/reqrecord.sh's caller contract.
-SAFERALT_NO_ALT_CONSEQUENCE='The second is always recorded on the thread and sent to the requester, and on a
-  RISKY ask it becomes an OPEN audit item (risk-record) until an auditor closes it.'
 
 # Standing authority. This is the escalation floor when no leader can be
 # derived, and the break-glass path over a derived leader. It is no longer the
@@ -276,7 +266,7 @@ RISK_KEYS='["tools:admin","tools:manage_connections","tools:manage_runtime","env
 # NEW permission key into "safe", so the day someone adds `secrets:read` to a
 # template the classifier keeps answering "not risky" and the control quietly
 # stops applying to the one grant it most exists for. The queue already learned
-# this exact lesson once — see STATUS_EVENTS, where a denylist of event types
+# this exact lesson once — see the status-event allowlist, where a denylist of event types
 # made every new event a decision. An unclassified key is a question nobody has
 # answered yet, and the honest answer to an unanswered question is to stop.
 NONRISK_KEYS='["agents:configure","agents:suggest-changes","tasks:assign_scope","tasks:manage_active_checkouts","skills:suggest-changes","tools:view_audit","tools:use","audit:view_agent_actions"]'
@@ -324,10 +314,6 @@ classify_risk() {
   printf '%s\n' "$factors"
   return 0
 }
-
-now_iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
-plus_days() { date -u -d "+$1 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-              || date -u -v "+$1d" +%Y-%m-%dT%H:%M:%SZ; }
 
 # -Atq and ON_ERROR_STOP are this tool's flags; the backend choice is not its
 # business. Wrapper keeps every call site below unchanged. See lib/pcsql.sh.
@@ -448,274 +434,20 @@ is_descendant_of() {
 
 template_disabled() { [[ -f "$DISABLED_TEMPLATES" ]] && grep -qxF "$1" "$DISABLED_TEMPLATES"; }
 
-log_event()    { printf '%s\n' "$1" >> "$GRANT_LOG"; chmod 0600 "$GRANT_LOG" 2>/dev/null || true; }
-append_queue() { printf '%s\n' "$1" >> "$QUEUE"; chmod 0600 "$QUEUE" 2>/dev/null || true; }
 
 # --- serialising the queue --------------------------------------------------
-# An id is allocated by COUNTING existing rows, so allocate-then-append has to
-# be one critical section or two concurrent submits take the same id. `mkdir` is
-# the lock because it is atomic on every filesystem this runs on and needs no
-# util-linux (`flock` is absent in the paperclip container, same as `column`).
-#
-# The holder's pid goes in the lock so a crashed holder cannot wedge the queue
-# forever. This is a liveness aid, NOT a correctness one: the invariant that
-# actually protects a decision is assert_unambiguous below, which holds even if
-# this lock is defeated, skipped, or the queue file is restored from a backup
-# that already contains duplicates.
-QUEUE_LOCK="${QUEUE}.lock"
-LOCK_WAIT_TRIES="${LOCK_WAIT_TRIES:-100}"
-
-queue_lock() {
-  local i pid
-  for (( i=0; i<LOCK_WAIT_TRIES; i++ )); do
-    if mkdir "$QUEUE_LOCK" 2>/dev/null; then
-      printf '%s\n' "$$" > "$QUEUE_LOCK/pid" 2>/dev/null || true
-      return 0
-    fi
-    pid="$(cat "$QUEUE_LOCK/pid" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$QUEUE_LOCK" 2>/dev/null || true   # holder died mid-write
-      continue
-    fi
-    sleep 0.05 2>/dev/null || sleep 1
-  done
-  die "could not acquire the queue lock ($QUEUE_LOCK) — another writer is stuck."
-}
-queue_unlock() { rm -rf "$QUEUE_LOCK" 2>/dev/null || true; }
-
-# Current state of a request = its most recent status-bearing record.
-#
-# Expiry is DERIVED here, not waited for. A pending request past its expiresAt
-# is expired whether or not anybody has looked at it: materialising expiry only
-# as a side effect of an attempted review made an unread request permanently
-# 'pending', which in turn refused the documented remedy (--supersedes) and left
-# the requester with no move at all. Deriving it here means every read path —
-# review, the supersede precondition, list, thread — agrees without depending on
-# somebody having tried something first.
-request_state() {
-  [[ -f "$QUEUE" ]] || return 1
-  local rec exp
-  rec="$(jq -c --arg id "$1" --argjson ev "$STATUS_EVENTS" \
-         'select(.requestId==$id and ($ev[.event] // false) and has("status"))' "$QUEUE" | tail -1)"
-  [[ -n "$rec" ]] || return 1
-  if [[ "$(jq -r '.status' <<<"$rec")" == "pending" ]]; then
-    exp="$(request_submission "$1" | jq -r '.expiresAt // ""')"
-    expired "$exp" && rec="$(jq -c '.status="expired" | .derivedExpiry=true' <<<"$rec")"
-  fi
-  printf '%s\n' "$rec"
-}
-request_submission() {
-  [[ -f "$QUEUE" ]] || return 1
-  jq -c --arg id "$1" 'select(.requestId==$id and .event=="request.submitted")' "$QUEUE" | tail -1
-}
-submission_count() {
-  [[ -f "$QUEUE" ]] || { echo 0; return 0; }
-  jq -r --arg id "$1" 'select(.requestId==$id and .event=="request.submitted")|.requestId' "$QUEUE" | wc -l
-}
-
-# THE INVARIANT. A reviewer decides an ID; if that ID names two submissions then
-# whatever it decided is not what executes — request_submission() resolves the
-# ambiguity with `tail -1`, which is an arbitrary answer, not a correct one.
-# Both requests can be inside the requester's ceiling, so no other control fires
-# and the decision simply does not bind to what was decided.
-#
-# Refusing outright is the only safe answer: there is no way to tell from the
-# record which of the two the reviewer read. This is deliberately separate from
-# queue_lock — the lock stops duplicates being CREATED, this stops a duplicate
-# that exists anyway (restored backup, rotated file, defeated lock) being ACTED
-# ON. Callers invoke it from a function body, never a command substitution,
-# because `die` inside `$(...)` exits only the subshell.
-assert_unambiguous() {
-  local n; n="$(submission_count "$1")"
-  [[ "$n" -le 1 ]] || {
-    log_event "$(jq -cn --arg id "$1" --argjson n "$n" \
-      '{event:"review.refused",reason:"ambiguous_request_id",requestId:$id,submissions:$n}')"
-    die "request id $1 names $n distinct submissions; refusing to act on an ambiguous record."
-  }
-  assert_one_decision "$1"
-}
-
-# The other half of the same invariant. A request has at most ONE terminal
-# decision — `review` refuses a request that is already decided or expired, and
-# reap_expired only ever expires a request whose last status is pending — so
-# two terminal rows for one id means the record has been tampered with or
-# merged badly, exactly as two submissions does.
-#
-# It mattered enough to add in TOG-254 because that change introduced a NEW
-# writer to this file: REQUEST_NOTIFY_CMD is an operator-configured subprocess
-# that did not exist before. It runs as the same user and therefore CAN append
-# here; what it must not be able to do is have an appended row silently become
-# the decision. request_state() resolves by `tail -1`, so without this a later
-# forged row wins by being later. The design's own words about duplicate
-# submissions apply unchanged: an arbitrary answer is worse than a refusal,
-# because every other control still passes while the decision quietly fails to
-# bind to what was decided.
-#
-# This is detective, not preventive — a transport running as the same user
-# cannot be sandboxed by the script that invokes it. It converts a silent forge
-# into a loud refusal, which is the same trade the override design already made.
-decision_count() {
-  [[ -f "$QUEUE" ]] || { echo 0; return 0; }
-  jq -r --arg id "$1" \
-    'select(.requestId==$id and (.event=="request.reviewed" or .event=="request.expired"))|.requestId' \
-    "$QUEUE" 2>/dev/null | wc -l | tr -d ' '
-}
-assert_one_decision() {
-  local n; n="$(decision_count "$1")"
-  [[ "$n" -le 1 ]] || {
-    log_event "$(jq -cn --arg id "$1" --argjson n "$n" \
-      '{event:"review.refused",reason:"ambiguous_decision",requestId:$id,decisions:$n}')"
-    die "request id $1 carries $n terminal decisions; refusing to act on an ambiguous record."
-  }
-}
-
-# CALL ONLY WITH THE QUEUE LOCK HELD. This counts rows and returns the next
-# number; the count is stale the moment the lock is released.
-next_id() {
-  local n=1
-  [[ -f "$QUEUE" ]] && n=$(( $(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" 2>/dev/null | wc -l) + 1 ))
-  printf 'REQ-%03d' "$n"
-}
-
-# A pending request past its expiry is expired, not decidable. Expiry never
-# re-targets the request to a different approver — see the header.
-expired() {
-  local exp="$1"
-  [[ -n "$exp" && "$exp" != "null" ]] || return 1
-  [[ "$(now_iso)" > "$exp" ]]
-}
-
-# --- the safer-alternative contract (TOG-388, factored out in TOG-403) ------
-# The owner's decision model, as ARGUMENT SHAPES: a denial must leave the
-# requester somewhere to go, and an approval of a risky ask must show which
-# safer routes were weighed and why each failed. It lives here because it is
-# the SAME model in both flows — seating an agent and handing over a credential
-# — and two copies of a decision model do not stay one model. The divergence is
-# invisible from either side: both files still refuse things, just no longer
-# the same things.
-#
-# STATE IN GLOBALS, NOT RETURN VALUES. These are built one argv word at a time
-# inside the caller's own parsing loop, and a function that returned them by
-# echo could not also `die` on a malformed pair — `die` inside `$(...)` exits
-# only the subshell, so the parse would carry on past its own refusal. Call
-# saferalt_reset once at the top of every decision command.
-#
-# CALLER CONTRACT
-#   SAFERALT_NO_ALT_CONSEQUENCE  one line appended to the denial-floor refusal,
-#                                naming what a recorded --no-safer-alternative
-#                                finding BECOMES in this flow. The two flows
-#                                genuinely differ: org_request_queue.sh turns a
-#                                risky one into an open audit item that
-#                                `ack-risk` drains; capability_gate.sh has no
-#                                such command and says so instead. One sentence
-#                                covering both would be false in one of them,
-#                                which is the exact failure this file exists to
-#                                prevent.
-saferalt_reset() {
-  SAFERALT_ALTS='[]'; SAFERALT_CONSIDERED='[]'; SAFERALT_NO_ALT=""; SAFERALT_SHIFT=0
-}
-
-# Consume one flag of the contract from the caller's argv. Sets SAFERALT_SHIFT
-# to how many words it took, or 0 if $1 is none of ours — so the caller's `*)`
-# arm offers this first and only then falls through to "unknown argument".
-saferalt_parse_arg() {
-  SAFERALT_SHIFT=0
-  case "${1:-}" in
-    # A safer route that still FULLY unblocks the requester's work. Repeatable.
-    --alternative)
-      [[ -n "${2:-}" ]] || die "--alternative needs a value."
-      SAFERALT_ALTS="$(jq -c --arg a "$2" '. + [$a]' <<<"$SAFERALT_ALTS")"
-      SAFERALT_SHIFT=2;;
-    # The explicit finding that there is no safer route. An escape hatch that
-    # is RECORDED and surfaced, not one that is free.
-    --no-safer-alternative)
-      [[ -n "${2:-}" ]] || die "--no-safer-alternative needs the finding itself, not a bare flag."
-      SAFERALT_NO_ALT="$2"
-      SAFERALT_SHIFT=2;;
-    # An alternative that was weighed and did not work, with the reason it did
-    # not. The two flags are a PAIR and are parsed as one unit: --because must
-    # immediately follow its --considered. Parsing them as two independent
-    # repeatable lists lets a mismatched count pair alternative 1 with reason 2
-    # and produce a record that is fully populated and entirely wrong, which is
-    # worse than a missing one because it reads as diligence.
-    --considered)
-      [[ -n "${2:-}" ]] || die "--considered needs a value."
-      [[ "${3:-}" == "--because" ]] \
-        || die "--considered \"$2\" must be followed immediately by --because \"<why it failed>\"; an alternative with no failure reason is a list, not an analysis."
-      [[ -n "${4:-}" ]] || die "--because needs a value."
-      SAFERALT_CONSIDERED="$(jq -c --arg a "$2" --arg w "$4" '. + [{alternative:$a,whyItFailed:$w}]' <<<"$SAFERALT_CONSIDERED")"
-      SAFERALT_SHIFT=4;;
-    --because) die "--because must follow a --considered; it cannot stand alone.";;
-  esac
-}
-
-# The two directions are not interchangeable, and each wrong combination gets
-# its OWN refusal. --alternative is a way forward and belongs on a denial;
-# --considered/--because is a rejected route and belongs on an approval. A
-# generic "bad flags" message would leave the reviewer guessing which half of
-# the model it had backwards, which is the half it is least able to guess.
-#
-# Callers run this BEFORE reading the request, for the same reason the --reason
-# check runs there: a refusal that depends on who is asking, or on which
-# request was named, is a refusal a reviewer can shop around.
-saferalt_assert_direction() {
-  local n_alt n_cons
-  n_alt="$(jq -r 'length' <<<"$SAFERALT_ALTS")"
-  n_cons="$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")"
-  if [[ "$1" == "rejected" ]]; then
-    [[ $n_cons -eq 0 ]] \
-      || die "--considered/--because records an alternative that FAILED, which belongs on an approval; on a denial the alternative is the way forward, so use --alternative."
-    [[ -z "$SAFERALT_NO_ALT" || $n_alt -eq 0 ]] \
-      || die "a denial cannot both offer an alternative and find that none exists; drop one."
-    [[ $n_alt -gt 0 || -n "$SAFERALT_NO_ALT" ]] || die \
-"a denial must leave the requester somewhere to go. Supply either:
-    --alternative \"<a safer route that still fully unblocks the work>\"   (repeatable)
-  or, if you have looked and there genuinely is none:
-    --no-safer-alternative \"<what you considered and why nothing works>\"
-  $SAFERALT_NO_ALT_CONSEQUENCE"
-  else
-    [[ $n_alt -eq 0 ]] \
-      || die "--alternative offers the requester a way forward instead of granting the ask; on an approval the ask IS granted, so record the routes you rejected with --considered/--because."
-    [[ -z "$SAFERALT_NO_ALT" ]] \
-      || die "--no-safer-alternative is a denial finding. On an approval, 'nothing safer worked' is exactly what --considered/--because has to show, one alternative at a time."
-  fi
-}
-
-# Only when no safer alternative exists may a risky ask be granted — and never
-# without recording which were considered and why each failed. That record is
-# the artifact the owner audits, so its absence is the thing that has to be
-# impossible. The ask label and the denial remedy are the CALLER's because the
-# command line differs per flow; the model does not, so the wording is here.
-saferalt_assert_grant_record() {
-  [[ "$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")" -gt 0 ]] || die \
-"$1 is a RISKY ask, so granting it needs the safer alternatives on the record.
-  Supply at least one pair:
-    --considered \"<a safer route you weighed>\" --because \"<why it did not fully unblock the work>\"
-  If a safer route DOES fully unblock it, this is a denial that offers it, not an approval:
-    $2"
-}
-
-# The record fields, as ONE SHAPE in both flows. Field names are what an
-# auditor's query binds to, and org_access_review.sh already reads
-# `alternativesConsidered` and `noSaferAlternative` by name. Two flows that
-# spelled them differently would each look correct read on its own, and the
-# cross-flow report would silently cover only one of them. Emitted as an object
-# the caller merges into its decision row with `+`, so the row keeps whatever
-# flow-specific fields it already had.
-saferalt_decision_json() {
-  jq -cn --argjson a "$SAFERALT_ALTS" --argjson c "$SAFERALT_CONSIDERED" --arg n "$SAFERALT_NO_ALT" \
-    '{alternatives:$a,alternativesConsidered:$c,
-      noSaferAlternative:(if $n=="" then null else $n end)}'
-}
+# The append-only record, its lock, derived expiry and one-decision invariants
+# live in lib/reqrecord.sh. This file keeps only provisioning-specific writers
+# and views; every read and write below calls the sourced implementation.
 
 # Materialise expiry for every request that has aged out, so `thread` and `list`
 # show it and the audit trail records that it happened. Idempotent, and safe to
 # call from a read path: it writes a DERIVED fact, never a decision. On a
-# read-only queue it fails quietly and request_state() still derives correctly.
+# read-only queue it fails quietly and reqrecord_state() still derives correctly.
 reap_expired() {
   [[ -f "$QUEUE" ]] || return 0
   local rows rid exp
-  rows="$(jq -s -r --argjson ev "$STATUS_EVENTS" '
+  rows="$(jq -s -r --argjson ev "$REQRECORD_STATUS_EVENTS" '
       map(select($ev[.event] // false))
       | group_by(.requestId)
       | map({rid: .[0].requestId, exp: (.[0].expiresAt // ""), last: .[-1].status})
@@ -867,7 +599,7 @@ emit_notification() {
   # The field below is `decision`, NOT `status`: a notification is not a state
   # transition, and a row that merely LOOKS like one is indistinguishable from
   # one to any query filtering on shape instead of on event name. Belt to
-  # STATUS_EVENTS' braces — either alone fixes it; both means a future query
+  # the status-event allowlist's braces — either alone fixes it; both means a future query
   # written either way stays correct.
   local payload
   payload="$(jq -cn --arg id "$rid" --arg s "$status" --arg a "$aid" --arg r "$role" \
@@ -1005,9 +737,9 @@ cmd_submit() {
   # a request that is still live.
   local depth=0 root=""
   if [[ -n "$supersedes" ]]; then
-    assert_unambiguous "$supersedes"
+    reqrecord_assert_unambiguous "$supersedes"
     local prev prev_sub prev_status prev_requester path_depth root_count
-    prev="$(request_state "$supersedes")" || die "no such request: $supersedes"
+    prev="$(reqrecord_state "$supersedes")" || die "no such request: $supersedes"
     [[ -n "$prev" ]] || die "no such request: $supersedes"
     prev_sub="$(request_submission "$supersedes")"
     prev_status="$(jq -r '.status' <<<"$prev")"
@@ -1049,12 +781,12 @@ cmd_submit() {
   local d skips; d="$(derive_leader "$id" "$template")"; skips="$(f 5 "$d")"
   local lmode lid lrole; lmode="$(f 1 "$d")"; lid="$(f 2 "$d")"; lrole="$(f 3 "$d")"
 
-  # Allocate and append as ONE critical section. next_id() derives the id by
+  # Allocate and append as ONE critical section. reqrecord_next_id() derives the id by
   # counting rows, so a concurrent submitter that reads between our count and
   # our append takes the same id.
   local rid exp; exp="$(plus_days "$REQUEST_TTL_DAYS")"
   queue_lock
-  rid="$(next_id)"
+  rid="$(reqrecord_next_id)"
   append_queue "$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg t "$tpl" \
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
     --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
@@ -1184,9 +916,9 @@ cmd_review() {
   n_cons="$(jq -r 'length' <<<"$SAFERALT_CONSIDERED")"
 
   reap_expired
-  assert_unambiguous "$rid"
+  reqrecord_assert_unambiguous "$rid"
 
-  local rec sub; rec="$(request_state "$rid")" || die "no such request: $rid"
+  local rec sub; rec="$(reqrecord_state "$rid")" || die "no such request: $rid"
   [[ -n "$rec" ]] || die "no such request: $rid"
   sub="$(request_submission "$rid")"
 
@@ -1197,7 +929,7 @@ cmd_review() {
   title="$(jq -r '.title' <<<"$sub")"
   exp="$(jq -r '.expiresAt // ""' <<<"$sub")"
 
-  # Expiry is derived by request_state(), so this fires whether or not anyone
+  # Expiry is derived by reqrecord_state(), so this fires whether or not anyone
   # has observed the request before now.
   local cur; cur="$(jq -r '.status' <<<"$rec")"
   [[ "$cur" != "expired" ]] \
@@ -1450,7 +1182,7 @@ cmd_comment() {
   [[ -n "$rid" && -n "$author" && -n "$body" ]] \
     || die "usage: comment --request <ID> --author <ROLE> --body \"...\""
 
-  assert_unambiguous "$rid"
+  reqrecord_assert_unambiguous "$rid"
   local sub; sub="$(request_submission "$rid")" || die "no such request: $rid"
   [[ -n "$sub" ]] || die "no such request: $rid"
   local rq_id template; rq_id="$(jq -r '.requesterAgentId' <<<"$sub")"
@@ -1504,7 +1236,7 @@ cmd_thread() {
   # checked, not just the one asked for: a forged decision three amendments
   # back still changes what this view means.
   local r
-  for r in "${chain[@]}"; do assert_unambiguous "$r"; done
+  for r in "${chain[@]}"; do reqrecord_assert_unambiguous "$r"; done
 
   for r in "${chain[@]}"; do
     jq -r --arg id "$r" 'select(.requestId==$id) |
@@ -1892,13 +1624,13 @@ cmd_list() {
   # So an aged-out request leaves the pending inbox on its own, rather than
   # sitting there looking decidable until somebody attempts a review.
   reap_expired
-  jq -s --arg w "$want" --argjson ev "$STATUS_EVENTS" -r '
+  jq -s --arg w "$want" --argjson ev "$REQRECORD_STATUS_EVENTS" -r '
     # A set, not an array: `$acked[.rid]` evaluates .rid against the row being
     # rendered, where `index(.rid)` would evaluate it against the array itself.
     (map(select(.event=="override.acknowledged")) | map({key:.requestId, value:true}) | from_entries) as $acked
     # Only status-bearing events may become `last`. A comment, acknowledgement
     # or notification landing there would give the request a null status and
-    # silently drop it from every filtered listing. See STATUS_EVENTS.
+    # silently drop it from every filtered listing. See the status-event allowlist.
     | map(select($ev[.event] // false))
     | group_by(.requestId)
     | map({rid: .[0].requestId, sub: .[0], last: .[-1]})
@@ -1910,11 +1642,6 @@ cmd_list() {
        else "BYPASSED \(.last.override.bypassedLeader) — UNREVIEWED" end)
   ' "$QUEUE" | { printf 'ID\tSTATUS\tREQUESTER\tTEMPLATE\tTITLE\tREVIEWER\tOVERRIDE\n'; cat; } | tabulate
 }
-
-# `column` is util-linux and is NOT present everywhere this runs — a container
-# without it does not error, it prints NOTHING, so the whole listing silently
-# disappears. Fall back to the raw TSV, which is ugly and complete.
-tabulate() { if command -v column >/dev/null; then column -t -s$'\t'; else cat; fi; }
 
 cmd_set_template() {
   local tpl="$1" enable="$2" reviewer=""
