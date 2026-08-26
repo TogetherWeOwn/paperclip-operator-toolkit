@@ -1764,25 +1764,137 @@ test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even
       headersFor(REQUESTER),
     );
     const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
-    // Domain owner turns key 1 so the request is awaiting_custody.
-    await call(
+    // Domain owner turns key 1 so the request is awaiting_custody. `github.token`
+    // is a credential, so the gate will not GRANT it without the safer-
+    // alternatives record — this key does not turn without one.
+    const review = await call(
       rpc("tools/call", {
         name: "review_capability_request",
-        arguments: { request_id: reqId, decision: "approve", reason: "owner agrees" },
+        arguments: {
+          request_id: reqId, decision: "approve", reason: "owner agrees",
+          alternatives_considered: [{
+            alternative: "let the broker mint a token for the run instead",
+            why_it_failed: "the broker mints only for an in_progress checkout",
+          }],
+        },
       }),
       headersFor(DOMAIN_OWNER),
     );
+    // ASSERT THE PRECONDITION, or the whole test is satisfiable by the wrong
+    // gate — which is what it did until TOG-459.
+    //
+    // This test PASSED throughout the window in which `alternatives_considered`
+    // was undeclared on the transport (TOG-467), and it passed without ever
+    // reaching the rule it is named for. The review above was refused for want
+    // of the record, so the request stayed `pending`, and the countersign below
+    // died at capability_gate.sh:983 — "request has no domain-owner key yet; the
+    // CUSTODIAN countersigns, it does not decide first". The assertion was
+    // /custodian|requester cannot|does not hold custody/i, and :983's message
+    // contains "custodian". A green test, measuring the ordering gate.
+    //
+    // Fixing the transport did not fix this: the review call here still supplied
+    // no record, so it is still refused and this test is STILL green for the
+    // wrong reason on main. Hence the precondition.
+    assert.equal(review.json.result.isError, false, review.json.result.content?.[0]?.text);
+    assert.match(review.json.result.content[0].text, /awaiting_custody|KEY 1/i);
+
     // Now the REQUESTER tries to be the second key. The transport authenticates
     // it as the requester (it cannot pretend otherwise), and the gate refuses
     // on separation of duties — the reply carries the reason, not a 500.
     const counter = await call(
       rpc("tools/call", {
         name: "countersign_capability_request",
-        arguments: { request_id: reqId, decision: "approve", reason: "let me approve my own ask" },
+        arguments: {
+          request_id: reqId, decision: "approve", reason: "let me approve my own ask",
+          alternatives_considered: [{
+            alternative: "wait for the real custodian to countersign",
+            why_it_failed: "supplied only so the refusal cannot be about a missing record",
+          }],
+        },
       }),
       headersFor(REQUESTER),
     );
     assert.equal(counter.json.result.isError, true, "the requester was allowed to countersign its own request");
-    assert.match(counter.json.result.content[0].text, /custodian|requester cannot|does not hold custody/i);
+    const refusal = counter.json.result.content[0].text;
+    // WHICH refusal, precisely: custody belongs to a different role
+    // (capability_gate.sh:1006). That IS the separation of duties here — the
+    // second key is held by someone else, so the requester cannot turn it
+    // whatever it claims over the wire.
+    //
+    // NOT the literal self-countersign line at :1014, which is unreachable from
+    // any request that got this far: a requester who is also the designated
+    // custodian is classified `custody_conflict` and diverted to owner-reserved
+    // at SUBMIT (:498, covered by test_capability_gate.sh:229), so it never
+    // reaches awaiting_custody. :1014 only catches an org that changed
+    // mid-flight. Recorded here so the next reader does not re-derive it.
+    assert.match(refusal, /does not hold custody/i);
+    // And explicitly NOT the ordering gate in front of it. This is the pair of
+    // assertions that would have caught the original defect.
+    assert.doesNotMatch(refusal, /it does not decide first/i);
+    assert.doesNotMatch(refusal, /no domain-owner key yet/i);
   });
 });
+
+// TOG-459. The countersign side of TOG-467's fail-closed test, which covers
+// review. Not a duplicate: the two rules are DIFFERENT. A review's record is
+// required only when the REGISTRY calls the capability risky, so that test also
+// depends on the classification. A countersignature is reached only through
+// `class: credential`, so its approval ALWAYS hands over a secret and the record
+// is required unconditionally — capability_gate.sh:955, which says in as many
+// words that there is deliberately no routine branch and no test for one.
+//
+// Without this, deleting that unconditional assert would leave every test green:
+// the review-side test exercises a different call, and every other countersign
+// test supplies a record and so never asks what happens without it.
+test("TOG-459: a countersignature without the record is refused, with no routine branch to fall into",
+  { skip: skipIfNoGate }, async () => {
+    const dir = scratch();
+    const { cfg } = realGateConfig(dir);
+    await withServer(cfg, {}, async (call) => {
+      const submit = await call(
+        rpc("tools/call", {
+          name: "submit_capability_request",
+          arguments: {
+            capability: "github.token", action: "read",
+            facts: "the audit run holds no GH_APP binding, measured on 2026-08-25",
+            reasoning: "reading check-runs needs a scoped installation token and this run has none",
+          },
+        }),
+        headersFor(REQUESTER),
+      );
+      const reqId = (/\b(CAP-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+      const review = await call(
+        rpc("tools/call", {
+          name: "review_capability_request",
+          arguments: {
+            request_id: reqId, decision: "approve", reason: "owner agrees, scoped read only",
+            alternatives_considered: [{
+              alternative: "let the broker mint a token for the run instead",
+              why_it_failed: "the broker mints only for an in_progress checkout",
+            }],
+          },
+        }),
+        headersFor(DOMAIN_OWNER),
+      );
+      assert.equal(review.json.result.isError, false, review.json.result.content?.[0]?.text);
+
+      // EXACTLY ONE input omitted — the record — from a call that is otherwise
+      // complete and authorised. The custodian is the real custodian and the
+      // request genuinely is awaiting_custody, both asserted below by what the
+      // refusal is NOT, so nothing else can account for it.
+      const counter = await call(
+        rpc("tools/call", {
+          name: "countersign_capability_request",
+          arguments: { request_id: reqId, decision: "approve", reason: "custody agrees" },
+        }),
+        headersFor(CUSTODIAN),
+      );
+      assert.equal(counter.json.result.isError, true, "a credential was handed over with no alternatives record");
+      const refusal = counter.json.result.content[0].text;
+      assert.match(refusal, /RISKY ask, so granting it needs the safer alternatives on the record/i);
+      assert.match(refusal, /--considered/);
+      // Not an authority refusal wearing the same clothes.
+      assert.doesNotMatch(refusal, /does not hold custody/i);
+      assert.doesNotMatch(refusal, /no domain-owner key yet/i);
+    });
+  });
