@@ -1316,9 +1316,8 @@ jobs:
       - name: gh_token.sh api request-body suite
         run: ./test_gh_token_api_body.sh
 
-      # Its mutation guard. Two mutations, because the fix has two halves that
-      # fail independently and a single mutation would leave one of them
-      # ungated:
+      # Its mutation guard. Three mutations, because the fixes fail independently
+      # and a single mutation would leave one of them ungated:
       #
       #   body-slot-collision   restores the original call — body slot empty,
       #                         JSON passed positionally. Surgical: the
@@ -1336,6 +1335,11 @@ jobs:
       #                         a NEIGHBOURING gate satisfy the test, which is
       #                         how assertions in this repo have gone green for
       #                         the wrong reason before.
+      #   http-status-ignored   routes `api` back through curl_authed, restoring
+      #                         the TOG-455 false success: GitHub's 409 body is
+      #                         printed, but the command exits 0 and `&& merged`
+      #                         runs. The named red assertions require the exit
+      #                         status AND body-preservation contract together.
       #
       # Each mutation asserts red on the NAMED assertions it should break, not
       # merely on a non-zero exit. "The suite failed" is satisfied by a suite
@@ -1387,8 +1391,8 @@ jobs:
 
           # --- mutation 1: body-slot-collision ---------------------------------
           cp "$mut/gh_token.sh" "$mut/gh_token.orig"
-          before='    curl_authed "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
-          after='    curl_authed "$tok" "$method" "https://api.github.com${path}" "" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          before='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          after='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
           if ! grep -qxF "$before" "$mut/gh_token.sh"; then
             echo "::error::could not find the curl_authed call in the api arm to mutate; this guard is now blind, fix it"
             exit 2
@@ -1439,6 +1443,29 @@ jobs:
           require_red "$mut/unchecked-mint.txt" \
             "a failed mint exited 0" \
             "the request went out anyway"
+
+          # --- mutation 3: http-status-ignored ----------------------------------
+          cp "$mut/gh_token.orig" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          before='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          after='    curl_authed "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
+          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
+            echo "::error::could not find the HTTP-aware api call to mutate; this guard is now blind, fix it"
+            exit 2
+          fi
+          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
+            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
+          chmod +x "$mut/gh_token.sh"
+          run_mutant http-status-ignored
+          require_red "$mut/http-status-ignored.txt" \
+            "HTTP 409 exited 0, expected 22" \
+            "the composed caller contract broke"
+          # Surgical: ignoring status must not discard the error body. This keeps
+          # the mutation focused on the false-success half of the pair.
+          if ! plain "$mut/http-status-ignored.txt" | grep -qF "PASS  HTTP 409 response body is still printed in full"; then
+            echo "::error::mutation 'http-status-ignored' also lost the body — it does not isolate the exit-status assertion"
+            exit 1
+          fi
 
       # TOG-201. The other half of gh_token.sh's contract: an unrecognised
       # subcommand printed usage on STDOUT and exited 0, so

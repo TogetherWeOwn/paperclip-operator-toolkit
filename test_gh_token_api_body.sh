@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression suite for gh_token.sh `api` — the request body must reach the
-# request, and only the request.
+# request and only the request, and an HTTP refusal must not report success.
 #
 # THE BUG THIS EXISTS FOR (TOG-305). curl_authed's contract is
 #
@@ -28,6 +28,13 @@
 #   3. The exit status came from the LAST curl URL, so a successful API write
 #      reported failure — and, in the other direction, a failed write could be
 #      masked by a stray argument that happened to parse.
+#
+# THE SECOND BUG THIS COVERS (TOG-455). Even after the request's transport status
+# was propagated correctly, curl still exits 0 when GitHub reaches the request
+# and refuses it with HTTP 4xx/5xx. That made `api ... && echo merged` print
+# "merged" after a guarded merge returned 409. Section 10 requires the refusal
+# body and a distinct non-zero exit together; section 11 pins the existing
+# check/token/meta diagnostics, whose app_api calls must keep parsing error bodies.
 #
 # WHY THIS IS HARDER THAN IT LOOKS. Four traps, each of which a naive suite
 # falls into and this one deliberately does not:
@@ -139,6 +146,7 @@ fi
 printf '%s\n' "$url" > "$STUB_DIR/call.$n.url"
 
 rc=0
+http_status=200
 case "$url" in
   */access_tokens)
     if [ -n "${STUB_MINT_FAILS:-}" ]; then
@@ -147,13 +155,32 @@ case "$url" in
       printf '{"token":"%s","expires_at":"2099-01-01T00:00:00Z"}\n' "$STUB_MINT_CANARY"
     fi
     ;;
+  */app)
+    if [ -n "${STUB_APP_FAILS:-}" ]; then
+      printf '{"message":"stub refuses app check"}\n'
+    else
+      printf '{"name":"stub","slug":"stub-app","id":1,"owner":{"login":"stub"}}\n'
+    fi
+    ;;
   *)
-    printf '{"ok":true}\n'
-    # The transport-failure seam for the exit-status section. Applies only to
-    # the caller's request, never to the mint, so the two cannot be confused.
+    printf '%s' "${STUB_API_BODY:-{\"ok\":true\}}"
+    # The transport- and HTTP-failure seams apply only to the caller's request,
+    # never to the mint, so the two cannot be confused.
     if [ -n "${STUB_API_RC:-}" ]; then rc="$STUB_API_RC"; fi
+    if [ -n "${STUB_API_STATUS:-}" ]; then http_status="$STUB_API_STATUS"; fi
     ;;
 esac
+
+# curl's -D/--dump-header writes response headers to a file and leaves the body
+# on stdout. Honour the last spelling, as real curl does when an option repeats.
+dump=""; prev=""
+for a in "$@"; do
+  case "$prev" in --dump-header|-D) dump="$a" ;; esac
+  prev="$a"
+done
+if [ -n "$dump" ]; then
+  printf 'HTTP/1.1 %s Stub\r\nContent-Type: application/json\r\n\r\n' "$http_status" > "$dump"
+fi
 
 # Real curl treats every non-option argument as a URL, and exits with the
 # status of the LAST one it processed. That is not stub colour -- it is the
@@ -200,13 +227,19 @@ run_tool() {
     STUB_DIR="$STUB_DIR" \
     STUB_MINT_CANARY="$MINT_CANARY" \
     ${STUB_MINT_FAILS:+STUB_MINT_FAILS=1} \
+    ${STUB_APP_FAILS:+STUB_APP_FAILS=1} \
     ${STUB_API_RC:+STUB_API_RC="$STUB_API_RC"} \
+    ${STUB_API_STATUS:+STUB_API_STATUS="$STUB_API_STATUS"} \
+    ${STUB_API_BODY:+STUB_API_BODY="$STUB_API_BODY"} \
     bash "$TOOL" "$@" 2>"$TMP/stderr")"
   RC=$?
   ERR="$(cat "$TMP/stderr")"
 }
 STUB_MINT_FAILS=""
+STUB_APP_FAILS=""
 STUB_API_RC=""
+STUB_API_STATUS=""
+STUB_API_BODY=""
 
 ncalls() { cat "$STUB_DIR/seq" 2>/dev/null || echo 0; }
 # The index of the call that is NOT the mint. Named rather than assumed to be
@@ -356,7 +389,7 @@ i="$(api_call)" && {
   # arbitrary strings from the caller and hands them to curl positionally.
   # `bash` and the absolute path are the stub's own shebang expansion, not
   # anything gh_token.sh chose to pass.
-  stray="$(grep -v -e '^curl$' -e '^bash$' -e '^--config$' -e '^/' -e '^$' \
+  stray="$(grep -v -e '^curl$' -e '^bash$' -e '^--config$' -e '^--dump-header$' -e '^/' -e '^$' \
              "$STUB_DIR/call.$i.argv" || true)"
   if [[ -z "$stray" ]]; then
     ok "curl's argv is the config path and nothing else"
@@ -467,12 +500,78 @@ else
       "this is the TOG-305 symptom: rc came from something other than the request"
 fi
 
-# --- 10. a failed mint must not produce an unauthenticated request ------------
+# --- 10. HTTP refusal is failure, with the body intact ------------------------
+hdr "10. An HTTP error is not success, and its body is not discarded"
+HTTP_BODY='{"message":"Head branch was modified. Review and try the merge again.","status":"409"}'
+STUB_API_STATUS=409
+STUB_API_BODY="$HTTP_BODY"
+run_tool api PUT /repos/stub-org/repo/pulls/12/merge "$BODY_CANARY"
+STUB_API_STATUS=""
+STUB_API_BODY=""
+if [[ $RC -eq 22 ]]; then
+  ok "HTTP 409 exits 22, distinct from a transport failure"
+else
+  bad "HTTP 409 exited $RC, expected 22" \
+      "a refused write still looks successful, or is indistinguishable from transport failure"
+fi
+if [[ "$OUT" == "$HTTP_BODY" ]]; then
+  ok "HTTP 409 response body is still printed in full"
+else
+  bad "HTTP 409 body was lost or changed" "got='${OUT:-<empty>}'"
+fi
+
+# Assert the pair in the literal caller pattern from the finding. Either half
+# alone is passed by a bug: non-zero with no body destroys the diagnosis, while
+# a body with exit 0 still takes && and claims the write landed.
+used="$(env -i PATH="$TMP/bin:$PATH" HOME="$TMP" TMPDIR="$TMP/tooltmp" \
+  GITHUB_APP_PEM="$TMP/fake-key.pem" GITHUB_APP_ENV="$TMP/fake.env" \
+  STUB_DIR="$STUB_DIR" STUB_MINT_CANARY="$MINT_CANARY" \
+  STUB_API_STATUS=409 STUB_API_BODY="$HTTP_BODY" \
+  bash -c 'out="$("$0" api PUT /repos/stub-org/repo/pulls/12/merge "$1")"; rc=$?; printf "RC=%s\nBODY=%s\n" "$rc" "$out"; [[ $rc -eq 0 ]] && printf "MERGED\n"' \
+  "$TOOL" "$BODY_CANARY" 2>"$TMP/caller-stderr")"
+if [[ "$used" == "RC=22"$'\n'"BODY=$HTTP_BODY" ]]; then
+  ok "the caller sees the refusal body and does not take the success branch"
+else
+  bad "the composed caller contract broke" "got='${used:0:240}'"
+fi
+
+# curl-level HTTP semantics belong only to the public api arm. app_api's three
+# existing callers deliberately keep their body-parsing messages; routing them
+# through the new wrapper would replace those messages with a generic failure.
+hdr "11. check / token / meta keep their established error messages"
+STUB_MINT_FAILS=1
+run_tool token
+STUB_MINT_FAILS=""
+if grep -qF 'ERROR minting token:' <<<"$ERR" && grep -qF 'stub refuses to mint' <<<"$ERR"; then
+  ok "token still prints GitHub's mint failure message"
+else
+  bad "token's mint failure message changed" "stderr='${ERR:0:240}'"
+fi
+
+STUB_APP_FAILS=1
+run_tool check
+STUB_APP_FAILS=""
+if grep -qF 'ERROR: check: /app did not answer with an app: stub refuses app check' <<<"$ERR"; then
+  ok "check still prints the response-body validation message"
+else
+  bad "check's API error message changed" "stderr='${ERR:0:240}'"
+fi
+
+STUB_MINT_FAILS=1
+run_tool meta
+STUB_MINT_FAILS=""
+if grep -qF 'ERROR: meta: the installation returned no token: stub refuses to mint' <<<"$ERR"; then
+  ok "meta still prints the response-body validation message"
+else
+  bad "meta's mint failure message changed" "stderr='${ERR:0:240}'"
+fi
+
+# --- 12. a failed mint must not produce an unauthenticated request ------------
 # Adjacent to the same defect and on the same code path: `tok="$(mint_token)"`
 # runs mint_token in a command substitution, so its `exit 1` kills only the
 # subshell. Without a check, $tok is empty and the request goes out with an
 # empty bearer -- another 'the safety step was skipped and nothing said so'.
-hdr "10. A failed mint stops the request"
+hdr "12. A failed mint stops the request"
 STUB_MINT_FAILS=1
 run_tool api PUT /repos/stub-org/repo/pulls/12/merge "$BODY_CANARY"
 STUB_MINT_FAILS=""

@@ -118,6 +118,15 @@ printf 'URL\t%s\n' "$url" >> "$STUB_CFGLOG"
 # substitution subshell running curl_authed — the frame whose traps are reset
 # to their defaults and whose local $cfg no other frame can see. SIGTERM to it
 # is what ^C during a mint looks like from the config file's point of view.
+dump=""; prev=""
+for a in "$@"; do
+  case "$prev" in --dump-header|-D) dump="$a" ;; esac
+  prev="$a"
+done
+if [ -n "$dump" ]; then
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n' > "$dump"
+fi
+
 case "$url" in
   */access_tokens)
     if [ -n "${STUB_KILL_PARENT:-}" ]; then
