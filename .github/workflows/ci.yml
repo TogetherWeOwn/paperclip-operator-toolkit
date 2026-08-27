@@ -267,7 +267,17 @@ jobs:
           ./test/fixtures/orgdb/reset.sh
           ./schema_drift.sh compare expected.fp
       - name: Privilege invariants are named and mutation-gated
-        run: ./verification/tog-480-mutation-gate.sh
+        run: |
+          set +e
+          out="$(./verification/tog-480-mutation-gate.sh 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          if [[ $rc -ne 0 ]]; then
+            summary="$(printf '%s\n' "$out" | tail -n 20 | tr '\n' ' ' | cut -c1-1500)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            echo "::error title=Privilege mutation gate failed::$summary"
+            exit "$rc"
+          fi
       # CI verifies policy through the dumb stub. It deliberately cannot prove
       # what the real API now does with reportsTo, permissions, or termination;
       # the operator's VPS pre-release pass remains the API-contract coverage.
