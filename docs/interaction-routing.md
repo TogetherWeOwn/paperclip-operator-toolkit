@@ -89,7 +89,7 @@ actually stopped by `:2975` — the other 16 stop earlier at `:2962` because the
 further **31 of 49** were *unassigned*, where `:2793` opens the assignee gate to every agent. Measured
 again for TOG-423; the earlier figure of 42 was wrong, and it pointed at the wrong gate. The queue's
 bottleneck is the **policy field**, which authors choose, not the assignee gate, which they do not
-whatever their kind or policy. Flipping all 49 to `board_or_agents` would still leave 42 dead.
+whatever their kind or policy. Flipping all 49 to `board_or_agents` would still leave 2 dead.
 
 > **An agent must never be the one to answer its own ask.** Either address it to someone else *and
 > hand them the issue*, or ask in a comment. Comments are the one reliable cross-assignee channel.
