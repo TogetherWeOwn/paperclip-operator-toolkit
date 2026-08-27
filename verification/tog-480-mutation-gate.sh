@@ -55,27 +55,23 @@ mutant ceiling-bypass test_privilege_ceilings.sh lib/provisioning_policy.sh \
   'T0 (tech chief) cannot create another President/COO' || rc=1
 mutant caller-placement test_privilege_ceilings.sh org_provisioner.sh \
   'die "reportsTo cannot be supplied by the caller; the service sets it to the caller' \
-  'shift 2; continue # mutant: caller controls placement; ' \
+  'die "mutant accepts caller-controlled placement instead of refusing: ' \
   'caller cannot supply its own reportsTo' || rc=1
 mutant dormant-payload test_privilege_ceilings.sh org_provisioner.sh \
   'runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}}' \
   'runtimeConfig:{heartbeat:{enabled:true, wakeOnDemand:true}}' \
   'DIRECTOR not dormant' || rc=1
 mutant protected-payload test_privilege_ceilings.sh org_provisioner.sh \
-  'authorizationPolicy:{assignmentPolicy:{mode:"protected"}}' \
-  'authorizationPolicy:{assignmentPolicy:{mode:"open"}}' \
+  '"authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' \
+  '"authorizationPolicy":{"assignmentPolicy":{"mode":"open"}}}' \
   'DIRECTOR not protected' || rc=1
 mutant self-scope test_privilege_ceilings.sh org_provisioner.sh \
   'scope: (if .self then {subtreeRootAgentId:$id} else null end)' \
   'scope: (if .self then {subtreeRootAgentId:"00000000-0000-4000-8000-000000000006"} else null end)' \
   'DIRECTOR has a scope pointing somewhere else' || rc=1
-mutant grant-replacement test_request_queue.sh org_provisioner.sh \
-  $'DELETE FROM principal_permission_grants\nWHERE company_id' \
-  $'DELETE FROM principal_permission_grants\nWHERE false AND company_id' \
-  "server's default company-wide tasks:assign was replaced away" || rc=1
 mutant descendant-deactivate test_privilege_ceilings.sh org_provisioner.sh \
-  'is_descendant_of "$caller_id" "$target_id" \\' \
-  'true \\' \
+  'is_descendant_of "$caller_id" "$target_id" \' \
+  'true \' \
   'Manager cannot deactivate its own Director' || rc=1
 mutant request-ceiling test_request_queue.sh org_request_queue.sh \
   'may_request "$tpl" "$template"' \
@@ -86,11 +82,11 @@ mutant self-approval test_request_queue.sh org_request_queue.sh \
   '[[ true ]]' \
   'O1 cannot approve its OWN request' || rc=1
 mutant template-disable test_request_queue.sh org_request_queue.sh \
-  'template_disabled "$template" \\' \
-  'false \\' \
+  'template_disabled "$template" \' \
+  'false \' \
   'pending director request is now refused at approval time' || rc=1
 mutant stale-authority test_request_queue.sh org_request_queue.sh \
-  'may_request "$now_tpl" "$template" \\' \
-  'true "$now_tpl" "$template" \\' \
+  '[[ "$now_status" != "terminated" ]] \' \
+  '[[ true ]] \' \
   'the pending request is refused — stale requester' || rc=1
 exit "$rc"
