@@ -27,10 +27,12 @@ run_suite() { # dir suite
 }
 mutant() { # label suite target anchor replacement named-failure
   local label="$1" suite="$2" target="$3" anchor="$4" repl="$5" want="$6"
-  local d; d="$(mktemp -d)"; stage "$d"
-  if ! run_suite "$d" "$suite" >"$d/base" 2>&1; then
-    echo "BASELINE FAILED for $label" >&2; cat "$d/base"; rm -rf "$d"; return 2
+  local d baseline; d="$(mktemp -d)"; stage "$d"
+  baseline="$(mktemp)"
+  if ! run_suite "$d" "$suite" >"$baseline" 2>&1; then
+    echo "BASELINE FAILED for $label" >&2; cat "$baseline"; rm -f "$baseline"; rm -rf "$d"; return 2
   fi
+  rm -f "$baseline"
   node - "$d/$target" "$anchor" "$repl" <<'NODE'
 const fs=require('fs'), [p,a,r]=process.argv.slice(2); let s=fs.readFileSync(p,'utf8');
 if(!s.includes(a)){console.error('mutation anchor missing');process.exit(2)}
