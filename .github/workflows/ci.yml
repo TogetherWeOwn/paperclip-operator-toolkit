@@ -243,7 +243,7 @@ jobs:
       COMPANY_ID: 00000000-0000-4000-8000-000000000480
       PAPERCLIP_API_URL: http://recording-stub.invalid
       PAPERCLIP_CLI: ${{ github.workspace }}/test/fixtures/orgdb/paperclipai
-      PAPERCLIP_STUB_LOG: ${{ runner.temp }}/paperclip-stub.jsonl
+      PAPERCLIP_STUB_LOG: ${{ github.workspace }}/paperclip-stub.jsonl
       GRANT_LOG: ${{ github.workspace }}/provisioner-grant-log.jsonl
     steps:
       - uses: actions/checkout@v4
