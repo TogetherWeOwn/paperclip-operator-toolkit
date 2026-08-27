@@ -59,7 +59,9 @@ name: CI
 #                                       committed at all — TOG-356
 #     test_agent_endpoint_preflight.sh  agent_endpoint_preflight.sh: whether the
 #                                       model endpoint the agents are about to be
-#                                       pointed at can serve them — TOG-358
+#                                       pointed at can serve them — TOG-358, and
+#                                       whether it tells a dead endpoint apart
+#                                       from a dead model lane — TOG-361
 #     test_quota_rotation_watch.sh      quota_rotation_watch.py: whether teamclaude
 #                                       stops sending traffic to a quota-spent
 #                                       account, and whether a watcher that
@@ -2155,9 +2157,15 @@ jobs:
           # A hung endpoint folded into "reachable enough".
           preflight_mutation "hang-reads-ok" \
             's/verdict "timeout" 6/verdict "timeout" 0/' || rc=1
-          # Cost accounting quietly dropped: every request still succeeds.
-          preflight_mutation "cache-check-deleted" \
-            's/if \[\[ "\$HAS_CACHE" != "yes" \]\]; then/if [[ "$HAS_CACHE" == "impossible" ]]; then/' || rc=1
+          # A route can inject both field names as zero and still carry no
+          # accounting. Defeat the positive cache-write gate; the zero-cache
+          # case must then make the suite red.
+          preflight_mutation "cache-creation-check-deleted" \
+            's/"\$CACHE_CREATE" -le 0/"$CACHE_CREATE" -le -1/' || rc=1
+          # A positive write alone is also insufficient. Defeat the identical
+          # replay's positive-read gate; the write-only case must make it red.
+          preflight_mutation "cache-replay-check-deleted" \
+            's/"\$CACHE_REPLAY_READ" -le 0/"$CACHE_REPLAY_READ" -le -1/' || rc=1
           # Billing per token while the subscriptions idle, reported as fine.
           preflight_mutation "payg-not-flagged" \
             's/^\[\[ "\$RESP_ID" == gen-\* \]\]/[[ "$RESP_ID" == nevermatch-* ]]/' \
@@ -2169,6 +2177,23 @@ jobs:
           # request, ever. This mutation adds a second probe call.
           preflight_mutation "retries-on-auth-failure" \
             's|^CURL_EXIT=0$|curl -sS -o /dev/null -H "@$HDRS" -d "$REQ" --max-time "$TIMEOUT" "$BASE/v1/messages" >/dev/null 2>\&1\nCURL_EXIT=0|' || rc=1
+          # TOG-361. A live endpoint whose model lane is dead, scored as a pass.
+          preflight_mutation "dead-model-lane-reads-ok" \
+            's/verdict "model-unavailable" 8/verdict "model-unavailable" 0/' || rc=1
+          # Collapse the classification back into a generic timeout. Both values
+          # are non-zero, so a merge gate would miss this wrong diagnosis.
+          preflight_mutation "model-lane-reads-as-outage" \
+            's/if \[\[ "\$CCODE" == 200 \]\]; then/if [[ "$CCODE" == 999 ]]; then/' || rc=1
+          # TOG-358. The subscription lane answers Claude Code clients, not a
+          # bare curl. Silently losing the default identity makes a healthy lane
+          # read as a hang.
+          preflight_mutation "client-identity-not-sent" \
+            's/^CLIENT_IDENTITY=1$/CLIENT_IDENTITY=0/' || rc=1
+          # OmniRoute's combo validator manufactures a 502 below 16 output
+          # tokens, before the selected upstream runs. A one-token probe cannot
+          # distinguish that validator from a broken route.
+          preflight_mutation "combo-output-budget-too-small" \
+            's/"max_tokens":16/"max_tokens":1/g' || rc=1
           exit $rc
 
       # TOG-425. This watcher answers a question that expires: the evidence for
