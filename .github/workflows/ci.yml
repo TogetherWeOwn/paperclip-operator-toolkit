@@ -253,19 +253,49 @@ jobs:
         run: ./test_orgdb_fixture.sh
       - name: Run privilege ceiling suite
         run: |
-          ./test/fixtures/orgdb/reset.sh
-          rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
-          ./test_privilege_ceilings.sh
+          set +e
+          out="$({
+            ./test/fixtures/orgdb/reset.sh
+            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+            ./test_privilege_ceilings.sh
+          } 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          if [[ $rc -ne 0 ]]; then
+            summary="$(printf '%s\n' "$out" | tail -n 20 | tr '\n' ' ' | cut -c1-1500)"
+            summary="${summary//'%'/'%25'}"; summary="${summary//$'\r'/'%0D'}"
+            echo "::error title=Privilege ceiling suite failed::$summary"
+            exit "$rc"
+          fi
       - name: Run request queue suite
         run: |
-          ./test/fixtures/orgdb/reset.sh
-          rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
-          ./test_request_queue.sh
+          set +e
+          out="$({
+            ./test/fixtures/orgdb/reset.sh
+            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+            ./test_request_queue.sh
+          } 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          if [[ $rc -ne 0 ]]; then
+            summary="$(printf '%s\n' "$out" | tail -n 20 | tr '\n' ' ' | cut -c1-1500)"
+            summary="${summary//'%'/'%25'}"; summary="${summary//$'\r'/'%0D'}"
+            echo "::error title=Request queue suite failed::$summary"
+            exit "$rc"
+          fi
       - name: Schema fixture fingerprint is stable
         run: |
-          ./schema_drift.sh fingerprint > expected.fp
-          ./test/fixtures/orgdb/reset.sh
-          ./schema_drift.sh compare expected.fp
+          set +e
+          out="$({
+            ./schema_drift.sh fingerprint > expected.fp
+            ./test/fixtures/orgdb/reset.sh
+            ./schema_drift.sh compare expected.fp
+          } 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          if [[ $rc -ne 0 ]]; then
+            summary="$(printf '%s\n' "$out" | tail -n 20 | tr '\n' ' ' | cut -c1-1500)"
+            summary="${summary//'%'/'%25'}"; summary="${summary//$'\r'/'%0D'}"
+            echo "::error title=Schema fixture check failed::$summary"
+            exit "$rc"
+          fi
       - name: Privilege invariants are named and mutation-gated
         run: |
           set +e
