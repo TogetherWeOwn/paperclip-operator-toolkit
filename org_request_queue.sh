@@ -333,7 +333,7 @@ SELECT a.id::text,
        COALESCE(a.metadata->>'permissionProfile',''),
        a.status,
        COALESCE(a.reports_to::text,''),
-       a.title
+       regexp_replace(COALESCE(a.title,''), E'[\\t\\r\\n]+', ' ', 'g')
 FROM agents a
 WHERE a.company_id = :'company_id'::uuid
   AND (a.metadata->>'orgRoleId' = :'text' OR a.id::text = :'text')
@@ -711,22 +711,31 @@ cmd_submit() {
   done
   [[ -n "$requester" && -n "$template" && -n "$title" ]] \
     || die "usage: submit --requester <ROLE> --template <T> --title <TITLE>"
+
+  # Resolve display metadata without moving the validation gate: malformed
+  # delivery addresses are still refused before requester validity is revealed.
+  local row id tpl status requester_title
+  row="$(resolve_agent "$requester")"
+  id="$(f 1 "$row")"; tpl="$(f 3 "$row")"; status="$(f 4 "$row")"; requester_title="$(f 6 "$row")"
   if [[ -n "$notify_issue" && ! "$notify_issue" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
-    log_event "$(jq -cn --arg r "$requester" --arg n "$notify_issue" \
-      '{event:"request.refused",reason:"malformed_notify_issue",requester:$r,notifyIssue:$n}')"
+    log_event "$(jq -cn --arg r "$requester" --arg rid "$id" --arg rt "$requester_title" --arg n "$notify_issue" \
+      '{event:"request.refused",reason:"malformed_notify_issue",requester:$r,
+        requesterAgentId:(if $rid=="" then null else $rid end),
+        requesterTitle:(if $rt=="" then null else $rt end),notifyIssue:$n}')"
     die "--notify-issue '$notify_issue' is not a well-formed issue id."
   fi
   reap_expired
 
-  local row id tpl status
-  row="$(resolve_agent "$requester")"; [[ -n "$row" ]] || die "requester not found: $requester"
-  id="$(f 1 "$row")"; tpl="$(f 3 "$row")"; status="$(f 4 "$row")"
+  [[ -n "$row" ]] || die "requester not found: $requester"
   [[ "$status" != "terminated" ]] || die "requester $requester is terminated."
   [[ -n "$tpl" ]] || die "requester has no permissionProfile; refusing to infer authority."
 
   if ! may_request "$tpl" "$template"; then
-    log_event "$(jq -cn --arg r "$requester" --arg t "$tpl" --arg w "$template" \
-      '{event:"request.refused",reason:"template_above_request_ceiling",requester:$r,requesterTemplate:$t,requestedTemplate:$w}')"
+    log_event "$(jq -cn --arg r "$requester" --arg rid "$id" --arg rt "$requester_title" \
+      --arg t "$tpl" --arg w "$template" \
+      '{event:"request.refused",reason:"template_above_request_ceiling",requester:$r,
+        requesterAgentId:$rid,requesterTitle:(if $rt=="" then null else $rt end),
+        requesterTemplate:$t,requestedTemplate:$w}')"
     echo "  requester template : $tpl" >&2
     echo "  requested          : $template" >&2
     die "template '$template' is above the request ceiling of '$tpl'."
@@ -766,8 +775,10 @@ cmd_submit() {
     # `>` not `>=`: MAX_SUPERSEDE_CHAIN is the number of resubmissions ALLOWED,
     # and the docs and the CLI both say five. `>=` allowed four.
     if [[ $depth -gt $MAX_SUPERSEDE_CHAIN ]]; then
-      log_event "$(jq -cn --arg id "$supersedes" --arg root "$root" --arg r "$requester" --argjson d "$depth" \
-        '{event:"request.refused",reason:"supersede_chain_exhausted",supersedes:$id,chainRoot:$root,requester:$r,depth:$d}')"
+      log_event "$(jq -cn --arg id "$supersedes" --arg root "$root" --arg r "$requester" \
+        --arg rid "$id" --arg rt "$requester_title" --argjson d "$depth" \
+        '{event:"request.refused",reason:"supersede_chain_exhausted",supersedes:$id,chainRoot:$root,
+          requester:$r,requesterAgentId:$rid,requesterTitle:(if $rt=="" then null else $rt end),depth:$d}')"
       die "request $root has already been resubmitted $MAX_SUPERSEDE_CHAIN times; escalate instead of resubmitting."
     fi
   fi
@@ -779,7 +790,9 @@ cmd_submit() {
   # whether that agent could receive it had to re-derive from state that had
   # since moved. A routing decision nobody recorded is one nobody can audit.
   local d skips; d="$(derive_leader "$id" "$template")"; skips="$(f 5 "$d")"
-  local lmode lid lrole; lmode="$(f 1 "$d")"; lid="$(f 2 "$d")"; lrole="$(f 3 "$d")"
+  local lmode lid lrole leader_title leader_row
+  lmode="$(f 1 "$d")"; lid="$(f 2 "$d")"; lrole="$(f 3 "$d")"
+  leader_row="$(resolve_agent "$lid")"; leader_title="$(f 6 "$leader_row")"
 
   # Allocate and append as ONE critical section. reqrecord_next_id() derives the id by
   # counting rows, so a concurrent submitter that reads between our count and
@@ -787,12 +800,13 @@ cmd_submit() {
   local rid exp; exp="$(plus_days "$REQUEST_TTL_DAYS")"
   queue_lock
   rid="$(reqrecord_next_id)"
-  append_queue "$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg t "$tpl" \
+  append_queue "$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg rt "$requester_title" --arg t "$tpl" \
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
     --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
     --arg ni "$notify_issue" \
-    --arg lm "$lmode" --arg lid "$lid" --arg lr "$lrole" \
+    --arg lm "$lmode" --arg lid "$lid" --arg lr "$lrole" --arg lt "$leader_title" \
     '{event:"request.submitted",requestId:$id,status:"pending",requester:$r,requesterAgentId:$rid2,
+      requesterTitle:(if $rt=="" then null else $rt end),
       requesterTemplate:$t,template:$w,title:$ti,rationale:$ra,
       supersedes:(if $sup=="" then null else $sup end),supersedeDepth:$d,
       chainRoot:(if $root=="" then null else $root end),
@@ -800,6 +814,7 @@ cmd_submit() {
       responsibleLeaderMode:(if $lm=="" then null else $lm end),
       responsibleLeaderAgentId:(if $lid=="" then null else $lid end),
       responsibleLeader:(if $lr=="" then null else $lr end),
+      responsibleLeaderTitle:(if $lt=="" then null else $lt end),
       submittedAt:$at,expiresAt:$exp}')"
   queue_unlock
 
@@ -972,15 +987,16 @@ cmd_review() {
       "review --reviewer $reviewer --request $rid --reject --reason \"...\" --alternative \"...\""
   fi
 
-  local rvrow rv_id rv_tpl
+  local rvrow rv_id rv_tpl reviewer_title
   rvrow="$(resolve_agent "$reviewer")"; [[ -n "$rvrow" ]] || die "reviewer not found: $reviewer"
-  rv_id="$(f 1 "$rvrow")"; rv_tpl="$(f 3 "$rvrow")"
+  rv_id="$(f 1 "$rvrow")"; rv_tpl="$(f 3 "$rvrow")"; reviewer_title="$(f 6 "$rvrow")"
   [[ "$(f 4 "$rvrow")" != "terminated" ]] || die "reviewer $reviewer is terminated."
 
   # --- authority, derived fresh from live state at DECISION time -----------
-  local d mode leader_id leader_role standing="no" override="no"
+  local d mode leader_id leader_role leader_title leader_row standing="no" override="no"
   d="$(derive_leader "$rq_id_at_submit" "$template")"
   mode="$(f 1 "$d")"; leader_id="$(f 2 "$d")"; leader_role="$(f 3 "$d")"
+  leader_row="$(resolve_agent "$leader_id")"; leader_title="$(f 6 "$leader_row")"
   jq -e --arg t "$rv_tpl" 'index($t) != null' <<<"$STANDING_AUTHORITY" >/dev/null && standing="yes"
 
   if [[ "$mode" == "leader" && "$rv_id" == "$leader_id" ]]; then
@@ -988,10 +1004,13 @@ cmd_review() {
   elif [[ "$standing" == "yes" ]]; then
     [[ "$mode" == "leader" ]] && override="yes"
   else
-    log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" --arg t "$rv_tpl" \
-                 --arg m "$mode" --arg l "$leader_role" \
+    log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+                 --arg t "$rv_tpl" --arg m "$mode" --arg l "$leader_role" --arg lid "$leader_id" --arg lt "$leader_title" \
       '{event:"review.refused",reason:"not_the_responsible_leader",requestId:$id,
-        reviewer:$r,reviewerTemplate:$t,mode:$m,responsibleLeader:(if $l=="" then null else $l end)}')"
+        reviewer:$r,reviewerAgentId:$rvid,reviewerTitle:(if $rvt=="" then null else $rvt end),
+        reviewerTemplate:$t,mode:$m,responsibleLeader:(if $l=="" then null else $l end),
+        responsibleLeaderAgentId:(if $lid=="" then null else $lid end),
+        responsibleLeaderTitle:(if $lt=="" then null else $lt end)}')"
     if [[ "$mode" == "leader" ]]; then
       echo "  responsible leader : $leader_role" >&2
     else
@@ -1003,8 +1022,9 @@ cmd_review() {
   # Separation of duties. Derivation cannot produce the requester, but the
   # standing-authority path is not derived, so both checks run on every path.
   [[ "$rv_id" != "$rq_id_at_submit" ]] \
-    || { log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" \
-           '{event:"review.refused",reason:"self_approval",requestId:$id,reviewer:$r}')"
+    || { log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+           '{event:"review.refused",reason:"self_approval",requestId:$id,reviewer:$r,
+             reviewerAgentId:$rvid,reviewerTitle:(if $rvt=="" then null else $rvt end)}')"
          die "a requester cannot review its own request ($rid)."; }
   # A reviewer inside the requester's own subtree is a captive approver, not a
   # reviewer. Derivation cannot produce one; the standing-authority path can.
@@ -1017,13 +1037,19 @@ cmd_review() {
   # a compromised root operator is outside what a subtree rule can reach.
   local rq_row; rq_row="$(resolve_agent "$rq_id_at_submit")"
   if [[ -n "$(f 5 "$rq_row")" ]] && is_descendant_of "$rq_id_at_submit" "$rv_id"; then
-    log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" --arg q "$rq_role" \
-      '{event:"review.refused",reason:"reviewer_is_descendant_of_requester",requestId:$id,reviewer:$r,requester:$q}')"
+    local requester_title_at_submit
+    requester_title_at_submit="$(jq -r '.requesterTitle // ""' <<<"$sub")"
+    log_event "$(jq -cn --arg id "$rid" --arg r "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+      --arg q "$rq_role" --arg qid "$rq_id_at_submit" --arg qt "$requester_title_at_submit" \
+      '{event:"review.refused",reason:"reviewer_is_descendant_of_requester",requestId:$id,
+        reviewer:$r,reviewerAgentId:$rvid,reviewerTitle:(if $rvt=="" then null else $rvt end),
+        requester:$q,requesterAgentId:$qid,requesterTitle:(if $qt=="" then null else $qt end)}')"
     die "$reviewer reports into $rq_role's own subtree; a captive approver is not a reviewer."
   fi
 
   local override_json='null'
-  [[ "$override" == "yes" ]] && override_json="$(jq -cn --arg l "$leader_role" '{bypassedLeader:$l}')"
+  [[ "$override" == "yes" ]] && override_json="$(jq -cn --arg l "$leader_role" --arg id "$leader_id" --arg t "$leader_title" \
+    '{bypassedLeader:$l,bypassedLeaderAgentId:$id,bypassedLeaderTitle:(if $t=="" then null else $t end)}')"
 
   # An override is an open audit item from the moment it is taken, and whoever
   # takes it is told so to their face. Writing it to the queue and saying
@@ -1057,10 +1083,11 @@ cmd_review() {
     '{risky:($f != ""), factors:(if $f=="" then [] else ($f|split(",")) end)}')"
 
   if [[ "$decision" == "rejected" ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg re "$reason" \
+    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" --arg re "$reason" \
       --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
       --argjson sa "$(saferalt_decision_json)" \
-      '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reason:$re,at:$at,override:$ov,
+      '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reviewerAgentId:$rvid,
+        reviewerTitle:(if $rvt=="" then null else $rvt end),reason:$re,at:$at,override:$ov,
         risk:$risk} + $sa')"
     echo "REJECTED $rid by $reviewer — $reason"
     announce_override
@@ -1120,8 +1147,10 @@ cmd_review() {
   local out rc
   out="$("$PROV" create --caller "$rq_role" --template "$template" --title "$title" 2>&1)"; rc=$?
   if [[ $rc -ne 0 ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg e "$out" --arg at "$(now_iso)" \
-      '{event:"request.reviewed",requestId:$id,status:"failed",reviewer:$rv,error:$e,at:$at}')"
+    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+      --arg e "$out" --arg at "$(now_iso)" \
+      '{event:"request.reviewed",requestId:$id,status:"failed",reviewer:$rv,reviewerAgentId:$rvid,
+        reviewerTitle:(if $rvt=="" then null else $rvt end),error:$e,at:$at}')"
     echo "$out" >&2
     # A provisioner refusal ends the request as finally as a denial does, and
     # it was the terminal state nobody had named. Notify BEFORE die(), or the
@@ -1130,10 +1159,12 @@ cmd_review() {
     die "provisioner rejected the approved request; queue marked failed (no partial state)."
   fi
   local new_id; new_id="$(grep -oE 'PROVISIONED [A-Z0-9_]+ -> [0-9a-f-]{36}' <<<"$out" | awk '{print $4}')"
-  append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg n "$new_id" --arg re "$reason" \
+  append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+    --arg n "$new_id" --arg re "$reason" \
     --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
     --argjson sa "$(saferalt_decision_json)" \
-    '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,newAgentId:$n,reason:$re,at:$at,override:$ov,
+    '{event:"request.reviewed",requestId:$id,status:"approved",reviewer:$rv,reviewerAgentId:$rvid,
+      reviewerTitle:(if $rvt=="" then null else $rvt end),newAgentId:$n,reason:$re,at:$at,override:$ov,
       risk:$risk} + $sa')"
   echo "APPROVED $rid by $reviewer"
   announce_override
@@ -1189,7 +1220,8 @@ cmd_comment() {
   template="$(jq -r '.template' <<<"$sub")"
 
   local arow; arow="$(resolve_agent "$author")"; [[ -n "$arow" ]] || die "author not found: $author"
-  local a_id a_tpl; a_id="$(f 1 "$arow")"; a_tpl="$(f 3 "$arow")"
+  local a_id a_tpl author_title
+  a_id="$(f 1 "$arow")"; a_tpl="$(f 3 "$arow")"; author_title="$(f 6 "$arow")"
   # cmd_review refuses a terminated reviewer; this path resolved the author and
   # never checked, so a terminated agent could still write into the record of a
   # live decision.
@@ -1203,8 +1235,10 @@ cmd_comment() {
   [[ "$ok" == "yes" ]] \
     || die "$author is neither the requester nor the responsible leader for $rid."
 
-  append_queue "$(jq -cn --arg id "$rid" --arg a "$author" --arg b "$body" --arg at "$(now_iso)" \
-    '{event:"request.comment",requestId:$id,author:$a,body:$b,at:$at}')"
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$author" --arg aid "$a_id" --arg atitle "$author_title" \
+    --arg b "$body" --arg at "$(now_iso)" \
+    '{event:"request.comment",requestId:$id,author:$a,authorAgentId:$aid,
+      authorTitle:(if $atitle=="" then null else $atitle end),body:$b,at:$at}')"
   echo "COMMENT recorded on $rid by $author"
 }
 
@@ -1239,17 +1273,33 @@ cmd_thread() {
   for r in "${chain[@]}"; do reqrecord_assert_unambiguous "$r"; done
 
   for r in "${chain[@]}"; do
-    jq -r --arg id "$r" 'select(.requestId==$id) |
+    jq -r --arg id "$r" '
+      def actor($title; $agentId; $legacy):
+        if (($title // "") != "" and ($agentId // "") != "")
+        then "\($title) [\($agentId)]"
+        elif (($legacy // "") != "") then $legacy
+        elif (($agentId // "") != "") then $agentId
+        else "?" end;
+      select(.requestId==$id) |
       if   .event=="request.submitted" then
-        "\($id)  SUBMITTED  \(.requester) [\(.requesterTemplate)] requests \(.template) — \"\(.title)\"" +
+        "\($id)  SUBMITTED  \(actor(.requesterTitle; .requesterAgentId; .requester)) [\(.requesterTemplate)] requests \(.template) — \"\(.title)\"" +
+        (if (.responsibleLeaderAgentId // "") != "" then
+           "\n        responsible leader: \(actor(.responsibleLeaderTitle; .responsibleLeaderAgentId; .responsibleLeader))"
+         elif (.responsibleLeaderMode // "") == "escalate" then
+           "\n        responsible leader: standing authority (reporting chain exhausted)"
+         elif (.responsibleLeaderMode // "") == "cycle" then
+           "\n        responsible leader: unresolvable reporting chain"
+         else "" end) +
         (if (.rationale // "") != "" then "\n        rationale: \(.rationale)" else "" end) +
         (if (.supersedes // null) != null then "\n        supersedes \(.supersedes)" else "" end)
-      elif .event=="request.comment"  then "\($id)  COMMENT    \(.author): \(.body)"
+      elif .event=="request.comment"  then "\($id)  COMMENT    \(actor(.authorTitle; .authorAgentId; .author)): \(.body)"
       elif .event=="request.expired"  then "\($id)  EXPIRED    undecided; resubmission required"
       elif .event=="request.reviewed" then
-        "\($id)  \(.status|ascii_upcase)   by \(.reviewer)" +
+        "\($id)  \(.status|ascii_upcase)   by \(actor(.reviewerTitle; .reviewerAgentId; .reviewer))" +
         (if (.reason // "") != "" then " — \(.reason)" else "" end) +
-        (if (.override // null) != null then "\n        (standing-authority override; bypassed \(.override.bypassedLeader))" else "" end) +
+        (if (.override // null) != null then
+           "\n        (standing-authority override; bypassed \(actor(.override.bypassedLeaderTitle; .override.bypassedLeaderAgentId; .override.bypassedLeader)))"
+         else "" end) +
         # The safer-alternatives record (TOG-388). `thread` is the view a
         # reviewer reads before deciding an amendment and the view an audit
         # reads afterwards, so what was OFFERED and what was RULED OUT has to
@@ -1272,9 +1322,9 @@ cmd_thread() {
          else "" end) +
         (if (.newAgentId // "") != "" then "\n        provisioned \(.newAgentId)" else "" end)
       elif .event=="override.acknowledged" then
-        "\($id)  OVERRIDE-ACK  by \(.auditor) — \(.note)"
+        "\($id)  OVERRIDE-ACK  by \(actor(.auditorTitle; .auditorAgentId; .auditor)) — \(.note)"
       elif .event=="risk.acknowledged" then
-        "\($id)  RISK-ACK   by \(.auditor) — \(.note)"
+        "\($id)  RISK-ACK   by \(actor(.auditorTitle; .auditorAgentId; .auditor)) — \(.note)"
       else empty end' "$QUEUE"
   done
 }
@@ -1369,8 +1419,8 @@ cmd_ack_override() {
 
   local row; row="$(resolve_agent "$auditor")"
   [[ -n "$row" ]] || die "auditor $auditor not found."
-  local a_id a_tpl a_status
-  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"
+  local a_id a_tpl a_status auditor_title
+  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"; auditor_title="$(f 6 "$row")"
   [[ "$a_status" != "terminated" ]] || die "auditor $auditor is terminated."
   jq -e --arg t "$a_tpl" 'index($t) != null' <<<"$AUDIT_AUTHORITY" >/dev/null \
     || die "$auditor [$a_tpl] does not hold override-acknowledgement authority."
@@ -1380,16 +1430,21 @@ cmd_ack_override() {
   # open list back into a write-only log.
   local rv_role rv_row rv_id
   rv_role="$(jq -r '.reviewer' <<<"$ov")"
-  rv_row="$(resolve_agent "$rv_role")"
-  rv_id="$(f 1 "$rv_row")"
+  rv_id="$(jq -r '.reviewerAgentId // ""' <<<"$ov")"
+  if [[ -z "$rv_id" ]]; then
+    rv_row="$(resolve_agent "$rv_role")"
+    rv_id="$(f 1 "$rv_row")"
+  fi
   if [[ -n "$rv_id" && "$rv_id" == "$a_id" ]]; then
     log_event "$(jq -cn --arg id "$rid" --arg a "$auditor" \
       '{event:"override.ack_refused",reason:"self_acknowledgement",requestId:$id,auditor:$a}')"
     die "$auditor took this override; it cannot also clear it."
   fi
 
-  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg n "$note" --arg at "$(now_iso)" \
-    '{event:"override.acknowledged",requestId:$id,auditor:$a,note:$n,at:$at}')"
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg aid "$a_id" --arg atitle "$auditor_title" \
+    --arg n "$note" --arg at "$(now_iso)" \
+    '{event:"override.acknowledged",requestId:$id,auditor:$a,auditorAgentId:$aid,
+      auditorTitle:(if $atitle=="" then null else $atitle end),note:$n,at:$at}')"
   echo "ACKNOWLEDGED override on $rid by $auditor — $note"
 }
 
@@ -1506,25 +1561,30 @@ cmd_ack_risk() {
   jq -e -s --arg id "$rid" 'any(.[]; .event=="risk.acknowledged" and .requestId==$id)' "$QUEUE" >/dev/null \
     && die "$rid is already acknowledged."
 
-  local row a_id a_tpl a_status
+  local row a_id a_tpl a_status auditor_title
   row="$(resolve_agent "$auditor")"; [[ -n "$row" ]] || die "auditor $auditor not found."
-  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"
+  a_id="$(f 1 "$row")"; a_tpl="$(f 3 "$row")"; a_status="$(f 4 "$row")"; auditor_title="$(f 6 "$row")"
   [[ "$a_status" != "terminated" ]] || die "auditor $auditor is terminated."
   jq -e --arg t "$a_tpl" 'index($t) != null' <<<"$AUDIT_AUTHORITY" >/dev/null \
     || die "$auditor [$a_tpl] does not hold override-acknowledgement authority."
 
   local rv_role rv_row rv_id
   rv_role="$(jq -r '.reviewer' <<<"$item")"
-  rv_row="$(resolve_agent "$rv_role")"
-  rv_id="$(f 1 "$rv_row")"
+  rv_id="$(jq -r '.reviewerAgentId // ""' <<<"$item")"
+  if [[ -z "$rv_id" ]]; then
+    rv_row="$(resolve_agent "$rv_role")"
+    rv_id="$(f 1 "$rv_row")"
+  fi
   if [[ -n "$rv_id" && "$rv_id" == "$a_id" ]]; then
     log_event "$(jq -cn --arg id "$rid" --arg a "$auditor" \
       '{event:"risk.ack_refused",reason:"self_acknowledgement",requestId:$id,auditor:$a}')"
     die "$auditor took this decision; it cannot also clear its risk record."
   fi
 
-  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg n "$note" --arg at "$(now_iso)" \
-    '{event:"risk.acknowledged",requestId:$id,auditor:$a,note:$n,at:$at}')"
+  append_queue "$(jq -cn --arg id "$rid" --arg a "$auditor" --arg aid "$a_id" --arg atitle "$auditor_title" \
+    --arg n "$note" --arg at "$(now_iso)" \
+    '{event:"risk.acknowledged",requestId:$id,auditor:$a,auditorAgentId:$aid,
+      auditorTitle:(if $atitle=="" then null else $atitle end),note:$n,at:$at}')"
   echo "ACKNOWLEDGED risk record on $rid by $auditor — $note"
 }
 

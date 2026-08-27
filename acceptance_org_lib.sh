@@ -109,7 +109,7 @@ with open(sys.argv[2], 'w') as fh:
             a['id'], m.get('orgRoleId', '') or '',
             m.get('permissionProfile', '') or '',
             a.get('status', '') or '', a.get('reportsTo') or '',
-            (a.get('title', '') or '').replace('\t', ' '),
+            ' '.join((a.get('title', '') or '').replace('\t', ' ').splitlines()),
         ]) + '\n')
 print(len(items))
 PY

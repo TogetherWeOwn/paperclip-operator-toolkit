@@ -305,6 +305,12 @@ eq "the provisioner ran as the ORIGINAL requester" "$CALLER" "$RQ_ID"
 TH="$("$Q" thread --request "$R2" </dev/null 2>&1)"
 grep -q "$R1" <<<"$TH" && ok "the thread follows the supersedes link back to the denial" \
   || bad "the thread does not follow the supersedes link back"
+grep -qF "$(fld 6 "$RQ") [$RQ_ID]" <<<"$TH" \
+  && ok "the HTTP audit trail names the authenticated requester alongside its stable id" \
+  || bad "the HTTP audit trail left the requester as a raw UUID"
+grep -qF "$(fld 6 "$LD_ROW") [$LD_ID]" <<<"$TH" \
+  && ok "the HTTP audit trail names the authenticated reviewer alongside its stable id" \
+  || bad "the HTTP audit trail left the reviewer as a raw UUID"
 [[ -n "${TRANSPORT_SHOW_THREAD:-}" ]] && { printf '\n'; sed 's/^/      /' <<<"$TH"; printf '\n'; }
 
 # ---------------------------------------------------------------------------

@@ -143,6 +143,12 @@ eq "the provisioner ran as the ORIGINAL requester" "$CALLER" "$RQ_ID"
 TH="$("$Q" thread --request "$R2" </dev/null 2>&1)"
 grep -q "$R1" <<<"$TH" && ok "the thread shows the superseded denial, not just the verdict" \
   || bad "the thread does not follow the supersedes link back"
+grep -qF "$RQ_TITLE [$RQ_ID]" <<<"$TH" \
+  && ok "the audit trail names the requester alongside its stable id" \
+  || bad "the audit trail left the requester as a raw UUID"
+grep -qF "$(fld 6 "$LD_ROW") [$(fld 1 "$LD_ROW")]" <<<"$TH" \
+  && ok "the audit trail names the responsible leader alongside its stable id" \
+  || bad "the audit trail left the responsible leader as a raw UUID"
 # The rendered exchange is the epic's headline evidence, so make it capturable.
 [[ -n "${REHEARSAL_SHOW_THREAD:-}" ]] && { printf '\n'; sed 's/^/      /' <<<"$TH"; printf '\n'; }
 
@@ -204,13 +210,12 @@ fi
 
 # ---------------------------------------------------------------------------
 hdr "5. The audit trail is legible"
-# Every step must appear, and appear attributably. This is where the missing
-# orgRoleId on most of the org shows up as a real reviewability cost.
+# The rendered request thread is the authoritative audit exchange. The grant log
+# holds refusal/control diagnostics, and its event schemas are broader than this
+# request-flow fix; merely finding a UUID there says nothing about whether the
+# rendered decision trail is readable.
 [[ -s "$GRANT_LOG" ]] && ok "the grant log recorded the run" || bad "the grant log is empty"
-if grep -qE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}' "$GRANT_LOG" 2>/dev/null; then
-  inf "the grant log names parties by UUID where orgRoleId is absent"
-  inf "($NOROLE of $N live agents, including the whole engineering chain)"
-fi
+inf "stable UUIDs are retained for attribution; the request thread renders titles beside them ($NOROLE of $N agents have no orgRoleId)"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

@@ -112,9 +112,9 @@ u-o3	O3	P3_AUDIT_RISK	idle		Chief Audit & Agent Risk
 u-o2	O2	P2_OWNER_COS	idle		Chief of Staff to Owner
 u-t0	T0	B2_TECH_CHIEF	running	u-o1	CTO & Chief AI Officer
 u-s0	S0	B3_SECURITY_CHIEF	idle	u-o1	CISO
-u-dir	DIR	C1_DIRECTOR_BUILDER	idle	u-t0	Director of Engineering
-u-mgr	MGR	D1_MANAGER	idle	u-dir	Engineering Manager
-u-eng	ENG	E0_SPECIALIST	idle	u-mgr	Web Engineer
+00000000-0000-4000-8000-000000000007	DIR	C1_DIRECTOR_BUILDER	idle	u-t0	Director of Engineering
+00000000-0000-4000-8000-000000000008	MGR	D1_MANAGER	idle	00000000-0000-4000-8000-000000000007	Engineering Manager
+u-eng	ENG	E0_SPECIALIST	idle	00000000-0000-4000-8000-000000000008	Web Engineer
 ORG
 }
 
@@ -140,6 +140,15 @@ eq "DIR requesting a manager -> T0"            "$(who_f 2 DIR D1_MANAGER)"      
 eq "T0 requesting a director -> O1"            "$(who_f 2 T0 C1_DIRECTOR_BUILDER)" "O1"
 eq "mode is 'leader' for an ordinary request"  "$(who_f 1 MGR E0_SPECIALIST)"      "leader"
 
+hdr "1b. Display metadata cannot corrupt the authorization tuple"
+# The database resolver normalizes control characters before emitting TSV. Test
+# that exact boundary in the source: title is display metadata and must never be
+# able to add a row to the authorization tuple.
+grep -q 'regexp_replace(COALESCE(a.title' "$Q" \
+  && grep -qF "[\\\\t\\\\r\\\\n]+" "$Q" \
+  && ok "the database snapshot normalizes title tabs/newlines before TSV parsing" \
+  || bad "database titles can inject fields or rows into the authorization tuple"
+
 hdr "2. A leader may only approve what it could create itself"
 # DIR cannot create a C2_PLATFORM_DIRECTOR; T0 can. The walk must pass over DIR.
 eq "MGR requesting a platform director skips DIR and lands on T0" \
@@ -151,13 +160,13 @@ hdr "3. Dormancy is NOT a skip reason — the leader is woken, never bypassed"
 # This is the design's most likely future regression. If someone 'helpfully'
 # adds idle/paused to the skip list, this goes red.
 for st in idle paused dormant running; do
-  base_org; sed -i "s/^u-dir\tDIR\tC1_DIRECTOR_BUILDER\tidle/u-dir\tDIR\tC1_DIRECTOR_BUILDER\t$st/" "$ORG_SNAPSHOT"
+  base_org; sed -i "s/^00000000-0000-4000-8000-000000000007\tDIR\tC1_DIRECTOR_BUILDER\tidle/00000000-0000-4000-8000-000000000007\tDIR\tC1_DIRECTOR_BUILDER\t$st/" "$ORG_SNAPSHOT"
   eq "a '$st' leader still decides" "$(who_f 2 MGR E0_SPECIALIST)" "DIR"
 done
 reset
 
 hdr "4. Skip rules that DO apply, and the escalation floor"
-base_org; sed -i "s/^u-dir\tDIR\tC1_DIRECTOR_BUILDER\tidle/u-dir\tDIR\tC1_DIRECTOR_BUILDER\tterminated/" "$ORG_SNAPSHOT"
+base_org; sed -i "s/^00000000-0000-4000-8000-000000000007\tDIR\tC1_DIRECTOR_BUILDER\tidle/00000000-0000-4000-8000-000000000007\tDIR\tC1_DIRECTOR_BUILDER\tterminated/" "$ORG_SNAPSHOT"
 eq "a terminated leader is skipped"            "$(who_f 2 MGR E0_SPECIALIST)" "T0"
 eq "  ...with the reason recorded"             "$(who_f 4 MGR E0_SPECIALIST | jq -r '.[0].reason')" "terminated"
 reset
@@ -234,8 +243,8 @@ eq "  ...and the refusal is logged with its reason" \
 reset
 
 hdr "8. Deny is a conversation, not a dead end"
-must_allow "MGR submits a request that will be denied" \
-  "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Denied Engineer" \
+must_allow "the UUID-authenticated manager submits a request that will be denied" \
+  "$Q" submit --requester 00000000-0000-4000-8000-000000000008 --template E0_SPECIALIST --title "TESTQ Denied Engineer" \
               --rationale "backlog is 40 issues deep"
 REQ1="$(last_sub)"
 # EXACTLY ONE input is omitted, and the refusal is pinned to its own message.
@@ -248,19 +257,40 @@ REQ1="$(last_sub)"
 refuses_because "a denial without a reason is refused — the requester must know what to answer" \
   "must carry --reason" \
   "$Q" review --reviewer DIR --request "$REQ1" --reject --alternative "raise the per-agent concurrency cap first"
-must_allow "DIR denies with a reason and a safer alternative" \
-  "$Q" review --reviewer DIR --request "$REQ1" --reject --reason "show the queue depth per week first" \
+must_allow "the UUID-authenticated leader denies with a reason and a safer alternative" \
+  "$Q" review --reviewer 00000000-0000-4000-8000-000000000007 --request "$REQ1" --reject --reason "show the queue depth per week first" \
               --alternative "raise MGR's concurrency cap for two weeks and re-measure"
 eq "the reason is in the record"  \
    "$(jq -r --arg r "$REQ1" 'select(.requestId==$r and .status=="rejected")|.reason' "$QUEUE")" \
    "show the queue depth per week first"
+eq "the submission snapshots the requester's title beside its stable id" \
+   "$(jq -r --arg r "$REQ1" 'select(.event=="request.submitted" and .requestId==$r)|"\(.requesterTitle) [\(.requesterAgentId)]"' "$QUEUE")" \
+   "Engineering Manager [00000000-0000-4000-8000-000000000008]"
+eq "  ...and the chain-derived leader's title beside its stable id" \
+   "$(jq -r --arg r "$REQ1" 'select(.event=="request.submitted" and .requestId==$r)|"\(.responsibleLeaderTitle) [\(.responsibleLeaderAgentId)]"' "$QUEUE")" \
+   "Director of Engineering [00000000-0000-4000-8000-000000000007]"
+eq "the decision snapshots the reviewer's title beside its stable id" \
+   "$(jq -r --arg r "$REQ1" 'select(.event=="request.reviewed" and .requestId==$r)|"\(.reviewerTitle) [\(.reviewerAgentId)]"' "$QUEUE")" \
+   "Director of Engineering [00000000-0000-4000-8000-000000000007]"
+# Prove authorization did not move to display metadata: a different principal
+# with the SAME title remains unauthorized, while the real UUID still decides.
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+  '00000000-0000-4000-8000-000000000099' 'FAKE_DIR' 'C1_DIRECTOR_BUILDER' 'idle' '' 'Director of Engineering' \
+  >> "$ORG_SNAPSHOT"
+out="$($Q review --reviewer 00000000-0000-4000-8000-000000000099 --request "$REQ1" \
+  --approve --reason "same title, wrong principal" 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then
+  ok "a title-matching impostor is not the responsible leader"
+else
+  bad "a title-matching impostor was authorized by display metadata"
+fi
 eq "  ...and so is the alternative that was offered" \
    "$(jq -r --arg r "$REQ1" 'select(.requestId==$r and .status=="rejected")|.alternatives[0]' "$QUEUE")" \
    "raise MGR's concurrency cap for two weeks and re-measure"
-must_allow "the requester answers on the record" \
-  "$Q" comment --request "$REQ1" --author MGR --body "queue depth: 18/22/40 over three weeks"
-must_allow "the leader may ask for more without denying again" \
-  "$Q" comment --request "$REQ1" --author DIR --body "that is enough, resubmit"
+must_allow "the UUID-authenticated requester answers on the record" \
+  "$Q" comment --request "$REQ1" --author 00000000-0000-4000-8000-000000000008 --body "queue depth: 18/22/40 over three weeks"
+must_allow "the UUID-authenticated leader may ask for more without denying again" \
+  "$Q" comment --request "$REQ1" --author 00000000-0000-4000-8000-000000000007 --body "that is enough, resubmit"
 refuses_because "an unrelated agent cannot comment on the exchange" \
   "neither the requester nor the responsible leader" "$Q" comment --request "$REQ1" --author S0 --body "me too"
 refuses_because "a different requester cannot supersede someone else's denial" \
@@ -271,16 +301,43 @@ must_allow "the original requester amends and resubmits" \
 REQ2="$(last_sub)"
 refuses_because "a PENDING request cannot be superseded — no forking a live request" \
   "only a rejected or expired request can be superseded" "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Fork" --supersedes "$REQ2"
+# Titles are audit snapshots, not live directory lookups. Retitling both actors
+# after the exchange must not rewrite what the historical record says happened.
+sed -i 's/Director of Engineering/Engineering Director (retitled)/; s/Engineering Manager/Delivery Manager (retitled)/' "$ORG_SNAPSHOT"
 out="$("$Q" thread --request "$REQ2" 2>&1)"
 grep -q "show the queue depth per week first" <<<"$out" \
   && ok "thread shows the earlier denial, not just the latest request" \
   || { bad "thread lost the denial"; sed 's/^/        /' <<<"$out"; }
+grep -qF "Engineering Manager [00000000-0000-4000-8000-000000000008]" <<<"$out" \
+  && ok "thread names the UUID-authenticated requester by its snapshotted title" \
+  || { bad "thread left the requester as a raw UUID or re-read its retitled name"; sed 's/^/        /' <<<"$out"; }
+grep -qF "Director of Engineering [00000000-0000-4000-8000-000000000007]" <<<"$out" \
+  && ok "thread names the UUID-authenticated reviewer by its snapshotted title" \
+  || { bad "thread left the reviewer as a raw UUID or re-read its retitled name"; sed 's/^/        /' <<<"$out"; }
+grep -qF "responsible leader: Director of Engineering [00000000-0000-4000-8000-000000000007]" <<<"$out" \
+  && ok "a pending submission names the leader it was routed to, not only the later reviewer" \
+  || { bad "thread omitted the snapshotted responsible leader"; sed 's/^/        /' <<<"$out"; }
 grep -q "queue depth: 18/22/40 over three weeks" <<<"$out" \
   && ok "thread shows the requester's answer" || bad "thread lost the comment"
 grep -q "supersedes $REQ1" <<<"$out" \
   && ok "thread links the amendment to what it replaced" || bad "thread lost the supersedes link"
-must_allow "the amended request is decided on its merits" \
-  "$Q" review --reviewer DIR --request "$REQ2" --approve --reason "numbers supplied"
+# Authorization remains UUID-based: the retitled leader still decides.
+must_allow "the amended request is decided by the same UUID despite the retitle" \
+  "$Q" review --reviewer 00000000-0000-4000-8000-000000000007 --request "$REQ2" --approve --reason "numbers supplied"
+reset
+
+hdr "8b. Historical rows without display metadata still render"
+cat > "$QUEUE" <<'JSONL'
+{"event":"request.submitted","requestId":"REQ-LEGACY","status":"pending","requester":"MGR","requesterAgentId":"00000000-0000-4000-8000-000000000008","requesterTemplate":"D1_MANAGER","template":"E0_SPECIALIST","title":"Legacy row","rationale":"","submittedAt":"2026-01-01T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}
+{"event":"request.reviewed","requestId":"REQ-LEGACY","status":"rejected","reviewer":"DIR","reviewerAgentId":"00000000-0000-4000-8000-000000000007","reason":"legacy reason","at":"2026-01-01T00:01:00Z","override":null}
+JSONL
+out="$("$Q" thread --request REQ-LEGACY 2>&1)"
+grep -qF "SUBMITTED  MGR" <<<"$out" \
+  && ok "a pre-title submission keeps its readable legacy role instead of regressing to UUID" \
+  || { bad "legacy submission no longer renders"; sed 's/^/        /' <<<"$out"; }
+grep -qF "by DIR" <<<"$out" \
+  && ok "a pre-title decision keeps its readable legacy role instead of regressing to UUID" \
+  || { bad "legacy decision no longer renders"; sed 's/^/        /' <<<"$out"; }
 
 hdr "9. Resubmission is capped — five denials are not a disagreement resubmission fixes"
 # MAX_SUPERSEDE_CHAIN counts RESUBMISSIONS, not requests: the original submission
@@ -446,8 +503,8 @@ eq "the open list drains, so the report can return to green" "$(rc_of "$Q" overr
 eq "  ...but the override is still there under --all" \
    "$("$Q" overrides --all --json | jq -r '.ack.auditor')" "O3"
 out="$("$Q" thread --request "$REQ" 2>&1)"
-grep -q "OVERRIDE-ACK  by O3" <<<"$out" \
-  && ok "the acknowledgement joins the request's own thread" \
+grep -qF "OVERRIDE-ACK  by Chief Audit & Agent Risk [u-o3]" <<<"$out" \
+  && ok "the acknowledgement joins the request's own thread with readable attribution" \
   || { bad "thread lost the acknowledgement"; sed 's/^/        /' <<<"$out"; }
 
 # Regression guard. An acknowledgement is not a decision. If it is ever allowed
@@ -476,8 +533,13 @@ must_allow "O1 takes a break-glass decision of its own" \
   "$Q" review --reviewer O1 --request "$REQ" --approve --reason "reason supplied so this case asserts authority, not arity"
 eq "  ...recorded as an override over DIR" \
    "$(jq -r --arg r "$REQ" 'select(.requestId==$r and .status=="approved")|.override.bypassedLeader' "$QUEUE")" "DIR"
-refuses_because "O1 cannot clear its OWN override, though it does hold acknowledgement authority" \
-  "took this override; it cannot also clear it" "$Q" ack-override --request "$REQ" --auditor O1 --note "I stand by it"
+# Reassigning the readable role after the decision must not change who took it.
+# The separation-of-duty gate uses the decision-time reviewerAgentId snapshot.
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+  'u-o1-new' 'O1' 'P1_PRESIDENT_COO' 'idle' '' 'New President & COO' >> "$ORG_SNAPSHOT"
+sed -i '0,/^u-o1\tO1\t/{s/^u-o1\tO1\t/u-o1\tO1_OLD\t/}' "$ORG_SNAPSHOT"
+refuses_because "the original reviewer cannot clear its OWN override after the role is reassigned" \
+  "took this override; it cannot also clear it" "$Q" ack-override --request "$REQ" --auditor u-o1 --note "I stand by it"
 eq "  ...and the refused self-acknowledgement is itself logged" \
    "$(jq -r 'select(.reason=="self_acknowledgement")|.reason' "$GRANT_LOG" | tail -1)" "self_acknowledgement"
 must_allow "O3 clears it instead" \
@@ -525,7 +587,7 @@ reset
 must_allow "MGR submits, then is demoted before the decision" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Demoted"
 REQ="$(last_sub)"
-sed -i 's/^u-mgr\tMGR\tD1_MANAGER/u-mgr\tMGR\tE0_SPECIALIST/' "$ORG_SNAPSHOT"
+sed -i 's/^00000000-0000-4000-8000-000000000008\tMGR\tD1_MANAGER/00000000-0000-4000-8000-000000000008\tMGR\tE0_SPECIALIST/' "$ORG_SNAPSHOT"
 refuses_because "a demoted requester's pending request is refused at approval" \
   "ceiling changed" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...logged as ceiling_changed_since_submit" \
@@ -538,7 +600,7 @@ reset
 must_allow "MGR submits, then is terminated before the decision" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Terminated"
 REQ="$(last_sub)"
-sed -i 's/^\(u-mgr\tMGR\tD1_MANAGER\t\)idle/\1terminated/' "$ORG_SNAPSHOT"
+sed -i 's/^\(00000000-0000-4000-8000-000000000008\tMGR\tD1_MANAGER\t\)idle/\1terminated/' "$ORG_SNAPSHOT"
 refuses_because "a terminated requester's pending request is refused at approval" \
   "is terminated" "$Q" review --reviewer DIR --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
@@ -551,7 +613,7 @@ reset
 must_allow "MGR submits, then is deleted outright" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Vanished"
 REQ="$(last_sub)"
-grep -v '^u-mgr	' "$ORG_SNAPSHOT" > "$ORG_SNAPSHOT.tmp" && mv "$ORG_SNAPSHOT.tmp" "$ORG_SNAPSHOT"
+grep -v '^00000000-0000-4000-8000-000000000008	' "$ORG_SNAPSHOT" > "$ORG_SNAPSHOT.tmp" && mv "$ORG_SNAPSHOT.tmp" "$ORG_SNAPSHOT"
 refuses_because "a vanished requester's request is not executable by anyone" \
   "no longer exists" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
@@ -560,7 +622,7 @@ reset
 must_allow "MGR submits, then MGR is re-created as a different agent" \
   "$Q" submit --requester MGR --template E0_SPECIALIST --title "TESTQ Impostor"
 REQ="$(last_sub)"
-sed -i 's/^u-mgr\tMGR\t/u-mgr2\tMGR\t/' "$ORG_SNAPSHOT"
+sed -i 's/^00000000-0000-4000-8000-000000000008\tMGR\t/00000000-0000-4000-8000-0000000000082\tMGR\t/' "$ORG_SNAPSHOT"
 refuses_because "authority does not transfer to a new agent holding the same role id" \
   "identity changed" "$Q" review --reviewer A0 --request "$REQ" --approve --reason "reason supplied so this case asserts re-validation, not arity"
 eq "  ...and nothing was provisioned" "$(provisioned_count)" "0"
@@ -651,6 +713,15 @@ eq "  ...the risk factors are pinned to the decision" \
 eq "  ...and each alternative is paired with the reason it failed" \
    "$(jq -r --arg r "$RISKY" 'select(.requestId==$r and .status=="approved")|.alternativesConsidered[1].whyItFailed' "$QUEUE")" \
    "pipelines:write does not reach tool connections at all"
+# As with override acknowledgement, role reassignment after the decision must
+# not erase who actually took it.
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+  'u-o1-new' 'O1' 'P1_PRESIDENT_COO' 'idle' '' 'New President & COO' >> "$ORG_SNAPSHOT"
+sed -i '0,/^u-o1\tO1\t/{s/^u-o1\tO1\t/u-o1\tO1_OLD\t/}' "$ORG_SNAPSHOT"
+refuses_because "the original reviewer cannot clear its risk record after the role is reassigned" \
+  "cannot also clear its risk record" \
+  "$Q" ack-risk --request "$RISKY" --auditor u-o1 --note "looks fine to me"
+base_org
 
 # --- the record is an OPEN audit item until an independent auditor reads it ---
 eq "a granted risky ask is an open item on risk-record" "$(rc_of "$Q" risk-record)" "1"
@@ -674,8 +745,9 @@ eq "  ...but the item is still there under --all" \
 refuses_because "and it cannot be cleared twice" \
   "already acknowledged" "$Q" ack-risk --request "$RISKY" --auditor O1 --note "again"
 out="$("$Q" thread --request "$RISKY" 2>&1)"
-grep -q "RISK-ACK   by O3" <<<"$out" \
-  && ok "the acknowledgement joins the request's own thread" || bad "thread lost the risk acknowledgement"
+grep -qF "RISK-ACK   by Chief Audit & Agent Risk [u-o3]" <<<"$out" \
+  && ok "the acknowledgement joins the request's own thread with readable attribution" \
+  || bad "thread lost the risk acknowledgement"
 refuses_because "a routine approval has no risk record to acknowledge" \
   "carries no risky grant" \
   "$Q" ack-risk --request "$RISKY-nope" --auditor O3 --note "x"
