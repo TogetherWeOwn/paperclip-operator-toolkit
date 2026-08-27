@@ -80,6 +80,11 @@ name: CI
 #                                       the jq copy of that formula inside
 #                                       quota_brake.sh still agrees with it —
 #                                       TOG-440
+#     test_gh_scope_residue_monitor.sh gh_scope_residue_monitor.sh: whether a
+#                                       scheduled text-only zero stays
+#                                       inconclusive, and every outcome re-arms
+#                                       the native Paperclip issue monitor —
+#                                       TOG-398
 #     test_gh_permission_pin_audit.sh   gh_permission_pin_audit.sh: whether a
 #                                       change to DEFAULT_PERMISSION_PROFILE
 #                                       that reaches none of the 7 pinned
@@ -360,6 +365,15 @@ jobs:
       # failure-open that only appeared at production board size.
       - name: scope-residue gate regression suite
         run: ./test_gh_scope_residue.sh
+
+      # TOG-398. The detector above existed and was still discovered only by
+      # the agent whose project-less checkout had already failed. This suite
+      # pins the actual recurring mechanism: a native Paperclip issue monitor
+      # wakes the assignee, this wrapper records the board-only floor, and it
+      # re-arms the issue for the next cycle. Offline: detector, Paperclip API
+      # and clock are fixtures; the credential assertion reads curl's real argv.
+      - name: scope-residue scheduled monitor suite
+        run: ./test_gh_scope_residue_monitor.sh
 
       # TOG-346. The broker takes a project's profile as
       # `projectPermissions ?? defaultPermissions` — `??`, so a project's
