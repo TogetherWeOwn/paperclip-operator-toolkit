@@ -170,7 +170,8 @@ refuses_because "an approved request cannot be re-approved" \
   "$Q" review --reviewer A0 --request "$REQ_SELF" --approve --reason "reason supplied so this case asserts authority, not arity"
 refuses_because "an approved request cannot be flipped to rejected" \
   "decisions are final" \
-  "$Q" review --reviewer A0 --request "$REQ_SELF" --reject --reason "changed mind"
+  "$Q" review --reviewer A0 --request "$REQ_SELF" --reject --reason "changed mind" \
+    --alternative "keep the approved request final and submit a new request if circumstances changed"
 
 hdr "6. Template disablement (org.disable_template) freezes pending requests"
 refuses_because "a chief cannot disable a template" \
