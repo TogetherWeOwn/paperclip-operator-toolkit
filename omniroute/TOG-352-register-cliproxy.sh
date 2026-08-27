@@ -77,12 +77,27 @@
 
 set -euo pipefail
 
+# Strip inherited management credentials before any child process starts. Keep
+# one shell-local copy for the private curl config fd below; /proc exposes every
+# child environment on this host.
+MGMT_KEY="${OMNIROUTE_MGMT_TOKEN:-}"
+export -n MGMT_KEY 2>/dev/null || true
+unset OMNIROUTE_MGMT_TOKEN
+
 CP_ENV="${CP_ENV:-$HOME/secure-drop/cliproxy.env}"
 OMNIROUTE_BASE="${OMNIROUTE_BASE:-https://router.example.net}"
 NODE_NAME="${NODE_NAME:-cliproxy}"
 NODE_PREFIX="${NODE_PREFIX:-cliproxy}"
 CONN_NAME="${CONN_NAME:-cliproxy-main}"
-PROVIDER_ID="openai-compatible-${NODE_PREFIX}"
+# PROVIDER_ID is NOT set here. It is DERIVED from the provider node's own id
+# once the node is known (see resolve_node_id below).
+#
+# Measured, TOG-485: this build returns `openai-compatible-<apiType>-<uuid>`
+# (e.g. openai-compatible-chat-1628780c-...), NOT `openai-compatible-<prefix>`.
+# Constructing it produced {"error":"OpenAI Compatible node not found"} AFTER
+# the node had already been created, so the script left a real node behind and
+# then failed. The node's own id IS the provider id. Derive it, never build it.
+PROVIDER_ID=""
 
 # CLIProxy as reached BY OMNIROUTE (from inside the omniroute container).
 CP_BASE_FOR_OMNIROUTE="${CP_BASE_FOR_OMNIROUTE:-http://host.containers.internal:8317/v1}"
@@ -115,24 +130,37 @@ step "Preflight"
 perm="$(stat -c '%a' "$CP_ENV" 2>/dev/null || echo '?')"
 [[ "$perm" == "600" ]] || warn "$CP_ENV is mode $perm, expected 600"
 
-set -a; . "$CP_ENV"; set +a
-[[ -n "${CLIPROXY_API_KEY:-}" ]] || die "CLIPROXY_API_KEY not set by $CP_ENV"
-echo "cliproxy credential: loaded (${#CLIPROXY_API_KEY} chars, not shown)"
+# Source without auto-export. If the file itself exports the variable, clear the
+# attribute immediately before the next child starts.
+. "$CP_ENV"
+CP_KEY="${CLIPROXY_API_KEY:-}"
+export -n CP_KEY 2>/dev/null || true
+unset CLIPROXY_API_KEY
+[[ -n "$CP_KEY" ]] || die "CLIPROXY_API_KEY not set by $CP_ENV"
+echo "cliproxy credential: loaded (${#CP_KEY} chars, not shown)"
 
-: "${OMNIROUTE_MGMT_TOKEN:?set OMNIROUTE_MGMT_TOKEN to an OmniRoute *management* token (an agent key gets 403 AUTH_001)}"
+[[ -n "$MGMT_KEY" ]] || die "set OMNIROUTE_MGMT_TOKEN to an OmniRoute *management* token (an agent key gets 403 AUTH_001)"
 
 # curl auth via a --config file on a fd, so no secret reaches argv or the filesystem.
+# Request bodies use stdin: connection-create JSON contains the CLIProxy key.
 mgmt() {
   local method="$1" path="$2" body="${3:-}"
   local args=(-sS -X "$method" -H "Content-Type: application/json" -w '\n%{http_code}')
-  [[ -n "$body" ]] && args+=(-d "$body")
-  curl "${args[@]}" --config /dev/fd/3 "${OMNIROUTE_BASE}${path}" \
-    3<<<"header = \"Authorization: Bearer ${OMNIROUTE_MGMT_TOKEN}\""
+  [[ -n "$body" ]] && args+=(--data-binary @-)
+  if [[ -n "$body" ]]; then
+    # -q MUST be argv[1]; otherwise curl reads ~/.curlrc before this private
+    # config and can trace, dump, or forward the management credential.
+    printf '%s' "$body" | curl -q "${args[@]}" --config /dev/fd/3 "${OMNIROUTE_BASE}${path}" \
+      3<<<"header = \"Authorization: Bearer ${MGMT_KEY}\""
+  else
+    curl -q "${args[@]}" --config /dev/fd/3 "${OMNIROUTE_BASE}${path}" \
+      3<<<"header = \"Authorization: Bearer ${MGMT_KEY}\""
+  fi
 }
 
 cp_get() {
-  curl -sS --config /dev/fd/3 "${CP_BASE_FOR_OPERATOR}$1" \
-    3<<<"header = \"Authorization: Bearer ${CLIPROXY_API_KEY}\""
+  curl -q -sS --config /dev/fd/3 "${CP_BASE_FOR_OPERATOR}$1" \
+    3<<<"header = \"Authorization: Bearer ${CP_KEY}\""
 }
 
 # -- CLIProxy liveness and a FRESH catalogue read -----------------------------
@@ -144,28 +172,120 @@ cp_models_json="$(cp_get /models)" || die "CLIProxy unreachable at $CP_BASE_FOR_
 cp_count="$(jq -r '(.data // []) | length' <<<"$cp_models_json")"
 [[ "${cp_count:-0}" -gt 0 ]] || die "CLIProxy returned no models — refusing to register an empty upstream"
 echo "CLIProxy serves $cp_count models right now"
-jq -r '(.data // [])[].id' <<<"$cp_models_json" | sort > /tmp/tog352-cp-models.$$ || true
-echo "full id list written to /tmp/tog352-cp-models.$$"
+SCRATCH="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/tog352-register.XXXXXXXX")" \
+  || die "could not create private scratch directory"
+trap 'rm -rf "$SCRATCH"' EXIT
+CP_MODELS="$SCRATCH/cliproxy-models"
+jq -r '(.data // [])[].id' <<<"$cp_models_json" | sort > "$CP_MODELS" \
+  || die "could not record the CLIProxy model catalogue"
+echo "full id list written to private per-run scratch (removed on exit)"
 
-cp_has() { grep -qxF "$1" /tmp/tog352-cp-models.$$; }
+cp_has() { grep -qxF "$1" "$CP_MODELS"; }
+
+# -- response-envelope normalisation ------------------------------------------
+# Measured, TOG-485: these list endpoints do NOT all return a bare array.
+#   GET /api/providers       -> {"connections":[...]}
+#   GET /api/provider-nodes  -> {"nodes":[...]} (or a bare array)
+#   GET /api/combos          -> {"combos":[...]} (or a bare array)
+#
+# Status and shape are both gates. Defaulting an unrecognised object to [] turns
+# a completed 401/500 into "nothing exists" and makes --apply create duplicates.
+mgmt_list() { # mgmt_list <path> <primary-field>
+  local path="$1" field="$2" out code body
+  out="$(mgmt GET "$path")" || die "management request failed: GET $path"
+  code="$(tail -n1 <<<"$out")"
+  body="$(sed '$d' <<<"$out")"
+  [[ "$code" =~ ^20 ]] || die "GET $path returned HTTP $code: $(head -c 300 <<<"$body")"
+  jq -er --arg f "$field" '
+    if type == "array" then .
+    elif ((.[$f] | type) == "array") then .[$f]
+    elif ((.data | type) == "array") then .data
+    else error("unrecognised list envelope") end' <<<"$body" \
+    || die "GET $path returned an unrecognised list envelope: $(head -c 300 <<<"$body")"
+}
+
+list_nodes()  { mgmt_list /api/provider-nodes nodes; }
+list_conns()  { mgmt_list /api/providers connections; }
+list_combos() { mgmt_list /api/combos combos; }
+
+# name:model — every id is checked against the live CLIProxy catalogue before
+# apply, and the same registry defines the required verify state.
+COMBOS=(
+  "sub-claude-opus:claude-opus-5"
+  "sub-claude-sonnet:claude-sonnet-5"
+  "sub-claude-fable:claude-fable-5"
+  "sub-gemini-flash:gemini-3-flash"
+  "sub-gpt:gpt-5.4"
+)
+
+# Resolve the provider node id for NODE_PREFIX, or empty if it does not exist.
+# The returned id is BOTH the node id and the provider id (see PROVIDER_ID above).
+resolve_node_id() {
+  list_nodes | jq -r --arg p "$NODE_PREFIX" 'map(select(.prefix==$p)) | .[0].id // empty'
+}
 
 if [[ $VERIFY_ONLY -eq 1 ]]; then
   step "VERIFY MODE"
+  nodes_json="$(list_nodes)"
+  node_count="$(jq -r --arg p "$NODE_PREFIX" '[.[] | select(.prefix==$p)] | length' <<<"$nodes_json")"
+  [[ "$node_count" -eq 1 ]] || die "verify: expected exactly one provider node with prefix '$NODE_PREFIX', got $node_count"
+  jq -e --arg p "$NODE_PREFIX" --arg name "$NODE_NAME" --arg base "$CP_BASE_FOR_OMNIROUTE" '
+    any(.[];
+      .prefix == $p
+      and .name == $name
+      and .type == "openai-compatible"
+      and .apiType == "chat"
+      and .baseUrl == $base
+      and (.id | type) == "string" and (.id | length) > 0)' \
+    >/dev/null <<<"$nodes_json" \
+    || die "verify: node '$NODE_PREFIX' does not have type=openai-compatible apiType=chat baseUrl=$CP_BASE_FOR_OMNIROUTE"
+  PROVIDER_ID="$(jq -r --arg p "$NODE_PREFIX" '.[] | select(.prefix==$p) | .id' <<<"$nodes_json")"
   echo "-- node --"
-  mgmt GET /api/provider-nodes | sed '$d' \
-    | jq -r --arg p "$NODE_PREFIX" '(if type=="array" then . else (.nodes // .data // []) end)
-        | map(select(.prefix==$p)) | .[] | "id=\(.id) type=\(.type) baseUrl=\(.baseUrl) apiType=\(.apiType)"'
+  jq -r --arg p "$NODE_PREFIX" '.[] | select(.prefix==$p)
+      | "id=\(.id) type=\(.type) baseUrl=\(.baseUrl) apiType=\(.apiType)"' <<<"$nodes_json"
+
+  conns_json="$(list_conns)"
+  conn_count="$(jq -r --arg p "$PROVIDER_ID" --arg n "$CONN_NAME" '[.[] | select(.provider==$p and .name==$n)] | length' <<<"$conns_json")"
+  [[ "$conn_count" -eq 1 ]] || die "verify: expected exactly one '$CONN_NAME' connection for '$PROVIDER_ID', got $conn_count"
+  jq -e --arg p "$PROVIDER_ID" --arg n "$CONN_NAME" --arg base "$CP_BASE_FOR_OMNIROUTE" '
+    any(.[];
+      .provider == $p and .name == $n
+      and .isActive == true and .priority == 1
+      and .providerSpecificData.baseUrl == $base
+      and .providerSpecificData.autoSync == true
+      and (.id | type) == "string" and (.id | length) > 0)' \
+    >/dev/null <<<"$conns_json" \
+    || die "verify: connection '$CONN_NAME' is not active priority=1 autoSync=true at $CP_BASE_FOR_OMNIROUTE"
+  CONN_ID="$(jq -r --arg p "$PROVIDER_ID" --arg n "$CONN_NAME" '.[] | select(.provider==$p and .name==$n) | .id' <<<"$conns_json")"
   echo "-- connection --"
-  mgmt GET /api/providers | sed '$d' \
-    | jq -r --arg p "$PROVIDER_ID" 'map(select(.provider==$p)) | .[]
-        | "id=\(.id) name=\(.name) active=\(.isActive) priority=\(.priority) test=\(.testStatus)"'
+  jq -r --arg id "$CONN_ID" '.[] | select(.id==$id)
+      | "id=\(.id) name=\(.name) active=\(.isActive) priority=\(.priority) test=\(.testStatus)"' <<<"$conns_json"
+
   echo "-- catalogue exposure through OmniRoute --"
-  mgmt GET /v1/models | sed '$d' \
-    | jq -r --arg p "$NODE_PREFIX/" '[(.data//[])[].id | select(startswith($p))] | "\(length) ids under \($p)"'
+  omniroute_ids="$(mgmt_list /v1/models data | jq -c --arg p "$NODE_PREFIX/" '[.[].id | select(startswith($p)) | ltrimstr($p)] | sort | unique')"
+  cliproxy_ids="$(jq -c '[.data[].id] | sort | unique' <<<"$cp_models_json")"
+  [[ "$omniroute_ids" == "$cliproxy_ids" ]] \
+    || die "verify: ${NODE_PREFIX}/ catalogue does not exactly match CLIProxy (OmniRoute=$(jq length <<<"$omniroute_ids"), CLIProxy=$(jq length <<<"$cliproxy_ids"))"
+  echo "$(jq length <<<"$omniroute_ids") ids under ${NODE_PREFIX}/; exact set match"
+
   echo "-- combos --"
-  mgmt GET /api/combos | sed '$d' \
-    | jq -r '(if type=="array" then . else (.combos // .data // []) end)[]
-        | "\(.name): strategy=\(.strategy) legs=[\([.models[]? | "\(.model)@\(.providerId // "?")"] | join(" -> "))]"'
+  combos_json="$(list_combos)"
+  for entry in "${COMBOS[@]}"; do
+    cname="${entry%%:*}"; mid="${entry#*:}"
+    combo_count="$(jq -r --arg name "$cname" '[.[] | select(.name==$name)] | length' <<<"$combos_json")"
+    [[ "$combo_count" -eq 1 ]] || die "verify: expected exactly one combo named '$cname', got $combo_count"
+    jq -e --arg name "$cname" --arg model "$mid" --arg pid "$PROVIDER_ID" --arg cid "$CONN_ID" '
+      any(.[];
+        .name == $name
+        and .strategy == "priority"
+        and (.models | type) == "array" and (.models | length) >= 1
+        and .models[0].model == $model
+        and .models[0].providerId == $pid
+        and .models[0].connectionId == $cid)' \
+      >/dev/null <<<"$combos_json" \
+      || die "verify: combo '$cname' first leg is not '$mid' via provider '$PROVIDER_ID' connection '$CONN_ID'"
+  done
+  jq -r '.[] | "\(.name): strategy=\(.strategy) legs=[\([.models[]? | "\(.model)@\(.providerId // "?")"] | join(" -> "))]"' <<<"$combos_json"
   exit 0
 fi
 
@@ -187,9 +307,7 @@ node_payload="$(jq -nc \
 # denylist (src/shared/constants/upstreamHeaders.ts) and would be silently dropped.
 # The bearer key belongs on the CONNECTION, which is step 2.
 
-existing_node="$(mgmt GET /api/provider-nodes | sed '$d' \
-  | jq -r --arg p "$NODE_PREFIX" '(if type=="array" then . else (.nodes // .data // []) end)
-      | map(select(.prefix==$p)) | .[0].id // empty')"
+existing_node="$(resolve_node_id)"
 
 if [[ -n "$existing_node" ]]; then
   echo "already exists: $existing_node (verify baseUrl is $CP_BASE_FOR_OMNIROUTE)"
@@ -199,21 +317,29 @@ else
   if [[ $APPLY -eq 1 ]]; then
     out="$(mgmt POST /api/provider-nodes "$node_payload")"
     [[ "$(tail -n1 <<<"$out")" =~ ^20 ]] || die "node create failed: $out"
-    NODE_ID="$(sed '$d' <<<"$out" | jq -r '.id // .node.id')"
+    NODE_ID="$(sed '$d' <<<"$out" | jq -r '.id // .node.id // empty')"
+    # Fail loudly rather than carrying an empty id into step 2. The old failure
+    # mode was to create the node, then fail on a CONSTRUCTED provider id and
+    # leave the node orphaned; an empty id here would recreate that mess.
+    [[ -n "$NODE_ID" ]] || die "node created but no id in response: $(sed '$d' <<<"$out" | head -c 300)"
     echo "created node: $NODE_ID"
   else
     NODE_ID="<node-id>"
   fi
 fi
 
+# THE provider id. Same string as the node id — derived, never constructed.
+PROVIDER_ID="$NODE_ID"
+echo "provider id (derived from node): $PROVIDER_ID"
+
 # ------------------------------------------------------------ 2. connection --
 step "2. Connection"
 
-conn_payload="$(CP_KEY="$CLIPROXY_API_KEY" jq -nc \
+conn_payload="$(printf '%s' "$CP_KEY" | jq -Rs \
   --arg provider "$PROVIDER_ID" \
   --arg name "$CONN_NAME" \
   --arg baseUrl "$CP_BASE_FOR_OMNIROUTE" \
-  '{provider:$provider, name:$name, apiKey:env.CP_KEY, isActive:true, priority:1,
+  '{provider:$provider, name:$name, apiKey:., isActive:true, priority:1,
     providerSpecificData:{baseUrl:$baseUrl, autoSync:true}}')"
 # autoSync:true is REQUIRED and is the whole of scope item 2 ("must re-sync, not
 # be a one-time paste"). The scheduler skips every connection whose
@@ -223,7 +349,7 @@ conn_payload="$(CP_KEY="$CLIPROXY_API_KEY" jq -nc \
 # It does NOT populate the catalogue now: the scheduler runs at startup+5s then
 # every 24h. Step 3 does the immediate population.
 
-existing_conn="$(mgmt GET /api/providers | sed '$d' \
+existing_conn="$(list_conns \
   | jq -r --arg p "$PROVIDER_ID" 'map(select(.provider==$p)) | .[0].id // empty')"
 
 if [[ -n "$existing_conn" ]]; then
@@ -252,8 +378,29 @@ if [[ $APPLY -eq 1 ]]; then
   echo "POST /api/providers/$CONN_ID/sync-models"
   out="$(mgmt POST "/api/providers/$CONN_ID/sync-models" '{}')"
   [[ "$(tail -n1 <<<"$out")" =~ ^20 ]] || die "sync-models failed: $(sed '$d' <<<"$out" | head -c 300)"
-  synced="$(sed '$d' <<<"$out" | jq -r '(.models // .synced // []) | if type=="array" then length else . end' 2>/dev/null || echo '?')"
+  sync_body="$(sed '$d' <<<"$out")"
+  # The field is `syncedModels`. Measured, TOG-485.
+  #
+  # This line previously read `.models // .synced`, got 0 while the response body
+  # plainly said `syncedModels: 61`, and the gate below then aborted a
+  # registration that had ALREADY SUCCEEDED — printing a message that blamed
+  # networking which was in fact working. That false negative sent the operator
+  # to re-debug a solved problem. A false negative on a correctness gate costs
+  # as much as a false positive.
+  #
+  # The gate stays. Only the field name was wrong. The fallbacks are kept ONLY
+  # as a last resort, and the raw body is printed whenever the count does not
+  # look right, so the next field-name drift is visible instead of silent.
+  synced="$(jq -r '(.syncedModels // .models // .synced // [])
+                   | if type=="array" then length else . end' <<<"$sync_body" 2>/dev/null || echo '?')"
   echo "synced: $synced models (CLIProxy advertised $cp_count)"
+  if ! [[ "$synced" =~ ^[0-9]+$ ]] || [[ "$synced" -eq 0 ]]; then
+    echo "raw sync response (count field not found or zero — read this before blaming the network):" >&2
+    head -c 600 <<<"$sync_body" >&2; echo >&2
+    die "sync-models returned no usable model count. If the body above shows a non-zero count under some other field name, THIS SCRIPT is wrong, not the chain."
+  fi
+  [[ "$synced" -eq "$cp_count" ]] \
+    || die "sync-models synchronized $synced of $cp_count advertised models — refusing to call a partial catalogue complete"
 else
   echo "would POST /api/providers/<connection-id>/sync-models"
   echo "expect roughly $cp_count ids to appear under ${NODE_PREFIX}/"
@@ -278,15 +425,6 @@ step "4. Combos — subscription before PAYG"
 # competing sets. As of the 18:38Z snapshot no such combo and no teamclaude
 # connection exist, so today this branch will not fire.
 
-# name:model — every id is checked against the LIVE CLIProxy catalogue below.
-COMBOS=(
-  "sub-claude-opus:claude-opus-5"
-  "sub-claude-sonnet:claude-sonnet-5"
-  "sub-claude-fable:claude-fable-5"
-  "sub-gemini-flash:gemini-3-flash"
-  "sub-gpt:gpt-5.4"
-)
-
 missing=0
 for entry in "${COMBOS[@]}"; do
   mid="${entry#*:}"
@@ -299,12 +437,13 @@ for entry in "${COMBOS[@]}"; do
 done
 [[ $missing -eq 0 ]] || die "$missing combo model id(s) are not served by CLIProxy — fix the id list before applying"
 
-existing_combos="$(mgmt GET /api/combos | sed '$d' \
-  | jq -r '(if type=="array" then . else (.combos // .data // []) end) | map(.name) | join(" ")')"
+existing_combos="$(list_combos)"
 
 for entry in "${COMBOS[@]}"; do
   cname="${entry%%:*}"; mid="${entry#*:}"
-  if grep -qw -- "$cname" <<<"$existing_combos"; then
+  combo_count="$(jq -r --arg name "$cname" '[.[] | select(.name==$name)] | length' <<<"$existing_combos")"
+  [[ "$combo_count" -le 1 ]] || die "multiple combos named '$cname' exist; refusing to choose one"
+  if [[ "$combo_count" -eq 1 ]]; then
     echo "combo '$cname' already exists — leaving as-is (inspect leg order with --verify)"
     continue
   fi

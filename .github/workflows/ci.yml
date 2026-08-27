@@ -940,6 +940,18 @@ jobs:
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
 
+      # TOG-526. The offline stub proves its argv/environment detectors can
+      # catch exposed credentials, then requires private transport and rejects
+      # incomplete or malformed OmniRoute responses.
+      - name: OmniRoute chain verifier credential suite
+        run: ./test_tog485_verify_chain_argv.sh
+
+      # Same credential boundary for the operator-side registration script:
+      # management auth and the CLIProxy connection key must stay out of argv
+      # and child environments, including on its default dry-run path.
+      - name: OmniRoute registration credential suite
+        run: ./test_tog352_register_cliproxy_argv.sh
+
       # TOG-425. Whether teamclaude stops sending traffic to a quota-spent
       # Claude account, read out of the pacer's jsonl. Every case is a
       # synthetic feed in a temp dir, so this needs no quota, no network and no
