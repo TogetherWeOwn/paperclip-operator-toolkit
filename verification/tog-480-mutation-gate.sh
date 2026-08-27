@@ -11,7 +11,7 @@ stage() {
   local d="$1"
   cp "$HERE"/{org_provisioner.sh,org_request_queue.sh,test_privilege_ceilings.sh,test_request_queue.sh} "$d/"
   mkdir -p "$d/lib" "$d/test/fixtures/orgdb"
-  cp "$HERE/lib/pcsql.sh" "$d/lib/"
+  cp "$HERE/lib/"{pcsql.sh,provisioning_policy.sh,reqrecord.sh} "$d/lib/"
   cp "$HERE/test/fixtures/orgdb/"* "$d/test/fixtures/orgdb/"
   chmod +x "$d"/*.sh "$d/test/fixtures/orgdb/"*
 }
@@ -47,7 +47,7 @@ NODE
 }
 
 rc=0
-mutant ceiling-bypass test_privilege_ceilings.sh org_provisioner.sh \
+mutant ceiling-bypass test_privilege_ceilings.sh lib/provisioning_policy.sh \
   'if ! jq -e --arg c "$caller_template" --arg r "$template"' \
   'if false && ! jq -e --arg c "$caller_template" --arg r "$template"' \
   'T0 (tech chief) cannot create another President/COO' || rc=1
@@ -67,13 +67,17 @@ mutant self-scope test_privilege_ceilings.sh org_provisioner.sh \
   'scope: (if .self then {subtreeRootAgentId:$id} else null end)' \
   'scope: (if .self then {subtreeRootAgentId:"00000000-0000-4000-8000-000000000006"} else null end)' \
   'DIRECTOR has a scope pointing somewhere else' || rc=1
+mutant grant-replacement test_request_queue.sh org_provisioner.sh \
+  'DELETE FROM principal_permission_grants' \
+  'DELETE FROM principal_permission_grants WHERE false AND' \
+  "server's default company-wide tasks:assign was replaced away" || rc=1
 mutant descendant-deactivate test_privilege_ceilings.sh org_provisioner.sh \
   'is_descendant_of "$caller_id" "$target_id" \\' \
   'true \\' \
   'Manager cannot deactivate its own Director' || rc=1
 mutant request-ceiling test_request_queue.sh org_request_queue.sh \
-  'may_request "$requester_tpl" "$template"' \
-  'true "$requester_tpl" "$template"' \
+  'may_request "$tpl" "$template"' \
+  'true "$tpl" "$template"' \
   'T0 cannot request a President/COO' || rc=1
 mutant self-approval test_request_queue.sh org_request_queue.sh \
   '[[ "$rv_id" != "$rq_id_at_submit" ]]' \

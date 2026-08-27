@@ -6,10 +6,12 @@
 # Uses its own queue file; the shared grant log stays authoritative.
 # Any agent it provisions is torn down at the end.
 #
-# THIS SUITE NEEDS THE LIVE COMPANY DATABASE and there is no offline seam for
-# it: org_provisioner.sh has no ORG_SNAPSHOT path, and sections 7/9/10 read SQL
-# directly. CI therefore cannot run it, which is exactly why the two guards
-# below exist rather than a comment asking the operator to be careful.
+# THIS SUITE NEEDS A COMPANY-SHAPED POSTGRES DATABASE and is not a purely
+# offline unit test: org_provisioner.sh has no ORG_SNAPSHOT path, and sections
+# 7/9/10 read SQL directly. CI supplies a throwaway schema/org fixture plus a
+# dumb recording CLI; the VPS run remains necessary for the real Paperclip API
+# contract. The two guards below still ensure an unavailable database never
+# scores itself green.
 #
 # WHY A REFUSAL IS NOT ENOUGH TO PASS A CASE (TOG-402). The old helper was
 #

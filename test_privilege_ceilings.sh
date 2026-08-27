@@ -5,10 +5,12 @@
 #
 # Creates a temporary test subtree under T0 and removes it at the end.
 #
-# NEEDS THE LIVE COMPANY DATABASE. org_provisioner.sh has no ORG_SNAPSHOT seam,
-# so there is no offline mode for this suite and CI cannot run it. See the
-# pcsql_preflight guard below, and the header of test_request_queue.sh for the
-# measurement that motivated both (TOG-402): a refusal-shaped assertion accepts
+# NEEDS A COMPANY-SHAPED POSTGRES DATABASE. org_provisioner.sh has no
+# ORG_SNAPSHOT seam, so this suite cannot run as a purely offline unit test. CI
+# supplies a throwaway schema/org fixture plus a dumb recording CLI; the VPS run
+# remains necessary for the real Paperclip API contract. See the pcsql_preflight
+# guard below, and the header of test_request_queue.sh for the measurement that
+# motivated both (TOG-402): a refusal-shaped assertion accepts
 # ANY refusal, so a tool that dies at "caller not found" satisfies a case that
 # names the delegation ceiling. Here that produced 2 undeserved passes out of
 # 36 with no podman present; the sibling suite produced 15 of 31.
