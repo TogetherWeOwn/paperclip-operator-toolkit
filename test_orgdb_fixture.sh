@@ -17,6 +17,19 @@ done
 for r in P0 O1 O2 O3 A0 T0 S0 F0; do
   grep -q "orgRoleId.*$r" "$HERE/test/fixtures/orgdb/org.sql" && ok "fixture contains $r" || bad "fixture misses $r"
 done
+for i in company_memberships_company_principal_unique_idx \
+  principal_permission_grants_unique_idx company_secret_bindings_target_path_uq \
+  budget_policies_company_scope_metric_unique_idx \
+  agents_company_built_in_agent_key_unique_idx heartbeat_runs_company_ctx_taskkey_created_idx; do
+  grep -q "${i}" "$HERE/test/fixtures/orgdb/schema.sql" && ok "schema contains index $i" || bad "schema misses index $i"
+done
+node - "$HERE/schema_drift.sh" <<'NODE'
+const fs=require('fs'); const s=fs.readFileSync(process.argv[2],'utf8');
+for (const x of ["SELECT 'column'", "SELECT 'index'", 'pg_indexes']) {
+  if (!s.includes(x)) { console.error(`missing schema drift term: ${x}`); process.exit(1) }
+}
+NODE
+[[ $? -eq 0 ]] && ok "drift fingerprint includes columns and indexes" || bad "drift fingerprint omits indexes"
 
 mkdir "$TMP/bin"
 cat > "$TMP/bin/psql" <<'PSQL'

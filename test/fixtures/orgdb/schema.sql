@@ -1,11 +1,11 @@
 -- TOG-480 CI fixture schema.
 --
--- Extracted from /app/packages/db/src/migrations/meta/0211_snapshot.json on
--- 2026-08-25. These are the six platform tables the operator suites read or
+-- Extracted from the ordered /app/packages/db/src/migrations inputs and
+-- meta/0211_snapshot.json on 2026-08-27. These are the six platform tables the operator suites read or
 -- write. Foreign keys to tables outside this six-table fixture are deliberately
 -- omitted: this is a query-compatible fixture, not a second Paperclip schema.
--- schema_drift.sh compares every column, type, nullability and default against
--- the running database so this snapshot cannot silently rot.
+-- schema_drift.sh compares every column, type, nullability, default and index
+-- against the running database so this snapshot cannot silently rot.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE agents (
@@ -35,6 +35,11 @@ CREATE TABLE agents (
 );
 CREATE INDEX agents_company_status_idx ON agents (company_id, status);
 CREATE INDEX agents_company_reports_to_idx ON agents (company_id, reports_to);
+CREATE INDEX agents_company_default_environment_idx ON agents (company_id, default_environment_id);
+CREATE UNIQUE INDEX agents_company_built_in_agent_key_unique_idx
+  ON agents (company_id, ((metadata -> 'paperclipBuiltInAgent' ->> 'key')))
+  WHERE (metadata -> 'paperclipBuiltInAgent' ->> 'key') IS NOT NULL
+    AND status <> 'terminated';
 
 CREATE TABLE principal_permission_grants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -49,6 +54,8 @@ CREATE TABLE principal_permission_grants (
 );
 CREATE UNIQUE INDEX principal_permission_grants_unique_idx
   ON principal_permission_grants (company_id, principal_type, principal_id, permission_key);
+CREATE INDEX principal_permission_grants_company_permission_idx
+  ON principal_permission_grants (company_id, permission_key);
 
 CREATE TABLE company_memberships (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -62,6 +69,10 @@ CREATE TABLE company_memberships (
 );
 CREATE UNIQUE INDEX company_memberships_company_principal_unique_idx
   ON company_memberships (company_id, principal_type, principal_id);
+CREATE INDEX company_memberships_principal_status_idx
+  ON company_memberships (principal_type, principal_id, status);
+CREATE INDEX company_memberships_company_status_idx
+  ON company_memberships (company_id, status);
 
 CREATE TABLE company_secret_bindings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -78,6 +89,12 @@ CREATE TABLE company_secret_bindings (
   created_at timestamp with time zone DEFAULT now() NOT NULL,
   updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+CREATE INDEX company_secret_bindings_company_idx
+  ON company_secret_bindings (company_id);
+CREATE INDEX company_secret_bindings_secret_idx
+  ON company_secret_bindings (secret_id);
+CREATE INDEX company_secret_bindings_target_idx
+  ON company_secret_bindings (company_id, target_type, target_id);
 CREATE UNIQUE INDEX company_secret_bindings_target_path_uq
   ON company_secret_bindings (company_id, target_type, target_id, config_path);
 
@@ -98,6 +115,10 @@ CREATE TABLE budget_policies (
   created_at timestamp with time zone DEFAULT now() NOT NULL,
   updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+CREATE INDEX budget_policies_company_scope_active_idx
+  ON budget_policies (company_id, scope_type, scope_id, is_active);
+CREATE INDEX budget_policies_company_window_idx
+  ON budget_policies (company_id, window_kind, metric);
 CREATE UNIQUE INDEX budget_policies_company_scope_metric_unique_idx
   ON budget_policies (company_id, scope_type, scope_id, metric, window_kind);
 
@@ -152,3 +173,21 @@ CREATE TABLE heartbeat_runs (
   created_at timestamp with time zone DEFAULT now() NOT NULL,
   updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+CREATE INDEX heartbeat_runs_company_agent_started_idx
+  ON heartbeat_runs (company_id, agent_id, started_at);
+CREATE INDEX heartbeat_runs_company_responsible_user_idx
+  ON heartbeat_runs (company_id, responsible_user_id, created_at);
+CREATE INDEX heartbeat_runs_company_liveness_idx
+  ON heartbeat_runs (company_id, liveness_state, created_at);
+CREATE INDEX heartbeat_runs_company_status_last_output_idx
+  ON heartbeat_runs (company_id, status, last_output_at);
+CREATE INDEX heartbeat_runs_company_status_process_started_idx
+  ON heartbeat_runs (company_id, status, process_started_at);
+CREATE INDEX heartbeat_runs_company_created_at_desc_idx
+  ON heartbeat_runs (company_id, created_at DESC);
+CREATE INDEX heartbeat_runs_company_ctx_issue_created_idx
+  ON heartbeat_runs (company_id, ((context_snapshot ->> 'issueId')), created_at DESC);
+CREATE INDEX heartbeat_runs_company_ctx_task_created_idx
+  ON heartbeat_runs (company_id, ((context_snapshot ->> 'taskId')), created_at DESC);
+CREATE INDEX heartbeat_runs_company_ctx_taskkey_created_idx
+  ON heartbeat_runs (company_id, ((context_snapshot ->> 'taskKey')), created_at DESC);

@@ -9,14 +9,23 @@ EXIT_OK=0; EXIT_REFUSED=2; EXIT_DRIFT=3
 
 die() { echo "REFUSED: $ME: $*" >&2; exit $EXIT_REFUSED; }
 query() {
-  psql -Atq -v ON_ERROR_STOP=1 <<SQL
-SELECT table_name, column_name, data_type,
+  psql -X -Atq -v ON_ERROR_STOP=1 <<SQL
+SET search_path = public, pg_catalog;
+SELECT 'column', table_name, lpad(ordinal_position::text, 3, '0'), column_name,
+       data_type,
        CASE WHEN is_nullable='NO' THEN 'not-null' ELSE 'nullable' END,
        COALESCE(regexp_replace(column_default, '::(text|jsonb|boolean|integer|bigint|uuid)$', ''), '(none)')
 FROM information_schema.columns
 WHERE table_schema='public'
   AND table_name IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
-ORDER BY table_name, ordinal_position;
+UNION ALL
+SELECT 'index', tablename, '---', indexname,
+       regexp_replace(indexdef, ' ON public\\.', ' ON '),
+       '(none)', '(none)'
+FROM pg_indexes
+WHERE schemaname='public'
+  AND tablename IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
+ORDER BY 2, 1, 3, 4;
 SQL
 }
 case "${1:-}" in
