@@ -25,9 +25,10 @@ run_suite() { # dir suite
     PAPERCLIP_STUB_LOG="$d/calls.jsonl" GRANT_LOG="$d/grants.jsonl" \
     QUEUE="$d/queue.jsonl" DISABLED_TEMPLATES="$d/disabled" "./$suite")
 }
-mutant() { # label suite target anchor replacement named-failure
-  local label="$1" suite="$2" target="$3" anchor="$4" repl="$5" want="$6"
+mutant() { # label suite target anchor replacement named-failure [stage-hook]
+  local label="$1" suite="$2" target="$3" anchor="$4" repl="$5" want="$6" hook="${7:-true}"
   local d baseline; d="$(mktemp -d)"; stage "$d"
+  "$hook" "$d" || { echo "$label: stage hook failed" >&2; rm -rf "$d"; return 2; }
   baseline="$(mktemp)"
   if ! run_suite "$d" "$suite" >"$baseline" 2>&1; then
     echo "BASELINE FAILED for $label" >&2; cat "$baseline"; rm -f "$baseline"; rm -rf "$d"; return 2
@@ -48,6 +49,33 @@ NODE
   echo "ok: $label -> $want"; rm -rf "$d"
 }
 
+seed_server_default_grant() { # stage-dir
+  local d="$1"
+  mv "$d/test/fixtures/orgdb/paperclipai" "$d/test/fixtures/orgdb/paperclipai.real"
+  cat > "$d/test/fixtures/orgdb/paperclipai" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+out="$("$HERE/paperclipai.real" "$@")"; rc=$?
+printf '%s\n' "$out"
+[[ $rc -eq 0 ]] || exit "$rc"
+if [[ "${1:-}" == agent && "${2:-}" == create ]]; then
+  company=""
+  for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == --company-id ]]; then j=$((i+1)); company="${!j}"; break; fi
+  done
+  id="$(jq -er .id <<<"$out")" || exit 2
+  psql -Atq -v ON_ERROR_STOP=1 -v company="$company" -v agent="$id" <<'SQL' >/dev/null
+INSERT INTO principal_permission_grants
+  (company_id, principal_type, principal_id, permission_key, scope)
+VALUES (:'company'::uuid, 'agent', :'agent', 'tasks:assign', NULL)
+ON CONFLICT DO NOTHING;
+SQL
+fi
+STUB
+  chmod +x "$d/test/fixtures/orgdb/paperclipai"
+}
+
 rc=0
 mutant ceiling-bypass test_privilege_ceilings.sh lib/provisioning_policy.sh \
   'if ! jq -e --arg c "$caller_template" --arg r "$template"' \
@@ -65,6 +93,10 @@ mutant protected-payload test_privilege_ceilings.sh org_provisioner.sh \
   '"authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' \
   '"authorizationPolicy":{"assignmentPolicy":{"mode":"open"}}}' \
   'DIRECTOR not protected' || rc=1
+mutant exact-grant-replacement test_request_queue.sh org_provisioner.sh \
+  $'DELETE FROM principal_permission_grants\nWHERE company_id = :\'company_id\'::uuid\n  AND principal_type = \'agent\'\n  AND principal_id = :\'agent_id\';' \
+  $'DELETE FROM principal_permission_grants\nWHERE false;' \
+  'default tasks:assign survived' seed_server_default_grant || rc=1
 mutant self-scope test_privilege_ceilings.sh org_provisioner.sh \
   'scope: (if .self then {subtreeRootAgentId:$id} else null end)' \
   'scope: (if .self then {subtreeRootAgentId:"00000000-0000-4000-8000-000000000006"} else null end)' \
@@ -73,6 +105,10 @@ mutant descendant-deactivate test_privilege_ceilings.sh org_provisioner.sh \
   'is_descendant_of "$caller_id" "$target_id" \' \
   'true \' \
   'Manager cannot deactivate its own Director' || rc=1
+mutant kill-switch test_privilege_ceilings.sh org_provisioner.sh \
+  $'cmd_create() {\n  assert_enabled' \
+  $'cmd_create() {\n  true' \
+  'all provisioning refused while kill switch engaged' || rc=1
 mutant request-ceiling test_request_queue.sh org_request_queue.sh \
   'may_request "$tpl" "$template"' \
   'true "$tpl" "$template"' \
