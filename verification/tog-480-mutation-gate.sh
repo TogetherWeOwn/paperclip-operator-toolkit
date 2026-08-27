@@ -68,8 +68,8 @@ mutant self-scope test_privilege_ceilings.sh org_provisioner.sh \
   'scope: (if .self then {subtreeRootAgentId:"00000000-0000-4000-8000-000000000006"} else null end)' \
   'DIRECTOR has a scope pointing somewhere else' || rc=1
 mutant grant-replacement test_request_queue.sh org_provisioner.sh \
-  'DELETE FROM principal_permission_grants' \
-  'DELETE FROM principal_permission_grants WHERE false AND' \
+  $'DELETE FROM principal_permission_grants\nWHERE company_id' \
+  $'DELETE FROM principal_permission_grants\nWHERE false AND company_id' \
   "server's default company-wide tasks:assign was replaced away" || rc=1
 mutant descendant-deactivate test_privilege_ceilings.sh org_provisioner.sh \
   'is_descendant_of "$caller_id" "$target_id" \\' \
