@@ -371,7 +371,7 @@ cmd_create() {
       adapterType:$adapter, adapterConfig:{},
       runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}},
       budgetMonthlyCents:$budget,
-      permissions:{canCreateAgents:false, canCreateSkills:false,
+      permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:false,
                    authorizationPolicy:{assignmentPolicy:{mode:"protected"}}},
       metadata:{permissionProfile:$tpl, provisionedBy:"org_provisioner"},
       reportsTo:$parent
