@@ -255,8 +255,8 @@ jobs:
         run: |
           set +e
           out="$({
-            ./test/fixtures/orgdb/reset.sh
-            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+            ./test/fixtures/orgdb/reset.sh &&
+            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG" &&
             ./test_privilege_ceilings.sh
           } 2>&1)"; rc=$?
           printf '%s\n' "$out"
@@ -271,8 +271,8 @@ jobs:
         run: |
           set +e
           out="$({
-            ./test/fixtures/orgdb/reset.sh
-            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG"
+            ./test/fixtures/orgdb/reset.sh &&
+            rm -f "$GRANT_LOG" "$PAPERCLIP_STUB_LOG" &&
             ./test_request_queue.sh
           } 2>&1)"; rc=$?
           printf '%s\n' "$out"
@@ -287,9 +287,31 @@ jobs:
         run: |
           set +e
           out="$({
-            ./schema_drift.sh fingerprint > expected.fp
-            ./test/fixtures/orgdb/reset.sh
-            ./schema_drift.sh compare expected.fp
+            ./schema_drift.sh fingerprint > expected.fp &&
+            ./test/fixtures/orgdb/reset.sh &&
+            ./schema_drift.sh compare expected.fp || exit $?
+
+            cp expected.fp column-drift.fp
+            node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>l.startsWith("column|agents|")); if(!a)throw Error("column fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|name|","|name_mutant|")))' column-drift.fp
+            set +e
+            column_out="$(./schema_drift.sh compare column-drift.fp 2>&1)"; column_rc=$?
+            set -e
+            printf '%s\n' "$column_out"
+            [[ $column_rc -eq 3 && "$column_out" == *"name_mutant"* ]] || {
+              echo "column drift mutant was not detected with exit 3 and the affected column" >&2
+              exit 1
+            }
+
+            cp expected.fp index-drift.fp
+            node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>l.startsWith("index|agents|")); if(!a)throw Error("index fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|agents_","|agents_mutant_")))' index-drift.fp
+            set +e
+            index_out="$(./schema_drift.sh compare index-drift.fp 2>&1)"; index_rc=$?
+            set -e
+            printf '%s\n' "$index_out"
+            [[ $index_rc -eq 3 && "$index_out" == *"agents_mutant_"* ]] || {
+              echo "index drift mutant was not detected with exit 3 and the affected index" >&2
+              exit 1
+            }
           } 2>&1)"; rc=$?
           printf '%s\n' "$out"
           if [[ $rc -ne 0 ]]; then

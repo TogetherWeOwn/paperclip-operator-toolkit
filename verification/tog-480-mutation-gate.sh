@@ -17,8 +17,8 @@ stage() {
 }
 run_suite() { # dir suite
   local d="$1" suite="$2"
-  "$FIXTURE" >/dev/null
-  rm -f "$d/grants.jsonl" "$d/queue.jsonl" "$d/disabled"
+  "$FIXTURE" >/dev/null || return $?
+  rm -f "$d/grants.jsonl" "$d/queue.jsonl" "$d/disabled" || return $?
   (cd "$d" && COMPANY_ID=00000000-0000-4000-8000-000000000480 \
     PAPERCLIP_SQL_BACKEND=psql PAPERCLIP_API_URL=http://stub.invalid \
     PAPERCLIP_CLI="$d/test/fixtures/orgdb/paperclipai" \
@@ -93,6 +93,11 @@ mutant protected-payload test_privilege_ceilings.sh org_provisioner.sh \
   '"authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' \
   '"authorizationPolicy":{"assignmentPolicy":{"mode":"open"}}}' \
   'DIRECTOR not protected' || rc=1
+mutant permissions-update-omitted test_privilege_ceilings.sh org_provisioner.sh \
+  $'  pc agent permissions:update "$new_id" --payload-json \\
+    '{"canCreateAgents":false,"canCreateSkills":false,"canAssignTasks":false,\n      "authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' --json >/dev/null' \
+  '  true # mutant omits permissions:update' \
+  'DIRECTOR legacy permission flags are not explicitly false' || rc=1
 mutant exact-grant-replacement test_request_queue.sh org_provisioner.sh \
   $'DELETE FROM principal_permission_grants\nWHERE company_id = :\'company_id\'::uuid\n  AND principal_type = \'agent\'\n  AND principal_id = :\'agent_id\';' \
   $'DELETE FROM principal_permission_grants\nWHERE false;' \

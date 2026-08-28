@@ -89,6 +89,7 @@ companywide() { q "SELECT count(*) FROM principal_permission_grants WHERE compan
 self_scoped_ok() { q "SELECT CASE WHEN count(*) FILTER (WHERE scope IS NOT NULL AND scope <> jsonb_build_object('subtreeRootAgentId', :'agent_id')) = 0 THEN 'yes' ELSE 'no' END FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
 dormant()     { q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 protected()   { q "SELECT CASE WHEN permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode'='protected' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+legacy_flags_off() { q "SELECT CASE WHEN permissions->'canCreateAgents'='false'::jsonb AND permissions->'canCreateSkills'='false'::jsonb AND permissions->'canAssignTasks'='false'::jsonb THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 parent_of()   { q "SELECT COALESCE(p.metadata->>'orgRoleId', p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'agent_id'::uuid;" "$1"; }
 
 hdr "1. Upward and lateral creation must be impossible"
@@ -221,6 +222,9 @@ for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
   [[ "$(dormant "$id")" == "yes" ]] && ok "$lbl heartbeat disabled + wakeOnDemand false" || bad "$lbl not dormant"
   [[ "$(protected "$id")" == "yes" ]] && ok "$lbl assignment policy protected" || bad "$lbl not protected"
+  [[ "$(legacy_flags_off "$id")" == "yes" ]] \
+    && ok "$lbl legacy permission flags explicitly false" \
+    || bad "$lbl legacy permission flags are not explicitly false"
 done
 
 hdr "10. Deactivation is descendant-only"
