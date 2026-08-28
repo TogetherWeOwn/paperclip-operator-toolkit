@@ -35,7 +35,12 @@ mkdir "$TMP/bin"
 cat > "$TMP/bin/psql" <<'PSQL'
 #!/usr/bin/env bash
 cat > "${PSQL_STDIN:?}"
-if grep -q 'INSERT INTO agents' "$PSQL_STDIN"; then echo 00000000-0000-4000-8000-000000000099; fi
+[[ "${PSQL_FAIL:-0}" == 0 ]] || { echo "stubbed SQL failure" >&2; exit 9; }
+if grep -q 'INSERT INTO agents' "$PSQL_STDIN"; then
+  echo 00000000-0000-4000-8000-000000000099
+elif grep -q 'SELECT count(\*) FROM updated' "$PSQL_STDIN"; then
+  printf '%s\n' "${PSQL_AFFECTED:-1}"
+fi
 PSQL
 chmod +x "$TMP/bin/psql"
 export PATH="$TMP/bin:$PATH" PSQL_STDIN="$TMP/sql" PAPERCLIP_STUB_LOG="$TMP/calls"
@@ -44,6 +49,43 @@ out="$("$HERE/test/fixtures/orgdb/paperclipai" agent create --company-id 0000000
 [[ "$(jq -r .id <<<"$out")" == 00000000-0000-4000-8000-000000000099 ]] && ok "create echoes recorded id" || bad "create did not echo id"
 [[ "$(jq -c .payload "$TMP/calls")" == "$payload" ]] && ok "stub records payload verbatim" || bad "stub rewrote payload"
 if "$HERE/test/fixtures/orgdb/paperclipai" agent frobnicate >/dev/null 2>&1; then bad "stub accepts an unknown command"; else ok "stub refuses unknown commands"; fi
+
+unknown=00000000-0000-4000-8000-000000000098
+PSQL_FAIL=1 "$HERE/test/fixtures/orgdb/paperclipai" agent permissions:update "$unknown" --payload-json '{}' --json --api-base http://stub >/dev/null 2>&1 \
+  && bad "stub hides permissions:update SQL errors" || ok "stub propagates permissions:update SQL errors"
+PSQL_AFFECTED=0 "$HERE/test/fixtures/orgdb/paperclipai" agent permissions:update "$unknown" --payload-json '{}' --json --api-base http://stub >/dev/null 2>&1 \
+  && bad "stub accepts zero-row permissions:update" || ok "stub refuses zero-row permissions:update"
+PSQL_AFFECTED=2 "$HERE/test/fixtures/orgdb/paperclipai" agent terminate "$unknown" --json --api-base http://stub >/dev/null 2>&1 \
+  && bad "stub accepts multi-row terminate" || ok "stub refuses multi-row terminate"
+
+mkdir "$TMP/reset-bin"
+cat > "$TMP/reset-bin/psql" <<'PSQL'
+#!/usr/bin/env bash
+sql="$(cat)"; printf '%s\n' "$sql" >> "${RESET_SQL_LOG:?}"
+case "$sql" in
+  *'SELECT current_database()'*) printf '%s\n' "${RESET_CONNECTED_DB:-org_fixture}" ;;
+  *"to_regclass('public.org_fixture_sentinel')"*) printf '%s\n' "${RESET_SENTINEL_TABLE:-}" ;;
+  *'SELECT marker FROM public.org_fixture_sentinel'*) printf '%s\n' "${RESET_SENTINEL_VALUE:-paperclip-ops-tooling:TOG-480}" ;;
+  *'SELECT count(*)'*) printf '%s\n' "${RESET_PUBLIC_TABLES:-0}" ;;
+esac
+PSQL
+chmod +x "$TMP/reset-bin/psql"
+reset_cmd="$HERE/test/fixtures/orgdb/reset.sh"
+RESET_SQL_LOG="$TMP/reset-wrong-name.sql" PATH="$TMP/reset-bin:$PATH" PGDATABASE=production "$reset_cmd" >/dev/null 2>&1 \
+  && bad "reset accepts the wrong explicit database" || ok "reset refuses the wrong explicit database"
+if [[ -f "$TMP/reset-wrong-name.sql" ]] && grep -q 'DROP TABLE' "$TMP/reset-wrong-name.sql"; then bad "wrong-database refusal reached DROP"; else ok "wrong-database refusal happens before DROP"; fi
+RESET_SQL_LOG="$TMP/reset-no-sentinel.sql" PATH="$TMP/reset-bin:$PATH" PGDATABASE=org_fixture "$reset_cmd" >/dev/null 2>&1 \
+  && bad "reset accepts a database without the sentinel" || ok "reset refuses a database without the sentinel"
+if grep -q 'DROP TABLE' "$TMP/reset-no-sentinel.sql"; then bad "missing-sentinel refusal reached DROP"; else ok "missing-sentinel refusal happens before DROP"; fi
+RESET_SQL_LOG="$TMP/reset-wrong-connected.sql" RESET_CONNECTED_DB=production PATH="$TMP/reset-bin:$PATH" PGDATABASE=org_fixture "$reset_cmd" >/dev/null 2>&1 \
+  && bad "reset accepts an overridden connected database" || ok "reset verifies the server-side database name"
+if grep -q 'DROP TABLE' "$TMP/reset-wrong-connected.sql"; then bad "connected-database refusal reached DROP"; else ok "connected-database refusal happens before DROP"; fi
+RESET_SQL_LOG="$TMP/reset-init-nonempty.sql" RESET_PUBLIC_TABLES=1 PATH="$TMP/reset-bin:$PATH" PGDATABASE=org_fixture "$reset_cmd" --init >/dev/null 2>&1 \
+  && bad "reset initializes a sentinel over existing tables" || ok "reset refuses to arm a non-empty database"
+if grep -q 'CREATE TABLE public.org_fixture_sentinel' "$TMP/reset-init-nonempty.sql"; then bad "non-empty init created the sentinel"; else ok "non-empty init makes no sentinel write"; fi
+RESET_SQL_LOG="$TMP/reset-valid.sql" RESET_SENTINEL_TABLE=org_fixture_sentinel PATH="$TMP/reset-bin:$PATH" PGDATABASE=org_fixture "$reset_cmd" >/dev/null 2>&1 \
+  && ok "reset reaches the loader only after both guards pass" || bad "reset refuses a valid fixture sentinel"
+if grep -q 'DROP TABLE' "$TMP/reset-valid.sql"; then ok "valid fixture reset executes the DROP"; else bad "valid fixture reset never reached DROP"; fi
 
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -249,6 +249,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Postgres client and jq
         run: sudo apt-get update && sudo apt-get install -y postgresql-client jq
+      - name: Arm the empty throwaway database
+        run: ./test/fixtures/orgdb/reset.sh --init
       - name: Fixture and recording-stub contract
         run: ./test_orgdb_fixture.sh
       - name: Run privilege ceiling suite

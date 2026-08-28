@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Compare the six-table CI fixture with a fingerprint taken from the running
-# Paperclip database. CI tests the detector; the operator comparison still runs
-# where the production schema is reachable.
+# Paperclip database. The contract is columns (including type, nullability and
+# default) plus indexes on those six tables. It intentionally excludes foreign
+# keys, non-index constraints and triggers because the query-compatible fixture
+# omits platform behaviour outside the two privilege suites. CI tests the
+# detector; the operator comparison still runs where production is reachable.
 set -uo pipefail
 ME="$(basename "${BASH_SOURCE[0]}")"
 TABLES="agents budget_policies company_memberships company_secret_bindings heartbeat_runs principal_permission_grants"

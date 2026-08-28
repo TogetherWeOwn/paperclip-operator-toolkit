@@ -39,6 +39,8 @@ const fs=require('fs'), [p,a,r]=process.argv.slice(2); let s=fs.readFileSync(p,'
 if(!s.includes(a)){console.error('mutation anchor missing');process.exit(2)}
 fs.writeFileSync(p,s.replace(a,r));
 NODE
+  mutation_rc=$?
+  if [[ $mutation_rc -ne 0 ]]; then rm -rf "$d"; return "$mutation_rc"; fi
   bash -n "$d/$target" || { echo "$label: mutant does not parse" >&2; rm -rf "$d"; return 2; }
   if run_suite "$d" "$suite" >"$d/out" 2>&1; then
     echo "$label: mutant left $suite green" >&2; rm -rf "$d"; return 1
@@ -47,6 +49,29 @@ NODE
     echo "$label: red, but not on named assertion '$want'" >&2; cat "$d/out"; rm -rf "$d"; return 1
   fi
   echo "ok: $label -> $want"; rm -rf "$d"
+}
+
+mutate_caller_placement() { # stage-dir
+  local d="$1"
+  node - "$d/org_provisioner.sh" <<'NODE'
+const fs=require('fs'), p=process.argv[2]; let s=fs.readFileSync(p,'utf8');
+for (const [a,r] of [
+  ['local caller_ref="" template="" title="" capabilities=""', 'local caller_ref="" caller_parent="" template="" title="" capabilities=""'],
+  ['--arg name "$title" --arg title "$title" --arg parent "$caller_id"', '--arg name "$title" --arg title "$title" --arg parent "${caller_parent:-$caller_id}"']
+]) {
+  if (!s.includes(a)) { console.error(`caller-placement hook anchor missing: ${a}`); process.exit(2) }
+  s=s.replace(a,r)
+}
+fs.writeFileSync(p,s)
+NODE
+  [[ $? -eq 0 ]] || return $?
+  node - "$d/test_privilege_ceilings.sh" <<'NODE'
+const fs=require('fs'), p=process.argv[2]; let s=fs.readFileSync(p,'utf8');
+const a='create --caller T0 --template C1_DIRECTOR_BUILDER --title "TEST Director AI Engineering"';
+const r='create --caller T0 --template C1_DIRECTOR_BUILDER --title "TEST Director AI Engineering" --reports-to 00000000-0000-4000-8000-000000000003';
+if (!s.includes(a)) { console.error('caller-placement invocation anchor missing'); process.exit(2) }
+fs.writeFileSync(p,s.replace(a,r))
+NODE
 }
 
 seed_server_default_grant() { # stage-dir
@@ -82,17 +107,17 @@ mutant ceiling-bypass test_privilege_ceilings.sh lib/provisioning_policy.sh \
   'if false && ! jq -e --arg c "$caller_template" --arg r "$template"' \
   'T0 (tech chief) cannot create another President/COO' || rc=1
 mutant caller-placement test_privilege_ceilings.sh org_provisioner.sh \
-  'die "reportsTo cannot be supplied by the caller; the service sets it to the caller' \
-  'die "mutant accepts caller-controlled placement instead of refusing: ' \
-  'caller cannot supply its own reportsTo' || rc=1
+  $'--reports-to|--parent)\n        # Invariant 3: placement is the service\'s decision, never the caller\'s.\n        die "reportsTo cannot be supplied by the caller; the service sets it to the caller\'s own subtree.";;' \
+  $'--reports-to|--parent)\n        caller_parent="$2"; shift 2;;' \
+  'DIRECTOR create payload accepted caller-controlled placement' mutate_caller_placement || rc=1
 mutant dormant-payload test_privilege_ceilings.sh org_provisioner.sh \
   'runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}}' \
   'runtimeConfig:{heartbeat:{enabled:true, wakeOnDemand:true}}' \
   'DIRECTOR not dormant' || rc=1
-mutant protected-payload test_privilege_ceilings.sh org_provisioner.sh \
-  '"authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' \
-  '"authorizationPolicy":{"assignmentPolicy":{"mode":"open"}}}' \
-  'DIRECTOR not protected' || rc=1
+mutant protected-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+  'authorizationPolicy:{assignmentPolicy:{mode:"protected"}}' \
+  'authorizationPolicy:{assignmentPolicy:{mode:"open"}}' \
+  'DIRECTOR agent.create payload was not born protected' || rc=1
 mutant permissions-update-omitted test_privilege_ceilings.sh org_provisioner.sh \
   $'  pc agent permissions:update "$new_id" --payload-json \\\n    \'{"canCreateAgents":false,"canCreateSkills":false,"canAssignTasks":false,\n      "authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}\' --json >/dev/null' \
   '  true # mutant omits permissions:update' \
@@ -100,11 +125,15 @@ mutant permissions-update-omitted test_privilege_ceilings.sh org_provisioner.sh 
 mutant exact-grant-replacement test_request_queue.sh org_provisioner.sh \
   $'DELETE FROM principal_permission_grants\nWHERE company_id = :\'company_id\'::uuid\n  AND principal_type = \'agent\'\n  AND principal_id = :\'agent_id\';' \
   $'DELETE FROM principal_permission_grants\nWHERE false;' \
-  'default tasks:assign survived' seed_server_default_grant || rc=1
-mutant self-scope test_privilege_ceilings.sh org_provisioner.sh \
+  'company-wide organizational grant survived' seed_server_default_grant || rc=1
+mutant self-scope-foreign test_privilege_ceilings.sh org_provisioner.sh \
   'scope: (if .self then {subtreeRootAgentId:$id} else null end)' \
   'scope: (if .self then {subtreeRootAgentId:"00000000-0000-4000-8000-000000000006"} else null end)' \
-  'DIRECTOR has a scope pointing somewhere else' || rc=1
+  'DIRECTOR SELF scope mismatch' || rc=1
+mutant self-scope-null test_request_queue.sh org_provisioner.sh \
+  'scope: (if .self then {subtreeRootAgentId:$id} else null end)' \
+  'scope: null' \
+  'director has 3 SELF permission(s) with NULL or foreign scope' || rc=1
 mutant descendant-deactivate test_privilege_ceilings.sh org_provisioner.sh \
   'is_descendant_of "$caller_id" "$target_id" \' \
   'true \' \

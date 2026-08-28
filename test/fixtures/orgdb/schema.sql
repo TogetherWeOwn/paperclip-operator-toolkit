@@ -1,11 +1,14 @@
 -- TOG-480 CI fixture schema.
 --
 -- Extracted from the ordered /app/packages/db/src/migrations inputs and
--- meta/0211_snapshot.json on 2026-08-27. These are the six platform tables the operator suites read or
--- write. Foreign keys to tables outside this six-table fixture are deliberately
--- omitted: this is a query-compatible fixture, not a second Paperclip schema.
--- schema_drift.sh compares every column, type, nullability, default and index
--- against the running database so this snapshot cannot silently rot.
+-- meta/0211_snapshot.json on 2026-08-27. These are the six platform tables the
+-- operator suites read or write. This is a query-compatible fixture, not a
+-- second Paperclip schema. Its drift contract is deliberately limited to every
+-- column (type, nullability, default) and every index on those six tables.
+-- Foreign keys, CHECK/UNIQUE constraints not represented by indexes, and
+-- triggers are outside that contract: foreign keys to tables outside the
+-- fixture are intentionally omitted, and the suites do not exercise platform
+-- trigger behaviour. schema_drift.sh names the same boundary.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE agents (

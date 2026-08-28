@@ -2,7 +2,7 @@
 # Dumb recording stand-in for the three Paperclip CLI calls org_provisioner.sh
 # makes. It maps payload keys to columns and stores the values it was handed; it
 # does not calculate permissions, heartbeat policy, placement, or grants.
-set -uo pipefail
+set -euo pipefail
 
 command -v jq >/dev/null || { echo "stub: jq required" >&2; exit 2; }
 command -v psql >/dev/null || { echo "stub: psql required" >&2; exit 2; }
@@ -46,7 +46,9 @@ SELECT :'company'::uuid,
        COALESCE(j->'permissions','{}'::jsonb), j->'metadata', NULLIF(j->>'reportsTo','')::uuid
 FROM p RETURNING id::text;
 SQL
-)" || exit $?
+)"
+    [[ "$id" =~ ^[0-9a-fA-F-]{36}$ ]] \
+      || { echo "stub: create did not insert exactly one agent" >&2; exit 1; }
     log_call "$(jq -cn --arg command agent.create --arg companyId "$company" --argjson payload "$payload" '{command:$command,companyId:$companyId,payload:$payload}')"
     jq -cn --arg id "$id" '{id:$id}'
     ;;
@@ -58,10 +60,17 @@ SQL
       *) echo "stub: unsupported permissions:update argument '$1'" >&2; exit 2 ;;
     esac; done
     [[ -n "$id" && -n "$payload" ]] || { echo "stub: permissions:update needs id and payload" >&2; exit 2; }
-    psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" -v payload="$payload" <<'SQL' >/dev/null
-UPDATE agents SET permissions=:'payload'::jsonb, updated_at=now()
-WHERE id=:'agent'::uuid;
+    affected="$(psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" -v payload="$payload" <<'SQL'
+WITH updated AS (
+  UPDATE agents SET permissions=:'payload'::jsonb, updated_at=now()
+  WHERE id=:'agent'::uuid
+  RETURNING 1
+)
+SELECT count(*) FROM updated;
 SQL
+)"
+    [[ "$affected" == "1" ]] \
+      || { echo "stub: permissions:update affected '$affected' agents, expected 1" >&2; exit 1; }
     log_call "$(jq -cn --arg command agent.permissions:update --arg agentId "$id" --argjson payload "$payload" '{command:$command,agentId:$agentId,payload:$payload}')"
     jq -cn --arg id "$id" '{id:$id}'
     ;;
@@ -72,9 +81,17 @@ SQL
       *) echo "stub: unsupported terminate argument '$1'" >&2; exit 2 ;;
     esac; done
     [[ -n "$id" ]] || { echo "stub: terminate needs id" >&2; exit 2; }
-    psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" <<'SQL' >/dev/null
-UPDATE agents SET status='terminated', updated_at=now() WHERE id=:'agent'::uuid;
+    affected="$(psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" <<'SQL'
+WITH updated AS (
+  UPDATE agents SET status='terminated', updated_at=now()
+  WHERE id=:'agent'::uuid
+  RETURNING 1
+)
+SELECT count(*) FROM updated;
 SQL
+)"
+    [[ "$affected" == "1" ]] \
+      || { echo "stub: terminate affected '$affected' agents, expected 1" >&2; exit 1; }
     log_call "$(jq -cn --arg command agent.terminate --arg agentId "$id" '{command:$command,agentId:$agentId}')"
     jq -cn --arg id "$id" '{id:$id}'
     ;;

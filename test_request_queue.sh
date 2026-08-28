@@ -199,8 +199,16 @@ if [[ -n "${DIR_ID:-}" ]]; then
   [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
     && ok "director holds exactly the C1_DIRECTOR_BUILDER template" \
     || bad "director grants are '$keys'"
-  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key='tasks:assign';" "$DIR_ID")"
-  [[ "$cw" == "0" ]] && ok "server's default company-wide tasks:assign was replaced away" || bad "default tasks:assign survived (count='$cw')"
+  scoped="$(q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope=jsonb_build_object('subtreeRootAgentId', :'text');" "$DIR_ID")"
+  [[ "$scoped" == "agents:configure,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
+    && ok "director SELF grants have the exact own-subtree scope" \
+    || bad "director own-subtree grants are '$scoped'"
+  scope_errors="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts') AND scope IS DISTINCT FROM jsonb_build_object('subtreeRootAgentId', :'text');" "$DIR_ID")"
+  [[ "$scope_errors" == "0" ]] \
+    && ok "director has no NULL or foreign scope on a SELF permission" \
+    || bad "director has $scope_errors SELF permission(s) with NULL or foreign scope"
+  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$DIR_ID")"
+  [[ "$cw" == "0" ]] && ok "server/default SELF grants were replaced away from company scope" || bad "company-wide organizational grant survived (count='$cw')"
   dorm="$(q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'text'::uuid;" "$DIR_ID")"
   [[ "$dorm" == "yes" ]] && ok "queue-provisioned agent is born dormant" || bad "queue-provisioned agent is not dormant"
 else bad "no director id captured"; fi
