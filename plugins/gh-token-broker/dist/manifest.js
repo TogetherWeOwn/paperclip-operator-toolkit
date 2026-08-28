@@ -29,6 +29,10 @@ export const manifest = {
     "secrets.read-ref",
     // Call api.github.com to mint.
     "http.outbound",
+    // Persist disclosure grant consumption and signed receipts server-side.
+    "database.namespace.read",
+    "database.namespace.write",
+    "database.namespace.migrate",
     // Derive scope server-side from the issue the caller actually holds.
     "issues.read",
     // TOG-309. Held for its *side effects*, not as the gate: the host's
@@ -48,7 +52,31 @@ export const manifest = {
     worker: "./dist/worker.js",
   },
 
+  database: {
+    namespaceSlug: "gh_token_broker",
+    migrationsDir: "./migrations",
+    coreReadTables: ["heartbeat_runs"],
+  },
+
   apiRoutes: [
+    {
+      routeKey: "disclosure-preflight",
+      method: "POST",
+      path: "/issues/:issueId/external-disclosures/preflight",
+      auth: "agent",
+      capability: "api.routes.register",
+      checkoutPolicy: "none",
+      companyResolution: { from: "issue", param: "issueId" },
+    },
+    {
+      routeKey: "disclose",
+      method: "POST",
+      path: "/issues/:issueId/external-disclosures",
+      auth: "agent",
+      capability: "api.routes.register",
+      checkoutPolicy: "none",
+      companyResolution: { from: "issue", param: "issueId" },
+    },
     {
       // Step 1 of the operator's de-risk order: prove that agent-authenticated
       // plugin API routes dispatch at all, and that the host hands the worker an
@@ -151,6 +179,32 @@ export const manifest = {
         title: "Default permission profile",
         description:
           "Applied when a project does not set GH_APP_PERMISSIONS. Defaults to contents/pull_requests/issues write plus metadata read.",
+      },
+      externalDisclosureAuthorizers: {
+        type: "array",
+        title: "External disclosure authorizers",
+        description:
+          "Trusted Ed25519 public keys and their authorizing principals. Empty or omitted fails closed.",
+        default: [],
+        items: {
+          type: "object",
+          required: ["keyId", "algorithm", "authorizingPrincipal", "publicKeyPem"],
+          additionalProperties: false,
+          properties: {
+            keyId: { type: "string" },
+            algorithm: { type: "string", enum: ["ed25519"] },
+            authorizingPrincipal: {
+              type: "object",
+              required: ["principalClass", "principalId"],
+              additionalProperties: false,
+              properties: {
+                principalClass: { type: "string" },
+                principalId: { type: "string" },
+              },
+            },
+            publicKeyPem: { type: "string" },
+          },
+        },
       },
     },
   },

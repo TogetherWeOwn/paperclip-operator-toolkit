@@ -38,6 +38,51 @@ the caller cannot influence them. **`runId` is the exception**, and an earlier
 revision of this file said otherwise. See
 [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 
+### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures/preflight`
+
+Read-only production preflight for the task-specific external mutation gate
+added after
+[`TOG-574`](../../docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md).
+The request carries one signed immutable grant, the exact approval-record text,
+and the exact artifact bodies. The broker:
+
+1. verifies the signature and exact approval/artifact hashes;
+2. requires the host-propagated actor source to be `agent_jwt` (current hosts do
+   not propagate it yet, so production fails closed until that host change lands),
+   then resolves the signed run against `public.heartbeat_runs`, requiring a
+   current `running` row for the calling agent and route issue;
+3. retains the host-recorded session ID rather than copying the run ID;
+4. mints the configured GitHub App token to the signed repository/permission
+   subset and verifies GitHub's actual returned grant; and
+5. renders separate `capability`, `authority`, and `mutation` objects before any
+   external mutation, then records a five-minute one-shot `preflightId` bound to
+   the canonical grant and request hashes.
+
+### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures`
+
+The submit body is the same exact request plus the returned `preflightId`.
+The broker recomputes every capability and authority check, then atomically
+changes the server-side grant row from `preflighted` to `claimed` only when the
+confirmation is present, unexpired, unconsumed, and bound to the same request.
+Missing, expired, replayed, or substituted confirmations fail before the
+external request. It then performs the mutation inside the broker and finalizes
+the same row as the redacted receipt.
+
+The receipt retains the response status/identifier, preflight/approval IDs,
+approval and artifact hashes, host-derived issue/run/actual session identity,
+token issue/expiry, installation ID, repository selection/list and effective
+permissions. It never retains or returns the token, App private key, approval
+text, private artifact body, or remote response body.
+
+Production supports only the exact configured GitHub App principal. A human
+principal grant is deliberately refused; human-token handling exists only in the
+offline protocol fixture to prove principal substitution fails closed.
+
+The checked-in repository provisions no real authorizer public key. Operators
+must independently add a legitimate Ed25519 authorizer entry to the broker's
+`externalDisclosureAuthorizers` config before any real grant can pass. The test
+suite generates a fresh fixture keypair at runtime.
+
 ### `POST /api/plugins/gh-token-broker/api/issues/:issueId/github-token`
 
 Mints the token. Request body is optional; both fields may only *narrow* the

@@ -144,7 +144,10 @@ export async function mintInstallationToken(fetchImpl, installationId, jwt, { re
 
   return {
     token: body.token,
+    issuedAt: new Date().toISOString(),
     expiresAt: body.expires_at ?? null,
+    installationId: String(installationId),
+    repositorySelection: body.repository_selection ?? (Array.isArray(body.repositories) ? "selected" : null),
     // Echo back what GitHub actually granted, not what we asked for. If these
     // diverge, the App's own ceiling is narrower than the profile and the
     // caller should see the truth.
@@ -153,4 +156,28 @@ export async function mintInstallationToken(fetchImpl, installationId, jwt, { re
       ? body.repositories.map((r) => r?.name).filter(Boolean)
       : null,
   };
+}
+
+export async function submitRepositoryMutation(fetchImpl, token, destination, action, body) {
+  const response = await fetchImpl(
+    `${destination.apiOrigin}${destination.endpoint}`,
+    {
+      method: action,
+      headers: {
+        ...API_HEADERS,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body,
+      redirect: "error",
+    },
+  );
+
+  let parsed = null;
+  try {
+    parsed = await response.json();
+  } catch {
+    parsed = null;
+  }
+  return { status: response.status, ok: response.ok, body: parsed };
 }

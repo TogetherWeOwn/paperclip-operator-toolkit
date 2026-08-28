@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createVerify, generateKeyPairSync } from "node:crypto";
+import crypto, { createVerify, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { pluginManifestV1Schema } from "@paperclipai/shared";
@@ -18,6 +18,7 @@ import {
   resolveScope,
 } from "../dist/scope.js";
 import { createAppJwt, mintInstallationToken } from "../dist/github.js";
+import { canonical, sha256 } from "../dist/disclosure.js";
 import { MINTABLE_ISSUE_STATUSES, assertMintOwnership } from "../dist/ownership.js";
 import { plugin } from "../dist/worker.js";
 
@@ -43,7 +44,16 @@ test("manifest validates against the host's own schema", () => {
   );
 });
 
-test("both routes are agent-auth and declare the capability", () => {
+test("manifest declares the external-disclosure authorizer trust store", () => {
+  const schema = manifest.instanceConfigSchema.properties.externalDisclosureAuthorizers;
+  assert.equal(schema.type, "array");
+  assert.deepEqual(schema.default, []);
+  assert.deepEqual(schema.items.required, ["keyId", "algorithm", "authorizingPrincipal", "publicKeyPem"]);
+  assert.deepEqual(schema.items.properties.algorithm.enum, ["ed25519"]);
+  assert.equal(schema.items.additionalProperties, false);
+});
+
+test("all routes are agent-auth and declare the capability", () => {
   for (const route of manifest.apiRoutes) {
     assert.equal(route.auth, "agent", `${route.routeKey} must be agent-only`);
     assert.equal(route.capability, "api.routes.register");
@@ -79,6 +89,9 @@ test("manifest requests no capability beyond what the broker uses", () => {
     "api.routes.register",
     "secrets.read-ref",
     "http.outbound",
+    "database.namespace.read",
+    "database.namespace.write",
+    "database.namespace.migrate",
     "issues.read",
     "issues.checkout",
     "projects.read",
@@ -854,6 +867,7 @@ function issuesClient(row = issueRow(), extra = {}) {
 function makeCtx(overrides = {}) {
   const logs = [];
   const activity = [];
+  const disclosureRows = new Map();
   const ctx = {
     logger: {
       info: (message, meta) => logs.push({ level: "info", message, meta }),
@@ -864,16 +878,22 @@ function makeCtx(overrides = {}) {
     config: { get: async () => ({ appId: "4685085", org: "TogetherWeOwn", privateKeyRef: { type: "secret_ref", secretId: "pem" }, installationId: 99 }) },
     secrets: { resolve: async () => TEST_PEM },
     http: {
-      fetch: async () => ({
-        status: 201,
-        ok: true,
-        json: async () => ({
-          token: "ghs_minted",
-          expires_at: "2026-08-23T18:00:00Z",
-          permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
-          repositories: [{ name: "nntune" }],
-        }),
-      }),
+      fetch: async (url) => {
+        if (url.includes("/access_tokens")) {
+          return {
+            status: 201,
+            ok: true,
+            json: async () => ({
+              token: "ghs_minted",
+              expires_at: "2026-08-23T18:00:00Z",
+              repository_selection: "selected",
+              permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+              repositories: [{ name: "nntune" }],
+            }),
+          };
+        }
+        return { status: 404, ok: false, json: async () => ({ message: "unexpected" }) };
+      },
     },
     issues: issuesClient(),
     projects: {
@@ -881,9 +901,49 @@ function makeCtx(overrides = {}) {
       getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
     },
     activity: { log: async (entry) => activity.push(entry) },
+    db: {
+      namespace: "plugin_gh_token_broker_c304a73ea6",
+      query: async (sql, params) => {
+        if (!sql.includes("FROM public.heartbeat_runs")) throw new Error(`unexpected SQL: ${sql}`);
+        if (params[0] !== "run-abc" || params[1] !== COMPANY || params[2] !== "agent-1") return [];
+        return [{
+          id: "run-abc",
+          company_id: COMPANY,
+          agent_id: "agent-1",
+          status: "running",
+          session_id_before: "session-abc",
+          session_id_after: null,
+          context_snapshot: { issueId: ISSUE },
+        }];
+      },
+      execute: async (sql, params) => {
+        if (sql.startsWith("INSERT INTO")) {
+          if (disclosureRows.has(params[0])) return { rowCount: 0 };
+          disclosureRows.set(params[0], JSON.parse(params[6]));
+          return { rowCount: 1 };
+        }
+        if (sql.startsWith("UPDATE") && sql.includes("SET status = 'claimed'")) {
+          const current = disclosureRows.get(params[0]);
+          if (
+            !current || current.status !== "preflighted" ||
+            current.preflightId !== params[1] || current.requestHash !== params[2] ||
+            Date.parse(current.expiresAt) <= Date.now()
+          ) return { rowCount: 0 };
+          disclosureRows.set(params[0], JSON.parse(params[3]));
+          return { rowCount: 1 };
+        }
+        if (sql.startsWith("UPDATE")) {
+          const current = disclosureRows.get(params[0]);
+          if (!current || current.status !== "claimed") return { rowCount: 0 };
+          disclosureRows.set(params[0], { ...JSON.parse(params[2]), status: params[1] });
+          return { rowCount: 1 };
+        }
+        throw new Error(`unexpected SQL: ${sql}`);
+      },
+    },
     ...overrides,
   };
-  return { ctx, logs, activity };
+  return { ctx, logs, activity, disclosureRows };
 }
 
 const AGENT_ACTOR = {
@@ -892,6 +952,7 @@ const AGENT_ACTOR = {
   agentId: "agent-1",
   userId: null,
   runId: "run-abc",
+  actorSource: "agent_jwt",
 };
 
 function request(routeKey, extra = {}) {
@@ -904,7 +965,9 @@ function request(routeKey, extra = {}) {
     body: {},
     actor: AGENT_ACTOR,
     companyId: COMPANY,
-    headers: {},
+    headers: routeKey === "disclosure-preflight" || routeKey === "disclose"
+      ? { "x-paperclip-run-id": AGENT_ACTOR.runId }
+      : {},
     ...extra,
   };
 }
@@ -919,6 +982,248 @@ test("whoami echoes the host-derived runId", async () => {
   assert.equal(response.body.agentId, "agent-1");
   assert.equal(response.body.companyId, COMPANY);
   assert.equal(response.body.actorType, "agent");
+});
+
+const { privateKey: DISCLOSURE_PRIVATE_KEY, publicKey: DISCLOSURE_PUBLIC_KEY } = generateKeyPairSync("ed25519");
+const DISCLOSURE_KEY_ID = "test-disclosure-ed25519-v1";
+
+function disclosureBody(overrides = {}) {
+  const report = JSON.stringify({ title: "private report", description: "PRIVATE BODY" });
+  const approvalRecord = "approved exact disclosure set\n";
+  const now = Date.now();
+  const unsigned = {
+    version: 1,
+    destination: {
+      provider: "github",
+      apiOrigin: "https://api.github.com",
+      repository: "TogetherWeOwn/nntune",
+      endpoint: "/repos/TogetherWeOwn/nntune/private-vulnerability-reporting",
+    },
+    channel: "github-private-vulnerability-reporting",
+    action: "POST",
+    artifacts: [{ id: "report-1", sha256: sha256(Buffer.from(report)) }],
+    authenticatingPrincipal: {
+      principalClass: "github_app",
+      credentialClass: "github_app_installation_token",
+      principalId: "github-app:4685085",
+    },
+    authorizingPrincipal: { principalClass: "owner", principalId: "test-owner" },
+    approvalRecord: { id: "approval-exact-1", source: "TOG-576 interaction", sha256: sha256(Buffer.from(approvalRecord)) },
+    approvedAt: new Date(now - 60_000).toISOString(),
+    expiresAt: new Date(now + 15 * 60_000).toISOString(),
+    allowedIssueId: "TOG-576",
+    allowedRunId: "run-abc",
+    requiredPermissions: { security_advisories: "write" },
+    ...overrides,
+  };
+  return {
+    grant: {
+      ...unsigned,
+      signature: {
+        algorithm: "ed25519",
+        keyId: DISCLOSURE_KEY_ID,
+        value: crypto.sign(null, Buffer.from(canonical(unsigned)), DISCLOSURE_PRIVATE_KEY).toString("base64"),
+      },
+    },
+    approvalRecord,
+    artifacts: [{ id: "report-1", body: report }],
+  };
+}
+
+function disclosureConfig() {
+  return {
+    appId: "4685085",
+    org: "TogetherWeOwn",
+    privateKeyRef: { type: "secret_ref", secretId: "pem" },
+    installationId: 99,
+    externalDisclosureAuthorizers: [{
+      keyId: DISCLOSURE_KEY_ID,
+      algorithm: "ed25519",
+      authorizingPrincipal: { principalClass: "owner", principalId: "test-owner" },
+      publicKeyPem: DISCLOSURE_PUBLIC_KEY.export({ type: "spki", format: "pem" }),
+    }],
+  };
+}
+
+function disclosureCtx(overrides = {}) {
+  return makeCtx({
+    config: { get: async () => disclosureConfig() },
+    issues: issuesClient(issueRow({ id: ISSUE, identifier: "TOG-576" })),
+    projects: {
+      get: async () => ({
+        id: PROJECT,
+        env: {
+          GH_APP_REPOS: "nntune",
+          GH_APP_PERMISSIONS: "metadata=read,security_advisories=write",
+        },
+      }),
+      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
+    },
+    ...overrides,
+  });
+}
+
+test("server-side disclosure preflight renders exact authority then consumes once with a redacted receipt", async () => {
+  let mutationPosts = 0;
+  const { ctx, disclosureRows } = disclosureCtx({
+    http: {
+      fetch: async (url) => {
+        if (url.includes("/access_tokens")) {
+          return {
+            status: 201,
+            ok: true,
+            json: async () => ({
+              token: "ghs_minted",
+              expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+              repository_selection: "selected",
+              permissions: { metadata: "read", security_advisories: "write" },
+              repositories: [{ name: "nntune" }],
+            }),
+          };
+        }
+        mutationPosts += 1;
+        return { status: 201, ok: true, json: async () => ({ ghsa_id: "GHSA-test-0000-0000" }) };
+      },
+    },
+  });
+  await plugin.definition.setup(ctx);
+  const body = disclosureBody();
+
+  const preflight = await plugin.definition.onApiRequest(request("disclosure-preflight", { body }));
+  assert.equal(preflight.status, 200, JSON.stringify(preflight.body));
+  assert.equal(preflight.body.capability.authenticatingPrincipal.principalClass, "github_app");
+  assert.equal(preflight.body.authority.allowedIssueId, "TOG-576");
+  assert.equal(preflight.body.authority.allowedRunId, "run-abc");
+  assert.equal(preflight.body.mutation.approvalId, "approval-exact-1");
+  assert.equal(preflight.body.mutation.artifacts[0].sha256, body.grant.artifacts[0].sha256);
+  assert.equal(mutationPosts, 0, "preflight performed an external mutation");
+
+  const first = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...body, preflightId: preflight.body.confirmation.preflightId },
+  }));
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.receipt.artifacts[0].responseStatus, 201);
+  assert.equal(first.body.receipt.artifacts[0].responseIdentifier.value, "GHSA-test-0000-0000");
+  assert.equal(first.body.receipt.sessionId, "session-abc");
+  assert.notEqual(first.body.receipt.sessionId, first.body.receipt.runId);
+  assert.equal(mutationPosts, 1);
+  assert.equal(disclosureRows.size, 1);
+  const serialized = JSON.stringify([...disclosureRows.values()]);
+  assert.ok(!serialized.includes("ghs_minted"));
+  assert.ok(!serialized.includes("PRIVATE BODY"));
+
+  const replay = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...body, preflightId: preflight.body.confirmation.preflightId },
+  }));
+  assert.equal(replay.status, 409);
+  assert.match(replay.body.error, /missing, expired, mismatched, or already consumed/);
+  assert.equal(mutationPosts, 1);
+});
+
+test("server-side disclosure requires a run-JWT-bound header and rejects substitutions", async () => {
+  const { ctx } = disclosureCtx();
+  await plugin.definition.setup(ctx);
+
+  const agentKeyStyle = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", {
+      body: disclosureBody(),
+      actor: { ...AGENT_ACTOR, actorSource: "agent_key" },
+    }),
+  );
+  assert.equal(agentKeyStyle.status, 403);
+  assert.match(agentKeyStyle.body.error, /agent_jwt actor source/);
+
+  const omittedSource = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", {
+      body: disclosureBody(),
+      actor: { ...AGENT_ACTOR, actorSource: undefined },
+    }),
+  );
+  assert.equal(omittedSource.status, 403);
+  assert.match(omittedSource.body.error, /agent_jwt actor source/);
+
+  const wrongRun = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", { body: disclosureBody({ allowedRunId: "different-run" }) }),
+  );
+  assert.equal(wrongRun.status, 403);
+  assert.match(wrongRun.body.error, /current run/);
+
+  const human = disclosureBody({
+    authenticatingPrincipal: {
+      principalClass: "human",
+      credentialClass: "github_user_token",
+      principalId: "github-user:owner-login",
+    },
+  });
+  const wrongPrincipal = await plugin.definition.onApiRequest(request("disclosure-preflight", { body: human }));
+  assert.equal(wrongPrincipal.status, 403);
+  assert.match(wrongPrincipal.body.error, /only the exact configured GitHub App principal/);
+
+  const noRun = disclosureCtx({ db: { ...ctx.db, query: async () => [] } });
+  await plugin.definition.setup(noRun.ctx);
+  const forgedHeader = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", { body: disclosureBody() }),
+  );
+  assert.equal(forgedHeader.status, 403);
+  assert.match(forgedHeader.body.error, /current running heartbeat run/);
+});
+
+test("signed destination rejects dot-segment and encoding substitutions", async () => {
+  const { ctx } = disclosureCtx();
+  await plugin.definition.setup(ctx);
+
+  for (const endpoint of [
+    "/repos/TogetherWeOwn/nntune/issues/123/../456/comments",
+    "/repos/TogetherWeOwn/nntune/issues/123/%2e%2e/456/comments",
+    "/repos/TogetherWeOwn/nntune/issues//456/comments",
+  ]) {
+    const response = await plugin.definition.onApiRequest(
+      request("disclosure-preflight", {
+        body: disclosureBody({
+          destination: {
+            provider: "github",
+            apiOrigin: "https://api.github.com",
+            repository: "TogetherWeOwn/nntune",
+            endpoint,
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 400, `${endpoint}: ${JSON.stringify(response.body)}`);
+    assert.match(response.body.error, /canonical path|canonical URL pathname/);
+  }
+});
+
+test("submission refuses without the matching one-shot preflight confirmation", async () => {
+  let mutationPosts = 0;
+  const { ctx } = disclosureCtx({
+    http: {
+      fetch: async (url) => {
+        if (url.includes("/access_tokens")) {
+          return {
+            status: 201,
+            ok: true,
+            json: async () => ({
+              token: "ghs_minted",
+              expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+              repository_selection: "selected",
+              permissions: { metadata: "read", security_advisories: "write" },
+              repositories: [{ name: "nntune" }],
+            }),
+          };
+        }
+        mutationPosts += 1;
+        return { status: 201, ok: true, json: async () => ({}) };
+      },
+    },
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...disclosureBody(), preflightId: "not-a-real-confirmation" },
+  }));
+  assert.equal(response.status, 409);
+  assert.equal(mutationPosts, 0);
 });
 
 test("mint returns a scoped token and never the private key", async () => {
