@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Dumb recording stand-in for the three Paperclip CLI calls org_provisioner.sh
+# makes. It maps payload keys to columns and stores the values it was handed; it
+# does not calculate permissions, heartbeat policy, placement, or grants.
+set -euo pipefail
+
+command -v jq >/dev/null || { echo "stub: jq required" >&2; exit 2; }
+command -v psql >/dev/null || { echo "stub: psql required" >&2; exit 2; }
+
+log_call() {
+  [[ -n "${PAPERCLIP_STUB_LOG:-}" ]] || return 0
+  printf '%s\n' "$1" >> "$PAPERCLIP_STUB_LOG"
+}
+
+# org_provisioner appends this global option after the command-specific argv.
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --api-base) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- "${args[@]}"
+
+[[ "${1:-}" == agent ]] || { echo "stub: unsupported command" >&2; exit 2; }
+case "${2:-}" in
+  create)
+    shift 2; company=""; payload=""
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --company-id) company="${2:-}"; shift 2 ;;
+      --payload-json) payload="${2:-}"; shift 2 ;;
+      --json) shift ;;
+      *) echo "stub: unsupported agent create argument '$1'" >&2; exit 2 ;;
+    esac; done
+    [[ -n "$company" && -n "$payload" ]] || { echo "stub: create needs company and payload" >&2; exit 2; }
+    jq -e 'type=="object"' <<<"$payload" >/dev/null || { echo "stub: invalid payload" >&2; exit 2; }
+    id="$(psql -Atq -v ON_ERROR_STOP=1 -v company="$company" -v payload="$payload" <<'SQL'
+WITH p AS (SELECT :'payload'::jsonb AS j)
+INSERT INTO agents
+  (company_id, name, role, title, capabilities, adapter_type, adapter_config,
+   runtime_config, budget_monthly_cents, permissions, metadata, reports_to)
+SELECT :'company'::uuid,
+       j->>'name', COALESCE(j->>'role','general'), j->>'title', j->>'capabilities',
+       COALESCE(j->>'adapterType','process'), COALESCE(j->'adapterConfig','{}'::jsonb),
+       COALESCE(j->'runtimeConfig','{}'::jsonb), COALESCE((j->>'budgetMonthlyCents')::integer,0),
+       COALESCE(j->'permissions','{}'::jsonb), j->'metadata', NULLIF(j->>'reportsTo','')::uuid
+FROM p RETURNING id::text;
+SQL
+)"
+    [[ "$id" =~ ^[0-9a-fA-F-]{36}$ ]] \
+      || { echo "stub: create did not insert exactly one agent" >&2; exit 1; }
+    log_call "$(jq -cn --arg command agent.create --arg companyId "$company" --argjson payload "$payload" '{command:$command,companyId:$companyId,payload:$payload}')"
+    jq -cn --arg id "$id" '{id:$id}'
+    ;;
+  permissions:update)
+    id="${3:-}"; shift 3; payload=""
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --payload-json) payload="${2:-}"; shift 2 ;;
+      --json) shift ;;
+      *) echo "stub: unsupported permissions:update argument '$1'" >&2; exit 2 ;;
+    esac; done
+    [[ -n "$id" && -n "$payload" ]] || { echo "stub: permissions:update needs id and payload" >&2; exit 2; }
+    affected="$(psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" -v payload="$payload" <<'SQL'
+WITH updated AS (
+  UPDATE agents SET permissions=:'payload'::jsonb, updated_at=now()
+  WHERE id=:'agent'::uuid
+  RETURNING 1
+)
+SELECT count(*) FROM updated;
+SQL
+)"
+    [[ "$affected" == "1" ]] \
+      || { echo "stub: permissions:update affected '$affected' agents, expected 1" >&2; exit 1; }
+    log_call "$(jq -cn --arg command agent.permissions:update --arg agentId "$id" --argjson payload "$payload" '{command:$command,agentId:$agentId,payload:$payload}')"
+    jq -cn --arg id "$id" '{id:$id}'
+    ;;
+  terminate)
+    id="${3:-}"; shift 3
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --json) shift ;;
+      *) echo "stub: unsupported terminate argument '$1'" >&2; exit 2 ;;
+    esac; done
+    [[ -n "$id" ]] || { echo "stub: terminate needs id" >&2; exit 2; }
+    affected="$(psql -Atq -v ON_ERROR_STOP=1 -v agent="$id" <<'SQL'
+WITH updated AS (
+  UPDATE agents SET status='terminated', updated_at=now()
+  WHERE id=:'agent'::uuid
+  RETURNING 1
+)
+SELECT count(*) FROM updated;
+SQL
+)"
+    [[ "$affected" == "1" ]] \
+      || { echo "stub: terminate affected '$affected' agents, expected 1" >&2; exit 1; }
+    log_call "$(jq -cn --arg command agent.terminate --arg agentId "$id" '{command:$command,agentId:$agentId}')"
+    jq -cn --arg id "$id" '{id:$id}'
+    ;;
+  *) echo "stub: unsupported agent command '${2:-}'" >&2; exit 2 ;;
+esac

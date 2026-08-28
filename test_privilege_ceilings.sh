@@ -5,10 +5,12 @@
 #
 # Creates a temporary test subtree under T0 and removes it at the end.
 #
-# NEEDS THE LIVE COMPANY DATABASE. org_provisioner.sh has no ORG_SNAPSHOT seam,
-# so there is no offline mode for this suite and CI cannot run it. See the
-# pcsql_preflight guard below, and the header of test_request_queue.sh for the
-# measurement that motivated both (TOG-402): a refusal-shaped assertion accepts
+# NEEDS A COMPANY-SHAPED POSTGRES DATABASE. org_provisioner.sh has no
+# ORG_SNAPSHOT seam, so this suite cannot run as a purely offline unit test. CI
+# supplies a throwaway schema/org fixture plus a dumb recording CLI; the VPS run
+# remains necessary for the real Paperclip API contract. See the pcsql_preflight
+# guard below, and the header of test_request_queue.sh for the measurement that
+# motivated both (TOG-402): a refusal-shaped assertion accepts
 # ANY refusal, so a tool that dies at "caller not found" satisfies a case that
 # names the delegation ceiling. Here that produced 2 undeserved passes out of
 # 36 with no podman present; the sibling suite produced 15 of 31.
@@ -83,10 +85,14 @@ qnum() { local v; v="$(q "$@")"; [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v" || p
 
 grant_count() { q "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
 grant_keys()  { q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
-companywide() { q "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:create','users:manage_permissions','joins:approve','agents:configure');" "$1"; }
-self_scoped_ok() { q "SELECT CASE WHEN count(*) FILTER (WHERE scope IS NOT NULL AND scope <> jsonb_build_object('subtreeRootAgentId', :'agent_id')) = 0 THEN 'yes' ELSE 'no' END FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
+self_scope_keys() { q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope = jsonb_build_object('subtreeRootAgentId', :'agent_id') AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$1"; }
 dormant()     { q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+create_call_payload_ok() { local title="$1"; jq -ser --arg title "$title" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload | (.permissions.canCreateAgents==false and .permissions.canCreateSkills==false and .permissions.canAssignTasks==false and .permissions.authorizationPolicy.assignmentPolicy.mode=="protected")' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
+create_call_parent() { local title="$1"; jq -ser --arg title "$title" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload.reportsTo' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
+create_call_title_for() { q "SELECT title FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+backend_is_recording_stub() { [[ -n "${PAPERCLIP_STUB_LOG:-}" && -r "${PAPERCLIP_STUB_LOG:-}" ]]; }
 protected()   { q "SELECT CASE WHEN permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode'='protected' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+legacy_flags_off() { q "SELECT CASE WHEN permissions->'canCreateAgents'='false'::jsonb AND permissions->'canCreateSkills'='false'::jsonb AND permissions->'canAssignTasks'='false'::jsonb THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 parent_of()   { q "SELECT COALESCE(p.metadata->>'orgRoleId', p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'agent_id'::uuid;" "$1"; }
 
 hdr "1. Upward and lateral creation must be impossible"
@@ -198,20 +204,24 @@ fi
 [[ "$c_s" == "0" ]] && ok "specialist has ZERO organizational-governance grants" \
                    || bad "specialist grant count is '$c_s', expected 0"
 
-hdr "7. No descendant inherited the server's default company-wide tasks:assign"
+hdr "7. No descendant holds a company-wide organizational grant"
 for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
-  n="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:create','users:manage_permissions','joins:approve','agents:configure');" "$id")"
+  n="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:create','users:manage_permissions','joins:approve','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$id")"
   [[ "$n" == "0" ]] && ok "$lbl holds no company-wide privileged grant" \
                     || bad "$lbl company-wide privileged grant count is '$n', expected 0"
 done
 
-hdr "8. SELF scopes bind to the agent's own subtree, not the caller's"
-for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}"; do
-  lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
-  [[ "$(self_scoped_ok "$id")" == "yes" ]] \
-    && ok "$lbl scoped grants resolve to its OWN subtreeRootAgentId" \
-    || bad "$lbl has a scope pointing somewhere else"
+hdr "8. Every SELF permission has exactly the agent's own subtree scope"
+for row in \
+  "DIRECTOR:${DIR:-}:agents:configure,tasks:assign_scope,tasks:manage_active_checkouts" \
+  "MANAGER:${MGR:-}:tasks:assign_scope,tasks:manage_active_checkouts"; do
+  lbl="${row%%:*}"; rest="${row#*:}"; id="${rest%%:*}"; want="${rest#*:}"
+  [[ -n "$id" ]] || continue
+  got="$(self_scope_keys "$id")"; errors="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts') AND scope IS DISTINCT FROM jsonb_build_object('subtreeRootAgentId', :'agent_id');" "$id")"
+  [[ "$got" == "$want" && "$errors" == "0" ]] \
+    && ok "$lbl SELF grants are exactly '$want' on its own subtreeRootAgentId" \
+    || bad "$lbl SELF scope mismatch: own-scope='$got' errors='$errors', expected '$want' and 0"
 done
 
 hdr "9. Provisioned agents are born dormant and protected"
@@ -219,7 +229,23 @@ for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
   [[ "$(dormant "$id")" == "yes" ]] && ok "$lbl heartbeat disabled + wakeOnDemand false" || bad "$lbl not dormant"
   [[ "$(protected "$id")" == "yes" ]] && ok "$lbl assignment policy protected" || bad "$lbl not protected"
+  [[ "$(legacy_flags_off "$id")" == "yes" ]] \
+    && ok "$lbl legacy permission flags explicitly false" \
+    || bad "$lbl legacy permission flags are not explicitly false"
+  if backend_is_recording_stub; then
+    title="$(create_call_title_for "$id")"
+    [[ "$(create_call_payload_ok "$title")" == "true" ]] \
+      && ok "$lbl agent.create payload is protected before permissions:update" \
+      || bad "$lbl agent.create payload was not born protected"
+  fi
 done
+
+if backend_is_recording_stub && [[ -n "${DIR:-}" ]]; then
+  dir_title="$(create_call_title_for "$DIR")"
+  [[ "$(create_call_parent "$dir_title")" == "$T0_ID" ]] \
+    && ok "DIRECTOR agent.create payload uses the caller-selected-by-service parent" \
+    || bad "DIRECTOR create payload accepted caller-controlled placement"
+fi
 
 hdr "10. Deactivation is descendant-only"
 refuses_because "Manager cannot deactivate its own Director (upward)" \

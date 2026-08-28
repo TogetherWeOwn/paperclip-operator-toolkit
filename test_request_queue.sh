@@ -6,10 +6,12 @@
 # Uses its own queue file; the shared grant log stays authoritative.
 # Any agent it provisions is torn down at the end.
 #
-# THIS SUITE NEEDS THE LIVE COMPANY DATABASE and there is no offline seam for
-# it: org_provisioner.sh has no ORG_SNAPSHOT path, and sections 7/9/10 read SQL
-# directly. CI therefore cannot run it, which is exactly why the two guards
-# below exist rather than a comment asking the operator to be careful.
+# THIS SUITE NEEDS A COMPANY-SHAPED POSTGRES DATABASE and is not a purely
+# offline unit test: org_provisioner.sh has no ORG_SNAPSHOT path, and sections
+# 7/9/10 read SQL directly. CI supplies a throwaway schema/org fixture plus a
+# dumb recording CLI; the VPS run remains necessary for the real Paperclip API
+# contract. The two guards below still ensure an unavailable database never
+# scores itself green.
 #
 # WHY A REFUSAL IS NOT ENOUGH TO PASS A CASE (TOG-402). The old helper was
 #
@@ -168,7 +170,8 @@ refuses_because "an approved request cannot be re-approved" \
   "$Q" review --reviewer A0 --request "$REQ_SELF" --approve --reason "reason supplied so this case asserts authority, not arity"
 refuses_because "an approved request cannot be flipped to rejected" \
   "decisions are final" \
-  "$Q" review --reviewer A0 --request "$REQ_SELF" --reject --reason "changed mind"
+  "$Q" review --reviewer A0 --request "$REQ_SELF" --reject --reason "changed mind" \
+    --alternative "keep the approved request final and submit a new request if circumstances changed"
 
 hdr "6. Template disablement (org.disable_template) freezes pending requests"
 refuses_because "a chief cannot disable a template" \
@@ -196,8 +199,16 @@ if [[ -n "${DIR_ID:-}" ]]; then
   [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
     && ok "director holds exactly the C1_DIRECTOR_BUILDER template" \
     || bad "director grants are '$keys'"
-  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key='tasks:assign';" "$DIR_ID")"
-  [[ "$cw" == "0" ]] && ok "server's default company-wide tasks:assign was replaced away" || bad "default tasks:assign survived (count='$cw')"
+  scoped="$(q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope=jsonb_build_object('subtreeRootAgentId', :'text');" "$DIR_ID")"
+  [[ "$scoped" == "agents:configure,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
+    && ok "director SELF grants have the exact own-subtree scope" \
+    || bad "director own-subtree grants are '$scoped'"
+  scope_errors="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts') AND scope IS DISTINCT FROM jsonb_build_object('subtreeRootAgentId', :'text');" "$DIR_ID")"
+  [[ "$scope_errors" == "0" ]] \
+    && ok "director has no NULL or foreign scope on a SELF permission" \
+    || bad "director has $scope_errors SELF permission(s) with NULL or foreign scope"
+  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$DIR_ID")"
+  [[ "$cw" == "0" ]] && ok "server/default SELF grants were replaced away from company scope" || bad "company-wide organizational grant survived (count='$cw')"
   dorm="$(q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'text'::uuid;" "$DIR_ID")"
   [[ "$dorm" == "yes" ]] && ok "queue-provisioned agent is born dormant" || bad "queue-provisioned agent is not dormant"
 else bad "no director id captured"; fi
@@ -216,7 +227,7 @@ refuses_because "the pending request is refused — stale requester, authority n
 
 hdr "9. Audit trail completeness"
 for ev in request.refused review.refused template.disabled template.enabled create.applied; do
-  n="$(jq -r --arg e "$ev" 'select(.event==$e)|.event' "$HERE/provisioner-grant-log.jsonl" 2>/dev/null | wc -l)"
+  n="$(jq -r --arg e "$ev" 'select(.event==$e)|.event' "${GRANT_LOG:-$HERE/provisioner-grant-log.jsonl}" 2>/dev/null | wc -l)"
   [[ "$n" -gt 0 ]] && ok "grant log records '$ev' ($n)" || bad "grant log missing '$ev'"
 done
 
