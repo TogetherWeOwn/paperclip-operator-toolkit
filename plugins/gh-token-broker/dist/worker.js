@@ -11,6 +11,7 @@
  * never logged, never written to state, and never placed on a command line.
  */
 
+import crypto from "node:crypto";
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import { manifest } from "./manifest.js";
 import {
@@ -25,10 +26,12 @@ import {
   DisclosureError,
   assertAppPrincipal,
   assertPermissionGrant,
+  disclosureRequestHash,
   grantId,
   proveAuthority,
   responseIdentifier,
   validateDisclosureRequest,
+  validateDisclosureSubmission,
   verifyGrantSignature,
 } from "./disclosure.js";
 
@@ -172,23 +175,168 @@ async function mint(ctx, { companyId, config, scope }) {
 }
 
 const disclosureTable = (ctx) => `${ctx.db.namespace}.external_disclosure_receipts`;
+const PREFLIGHT_TTL_MS = 5 * 60_000;
 
-async function claimDisclosure(ctx, { grantId: id, companyId, issue, runId, approvalId, claimedAt }) {
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+async function resolveDisclosureRun(ctx, { companyId, issueId, actor }) {
+  const rows = await ctx.db.query(
+    `SELECT id, company_id, agent_id, status, session_id_before, session_id_after, context_snapshot FROM public.heartbeat_runs WHERE id = $1 AND company_id = $2 AND agent_id = $3 LIMIT 1`,
+    [actor.runId, companyId, actor.agentId],
+  );
+  const run = rows[0];
+  if (!run || run.status !== "running") {
+    throw new DisclosureError("External disclosure requires the current running heartbeat run.", 403);
+  }
+  const contextIssueId = firstString(run.context_snapshot?.issueId, run.context_snapshot?.taskId);
+  if (contextIssueId !== issueId) {
+    throw new DisclosureError("Authority refused: authenticated run is not scoped to this issue.", 403);
+  }
+  const sessionId = firstString(run.session_id_after, run.session_id_before);
+  if (!sessionId) {
+    throw new DisclosureError("Authority refused: authenticated run has no host-recorded session ID.", 403);
+  }
+  return { runId: run.id, sessionId };
+}
+
+async function prepareDisclosure(ctx, input, { requirePreflightId = false } = {}) {
+  const { companyId } = input;
+  const issueId = input.params?.issueId;
+  if (!issueId) throw new DisclosureError("Missing issueId.", 400);
+  if (input.actor?.actorType !== "agent" || !input.actor?.agentId || !input.actor?.runId) {
+    throw new DisclosureError("External disclosure requires an authenticated agent run.", 403);
+  }
+
+  const config = await readConfig(ctx, companyId);
+  const request = requirePreflightId
+    ? validateDisclosureSubmission(input.body)
+    : validateDisclosureRequest(input.body);
+  verifyGrantSignature(request.grant, config.externalDisclosureAuthorizers ?? []);
+
+  const preliminary = await ctx.issues.get(issueId, companyId);
+  if (!preliminary) throw new DisclosureError("Issue not found.", 404);
+  if (preliminary.identifier !== request.grant.allowedIssueId) {
+    throw new DisclosureError("Authority refused: route issue does not equal the signed allowed issue.", 403);
+  }
+  const authenticatedRun = await resolveDisclosureRun(ctx, {
+    companyId,
+    issueId: preliminary.id,
+    actor: input.actor,
+  });
+  if (authenticatedRun.runId !== request.grant.allowedRunId) {
+    throw new DisclosureError("Authority refused: authenticated current run does not equal the signed allowed run.", 403);
+  }
+
+  const { issue, scope, ownership } = await deriveScope(ctx, {
+    issueId,
+    companyId,
+    body: {
+      repositories: [request.grant.destination.repository.split("/")[1]],
+      permissions: request.grant.requiredPermissions,
+    },
+    config,
+    actor: { ...input.actor, runId: authenticatedRun.runId },
+  });
+  if (ownership.runId !== authenticatedRun.runId) {
+    throw new DisclosureError("Authority refused: issue ownership does not equal the authenticated run.", 403);
+  }
+
+  const authenticatingPrincipal = assertAppPrincipal(request.grant, config.appId);
+  const authority = proveAuthority({ request, issue, actorRunId: authenticatedRun.runId });
+  const credential = await mint(ctx, { companyId, config, scope });
+  assertPermissionGrant(request.grant.requiredPermissions, credential.permissions ?? scope.permissions);
+  const repoName = request.grant.destination.repository.split("/")[1];
+  const grantedRepositories = credential.repositories ?? scope.repositories;
+  if (!grantedRepositories.some((name) => name.toLowerCase() === repoName.toLowerCase())) {
+    throw new DisclosureError("Capability refused: GitHub did not grant the destination repository.", 403);
+  }
+
+  const id = grantId(request.grant);
+  const requestHash = disclosureRequestHash(request);
+  const capability = {
+    ok: true,
+    authenticatingPrincipal,
+    tokenIssuedAt: credential.issuedAt,
+    tokenExpiresAt: credential.expiresAt,
+    installationId: credential.installationId,
+    repositorySelection: credential.repositorySelection,
+    repositories: grantedRepositories,
+    effectivePermissions: credential.permissions ?? scope.permissions,
+  };
+  const mutation = {
+    destination: request.grant.destination,
+    principal: authenticatingPrincipal,
+    artifacts: request.grant.artifacts,
+    approvalId: request.grant.approvalRecord.id,
+  };
+
+  return {
+    companyId,
+    issue,
+    request,
+    credential,
+    authenticatedRun,
+    id,
+    requestHash,
+    capability,
+    authority,
+    mutation,
+  };
+}
+
+async function createDisclosurePreflight(ctx, prepared) {
+  const preflightId = crypto.randomUUID();
+  const createdAt = new Date();
+  const expiresAt = new Date(createdAt.getTime() + PREFLIGHT_TTL_MS);
   const table = disclosureTable(ctx);
   const result = await ctx.db.execute(
-    `INSERT INTO ${table} (grant_id, company_id, issue_id, issue_identifier, run_id, approval_id, status, receipt_json) VALUES ($1, $2, $3, $4, $5, $6, 'claimed', $7::jsonb) ON CONFLICT (grant_id) DO NOTHING`,
-    [id, companyId, issue.id, issue.identifier, runId, approvalId, JSON.stringify({
+    `INSERT INTO ${table} (grant_id, company_id, issue_id, issue_identifier, run_id, approval_id, status, receipt_json) VALUES ($1, $2, $3, $4, $5, $6, 'preflighted', $7::jsonb) ON CONFLICT (grant_id) DO NOTHING`,
+    [prepared.id, prepared.companyId, prepared.issue.id, prepared.issue.identifier, prepared.authenticatedRun.runId, prepared.request.grant.approvalRecord.id, JSON.stringify({
       version: 1,
-      grantId: id,
-      issueId: issue.identifier,
-      runId,
-      approvalId,
+      grantId: prepared.id,
+      preflightId,
+      requestHash: prepared.requestHash,
+      issueId: prepared.issue.identifier,
+      issueUuid: prepared.issue.id,
+      runId: prepared.authenticatedRun.runId,
+      sessionId: prepared.authenticatedRun.sessionId,
+      approvalId: prepared.request.grant.approvalRecord.id,
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      status: "preflighted",
+    })],
+  );
+  if (result.rowCount !== 1) {
+    throw new DisclosureError(`Grant ${prepared.id} has already been preflighted or consumed; replay refused.`, 409);
+  }
+  return { preflightId, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString() };
+}
+
+async function consumeDisclosurePreflight(ctx, prepared, preflightId, claimedAt) {
+  const table = disclosureTable(ctx);
+  const result = await ctx.db.execute(
+    `UPDATE ${table} SET status = 'claimed', receipt_json = $4::jsonb, updated_at = now() WHERE grant_id = $1 AND status = 'preflighted' AND receipt_json ->> 'preflightId' = $2 AND receipt_json ->> 'requestHash' = $3 AND (receipt_json ->> 'expiresAt')::timestamptz > now()`,
+    [prepared.id, preflightId, prepared.requestHash, JSON.stringify({
+      version: 1,
+      grantId: prepared.id,
+      preflightId,
+      requestHash: prepared.requestHash,
+      issueId: prepared.issue.identifier,
+      issueUuid: prepared.issue.id,
+      runId: prepared.authenticatedRun.runId,
+      sessionId: prepared.authenticatedRun.sessionId,
+      approvalId: prepared.request.grant.approvalRecord.id,
       claimedAt,
       status: "claimed",
     })],
   );
   if (result.rowCount !== 1) {
-    throw new DisclosureError(`Grant ${id} has already been consumed; replay refused.`, 409);
+    throw new DisclosureError("Preflight confirmation is missing, expired, mismatched, or already consumed.", 409);
   }
 }
 
@@ -203,57 +351,23 @@ async function completeDisclosure(ctx, id, receipt) {
   }
 }
 
+async function handleDisclosurePreflight(ctx, input) {
+  const prepared = await prepareDisclosure(ctx, input);
+  const confirmation = await createDisclosurePreflight(ctx, prepared);
+  return json(200, {
+    ok: true,
+    capability: prepared.capability,
+    authority: prepared.authority,
+    mutation: prepared.mutation,
+    confirmation,
+  });
+}
+
 async function handleDisclosure(ctx, input) {
-  const { companyId } = input;
-  const issueId = input.params?.issueId;
-  if (!issueId) throw new DisclosureError("Missing issueId.", 400);
-  if (input.actor?.actorType !== "agent" || !input.actor?.agentId || !input.actor?.runId) {
-    throw new DisclosureError("External disclosure requires an authenticated agent run.", 403);
-  }
-
-  const config = await readConfig(ctx, companyId);
-  const request = validateDisclosureRequest(input.body);
-  verifyGrantSignature(request.grant, config.externalDisclosureAuthorizers ?? []);
-
-  const preliminary = await ctx.issues.get(issueId, companyId);
-  if (!preliminary) throw new DisclosureError("Issue not found.", 404);
-  if (preliminary.identifier !== request.grant.allowedIssueId) {
-    throw new DisclosureError("Authority refused: route issue does not equal the signed allowed issue.", 403);
-  }
-  const { issue, scope, ownership } = await deriveScope(ctx, {
-    issueId,
-    companyId,
-    body: {
-      repositories: [request.grant.destination.repository.split("/")[1]],
-      permissions: request.grant.requiredPermissions,
-    },
-    config,
-    actor: input.actor,
-  });
-  if (ownership.runId !== request.grant.allowedRunId) {
-    throw new DisclosureError("Authority refused: authenticated current run does not equal the signed allowed run.", 403);
-  }
-
-  const authenticatingPrincipal = assertAppPrincipal(request.grant, config.appId);
-  const authority = proveAuthority({ request, issue, actorRunId: ownership.runId });
-  const credential = await mint(ctx, { companyId, config, scope });
-  assertPermissionGrant(request.grant.requiredPermissions, credential.permissions ?? scope.permissions);
-  const repoName = request.grant.destination.repository.split("/")[1];
-  const grantedRepositories = credential.repositories ?? scope.repositories;
-  if (!grantedRepositories.some((name) => name.toLowerCase() === repoName.toLowerCase())) {
-    throw new DisclosureError("Capability refused: GitHub did not grant the destination repository.", 403);
-  }
-
-  const id = grantId(request.grant);
+  const prepared = await prepareDisclosure(ctx, input, { requirePreflightId: true });
+  const { companyId, issue, request, credential, authenticatedRun, id } = prepared;
   const claimedAt = new Date().toISOString();
-  await claimDisclosure(ctx, {
-    grantId: id,
-    companyId,
-    issue,
-    runId: ownership.runId,
-    approvalId: request.grant.approvalRecord.id,
-    claimedAt,
-  });
+  await consumeDisclosurePreflight(ctx, prepared, request.preflightId, claimedAt);
 
   const entries = [];
   for (const artifact of request.artifacts) {
@@ -278,6 +392,7 @@ async function handleDisclosure(ctx, input) {
   const receipt = {
     version: 1,
     grantId: id,
+    preflightId: request.preflightId,
     approvalId: request.grant.approvalRecord.id,
     approvalRecordSha256: request.grant.approvalRecord.sha256,
     approvedAt: request.grant.approvedAt,
@@ -288,17 +403,17 @@ async function handleDisclosure(ctx, input) {
     action: request.grant.action,
     issueId: issue.identifier,
     issueUuid: issue.id,
-    runId: ownership.runId,
-    sessionId: ownership.runId,
-    authenticatingPrincipal,
+    runId: authenticatedRun.runId,
+    sessionId: authenticatedRun.sessionId,
+    authenticatingPrincipal: prepared.capability.authenticatingPrincipal,
     authorizingPrincipal: request.grant.authorizingPrincipal,
     tokenIssuedAt: credential.issuedAt,
     tokenExpiresAt: credential.expiresAt,
     installationId: credential.installationId,
     repositorySelection: credential.repositorySelection,
-    repositories: grantedRepositories,
-    effectivePermissions: credential.permissions ?? scope.permissions,
-    authority,
+    repositories: prepared.capability.repositories,
+    effectivePermissions: prepared.capability.effectivePermissions,
+    authority: prepared.authority,
     artifacts: entries,
     success,
   };
@@ -310,8 +425,10 @@ async function handleDisclosure(ctx, input) {
     entityId: issue.id,
     metadata: {
       grantId: id,
+      preflightId: receipt.preflightId,
       approvalId: receipt.approvalId,
       runId: receipt.runId,
+      sessionId: receipt.sessionId,
       destination: receipt.destination,
       artifactHashes: receipt.artifacts.map(({ id: artifactId, artifactSha256 }) => ({ id: artifactId, sha256: artifactSha256 })),
       success,
@@ -320,23 +437,9 @@ async function handleDisclosure(ctx, input) {
 
   return json(success ? 200 : 502, {
     ok: success,
-    capability: {
-      ok: true,
-      authenticatingPrincipal,
-      tokenIssuedAt: receipt.tokenIssuedAt,
-      tokenExpiresAt: receipt.tokenExpiresAt,
-      installationId: receipt.installationId,
-      repositorySelection: receipt.repositorySelection,
-      repositories: receipt.repositories,
-      effectivePermissions: receipt.effectivePermissions,
-    },
-    authority,
-    mutation: {
-      destination: receipt.destination,
-      principal: authenticatingPrincipal,
-      artifacts: request.grant.artifacts,
-      approvalId: receipt.approvalId,
-    },
+    capability: prepared.capability,
+    authority: prepared.authority,
+    mutation: prepared.mutation,
     receipt,
   });
 }
@@ -445,6 +548,8 @@ export const plugin = definePlugin({
       switch (input.routeKey) {
         case "whoami":
           return await handleWhoami(input);
+        case "disclosure-preflight":
+          return await handleDisclosurePreflight(ctx, input);
         case "disclose":
           return await handleDisclosure(ctx, input);
         case "mint":

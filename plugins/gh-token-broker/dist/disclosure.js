@@ -229,14 +229,33 @@ function validateArtifacts(value) {
   }).sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function validateDisclosureRequest(body) {
-  exactKeys(body, ["grant", "approvalRecord", "artifacts"], "request body");
+function validateRequestBody(body, requirePreflightId) {
+  const keys = ["grant", "approvalRecord", "artifacts"];
+  if (requirePreflightId) keys.push("preflightId");
+  exactKeys(body, keys, "request body");
   if (typeof body.approvalRecord !== "string") fail("approvalRecord must be a string.");
   return {
     grant: validateGrant(body.grant),
     approvalRecord: body.approvalRecord,
     artifacts: validateArtifacts(body.artifacts),
+    ...(requirePreflightId ? { preflightId: nonempty(body.preflightId, "preflightId") } : {}),
   };
+}
+
+export function validateDisclosureRequest(body) {
+  return validateRequestBody(body, false);
+}
+
+export function validateDisclosureSubmission(body) {
+  return validateRequestBody(body, true);
+}
+
+export function disclosureRequestHash(request) {
+  return sha256(canonical({
+    grantId: grantId(request.grant),
+    approvalRecordSha256: sha256(Buffer.from(request.approvalRecord, "utf8")),
+    artifacts: request.artifacts.map(({ id, sha256: digest }) => ({ id, sha256: digest })),
+  }));
 }
 
 export function proveAuthority({ request, issue, actorRunId, now = Date.now() }) {

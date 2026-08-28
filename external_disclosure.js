@@ -26,15 +26,15 @@ function help() {
     'external_disclosure.js - task-specific external mutation gate',
     '',
     '  preflight --grant FILE --runtime FILE',
-    '  submit    --grant FILE --runtime FILE --state-dir DIR',
+    '  submit    (disabled; use the host broker preflight + submission routes)',
     '  help',
     '',
     `The bearer credential is read only from ${TOKEN_ENV}; never put it on argv.`,
     `The authorizer registry is pinned to ${path.basename(TRUST_STORE)} next to this executable.`,
     'Tests must run an isolated copy with a fixture registry; no runtime override exists.',
     'The runtime file names artifact files and credential metadata, but never embeds',
-    'the private artifact body. submit writes <grant-sha256>.claim.json and',
-    '<grant-sha256>.receipt.json beneath the state directory.',
+    'the private artifact body. This fixture performs read-only preflight only;',
+    'production one-shot confirmation and receipt persistence live in gh-token-broker.',
     '',
   ].join('\n'))
 }

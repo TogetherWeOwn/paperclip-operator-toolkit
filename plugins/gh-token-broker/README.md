@@ -38,38 +38,43 @@ the caller cannot influence them. **`runId` is the exception**, and an earlier
 revision of this file said otherwise. See
 [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 
-### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures`
+### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures/preflight`
 
-Task-specific external mutation gate added after
+Read-only production preflight for the task-specific external mutation gate
+added after
 [`TOG-574`](../../docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md).
 The request carries one signed immutable grant, the exact approval-record text,
-and the exact artifact bodies. The broker derives the current issue, run, agent,
-credential, repository scope, permissions, token timestamps, installation ID and
-repository selection from host/GitHub state — none are caller-authored receipt
-metadata.
+and the exact artifact bodies. The broker:
 
-Before any external write it:
-
-1. verifies the grant signature against `externalDisclosureAuthorizers` in the
-   reviewed broker config;
-2. proves the route issue identifier and host-authenticated run ID equal the
-   signed `allowedIssueId` / `allowedRunId`;
-3. hashes the submitted artifact bytes and approval record and requires an exact
-   signed match;
+1. verifies the signature and exact approval/artifact hashes;
+2. resolves the claimed run against `public.heartbeat_runs`, requiring a current
+   `running` row for the calling agent and route issue;
+3. retains the host-recorded session ID rather than copying the run ID;
 4. mints the configured GitHub App token to the signed repository/permission
-   subset and verifies GitHub's actual returned grant;
-5. atomically inserts the canonical grant ID into the broker's server-side
-   Postgres namespace. The primary-key conflict is the replay gate across runs,
-   processes and caller machines;
-6. performs the mutation inside the broker and finalizes the same server-side
-   row as the redacted receipt.
+   subset and verifies GitHub's actual returned grant; and
+5. renders separate `capability`, `authority`, and `mutation` objects before any
+   external mutation, then records a five-minute one-shot `preflightId` bound to
+   the canonical grant and request hashes.
 
-The response renders separate `capability`, `authority`, `mutation`, and `receipt`
-objects. The receipt retains the response status/identifier, approval and
-artifact hashes, current issue/run/session identity, token issue/expiry,
-installation ID, repository selection/list and effective permissions. It never
-retains or returns the token, App private key, approval text, private artifact
-body, or remote response body.
+### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures`
+
+The submit body is the same exact request plus the returned `preflightId`.
+The broker recomputes every capability and authority check, then atomically
+changes the server-side grant row from `preflighted` to `claimed` only when the
+confirmation is present, unexpired, unconsumed, and bound to the same request.
+Missing, expired, replayed, or substituted confirmations fail before the
+external request. It then performs the mutation inside the broker and finalizes
+the same row as the redacted receipt.
+
+The receipt retains the response status/identifier, preflight/approval IDs,
+approval and artifact hashes, host-derived issue/run/actual session identity,
+token issue/expiry, installation ID, repository selection/list and effective
+permissions. It never retains or returns the token, App private key, approval
+text, private artifact body, or remote response body.
+
+Production supports only the exact configured GitHub App principal. A human
+principal grant is deliberately refused; human-token handling exists only in the
+offline protocol fixture to prove principal substitution fails closed.
 
 The checked-in repository provisions no real authorizer public key. Operators
 must independently add a legitimate Ed25519 authorizer entry to the broker's

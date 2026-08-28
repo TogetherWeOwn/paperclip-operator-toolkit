@@ -894,15 +894,39 @@ function makeCtx(overrides = {}) {
     activity: { log: async (entry) => activity.push(entry) },
     db: {
       namespace: "plugin_gh_token_broker_c304a73ea6",
+      query: async (sql, params) => {
+        if (!sql.includes("FROM public.heartbeat_runs")) throw new Error(`unexpected SQL: ${sql}`);
+        if (params[0] !== "run-abc" || params[1] !== COMPANY || params[2] !== "agent-1") return [];
+        return [{
+          id: "run-abc",
+          company_id: COMPANY,
+          agent_id: "agent-1",
+          status: "running",
+          session_id_before: "session-abc",
+          session_id_after: null,
+          context_snapshot: { issueId: ISSUE },
+        }];
+      },
       execute: async (sql, params) => {
         if (sql.startsWith("INSERT INTO")) {
           if (disclosureRows.has(params[0])) return { rowCount: 0 };
           disclosureRows.set(params[0], JSON.parse(params[6]));
           return { rowCount: 1 };
         }
+        if (sql.startsWith("UPDATE") && sql.includes("SET status = 'claimed'")) {
+          const current = disclosureRows.get(params[0]);
+          if (
+            !current || current.status !== "preflighted" ||
+            current.preflightId !== params[1] || current.requestHash !== params[2] ||
+            Date.parse(current.expiresAt) <= Date.now()
+          ) return { rowCount: 0 };
+          disclosureRows.set(params[0], JSON.parse(params[3]));
+          return { rowCount: 1 };
+        }
         if (sql.startsWith("UPDATE")) {
-          if (!disclosureRows.has(params[0])) return { rowCount: 0 };
-          disclosureRows.set(params[0], JSON.parse(params[2]));
+          const current = disclosureRows.get(params[0]);
+          if (!current || current.status !== "claimed") return { rowCount: 0 };
+          disclosureRows.set(params[0], { ...JSON.parse(params[2]), status: params[1] });
           return { rowCount: 1 };
         }
         throw new Error(`unexpected SQL: ${sql}`);
@@ -1009,9 +1033,8 @@ function disclosureConfig() {
   };
 }
 
-test("server-side disclosure binds the host issue/run, consumes once and writes a redacted receipt", async () => {
-  let mutationPosts = 0;
-  const { ctx, disclosureRows } = makeCtx({
+function disclosureCtx(overrides = {}) {
+  return makeCtx({
     config: { get: async () => disclosureConfig() },
     issues: issuesClient(issueRow({ id: ISSUE, identifier: "TOG-576" })),
     projects: {
@@ -1024,6 +1047,13 @@ test("server-side disclosure binds the host issue/run, consumes once and writes 
       }),
       getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
     },
+    ...overrides,
+  });
+}
+
+test("server-side disclosure preflight renders exact authority then consumes once with a redacted receipt", async () => {
+  let mutationPosts = 0;
+  const { ctx, disclosureRows } = disclosureCtx({
     http: {
       fetch: async (url) => {
         if (url.includes("/access_tokens")) {
@@ -1045,46 +1075,45 @@ test("server-side disclosure binds the host issue/run, consumes once and writes 
     },
   });
   await plugin.definition.setup(ctx);
-  const input = request("disclose", { body: disclosureBody() });
+  const body = disclosureBody();
 
-  const first = await plugin.definition.onApiRequest(input);
+  const preflight = await plugin.definition.onApiRequest(request("disclosure-preflight", { body }));
+  assert.equal(preflight.status, 200, JSON.stringify(preflight.body));
+  assert.equal(preflight.body.capability.authenticatingPrincipal.principalClass, "github_app");
+  assert.equal(preflight.body.authority.allowedIssueId, "TOG-576");
+  assert.equal(preflight.body.authority.allowedRunId, "run-abc");
+  assert.equal(preflight.body.mutation.approvalId, "approval-exact-1");
+  assert.equal(preflight.body.mutation.artifacts[0].sha256, body.grant.artifacts[0].sha256);
+  assert.equal(mutationPosts, 0, "preflight performed an external mutation");
+
+  const first = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...body, preflightId: preflight.body.confirmation.preflightId },
+  }));
   assert.equal(first.status, 200, JSON.stringify(first.body));
-  assert.equal(first.body.capability.authenticatingPrincipal.principalClass, "github_app");
-  assert.equal(first.body.authority.allowedIssueId, "TOG-576");
-  assert.equal(first.body.authority.allowedRunId, "run-abc");
   assert.equal(first.body.receipt.artifacts[0].responseStatus, 201);
   assert.equal(first.body.receipt.artifacts[0].responseIdentifier.value, "GHSA-test-0000-0000");
+  assert.equal(first.body.receipt.sessionId, "session-abc");
+  assert.notEqual(first.body.receipt.sessionId, first.body.receipt.runId);
   assert.equal(mutationPosts, 1);
   assert.equal(disclosureRows.size, 1);
   const serialized = JSON.stringify([...disclosureRows.values()]);
   assert.ok(!serialized.includes("ghs_minted"));
   assert.ok(!serialized.includes("PRIVATE BODY"));
 
-  const replay = await plugin.definition.onApiRequest(input);
+  const replay = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...body, preflightId: preflight.body.confirmation.preflightId },
+  }));
   assert.equal(replay.status, 409);
-  assert.match(replay.body.error, /replay refused/);
+  assert.match(replay.body.error, /missing, expired, mismatched, or already consumed/);
   assert.equal(mutationPosts, 1);
 });
 
-test("server-side disclosure rejects caller attempts to substitute issue/run or principal class", async () => {
-  const { ctx } = makeCtx({
-    config: { get: async () => disclosureConfig() },
-    issues: issuesClient(issueRow({ id: ISSUE, identifier: "TOG-576" })),
-    projects: {
-      get: async () => ({
-        id: PROJECT,
-        env: {
-          GH_APP_REPOS: "nntune",
-          GH_APP_PERMISSIONS: "metadata=read,security_advisories=write",
-        },
-      }),
-      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
-    },
-  });
+test("server-side disclosure requires a live host run and rejects substitutions", async () => {
+  const { ctx } = disclosureCtx();
   await plugin.definition.setup(ctx);
 
   const wrongRun = await plugin.definition.onApiRequest(
-    request("disclose", { body: disclosureBody({ allowedRunId: "different-run" }) }),
+    request("disclosure-preflight", { body: disclosureBody({ allowedRunId: "different-run" }) }),
   );
   assert.equal(wrongRun.status, 403);
   assert.match(wrongRun.body.error, /current run/);
@@ -1096,9 +1125,49 @@ test("server-side disclosure rejects caller attempts to substitute issue/run or 
       principalId: "github-user:owner-login",
     },
   });
-  const wrongPrincipal = await plugin.definition.onApiRequest(request("disclose", { body: human }));
+  const wrongPrincipal = await plugin.definition.onApiRequest(request("disclosure-preflight", { body: human }));
   assert.equal(wrongPrincipal.status, 403);
   assert.match(wrongPrincipal.body.error, /only the exact configured GitHub App principal/);
+
+  const noRun = disclosureCtx({ db: { ...ctx.db, query: async () => [] } });
+  await plugin.definition.setup(noRun.ctx);
+  const forgedHeader = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", { body: disclosureBody() }),
+  );
+  assert.equal(forgedHeader.status, 403);
+  assert.match(forgedHeader.body.error, /current running heartbeat run/);
+});
+
+test("submission refuses without the matching one-shot preflight confirmation", async () => {
+  let mutationPosts = 0;
+  const { ctx } = disclosureCtx({
+    http: {
+      fetch: async (url) => {
+        if (url.includes("/access_tokens")) {
+          return {
+            status: 201,
+            ok: true,
+            json: async () => ({
+              token: "ghs_minted",
+              expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+              repository_selection: "selected",
+              permissions: { metadata: "read", security_advisories: "write" },
+              repositories: [{ name: "nntune" }],
+            }),
+          };
+        }
+        mutationPosts += 1;
+        return { status: 201, ok: true, json: async () => ({}) };
+      },
+    },
+  });
+  await plugin.definition.setup(ctx);
+
+  const response = await plugin.definition.onApiRequest(request("disclose", {
+    body: { ...disclosureBody(), preflightId: "not-a-real-confirmation" },
+  }));
+  assert.equal(response.status, 409);
+  assert.equal(mutationPosts, 0);
 });
 
 test("mint returns a scoped token and never the private key", async () => {

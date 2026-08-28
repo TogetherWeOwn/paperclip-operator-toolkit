@@ -55,9 +55,19 @@ export const manifest = {
   database: {
     namespaceSlug: "gh_token_broker",
     migrationsDir: "./migrations",
+    coreReadTables: ["heartbeat_runs"],
   },
 
   apiRoutes: [
+    {
+      routeKey: "disclosure-preflight",
+      method: "POST",
+      path: "/issues/:issueId/external-disclosures/preflight",
+      auth: "agent",
+      capability: "api.routes.register",
+      checkoutPolicy: "none",
+      companyResolution: { from: "issue", param: "issueId" },
+    },
     {
       routeKey: "disclose",
       method: "POST",
