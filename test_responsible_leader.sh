@@ -153,8 +153,8 @@ hdr "2. A leader may only approve what it could create itself"
 # DIR cannot create a C2_PLATFORM_DIRECTOR; T0 can. The walk must pass over DIR.
 eq "MGR requesting a platform director skips DIR and lands on T0" \
    "$(who_f 2 MGR C2_PLATFORM_DIRECTOR)" "T0"
-eq "  ...and records why DIR was skipped" \
-   "$(who_f 4 MGR C2_PLATFORM_DIRECTOR | jq -r '.[0].reason')" "ceiling_insufficient"
+eq "  ...and records the exact ordered skip prefix" \
+   "$(who_f 4 MGR C2_PLATFORM_DIRECTOR)" '[{"agent":"DIR","reason":"ceiling_insufficient"}]'
 
 hdr "3. Dormancy is NOT a skip reason — the leader is woken, never bypassed"
 # This is the design's most likely future regression. If someone 'helpfully'

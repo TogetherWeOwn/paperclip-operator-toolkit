@@ -17,7 +17,8 @@ set -uo pipefail
 # The responsible leader is the nearest LIVE ancestor of the requester, walking
 # reports_to upward, whose own delegation ceiling already contains the requested
 # template — that is, a leader may only approve what it could have done itself.
-# In the org as it stands this is the requester's direct manager in every case.
+# The direct manager decides when their ceiling contains the template; otherwise
+# the walk continues upward and records the objective skip reason.
 #
 # The walk skips an ancestor only for `terminated` or an insufficient ceiling,
 # and both are logged. Dormancy is NOT a skip reason: an idle leader is woken,

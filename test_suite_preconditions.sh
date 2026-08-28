@@ -107,7 +107,7 @@ out="$( PATH="$WITH_STUB" STUB_MODE=reachable pcsql_preflight 2>&1 )"; rc=$?
                 || { bad "refused a working backend (rc=$rc)"; sed 's/^/        /' <<<"$out" | head -3; }
 
 hdr "3. Guard 1 — a suite that cannot reach its subject exits 3 and asserts nothing"
-for s in test_request_queue.sh test_privilege_ceilings.sh; do
+for s in test_request_queue.sh test_privilege_ceilings.sh org_access_review.sh; do
   out="$( PATH="$NO_BACKEND_PATH" PAPERCLIP_SQL_BACKEND=podman COMPANY_ID="$COMPANY_ID" "$HERE/$s" 2>&1 )"; rc=$?
   if [[ $rc -eq 3 ]]; then ok "$s exits 3 with no backend"
   else bad "$s exited $rc, wanted 3"; fi

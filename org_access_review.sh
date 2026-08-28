@@ -44,19 +44,36 @@ hdr()   { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # shellcheck source=lib/pcsql.sh
 . "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
 
+# PRECONDITION — exit 3 ("could not run"), distinct from 1 (findings). Without
+# this guard, every failed SQL command produces an empty string and the absence
+# checks below report a clean review that measured nothing.
+if ! pcsql_preflight; then
+  cat >&2 <<EOF
+
+ERROR: org_access_review.sh cannot reach the company database, so it did not run.
+
+  A missing backend must never read as zero findings. Select a reachable backend:
+    PAPERCLIP_SQL_BACKEND=podman (default) — podman + ${PAPERCLIP_DB_CTR:-paperclip-db}
+    PAPERCLIP_SQL_BACKEND=psql             — psql + DATABASE_URL or libpq PG* vars
+EOF
+  exit 3
+fi
+
 # Takes the SQL as an argument rather than on stdin, as it always has; the
 # helper wants it on stdin. See lib/pcsql.sh for the backend choice.
 sql() { PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -F"|" <<<"$1"; }
 
-# Declared role templates. Source of truth is the provisioner so the review and
-# the provisioner can never drift apart.
+# Declared role templates. Source of truth is the provisioner's machine-readable
+# catalog, so the review never parses aligned human output or strips `(SELF)`
+# presentation markers.
 TEMPLATE_EXPECT="$(
-  COMPANY_ID="$COMPANY_ID" "$HERE/org_provisioner.sh" templates 2>/dev/null \
-  | sed 's/  */ /g' | while read -r tpl rest; do
+  COMPANY_ID="$COMPANY_ID" "$HERE/org_provisioner.sh" template-keys 2>/dev/null \
+  | while IFS=$'\t' read -r tpl keys; do
       [[ -n "$tpl" ]] || continue
-      printf '%s|%s\n' "$tpl" "$(tr -d ' ' <<<"$rest" | tr ',' '\n' | sed 's/(SELF)//' | sort | paste -sd, -)"
+      printf '%s|%s\n' "$tpl" "$(tr ',' '\n' <<<"$keys" | sort | paste -sd, -)"
     done
 )"
+[[ -n "$TEMPLATE_EXPECT" ]] || { echo "ERROR: provisioner template catalog produced no rows" >&2; exit 3; }
 # Executive profiles applied by the bootstrap, not provisionable (report 6/7).
 TEMPLATE_EXPECT+=$'\n'"P1_PRESIDENT_COO|agents:configure,agents:create,audit:view_agent_actions,environments:manage,joins:approve,pipelines:write,skills:create,tasks:assign,tasks:manage_active_checkouts,tools:admin,tools:manage_connections,tools:manage_runtime,tools:use,tools:view_audit,users:invite,users:manage_permissions"
 TEMPLATE_EXPECT+=$'\n'"P2_OWNER_COS|agents:suggest-changes,audit:view_agent_actions,skills:suggest-changes,tasks:assign"
