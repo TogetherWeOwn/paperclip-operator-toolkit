@@ -83,6 +83,7 @@ operator-run.
 | `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
 | `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. `api` takes the JSON request body as argument 3; extra `curl` arguments go after `--`. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh`, `test_gh_token_api_body.sh` |
+| `external_disclosure.js` | Task/run/artifact/principal-bound external-mutation gate. Separately proves capability and authority, atomically consumes one immutable grant, and writes a receipt with response/provenance metadata but no token or private body. See [`docs/external-disclosure-grants.md`](docs/external-disclosure-grants.md) and the [TOG-574 incident review](docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md). | `node --test test/external-disclosure.test.mjs` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
@@ -109,6 +110,7 @@ operator-run.
 # Offline — no credentials, no network, no database. These are what CI runs.
 ./test_gh_app_token.sh
 node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
+node --test test/external-disclosure.test.mjs
 ./test_gh_token_argv.sh
 ./test_gh_ci_status.sh
 ./test_sibling_guard.sh

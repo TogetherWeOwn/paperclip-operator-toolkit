@@ -14,6 +14,9 @@ name: CI
 #                                       REQUEST rather than curl's argv, so a
 #                                       `sha` head guard is actually sent and a
 #                                       guarded write is guarded — TOG-305
+#     test/external-disclosure.test.mjs immutable task/run/artifact/principal
+#                                       grants, one-shot consumption and redacted
+#                                       submission receipts — TOG-576
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
 #     test_tog153_artifacts.sh          TOG-153 register/verify artifact contract:
 #                                       fail-loud argv, dedicated catch-all,
@@ -425,6 +428,18 @@ jobs:
       # stubs the suite starts itself, and the RSA key is generated per-run.
       - name: gh-app-token.js broker/credential-source suite
         run: node --test test/gh-app-token.test.mjs
+
+      # TOG-576. Reproduces the TOG-574 authorization failure against loopback
+      # GitHub stubs: a capable App token is not a human principal and a broad
+      # channel approval is not an exact task/run/artifact grant. The passing
+      # control also inspects the one-shot receipt for token/body absence.
+      - name: task-specific external-disclosure grant suite
+        env:
+          EXTERNAL_DISCLOSURE_TOKEN: ''
+          GH_TOKEN: ''
+          GH_APP_PRIVATE_KEY: ''
+          PAPERCLIP_API_KEY: ''
+        run: node --test test/external-disclosure.test.mjs
 
       # Same reasoning as the broker suite's equivalent step: assert the
       # isolation rather than trust it. If this ever needs a real GH_APP_*, the
