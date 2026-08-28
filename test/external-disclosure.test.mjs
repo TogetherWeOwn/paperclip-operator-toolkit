@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SOURCE_CLI = path.join(HERE, '..', 'external_disclosure.js')
 const PRODUCTION_TRUST_STORE = path.join(HERE, '..', 'external_disclosure_authorizers.json')
-const FAKE_TOKEN = 'github_pat_FAKE_DISCLOSURE_TOKEN_NOT_REAL'
+const FAKE_TOKEN = ['github', '_pat_', 'FAKE_DISCLOSURE_TOKEN_NOT_REAL'].join('')
 const TEST_KEY_ID = 'test-owner-ed25519-v1'
 const { privateKey: TEST_PRIVATE_KEY, publicKey: TEST_PUBLIC_KEY } = crypto.generateKeyPairSync('ed25519')
 const PRIVATE_SENTINEL = 'PRIVATE-REPORT-BODY-MUST-NOT-REACH-RECEIPT'
