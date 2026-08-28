@@ -292,7 +292,13 @@ jobs:
             ./schema_drift.sh compare expected.fp || exit $?
 
             cp expected.fp column-drift.fp
-            node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>l.startsWith("column|agents|")); if(!a)throw Error("column fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|name|","|name_mutant|")))' column-drift.fp
+            column_before="$(sha256sum column-drift.fp)"
+            node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>/^column\|agents\|[^|]+\|name\|/.test(l)); if(!a)throw Error("agents.name column fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|name|","|name_mutant|")))' column-drift.fp
+            column_after="$(sha256sum column-drift.fp)"
+            [[ "$column_before" != "$column_after" ]] || {
+              echo "column drift mutation did not change the fingerprint" >&2
+              exit 1
+            }
             set +e
             column_out="$(./schema_drift.sh compare column-drift.fp 2>&1)"; column_rc=$?
             set -e
