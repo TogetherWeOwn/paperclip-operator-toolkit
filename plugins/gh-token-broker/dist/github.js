@@ -169,6 +169,7 @@ export async function submitRepositoryMutation(fetchImpl, token, destination, ac
         "Content-Type": "application/json",
       },
       body,
+      redirect: "error",
     },
   );
 

@@ -69,11 +69,30 @@ function validateDestination(value) {
     fail('grant.destination.apiOrigin must be exactly "https://api.github.com".');
   }
   const repository = nonempty(value.repository, "grant.destination.repository");
-  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) fail("grant.destination.repository must be owner/name.");
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repository)) {
+    fail("grant.destination.repository must be one unencoded GitHub owner/name.");
+  }
   const endpoint = nonempty(value.endpoint, "grant.destination.endpoint");
   const repositoryPrefix = `/repos/${repository}`;
-  if (!endpoint.startsWith(`${repositoryPrefix}/`) || endpoint.includes("?") || endpoint.includes("#")) {
-    fail(`grant.destination.endpoint must be beneath ${repositoryPrefix}/ without query or fragment.`);
+  if (
+    !endpoint.startsWith(`${repositoryPrefix}/`) ||
+    endpoint.includes("?") || endpoint.includes("#") || endpoint.includes("%") ||
+    endpoint.includes("\\") || endpoint.includes("//")
+  ) {
+    fail(`grant.destination.endpoint must be one unencoded canonical path beneath ${repositoryPrefix}/.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(endpoint, value.apiOrigin);
+  } catch {
+    fail("grant.destination.endpoint is not a valid URL path.");
+  }
+  if (parsed.origin !== value.apiOrigin || parsed.pathname !== endpoint || parsed.search || parsed.hash) {
+    fail("grant.destination.endpoint must equal its canonical URL pathname.");
+  }
+  const segments = endpoint.split("/").filter(Boolean);
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    fail("grant.destination.endpoint must not contain dot segments.");
   }
   return { provider: "github", apiOrigin: value.apiOrigin, repository, endpoint };
 }

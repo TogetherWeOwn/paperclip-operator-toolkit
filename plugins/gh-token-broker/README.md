@@ -47,8 +47,10 @@ The request carries one signed immutable grant, the exact approval-record text,
 and the exact artifact bodies. The broker:
 
 1. verifies the signature and exact approval/artifact hashes;
-2. resolves the claimed run against `public.heartbeat_runs`, requiring a current
-   `running` row for the calling agent and route issue;
+2. requires the host-propagated actor source to be `agent_jwt` (current hosts do
+   not propagate it yet, so production fails closed until that host change lands),
+   then resolves the signed run against `public.heartbeat_runs`, requiring a
+   current `running` row for the calling agent and route issue;
 3. retains the host-recorded session ID rather than copying the run ID;
 4. mints the configured GitHub App token to the signed repository/permission
    subset and verifies GitHub's actual returned grant; and

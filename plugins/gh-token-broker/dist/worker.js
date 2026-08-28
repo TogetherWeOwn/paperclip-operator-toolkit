@@ -211,6 +211,13 @@ async function prepareDisclosure(ctx, input, { requirePreflightId = false } = {}
   if (input.actor?.actorType !== "agent" || !input.actor?.agentId || !input.actor?.runId) {
     throw new DisclosureError("External disclosure requires an authenticated agent run.", 403);
   }
+  // A long-lived agent key may attach any X-Paperclip-Run-Id it knows. Only an
+  // agent JWT proves the caller controls the signed run_id. Current hosts omit
+  // actorSource from plugin worker inputs, so this deliberately fails closed
+  // there until the host propagates getActorInfo(req).actorSource.
+  if (input.actor.actorSource !== "agent_jwt") {
+    throw new DisclosureError("External disclosure requires a host-verified agent_jwt actor source.", 403);
+  }
 
   const config = await readConfig(ctx, companyId);
   const request = requirePreflightId

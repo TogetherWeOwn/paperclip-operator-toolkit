@@ -952,6 +952,7 @@ const AGENT_ACTOR = {
   agentId: "agent-1",
   userId: null,
   runId: "run-abc",
+  actorSource: "agent_jwt",
 };
 
 function request(routeKey, extra = {}) {
@@ -964,7 +965,9 @@ function request(routeKey, extra = {}) {
     body: {},
     actor: AGENT_ACTOR,
     companyId: COMPANY,
-    headers: {},
+    headers: routeKey === "disclosure-preflight" || routeKey === "disclose"
+      ? { "x-paperclip-run-id": AGENT_ACTOR.runId }
+      : {},
     ...extra,
   };
 }
@@ -1117,9 +1120,27 @@ test("server-side disclosure preflight renders exact authority then consumes onc
   assert.equal(mutationPosts, 1);
 });
 
-test("server-side disclosure requires a live host run and rejects substitutions", async () => {
+test("server-side disclosure requires a run-JWT-bound header and rejects substitutions", async () => {
   const { ctx } = disclosureCtx();
   await plugin.definition.setup(ctx);
+
+  const agentKeyStyle = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", {
+      body: disclosureBody(),
+      actor: { ...AGENT_ACTOR, actorSource: "agent_key" },
+    }),
+  );
+  assert.equal(agentKeyStyle.status, 403);
+  assert.match(agentKeyStyle.body.error, /agent_jwt actor source/);
+
+  const omittedSource = await plugin.definition.onApiRequest(
+    request("disclosure-preflight", {
+      body: disclosureBody(),
+      actor: { ...AGENT_ACTOR, actorSource: undefined },
+    }),
+  );
+  assert.equal(omittedSource.status, 403);
+  assert.match(omittedSource.body.error, /agent_jwt actor source/);
 
   const wrongRun = await plugin.definition.onApiRequest(
     request("disclosure-preflight", { body: disclosureBody({ allowedRunId: "different-run" }) }),
@@ -1145,6 +1166,32 @@ test("server-side disclosure requires a live host run and rejects substitutions"
   );
   assert.equal(forgedHeader.status, 403);
   assert.match(forgedHeader.body.error, /current running heartbeat run/);
+});
+
+test("signed destination rejects dot-segment and encoding substitutions", async () => {
+  const { ctx } = disclosureCtx();
+  await plugin.definition.setup(ctx);
+
+  for (const endpoint of [
+    "/repos/TogetherWeOwn/nntune/issues/123/../456/comments",
+    "/repos/TogetherWeOwn/nntune/issues/123/%2e%2e/456/comments",
+    "/repos/TogetherWeOwn/nntune/issues//456/comments",
+  ]) {
+    const response = await plugin.definition.onApiRequest(
+      request("disclosure-preflight", {
+        body: disclosureBody({
+          destination: {
+            provider: "github",
+            apiOrigin: "https://api.github.com",
+            repository: "TogetherWeOwn/nntune",
+            endpoint,
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 400, `${endpoint}: ${JSON.stringify(response.body)}`);
+    assert.match(response.body.error, /canonical path|canonical URL pathname/);
+  }
 });
 
 test("submission refuses without the matching one-shot preflight confirmation", async () => {
