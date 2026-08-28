@@ -9,15 +9,26 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const CLI = path.join(HERE, '..', 'external_disclosure.js')
+const SOURCE_CLI = path.join(HERE, '..', 'external_disclosure.js')
+const PRODUCTION_TRUST_STORE = path.join(HERE, '..', 'external_disclosure_authorizers.json')
 const FAKE_TOKEN = 'github_pat_FAKE_DISCLOSURE_TOKEN_NOT_REAL'
 const TEST_KEY_ID = 'test-owner-ed25519-v1'
-const TEST_PRIVATE_KEY = crypto.createPrivateKey({
-  key: Buffer.from('MC4CAQAwBQYDK2VwBCIEIO+jLlNxQW+eR57iXa3OaImVmOY07/iY0zlUqhc9itFh', 'base64'),
-  type: 'pkcs8',
-  format: 'der',
-})
+const { privateKey: TEST_PRIVATE_KEY, publicKey: TEST_PUBLIC_KEY } = crypto.generateKeyPairSync('ed25519')
 const PRIVATE_SENTINEL = 'PRIVATE-REPORT-BODY-MUST-NOT-REACH-RECEIPT'
+const TRUST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tog576-trust-'))
+const CLI = path.join(TRUST_DIR, 'external_disclosure.js')
+
+fs.copyFileSync(SOURCE_CLI, CLI)
+writeJson(path.join(TRUST_DIR, 'external_disclosure_authorizers.json'), {
+  version: 1,
+  keys: [{
+    keyId: TEST_KEY_ID,
+    algorithm: 'ed25519',
+    authorizingPrincipal: { principalClass: 'test-owner', principalId: 'offline-suite-only' },
+    publicKeyPem: TEST_PUBLIC_KEY.export({ type: 'spki', format: 'pem' }),
+  }],
+})
+process.on('exit', () => fs.rmSync(TRUST_DIR, { recursive: true, force: true }))
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
@@ -53,7 +64,11 @@ function writeJson(file, value) {
 function run(args, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { PATH: process.env.PATH, HOME: os.tmpdir(), ...env },
+      env: {
+        PATH: process.env.PATH,
+        HOME: os.tmpdir(),
+        ...env,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -163,6 +178,30 @@ function fixture(dir, origin, { grantPrincipal = 'app', runtimePrincipal = 'app'
 }
 
 const env = { EXTERNAL_DISCLOSURE_TOKEN: FAKE_TOKEN }
+
+test('the production trust store rejects the offline fixture signer', async () => {
+  const dir = scratch('production-trust')
+  const api = await stub({ principal: 'app' })
+  try {
+    const f = fixture(dir, api.origin)
+    const productionCli = path.join(dir, 'external_disclosure.js')
+    fs.copyFileSync(SOURCE_CLI, productionCli)
+    fs.copyFileSync(PRODUCTION_TRUST_STORE, path.join(dir, 'external_disclosure_authorizers.json'))
+    const child = spawn(process.execPath, [productionCli, 'preflight', '--grant', f.grantPath, '--runtime', f.runtimePath], {
+      env: { PATH: process.env.PATH, HOME: os.tmpdir(), ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const code = await new Promise((resolve) => child.on('close', resolve))
+    assert.equal(code, 1)
+    assert.match(stderr, /not trusted/)
+    assert.equal(api.calls.length, 0)
+  } finally {
+    await api.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 // TOG-574 reproduction: the credential is capable and the runtime says App,
 // but the grant names a human principal. The read-only capability probes may run;

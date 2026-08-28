@@ -29,6 +29,8 @@ function help() {
     '  help',
     '',
     `The bearer credential is read only from ${TOKEN_ENV}; never put it on argv.`,
+    `The authorizer registry is pinned to ${path.basename(TRUST_STORE)} next to this executable.`,
+    'Tests must run an isolated copy with a fixture registry; no runtime override exists.',
     'The runtime file names artifact files and credential metadata, but never embeds',
     'the private artifact body. submit writes <grant-sha256>.claim.json and',
     '<grant-sha256>.receipt.json beneath the state directory.',
