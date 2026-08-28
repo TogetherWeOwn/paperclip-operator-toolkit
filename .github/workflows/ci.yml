@@ -310,6 +310,23 @@ jobs:
               exit 1
             }
 
+            cp expected.fp type-drift.fp
+            type_before="$(sha256sum type-drift.fp)"
+            node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>/^column\|agents\|[^|]+\|created_at\|timestamp with time zone\|/.test(l)); if(!a)throw Error("agents.created_at type fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|timestamp with time zone|","|timestamp(3) with time zone|")))' type-drift.fp
+            type_after="$(sha256sum type-drift.fp)"
+            [[ "$type_before" != "$type_after" ]] || {
+              echo "type drift mutation did not change the fingerprint" >&2
+              exit 1
+            }
+            set +e
+            type_out="$(./schema_drift.sh compare type-drift.fp 2>&1)"; type_rc=$?
+            set -e
+            printf '%s\n' "$type_out"
+            [[ $type_rc -eq 3 && "$type_out" == *"timestamp(3) with time zone"* ]] || {
+              echo "type drift mutant was not detected with exit 3 and the affected type" >&2
+              exit 1
+            }
+
             cp expected.fp index-drift.fp
             node -e 'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),a=s.split("\n").find(l=>l.startsWith("index|agents|")); if(!a)throw Error("index fingerprint anchor missing"); fs.writeFileSync(p,s.replace(a,a.replace("|agents_","|agents_mutant_")))' index-drift.fp
             set +e

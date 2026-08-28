@@ -14,13 +14,19 @@ die() { echo "REFUSED: $ME: $*" >&2; exit $EXIT_REFUSED; }
 query() {
   psql -X -Atq -v ON_ERROR_STOP=1 <<SQL
 SET search_path = public, pg_catalog;
-SELECT 'column', table_name, lpad(ordinal_position::text, 3, '0'), column_name,
-       data_type,
-       CASE WHEN is_nullable='NO' THEN 'not-null' ELSE 'nullable' END,
-       COALESCE(regexp_replace(column_default, '::(text|jsonb|boolean|integer|bigint|uuid)$', ''), '(none)')
-FROM information_schema.columns
-WHERE table_schema='public'
-  AND table_name IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
+SELECT 'column', c.relname, lpad(a.attnum::text, 3, '0'), a.attname,
+       pg_catalog.format_type(a.atttypid, a.atttypmod),
+       CASE WHEN a.attnotnull THEN 'not-null' ELSE 'nullable' END,
+       COALESCE(regexp_replace(pg_get_expr(d.adbin, d.adrelid), '::(text|jsonb|boolean|integer|bigint|uuid)$', ''), '(none)')
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE n.nspname='public'
+  AND c.relkind IN ('r','p')
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+  AND c.relname IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
 UNION ALL
 SELECT 'index', tablename, '---', indexname,
        regexp_replace(indexdef, ' ON public\\.', ' ON '),

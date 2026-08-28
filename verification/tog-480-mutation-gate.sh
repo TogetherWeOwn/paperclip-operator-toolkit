@@ -120,6 +120,10 @@ mutant protected-create-payload test_privilege_ceilings.sh org_provisioner.sh \
   'authorizationPolicy:{assignmentPolicy:{mode:"protected"}}' \
   'authorizationPolicy:{assignmentPolicy:{mode:"open"}}' \
   'DIRECTOR agent.create payload was not born protected' || rc=1
+mutant assign-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+  'canAssignTasks:false,' \
+  'canAssignTasks:true,' \
+  'DIRECTOR agent.create payload was not born protected' || rc=1
 mutant permissions-update-omitted test_privilege_ceilings.sh org_provisioner.sh \
   $'  pc agent permissions:update "$new_id" --payload-json \\\n    \'{"canCreateAgents":false,"canCreateSkills":false,"canAssignTasks":false,\n      "authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}\' --json >/dev/null' \
   '  true # mutant omits permissions:update' \
