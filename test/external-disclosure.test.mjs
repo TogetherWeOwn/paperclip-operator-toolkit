@@ -245,8 +245,8 @@ test('REGRESSION: broad route approval without exact issue/run binding fails clo
   try {
     const f = fixture(dir, api.origin, { issue: 'TOG-551', runId: 'broad-route-run' })
     const result = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(result.code, 1)
-    assert.match(result.stderr, /issue ID/)
+    assert.equal(result.code, 2)
+    assert.match(result.stderr, /host-authenticated gh-token-broker/)
     assert.equal(api.calls.filter((call) => call.method === 'POST').length, 0)
     assert.ok(!fs.existsSync(f.state), 'a refused preflight must not consume the grant')
   } finally {
@@ -280,8 +280,8 @@ test('artifact substitution is refused before mutation', async () => {
     const f = fixture(dir, api.origin)
     fs.appendFileSync(f.artifact, '\nsubstituted')
     const result = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(result.code, 1)
-    assert.match(result.stderr, /artifact set/)
+    assert.equal(result.code, 2)
+    assert.match(result.stderr, /host-authenticated gh-token-broker/)
     assert.equal(api.calls.filter((call) => call.method === 'POST').length, 0)
   } finally {
     await api.close()
@@ -289,136 +289,36 @@ test('artifact substitution is refused before mutation', async () => {
   }
 })
 
-test('a post-hash path replacement cannot substitute the transmitted bytes', async () => {
-  const dir = scratch('race')
-  let artifactPath = null
-  let replacementBody = null
-  const api = await stub({
-    principal: 'app',
-    onRepositoryProbe: () => {
-      fs.writeFileSync(artifactPath, replacementBody)
-    },
-  })
+test('local submit is disabled before a claim or external mutation', async () => {
+  const dir = scratch('disabled-submit')
+  const api = await stub({ principal: 'app' })
   try {
-    const approvedBody = JSON.stringify({ title: 'approved report', description: PRIVATE_SENTINEL })
-    replacementBody = JSON.stringify({ title: 'substituted report', description: 'UNAUTHORIZED-REPLACEMENT' })
-    const f = fixture(dir, api.origin, { artifactBody: approvedBody })
-    artifactPath = f.artifact
+    const f = fixture(dir, api.origin)
     const result = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(result.code, 0, result.stderr)
-    const post = api.calls.find((call) => call.method === 'POST')
-    assert.equal(post.body, approvedBody, 'submission reopened the replaced artifact path')
-    assert.notEqual(post.body, replacementBody)
-    const receiptName = fs.readdirSync(f.state).find((name) => name.endsWith('.receipt.json'))
-    const receipt = JSON.parse(fs.readFileSync(path.join(f.state, receiptName), 'utf8'))
-    assert.equal(receipt.artifacts[0].artifactSha256, sha256(approvedBody))
+    assert.equal(result.code, 2)
+    assert.match(result.stderr, /host-authenticated gh-token-broker/)
+    assert.equal(api.calls.length, 0)
+    assert.ok(!fs.existsSync(f.state))
   } finally {
     await api.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('passing exact-match control submits once and writes a redacted receipt', async () => {
-  const dir = scratch('exact')
+test('preflight rejects a non-canonical spelling of a valid signature', async () => {
+  const dir = scratch('signature-encoding')
   const api = await stub({ principal: 'app' })
   try {
     const f = fixture(dir, api.origin)
-    const first = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(first.code, 0, first.stderr)
-    assert.equal(api.calls.filter((call) => call.method === 'POST').length, 1)
-
-    const files = fs.readdirSync(f.state)
-    const receiptName = files.find((name) => name.endsWith('.receipt.json'))
-    const claimName = files.find((name) => name.endsWith('.claim.json'))
-    assert.ok(receiptName)
-    assert.ok(claimName)
-    const receiptText = fs.readFileSync(path.join(f.state, receiptName), 'utf8')
-    const receipt = JSON.parse(receiptText)
-    assert.equal(receipt.success, true)
-    assert.equal(receipt.approvalId, 'approval-exact-1')
-    assert.equal(receipt.issueId, 'TOG-576')
-    assert.equal(receipt.runId, 'run-576')
-    assert.equal(receipt.sessionId, 'session-576')
-    assert.equal(receipt.installationId, '99')
-    assert.equal(receipt.repositorySelection, 'selected')
-    assert.deepEqual(receipt.repositories, ['paperclip'])
-    assert.deepEqual(receipt.effectivePermissions, { metadata: 'read', security_advisories: 'write' })
-    assert.equal(receipt.artifacts[0].responseStatus, 201)
-    assert.deepEqual(receipt.artifacts[0].responseIdentifier, { field: 'ghsa_id', value: 'GHSA-test-0000-0000' })
-    assert.equal(receipt.artifacts[0].artifactSha256, sha256(fs.readFileSync(f.artifact)))
-    assert.ok(!receiptText.includes(FAKE_TOKEN), 'receipt retained the token')
-    assert.ok(!receiptText.includes(PRIVATE_SENTINEL), 'receipt retained the private report body')
-
-    const preflight = JSON.parse(first.stdout.trim().split('\n')[0])
-    assert.equal(preflight.capability.ok, true)
-    assert.equal(preflight.authority.ok, true)
-    assert.equal(preflight.mutation.approvalId, 'approval-exact-1')
-    assert.deepEqual(preflight.mutation.artifacts, [{ id: 'report-1', sha256: sha256(fs.readFileSync(f.artifact)) }])
-  } finally {
-    await api.close()
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a non-canonical spelling of a valid signature cannot create a second grant identity', async () => {
-  const dir = scratch('signature-replay')
-  const api = await stub({ principal: 'app' })
-  try {
-    const f = fixture(dir, api.origin)
-    const first = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(first.code, 0, first.stderr)
-
     const grant = JSON.parse(fs.readFileSync(f.grantPath, 'utf8'))
     assert.match(grant.signature.value, /==$/)
     grant.signature.value = grant.signature.value.replace(/=+$/, '')
     writeJson(f.grantPath, grant)
 
-    const second = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(second.code, 1)
-    assert.match(second.stderr, /canonical padded base64/)
-    assert.equal(api.calls.filter((call) => call.method === 'POST').length, 1)
-  } finally {
-    await api.close()
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a consumed grant rejects replay without another external POST', async () => {
-  const dir = scratch('replay')
-  const api = await stub({ principal: 'app' })
-  try {
-    const f = fixture(dir, api.origin)
-    const first = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(first.code, 0, first.stderr)
-    const second = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(second.code, 1)
-    assert.match(second.stderr, /replay refused/)
-    assert.equal(api.calls.filter((call) => call.method === 'POST').length, 1)
-  } finally {
-    await api.close()
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('failed external response is still consumed and recorded without the response body', async () => {
-  const dir = scratch('rejected')
-  const api = await stub({ principal: 'app', postStatus: 422 })
-  try {
-    const f = fixture(dir, api.origin)
-    const result = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
+    const result = await run(['preflight', '--grant', f.grantPath, '--runtime', f.runtimePath], env)
     assert.equal(result.code, 1)
-    const receiptName = fs.readdirSync(f.state).find((name) => name.endsWith('.receipt.json'))
-    const receiptText = fs.readFileSync(path.join(f.state, receiptName), 'utf8')
-    const receipt = JSON.parse(receiptText)
-    assert.equal(receipt.success, false)
-    assert.equal(receipt.artifacts[0].responseStatus, 422)
-    assert.equal(receipt.artifacts[0].outcome, 'rejected')
-    assert.ok(!receiptText.includes('refused'), 'private/remote response body reached receipt')
-
-    const replay = await run(['submit', '--grant', f.grantPath, '--runtime', f.runtimePath, '--state-dir', f.state], env)
-    assert.equal(replay.code, 1)
-    assert.match(replay.stderr, /replay refused/)
-    assert.equal(api.calls.filter((call) => call.method === 'POST').length, 1)
+    assert.match(result.stderr, /canonical padded base64/)
+    assert.equal(api.calls.length, 0)
   } finally {
     await api.close()
     fs.rmSync(dir, { recursive: true, force: true })

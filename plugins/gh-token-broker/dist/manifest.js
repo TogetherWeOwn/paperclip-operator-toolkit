@@ -29,6 +29,10 @@ export const manifest = {
     "secrets.read-ref",
     // Call api.github.com to mint.
     "http.outbound",
+    // Persist disclosure grant consumption and signed receipts server-side.
+    "database.namespace.read",
+    "database.namespace.write",
+    "database.namespace.migrate",
     // Derive scope server-side from the issue the caller actually holds.
     "issues.read",
     // TOG-309. Held for its *side effects*, not as the gate: the host's
@@ -48,7 +52,21 @@ export const manifest = {
     worker: "./dist/worker.js",
   },
 
+  database: {
+    namespaceSlug: "gh_token_broker",
+    migrationsDir: "./migrations",
+  },
+
   apiRoutes: [
+    {
+      routeKey: "disclose",
+      method: "POST",
+      path: "/issues/:issueId/external-disclosures",
+      auth: "agent",
+      capability: "api.routes.register",
+      checkoutPolicy: "none",
+      companyResolution: { from: "issue", param: "issueId" },
+    },
     {
       // Step 1 of the operator's de-risk order: prove that agent-authenticated
       // plugin API routes dispatch at all, and that the host hands the worker an

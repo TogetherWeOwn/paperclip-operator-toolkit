@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Task-specific, one-shot gate for external disclosures (TOG-576).
+// Offline protocol fixture for external-disclosure grants (TOG-576).
 //
-// This tool does not mint credentials and never treats possession of one as
-// authority. It reads the bearer from EXTERNAL_DISCLOSURE_TOKEN, proves the
-// credential's runtime principal and destination access with read-only calls,
-// separately proves exact equality with an immutable approval grant, claims the
-// grant once, and only then sends the approved artifact bytes.
+// Production submission is deliberately disabled here. Caller-owned filesystem
+// state cannot prove global one-shot consumption, current Paperclip issue/run
+// identity, or immutable receipt provenance. The authoritative mutation path is
+// the host-authenticated gh-token-broker external-disclosures route. This file
+// retains preflight validation for offline grant construction and regression
+// tests, but `submit` always refuses before a claim or external request.
 
 const crypto = require('crypto')
 const fs = require('fs')
@@ -700,6 +701,9 @@ async function main() {
   if (mode === 'help' || mode === '--help' || mode === '-h') return help()
   if (!['preflight', 'submit'].includes(mode)) {
     die(`unknown command "${mode || ''}"; expected preflight, submit, or help`, 2)
+  }
+  if (mode === 'submit') {
+    die('production submit moved to the host-authenticated gh-token-broker external-disclosures route; local submission is disabled', 2)
   }
   const args = argsFor(mode)
   const result = await preflight(args['--grant'], args['--runtime'])

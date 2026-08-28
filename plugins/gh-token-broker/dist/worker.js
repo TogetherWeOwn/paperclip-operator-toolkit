@@ -19,8 +19,18 @@ import {
   describeCiVisibility,
   resolveScope,
 } from "./scope.js";
-import { GitHubError, createAppJwt, getInstallationId, mintInstallationToken } from "./github.js";
+import { GitHubError, createAppJwt, getInstallationId, mintInstallationToken, submitRepositoryMutation } from "./github.js";
 import { OwnershipError, assertMintOwnership } from "./ownership.js";
+import {
+  DisclosureError,
+  assertAppPrincipal,
+  assertPermissionGrant,
+  grantId,
+  proveAuthority,
+  responseIdentifier,
+  validateDisclosureRequest,
+  verifyGrantSignature,
+} from "./disclosure.js";
 
 /** Held from setup() so onApiRequest can reach host services. */
 let context = null;
@@ -30,7 +40,7 @@ function json(status, body) {
 }
 
 function errorStatus(error) {
-  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError) {
+  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError || error instanceof DisclosureError) {
     return error.status ?? 400;
   }
   return 500;
@@ -42,7 +52,7 @@ function errorStatus(error) {
  * whose message might quote resolved config, so it is replaced wholesale.
  */
 function errorMessage(error) {
-  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError) {
+  if (error instanceof ScopeError || error instanceof GitHubError || error instanceof OwnershipError || error instanceof DisclosureError) {
     return error.message;
   }
   return "Internal broker error.";
@@ -161,6 +171,176 @@ async function mint(ctx, { companyId, config, scope }) {
   });
 }
 
+const disclosureTable = (ctx) => `${ctx.db.namespace}.external_disclosure_receipts`;
+
+async function claimDisclosure(ctx, { grantId: id, companyId, issue, runId, approvalId, claimedAt }) {
+  const table = disclosureTable(ctx);
+  const result = await ctx.db.execute(
+    `INSERT INTO ${table} (grant_id, company_id, issue_id, issue_identifier, run_id, approval_id, status, receipt_json) VALUES ($1, $2, $3, $4, $5, $6, 'claimed', $7::jsonb) ON CONFLICT (grant_id) DO NOTHING`,
+    [id, companyId, issue.id, issue.identifier, runId, approvalId, JSON.stringify({
+      version: 1,
+      grantId: id,
+      issueId: issue.identifier,
+      runId,
+      approvalId,
+      claimedAt,
+      status: "claimed",
+    })],
+  );
+  if (result.rowCount !== 1) {
+    throw new DisclosureError(`Grant ${id} has already been consumed; replay refused.`, 409);
+  }
+}
+
+async function completeDisclosure(ctx, id, receipt) {
+  const table = disclosureTable(ctx);
+  const result = await ctx.db.execute(
+    `UPDATE ${table} SET status = $2, receipt_json = $3::jsonb, updated_at = now() WHERE grant_id = $1 AND status = 'claimed'`,
+    [id, receipt.success ? "accepted" : "rejected", JSON.stringify(receipt)],
+  );
+  if (result.rowCount !== 1) {
+    throw new DisclosureError("Disclosure was consumed but its server-side receipt could not be finalized.", 500);
+  }
+}
+
+async function handleDisclosure(ctx, input) {
+  const { companyId } = input;
+  const issueId = input.params?.issueId;
+  if (!issueId) throw new DisclosureError("Missing issueId.", 400);
+  if (input.actor?.actorType !== "agent" || !input.actor?.agentId || !input.actor?.runId) {
+    throw new DisclosureError("External disclosure requires an authenticated agent run.", 403);
+  }
+
+  const config = await readConfig(ctx, companyId);
+  const request = validateDisclosureRequest(input.body);
+  verifyGrantSignature(request.grant, config.externalDisclosureAuthorizers ?? []);
+
+  const preliminary = await ctx.issues.get(issueId, companyId);
+  if (!preliminary) throw new DisclosureError("Issue not found.", 404);
+  if (preliminary.identifier !== request.grant.allowedIssueId) {
+    throw new DisclosureError("Authority refused: route issue does not equal the signed allowed issue.", 403);
+  }
+  const { issue, scope, ownership } = await deriveScope(ctx, {
+    issueId,
+    companyId,
+    body: {
+      repositories: [request.grant.destination.repository.split("/")[1]],
+      permissions: request.grant.requiredPermissions,
+    },
+    config,
+    actor: input.actor,
+  });
+  if (ownership.runId !== request.grant.allowedRunId) {
+    throw new DisclosureError("Authority refused: authenticated current run does not equal the signed allowed run.", 403);
+  }
+
+  const authenticatingPrincipal = assertAppPrincipal(request.grant, config.appId);
+  const authority = proveAuthority({ request, issue, actorRunId: ownership.runId });
+  const credential = await mint(ctx, { companyId, config, scope });
+  assertPermissionGrant(request.grant.requiredPermissions, credential.permissions ?? scope.permissions);
+  const repoName = request.grant.destination.repository.split("/")[1];
+  const grantedRepositories = credential.repositories ?? scope.repositories;
+  if (!grantedRepositories.some((name) => name.toLowerCase() === repoName.toLowerCase())) {
+    throw new DisclosureError("Capability refused: GitHub did not grant the destination repository.", 403);
+  }
+
+  const id = grantId(request.grant);
+  const claimedAt = new Date().toISOString();
+  await claimDisclosure(ctx, {
+    grantId: id,
+    companyId,
+    issue,
+    runId: ownership.runId,
+    approvalId: request.grant.approvalRecord.id,
+    claimedAt,
+  });
+
+  const entries = [];
+  for (const artifact of request.artifacts) {
+    const response = await submitRepositoryMutation(
+      (url, init) => ctx.http.fetch(url, init),
+      credential.token,
+      request.grant.destination,
+      request.grant.action,
+      artifact.body,
+    );
+    entries.push({
+      id: artifact.id,
+      artifactSha256: artifact.sha256,
+      responseStatus: response.status,
+      responseIdentifier: responseIdentifier(response.body),
+      outcome: response.ok ? "accepted" : "rejected",
+    });
+    if (!response.ok) break;
+  }
+
+  const success = entries.length === request.artifacts.length && entries.every((entry) => entry.outcome === "accepted");
+  const receipt = {
+    version: 1,
+    grantId: id,
+    approvalId: request.grant.approvalRecord.id,
+    approvalRecordSha256: request.grant.approvalRecord.sha256,
+    approvedAt: request.grant.approvedAt,
+    claimedAt,
+    completedAt: new Date().toISOString(),
+    destination: request.grant.destination,
+    channel: request.grant.channel,
+    action: request.grant.action,
+    issueId: issue.identifier,
+    issueUuid: issue.id,
+    runId: ownership.runId,
+    sessionId: ownership.runId,
+    authenticatingPrincipal,
+    authorizingPrincipal: request.grant.authorizingPrincipal,
+    tokenIssuedAt: credential.issuedAt,
+    tokenExpiresAt: credential.expiresAt,
+    installationId: credential.installationId,
+    repositorySelection: credential.repositorySelection,
+    repositories: grantedRepositories,
+    effectivePermissions: credential.permissions ?? scope.permissions,
+    authority,
+    artifacts: entries,
+    success,
+  };
+  await completeDisclosure(ctx, id, receipt);
+  await ctx.activity.log({
+    companyId,
+    message: "External disclosure attempted under task-specific grant",
+    entityType: "issue",
+    entityId: issue.id,
+    metadata: {
+      grantId: id,
+      approvalId: receipt.approvalId,
+      runId: receipt.runId,
+      destination: receipt.destination,
+      artifactHashes: receipt.artifacts.map(({ id: artifactId, artifactSha256 }) => ({ id: artifactId, sha256: artifactSha256 })),
+      success,
+    },
+  });
+
+  return json(success ? 200 : 502, {
+    ok: success,
+    capability: {
+      ok: true,
+      authenticatingPrincipal,
+      tokenIssuedAt: receipt.tokenIssuedAt,
+      tokenExpiresAt: receipt.tokenExpiresAt,
+      installationId: receipt.installationId,
+      repositorySelection: receipt.repositorySelection,
+      repositories: receipt.repositories,
+      effectivePermissions: receipt.effectivePermissions,
+    },
+    authority,
+    mutation: {
+      destination: receipt.destination,
+      principal: authenticatingPrincipal,
+      artifacts: request.grant.artifacts,
+      approvalId: receipt.approvalId,
+    },
+    receipt,
+  });
+}
+
 async function handleWhoami(input) {
   // Reports only what the host derived about the caller. The point of the probe
   // is that the caller cannot influence any of these values.
@@ -265,6 +445,8 @@ export const plugin = definePlugin({
       switch (input.routeKey) {
         case "whoami":
           return await handleWhoami(input);
+        case "disclose":
+          return await handleDisclosure(ctx, input);
         case "mint":
           return await handleMint(ctx, input);
         default:

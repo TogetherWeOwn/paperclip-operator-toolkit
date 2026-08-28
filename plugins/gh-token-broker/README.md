@@ -38,6 +38,44 @@ the caller cannot influence them. **`runId` is the exception**, and an earlier
 revision of this file said otherwise. See
 [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 
+### `POST /api/plugins/gh-token-broker/api/issues/:issueId/external-disclosures`
+
+Task-specific external mutation gate added after
+[`TOG-574`](../../docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md).
+The request carries one signed immutable grant, the exact approval-record text,
+and the exact artifact bodies. The broker derives the current issue, run, agent,
+credential, repository scope, permissions, token timestamps, installation ID and
+repository selection from host/GitHub state — none are caller-authored receipt
+metadata.
+
+Before any external write it:
+
+1. verifies the grant signature against `externalDisclosureAuthorizers` in the
+   reviewed broker config;
+2. proves the route issue identifier and host-authenticated run ID equal the
+   signed `allowedIssueId` / `allowedRunId`;
+3. hashes the submitted artifact bytes and approval record and requires an exact
+   signed match;
+4. mints the configured GitHub App token to the signed repository/permission
+   subset and verifies GitHub's actual returned grant;
+5. atomically inserts the canonical grant ID into the broker's server-side
+   Postgres namespace. The primary-key conflict is the replay gate across runs,
+   processes and caller machines;
+6. performs the mutation inside the broker and finalizes the same server-side
+   row as the redacted receipt.
+
+The response renders separate `capability`, `authority`, `mutation`, and `receipt`
+objects. The receipt retains the response status/identifier, approval and
+artifact hashes, current issue/run/session identity, token issue/expiry,
+installation ID, repository selection/list and effective permissions. It never
+retains or returns the token, App private key, approval text, private artifact
+body, or remote response body.
+
+The checked-in repository provisions no real authorizer public key. Operators
+must independently add a legitimate Ed25519 authorizer entry to the broker's
+`externalDisclosureAuthorizers` config before any real grant can pass. The test
+suite generates a fresh fixture keypair at runtime.
+
 ### `POST /api/plugins/gh-token-broker/api/issues/:issueId/github-token`
 
 Mints the token. Request body is optional; both fields may only *narrow* the
