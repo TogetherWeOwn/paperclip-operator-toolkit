@@ -12,9 +12,24 @@ EXIT_OK=0; EXIT_REFUSED=2; EXIT_DRIFT=3
 
 die() { echo "REFUSED: $ME: $*" >&2; exit $EXIT_REFUSED; }
 query() {
+  local table_count
+  table_count="$(psql -X -Atq -v ON_ERROR_STOP=1 <<SQL
+SELECT count(*)
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r','p')
+  AND c.relname IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants');
+SQL
+)" || return 2
+  [[ "$table_count" == "6" ]] || {
+    echo "REFUSED: $ME: expected all six Paperclip fixture tables, found ${table_count:-no measurable count}" >&2
+    return 2
+  }
+
   psql -X -Atq -v ON_ERROR_STOP=1 <<SQL
 SET search_path = public, pg_catalog;
-SELECT 'column', c.relname, lpad(a.attnum::text, 3, '0'), a.attname,
+SELECT 'column', c.relname, '---', a.attname,
        pg_catalog.format_type(a.atttypid, a.atttypmod),
        CASE WHEN a.attnotnull THEN 'not-null' ELSE 'nullable' END,
        COALESCE(regexp_replace(pg_get_expr(d.adbin, d.adrelid), '::(text|jsonb|boolean|integer|bigint|uuid)$', ''), '(none)')
@@ -34,7 +49,7 @@ SELECT 'index', tablename, '---', indexname,
 FROM pg_indexes
 WHERE schemaname='public'
   AND tablename IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
-ORDER BY 2, 1, 3, 4;
+ORDER BY 2, 1, 4;
 SQL
 }
 case "${1:-}" in
