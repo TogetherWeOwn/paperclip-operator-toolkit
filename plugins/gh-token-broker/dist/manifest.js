@@ -180,6 +180,32 @@ export const manifest = {
         description:
           "Applied when a project does not set GH_APP_PERMISSIONS. Defaults to contents/pull_requests/issues write plus metadata read.",
       },
+      externalDisclosureAuthorizers: {
+        type: "array",
+        title: "External disclosure authorizers",
+        description:
+          "Trusted Ed25519 public keys and their authorizing principals. Empty or omitted fails closed.",
+        default: [],
+        items: {
+          type: "object",
+          required: ["keyId", "algorithm", "authorizingPrincipal", "publicKeyPem"],
+          additionalProperties: false,
+          properties: {
+            keyId: { type: "string" },
+            algorithm: { type: "string", enum: ["ed25519"] },
+            authorizingPrincipal: {
+              type: "object",
+              required: ["principalClass", "principalId"],
+              additionalProperties: false,
+              properties: {
+                principalClass: { type: "string" },
+                principalId: { type: "string" },
+              },
+            },
+            publicKeyPem: { type: "string" },
+          },
+        },
+      },
     },
   },
 };

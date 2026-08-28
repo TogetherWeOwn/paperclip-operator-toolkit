@@ -44,6 +44,15 @@ test("manifest validates against the host's own schema", () => {
   );
 });
 
+test("manifest declares the external-disclosure authorizer trust store", () => {
+  const schema = manifest.instanceConfigSchema.properties.externalDisclosureAuthorizers;
+  assert.equal(schema.type, "array");
+  assert.deepEqual(schema.default, []);
+  assert.deepEqual(schema.items.required, ["keyId", "algorithm", "authorizingPrincipal", "publicKeyPem"]);
+  assert.deepEqual(schema.items.properties.algorithm.enum, ["ed25519"]);
+  assert.equal(schema.items.additionalProperties, false);
+});
+
 test("all routes are agent-auth and declare the capability", () => {
   for (const route of manifest.apiRoutes) {
     assert.equal(route.auth, "agent", `${route.routeKey} must be agent-only`);
