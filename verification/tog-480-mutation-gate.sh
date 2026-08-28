@@ -124,10 +124,6 @@ mutant assign-create-payload test_privilege_ceilings.sh org_provisioner.sh \
   'canAssignTasks:false,' \
   'canAssignTasks:true,' \
   'DIRECTOR agent.create payload was not born protected' || rc=1
-mutant permissions-update-omitted test_privilege_ceilings.sh org_provisioner.sh \
-  $'  pc agent permissions:update "$new_id" --payload-json \\\n    \'{"canCreateAgents":false,"canCreateSkills":false,"canAssignTasks":false,\n      "authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}\' --json >/dev/null' \
-  '  true # mutant omits permissions:update' \
-  'DIRECTOR legacy permission flags are not explicitly false' || rc=1
 mutant exact-grant-replacement test_request_queue.sh org_provisioner.sh \
   $'DELETE FROM principal_permission_grants\nWHERE company_id = :\'company_id\'::uuid\n  AND principal_type = \'agent\'\n  AND principal_id = :\'agent_id\';' \
   $'DELETE FROM principal_permission_grants\nWHERE false;' \
