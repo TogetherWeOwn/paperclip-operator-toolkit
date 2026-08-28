@@ -25,10 +25,11 @@ run_suite() { # dir suite
     PAPERCLIP_STUB_LOG="$d/calls.jsonl" GRANT_LOG="$d/grants.jsonl" \
     QUEUE="$d/queue.jsonl" DISABLED_TEMPLATES="$d/disabled" "./$suite")
 }
-mutant() { # label suite target anchor replacement named-failure [stage-hook]
-  local label="$1" suite="$2" target="$3" anchor="$4" repl="$5" want="$6" hook="${7:-true}"
-  local d baseline; d="$(mktemp -d)"; stage "$d"
-  "$hook" "$d" || { echo "$label: stage hook failed" >&2; rm -rf "$d"; return 2; }
+mutant() { # label suite target anchor replacement named-failure [stage-hook] [mutant-hook]
+  local label="$1" suite="$2" target="$3" anchor="$4" repl="$5" want="$6"
+  local stage_hook="${7:-true}" mutant_hook="${8:-true}"
+  local d baseline mutation_rc; d="$(mktemp -d)"; stage "$d"
+  "$stage_hook" "$d" || { echo "$label: stage hook failed" >&2; rm -rf "$d"; return 2; }
   baseline="$(mktemp)"
   if ! run_suite "$d" "$suite" >"$baseline" 2>&1; then
     echo "BASELINE FAILED for $label" >&2; cat "$baseline"; rm -f "$baseline"; rm -rf "$d"; return 2
@@ -41,6 +42,7 @@ fs.writeFileSync(p,s.replace(a,r));
 NODE
   mutation_rc=$?
   if [[ $mutation_rc -ne 0 ]]; then rm -rf "$d"; return "$mutation_rc"; fi
+  "$mutant_hook" "$d" || { echo "$label: mutant hook failed" >&2; rm -rf "$d"; return 2; }
   bash -n "$d/$target" || { echo "$label: mutant does not parse" >&2; rm -rf "$d"; return 2; }
   if run_suite "$d" "$suite" >"$d/out" 2>&1; then
     echo "$label: mutant left $suite green" >&2; rm -rf "$d"; return 1
@@ -51,7 +53,7 @@ NODE
   echo "ok: $label -> $want"; rm -rf "$d"
 }
 
-mutate_caller_placement() { # stage-dir
+mutate_caller_placement() { # staged mutant dir
   local d="$1"
   node - "$d/org_provisioner.sh" <<'NODE'
 const fs=require('fs'), p=process.argv[2]; let s=fs.readFileSync(p,'utf8');
@@ -109,7 +111,7 @@ mutant ceiling-bypass test_privilege_ceilings.sh lib/provisioning_policy.sh \
 mutant caller-placement test_privilege_ceilings.sh org_provisioner.sh \
   $'--reports-to|--parent)\n        # Invariant 3: placement is the service\'s decision, never the caller\'s.\n        die "reportsTo cannot be supplied by the caller; the service sets it to the caller\'s own subtree.";;' \
   $'--reports-to|--parent)\n        caller_parent="$2"; shift 2;;' \
-  'DIRECTOR create payload accepted caller-controlled placement' mutate_caller_placement || rc=1
+  'DIRECTOR create payload accepted caller-controlled placement' true mutate_caller_placement || rc=1
 mutant dormant-payload test_privilege_ceilings.sh org_provisioner.sh \
   'runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}}' \
   'runtimeConfig:{heartbeat:{enabled:true, wakeOnDemand:true}}' \
