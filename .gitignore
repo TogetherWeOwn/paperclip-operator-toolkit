@@ -1,5 +1,12 @@
 # Never commit operational state or credentials.
 *.env
+# TOG-554's reviewed rehearsal runtime configuration is non-secret and
+# load-bearing. Keep the global operational-env denylist, but make this exact
+# deployment artifact reproducible from a clean checkout.
+!omniroute/rehearsal/runtime.env
+# The default rehearsal DB capture contains a raw live SQLite pre-image. Keep
+# the whole directory unstageable even when an operator runs `git add -A`.
+omniroute/rehearsal/private-db/
 *.pem
 *.key
 *-log.jsonl

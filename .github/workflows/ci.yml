@@ -237,11 +237,12 @@ jobs:
           # `*.sh` glob does not descend, and acceptance_live.sh is a script the
           # OPERATOR runs on the VPS — a parse error there surfaces in front of
           # a human doing an install, which is the worst place to find one.
-          # omniroute/*.sh is included because every script there is operator-run
-          # against a management surface no runner can reach (TOG-371). TOG-519
-          # added a narrow stubbed contract suite for the two TOG-153 artifacts,
-          # but no CI job performs a real registration. See omniroute/README.md.
-          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # omniroute/*.sh and omniroute/rehearsal/*.sh are included because
+          # every script there is operator-run against a management or host
+          # surface no runner can reach (TOG-371/TOG-554). The rehearsal suite
+          # below exercises its Podman paths with a fake runtime, but this parse
+          # gate also covers the nested scripts directly.
+          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           # The repo's first Python. Same argument as the shell gate above: these
           # are operator-run and have no suite, so a parse error would otherwise
@@ -306,6 +307,18 @@ jobs:
       # the old claude-* -> claude-sonnet target. The suite never sends inference.
       - name: TOG-153 operator artifact suite
         run: ./test_tog153_artifacts.sh
+
+      # TOG-554. No live Podman or inference traffic: the suite uses a fake
+      # Podman state machine and a fixture artifact to exercise package hashes,
+      # refusal gates, success/no-op/undo paths, replay protection and rollback.
+      - name: OmniRoute rehearsal package suite
+        run: ./test_omniroute_rehearsal.sh
+
+      - name: Install pinned OmniRoute translator fixture compiler
+        run: npm install --no-save --ignore-scripts typescript@5.9.3
+
+      - name: OmniRoute rehearsal translator fixture
+        run: node --test test_omniroute_rehearsal_translator.mjs
 
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
