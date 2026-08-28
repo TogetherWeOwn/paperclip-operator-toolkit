@@ -37,9 +37,14 @@ EXPECT_DORMANT=1
 [[ "${1:-}" == "--allow-active" ]] && EXPECT_DORMANT=0
 
 FINDINGS=0
+SQL_FAILED=0
 note()  { printf '  \033[33mFINDING\033[0m  %s\n' "$1"; FINDINGS=$((FINDINGS+1)); }
 good()  { printf '  \033[32mOK\033[0m       %s\n' "$1"; }
 hdr()   { printf '\n\033[1m%s\033[0m\n' "$1"; }
+unknown() {
+  echo "ERROR: org_access_review.sh could not complete every database query, so it produced no verdict." >&2
+  exit 3
+}
 
 # shellcheck source=lib/pcsql.sh
 . "$HERE/lib/pcsql.sh" || { echo "ERROR: missing $HERE/lib/pcsql.sh" >&2; exit 1; }
@@ -60,8 +65,36 @@ EOF
 fi
 
 # Takes the SQL as an argument rather than on stdin, as it always has; the
-# helper wants it on stdin. See lib/pcsql.sh for the backend choice.
-sql() { PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -F"|" <<<"$1"; }
+# helper wants it on stdin. See lib/pcsql.sh for the backend choice. Every query
+# is fail-fast, and a failure writes a sentinel that survives command/process
+# substitution so the script cannot mistake an empty result for zero findings.
+SQL_FAILURE_FILE="$(mktemp)"
+trap 'rm -f "$SQL_FAILURE_FILE"' EXIT
+sql() {
+  local out rc
+  out="$(PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -v ON_ERROR_STOP=1 -F"|" <<<"$1")"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    printf x > "$SQL_FAILURE_FILE"
+    return "$rc"
+  fi
+  printf '%s' "$out"
+}
+check_sql() { [[ ! -s "$SQL_FAILURE_FILE" ]] || unknown; }
+trap_sql() { check_sql; }
+trap trap_sql DEBUG
+
+# The backend answering SELECT 1 is not enough: a reachable empty or wrong
+# database would make every absence check green. Require the Paperclip agents
+# table and at least one row for the requested company before scoring anything.
+subject_count="$(sql "
+SELECT count(*)
+FROM agents
+WHERE company_id = :'cid'::uuid;")"
+check_sql
+if [[ ! "$subject_count" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: org_access_review.sh found no agents for company $COMPANY_ID; refusing to score an empty or wrong database." >&2
+  exit 3
+fi
 
 # Declared role templates. Source of truth is the provisioner's machine-readable
 # catalog, so the review never parses aligned human output or strips `(SELF)`

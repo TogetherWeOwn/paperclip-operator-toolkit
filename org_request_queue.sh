@@ -400,7 +400,7 @@ derive_leader() {
     [[ "$seen" != *" $parent "* ]] || { printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
     seen+="$parent "
     row="$(resolve_agent "$parent")"
-    [[ -n "$row" ]] || { skips="$(jq -c --arg a "$parent" --arg r missing "$skip" <<<"$skips")"; break; }
+    [[ -n "$row" ]] || { skips="$(jq -c --arg a "$parent" --arg r missing "$skip" <<<"$skips")"; printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
 
     local a_id a_role a_tpl a_status
     a_id="$(f 1 "$row")"; a_role="$(f 2 "$row")"
@@ -418,6 +418,7 @@ derive_leader() {
     parent="$(f 5 "$row")"
     depth=$((depth+1))
   done
+  [[ -z "$parent" ]] || { printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
   printf 'escalate\t\t\t\t%s\n' "$skips"
 }
 
