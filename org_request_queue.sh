@@ -17,7 +17,8 @@ set -uo pipefail
 # The responsible leader is the nearest LIVE ancestor of the requester, walking
 # reports_to upward, whose own delegation ceiling already contains the requested
 # template — that is, a leader may only approve what it could have done itself.
-# In the org as it stands this is the requester's direct manager in every case.
+# The direct manager decides when their ceiling contains the template; otherwise
+# the walk continues upward and records the objective skip reason.
 #
 # The walk skips an ancestor only for `terminated` or an insufficient ceiling,
 # and both are logged. Dormancy is NOT a skip reason: an idle leader is woken,
@@ -399,7 +400,7 @@ derive_leader() {
     [[ "$seen" != *" $parent "* ]] || { printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
     seen+="$parent "
     row="$(resolve_agent "$parent")"
-    [[ -n "$row" ]] || { skips="$(jq -c --arg a "$parent" --arg r missing "$skip" <<<"$skips")"; break; }
+    [[ -n "$row" ]] || { skips="$(jq -c --arg a "$parent" --arg r missing "$skip" <<<"$skips")"; printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
 
     local a_id a_role a_tpl a_status
     a_id="$(f 1 "$row")"; a_role="$(f 2 "$row")"
@@ -417,6 +418,7 @@ derive_leader() {
     parent="$(f 5 "$row")"
     depth=$((depth+1))
   done
+  [[ -z "$parent" ]] || { printf 'cycle\t\t\t\t%s\n' "$skips"; return; }
   printf 'escalate\t\t\t\t%s\n' "$skips"
 }
 

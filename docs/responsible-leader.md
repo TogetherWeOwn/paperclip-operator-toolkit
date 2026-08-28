@@ -45,9 +45,9 @@ request for a `B2_TECH_CHIEF`, because it could not seat one itself.
 **"Nearest live."** The walk skips an ancestor only for reasons that are objective, logged, and
 outside the requester's control — see the skip rules below.
 
-In the org as it stands on 2026-08-23 this resolves to *the requester's direct manager* in every
-case. That is intentional. The walk is not a general search; it is a direct-manager rule with
-defined behaviour when the direct manager cannot be the decider.
+In the org as it stood on 2026-08-23 this resolved to *the requester's direct manager* in every
+case. That was an observation about that roster, not an invariant. The walk is a nearest-qualified-
+ancestor rule with defined behaviour when the direct manager cannot be the decider.
 
 ### Skip rules — and the one that is deliberately absent
 

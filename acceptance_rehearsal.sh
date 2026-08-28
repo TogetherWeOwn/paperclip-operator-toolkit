@@ -51,10 +51,34 @@ save_org
 
 # ---------------------------------------------------------------------------
 hdr "1. Derivation terminates cleanly for every live agent"
-# The fixture suite proves the rules. This proves the real org contains no
-# shape that makes them misfire: no cycle, and no skip that a fixture omitted.
-CYCLES=0; SKIPS=0; DERIVED=0; ESCALATED=0
+# The fixture suite proves the rules. This proves the resolver follows those
+# rules for every requestable pair in the real org. A non-empty skip list is not
+# itself a failure: the accepted algorithm MUST skip a terminated or
+# under-ceiling ancestor. The invariant is that the ordered skip prefix and the
+# selected leader exactly match an independent walk of today's snapshot and
+# today's extracted ceiling catalog.
+CYCLES=0; SKIPS=0; DERIVED=0; ESCALATED=0; EXAMINED=0; DERIVATION_ERRORS=0
 mapfile -t ROWS < "$ORG_SNAPSHOT"
+
+# Graph integrity is independent of request ceilings. An empty-ceiling agent can
+# still participate in a reporting cycle or point at a missing manager, so walk
+# every snapshot row before the template-specific responsible-leader checks.
+for r in "${ROWS[@]}"; do
+  id="$(fld 1 "$r")"; parent="$(fld 5 "$r")"; seen=" $id "; depth=0; graph_bad=0
+  while [[ -n "$parent" ]]; do
+    if [[ "$seen" == *" $parent "* ]]; then graph_bad=1; break; fi
+    seen+="$parent "
+    ancestor="$(awk -F'\t' -v k="$parent" '$1==k{print; exit}' "$ORG_SNAPSHOT")"
+    if [[ -z "$ancestor" ]]; then graph_bad=1; break; fi
+    parent="$(fld 5 "$ancestor")"; depth=$((depth+1))
+    if [[ $depth -ge 60 && -n "$parent" ]]; then graph_bad=1; break; fi
+  done
+  if [[ $graph_bad -ne 0 ]]; then
+    CYCLES=$((CYCLES+1))
+    bad "malformed reporting chain for $(fld 6 "$r") ($id)"
+  fi
+done
+
 for r in "${ROWS[@]}"; do
   id="$(fld 1 "$r")"; prof="$(fld 3 "$r")"
   [[ -n "$prof" ]] || continue
@@ -62,20 +86,64 @@ for r in "${ROWS[@]}"; do
   extra=""; [[ "$prof" == "P3_AUDIT_RISK" ]] && extra="E4_AUDIT_ANALYST"
   tpls="$(tr ',' '\n' <<<"$ceil,$extra" | sed 's/^ *//;s/ *$//' | grep -v '^$' | sort -u)"
   for t in $tpls; do
-    out="$("$Q" who --requester "$id" --template "$t" </dev/null 2>&1)" || continue
-    case "$(fld 1 "$out")" in
-      cycle)    CYCLES=$((CYCLES+1)); bad "cycle deriving $t for $(fld 6 "$r")";;
+    EXAMINED=$((EXAMINED+1))
+    if ! out="$("$Q" who --requester "$id" --template "$t" </dev/null 2>&1)"; then
+      DERIVATION_ERRORS=$((DERIVATION_ERRORS+1))
+      bad "who failed deriving $t for $(fld 6 "$r")"
+      sed 's/^/        /' <<<"$out" | head -3
+      continue
+    fi
+
+    requester_row="$(awk -F'\t' -v k="$id" '$1==k{print; exit}' "$ORG_SNAPSHOT")"
+    parent="$(fld 5 "$requester_row")"; expected_mode="escalate"; expected_role=""; expected_tpl=""
+    expected_skips='[]'; seen=" $id "; depth=0; pair_error=0
+    while [[ -n "$parent" && $depth -lt 16 ]]; do
+      if [[ "$seen" == *" $parent "* ]]; then expected_mode="cycle"; break; fi
+      seen+="$parent "
+      ancestor="$(awk -F'\t' -v k="$parent" '$1==k{print; exit}' "$ORG_SNAPSHOT")"
+      if [[ -z "$ancestor" ]]; then
+        expected_skips="$(jq -c --arg a "$parent" '. + [{agent:$a,reason:"missing"}]' <<<"$expected_skips")"
+        expected_mode="cycle"
+        break
+      fi
+      a_role="$(fld 2 "$ancestor")"; a_tpl="$(fld 3 "$ancestor")"; a_status="$(fld 4 "$ancestor")"
+      a_label="${a_role:-$parent}"
+      if [[ "$a_status" == "terminated" ]]; then
+        expected_skips="$(jq -c --arg a "$a_label" '. + [{agent:$a,reason:"terminated"}]' <<<"$expected_skips")"
+      elif "$PROV" ceiling | awk -F'\t' -v p="$a_tpl" -v want="$t" '
+             $1==p { n=split($2,a,/, */); for(i=1;i<=n;i++) if(a[i]==want) found=1 }
+             END { exit !found }'; then
+        expected_mode="leader"; expected_role="$a_label"; expected_tpl="$a_tpl"
+        break
+      else
+        expected_skips="$(jq -c --arg a "$a_label" '. + [{agent:$a,reason:"ceiling_insufficient"}]' <<<"$expected_skips")"
+      fi
+      parent="$(fld 5 "$ancestor")"; depth=$((depth+1))
+    done
+    [[ -z "$parent" || "$expected_mode" != "escalate" ]] || expected_mode="cycle"
+
+    mode="$(fld 1 "$out")"; got_role="$(fld 2 "$out")"; got_tpl="$(fld 3 "$out")"; got_skips="$(fld 4 "$out")"
+    case "$mode" in
+      cycle)    ;;
       leader)   DERIVED=$((DERIVED+1));;
-      escalate) ESCALATED=$((ESCALATED+1))
-                [[ -n "$(fld 5 "$r")" ]] && bad "non-root escalated: $(fld 6 "$r") / $t";;
+      escalate) ESCALATED=$((ESCALATED+1));;
+      *)        pair_error=1; bad "unknown derivation mode '$mode' for $(fld 6 "$r")/$t";;
     esac
-    [[ "$(fld 4 "$out")" == "[]" ]] || { SKIPS=$((SKIPS+1)); inf "skips for $(fld 6 "$r")/$t: $(fld 4 "$out")"; }
+    [[ "$got_skips" == "[]" ]] || { SKIPS=$((SKIPS+1)); inf "validating skips for $(fld 6 "$r")/$t: $got_skips"; }
+    if [[ "$mode" != "$expected_mode" || "$got_role" != "$expected_role" \
+       || "$got_tpl" != "$expected_tpl" || "$got_skips" != "$expected_skips" ]]; then
+      pair_error=1
+      bad "derivation mismatch for $(fld 6 "$r")/$t: got $mode/$got_role/$got_tpl/$got_skips; expected $expected_mode/$expected_role/$expected_tpl/$expected_skips"
+    fi
+    DERIVATION_ERRORS=$((DERIVATION_ERRORS+pair_error))
   done
 done
 eq "no reporting cycle anywhere in the live org" "$CYCLES" 0
+eq "every requestable pair matched the independent chain walk" "$DERIVATION_ERRORS" 0
+eq "every examined pair produced exactly one terminal mode" "$((DERIVED+ESCALATED))" "$EXAMINED"
 ok "$DERIVED requestable pairs derived a responsible leader"
-ok "$ESCALATED escalated to the standing floor, all from root requesters"
-eq "no ancestor was skipped in the live org" "$SKIPS" 0
+ok "$ESCALATED requestable pairs exhausted their chain and escalated to the standing floor"
+ok "$SKIPS requestable pairs carried an objectively valid non-empty skip prefix"
 
 # ---------------------------------------------------------------------------
 hdr "2. The acceptance pair: a real subordinate and its real derived leader"

@@ -130,9 +130,9 @@ node --test test_tog473_mapping_guard.mjs
 OMNIROUTE_API_KEY=<read-key> node scripts/tog473-mapping-guard-calibration.mjs
 
 # Operator-only — need COMPANY_ID and the live Postgres on the VPS.
-# Both exit 3 ("could not run") if the backend is unreachable, rather than
-# reporting refusals that came from the missing database as enforcement. See
-# TOG-402 and test_suite_preconditions.sh.
+# All three exit 3 ("could not run") if the backend is unreachable, rather than
+# reporting refusals or zero findings from a missing database as enforcement.
+# See TOG-402, TOG-587, and test_suite_preconditions.sh.
 export COMPANY_ID=<uuid>
 ./test_privilege_ceilings.sh
 ./test_request_queue.sh
