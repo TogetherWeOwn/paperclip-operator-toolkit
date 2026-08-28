@@ -173,11 +173,21 @@ MAX_SUPERSEDE_CHAIN="${MAX_SUPERSEDE_CHAIN:-5}"
 # operator-side against Postgres and holds no Paperclip agent credential of its
 # own. See notify_paperclip_issue.sh for the reference adapter.
 REQUEST_NOTIFY_CMD="${REQUEST_NOTIFY_CMD:-}"
-# A hung transport must not hold the reviewer's terminal. This bounds it where
-# coreutils `timeout` exists; the guarantee that does not depend on it is the
-# ORDERING — the decision is already durably in the queue before delivery is
-# attempted, so even SIGKILL mid-delivery cannot lose or alter it.
+# A hung transport must not hold the reviewer's terminal. Delivery is attempted
+# only when coreutils `timeout` can enforce this ceiling; without it the attempt
+# fails closed and leaves the queued notification available for a later drain.
 REQUEST_NOTIFY_TIMEOUT="${REQUEST_NOTIFY_TIMEOUT:-10}"
+REQUEST_NOTIFY_KILL_AFTER="${REQUEST_NOTIFY_KILL_AFTER:-1}"
+REQUEST_TIMEOUT_CMD="${REQUEST_TIMEOUT_CMD:-timeout}"
+[[ "$REQUEST_NOTIFY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "ERROR: REQUEST_NOTIFY_TIMEOUT must be a positive integer" >&2; exit 1; }
+[[ "$REQUEST_NOTIFY_KILL_AFTER" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "ERROR: REQUEST_NOTIFY_KILL_AFTER must be a positive integer" >&2; exit 1; }
+# 20 tries/second plus five seconds of scheduling margin. Status writers use
+# this shared reqrecord lock budget, so their maximum wait always exceeds the
+# transport timeout AND the forced-kill grace period.
+REQRECORD_STATUS_LOCK="${QUEUE}.notify-status.lock"
+REQRECORD_STATUS_LOCK_TRIES=$(( (REQUEST_NOTIFY_TIMEOUT + REQUEST_NOTIFY_KILL_AFTER + 5) * 20 ))
 
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 [[ -x "$PROV" ]] || { echo "ERROR: org_provisioner.sh not found/executable" >&2; exit 1; }
@@ -342,6 +352,29 @@ ORDER BY a.created_at LIMIT 1;
 SQL
 }
 
+# Standing authority is named by permission profile rather than org role. Resolve
+# its live holder once when the notification is queued, so authenticated UUID
+# pulls reach the recorded recipient without re-targeting old notices on read.
+resolve_by_template() {
+  if [[ -n "$ORG_SNAPSHOT" ]]; then
+    awk -F'\t' -v t="$1" '($3==t && $4!="terminated"){print; exit}' "$ORG_SNAPSHOT"
+    return
+  fi
+  PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="$1" pcsql -F$'\t' <<'SQL'
+SELECT a.id::text,
+       COALESCE(a.metadata->>'orgRoleId',''),
+       COALESCE(a.metadata->>'permissionProfile',''),
+       a.status,
+       COALESCE(a.reports_to::text,''),
+       regexp_replace(COALESCE(a.title,''), E'[\\t\\r\\n]+', ' ', 'g')
+FROM agents a
+WHERE a.company_id = :'company_id'::uuid
+  AND a.metadata->>'permissionProfile' = :'text'
+  AND a.status <> 'terminated'
+ORDER BY a.created_at LIMIT 1;
+SQL
+}
+
 f() { cut -f"$1" <<<"$2"; }   # field $1 of a resolve_agent row
 
 ceiling_for() { "$PROV" ceiling 2>/dev/null | awk -v t="$1" '$1==t{$1="";print}'; }
@@ -459,7 +492,7 @@ reap_expired() {
   while IFS=$'\t' read -r rid exp; do
     [[ -n "$rid" ]] || continue
     if expired "$exp"; then
-      append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg e "$exp" \
+      append_status_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg e "$exp" \
         '{event:"request.expired",requestId:$id,status:"expired",at:$at,expiredAt:$e}')"
       # Expiry was the quietest dead end of the three: nothing woke on it at
       # all. It notifies from whichever read path reaps it, once — the
@@ -501,12 +534,36 @@ reap_expired() {
 # role can be re-pointed at a different agent; the decision was made about a
 # specific principal and is delivered to that principal.
 
-# Has this request already had a notification queued? Terminal states are final
-# and one-shot, so requestId alone is the idempotency key. This matters because
-# expiry is reaped from READ paths — `list` must not re-notify on every run.
+# Notification transport uses reqrecord's status lock, never QUEUE_LOCK.
+# Legitimate terminal writers wait for the bounded courier window and then
+# append; a transport that writes the JSONL directly bypasses this advisory lock
+# and is detected by the status fingerprint.
+
+# Has this request already had a notification queued FOR THIS AUDIENCE?
+#
+# Until TOG-317 the key was requestId alone, and the reasoning written here was
+# that terminal states are final and one-shot. That was true while a request
+# produced exactly one notification. It now produces two, to two different
+# recipients: the LEADER at submit ("you have something to decide") and the
+# REQUESTER at the terminal transition ("it was decided"). Keyed on requestId
+# alone, the submit-time leader notice arrives first and then swallows the
+# requester's decision notice for the rest of the request's life — TOG-254's
+# entire feature deleted as a side effect of building this one, silently, with
+# every suite still green because each half works in isolation.
+#
+# The idempotency that actually mattered is unchanged, per audience: expiry is
+# reaped from READ paths, so `list` must not re-notify the requester on every
+# invocation, and `announce` must not re-page the leader on every read either.
+#
+# `.audience // "requester"` is not defensive padding — a queue written before
+# this field existed holds requester notifications only, and those must keep
+# counting as already-sent or an upgrade re-notifies every historical request.
 notify_already() {
   [[ -f "$QUEUE" ]] || return 1
-  jq -s -e --arg id "$1" 'any(.[]; .event=="notify.queued" and .requestId==$id)' \
+  jq -s -e --arg id "$1" --arg aud "${2:-requester}" --arg role "${3:-}" \
+     'any(.[]; .event=="notify.queued" and .requestId==$id
+                and (.audience // "requester")==$aud
+                and ($role=="" or (.recipientRole // "")==$role))' \
      "$QUEUE" >/dev/null 2>&1
 }
 
@@ -519,7 +576,7 @@ notify_body() {
   # An alternative the requester never receives is the same dead end as no
   # alternative at all — that is the whole argument TOG-254 made about reasons,
   # and it applies with more force to the part that says what to do next.
-  local dec="${9:-}"
+  local dec="${9:-}" exp_at=""
   printf 'Request %s (%s — "%s") is now %s.\n' "$rid" "$tpl" "$title" "$status"
   case "$status" in
     approved) printf 'Approved by %s. Seated agent id: %s\n' "$rv" "${newid:-unknown}"
@@ -558,6 +615,41 @@ notify_body() {
               printf 'This needs the error fixed and a fresh request:\n'
               printf '  ./org_request_queue.sh submit --requester %s --template %s --title "%s" --supersedes %s\n' \
                      "$role" "$tpl" "$title" "$rid";;
+    # TOG-317. The only non-terminal status here, and the only one addressed to
+    # someone other than the requester. `$rv` is the derived LEADER rather than
+    # a reviewer that has already acted, and `$reason` carries the requester's
+    # rationale — a leader asked to decide with no statement of why is being
+    # asked to rubber-stamp.
+    #
+    # It says "nobody else is coming" explicitly because that is the part of
+    # this design a recipient is most likely to get wrong. Every other approval
+    # system an agent has seen escalates on a timeout; this one does not, and a
+    # leader who assumes it does will correctly conclude that ignoring the
+    # request routes it upward. It routes it nowhere.
+    pending)  printf '\nYOU are the responsible leader for this request. It was routed to you\n'
+              printf 'because you are the nearest ancestor of %s whose delegation ceiling\n' "$role"
+              printf 'already contains %s.\n\n' "$tpl"
+              printf 'NOBODY ELSE IS GOING TO DECIDE THIS. Waiting does not move it to a\n'
+              printf 'higher approver — expiry never re-targets a request. If it ages out it\n'
+              printf 'comes back to you, resubmitted, unchanged.\n\n'
+              [[ -n "$reason" ]] && printf 'Requester'"'"'s rationale: %s\n\n' "$reason"
+              # Read the deadline off the record row rather than adding a tenth
+              # positional parameter. For a terminal state `dec` is the reviewed
+              # row; for `pending` it is the submitted row — in both cases it is
+              # "the queue row this body is describing", which is the only
+              # reading of that parameter that stays true as cases are added.
+              exp_at="$(jq -r '.expiresAt // empty' <<<"${dec:-null}" 2>/dev/null)"
+              [[ -n "${exp_at:-}" ]] && printf 'It expires at %s if nobody decides it.\n\n' "$exp_at"
+              printf 'Decide it:\n'
+              printf '  ./org_request_queue.sh thread --request %s\n' "$rid"
+              printf '  ./org_request_queue.sh review --reviewer %s --request %s --approve --reason "..."\n' \
+                     "${rv:-<YOUR_ROLE>}" "$rid"
+              printf '  ./org_request_queue.sh review --reviewer %s --request %s --reject  --reason "..." --alternative "..."\n' \
+                     "${rv:-<YOUR_ROLE>}" "$rid"
+              printf '\nIf this is not yours to decide, say so on the record rather than\n'
+              printf 'letting it lapse — an expiry is indistinguishable from inattention:\n'
+              printf '  ./org_request_queue.sh comment --request %s --author %s --body "..."\n' \
+                     "$rid" "${rv:-<YOUR_ROLE>}";;
   esac
 }
 
@@ -573,7 +665,7 @@ NOTIFY_RESULT=""
 emit_notification() {
   local rid="$1" status="$2" reason="${3:-}" newid="${4:-}" rv="${5:-}"
   NOTIFY_RESULT=""
-  notify_already "$rid" && { NOTIFY_RESULT="already"; return 0; }
+  notify_already "$rid" requester && { NOTIFY_RESULT="already"; return 0; }
 
   local sub; sub="$(request_submission "$rid" 2>/dev/null)" || return 0
   [[ -n "$sub" ]] || return 0
@@ -601,13 +693,13 @@ emit_notification() {
   # The field below is `decision`, NOT `status`: a notification is not a state
   # transition, and a row that merely LOOKS like one is indistinguishable from
   # one to any query filtering on shape instead of on event name. Belt to
-  # the status-event allowlist's braces — either alone fixes it; both means a future query
+  # STATUS_EVENTS' braces — either alone fixes it; both means a future query
   # written either way stays correct.
   local payload
   payload="$(jq -cn --arg id "$rid" --arg s "$status" --arg a "$aid" --arg r "$role" \
     --arg t "$tpl" --arg ti "$title" --arg re "$reason" --arg n "$newid" \
     --arg rv "$rv" --arg b "$body" --arg at "$(now_iso)" --arg ni "$nissue" \
-    '{event:"notify.queued",requestId:$id,decision:$s,
+    '{event:"notify.queued",requestId:$id,audience:"requester",decision:$s,
       recipientAgentId:$a,recipientRole:$r,
       notifyIssue:(if $ni=="" then null else $ni end),
       template:$t,title:$ti,
@@ -627,63 +719,278 @@ emit_notification() {
 
   # Intent is recorded BEFORE delivery is attempted. A crash between the two
   # leaves a queued-but-undelivered notification, which `notify --drain` can
-  # finish; the reverse order would lose the notification silently.
-  append_queue "$payload"
+  # finish; the reverse order would lose the notification silently. A failed
+  # durable append is not intent: do not hand the courier something the outbox
+  # cannot later recover.
+  if ! append_queue "$payload"; then
+    NOTIFY_RESULT="failed"
+    return 0
+  fi
   notify_deliver "$payload"
 }
 
 # Attempt one delivery for an already-queued notification. Records the outcome
 # and ALWAYS returns 0 — see property 2 above.
 notify_deliver() {
-  local payload="$1" rid out rc
+  local payload="$1" rid aud role issue out rc fp_before fp_after tampered="no" queue_size
   rid="$(jq -r '.requestId' <<<"$payload")"
+  aud="$(jq -r '.audience // "requester"' <<<"$payload")"
+  role="$(jq -r '.recipientRole // ""' <<<"$payload")"
+  issue="$(jq -r '.notifyIssue // ""' <<<"$payload")"
 
-  if [[ -z "$REQUEST_NOTIFY_CMD" ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" \
-      '{event:"notify.pull_only",requestId:$id,at:$at,
-        detail:"REQUEST_NOTIFY_CMD unset; requester reads this with `inbox`"}')"
+  # A configured transport cannot invent an address for a leader. Null is the
+  # supported pull path, not a failed push attempt: record it before invoking the
+  # adapter so REQUEST_NOTIFY_ISSUE can never become an audience-blind fallback.
+  if [[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CMD" == *"notify_paperclip_issue.sh"* ]]; then
+    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role"       '{event:"notify.pull_only",requestId:$id,audience:$au,recipientRole:$role,at:$at,
+        detail:"leader notifyIssue unset; the recipient reads this with `inbox`"}')"
     NOTIFY_RESULT="pull_only"
     return 0
   fi
 
-  # Subshell + swallowed status: a transport that exits non-zero, hangs, or
-  # dies on a signal cannot propagate into the caller's control flow.
-  out="$(
-    if command -v timeout >/dev/null 2>&1; then
-      printf '%s' "$payload" | timeout "$REQUEST_NOTIFY_TIMEOUT" \
-        bash -c "$REQUEST_NOTIFY_CMD" 2>&1
-    else
-      printf '%s' "$payload" | bash -c "$REQUEST_NOTIFY_CMD" 2>&1
-    fi
-  )" && rc=0 || rc=$?
+  if [[ -z "$REQUEST_NOTIFY_CMD" ]]; then
+    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role"       '{event:"notify.pull_only",requestId:$id,audience:$au,recipientRole:$role,at:$at,
+        detail:"REQUEST_NOTIFY_CMD unset; the recipient reads this with `inbox`"}')"
+    NOTIFY_RESULT="pull_only"
+    return 0
+  fi
 
-  if [[ $rc -eq 0 ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg d "$out" \
-      '{event:"notify.delivered",requestId:$id,at:$at,detail:$d}')"
+  # External I/O never owns QUEUE_LOCK. The separate status lock keeps honest
+  # decision writers outside the fingerprint window, with a wait budget derived
+  # from this bounded transport timeout rather than the queue lock's ~5 seconds.
+  reqrecord_status_lock "$REQRECORD_STATUS_LOCK_TRIES"
+  queue_size="$(wc -c < "$QUEUE" | tr -d ' ')"
+  if ! fp_before="$(reqrecord_status_fingerprint)"; then
+    fp_before=""
+    out="decision-record fingerprint failed before transport; transport not invoked"
+    rc=125
+    tampered="yes"
+  elif command -v "$REQUEST_TIMEOUT_CMD" >/dev/null 2>&1 \
+    && [[ -x "$HERE/lib/notify_exec.py" ]] && command -v python3 >/dev/null 2>&1; then
+    out="$(printf '%s' "$payload" | REQUEST_NOTIFY_CMD="$REQUEST_NOTIFY_CMD" \
+      REQUEST_NOTIFY_TIMEOUT="$REQUEST_NOTIFY_TIMEOUT" \
+      REQUEST_NOTIFY_KILL_AFTER="$REQUEST_NOTIFY_KILL_AFTER" \
+      python3 "$HERE/lib/notify_exec.py" 2>&1)" && rc=0 || rc=$?
+  else
+    out="process-tree timeout enforcement unavailable; transport not invoked"
+    rc=125
+  fi
+
+  if ! fp_after="$(reqrecord_status_fingerprint)"; then
+    fp_after=""
+    tampered="yes"
+    [[ -n "$out" ]] && out+=$'\n'
+    out+="decision-record fingerprint failed after transport"
+  fi
+  [[ "$fp_before" == "$fp_after" ]] || tampered="yes"
+
+  # A courier can corrupt the JSONL itself, so appending a dispute after an
+  # unparseable tail would leave every jq reader stopping before the verdict.
+  # Preserve the artifact and remove only bytes appended since this delivery
+  # began. Honest rows cannot land in that interval because every queue writer
+  # takes the shared status lock; truncating the whole file to a shell snapshot
+  # would otherwise erase concurrent submissions or comments.
+  if [[ "$tampered" == "yes" ]] && ! jq -e . "$QUEUE" >/dev/null 2>&1; then
+    local corrupt_copy="${QUEUE}.notify-corrupt.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    cp "$QUEUE" "$corrupt_copy" 2>/dev/null || true
+    truncate -s "$queue_size" "$QUEUE"
+    chmod 0600 "$QUEUE" 2>/dev/null || true
+    [[ -n "$out" ]] && out+=$'\n'
+    out+="malformed queue preserved at $corrupt_copy"
+  fi
+
+  if [[ "$tampered" == "yes" ]]; then
+    # The fingerprint covers the whole decision record. Once it changes, the
+    # courier may have targeted a request other than the one in its payload, so
+    # disputing only $rid would leave that forged victim authoritative. Mark
+    # every request in the affected record: fail-closed is broader than guessing
+    # which line an untrusted same-uid process changed.
+    local disputed_id
+    while IFS= read -r disputed_id; do
+      [[ -n "$disputed_id" ]] || continue
+      append_queue_unlocked "$(jq -cn --arg id "$disputed_id" --arg at "$(now_iso)"       '{event:"request.disputed",requestId:$id,at:$at,
+          detail:"status-bearing rows changed while REQUEST_NOTIFY_CMD was running"}')"
+    done < <(jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | sort -u)
+    append_queue_unlocked "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role" --arg d "$out"       --argjson rc "$rc"       '{event:"notify.failed",requestId:$id,audience:$au,recipientRole:$role,at:$at,exit:$rc,detail:$d,
+        reason:"transport_mutated_decision_record"}')"
+    NOTIFY_RESULT="failed"
+  elif [[ $rc -eq 0 ]]; then
+    append_queue_unlocked "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role" --arg d "$out"       '{event:"notify.delivered",requestId:$id,audience:$au,recipientRole:$role,at:$at,detail:$d}')"
     NOTIFY_RESULT="delivered"
   else
-    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg d "$out" \
-      --argjson rc "$rc" \
-      '{event:"notify.failed",requestId:$id,at:$at,exit:$rc,detail:$d}')"
+    local fail_reason="transport_failed"
+    [[ $rc -eq 125 ]] && fail_reason="timeout_enforcement_unavailable"
+    append_queue_unlocked "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role" --arg d "$out"       --arg reason "$fail_reason" --argjson rc "$rc"       '{event:"notify.failed",requestId:$id,audience:$au,recipientRole:$role,at:$at,exit:$rc,detail:$d,reason:$reason}')"
     NOTIFY_RESULT="failed"
+  fi
+  reqrecord_status_unlock
+
+  if [[ "$tampered" == "yes" ]]; then
+    log_event "$(jq -cn --arg id "$rid" --arg au "$aud"       '{event:"request.disputed",reason:"notifier_wrote_decision_rows",requestId:$id,audience:$au}')"
+    echo "  WARNING: the notifier wrote decision rows for $rid; the record is now DISPUTED and every command will refuse it." >&2
   fi
   return 0
 }
 
-# Current delivery state per notified request: delivered | failed | pull_only |
-# queued. The LAST outcome row wins, so a drained retry supersedes its failure.
+# ===========================================================================
+# Telling the LEADER (TOG-317)
+# ===========================================================================
+# `docs/responsible-leader.md` has asserted since TOG-194 that a dormant leader
+# is "NOT a skip — wake them", and that this is what makes the refusal to
+# auto-escalate on a timer defensible. Nothing did it. Measured on origin/main
+# at 4b26243: `submit` writes exactly one queue row (`request.submitted`), the
+# transport is never invoked, `notify` prints "(no notifications)" and exits 0,
+# and `inbox --for <LEADER>` — the pull half TOG-254 built precisely so that a
+# failed push is not a dead end — answers "(no decisions)". Both halves were
+# absent, and the CI gate that exists to catch an undelivered notification read
+# green, because a notification nobody queued is not an undelivered one.
+#
+# TOG-390 narrowed the gap without closing it: `announce_reachability` now
+# prints "IS DORMANT — it will NOT be woken" at submit. That is honest, and it
+# is addressed to the REQUESTER's terminal. The leader still learns nothing.
+#
+# WHAT THIS REUSES, AND THE ONE THING IT MAY NOT.
+# Outbox, transport seam, drain, exit-1-while-undelivered and the pull-side
+# `inbox` are all TOG-254's and are used unchanged. The one piece that could
+# NOT be reused is the address: `notifyIssue` is written by the REQUESTER, and
+# pointing the leader's "you have something to decide" notice at an issue the
+# requester chose hands the least-privileged party in the flow the ability to
+# deliver the leader's summons somewhere the leader will never read — while the
+# queue records `notify.delivered`. That converts the delivery record into a
+# forgery of "the leader was told", which is the TOG-198 defect one layer up.
+# The leader's address is therefore operator-supplied and is never read from
+# the request record. Unset is fine and lands `pull_only`.
+REQUEST_LEADER_NOTIFY_ISSUE="${REQUEST_LEADER_NOTIFY_ISSUE:-}"
+
+# The leader intent is part of submission, not a post-submit side effect. Build
+# every recipient row first, then cmd_submit publishes the request and the whole
+# set in one durable batch. A crash therefore exposes either none of the request
+# or all of its drainable leader intents; it can never expose a routed request
+# with no wake, or P4 without P1.
+LEADER_NOTIFY_PAYLOADS=()
+LEADER_NOTIFY_RESULTS=""
+
+build_leader_notification_payloads() {
+  local rid="$1" sub="$2" lmode lid lrole standing_role
+  LEADER_NOTIFY_PAYLOADS=()
+  lmode="$(jq -r '.responsibleLeaderMode // ""' <<<"$sub")"
+  lid="$(jq -r '.responsibleLeaderAgentId // ""' <<<"$sub")"
+  lrole="$(jq -r '.responsibleLeader // ""' <<<"$sub")"
+
+  case "$lmode" in
+    leader)
+      build_leader_notification_payload "$rid" "$sub" "$lrole" "$lid" "$lmode" || return 1
+      LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")
+      ;;
+    escalate|cycle)
+      local standing_row standing_id
+      while IFS= read -r standing_role; do
+        [[ -n "$standing_role" ]] || continue
+        standing_row="$(resolve_by_template "$standing_role")"
+        standing_id="$(f 1 "$standing_row")"
+        build_leader_notification_payload "$rid" "$sub" "$standing_role" "$standing_id" "$lmode" || return 1
+        LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")
+      done < <(jq -r '.[]' <<<"$STANDING_AUTHORITY")
+      ;;
+  esac
+}
+
+LEADER_NOTIFY_PAYLOAD=""
+build_leader_notification_payload() {
+  local rid="$1" sub="$2" recip="$3" lid="$4" lmode="$5"
+  local rrole tpl title rationale
+  LEADER_NOTIFY_PAYLOAD=""
+  rrole="$(jq -r '.requester // ""' <<<"$sub")"
+  tpl="$(jq -r '.template // ""' <<<"$sub")"
+  title="$(jq -r '.title // ""' <<<"$sub")"
+  rationale="$(jq -r '.rationale // ""' <<<"$sub")"
+
+  local body; body="$(notify_body "$rid" pending "$rrole" "$tpl" "$title" "$rationale" "" "$recip" "$sub")"
+  local addr="$REQUEST_LEADER_NOTIFY_ISSUE" addr_note=""
+  if [[ -n "$addr" && ! "$addr" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    addr_note="REQUEST_LEADER_NOTIFY_ISSUE '$addr' is not a well-formed issue id; ignored"
+    echo "  WARNING: $addr_note" >&2
+    addr=""
+  fi
+
+  LEADER_NOTIFY_PAYLOAD="$(jq -cn --arg id "$rid" --arg a "$lid" --arg r "$recip" \
+    --arg t "$tpl" --arg ti "$title" --arg ra "$rationale" --arg rq "$rrole" \
+    --arg lm "$lmode" --arg b "$body" --arg at "$(now_iso)" --arg ni "$addr" \
+    --arg an "$addr_note" \
+    '{event:"notify.queued",requestId:$id,audience:"leader",decision:"pending",
+      recipientAgentId:(if $a=="" then null else $a end),recipientRole:$r,
+      notifyIssue:(if $ni=="" then null else $ni end),
+      addressNote:(if $an=="" then null else $an end),
+      template:$t,title:$ti,requester:$rq,
+      reason:(if $ra=="" then null else $ra end),
+      leaderMode:$lm,
+      body:$b,at:$at}')"
+  jq -e 'type=="object"' <<<"$LEADER_NOTIFY_PAYLOAD" >/dev/null 2>&1
+}
+
+deliver_leader_notifications() {
+  local payload role result failed=0 pull_only=0 delivered=0
+  NOTIFY_RESULT=""
+  LEADER_NOTIFY_RESULTS=""
+  for payload in "${LEADER_NOTIFY_PAYLOADS[@]}"; do
+    role="$(jq -r '.recipientRole // ""' <<<"$payload")"
+    notify_deliver "$payload"
+    result="$NOTIFY_RESULT"
+    LEADER_NOTIFY_RESULTS+="${role}"$'\t'"${result}"$'\n'
+    case "$result" in
+      failed)    failed=$((failed + 1));;
+      pull_only) pull_only=$((pull_only + 1));;
+      delivered) delivered=$((delivered + 1));;
+    esac
+  done
+  if [[ ${#LEADER_NOTIFY_PAYLOADS[@]} -eq 0 ]]; then
+    NOTIFY_RESULT="already"
+  elif [[ $failed -gt 0 ]]; then
+    NOTIFY_RESULT="failed"
+  elif [[ $pull_only -gt 0 ]]; then
+    NOTIFY_RESULT="pull_only"
+  elif [[ $delivered -eq ${#LEADER_NOTIFY_PAYLOADS[@]} ]]; then
+    NOTIFY_RESULT="delivered"
+  else
+    NOTIFY_RESULT="failed"
+  fi
+}
+
+# Current delivery state per notified request AND AUDIENCE: delivered | failed |
+# pull_only | queued. The LAST outcome row wins, so a drained retry supersedes
+# its failure.
+#
+# Grouped by [requestId, audience] since TOG-317. Grouped by requestId alone —
+# as it was — a request with both notifications would report ONE row: the
+# leader's queued payload paired with whichever outcome landed last, so the
+# requester's decision notice would vanish from `notify --list`, from `inbox`
+# and from the undelivered gate. The bug would present as "the feature works",
+# because the row it kept is a real one.
 notify_states() {
   [[ -f "$QUEUE" ]] || return 0
   jq -s -r '
-    map(select(.event | startswith("notify.")))
-    | group_by(.requestId)
-    | map({rid: .[0].requestId,
-           q:   (map(select(.event=="notify.queued")) | .[0]),
-           last:(map(select(.event!="notify.queued")) | last)})
-    | map({rid, status:.q.decision, role:.q.recipientRole, agent:.q.recipientAgentId,
-           state:(if .last == null then "queued"
-                  else (.last.event | ltrimstr("notify.")) end),
-           at:.q.at, body:.q.body, detail:(.last.detail // "")})
+    map(select(.event | startswith("notify."))
+        | .audience = (.audience // "requester")) as $rows
+    # Build states from queued rows, because they are the durable intent. Outcome
+    # rows written before recipient-aware delivery carried no recipientRole; for
+    # the historical requester audience only, match those role-less outcomes back
+    # to the queued recipient instead of splitting them into a phantom group.
+    | ($rows | map(select(.event=="notify.queued"))
+       | group_by([.requestId, .audience, (.recipientRole // "")])
+       | map(.[0]))
+    | map(. as $q
+        | ($rows
+           | map(select(.event!="notify.queued"
+                        and .requestId==$q.requestId
+                        and .audience==$q.audience
+                        and (   ((.recipientRole // "") == ($q.recipientRole // ""))
+                             or ($q.audience=="requester" and ((has("recipientRole")|not) or .recipientRole==null)))))
+           | last) as $last
+        | {rid:$q.requestId, audience:$q.audience, status:$q.decision,
+           role:($q.recipientRole // ""), agent:$q.recipientAgentId,
+           state:(if $last == null then "queued"
+                  else ($last.event | ltrimstr("notify.")) end),
+           at:$q.at, body:$q.body, detail:($last.detail // "")})
     | .[] | @json' "$QUEUE" 2>/dev/null
 }
 
@@ -796,13 +1103,15 @@ cmd_submit() {
   lmode="$(f 1 "$d")"; lid="$(f 2 "$d")"; lrole="$(f 3 "$d")"
   leader_row="$(resolve_agent "$lid")"; leader_title="$(f 6 "$leader_row")"
 
-  # Allocate and append as ONE critical section. reqrecord_next_id() derives the id by
-  # counting rows, so a concurrent submitter that reads between our count and
-  # our append takes the same id.
-  local rid exp; exp="$(plus_days "$REQUEST_TTL_DAYS")"
+  # Allocate, construct and publish the request plus its complete leader outbox as
+  # one durable replacement while both queue locks are held. The old file remains
+  # authoritative until the replacement is fsynced and renamed, so interruption
+  # during any row write leaves no partial request or partial standing set.
+  local rid exp submission rc; exp="$(plus_days "$REQUEST_TTL_DAYS")"
   queue_lock
+  reqrecord_status_lock
   rid="$(reqrecord_next_id)"
-  append_queue "$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg rt "$requester_title" --arg t "$tpl" \
+  submission="$(jq -cn --arg id "$rid" --arg r "$requester" --arg rid2 "$id" --arg rt "$requester_title" --arg t "$tpl" \
     --arg w "$template" --arg ti "$title" --arg ra "$rationale" --arg sup "$supersedes" \
     --arg root "$root" --argjson d "$depth" --arg at "$(now_iso)" --arg exp "$exp" \
     --arg ni "$notify_issue" \
@@ -818,7 +1127,15 @@ cmd_submit() {
       responsibleLeader:(if $lr=="" then null else $lr end),
       responsibleLeaderTitle:(if $lt=="" then null else $lt end),
       submittedAt:$at,expiresAt:$exp}')"
+  if ! build_leader_notification_payloads "$rid" "$submission"; then
+    reqrecord_status_unlock
+    queue_unlock
+    die "could not construct the complete leader notification intent set."
+  fi
+  append_queue_batch_unlocked "$submission" "${LEADER_NOTIFY_PAYLOADS[@]}"; rc=$?
+  reqrecord_status_unlock
   queue_unlock
+  [[ $rc -eq 0 ]] || die "could not durably persist the request and complete leader notification intent set."
 
   echo "SUBMITTED $rid  ($requester [$tpl] requests $template — \"$title\")  status=pending"
   [[ -n "$supersedes" ]] && echo "  supersedes $supersedes (resubmission $depth of $MAX_SUPERSEDE_CHAIN)"
@@ -834,16 +1151,33 @@ cmd_submit() {
   jq -e 'length > 0' <<<"$skips" >/dev/null 2>&1 \
     && echo "  skipped in chain   : $(jq -r 'map("\(.agent) (\(.reason))")|join(", ")' <<<"$skips")"
 
-  # "— will be woken to decide" is what this line used to promise, and on this
-  # company it was usually false: 138 of 144 agents cannot be woken on demand,
-  # so the wake is refused and the request waits until its TTL with nobody
-  # having looked at it. Say what is actually true about reachability, and say
-  # it at submit time while the requester is still standing here to read it.
-  #
-  # This NEVER blocks the submission. A request that was recorded and flagged
-  # is recoverable; one that was refused because a liveness probe could not
-  # reach its database is lost, and the probe is the least reliable component
-  # in this path. The gate reports, the human decides.
+  # The request and complete wake-intent set were committed together above.
+  # Only now may any courier run; every interruption before here is drainable or
+  # leaves the prior queue unchanged.
+  deliver_leader_notifications
+  if [[ -n "$LEADER_NOTIFY_RESULTS" ]]; then
+    local notified_role notified_state
+    while IFS=$'\t' read -r notified_role notified_state; do
+      [[ -n "$notified_role" ]] || continue
+      case "$notified_state" in
+        delivered) echo "  leader notified    : $notified_role — delivered.";;
+        pull_only) echo "  leader notified    : $notified_role — recorded only; reads with inbox --for $notified_role.";;
+        failed)    echo "  leader notified    : $notified_role — NO; delivery failed and remains drainable.";;
+      esac
+    done <<<"$LEADER_NOTIFY_RESULTS"
+  else
+    case "$NOTIFY_RESULT" in
+      delivered) echo "  leader notified    : yes — delivered to ${lrole:-the standing authority}.";;
+      pull_only) echo "  leader notified    : recorded only — no transport configured."
+                 echo "  The leader sees it with: ./org_request_queue.sh inbox --for ${lrole:-<LEADER>}";;
+      failed)    echo "  leader notified    : NO — delivery failed. The request stands and is unchanged."
+                 echo "  It is an open item until it is drained: ./org_request_queue.sh notify --drain";;
+    esac
+  fi
+
+  # Reachability is advisory and deliberately comes last. It is independently
+  # bounded so a broken source cannot keep submit open after the durable request
+  # and notification intent already exist.
   announce_reachability "$rid" "$lid" "$lrole"
   return 0
 }
@@ -861,7 +1195,12 @@ announce_reachability() {
   [[ -n "$lid" && -x "$probe" ]] || return 0
 
   local out rc verdict cause
-  out="$("$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?
+  if command -v "$REQUEST_TIMEOUT_CMD" >/dev/null 2>&1; then
+    out="$("$REQUEST_TIMEOUT_CMD" "${REQUEST_REACHABILITY_TIMEOUT:-2}" "$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?
+  else
+    echo "  reachability       : UNKNOWN for ${lrole:-$lid} (timeout_enforcement_unavailable) — advisory probe skipped, never run unbounded."
+    return 0
+  fi
   IFS=$'\t' read -r verdict cause _ _ _ <<<"$out"
   case "$rc" in
     0) echo "  reachability       : $lrole can receive this decision." ;;
@@ -1085,7 +1424,7 @@ cmd_review() {
     '{risky:($f != ""), factors:(if $f=="" then [] else ($f|split(",")) end)}')"
 
   if [[ "$decision" == "rejected" ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" --arg re "$reason" \
+    append_status_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" --arg re "$reason" \
       --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
       --argjson sa "$(saferalt_decision_json)" \
       '{event:"request.reviewed",requestId:$id,status:"rejected",reviewer:$rv,reviewerAgentId:$rvid,
@@ -1149,7 +1488,7 @@ cmd_review() {
   local out rc
   out="$("$PROV" create --caller "$rq_role" --template "$template" --title "$title" 2>&1)"; rc=$?
   if [[ $rc -ne 0 ]]; then
-    append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+    append_status_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
       --arg e "$out" --arg at "$(now_iso)" \
       '{event:"request.reviewed",requestId:$id,status:"failed",reviewer:$rv,reviewerAgentId:$rvid,
         reviewerTitle:(if $rvt=="" then null else $rvt end),error:$e,at:$at}')"
@@ -1161,7 +1500,7 @@ cmd_review() {
     die "provisioner rejected the approved request; queue marked failed (no partial state)."
   fi
   local new_id; new_id="$(grep -oE 'PROVISIONED [A-Z0-9_]+ -> [0-9a-f-]{36}' <<<"$out" | awk '{print $4}')"
-  append_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
+  append_status_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
     --arg n "$new_id" --arg re "$reason" \
     --arg at "$(now_iso)" --argjson ov "$override_json" --argjson risk "$risk_json" \
     --argjson sa "$(saferalt_decision_json)" \
@@ -1272,7 +1611,9 @@ cmd_thread() {
   # checked, not just the one asked for: a forged decision three amendments
   # back still changes what this view means.
   local r
-  for r in "${chain[@]}"; do reqrecord_assert_unambiguous "$r"; done
+  for r in "${chain[@]}"; do
+    reqrecord_assert_unambiguous "$r"
+  done
 
   for r in "${chain[@]}"; do
     jq -r --arg id "$r" '
@@ -1650,16 +1991,18 @@ cmd_notify() {
   [[ -f "$QUEUE" ]] || { echo "(no notifications)"; return 0; }
 
   if [[ "$mode" == "drain" ]]; then
-    local rid n=0
-    while read -r rid; do
+    local rid aud role n=0
+    while IFS=$'\t' read -r rid aud role; do
       [[ -n "$rid" ]] || continue
-      local q; q="$(jq -c --arg id "$rid" \
-        'select(.event=="notify.queued" and .requestId==$id)' "$QUEUE" | head -1)"
+      local q; q="$(jq -c --arg id "$rid" --arg a "$aud" --arg r "$role" \
+        'select(.event=="notify.queued" and .requestId==$id
+                and (.audience // "requester")==$a and .recipientRole==$r)' \
+        "$QUEUE" | head -1)"
       [[ -n "$q" ]] || continue
       notify_deliver "$q"          # same payload, same recipient, by construction
-      echo "  $rid -> $NOTIFY_RESULT"
+      echo "  $rid ($aud -> $role) -> $NOTIFY_RESULT"
       n=$((n+1))
-    done < <(notify_states | jq -r 'select(.state=="failed" or .state=="queued") | .rid')
+    done < <(notify_states | jq -r 'select(.state=="failed" or .state=="queued") | "\(.rid)\t\(.audience)\t\(.role)"')
     [[ $n -eq 0 ]] && echo "(nothing to drain)"
   fi
 
@@ -1667,8 +2010,8 @@ cmd_notify() {
   if [[ "$json" == "yes" ]]; then printf '%s\n' "${rows:-}"
   elif [[ -z "$rows" ]]; then echo "(no notifications)"
   else
-    jq -r '"\(.rid)\t\(.status)\t\(.role)\t\(.state)"' <<<"$rows" \
-      | { printf 'ID\tDECISION\tRECIPIENT\tDELIVERY\n'; cat; } | tabulate
+    jq -r '"\(.rid)\t\(.audience)\t\(.status)\t\(.role)\t\(.state)"' <<<"$rows" \
+      | { printf 'ID\tAUDIENCE\tDECISION\tRECIPIENT\tDELIVERY\n'; cat; } | tabulate
   fi
 
   # Same cron/CI contract as `overrides`: an undelivered decision is an
@@ -1690,15 +2033,16 @@ cmd_list() {
     # A set, not an array: `$acked[.rid]` evaluates .rid against the row being
     # rendered, where `index(.rid)` would evaluate it against the array itself.
     (map(select(.event=="override.acknowledged")) | map({key:.requestId, value:true}) | from_entries) as $acked
+    | (map(select(.event=="request.disputed")) | map({key:.requestId, value:true}) | from_entries) as $disputed
     # Only status-bearing events may become `last`. A comment, acknowledgement
     # or notification landing there would give the request a null status and
     # silently drop it from every filtered listing. See the status-event allowlist.
     | map(select($ev[.event] // false))
     | group_by(.requestId)
     | map({rid: .[0].requestId, sub: .[0], last: .[-1]})
-    | map(select($w == "all" or .last.status == $w))
+    | map(select($w == "all" or (($disputed[.rid] | not) and .last.status == $w)))
     | .[]
-    | "\(.rid)\t\(.last.status)\t\(.sub.requester) [\(.sub.requesterTemplate)]\t\(.sub.template)\t\(.sub.title)\t\(.last.reviewer // "-")\t" +
+    | "\(.rid)\t\(if $disputed[.rid] then "DISPUTED" else .last.status end)\t\(.sub.requester) [\(.sub.requesterTemplate)]\t\(.sub.template)\t\(.sub.title)\t\(if $disputed[.rid] then "-" else (.last.reviewer // "-") end)\t" +
       (if (.last.override // null) == null then "-"
        elif $acked[.rid] then "bypassed \(.last.override.bypassedLeader) (acked)"
        else "BYPASSED \(.last.override.bypassedLeader) — UNREVIEWED" end)

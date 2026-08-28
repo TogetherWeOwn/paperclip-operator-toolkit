@@ -11,7 +11,7 @@ stage() {
   local d="$1"
   cp "$HERE"/{org_provisioner.sh,org_request_queue.sh,test_privilege_ceilings.sh,test_request_queue.sh} "$d/"
   mkdir -p "$d/lib" "$d/test/fixtures/orgdb"
-  cp "$HERE/lib/"{pcsql.sh,provisioning_policy.sh,reqrecord.sh} "$d/lib/"
+  cp "$HERE/lib/"{pcsql.sh,provisioning_policy.sh,reqrecord.sh,durable_queue.py,notify_exec.py} "$d/lib/"
   cp "$HERE/test/fixtures/orgdb/"* "$d/test/fixtures/orgdb/"
   chmod +x "$d"/*.sh "$d/test/fixtures/orgdb/"*
 }

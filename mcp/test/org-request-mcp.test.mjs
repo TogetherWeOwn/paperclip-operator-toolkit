@@ -143,6 +143,15 @@ const skipIfNoGate = GATE_PRESENT
   ? false
   : "capability_gate.sh absent in this staging copy; the real-gate acceptance runs in the primary mcp-suite job";
 
+// The standing-authority read acceptance similarly drives the REAL queue. The
+// mutation harness stages mcp/ alone, so keep the same explicit primary-suite
+// boundary as the real capability-gate acceptance below.
+const REAL_QUEUE = fileURLToPath(new URL("../../org_request_queue.sh", import.meta.url));
+const QUEUE_PRESENT = existsSync(REAL_QUEUE);
+const skipIfNoQueue = QUEUE_PRESENT
+  ? false
+  : "org_request_queue.sh absent in this staging copy; the real-queue acceptance runs in the primary mcp-suite job";
+
 // `queueBody` rather than a `queueScript` override: both stubs write to the
 // same filename (they must — the server refuses to front anything not called
 // org_request_queue.sh), so an override evaluated by the caller gets silently
@@ -274,6 +283,102 @@ test("TOG-312: the read tool is scoped by the AUTHENTICATED principal, and takes
     // authenticated agent id, which is the only selector that exists.
     assert.deepEqual(recordedArgv(dir), ["inbox", "--for", CALLER]);
     assert.ok(!recordedArgv(dir).includes(VICTIM), "the victim's id must appear nowhere in the argv");
+  });
+});
+
+// TOG-579: compose the exact authenticated selector above with the REAL queue.
+// Standing authority is named by permission profile, but MCP knows only the
+// authenticated UUID. The enqueue path must record each live holder's UUID;
+// resolving the caller's current profile during read would retarget old notices.
+const P4_STEWARD = "44444444-0000-4000-8000-000000000004";
+const P1_PRESIDENT = "11111111-0000-4000-8000-000000000001";
+const UNRELATED = "99999999-0000-4000-8000-000000000009";
+
+function writeProvisionerStub(dir) {
+  const file = path.join(dir, "org_provisioner.sh");
+  writeFileSync(file, `#!/bin/sh
+case "$1" in
+  ceiling)
+    printf '%s\\t%s\\n' P1_PRESIDENT_COO E0_SPECIALIST
+    ;;
+  template-keys)
+    printf '%s\\t\\n' E0_SPECIALIST
+    ;;
+  *) exit 91 ;;
+esac
+`, { mode: 0o700 });
+  return file;
+}
+
+function realQueueConfig(dir) {
+  const org = path.join(dir, "org.tsv");
+  const queue = path.join(dir, "queue.jsonl");
+  writeFileSync(org, [
+    [P1_PRESIDENT, "O1", "P1_PRESIDENT_COO", "idle", "", "President & COO"],
+    [P4_STEWARD, "A0", "P4_PROVISIONING_STEWARD", "idle", P1_PRESIDENT, "Provisioning Steward"],
+    [UNRELATED, "DIR", "E0_SPECIALIST", "idle", P1_PRESIDENT, "Unrelated Specialist"],
+  ].map((row) => row.join("\t")).join("\n") + "\n");
+  const cfg = normalizeConfig({
+    companyId: COMPANY,
+    bearerSha256: BEARER_SHA,
+    queueScript: REAL_QUEUE,
+    requireLiveRun: false,
+    queueEnv: {
+      ORG_SNAPSHOT: org,
+      QUEUE: queue,
+      GRANT_LOG: path.join(dir, "grant-log.jsonl"),
+      DISABLED_TEMPLATES: path.join(dir, "disabled"),
+      PROV: writeProvisionerStub(dir),
+      REQUEST_NOTIFY_CMD: "",
+    },
+  });
+  return { cfg, queue };
+}
+
+test("TOG-579 ACCEPTANCE: authenticated P4 and P1 UUIDs pull only their own standing notices", { skip: skipIfNoQueue }, async () => {
+  const dir = scratch();
+  const { cfg, queue } = realQueueConfig(dir);
+  await withServer(cfg, {}, async (call) => {
+    const submit = await call(
+      rpc("tools/call", {
+        name: "submit_provisioning_request",
+        arguments: { template: "E0_SPECIALIST", title: "standing pull acceptance" },
+      }),
+      headersFor(P1_PRESIDENT),
+    );
+    assert.equal(submit.json.result.isError, false, submit.json.result.content?.[0]?.text);
+    const reqId = (/\b(REQ-\d{3,})\b/.exec(submit.json.result.content[0].text) || [])[1];
+    assert.ok(reqId, "the real queue did not record a request id");
+
+    const queued = readFileSync(queue, "utf8").split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((row) => row.event === "notify.queued" && row.requestId === reqId && row.audience === "leader");
+    assert.deepEqual(
+      queued.map((row) => [row.recipientRole, row.recipientAgentId]).sort(),
+      [["P1_PRESIDENT_COO", P1_PRESIDENT], ["P4_PROVISIONING_STEWARD", P4_STEWARD]],
+      "standing notification rows did not persist both live recipient UUIDs",
+    );
+
+    for (const [agentId, ownRole, otherRole] of [
+      [P4_STEWARD, "P4_PROVISIONING_STEWARD", "P1_PRESIDENT_COO"],
+      [P1_PRESIDENT, "P1_PRESIDENT_COO", "P4_PROVISIONING_STEWARD"],
+    ]) {
+      const read = await call(rpc("tools/call", { name: "read_my_requests", arguments: {} }), headersFor(agentId));
+      assert.equal(read.json.result.isError, false, read.json.result.content?.[0]?.text);
+      const text = read.json.result.content[0].text;
+      assert.match(text, new RegExp(`^${reqId}[\\t ]+PENDING[\\t ]+`, "m"));
+      assert.match(text, new RegExp(`review --reviewer ${ownRole} --request ${reqId}`));
+      assert.doesNotMatch(text, new RegExp(`review --reviewer ${otherRole} --request ${reqId}`));
+      assert.match(text, /pull_only/);
+    }
+
+    const unrelated = await call(
+      rpc("tools/call", { name: "read_my_requests", arguments: {} }),
+      headersFor(UNRELATED),
+    );
+    assert.equal(unrelated.json.result.isError, false, unrelated.json.result.content?.[0]?.text);
+    assert.doesNotMatch(unrelated.json.result.content[0].text, new RegExp(reqId));
+    assert.match(unrelated.json.result.content[0].text, /no decisions for/);
   });
 });
 

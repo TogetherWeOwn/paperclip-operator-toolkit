@@ -69,6 +69,12 @@ payload() {
       recipientAgentId:"agent-dir-1",body:$b,notifyIssue:$ni}'
 }
 
+leader_payload() {
+  jq -cn --arg ni "$1" \
+    '{requestId:"REQ-002",audience:"leader",decision:"pending",recipientRole:"DIR",
+      recipientAgentId:"agent-dir-1",body:"You have a request to decide.",notifyIssue:$ni}'
+}
+
 # ===========================================================================
 hdr "1. The credential never reaches argv"
 # gh_token.sh's "credentials never reach argv" note established this for the
@@ -182,7 +188,37 @@ else
 fi
 
 # ===========================================================================
-hdr "4. A refused delivery is reported as failure, not swallowed"
+hdr "4. Leader notifications render their decision field"
+deliver "$(leader_payload "1111-2222")"
+SENT="$(grep -o 'data-binary = ".*"' "$CFGCOPY" | head -1 | sed 's/^data-binary = //')"
+BODY_MD="$(jq -r 'fromjson | .body' <<<"$SENT" 2>/dev/null || echo "")"
+if grep -q '^\*\*Provisioning request REQ-002: pending\*\*' <<<"$BODY_MD"; then
+  ok "a leader payload headed by decision=pending renders PENDING"
+else
+  bad "a leader payload rendered a null or missing status"
+  note "$(head -c 200 <<<"$BODY_MD")"
+fi
+
+# A requester-wide fallback is intentionally only a requester fallback. Applying
+# it to a null leader address would contradict the queue's unset=>pull_only
+# contract and falsely record that the leader was told on somebody else's issue.
+REQUEST_NOTIFY_ISSUE=REQUESTER-FALLBACK deliver "$(payload "")"
+if [[ $RC -eq 0 ]] && grep -q '/issues/REQUESTER-FALLBACK/comments' "$CFGCOPY"; then
+  ok "a requester payload still uses REQUEST_NOTIFY_ISSUE"
+else
+  bad "a requester payload lost its configured fallback"
+fi
+REQUEST_NOTIFY_ISSUE=REQUESTER-FALLBACK deliver "$(leader_payload "")"
+[[ $RC -ne 0 ]] \
+  && ok "a leader payload with no leader address refuses the requester fallback" \
+  || bad "a null leader address was delivered to REQUEST_NOTIFY_ISSUE"
+[[ ! -s "$ARGV" ]] \
+  && ok "  ...and curl never ran for the unaddressed leader payload" \
+  || bad "  ...but curl ran for the unaddressed leader payload"
+unset REQUEST_NOTIFY_ISSUE
+
+# ===========================================================================
+hdr "5. A refused delivery is reported as failure, not swallowed"
 # The queue's retry/undelivered gate keys on this exit status; a transport that
 # exits 0 on an HTTP error would make the gate permanently green.
 STUB_HTTP_CODE=403 deliver "$(payload "1111-2222")"
@@ -195,7 +231,7 @@ STUB_HTTP_CODE=500 deliver "$(payload "1111-2222")"
 [[ $RC -ne 0 ]] && ok "HTTP 500 exits non-zero" || bad "HTTP 500 exited 0"
 
 # ===========================================================================
-hdr "5. No payload, no delivery"
+hdr "6. No payload, no delivery"
 OUT="$(printf '' | PATH="$BIN:$PATH" "$NOTIFY" 2>&1)"; RC=$?
 [[ $RC -ne 0 ]] && ok "an empty payload is refused" || bad "an empty payload was accepted"
 

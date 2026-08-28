@@ -132,11 +132,29 @@ ORG
 }
 reset() { rm -f "$QUEUE" "$GRANT_LOG" "$DISABLED_TEMPLATES" "$CREATE_ARGV" "$DELIVERED"; base_org; }
 last_sub() { jq -r 'select(.event=="request.submitted")|.requestId' "$QUEUE" | tail -1; }
-# Delivery state of a request, as the tool itself reports it.
-state_of() { "$Q" notify --json 2>/dev/null | jq -r --arg r "$1" 'select(.rid==$r)|.state'; }
-body_of()  { "$Q" notify --json 2>/dev/null | jq -r --arg r "$1" 'select(.rid==$r)|.body'; }
-# Count notify.queued rows for a request — the idempotency measure.
-nq_count() { jq -r --arg r "$1" 'select(.event=="notify.queued" and .requestId==$r)|.requestId' "$QUEUE" 2>/dev/null | wc -l | tr -d ' '; }
+# EVERY HELPER BELOW IS SCOPED TO audience=="requester" (TOG-317).
+#
+# This suite owns exactly one question — does the REQUESTER learn? — and since
+# TOG-317 a request carries a second notification, addressed to the LEADER.
+# Unscoped, each of these returns two lines, `eq` compares a two-line string
+# against one value, and twelve assertions go red at once without the property
+# any of them names having changed. Measured, not predicted: that is what the
+# first run of this change produced.
+#
+# The scope lives in the SELECTOR, not in a `tail -1`, even though emission
+# order happens to make tail -1 pick the right row today. Order is an accident
+# of when each notification is emitted; the audience is the thing being
+# asserted. A gate that leans on emission order stops testing what it names on
+# the day a third audience is added, and says nothing when it does.
+state_of() { "$Q" notify --json 2>/dev/null | jq -r --arg r "$1" 'select(.rid==$r and .audience=="requester")|.state'; }
+body_of()  { "$Q" notify --json 2>/dev/null | jq -r --arg r "$1" 'select(.rid==$r and .audience=="requester")|.body'; }
+# Count notify.queued rows addressed to the REQUESTER — the idempotency measure.
+nq_count() { jq -r --arg r "$1" 'select(.event=="notify.queued" and .requestId==$r and (.audience // "requester")=="requester")|.requestId' "$QUEUE" 2>/dev/null | wc -l | tr -d ' '; }
+# The requester-addressed queued row itself, selected by audience rather than
+# by position.
+req_row()  { jq -c 'select(.event=="notify.queued" and (.audience // "requester")=="requester")' "$QUEUE" 2>/dev/null | tail -1; }
+# What the transport was actually handed for the requester.
+req_delivered() { jq -c 'select((.audience // "requester")=="requester")' "$DELIVERED" 2>/dev/null | tail -1; }
 submit_one() { "$Q" submit --requester MGR --template E0_SPECIALIST --title "$1" "${@:2}" >/dev/null 2>&1; last_sub; }
 
 build_stub; build_transports; reset
@@ -156,7 +174,17 @@ b="$(body_of "$REQ")"
 has "$b" "approved"  "  ...and says it was approved"
 has "$b" "Seated agent id" "  ...and carries the SEATED AGENT ID, which is the point of having asked"
 eq "  ...addressed to the requester, not the reviewer" \
-   "$("$Q" notify --json | jq -r --arg r "$REQ" 'select(.rid==$r)|.role')" "MGR"
+   "$("$Q" notify --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="requester")|.role')" "MGR"
+# The complement, stated because TOG-317 makes this rule easy to misread. There
+# IS now a notification addressed to DIR on this same request — DIR is the
+# derived LEADER and was told at submit that it had something to decide. What
+# must never happen is the DECISION notice going anywhere but the requester.
+# Asserting only the first line above would keep passing if the two audiences
+# were ever merged back into one row.
+eq "  ...while the leader's own notice is a SEPARATE row, addressed to DIR" \
+   "$("$Q" notify --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role')" "DIR"
+eq "  ...so one request carries exactly two notifications, never one merged one" \
+   "$("$Q" notify --json | jq -r --arg r "$REQ" 'select(.rid==$r)|.audience' | sort | tr '\n' ',')" "leader,requester,"
 
 reset
 REQ="$(submit_one "TESTQ Deny me")"
@@ -254,9 +282,9 @@ printf 'u-mgr-NEW\tMGR\tD1_MANAGER\tidle\tu-o1\tImpostor Manager\n' >> "$ORG_SNA
 REQUEST_NOTIFY_CMD="$TMP/t_ok.sh" "$Q" notify --drain >/dev/null 2>&1
 eq "the drained retry now delivers" "$(state_of "$REQ")" "delivered"
 eq "  ...to the agent id recorded AT DECISION TIME, not the re-pointed role" \
-   "$(jq -r 'select(.event=="notify.queued")|.recipientAgentId' "$QUEUE" | tail -1)" "u-mgr"
+   "$(req_row | jq -r '.recipientAgentId')" "u-mgr"
 eq "  ...and the transport was handed that same original id" \
-   "$(jq -r '.recipientAgentId' "$DELIVERED" | tail -1)" "u-mgr"
+   "$(req_delivered | jq -r '.recipientAgentId')" "u-mgr"
 reset
 
 # ===========================================================================
@@ -280,9 +308,9 @@ REQ="$(submit_one "TESTQ Status must not be a notification")"
 eq "a notified request still reads as its DECISION, not as its notification" \
    "$("$Q" list --status rejected | grep -c "$REQ")" "1"
 eq "  ...and the notification row does not carry a 'status' field at all" \
-   "$(jq -r 'select(.event=="notify.queued")|has("status")' "$QUEUE" | tail -1)" "false"
+   "$(req_row | jq -r 'has("status")')" "false"
 eq "  ...it carries 'decision' instead" \
-   "$(jq -r 'select(.event=="notify.queued")|.decision' "$QUEUE" | tail -1)" "rejected"
+   "$(req_row | jq -r '.decision')" "rejected"
 
 # ===========================================================================
 hdr "5. The transport is a courier, not a participant"
@@ -366,12 +394,17 @@ has "$inb_by_id" "mgr's own request" "  ...with the reason, which is the whole p
 # And the isolation must hold on the id path too, or the fix widened the read.
 grep -q "$R2" <<<"$inb_by_id" && bad "reading by agent id leaks DIR's decisions" \
   || ok "  ...and still not DIR's"
-# The other principal's id must not open MGR's inbox either — matching two
-# fields must not mean matching them across rows.
-inb_other="$("$Q" inbox --for u-dir 2>&1)"
-grep -q "$R1" <<<"$inb_other" && bad "DIR's agent id reads MGR's decisions" \
-  || ok "  ...and DIR's agent id does not read MGR's"
-has "$inb_other" "$R2" "  ...while DIR does still see its own by agent id"
+# The other principal's id must not open MGR's REQUESTER inbox either. TOG-317
+# legitimately puts R1 in DIR's inbox under audience=leader — it is the summons
+# telling DIR to decide MGR's request — so an unscoped grep for the request id
+# would call the new feature a data leak. Assert the audiences independently.
+inb_other="$("$Q" inbox --for u-dir --json 2>&1)"
+eq "  ...and DIR's agent id does not read MGR's requester decision" \
+   "$(jq -r --arg r "$R1" 'select(.rid==$r and .audience=="requester")|.rid' <<<"$inb_other" | wc -l | tr -d ' ')" "0"
+eq "  ...while DIR legitimately sees the separate leader summons for MGR's request" \
+   "$(jq -r --arg r "$R1" 'select(.rid==$r and .audience=="leader")|.rid' <<<"$inb_other" | wc -l | tr -d ' ')" "1"
+eq "  ...and DIR still sees its own requester decision by agent id" \
+   "$(jq -r --arg r "$R2" 'select(.rid==$r and .audience=="requester")|.rid' <<<"$inb_other" | wc -l | tr -d ' ')" "1"
 # An id belonging to nobody in this queue reads EMPTY, not everything. A
 # selector that falls back to "show all" when it matches nothing is how a
 # personal inbox becomes a company-wide read.

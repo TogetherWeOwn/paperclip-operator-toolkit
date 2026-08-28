@@ -57,7 +57,7 @@ ancestor rule with defined behaviour when the direct manager cannot be the decid
 | ceiling does not contain the template | skip, logged as `ceiling_insufficient` | Cannot approve what it could not do itself. |
 | already visited (cycle) | **refuse the whole resolution**, fail closed | A cycle means the org data is wrong; guessing is worse than stopping. |
 | chain exhausted / requester is a root | **escalate** to the standing authority set | Defined below. |
-| `idle`, `paused`, dormant, slow to answer | **NOT a skip. Wake them.** | See below — this is the important one. |
+| `idle`, `paused`, dormant, slow to answer | **NOT a skip. Tell them, and keep the request where it is.** | See below — this is the important one. |
 
 **Dormancy is never a skip reason, and a pending request never re-targets itself on a timer.** This
 is the single most tempting thing to add and it must not be added. If a request could move to a
@@ -67,6 +67,24 @@ instead of a menu. A request that is not decided **expires**; it does not escala
 request is resubmitted (see *Deny is a conversation*), which puts it back in front of the same
 leader, and the expiry is visible in the log so a genuinely stuck leader is an operational problem
 someone can see rather than a silent widening of authority.
+
+That rule is only defensible if the leader is actually *told*, and until TOG-317 this row said
+"**Wake them**" while nothing did. It is now two separate claims, because they have two different
+truth values and merging them is what let the false one hide inside the true one:
+
+- **We tell them.** Guaranteed, and it is the queue's own outbox doing it — see *How the responsible
+  leader learns there is something to decide* below.
+- **They wake up.** **Not** guaranteed, and mostly false on this company: 138 of 144 agents carry
+  `runtime_config->'heartbeat'->>'wakeOnDemand' = false`, so a wake request is refused by the
+  platform and nothing turns red. This is a property of the platform that the queue measures
+  (`queue_liveness.sh`) and reports at submit (`announce_reachability`, TOG-390); it is not a
+  property the queue can provide.
+
+Keeping the two apart matters because the design's answer to a leader who never responds is *not* to
+find another leader. It is: the request stays put, the attempt to reach them is on the record as an
+undelivered notification, the reachability verdict is on the record next to it, and the break-glass
+path exists for when someone has to act anyway — logged as an override, counted, and answered for.
+A dormant leader is meant to look like an **operational problem with a name on it**, and it now does.
 
 ### The standing authority set is retained — as a floor, not the only path
 
@@ -364,10 +382,11 @@ one nobody had named. All four notify.
 
 The right instinct was stated in the issue: whatever wakes the leader is the same mechanism that
 should tell the requester, pointed the other way. Checking that turned up something worth writing
-down — **neither side has a notifier today.** This document's claim that a dormant leader is *woken*
-is, as of now, a statement about design intent with no code behind it, exactly as the requester's
-side was. This section defines the mechanism for one direction; the other direction is the same
-mechanism and should reuse it rather than grow a second one.
+down — **neither side had a notifier.** This document's claim that a dormant leader is *woken* was a
+statement about design intent with no code behind it, exactly as the requester's side had been.
+
+*Resolved 2026-08-25 by TOG-317, which reused this mechanism rather than growing a second one. See
+the next section.*
 
 There is no agent-addressed notification route on this instance. Measured 2026-08-24 from an agent
 principal:
@@ -481,6 +500,136 @@ same user cannot be sandboxed by the script that invokes it. What the change buy
 decision becomes a loud refusal instead of a silent substitution — the same trade the override design
 already made.
 
+## How the responsible leader learns there is something to decide
+
+Decided 2026-08-25 for TOG-317. Status: **accepted**. Implemented by `org_request_queue.sh`
+(`emit_leader_notification`); tested offline by `test_leader_notify.sh`.
+
+This document asserted from its first revision that a dormant leader is woken, and made that
+assertion load-bearing: it is the stated reason auto-escalation on a timer can be refused. **No code
+did it.** Measured on `origin/main` at `4b26243`, with a recording transport configured and a leader
+successfully derived:
+
+```
+$ org_request_queue.sh submit --requester MGR --template E0_SPECIALIST --title "..."
+SUBMITTED REQ-001 ...  responsible leader : DIR [C1_DIRECTOR_BUILDER]
+$ jq -r .event queue.jsonl        ->  request.submitted          # one row, no notify.*
+$ cat delivered.jsonl             ->  (empty — transport never invoked)
+$ org_request_queue.sh notify     ->  (no notifications);  exit 0
+$ org_request_queue.sh inbox --for DIR  ->  (no decisions for DIR)
+```
+
+Two details of that are worse than the missing notification itself, and both are the reason this
+needed a suite rather than a runbook line:
+
+1. **The pull half was missing too.** TOG-254's argument for `inbox` was that if the only answer to a
+   failed push is another push, the design has swapped one dead end for a subtler one. The leader had
+   neither.
+2. **The CI gate for undelivered notifications was green.** `notify` exits 1 while anything is
+   undelivered — but a notification nobody ever queued is not undelivered. The control that exists to
+   catch exactly this reported clean, which is the "a check that measured nothing must not read
+   green" failure one level up from where it was already known about.
+
+TOG-390 narrowed the gap without closing it: `announce_reachability` now prints *"IS DORMANT — it
+will NOT be woken"* at submit. That is honest and it is addressed to **the requester's terminal**.
+The leader still learned nothing.
+
+> **Submit notifies the derived leader, through the same outbox that notifies the requester,
+> addressed to the leader agent id recorded at submit. The request is durably queued before any
+> delivery is attempted, a failed wake never blocks the submission, and a failed wake is never
+> retried to a different recipient.**
+
+### What is reused, and the one thing that could not be
+
+Reused: the outbox, `REQUEST_NOTIFY_CMD` and its reference adapter, `notify --list` /
+`notify --drain`, the exit-1-while-undelivered contract, and `inbox` as the pull half. There is one
+outbox with two **audiences**, `requester` and `leader`, not two notifiers. The adapter applies the
+`REQUEST_NOTIFY_ISSUE` fallback only to requester payloads; a leader payload with no leader address
+remains unaddressed instead of being silently redirected to the requester's fallback thread.
+
+The one piece that could not be reused is **the address**. `notifyIssue` is written by the requester.
+Pointing the leader's summons at an issue the requester chose would let the least-privileged party in
+the flow deliver "you have something to decide" somewhere the leader never reads — while the queue
+records `notify.delivered`. That is not a missed notification; it is a **forged record of one**, and
+it is the TOG-198 steering defect one layer up. The leader's address is therefore operator-supplied
+(`REQUEST_LEADER_NOTIFY_ISSUE`), validated on the same allowlisted charset, and never read from the
+request record. Unset is a supported state and lands `pull_only`.
+
+### The audience key, which is the whole change in one line
+
+Both notifications live in one outbox and share an idempotency guard and a grouping key. Keyed on
+`requestId` alone — as they were — the leader's row is written **first**, at submit, and then
+swallows the requester's decision notice for the rest of the request's life. TOG-254's entire feature
+would be deleted as a side effect of building this one, silently, with the leader half demonstrably
+working and every suite green. The base key is `(requestId, audience)`; where one audience has
+multiple recipients, as standing authority does, `recipientRole` is the third key. `notify_already`,
+`notify_states`, `notify --drain` and both listings use that recipient-aware identity, and all standing
+`notify.queued` rows are appended before the first delivery attempt. A crash during recipient one can
+therefore leave deliveries incomplete, but cannot leave recipient two nonexistent or suppress its
+recovery.
+
+### A hole this change opened, and closed
+
+Found by running the new suite, not by reading the diff. Before TOG-317 the transport ran only at
+**review** time, when a genuine `request.reviewed` row already existed — so a forged one made the
+record ambiguous and the shared one-decision check refused it. **That protection was a collision,
+not a check**, and nothing said so. Running the transport at **submit** time, on a pending request,
+removes the thing to collide with.
+
+Transport delivery now owns a separate, bounded notification-status lock — never the queue lock that
+serializes request IDs. Legitimate terminal writers wait behind that bounded window; a transport
+that appends the JSONL file directly bypasses the advisory lock, changes the shared status
+fingerprint, and causes `request.disputed`. A disputed record is refused by authoritative reads and
+renders as `DISPUTED` under `list --status all`. The separate lock's wait budget is derived from the
+transport timeout, so a six-second honest delivery cannot make a valid review fail against the
+queue lock's old five-second ceiling.
+
+The ordering is equally deliberate: `notify.queued` intent is durable **before** the advisory
+reachability probe. The probe is bounded and comes last, so a broken liveness source cannot recreate
+the original state where the request exists but no leader outbox row does. `escalate` and `cycle`
+emit one addressable row per standing-authority role; a slash-joined display label is not an inbox.
+
+Stated plainly, because it changes how seriously to take this: exploiting the row-write detector
+needs a hostile `REQUEST_NOTIFY_CMD`, which is operator-set, and an operator who can set it can
+already write the queue file directly. So this is a **lost invariant, not a new privilege boundary**.
+It is fixed anyway — "the notifier has no path back into decisions" is a property this document
+states in three places, and a property that holds only by accident stops holding the next time a
+call site moves.
+
+### A reminder before expiry — decided, and the answer is no
+
+TOG-317 asked for this to be settled explicitly rather than defaulted into. **Rejected.**
+
+The case *for* is real: expiry is less arbitrary if the leader was warned. Three arguments beat it.
+
+- **It adds a timer to the notifier.** Two issues have gone into keeping the notifier out of
+  authorization, structurally rather than by intent. A pre-expiry reminder is the first thing that
+  would make the notifier read the clock and act on it, and the next request after that is "and
+  escalate if the reminder goes unanswered" — which is the auto-escalation this design rejects,
+  arriving by a road that does not look like one.
+- **It creates pressure a slow leader relieves by letting the request lapse.** A leader who is
+  behind, reminded that a decision is about to expire, has a cheaper option than deciding: wait.
+  Expiry is silent, resubmission is the requester's problem, and the nudge has made the wrong
+  behaviour easier than the right one.
+- **The existing machinery already covers it, and covers it better.** An undelivered wake keeps
+  `notify` exiting 1 for as long as it stays undelivered — a standing operational finding, aimed at
+  cron and CI rather than at the leader, and one that gets louder with time instead of being
+  dismissed. `notify --drain` retries. `queue_liveness.sh alarm` reports a queue that has stopped
+  deciding. Nagging the recipient is the one addition that would make the notifier easy to mute, and
+  a muted notifier is the dead end this whole issue exists to close, reached from the other side.
+
+Held by `test_leader_notify.sh` section 6: the fixture moves a pending request inside a plausible
+reminder window, then performs ten reads and requires exactly **one** notification addressed to the
+leader and zero `leader_reminder` rows. Expiry is reaped from read paths, so this rejects both a
+re-send of the original audience and a separate near-expiry reminder; the decision cannot reverse
+itself behind a new audience name.
+
+**If this is ever revisited**, the undo path is small: the reminder belongs beside `reap_expired`, it
+must be one-shot per request (a second audience key, e.g. `leader_reminder`, not a re-send of the
+`leader` row), and it must not change the expiry or the recipient. It should not be added without a
+measurement showing leaders are missing the first notification — which requires the first
+notification to exist, which is what this change provides.
+
 ## What was considered and rejected
 
 **Direct manager only, no walk.** Simpler, and identical to this design in every current case. Rejected
@@ -516,6 +665,14 @@ authorization decision, which is precisely what the requirement forbids. It is t
 auto-escalation on a timer, one layer down, and it would be easy to add believing it was a
 reliability improvement. A failed delivery is logged and drained to **the original recipient**, or it
 is left visible as an undelivered notification; it is never redirected.
+
+*Restated for the leader direction (TOG-317), where the temptation is far stronger.* "The leader
+didn't answer, so tell their manager" is the same rejected idea wearing a retry's clothes, and it is
+the one sentence most likely to be proposed as an obvious improvement. `test_leader_notify.sh`
+section 5 is adversarial about it rather than trusting this paragraph: the fixture gives the derived
+leader a manager specifically so the test can assert that no notification — after one failure, after
+three drained retries, or after the leader's role is re-pointed at a different agent id between
+submit and retry — is ever addressed to it.
 
 **Blocking the decision until delivery succeeds.** Rejected. It sounds like the safe choice and is
 the opposite: it makes an unreachable requester — or a broken transport, or a slow HTTP call — able

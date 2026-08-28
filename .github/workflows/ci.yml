@@ -28,6 +28,10 @@ name: CI
 #     test_decision_notify.sh           whether the REQUESTER ever learns a
 #                                       request was decided, and that delivery
 #                                       cannot influence a decision — TOG-254
+#     test_leader_notify.sh             whether the derived LEADER is told, and
+#                                       all transport invocations are contained
+#                                       without disputing honest concurrent
+#                                       reviews — TOG-317
 #     test_queue_liveness.sh            whether a request is routed at an agent
 #                                       that can actually receive it, and
 #                                       whether a queue that has stopped
@@ -701,6 +705,13 @@ jobs:
       - name: decision-notification suite
         run: ./test_decision_notify.sh
 
+      # TOG-317. The mirror question: whether the DERIVED LEADER is told there
+      # is something to decide. It also exercises containment at both transport
+      # call sites — submit and `notify --drain` — plus the legitimate race where
+      # a review overlaps an honest slow delivery and must not be disputed.
+      - name: leader-notification suite
+        run: ./test_leader_notify.sh
+
       # TOG-390. A fourth question in the same series, and the one that makes
       # the other three conditional: the record can be perfect and the notifier
       # flawless, and the request still never gets decided because the agent it
@@ -1213,21 +1224,54 @@ jobs:
           stage() {
             cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
                test_responsible_leader.sh test_request_record_integrity.sh \
-               test_decision_notify.sh "$1/"
-            mkdir -p "$1/lib" && cp lib/*.sh "$1/lib/"
+               test_decision_notify.sh test_leader_notify.sh "$1/"
+            mkdir -p "$1/lib" && cp lib/*.sh lib/*.py "$1/lib/"
           }
 
           # mutation_check <label> <suite> <expect-sibling: yes|no|skip> <sed-expr>...
           #   1. the unmutated copy must PASS      (else the gate is vacuous)
           #   2. the mutated copy must still PARSE (else it fails for the wrong reason)
           #   3. the mutated copy must FAIL        (the actual assertion)
+          # Every invocation has an OUTER watchdog independent of the code being
+          # mutated. Exit 124/137 is expected only from a mutant; a baseline that
+          # reaches either is a distinct harness failure, never "the mutant died".
+          mutation_suite() {
+            local dir="$1" suite="$2" limit="${MUTATION_SUITE_TIMEOUT:-150}"
+            local output="${MUTATION_SUITE_OUTPUT:-/dev/null}"
+            # This independent subreaper owns the whole mutation session. A
+            # courier can start a new session of its own; the watchdog still
+            # adopts and terminates it before returning 124 to this gate.
+            python3 "$dir/lib/mutation_watchdog.py" "$dir" "$suite" "$limit" >"$output" 2>&1
+          }
+
           mutation_check() {
             local label="$1" suite="$2" sibling="$3"; shift 3
             local mut; mut="$(mktemp -d)"; stage "$mut"
+            local assertion_sentinel="" required_assertion="" assertion_armed=""
+            if [[ "$label" == "transport-can-ignore-timeout-term" ]]; then
+              assertion_sentinel="$mut/.assertion-sentinel"
+              required_assertion="transport-ignore-term-courier-gone"
+              assertion_armed="transport-ignore-term-assertion-armed"
+            fi
 
-            if ! (cd "$mut" && "./$suite" >/dev/null 2>&1); then
-              echo "::error::$label: the UNMUTATED copy of $suite already fails — this gate proves nothing"
-              (cd "$mut" && "./$suite" 2>&1 | tail -20)
+            TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
+              mutation_suite "$mut" "$suite"
+            local base_rc=$?
+            if [[ $base_rc -ne 0 ]]; then
+              if [[ $base_rc -eq 124 || $base_rc -eq 137 ]]; then
+                echo "::error::$label: BASELINE TIMEOUT in $suite — the unmutated suite exceeded the outer ${MUTATION_SUITE_TIMEOUT:-150}s bound"
+              else
+                echo "::error::$label: the UNMUTATED copy of $suite already fails (rc=$base_rc) — this gate proves nothing"
+              fi
+              MUTATION_SUITE_OUTPUT="$mut/.baseline-output" \
+                TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
+                mutation_suite "$mut" "$suite"
+              tail -20 "$mut/.baseline-output"
+              rm -rf "$mut"; return 1
+            fi
+            if [[ -n "$required_assertion" ]] \
+              && ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
+              echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
               rm -rf "$mut"; return 1
             fi
 
@@ -1237,22 +1281,60 @@ jobs:
               if [[ "$e" == lib:* ]]; then
                 target="$mut/lib/reqrecord.sh"
                 e="${e#lib:}"
+              elif [[ "$e" == py:* ]]; then
+                target="$mut/lib/notify_exec.py"
+                e="${e#py:}"
               fi
-              sed -i "$e" "$target"
+              sed -i "$e" "$target" || {
+                echo "::error::$label: mutation expression failed for $target: $e"
+                rm -rf "$mut"; return 1
+              }
             done
-            if ! bash -n "$mut/org_request_queue.sh" "$mut/lib/reqrecord.sh"; then
+            if ! bash -n "$mut/org_request_queue.sh" "$mut/lib/reqrecord.sh" \
+              || ! python3 -m py_compile "$mut/lib/notify_exec.py"; then
               echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
               rm -rf "$mut"; return 1
             fi
             if cmp -s org_request_queue.sh "$mut/org_request_queue.sh" \
-              && cmp -s lib/reqrecord.sh "$mut/lib/reqrecord.sh"; then
+              && cmp -s lib/reqrecord.sh "$mut/lib/reqrecord.sh" \
+              && cmp -s lib/notify_exec.py "$mut/lib/notify_exec.py"; then
               echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
               rm -rf "$mut"; return 1
             fi
 
-            if (cd "$mut" && "./$suite" >/dev/null 2>&1); then
+            [[ -z "$assertion_sentinel" ]] || : > "$assertion_sentinel"
+            local descendant_watch="" mutant_output="$mut/.mutant-output"
+            if [[ -n "$required_assertion" ]]; then
+              descendant_watch="$mut/.descendant-watch"
+            fi
+            MUTATION_SUITE_OUTPUT="$mutant_output" \
+              MUTATION_WATCHDOG_PROCESS_FILE="$descendant_watch" \
+              TEST_LEADER_NOTIFY_DESCENDANT_WATCH="$descendant_watch" \
+              TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
+              mutation_suite "$mut" "$suite"
+            local mut_rc=$?
+            if [[ $mut_rc -eq 0 ]]; then
               echo "::error::$label: $suite PASSED against the mutation"
               rm -rf "$mut"; return 1
+            elif [[ -n "$required_assertion" ]]; then
+              if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: mutant reached the passing $required_assertion assertion"
+                rm -rf "$mut"; return 1
+              fi
+              if [[ -n "$assertion_armed" ]] \
+                && ! grep -qxF "$assertion_armed" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: mutant timed out before arming the intended TERM assertion"
+                rm -rf "$mut"; return 1
+              fi
+              if [[ $mut_rc -ne 124 ]] \
+                || ! grep -qxF "MUTATION_WATCHDOG: watched descendant terminated" "$mutant_output"; then
+                echo "::error::$label: mutant did not time out with attributable descendant cleanup (rc=$mut_rc)"
+                tail -20 "$mutant_output"
+                rm -rf "$mut"; return 1
+              fi
+              echo "  ok  $label — TERM assertion armed and blocked; watchdog terminated the escaped descendant"
+            elif [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
+              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
             fi
 
             # Cross-check: is this defect visible to the OTHER suite? Pins which
@@ -1261,17 +1343,23 @@ jobs:
             if [ "$sibling" != "skip" ]; then
               local other=test_responsible_leader.sh
               [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
-              if (cd "$mut" && "./$other" >/dev/null 2>&1); then
+              mutation_suite "$mut" "$other" >/dev/null 2>&1
+              local other_rc=$?
+              if [[ $other_rc -eq 0 ]]; then
                 [ "$sibling" = "yes" ] && {
                   echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
               else
+                if [[ $other_rc -eq 124 || $other_rc -eq 137 ]]; then
+                  echo "::error::$label: sibling $other hit the OUTER deadline; this cross-check is not attributable"
+                  rm -rf "$mut"; return 1
+                fi
                 [ "$sibling" = "no" ] && {
                   echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
                   rm -rf "$mut"; return 1; }
               fi
             fi
             rm -rf "$mut"
-            echo "  ok  $label"
+            [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]] || echo "  ok  $label"
           }
 
           rc=0
@@ -1347,7 +1435,7 @@ jobs:
           # of this gate mutated only the guard and the suite passed, which is
           # how the redundancy was found rather than assumed.
           mutation_check "notification-repeats-forever" test_decision_notify.sh skip \
-            's/^  notify_already "$rid" && { NOTIFY_RESULT="already"; return 0; }/  false \&\& { NOTIFY_RESULT="already"; return 0; }/' \
+            's/^  notify_already "$rid" requester && { NOTIFY_RESULT="already"; return 0; }/  false \&\& { NOTIFY_RESULT="already"; return 0; }/' \
             's/| map(select(.last == "pending" and .exp != ""))/| map(select(.exp != ""))/' || rc=1
 
           # Put the notification row back to carrying `status`, so it is shaped
@@ -1355,7 +1443,7 @@ jobs:
           # this feature actually caused while being written, and it made
           # notified requests vanish from every filtered listing.
           mutation_check "notification-shaped-like-a-decision" test_decision_notify.sh skip \
-            's/{event:"notify.queued",requestId:$id,decision:$s,/{event:"notify.queued",requestId:$id,status:$s,/' || rc=1
+            's/{event:"notify.queued",requestId:$id,audience:"requester",decision:$s,/{event:"notify.queued",requestId:$id,audience:"requester",status:$s,/' || rc=1
 
           # The undelivered-notification gate going green. Same failure mode as
           # a muted alarm: the feature still "works", and nobody learns that
@@ -1391,6 +1479,90 @@ jobs:
           # fix does something, this one proves it does not do too much.
           mutation_check "inbox-matches-everyone" test_decision_notify.sh skip \
             's/select(.role==$w or .agent==$w)/select(true)/' || rc=1
+
+          # --- TOG-317: the leader learns ------------------------------------
+          # These use sibling=skip because the cross-check only understands the
+          # original two-suite pair. Each still proves baseline, applied mutation,
+          # parse validity, and that the owning suite goes red.
+          mutation_check "leader-never-told" test_leader_notify.sh skip \
+            's/^  if ! build_leader_notification_payloads "$rid" "$submission"; then$/  LEADER_NOTIFY_PAYLOADS=(); if false; then/' || rc=1
+
+          # Standing notices are profile-addressed for the operator but UUID-
+          # addressed through authenticated MCP. Blank the enqueue-time profile
+          # resolution; both shell role pulls still work, so only the UUID
+          # assertions prove this path is actually reachable to agents.
+          mutation_check "standing-authority-agent-id-not-recorded" test_leader_notify.sh skip \
+            's/^        standing_id="$(f 1 "$standing_row")"$/        standing_id=""/' || rc=1
+
+          mutation_check "leader-notification-swallows-the-requesters" test_leader_notify.sh skip \
+            's/                and (.audience \/\/ "requester")==$aud/                and true/' || rc=1
+
+          mutation_check "leader-address-chosen-by-requester" test_leader_notify.sh skip \
+            's/^  local addr="$REQUEST_LEADER_NOTIFY_ISSUE" addr_note=""$/  local addr="$(jq -r ".notifyIssue \/\/ \\"\\"" <<<"$sub")" addr_note=""/' || rc=1
+
+          # Collapse reqrecord's separate notification-status lock back onto
+          # QUEUE_LOCK. A >5s honest transport then occupies the queue's ordinary
+          # writer lock and a legitimate overlapping review is refused.
+          mutation_check "transport-holds-queue-lock" test_leader_notify.sh skip \
+            's|^REQRECORD_STATUS_LOCK="${QUEUE}.notify-status.lock"$|REQRECORD_STATUS_LOCK="$QUEUE_LOCK"|' || rc=1
+
+          # Re-open the unbounded fallback when timeout enforcement is missing.
+          # The suite points the explicit timeout seam at an unavailable command
+          # and must prove that the transport is not invoked at all.
+          mutation_check "transport-runs-without-timeout-enforcement" test_leader_notify.sh skip \
+            's|^    out="process-tree timeout enforcement unavailable; transport not invoked"$|    out="transport ran without containment"; bash -c "$REQUEST_NOTIFY_CMD" </dev/null >/dev/null 2>\&1|' \
+            's|^    rc=125$|    rc=$?|' || rc=1
+
+          # Remove only the forced-kill escalation. The TERM-ignoring courier
+          # survives TERM, so its PID assertion must reject this mutant. The
+          # independent mutation_suite watchdog bounds that mutant and reports a
+          # mutant timeout separately from an unmutated baseline timeout.
+          mutation_check "transport-can-ignore-timeout-term" test_leader_notify.sh skip \
+            'py:s/os.killpg(proc.pid, signal.SIGKILL)/os.killpg(proc.pid, signal.SIGTERM)/' \
+            'py:s/signal_children(signal.SIGKILL)/signal_children(signal.SIGTERM)/' \
+            'py:s/proc.kill()/proc.terminate()/' || rc=1
+
+          # Remove descendant cleanup from the supervisor. The retained-stdout
+          # and detached-mutator fixtures exercise descriptor and process-tree
+          # containment; the owning suite must reject the mutation without
+          # letting it hang the CI job.
+          mutation_check "transport-descendants-survive-parent" test_leader_notify.sh skip \
+            'py:s/^        stop_tree(proc, grace)$/        pass/' || rc=1
+
+          # Suppress jq failure again. Malformed JSON then produces partial output
+          # that can compare equal and be credited as a delivered notification.
+          mutation_check "malformed-fingerprint-reads-equal" test_leader_notify.sh skip \
+            'lib:s#^    .select(\$ev\[.event\] // false). .\$QUEUE.$#    '\''select($ev[.event] // false)'\'' "$QUEUE" 2>/dev/null || true#' || rc=1
+
+          # Disable the central mutation verdict. Because the guard lives inside
+          # notify_deliver, this one deletion must expose both hostile submit and
+          # hostile drain cases; a call-site wrapper cannot satisfy the drain case.
+          mutation_check "notifier-mints-a-decision-on-submit-or-drain" test_leader_notify.sh skip \
+            's/^  \[\[ "$fp_before" == "$fp_after" \]\] || tampered="yes"$/  true/' || rc=1
+
+          # The atomic standing-authority intent set must retain both recipients.
+          # Collapsing the builder to its first row strands the second authority
+          # before publication, while a single-leader request still looks healthy.
+          mutation_check "standing-recipient-idempotency-collapsed" test_leader_notify.sh skip \
+            '/while IFS= read -r standing_role; do/,/done < <(jq -r/ s/      LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")$/      [[ ${#LEADER_NOTIFY_PAYLOADS[@]} -gt 0 ]] || LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")/' || rc=1
+
+          # Upgrade compatibility: recipient-aware grouping must still associate
+          # historical requester outcomes that predate recipientRole. Requiring an
+          # exact role match re-queues and redelivers already-delivered decisions.
+          mutation_check "legacy-notification-outcome-orphaned" test_leader_notify.sh skip \
+            's/                             or ($q.audience=="requester" and ((has("recipientRole")|not) or .recipientRole==null))))/                             or false))/' || rc=1
+
+          # Standing authority has two required recipients. Regressing to the old
+          # scalar summary lets P1's later success overwrite P4's earlier failure.
+          mutation_check "standing-mixed-result-collapsed" test_leader_notify.sh skip \
+            's/^    LEADER_NOTIFY_RESULTS+=.*$/    LEADER_NOTIFY_RESULTS=""/' \
+            's/^    NOTIFY_RESULT="failed"$/    NOTIFY_RESULT="$result"/' || rc=1
+
+          # Advisory reachability may never execute without an enforceable outer
+          # deadline. Re-open the direct fallback and the hanging fixture must hit
+          # this mutation gate's independent watchdog rather than hang the job.
+          mutation_check "reachability-runs-without-timeout-enforcement" test_leader_notify.sh skip \
+            's|^    echo "  reachability       : UNKNOWN for .*|    out="$("$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?;|' || rc=1
 
           # --- the transport's own gates (TOG-198 review) ---------------------
           # Separate helper because these mutate notify_paperclip_issue.sh, not
@@ -1451,6 +1623,16 @@ jobs:
           # machine, not merely displayed to a human.
           notify_mutation_check "notify-fence-not-measured" \
             's|^FENCE_LEN=\$(( \$(longest_tick_run "\$BODY") + 1 )).*$|FENCE_LEN=3|' || rc=1
+
+          # Leader rows carry `decision`, deliberately not `status`; reading only
+          # status renders the reference adapter heading as null.
+          notify_mutation_check "notify-renders-status-only" \
+            's/^STATUS=.*$/STATUS="$(jq -r '\''.status'\'' <<<"$PAYLOAD")"/' || rc=1
+
+          # Restore the audience-blind fallback. A leader row whose operator
+          # address is null then gets sent to the requester's fallback issue.
+          notify_mutation_check "notify-leader-uses-requester-fallback" \
+            's/^if \[\[ -z "$ISSUE" && "$AUDIENCE" == "requester" \]\]; then/if [[ -z "$ISSUE" ]]; then/' || rc=1
 
           exit $rc
 

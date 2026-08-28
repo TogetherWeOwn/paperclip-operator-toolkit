@@ -30,6 +30,7 @@
 # -------------------------------------------
 # Shared — the record's integrity:
 #     die  log_event  append_queue  queue_lock  queue_unlock
+#     reqrecord_status_lock  reqrecord_status_unlock  append_status_queue
 #     expired  submission_count  request_submission
 # ...and the decision's required content (TOG-403):
 #     saferalt_reset  saferalt_parse_arg  saferalt_assert_direction
@@ -91,8 +92,28 @@ SAFERALT_NO_ALT_CONSEQUENCE="${SAFERALT_NO_ALT_CONSEQUENCE:-$(printf '%s' 'The s
 # --- shared definitions -----------------------------------------------------
 die() { echo "REFUSED: $*" >&2; exit 2; }
 
-log_event()    { printf '%s\n' "$1" >> "$GRANT_LOG"; chmod 0600 "$GRANT_LOG" 2>/dev/null || true; }
-append_queue() { printf '%s\n' "$1" >> "$QUEUE"; chmod 0600 "$QUEUE" 2>/dev/null || true; }
+log_event() { printf '%s\n' "$1" >> "$GRANT_LOG"; chmod 0600 "$GRANT_LOG" 2>/dev/null || true; }
+
+REQRECORD_DURABLE_WRITER="${REQRECORD_DURABLE_WRITER:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/durable_queue.py}"
+
+append_queue_unlocked() {
+  [[ -x "$REQRECORD_DURABLE_WRITER" ]] \
+    || { echo "REFUSED: durable queue writer unavailable: $REQRECORD_DURABLE_WRITER" >&2; return 1; }
+  printf '%s\n' "$1" | "$REQRECORD_DURABLE_WRITER" append "$QUEUE"
+}
+append_queue_batch_unlocked() {
+  [[ $# -gt 0 ]] || { echo "REFUSED: empty durable queue batch" >&2; return 1; }
+  [[ -x "$REQRECORD_DURABLE_WRITER" ]] \
+    || { echo "REFUSED: durable queue writer unavailable: $REQRECORD_DURABLE_WRITER" >&2; return 1; }
+  printf '%s\n' "$@" | "$REQRECORD_DURABLE_WRITER" append-batch "$QUEUE"
+}
+append_queue() {
+  local rc
+  reqrecord_status_lock
+  append_queue_unlocked "$1"; rc=$?
+  reqrecord_status_unlock
+  return "$rc"
+}
 
 queue_lock() {
   local i pid
@@ -111,6 +132,40 @@ queue_lock() {
   die "could not acquire the queue lock ($QUEUE_LOCK) — another writer is stuck."
 }
 queue_unlock() { rm -rf "$QUEUE_LOCK" 2>/dev/null || true; }
+
+# Serialise status-bearing writes against an untrusted courier's fingerprint
+# window without holding QUEUE_LOCK during external I/O. The caller supplies a
+# wait budget in 50ms tries; notification delivery derives it from the enforced
+# transport timeout so an honest writer waits longer than the courier can run.
+REQRECORD_STATUS_LOCK="${REQRECORD_STATUS_LOCK:-${QUEUE}.status.lock}"
+REQRECORD_STATUS_LOCK_TRIES="${REQRECORD_STATUS_LOCK_TRIES:-${LOCK_WAIT_TRIES:-100}}"
+
+reqrecord_status_lock() {
+  local tries="${1:-$REQRECORD_STATUS_LOCK_TRIES}" i pid
+  [[ "$tries" =~ ^[1-9][0-9]*$ ]] || die "status lock wait must be a positive integer (got '$tries')."
+  for (( i=0; i<tries; i++ )); do
+    if mkdir "$REQRECORD_STATUS_LOCK" 2>/dev/null; then
+      printf '%s\n' "$$" > "$REQRECORD_STATUS_LOCK/pid" 2>/dev/null || true
+      return 0
+    fi
+    pid="$(cat "$REQRECORD_STATUS_LOCK/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$REQRECORD_STATUS_LOCK" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  die "could not acquire the status lock ($REQRECORD_STATUS_LOCK)."
+}
+reqrecord_status_unlock() { rm -rf "$REQRECORD_STATUS_LOCK" 2>/dev/null || true; }
+
+append_status_queue() {
+  local rc
+  reqrecord_status_lock
+  append_queue_unlocked "$1"; rc=$?
+  reqrecord_status_unlock
+  return "$rc"
+}
 
 expired() {
   local exp="$1"
@@ -282,6 +337,27 @@ reqrecord_state() {
   printf '%s\n' "$rec"
 }
 
+# Status-row fingerprint used around untrusted courier execution. It covers
+# every request, not only the request whose notification is being delivered: a
+# courier handling REQ-001 is no more entitled to decide REQ-002. Rows are
+# compared directly rather than through an optional checksum binary; missing
+# measurement must not read as agreement.
+reqrecord_status_fingerprint() {
+  [[ -f "$QUEUE" ]] || { echo "-"; return 0; }
+  jq -c --argjson ev "$REQRECORD_STATUS_EVENTS" \
+    'select($ev[.event] // false)' "$QUEUE"
+}
+
+reqrecord_assert_undisputed() {
+  [[ -f "$QUEUE" ]] || return 0
+  local n
+  n="$(jq -r --arg id "$1" 'select(.requestId==$id and .event=="request.disputed")|.requestId'        "$QUEUE" 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "$n" -eq 0 ]] || {
+    log_event "$(jq -cn --arg id "$1"       '{event:"review.refused",reason:"record_disputed_during_notify",requestId:$id}')"
+    die "request $1 had decision rows written while the notifier was running; refusing to act on a disputed record."
+  }
+}
+
 # THE INVARIANT. A reviewer decides an ID; if that ID names two submissions then
 # whatever it decided is not what executes — request_submission() resolves the
 # ambiguity with `tail -1`, which is an arbitrary answer, not a correct one.
@@ -300,6 +376,7 @@ reqrecord_assert_unambiguous() {
     die "request id $1 names $n distinct submissions; refusing to act on an ambiguous record."
   }
   reqrecord_assert_one_decision "$1"
+  reqrecord_assert_undisputed "$1"
 }
 
 # The other half. A request has at most ONE terminal decision, so two terminal

@@ -643,17 +643,25 @@ hdr "10. Adjacency — each assertion is pinned to its OWN gate"
 # UNMUTATED copy in the same staging directory passes — four gates on this
 # repo were vacuous for exactly that reason.
 STAGE="$TMP/stage"; mkdir -p "$STAGE/lib"
-cp "$G" "$STAGE/capability_gate.sh"; cp "$HERE/lib/reqrecord.sh" "$HERE/lib/pcsql.sh" "$STAGE/lib/"
-chmod +x "$STAGE/capability_gate.sh"
+cp "$G" "$STAGE/capability_gate.sh"
+cp "$HERE/lib/reqrecord.sh" "$HERE/lib/pcsql.sh" "$HERE/lib/durable_queue.py" "$STAGE/lib/"
+chmod +x "$STAGE/capability_gate.sh" "$STAGE/lib/durable_queue.py"
 
 # Run ONE named assertion against a staged gate. Emits pass/fail of that
 # assertion, so the caller can require green unmutated and red mutated.
 probe() { # probe <staged-gate> <reason-substring> <args...>
   local sg="$1" why="$2"; shift 2
-  local sq="$TMP/probe.jsonl" sl="$TMP/probe.log"
+  local sq="$TMP/probe.jsonl" sl="$TMP/probe.log" seed
   rm -f "$sq" "$sl"; rm -rf "$sq.lock"
-  QUEUE="$sq" GRANT_LOG="$sl" "$sg" submit --requester ENG --capability github.token \
-    --action grant --facts "$FACTS" --reasoning "$WHY" >/dev/null 2>&1
+  seed="$(QUEUE="$sq" GRANT_LOG="$sl" "$sg" submit --requester ENG --capability github.token \
+    --action grant --facts "$FACTS" --reasoning "$WHY" 2>&1)" || {
+      printf 'STAGED BASELINE SETUP FAILED: %s\n' "$seed" >&2
+      return 2
+    }
+  jq -e 'select(.event=="request.submitted" and .requestId=="CAP-001")' "$sq" >/dev/null 2>&1 || {
+    printf 'STAGED BASELINE SETUP FAILED: CAP-001 was not recorded\n' >&2
+    return 2
+  }
   local o; o="$(QUEUE="$sq" GRANT_LOG="$sl" "$sg" "$@" 2>&1)"; local rc=$?
   [[ $rc -ne 0 ]] && grep -qF -- "$why" <<<"$o"
 }

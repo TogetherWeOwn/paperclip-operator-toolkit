@@ -77,16 +77,20 @@ command -v jq >/dev/null || { echo "jq required" >&2; exit 69; }
 BASE="${PAPERCLIP_API_URL%/}"; BASE="${BASE%/api}"
 
 RID="$(jq -r '.requestId'       <<<"$PAYLOAD")"
-STATUS="$(jq -r '.status'       <<<"$PAYLOAD")"
+STATUS="$(jq -r '.decision // .status // empty' <<<"$PAYLOAD")"
 ROLE="$(jq -r '.recipientRole'  <<<"$PAYLOAD")"
+AUDIENCE="$(jq -r '.audience // "requester"' <<<"$PAYLOAD")"
 AGENT="$(jq -r '.recipientAgentId // ""' <<<"$PAYLOAD")"
 BODY="$(jq -r '.body'           <<<"$PAYLOAD")"
 
-# The issue to comment on. Supplied per-request via the queue record, or as a
-# single fallback inbox issue for deployments that route everything to one
-# thread. No issue means no address; say so plainly rather than inventing one.
+# The issue to comment on. Requester decisions may use the deployment's fallback
+# inbox. Leader rows may not: their address is operator-isolated upstream, and
+# null deliberately means pull_only rather than "send it to the requester's
+# fallback thread and claim the leader was told".
 ISSUE="$(jq -r '.notifyIssue // ""' <<<"$PAYLOAD")"
-ISSUE="${ISSUE:-${REQUEST_NOTIFY_ISSUE:-}}"
+if [[ -z "$ISSUE" && "$AUDIENCE" == "requester" ]]; then
+  ISSUE="${REQUEST_NOTIFY_ISSUE:-}"
+fi
 [[ -n "$ISSUE" ]] || {
   echo "no notifyIssue on the request and REQUEST_NOTIFY_ISSUE unset — nothing to address" >&2
   exit 65
