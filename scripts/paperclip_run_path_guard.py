@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed unless every mutable run path is owned by one run.
-
-This is a deterministic preflight for the Paperclip run launcher. It is not a
-replacement for mount namespaces: the launcher must expose only the approved
-paths writable and must keep /app and server state read-only or absent.
-"""
+"""Fail closed unless every mutable run path is owned by one isolated run."""
 
 from __future__ import annotations
 
@@ -15,12 +10,11 @@ import stat
 import sys
 from pathlib import Path
 
-DEFAULT_DENIED_ROOTS = (
-    "/app",
-    "/paperclip/instances",
-    "/paperclip/deployments",
-    "/paperclip/operator-handoff",
-)
+LIVE_STATE_ROOT = Path("/paperclip")
+REQUIRED_RUN_BASE = Path("/run/paperclip-runs")
+RUN_ROOT_MODE = 0o700
+MARKER_MODE = 0o600
+HANDOFF_MODE = 0o600
 
 
 class PathGuardError(ValueError):
@@ -58,52 +52,98 @@ def reject_symlink_components(root: Path, target: Path, label: str) -> None:
             raise PathGuardError(f"{label}: symlink component is forbidden: {component}")
 
 
-def check_private_owned_directory(path: Path, label: str) -> None:
+def check_directory(path: Path, label: str, expected_uid: int, expected_mode: int) -> None:
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode):
         raise PathGuardError(f"{label}: not a directory: {path}")
-    if info.st_uid != os.geteuid():
+    if info.st_uid != expected_uid:
         raise PathGuardError(
-            f"{label}: owner uid {info.st_uid} does not match launcher uid {os.geteuid()}: {path}"
+            f"{label}: owner uid {info.st_uid} does not match expected uid {expected_uid}: {path}"
         )
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        raise PathGuardError(f"{label}: group/other permission bits must be zero: {path}")
+    actual_mode = stat.S_IMODE(info.st_mode)
+    if actual_mode != expected_mode:
+        raise PathGuardError(
+            f"{label}: mode {actual_mode:04o} must be exactly {expected_mode:04o}: {path}"
+        )
 
 
-def load_marker(run_root: Path, expected_run_id: str) -> None:
-    marker = run_root / ".paperclip-run-scratch.json"
-    if marker.is_symlink():
-        raise PathGuardError(f"run marker must not be a symlink: {marker}")
+def load_json_file(
+    path: Path, label: str, expected_uid: int, expected_mode: int
+) -> dict[str, object]:
+    if path.is_symlink():
+        raise PathGuardError(f"{label} must not be a symlink: {path}")
     try:
-        marker_info = marker.stat()
-        payload = json.loads(marker.read_text(encoding="utf-8"))
+        info = path.stat()
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PathGuardError(f"run marker is missing or invalid: {marker}: {exc}") from exc
-    if marker_info.st_uid != os.geteuid():
-        raise PathGuardError(f"run marker has the wrong owner uid: {marker}")
-    if stat.S_IMODE(marker_info.st_mode) & 0o077:
-        raise PathGuardError(f"run marker exposes group/other permission bits: {marker}")
-    if payload.get("version") != 1 or payload.get("runId") != expected_run_id:
-        raise PathGuardError("run marker does not bind this directory to the expected run id")
+        raise PathGuardError(f"{label} is missing or invalid: {path}: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise PathGuardError(f"{label} is not a regular file: {path}")
+    if info.st_uid != expected_uid:
+        raise PathGuardError(f"{label} has the wrong owner uid: {path}")
+    actual_mode = stat.S_IMODE(info.st_mode)
+    if actual_mode != expected_mode:
+        raise PathGuardError(
+            f"{label} mode {actual_mode:04o} must be exactly {expected_mode:04o}: {path}"
+        )
+    if not isinstance(payload, dict):
+        raise PathGuardError(f"{label} payload must be a JSON object: {path}")
+    return payload
 
 
 def validate_paths(
     *,
     run_root: Path,
     run_id: str,
+    run_uid: int,
+    run_gid: int,
+    run_host_uid: int,
+    run_host_gid: int,
     mutable_paths: dict[str, Path],
-    denied_roots: list[Path],
+    launcher_uid: int | None = None,
+    required_run_base: Path = REQUIRED_RUN_BASE,
+    live_state_root: Path = LIVE_STATE_ROOT,
 ) -> dict[str, str]:
+    if launcher_uid is None:
+        launcher_uid = os.geteuid()
     if run_root.is_symlink():
         raise PathGuardError(f"run root must not be a symlink: {run_root}")
     run_root = resolved(run_root)
-    check_private_owned_directory(run_root, "run root")
-    load_marker(run_root, run_id)
+    required_base = resolved(required_run_base)
+    live_state = resolved(live_state_root)
+    if run_root == required_base or not is_within(run_root, required_base):
+        raise PathGuardError(f"run root must be below immutable run base {required_base}: {run_root}")
+    if is_within(run_root, live_state) or is_within(live_state, run_root):
+        raise PathGuardError(f"run root overlaps live service state: {live_state}")
+    check_directory(run_root, "run root", launcher_uid, RUN_ROOT_MODE)
 
-    denied = [resolved(path) for path in denied_roots]
-    for deny_root in denied:
-        if is_within(run_root, deny_root) or is_within(deny_root, run_root):
-            raise PathGuardError(f"run root overlaps denied root: {deny_root}")
+    marker = load_json_file(
+        run_root / ".paperclip-run-scratch.json",
+        "run marker",
+        launcher_uid,
+        MARKER_MODE,
+    )
+    if marker.get("version") != 1 or marker.get("runId") != run_id:
+        raise PathGuardError("run marker does not bind this directory to the expected run id")
+
+    handoff = load_json_file(
+        run_root / ".paperclip-run-ownership.json",
+        "ownership handoff",
+        launcher_uid,
+        HANDOFF_MODE,
+    )
+    if (
+        handoff.get("version") != 1
+        or handoff.get("runId") != run_id
+        or handoff.get("runUid") != run_uid
+        or handoff.get("runGid") != run_gid
+        or handoff.get("runHostUid") != run_host_uid
+        or handoff.get("runHostGid") != run_host_gid
+    ):
+        raise PathGuardError("ownership handoff does not bind the expected run identity")
+    ownership_paths = handoff.get("paths")
+    if not isinstance(ownership_paths, dict):
+        raise PathGuardError("ownership handoff paths must be a JSON object")
 
     result: dict[str, str] = {}
     seen: set[Path] = set()
@@ -116,14 +156,19 @@ def validate_paths(
         target = resolved(lexical)
         if target == run_root or not is_within(target, run_root):
             raise PathGuardError(f"{label}: path escapes run root: {requested} -> {target}")
-        for deny_root in denied:
-            if is_within(target, deny_root):
-                raise PathGuardError(f"{label}: path resolves into denied root: {deny_root}")
+        if is_within(target, live_state):
+            raise PathGuardError(f"{label}: path resolves into live service state: {live_state}")
         if target in seen:
             raise PathGuardError(f"{label}: mutable paths must be distinct: {target}")
         seen.add(target)
-        if target.exists():
-            check_private_owned_directory(target, label)
+        if ownership_paths.get(label) != str(target):
+            raise PathGuardError(f"{label}: ownership handoff path mismatch: {target}")
+        check_directory(target, label, run_host_uid, RUN_ROOT_MODE)
+        target_info = target.stat()
+        if target_info.st_gid != run_host_gid:
+            raise PathGuardError(
+                f"{label}: owner gid {target_info.st_gid} does not match run host gid {run_host_gid}: {target}"
+            )
         result[label] = str(target)
     return result
 
@@ -132,12 +177,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-uid", required=True, type=int)
+    parser.add_argument("--run-gid", required=True, type=int)
+    parser.add_argument("--run-host-uid", required=True, type=int)
+    parser.add_argument("--run-host-gid", required=True, type=int)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--dependency-root", required=True, type=Path)
     parser.add_argument("--cache-root", required=True, type=Path)
     parser.add_argument("--store-root", required=True, type=Path)
     parser.add_argument("--tmp-root", required=True, type=Path)
-    parser.add_argument("--deny-root", action="append", default=[], type=Path)
     return parser.parse_args(argv)
 
 
@@ -150,13 +198,15 @@ def main(argv: list[str]) -> int:
         "storeRoot": args.store_root,
         "tmpRoot": args.tmp_root,
     }
-    denied_roots = [Path(path) for path in DEFAULT_DENIED_ROOTS] + args.deny_root
     try:
         result = validate_paths(
             run_root=args.run_root,
             run_id=args.run_id,
+            run_uid=args.run_uid,
+            run_gid=args.run_gid,
+            run_host_uid=args.run_host_uid,
+            run_host_gid=args.run_host_gid,
             mutable_paths=mutable_paths,
-            denied_roots=denied_roots,
         )
     except (OSError, PathGuardError) as exc:
         print(f"DENY run_path_invalid: {exc}", file=sys.stderr)
