@@ -165,6 +165,16 @@ class RunPathGuardTest(unittest.TestCase):
         with self.assertRaisesRegex(GUARD.PathGuardError, "exactly 0600"):
             self.validate()
 
+    def test_rejects_handoff_mode_0400(self) -> None:
+        os.chmod(self.run_root / ".paperclip-run-ownership.json", 0o400)
+        with self.assertRaisesRegex(GUARD.PathGuardError, "exactly 0600"):
+            self.validate()
+
+    def test_rejects_handoff_mode_0640(self) -> None:
+        os.chmod(self.run_root / ".paperclip-run-ownership.json", 0o640)
+        with self.assertRaisesRegex(GUARD.PathGuardError, "exactly 0600"):
+            self.validate()
+
     def test_rejects_existing_mutable_path_wrong_mode(self) -> None:
         os.chmod(self.paths["workspace"], 0o500)
         with self.assertRaisesRegex(GUARD.PathGuardError, "exactly 0700"):

@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CARRIER="$ROOT/deploy/paperclip-immutable/paperclip.container"
 RUN_CARRIER="$ROOT/deploy/paperclip-immutable/agent-run.container.in"
+GENERATOR_EVIDENCE="$ROOT/deploy/paperclip-immutable/generated/board-quadlet-render.json"
+GENERATOR_EVIDENCE_SHA256=3ec6b0f53e767aee2ee7b9aaa574ae699b5ae2a62e0131c5b79ec5a9c821ee8d
+GENERATOR_EVIDENCE_CANDIDATE=060dc669d03d35f409abb7e0abef793fd34801c7
+GENERATOR_EVIDENCE_TREE=81ce1fcc39f20bbe786b942de9b2da17969bec12
+GENERATOR_EVIDENCE_PARENT=b6461240d12955e0a6f0b69b2dce25f204203f20
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() {
@@ -61,17 +66,60 @@ if grep -Eq '^Volume=.*:/paperclip([:,]|$)' "$RUN_CARRIER"; then
   fail 'agent carrier mounts live Paperclip state'
 fi
 
-# These sanitized authoritative ExecStart fixtures reproduce the Podman 4.9.3/systemd 255
-# generated shape recorded by TOG-654. TOG-657 owns revised-carrier host generation.
-server_exec='podman run --name paperclip --network paperclip.network --read-only --read-only-tmpfs=false --volume %h/.local/share/paperclip:/paperclip:Z --tmpfs /tmp:rw,nosuid,nodev,noexec,size=24g,mode=1777 --tmpfs /run:rw,nosuid,nodev,noexec,size=64m,mode=0755 --cap-drop all --security-opt no-new-privileges'
-run_exec='podman run --name paperclip-run-run-a --network none --read-only --read-only-tmpfs=false --user 61111:61112 --volume /run/paperclip-runs/run-a:/run/paperclip-run:rw,Z --volume /run/paperclip-runs/run-a/workspace:/workspace:rw,Z --cap-drop all --security-opt no-new-privileges'
+# The checked-in evidence is a sanitized capture of disposable revised-carrier dry-runs
+# from the installed Podman 4.9.3/systemd 255 generator. Fail closed unless the exact
+# carrier bytes and evidence bytes remain bound to that capture.
+[ -f "$GENERATOR_EVIDENCE" ] || fail 'sanitized generated ExecStart evidence is missing'
+[ "$(sha256sum "$GENERATOR_EVIDENCE" | cut -d' ' -f1)" = "$GENERATOR_EVIDENCE_SHA256" ] || fail 'generated ExecStart evidence hash drifted'
+mapfile -t generated_values < <(python3 - \
+  "$GENERATOR_EVIDENCE" "$CARRIER" "$RUN_CARRIER" \
+  "$GENERATOR_EVIDENCE_CANDIDATE" "$GENERATOR_EVIDENCE_TREE" "$GENERATOR_EVIDENCE_PARENT" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+evidence_path, server_path, run_path = map(Path, sys.argv[1:4])
+expected_commit, expected_tree, expected_parent = sys.argv[4:]
+evidence = json.loads(evidence_path.read_text())
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+candidate = evidence["candidate"]
+if candidate["commit"] != expected_commit:
+    raise SystemExit("generated evidence candidate commit drifted")
+if candidate["tree"] != expected_tree:
+    raise SystemExit("generated evidence candidate tree drifted")
+if candidate["parent"] != expected_parent:
+    raise SystemExit("generated evidence candidate parent drifted")
+actual = {"server": digest(server_path), "run": digest(run_path)}
+expected = {
+    "server": candidate["serverCarrierSha256"],
+    "run": candidate["runCarrierSha256"],
+}
+for key in ("server", "run"):
+    if expected[key] != actual[key]:
+        raise SystemExit(f"{key} carrier hash does not match generated evidence")
+    if evidence[key]["exitCode"] != 0:
+        raise SystemExit(f"{key} generator evidence is not successful")
+print(evidence["server"]["execStart"])
+print(evidence["run"]["execStart"])
+PY
+)
+[ "${#generated_values[@]}" -eq 2 ] || fail 'generated evidence did not yield two ExecStart values'
+server_exec=${generated_values[0]}
+run_exec=${generated_values[1]}
 for exec_start in "$server_exec" "$run_exec"; do
-  [ "$(grep -oE -- '(^|[[:space:]])--read-only([[:space:]]|$)' <<<"$exec_start" | wc -l)" -eq 1 ] || fail 'generated ExecStart lacks exactly one whole-root --read-only'
+  [ "$(grep -oE -- '(^|[[:space:]])--read-only([=[:space:]]|$)' <<<"$exec_start" | wc -l)" -eq 1 ] || fail 'generated ExecStart lacks exactly one whole-root --read-only'
   ! grep -q -- '--read-only=false' <<<"$exec_start" || fail 'generated ExecStart contains fail-open --read-only=false'
 done
-grep -Fq -- '--network paperclip.network' <<<"$server_exec" || fail 'server ExecStart lacks host-compatible network'
-grep -Fq -- '--tmpfs /tmp:rw,nosuid,nodev,noexec,size=24g,mode=1777' <<<"$server_exec" || fail 'server ExecStart lacks measured /tmp sizing'
-grep -Fq -- '--network none' <<<"$run_exec" || fail 'run ExecStart is not network-isolated'
+grep -Eq -- '(^|[[:space:]])--network=systemd-paperclip([[:space:]]|$)' <<<"$server_exec" || fail 'server ExecStart lacks generated host-compatible network'
+grep -Fq -- '--tmpfs /tmp:rw,nosuid,nodev,noexec,size=24g,mode=1777' <<<"$server_exec" || fail 'server ExecStart lacks generated measured /tmp sizing'
+grep -Eq -- '(^|[[:space:]])--network=none([[:space:]]|$)' <<<"$run_exec" || fail 'run ExecStart is not network-isolated'
+grep -Eq -- '(^|[[:space:]])--user 61111:61112([[:space:]]|$)' <<<"$run_exec" || fail 'run ExecStart lacks distinct run identity'
+grep -Fq -- '-v /run/paperclip-runs/run-a:/run/paperclip-run:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated run-root bind'
+grep -Fq -- '-v /run/paperclip-runs/run-a/workspace:/workspace:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated workspace bind'
 
 fixture=${PAPERCLIP_RUN_SCRATCH_DIR:-${TMPDIR:-/tmp}/paperclip-immutable-fixture-$$}
 fixture="$fixture/immutable-runtime-test"
@@ -237,6 +285,6 @@ test "$(cat "$run_root/dependencies/output")" = dependency
 test "$(cat "$run_root/tmp/output")" = tmp
 rm -rf "$run_base"
 
-printf 'PASS: carrier source and authoritative ExecStart fixtures have exactly one whole-root read-only setting\n'
+printf 'PASS: carrier hashes bind to sanitized Podman 4.9.3/systemd 255 generated ExecStart evidence with exactly one whole-root read-only setting\n'
 printf 'PASS: every negative mutation preserved the complete path/type/mode/uid/gid/link/content manifest\n'
 printf 'PASS: launcher ownership handoff enabled distinct-UID workspace/cache/store/dependency/tmp writes\n'
