@@ -78,7 +78,7 @@ unreadable, never as absent.
 ## Using it
 
 ```bash
-export MODEL_SURFACES_SOURCE_CMD="$PWD/pg_source.js model-surfaces"
+export MODEL_SURFACE_SOURCE_CMD="$PWD/pg_source.js model-surfaces"   # optional; this is also the default
 ./model_lane_probe.sh surfaces          # inventory; --long for per-agent rows
 ./model_lane_probe.sh check             # 0 ok · 3 ALARM · 5 could not measure
 ```
