@@ -122,8 +122,30 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# A refusal writes NO render. But `generated/board-quadlet-render.json` is a
+# CHECKED-IN artifact, so a fresh clone already has one at $OUT — and it was
+# rendered from an older carrier. The ask document tells the operator to post
+# back "the new board-quadlet-render.json"; on a refusal there is no new one,
+# and the stale file is indistinguishable from a fresh capture by name, path
+# and shape. Posting it would report a render of a carrier nobody is
+# installing as host confirmation of the one we are. So the refusal names the
+# leftover explicitly, and says which carrier it actually describes.
+warn_stale_out() {
+  [ -e "$OUT" ] || return 0
+  printf '\n    !! NO fresh render was written. A PRE-EXISTING file is still at:\n       %s\n' "$OUT" >&2
+  local stale_sha actual_sha
+  stale_sha="$(jq -r '.candidate.serverCarrierSha256 // empty' "$OUT" 2>/dev/null)"
+  actual_sha="$(sha256sum "$CARRIER" 2>/dev/null | cut -d' ' -f1)"
+  if [ -n "$stale_sha" ] && [ -n "$actual_sha" ] && [ "$stale_sha" != "$actual_sha" ]; then
+    printf '       It renders carrier %s,\n       but this checkout ships  %s — it is STALE.\n' \
+      "${stale_sha:0:12}…" "${actual_sha:0:12}…" >&2
+  fi
+  printf '       Do NOT post it as this window'"'"'s render. Report this refusal instead.\n' >&2
+}
+
 refuse() {
   printf 'REFUSED [%s]\n    what is wrong: %s\n    what clears it: %s\n' "$1" "$2" "$3" >&2
+  warn_stale_out
   exit 2
 }
 

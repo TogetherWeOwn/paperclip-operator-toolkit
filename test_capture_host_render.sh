@@ -350,5 +350,64 @@ grep -q 'REFUSED \[unsubstituted_placeholder\]' "$d/out" \
   || ok 'deleting the placeholder guard lets @PLACEHOLDER@ through'
 rm -rf "$d"
 
+# =========================================================================
+section '9. a refusal must disown the STALE render it did not overwrite'
+# =========================================================================
+# `generated/board-quadlet-render.json` is CHECKED IN, so a fresh clone already
+# carries one, rendered from an older carrier. A refusal writes no render, and
+# the ask document tells the operator to post back "the new board-quadlet-
+# render.json". By name, path and shape the leftover is indistinguishable from
+# a fresh capture, so the failure mode is posting a render of a carrier nobody
+# is installing as host confirmation of the one we are — in the single host
+# window this issue exists to buy. The refusal must name it.
+STALE_SHA=5439475be3739cbf7bb3b7842c22de007d46e8b3916ac7fb3d8383b0167ddb2c
+
+d="$(new_case)"; make_host "$d"
+printf '{"candidate":{"serverCarrierSha256":"%s"}}\n' "$STALE_SHA" > "$d/repo/$RENDER"
+stale_before="$(sha256sum "$d/repo/$RENDER" | cut -d' ' -f1)"
+( cd "$d/repo" && cp "$SCRIPT" ./capture_host_render.sh && PATH="$d/bin:$PATH" \
+    bash ./capture_host_render.sh --generator /nonexistent ) >"$d/out" 2>&1
+rc=$?
+
+[ "$rc" -eq 2 ] && ok 'a refusal still exits 2' || bad 'a refusal still exits 2' "rc=$rc"
+[ "$(sha256sum "$d/repo/$RENDER" | cut -d' ' -f1)" = "$stale_before" ] \
+  && ok 'the refusal leaves the pre-existing render untouched' \
+  || bad 'the refusal leaves the pre-existing render untouched' 'the file changed'
+grep -q 'NO fresh render was written' "$d/out" \
+  && ok 'the refusal states no fresh render was written' \
+  || bad 'the refusal states no fresh render was written' "$(cat "$d/out")"
+grep -q 'STALE' "$d/out" \
+  && ok 'the refusal names the leftover STALE against this carrier' \
+  || bad 'the refusal names the leftover STALE against this carrier' "$(cat "$d/out")"
+grep -q 'Do NOT post it' "$d/out" \
+  && ok 'the refusal tells the operator not to post it' \
+  || bad 'the refusal tells the operator not to post it' "$(cat "$d/out")"
+
+# A leftover that MATCHES the shipped carrier must not be cried stale, or the
+# warning becomes noise the operator learns to skip past.
+sha_now="$(sha256sum "$d/repo/deploy/paperclip-immutable/paperclip.container" | cut -d' ' -f1)"
+printf '{"candidate":{"serverCarrierSha256":"%s"}}\n' "$sha_now" > "$d/repo/$RENDER"
+( cd "$d/repo" && PATH="$d/bin:$PATH" \
+    bash ./capture_host_render.sh --generator /nonexistent ) >"$d/out" 2>&1
+grep -q 'STALE' "$d/out" \
+  && bad 'a CURRENT leftover is not falsely called stale' 'called stale anyway' \
+  || ok 'a CURRENT leftover is not falsely called stale'
+
+# MUTATION: delete the disowning call. Baseline already warned above, so this
+# half is meaningful; assert the mutation actually applied before scoring it.
+printf '{"candidate":{"serverCarrierSha256":"%s"}}\n' "$STALE_SHA" > "$d/repo/$RENDER"
+grep -v '^  warn_stale_out$' "$SCRIPT" > "$d/staged.sh"
+if cmp -s "$SCRIPT" "$d/staged.sh"; then
+  bad 'MUTATION: the stale-render disowning is load-bearing' \
+      'the mutation matched nothing — this control tests nothing'
+else
+  ( cd "$d/repo" && cp "$d/staged.sh" ./capture_host_render.sh && PATH="$d/bin:$PATH" \
+      bash ./capture_host_render.sh --generator /nonexistent ) >"$d/out" 2>&1
+  grep -q 'NO fresh render was written' "$d/out" \
+    && bad 'MUTATION: the stale-render disowning is load-bearing' 'still warned without the call' \
+    || ok 'MUTATION: the stale-render disowning is load-bearing'
+fi
+rm -rf "$d"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
