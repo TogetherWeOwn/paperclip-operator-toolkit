@@ -551,9 +551,22 @@ The one piece that could not be reused is **the address**. `notifyIssue` is writ
 Pointing the leader's summons at an issue the requester chose would let the least-privileged party in
 the flow deliver "you have something to decide" somewhere the leader never reads — while the queue
 records `notify.delivered`. That is not a missed notification; it is a **forged record of one**, and
-it is the TOG-198 steering defect one layer up. The leader's address is therefore operator-supplied
-(`REQUEST_LEADER_NOTIFY_ISSUE`), validated on the same allowlisted charset, and never read from the
-request record. Unset is a supported state and lands `pull_only`.
+it is the TOG-198 steering defect one layer up.
+
+A single derived leader may use the operator-supplied `REQUEST_LEADER_NOTIFY_ISSUE`. Standing authority
+is different: one request has multiple required recipients, and a shared issue cannot prove that each
+one is assigned to it. Standing push addresses therefore use
+`REQUEST_STANDING_NOTIFY_ISSUES=ROLE=AGENT_UUID=ISSUE,...`; the role and live UUID must both match the
+recipient being queued. A missing or mismatched binding leaves that recipient `pull_only`. Both address
+forms use the same allowlisted issue-id charset and are never read from the request record.
+
+Transport behavior is also explicit. `REQUEST_NOTIFY_CAPABILITY=issue_addressed` (the default and the
+reference Paperclip comment adapter's contract) makes an unaddressed leader row `pull_only` before the
+courier runs. `recipient_agent_id` is available for couriers that directly consume the recorded UUID.
+No behavior depends on an adapter filename, so copying or renaming the reference adapter changes
+nothing. Finally, a required standing role with no live UUID is `failed`, not `pull_only`: no
+authenticated principal exists that could read the claimed inbox, and `notify` / `notify --drain` stay
+red until a fresh request can record a real recipient.
 
 ### The audience key, which is the whole change in one line
 

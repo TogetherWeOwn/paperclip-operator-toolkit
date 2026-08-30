@@ -211,6 +211,12 @@ count="\$(jq -r --arg r "\$rid" 'select(.event=="notify.queued" and .requestId==
 printf '%s\n' "\$count" >> "$TMP/standing-counts"
 [[ "\$count" -eq 2 ]]
 EOF
+  cat > "$TMP/t_issue_recorder.sh" <<EOF
+#!/usr/bin/env bash
+payload="\$(cat)"
+jq -c '{recipientRole,recipientAgentId,notifyIssue}' <<<"\$payload" >> "$TMP/issue-deliveries"
+echo "delivered to \$(jq -r '.recipientRole' <<<"\$payload")"
+EOF
   cat > "$TMP/t_mixed_standing.sh" <<EOF
 #!/usr/bin/env bash
 payload="\$(cat)"
@@ -252,6 +258,9 @@ nq_aud()    { jq -r --arg r "$1" --arg a "$2" 'select(.event=="notify.queued" an
 
 build_stub; build_transports; reset
 export REQUEST_NOTIFY_CMD="$TMP/t_ok.sh"
+# The generic fixtures consume recipientAgentId directly. Tests that exercise the
+# issue-addressed reference contract override this explicitly.
+export REQUEST_NOTIFY_CAPABILITY="recipient_agent_id"
 
 # ===========================================================================
 hdr "0. BASELINE — the fixture actually routes at a leader"
@@ -347,10 +356,18 @@ eq "  ...and the submission itself still stands" \
 # the documented pull path even when the requester fallback is configured.
 cp "$HERE/notify_paperclip_issue.sh" "$TMP/notify_paperclip_issue.sh"
 chmod +x "$TMP/notify_paperclip_issue.sh"
-REQ4="$(REQUEST_NOTIFY_CMD="$TMP/notify_paperclip_issue.sh" \
+REQ4="$(REQUEST_NOTIFY_CMD="$TMP/notify_paperclip_issue.sh" REQUEST_NOTIFY_CAPABILITY=issue_addressed \
   REQUEST_NOTIFY_ISSUE=REQUESTER-FALLBACK submit_one "TESTL reference adapter pull only")"
 eq "a null leader address through the reference adapter records pull_only" \
    "$(lead_state "$REQ4")" "pull_only"
+cp "$TMP/notify_paperclip_issue.sh" "$TMP/paperclip-request-notifier"
+chmod +x "$TMP/paperclip-request-notifier"
+REQ5="$(REQUEST_NOTIFY_CMD="$TMP/paperclip-request-notifier" REQUEST_NOTIFY_CAPABILITY=issue_addressed \
+  REQUEST_NOTIFY_ISSUE=REQUESTER-FALLBACK submit_one "TESTL renamed reference adapter pull only")"
+eq "renaming the unchanged adapter does not change the pull_only contract" \
+   "$(lead_state "$REQ5")" "pull_only"
+eq "  ...and notify stays green because pull_only is supported, not failed" \
+   "$(REQUEST_NOTIFY_CMD="$TMP/paperclip-request-notifier" REQUEST_NOTIFY_CAPABILITY=issue_addressed "$Q" notify >/dev/null 2>&1; echo $?)" "0"
 reset
 
 # ===========================================================================
@@ -712,6 +729,9 @@ eq "  ...and each row records the live standing recipient UUID" \
 eq "  ...and both real authorities can pull the pending request by role" \
    "$(for role in P1_PRESIDENT_COO P4_PROVISIONING_STEWARD; do "$Q" inbox --for "$role" --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role'; done | sort | tr '\n' ',')" \
    "P1_PRESIDENT_COO,P4_PROVISIONING_STEWARD,"
+eq "  ...and each standing row records its delivery capability explicitly" \
+   "$("$Q" notify --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.capability' | sort | tr '\n' ',')" \
+   "push,push,"
 eq "  ...and the P4 authenticated UUID reads exactly P4's standing notice" \
    "$("$Q" inbox --for u-a0 --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role' | tr '\n' ',')" \
    "P4_PROVISIONING_STEWARD,"
@@ -721,16 +741,76 @@ eq "  ...and the P1 authenticated UUID reads exactly P1's standing notice" \
 eq "  ...and an unrelated UUID reads neither standing notice" \
    "$("$Q" inbox --for u-dir --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role' | wc -l | tr -d ' ')" "0"
 
+# A shared issue is not a recipient address. Prove the scalar legacy address
+# does not credit both standing roles, then prove explicit role=UUID=issue
+# bindings can independently push each recipient.
+reset; rm -f "$TMP/issue-deliveries"
+shared_out="$(REQUEST_NOTIFY_CMD="$TMP/t_issue_recorder.sh" REQUEST_NOTIFY_CAPABILITY=issue_addressed \
+  REQUEST_LEADER_NOTIFY_ISSUE=OPS-LEADER-INBOX \
+  "$Q" submit --requester O1 --template E0_SPECIALIST --title "TESTL shared standing issue" 2>&1)"
+shared_req="$(last_sub)"
+eq "a shared standing issue delivers to ZERO unproven recipients" \
+   "$(if [[ -f "$TMP/issue-deliveries" ]]; then wc -l < "$TMP/issue-deliveries" | tr -d ' '; else printf 0; fi)" "0"
+eq "  ...and leaves each standing role explicitly pull_only" \
+   "$("$Q" notify --json | jq -r --arg r "$shared_req" 'select(.rid==$r and .audience=="leader")|.state' | sort | tr '\n' ',')" \
+   "pull_only,pull_only,"
+has "$shared_out" "P4_PROVISIONING_STEWARD — recorded only" \
+  "  ...the CLI does not claim P4 was pushed"
+has "$shared_out" "P1_PRESIDENT_COO — recorded only" \
+  "  ...or claim P1 was pushed"
+
+reset; rm -f "$TMP/issue-deliveries"
+verified_out="$(REQUEST_NOTIFY_CMD="$TMP/t_issue_recorder.sh" REQUEST_NOTIFY_CAPABILITY=issue_addressed \
+  REQUEST_STANDING_NOTIFY_ISSUES='P4_PROVISIONING_STEWARD=u-a0=OPS-P4-INBOX,P1_PRESIDENT_COO=u-o1=OPS-P1-INBOX' \
+  "$Q" submit --requester O1 --template E0_SPECIALIST --title "TESTL verified standing issues" 2>&1)"
+verified_req="$(last_sub)"
+eq "recipient-specific bindings deliver one push to each standing UUID" \
+   "$(jq -r '[.recipientRole,.recipientAgentId,.notifyIssue]|@tsv' "$TMP/issue-deliveries" | sort | tr '\n' ',')" \
+   $'P1_PRESIDENT_COO\tu-o1\tOPS-P1-INBOX,P4_PROVISIONING_STEWARD\tu-a0\tOPS-P4-INBOX,'
+eq "  ...and both recipient-specific rows are delivered" \
+   "$("$Q" notify --json | jq -r --arg r "$verified_req" 'select(.rid==$r and .audience=="leader")|.state' | sort | tr '\n' ',')" \
+   "delivered,delivered,"
+has "$verified_out" "P4_PROVISIONING_STEWARD — delivered" \
+  "  ...with P4 reported separately"
+has "$verified_out" "P1_PRESIDENT_COO — delivered" \
+  "  ...and P1 reported separately"
+reset
+
+# A required standing profile with no live holder is not pull_only: there is no
+# authenticated UUID that could open the inbox. The intent remains visible as an
+# operational failure and notify/drain stays red instead of claiming readability.
+sed -i '/^u-a0\tA0\tP4_PROVISIONING_STEWARD\t/d' "$ORG_SNAPSHOT"
+missing_out="$(REQUEST_NOTIFY_CMD="" "$Q" submit --requester O1 --template E0_SPECIALIST --title "TESTL missing standing holder" 2>&1)"
+missing_req="$(last_sub)"
+eq "a missing standing holder records an explicit failed state" \
+   "$("$Q" notify --json 2>/dev/null | jq -r --arg r "$missing_req" 'select(.rid==$r and .role=="P4_PROVISIONING_STEWARD")|.state')" \
+   "failed"
+eq "  ...with no false readable-inbox UUID" \
+   "$("$Q" notify --json 2>/dev/null | jq -r --arg r "$missing_req" 'select(.rid==$r and .role=="P4_PROVISIONING_STEWARD")|.agent')" \
+   "null"
+has "$missing_out" "P4_PROVISIONING_STEWARD — NO; delivery failed" \
+  "  ...and submit reports the operational failure, not pull_only"
+missing_notify_out="$("$Q" notify 2>&1)"; missing_notify_rc=$?
+eq "  ...notify stays red while the required recipient is unaddressable" "$missing_notify_rc" "1"
+has "$missing_notify_out" "notification(s) undelivered" \
+  "  ...and names an undelivered notification"
+missing_drain_out="$(REQUEST_NOTIFY_CMD="" "$Q" notify --drain 2>&1)"; missing_drain_rc=$?
+eq "  ...drain also stays red instead of converting the failure to pull_only" "$missing_drain_rc" "1"
+has "$missing_drain_out" "$missing_req (leader -> P4_PROVISIONING_STEWARD) -> failed" \
+  "  ...and retries the same explicit failed recipient"
+reset
+
 # The recorded UUID is immutable notice ownership, not a live alias. Re-seat P4
 # after enqueue: the old holder keeps the old notice and the new holder does not
 # inherit it merely by taking the permission profile.
+immutable_req="$(REQUEST_NOTIFY_CMD="" "$Q" submit --requester O1 --template E0_SPECIALIST --title "TESTL immutable standing recipient" >/dev/null 2>&1; last_sub)"
 sed -i 's/^u-a0\tA0\tP4_PROVISIONING_STEWARD\t/u-a0-OLD\tA0X\tE0_SPECIALIST\t/' "$ORG_SNAPSHOT"
 printf 'u-a0-NEW\tA0\tP4_PROVISIONING_STEWARD\tidle\tu-o1\tReplacement Provisioning Steward\n' >> "$ORG_SNAPSHOT"
 eq "  ...and re-seating P4 does not retarget the already queued notice" \
-   "$("$Q" inbox --for u-a0 --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role' | tr '\n' ',')" \
+   "$("$Q" inbox --for u-a0 --json | jq -r --arg r "$immutable_req" 'select(.rid==$r and .audience=="leader")|.role' | tr '\n' ',')" \
    "P4_PROVISIONING_STEWARD,"
 eq "  ...or disclose that old notice to the replacement P4 holder" \
-   "$("$Q" inbox --for u-a0-NEW --json | jq -r --arg r "$REQ" 'select(.rid==$r and .audience=="leader")|.role' | wc -l | tr -d ' ')" "0"
+   "$("$Q" inbox --for u-a0-NEW --json | jq -r --arg r "$immutable_req" 'select(.rid==$r and .audience=="leader")|.role' | wc -l | tr -d ' ')" "0"
 reset
 
 # BASELINE FIRST: both successes must be reported independently before the mixed

@@ -1732,11 +1732,30 @@ jobs:
           mutation_check "standing-authority-agent-id-not-recorded" test_leader_notify.sh skip \
             's/^        standing_id="$(f 1 "$standing_row")"$/        standing_id=""/' || rc=1
 
+          # A shared operator issue is not proof that every standing recipient is
+          # assigned to it. Restoring the scalar fallback makes both standing rows
+          # report delivered to one P4-only issue; the recipient-specific test must
+          # reject that false success. mutation_check runs the staged baseline first.
+          mutation_check "standing-shared-issue-falsely-delivered" test_leader_notify.sh skip \
+            's/^      addr="$(standing_notify_issue_for "$recip" "$lid" 2>\/dev\/null || true)"$/      addr="$REQUEST_LEADER_NOTIFY_ISSUE"/' || rc=1
+
+          # pull_only is a capability contract, not an adapter basename. Reinsert
+          # the old filename check: the renamed, byte-identical adapter then lands
+          # failed/exit65 and the owning assertion must go red after its baseline.
+          mutation_check "pull-only-depends-on-adapter-filename" test_leader_notify.sh skip \
+            's/^  if \[\[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CAPABILITY" == "issue_addressed" \]\]; then$/  if [[ "$aud" == "leader" \&\& -z "$issue" \&\& "$REQUEST_NOTIFY_CMD" == *"notify_paperclip_issue.sh"* ]]; then/' || rc=1
+
+          # Degrade an unaddressable required role to pull_only again. With no live
+          # UUID there is no authenticated inbox reader, so the named missing-holder
+          # assertions must keep notify and drain red.
+          mutation_check "missing-standing-holder-reads-pull-only" test_leader_notify.sh skip \
+            's/^  if \[\[ "$delivery_capability" == "unaddressable" \]\]; then$/  if false; then/' || rc=1
+
           mutation_check "leader-notification-swallows-the-requesters" test_leader_notify.sh skip \
             's/                and (.audience \/\/ "requester")==$aud/                and true/' || rc=1
 
           mutation_check "leader-address-chosen-by-requester" test_leader_notify.sh skip \
-            's/^  local addr="$REQUEST_LEADER_NOTIFY_ISSUE" addr_note=""$/  local addr="$(jq -r ".notifyIssue \/\/ \\"\\"" <<<"$sub")" addr_note=""/' || rc=1
+            's/^      addr="$REQUEST_LEADER_NOTIFY_ISSUE"$/      addr="$(jq -r ".notifyIssue \/\/ \\"\\"" <<<"$sub")"/' || rc=1
 
           # Collapse reqrecord's separate notification-status lock back onto
           # QUEUE_LOCK. A >5s honest transport then occupies the queue's ordinary

@@ -173,6 +173,16 @@ MAX_SUPERSEDE_CHAIN="${MAX_SUPERSEDE_CHAIN:-5}"
 # operator-side against Postgres and holds no Paperclip agent credential of its
 # own. See notify_paperclip_issue.sh for the reference adapter.
 REQUEST_NOTIFY_CMD="${REQUEST_NOTIFY_CMD:-}"
+# How the configured courier proves it can address a leader. `recipient_agent_id`
+# means the transport consumes recipientAgentId directly. `issue_addressed`
+# means it can only deliver when the queue has an issue address explicitly bound
+# to that exact recipient UUID. The conservative default matches the reference
+# Paperclip comment adapter and makes a renamed copy behave identically.
+REQUEST_NOTIFY_CAPABILITY="${REQUEST_NOTIFY_CAPABILITY:-issue_addressed}"
+case "$REQUEST_NOTIFY_CAPABILITY" in
+  issue_addressed|recipient_agent_id) ;;
+  *) echo "ERROR: REQUEST_NOTIFY_CAPABILITY must be issue_addressed or recipient_agent_id" >&2; exit 1;;
+esac
 # A hung transport must not hold the reviewer's terminal. Delivery is attempted
 # only when coreutils `timeout` can enforce this ceiling; without it the attempt
 # fails closed and leaves the queued notification available for a later drain.
@@ -732,18 +742,32 @@ emit_notification() {
 # Attempt one delivery for an already-queued notification. Records the outcome
 # and ALWAYS returns 0 — see property 2 above.
 notify_deliver() {
-  local payload="$1" rid aud role issue out rc fp_before fp_after tampered="no" queue_size
+  local payload="$1" rid aud role issue delivery_capability out rc fp_before fp_after tampered="no" queue_size
   rid="$(jq -r '.requestId' <<<"$payload")"
   aud="$(jq -r '.audience // "requester"' <<<"$payload")"
   role="$(jq -r '.recipientRole // ""' <<<"$payload")"
   issue="$(jq -r '.notifyIssue // ""' <<<"$payload")"
+  delivery_capability="$(jq -r '.deliveryCapability // "push"' <<<"$payload")"
 
-  # A configured transport cannot invent an address for a leader. Null is the
-  # supported pull path, not a failed push attempt: record it before invoking the
-  # adapter so REQUEST_NOTIFY_ISSUE can never become an audience-blind fallback.
-  if [[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CMD" == *"notify_paperclip_issue.sh"* ]]; then
+  # A required standing role with no UUID has neither an authenticated pull inbox
+  # nor a truthful push target. Keep it as an explicit operational failure so
+  # `notify` and every drain attempt stay red until the live holder is restored
+  # and a fresh request publishes a valid recipient.
+  if [[ "$delivery_capability" == "unaddressable" ]]; then
+    append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role"       '{event:"notify.failed",requestId:$id,audience:$au,recipientRole:$role,at:$at,exit:66,
+        reason:"required_recipient_unaddressable",detail:"required standing role has no live authenticated agent UUID"}')"
+    NOTIFY_RESULT="failed"
+    return 0
+  fi
+
+  # A transport's addressing mode is an explicit queue contract, never inferred
+  # from its filename. An issue-addressed courier cannot push an unaddressed
+  # leader row; null is the supported pull path and stays honest after the
+  # reference adapter is copied or renamed.
+  if [[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CAPABILITY" == "issue_addressed" ]]; then
     append_queue "$(jq -cn --arg id "$rid" --arg at "$(now_iso)" --arg au "$aud" --arg role "$role"       '{event:"notify.pull_only",requestId:$id,audience:$au,recipientRole:$role,at:$at,
-        detail:"leader notifyIssue unset; the recipient reads this with `inbox`"}')"
+        reason:"transport_requires_proven_issue_address",
+        detail:"leader notifyIssue is not proven for this recipient; reads with `inbox`"}')"
     NOTIFY_RESULT="pull_only"
     return 0
   fi
@@ -858,9 +882,26 @@ notify_deliver() {
 # deliver the leader's summons somewhere the leader will never read — while the
 # queue records `notify.delivered`. That converts the delivery record into a
 # forgery of "the leader was told", which is the TOG-198 defect one layer up.
-# The leader's address is therefore operator-supplied and is never read from
-# the request record. Unset is fine and lands `pull_only`.
+# A shared issue address is not proof that each standing recipient reads it.
+# The legacy scalar remains useful for a single derived leader, but standing
+# recipients require an explicit role=issue binding whose UUID is verified when
+# the intent is built. Unproven standing recipients remain pull_only.
 REQUEST_LEADER_NOTIFY_ISSUE="${REQUEST_LEADER_NOTIFY_ISSUE:-}"
+REQUEST_STANDING_NOTIFY_ISSUES="${REQUEST_STANDING_NOTIFY_ISSUES:-}"
+
+standing_notify_issue_for() {
+  local role="$1" id="$2" entry configured_role configured_id issue
+  [[ -n "$id" && -n "$REQUEST_STANDING_NOTIFY_ISSUES" ]] || return 1
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    IFS='=' read -r configured_role configured_id issue <<<"$entry"
+    if [[ "$configured_role" == "$role" && "$configured_id" == "$id" && -n "$issue" ]]; then
+      printf '%s\n' "$issue"
+      return 0
+    fi
+  done < <(tr ',' '\n' <<<"$REQUEST_STANDING_NOTIFY_ISSUES")
+  return 1
+}
 
 # The leader intent is part of submission, not a post-submit side effect. Build
 # every recipient row first, then cmd_submit publishes the request and the whole
@@ -906,7 +947,21 @@ build_leader_notification_payload() {
   rationale="$(jq -r '.rationale // ""' <<<"$sub")"
 
   local body; body="$(notify_body "$rid" pending "$rrole" "$tpl" "$title" "$rationale" "" "$recip" "$sub")"
-  local addr="$REQUEST_LEADER_NOTIFY_ISSUE" addr_note=""
+  local addr="" addr_note="" delivery_capability="push"
+  if [[ -z "$lid" ]]; then
+    addr_note="required standing role $recip has no live authenticated agent UUID"
+    delivery_capability="unaddressable"
+  fi
+  if [[ "$delivery_capability" != "unaddressable" ]]; then
+    if [[ "$lmode" == "leader" ]]; then
+      addr="$REQUEST_LEADER_NOTIFY_ISSUE"
+    else
+      addr="$(standing_notify_issue_for "$recip" "$lid" 2>/dev/null || true)"
+      if [[ -z "$addr" && -n "$REQUEST_LEADER_NOTIFY_ISSUE" ]]; then
+        addr_note="shared REQUEST_LEADER_NOTIFY_ISSUE is not proven to target $recip [$lid]; standing recipient remains pull_only"
+      fi
+    fi
+  fi
   if [[ -n "$addr" && ! "$addr" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
     addr_note="REQUEST_LEADER_NOTIFY_ISSUE '$addr' is not a well-formed issue id; ignored"
     echo "  WARNING: $addr_note" >&2
@@ -916,10 +971,10 @@ build_leader_notification_payload() {
   LEADER_NOTIFY_PAYLOAD="$(jq -cn --arg id "$rid" --arg a "$lid" --arg r "$recip" \
     --arg t "$tpl" --arg ti "$title" --arg ra "$rationale" --arg rq "$rrole" \
     --arg lm "$lmode" --arg b "$body" --arg at "$(now_iso)" --arg ni "$addr" \
-    --arg an "$addr_note" \
+    --arg an "$addr_note" --arg dc "$delivery_capability" \
     '{event:"notify.queued",requestId:$id,audience:"leader",decision:"pending",
       recipientAgentId:(if $a=="" then null else $a end),recipientRole:$r,
-      notifyIssue:(if $ni=="" then null else $ni end),
+      notifyIssue:(if $ni=="" then null else $ni end),deliveryCapability:$dc,
       addressNote:(if $an=="" then null else $an end),
       template:$t,title:$ti,requester:$rq,
       reason:(if $ra=="" then null else $ra end),
@@ -988,6 +1043,7 @@ notify_states() {
            | last) as $last
         | {rid:$q.requestId, audience:$q.audience, status:$q.decision,
            role:($q.recipientRole // ""), agent:$q.recipientAgentId,
+           capability:($q.deliveryCapability // "push"),
            state:(if $last == null then "queued"
                   else ($last.event | ltrimstr("notify.")) end),
            at:$q.at, body:$q.body, detail:($last.detail // "")})

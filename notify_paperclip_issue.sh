@@ -20,8 +20,9 @@
 # — is an issue comment plus the wake it generates. So the notification is
 # posted as a comment on an issue that the recipient is assigned to. The
 # request record carries the issue via `--notify-issue` at submit time; without
-# one there is nothing to address, and the queue records the notification
-# `pull_only` instead, which is not a failure.
+# one there is nothing to address. The queue decides from its explicit
+# REQUEST_NOTIFY_CAPABILITY contract that this issue-addressed transport is
+# `pull_only`; the adapter's filename and exit status are not capability signals.
 #
 # WHAT THIS SCRIPT MAY NOT DO
 # ---------------------------
