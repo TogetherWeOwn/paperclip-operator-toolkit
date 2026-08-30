@@ -39,12 +39,19 @@ omniroute-network.service enabled enabled'
   local img_digest='sha256:1111111111111111111111111111111111111111111111111111111111111111'
   local run_digest="$img_digest"
   local inspect_rc=0 img_rc=0
+  # A failing systemctl is a THIRD state, distinct from both a populated and an
+  # empty instance: exiting non-zero, or exiting 0 having written a diagnostic
+  # where a table belongs. The stub could express neither, so the two refusals
+  # that handle them had no way to be tested.
+  local units_rc=0 units_stderr=''
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --networks)   networks="$2"; shift 2 ;;
       --units)      units="$2"; shift 2 ;;
       --sys-units)  sys_units="$2"; sys_units_set=1; shift 2 ;;
+      --units-rc)     units_rc="$2"; shift 2 ;;
+      --units-stderr) units_stderr="$2"; shift 2 ;;
       --img-digest) img_digest="$2"; shift 2 ;;
       --run-digest) run_digest="$2"; shift 2 ;;
       --inspect-rc) inspect_rc="$2"; shift 2 ;;
@@ -82,6 +89,11 @@ EOF
   # same list so an instance-agnostic host behaves exactly as before.
   cat >"$d/bin/systemctl" <<EOF
 #!/usr/bin/env bash
+if [ -n "$units_stderr" ]; then
+cat >&2 <<'ERRMSG'
+$units_stderr
+ERRMSG
+fi
 if [ "\$1" = "--system" ]; then
 cat <<'UNITS'
 $sys_units
@@ -91,6 +103,7 @@ cat <<'UNITS'
 $units
 UNITS
 fi
+exit $units_rc
 EOF
   chmod +x "$d/bin/podman" "$d/bin/systemctl"
 }
@@ -207,6 +220,57 @@ refuses no_network_units      "zero network units refuses (wrong instance?)"  --
 refuses image_inspect_failed  "podman image inspect failure refuses"          --img-rc 1
 refuses image_digest_unresolvable "an empty image digest refuses"             --img-digest ''
 refuses image_digest_unresolvable "a malformed image digest refuses"          --img-digest 'sha256:abc123'
+
+# =========================================================================
+section "3a. a FAILED unit query is not an absent unit"
+# =========================================================================
+# WHY. `systemctl --user` fails outright with no session bus, which is the
+# normal state of a root shell on this host. Swallowed into `|| true`, that
+# failure produced the same empty string a genuinely-empty instance produces,
+# so the operator was told "no units — try --system"; on --system they were
+# then told to re-run the flag they had just used. The window ends with no
+# evidence and no correct next step, and the fault was never the units.
+refuses unit_query_failed "a non-zero systemctl refuses as a QUERY failure, not an absence" \
+  --units-rc 1 --units-stderr 'Failed to connect to bus: No medium found'
+
+# The refusal must survive an EMPTY table too — otherwise "rc!=0 and empty"
+# falls through to the absence branch, which is the exact conflation above.
+refuses unit_query_failed "a non-zero systemctl with an empty table still refuses as a query failure" \
+  --units '' --sys-units '' --units-rc 1 --units-stderr 'Failed to list unit files: Access denied'
+
+# systemctl can exit 0 having printed a diagnostic where the table belongs.
+# The mapping is a blind sed, so "Failed to list unit files: ..." becomes the
+# unit `Failed`, is written to .networkUnits[], and the script exits 0. The
+# gate then reads a unit the host does not have. Fabricated evidence is worse
+# than none: no_network_units is a refusal, a fabricated unit is a false PASS.
+refuses unit_row_unrecognised "a diagnostic printed where a unit row belongs refuses" \
+  --units 'Failed to list unit files: Access denied'
+
+# BASELINE: the distinct-refusal claim only means something if the ORIGINAL
+# code reached a DIFFERENT verdict on these inputs. Assert the pre-fix shape
+# actually mis-handled them, so a regression cannot pass by coincidence.
+D="$(mktemp -d)"; make_host "$D" --units 'Failed to list unit files: Access denied'
+# Reconstruct the pre-fix query+parse: `2>/dev/null || true`, no row check.
+legacy_units="$(PATH="$D/bin:$PATH" systemctl --user list-unit-files '*-network.service' --no-legend --plain 2>/dev/null || true)"
+legacy_json="$(printf '%s\n' "$legacy_units" | awk 'NF {print $1}' | sed 's/-network\.service$/.network/' | jq -R . | jq -sc 'map(select(length>0)) | sort')"
+[ "$legacy_json" = '["Failed"]' ] \
+  && ok "BASELINE: the pre-fix parse really did fabricate the unit \"Failed\"" \
+  || bad "BASELINE: the pre-fix parse fabricated a unit" "got $legacy_json, expected [\"Failed\"]"
+rm -rf "$D"
+
+# A genuinely empty instance must STILL refuse as an absence, not as a query
+# failure — the two refusals carry opposite next steps, and collapsing them
+# either way strands the operator.
+refuses no_network_units "a genuinely empty instance still refuses as an ABSENCE" \
+  --units '' --sys-units ''
+
+# And the healthy host must not be caught by either new refusal.
+D="$(mktemp -d)"; make_host "$D"
+RC="$(run_capture "$D")"
+[ "$RC" = 0 ] && [ "$(jq -c '.networkUnits' "$D/ev.json" 2>/dev/null)" = '["omniroute.network","paperclip.network"]' ] \
+  && ok "the healthy host is untouched by the query-failure refusals" \
+  || bad "the healthy host is untouched by the query-failure refusals" "rc=$RC: $(cat "$D/out")"
+rm -rf "$D"
 
 # The empty-digest case is the one that matters most: an empty string recorded
 # instead of refused becomes `Image=paperclip-local@sha256:` in the carrier,
@@ -438,6 +502,36 @@ mutate_and_expect_red \
   "deleting the zero-leg guard lets a legless host through" \
   's/refuse no_network_legs/: no_network_legs_DISABLED/' \
   --networks '{}'
+
+# Delete the query-failure guard; a systemctl that FAILED must then fall
+# through to the absence branch — recording "no units" for a query that never
+# ran, which is what sends the operator to a flag that cannot help them.
+D="$(mktemp -d)"; make_host "$D" --units '' --sys-units '' --units-rc 1 --units-stderr 'Failed to connect to bus: No medium found'
+cp "$SCRIPT" "$D/staged.sh"
+sed -i 's/refuse unit_query_failed/: unit_query_failed_DISABLED/' "$D/staged.sh"
+RC="$(run_capture "$D" "$D/staged.sh")"
+if [ "$RC" = 2 ] && grep -q 'REFUSED \[no_network_units\]' "$D/out"; then
+  ok "deleting the query-failure guard conflates a failed query with an absence"
+else
+  bad "deleting the query-failure guard conflates a failed query with an absence" \
+      "rc=$RC, expected the absence refusal to take over: $(cat "$D/out")"
+fi
+rm -rf "$D"
+
+# Delete the row-shape guard; the diagnostic must then be recorded AS A UNIT.
+# rc=0 alone would not prove it — assert the fabricated name is in the
+# artifact, because that is the value the gate would go on to read.
+D="$(mktemp -d)"; make_host "$D" --units 'Failed to list unit files: Access denied'
+cp "$SCRIPT" "$D/staged.sh"
+sed -i 's/refuse unit_row_unrecognised/: unit_row_unrecognised_DISABLED/' "$D/staged.sh"
+RC="$(run_capture "$D" "$D/staged.sh")"
+if [ "$RC" = 0 ] && [ "$(jq -c '.networkUnits' "$D/ev.json" 2>/dev/null)" = '["Failed"]' ]; then
+  ok "deleting the row-shape guard writes the fabricated unit \"Failed\" into the evidence"
+else
+  bad "deleting the row-shape guard writes the fabricated unit into the evidence" \
+      "rc=$RC, networkUnits=$(jq -c '.networkUnits' "$D/ev.json" 2>&1): $(cat "$D/out")"
+fi
+rm -rf "$D"
 
 # Delete the empty-units guard; an empty unit list must then be recorded as
 # absence — the mis-query that would refuse a CORRECT carrier.

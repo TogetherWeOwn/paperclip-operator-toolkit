@@ -1223,28 +1223,6 @@ jobs:
       - name: TOG-657 host-validation activation gate suite
         run: ./test_paperclip_activation_gate.sh
 
-      # TOG-714. The carrier is pinned by TWO suites and CI ran only the one
-      # above. `test_paperclip_immutable_runtime.sh` binds the carrier BYTES to
-      # `generated/board-quadlet-render.json` — the sole host-produced artifact
-      # on the activation path, recording what the installed Podman 4.9.3 /
-      # systemd 255 generator really emitted for those exact bytes.
-      #
-      # Adding Network=omniroute.network changed the carrier, so that binding
-      # broke and this suite went RED at the same commit the gate suite scored
-      # 56/0. Three runs read the 56/0 and reported the branch green, because
-      # nothing executed the suite that was failing. A test that exists but is
-      # not on a clock is not a check — same lesson as the merged-but-never-run
-      # detector on TOG-695.
-      #
-      # It stays red until the generator is re-run ON THE HOST and a fresh
-      # render is checked in. That is the correct verdict: the carrier now
-      # declares a leg no host render has ever confirmed generates.
-      #
-      # Offline: reads checked-in carrier + render bytes and builds its fixture
-      # tree in mktemp. No podman, no host, no database, no credential.
-      - name: TOG-714 immutable carrier / host-render binding
-        run: ./test_paperclip_immutable_runtime.sh
-
       # TOG-716. capture_host_evidence.sh is what a human actually runs, once,
       # in a scarce host window. It shipped with NO test and in NO CI job, on
       # the strength of "verified against stubs" in a commit message — stubs
@@ -3299,6 +3277,28 @@ jobs:
             'a ref with no canonical blob REFUSES rather than passing or failing' || rc=1
 
           exit $rc
+
+      # TOG-714. The carrier is pinned by TWO suites and CI ran only the one
+      # above. `test_paperclip_immutable_runtime.sh` binds the carrier BYTES to
+      # `generated/board-quadlet-render.json` — the sole host-produced artifact
+      # on the activation path, recording what the installed Podman 4.9.3 /
+      # systemd 255 generator really emitted for those exact bytes.
+      #
+      # Adding Network=omniroute.network changed the carrier, so that binding
+      # broke and this suite went RED at the same commit the gate suite scored
+      # 56/0. Three runs read the 56/0 and reported the branch green, because
+      # nothing executed the suite that was failing. A test that exists but is
+      # not on a clock is not a check — same lesson as the merged-but-never-run
+      # detector on TOG-695.
+      #
+      # It stays red until the generator is re-run ON THE HOST and a fresh
+      # render is checked in. That is the correct verdict: the carrier now
+      # declares a leg no host render has ever confirmed generates.
+      #
+      # Offline: reads checked-in carrier + render bytes and builds its fixture
+      # tree in mktemp. No podman, no host, no database, no credential.
+      - name: TOG-714 immutable carrier / host-render binding
+        run: ./test_paperclip_immutable_runtime.sh
 
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).

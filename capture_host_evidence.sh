@@ -146,7 +146,42 @@ n_networks="$(printf '%s' "$networks_json" | jq -r 'length')"
 # Quadlet generates from .network files: `paperclip-network.service` comes
 # from `paperclip.network`. Map back to the unit name the CARRIER declares.
 # --no-legend/--plain keep the table stable across systemd versions.
-units_raw="$(systemctl "$SYSTEMD_SCOPE" list-unit-files '*-network.service' --no-legend --plain 2>/dev/null || true)"
+#
+# `2>/dev/null || true` here would swallow a FAILED query into the same empty
+# string a genuinely-empty instance produces — and `systemctl --user` fails
+# outright with no session bus, which is the normal state of a root shell on
+# this host. The operator would then be told "no units found, try --system"
+# when the real fault is that the query never ran, and on --system they would
+# be told to re-run the flag they just used. Capture status and empty
+# separately, and keep stderr OUT of units_raw: a diagnostic merged into the
+# parsed stream is indistinguishable from a unit row, and the awk below would
+# lift a word out of an error message and record it as a unit name.
+units_rc=0
+units_err="${TMPDIR:-/tmp}/che-stderr.$$"
+units_raw="$(systemctl "$SYSTEMD_SCOPE" list-unit-files '*-network.service' --no-legend --plain 2>"$units_err")" || units_rc=$?
+units_msg="$(head -c 400 "$units_err" 2>/dev/null)"; rm -f "$units_err"
+if [ "$units_rc" -ne 0 ]; then
+  refuse unit_query_failed \
+    "systemctl $SYSTEMD_SCOPE list-unit-files exited $units_rc: ${units_msg:-${units_raw:-(no output)}}. The query FAILED — this is not evidence that no unit exists, and recording it as absence would refuse a CORRECT carrier" \
+    "if this is a root shell, 'systemctl --user' has no session bus: re-run with --system. If --system also fails, the fault is the query, not the units — report that on TOG-716 rather than creating units to clear it"
+fi
+
+# A row that is not a unit name must never become one. systemctl can exit 0
+# having printed a diagnostic, and the mapping below is a blind sed — it turns
+# the line "Failed to list unit files: ..." into the unit `Failed`, writes it
+# to .networkUnits[], and exits 0. Fabricated evidence is worse than no
+# evidence: the gate reads it as a real installed unit.
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "${line%% *}" in
+    *-network.service) ;;
+    *) refuse unit_row_unrecognised \
+         "systemctl exited 0 but printed a row that is not a *-network.service unit: '${line}'. Recording it would fabricate a unit name the host does not have" \
+         "run 'systemctl $SYSTEMD_SCOPE list-unit-files \"*-network.service\" --no-legend --plain' by hand and check what it emitted" ;;
+  esac
+done <<EOF
+$units_raw
+EOF
 
 units_json="$(printf '%s\n' "$units_raw" \
   | awk 'NF {print $1}' \
