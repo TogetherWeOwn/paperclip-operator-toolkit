@@ -100,14 +100,32 @@ expected = {
 }
 for key in ("server", "run"):
     if expected[key] != actual[key]:
-        raise SystemExit(f"{key} carrier hash does not match generated evidence")
+        # The render is a HOST-produced artifact: it records what the installed
+        # Quadlet generator actually emitted for one exact set of carrier bytes.
+        # A carrier edit therefore invalidates it, and the ONLY way to restore
+        # the binding is to re-run the generator on the host. Editing the pinned
+        # hash to match the new carrier would reattach the name to bytes no
+        # generator ever saw — the same fail-open class as `touch`ing a .network
+        # unit to clear network_units. Say which side moved, and say that.
+        raise SystemExit(
+            f"{key} carrier hash does not match generated evidence: "
+            f"carrier is {actual[key]}, render was captured from "
+            f"{expected[key]}. The carrier changed after the render; the "
+            f"render is STALE. Re-run the generator on the host and check in "
+            f"a fresh board-quadlet-render.json. Do NOT edit the pinned hash "
+            f"to match — that binds the evidence to bytes never generated."
+        )
     if evidence[key]["exitCode"] != 0:
         raise SystemExit(f"{key} generator evidence is not successful")
 print(evidence["server"]["execStart"])
 print(evidence["run"]["execStart"])
 PY
 )
-[ "${#generated_values[@]}" -eq 2 ] || fail 'generated evidence did not yield two ExecStart values'
+# The python above exits non-zero with the real cause on stderr, but under
+# `mapfile < <(...)` that status is lost and only the line COUNT survives. A
+# count is a symptom; reporting it as the failure is how a stale host render
+# got read as "the suite is green" on TOG-714. Point the reader at stderr.
+[ "${#generated_values[@]}" -eq 2 ] || fail 'generated evidence did not yield two ExecStart values — see the SystemExit reason printed above for the actual cause (commonly: the carrier was edited, so the host render is stale)'
 server_exec=${generated_values[0]}
 run_exec=${generated_values[1]}
 for exec_start in "$server_exec" "$run_exec"; do
