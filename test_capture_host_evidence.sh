@@ -35,6 +35,7 @@ make_host() {
   local networks='{"systemd-paperclip":{},"systemd-omniroute":{}}'
   local units='paperclip-network.service enabled enabled
 omniroute-network.service enabled enabled'
+  local sys_units=''; local sys_units_set=0
   local img_digest='sha256:1111111111111111111111111111111111111111111111111111111111111111'
   local run_digest="$img_digest"
   local inspect_rc=0 img_rc=0
@@ -43,6 +44,7 @@ omniroute-network.service enabled enabled'
     case "$1" in
       --networks)   networks="$2"; shift 2 ;;
       --units)      units="$2"; shift 2 ;;
+      --sys-units)  sys_units="$2"; sys_units_set=1; shift 2 ;;
       --img-digest) img_digest="$2"; shift 2 ;;
       --run-digest) run_digest="$2"; shift 2 ;;
       --inspect-rc) inspect_rc="$2"; shift 2 ;;
@@ -50,6 +52,10 @@ omniroute-network.service enabled enabled'
       *) echo "make_host: bad arg $1" >&2; return 1 ;;
     esac
   done
+
+  # Default: the system instance mirrors the user instance, so every existing
+  # test keeps its original meaning regardless of which scope is queried.
+  [ "$sys_units_set" -eq 1 ] || sys_units="$units"
 
   mkdir -p "$d/bin"
   cat >"$d/bin/podman" <<EOF
@@ -71,19 +77,29 @@ if [ "\$1" = "inspect" ]; then
 fi
 exit 0
 EOF
+  # The stub answers PER INSTANCE. A root-owned host is the case where --user
+  # reports nothing and --system holds the units; --sys-units defaults to the
+  # same list so an instance-agnostic host behaves exactly as before.
   cat >"$d/bin/systemctl" <<EOF
 #!/usr/bin/env bash
+if [ "\$1" = "--system" ]; then
+cat <<'UNITS'
+$sys_units
+UNITS
+else
 cat <<'UNITS'
 $units
 UNITS
+fi
 EOF
   chmod +x "$d/bin/podman" "$d/bin/systemctl"
 }
 
 # Run the script (or a staged copy) against a stub host. Captures stdout+stderr.
+# Trailing args are passed through to the script under test.
 run_capture() {
-  local d="$1" script="${2:-$SCRIPT}"
-  ( cd "$d" && PATH="$d/bin:$PATH" bash "$script" --out "$d/ev.json" ) >"$d/out" 2>&1
+  local d="$1" script="${2:-$SCRIPT}"; shift 2 2>/dev/null || shift $#
+  ( cd "$d" && PATH="$d/bin:$PATH" bash "$script" --out "$d/ev.json" "$@" ) >"$d/out" 2>&1
   printf '%s' $?
 }
 
@@ -200,6 +216,93 @@ run_capture "$D" >/dev/null
 [ ! -f "$D/ev.json" ] \
   && ok "an unresolvable digest writes NO evidence file at all" \
   || bad "an unresolvable digest writes no evidence" "wrote $(jq -c . "$D/ev.json")"
+rm -rf "$D"
+
+# =========================================================================
+section "3b. --system reaches the root-owned instance, and says which it used"
+# =========================================================================
+# WHY. The document told the operator, twice, to "re-capture against --system"
+# on a no_network_units refusal. There was no --system flag: the parser's *)
+# arm exited 2 with `unknown argument`. That advice fires DURING the window,
+# in the branch where the operator is already recovering from a refusal, so
+# the window ended with no evidence and no instruction that worked.
+#
+# The root-owned host: --user reports nothing, --system holds the units.
+ROOT_OWNED=(--units '' --sys-units 'paperclip-network.service enabled enabled
+omniroute-network.service enabled enabled')
+
+# The defect itself: --user on a root-owned host must still refuse ...
+refuses no_network_units "root-owned host: --user still refuses" "${ROOT_OWNED[@]}"
+
+# ... and the refusal must name a flag that EXISTS. A refusal advising a
+# nonexistent flag is what shipped.
+D="$(mktemp -d)"; make_host "$D" "${ROOT_OWNED[@]}"
+run_capture "$D" >/dev/null
+advice="$(grep -o '\-\-system' "$D/out" | head -1)"
+if [ "$advice" = "--system" ]; then
+  # and the advised flag must actually be accepted by the parser
+  RC="$(run_capture "$D" "$SCRIPT" --system)"
+  if [ "$RC" = 0 ]; then
+    ok "the flag the refusal advises is accepted by the parser"
+  else
+    bad "the flag the refusal advises is accepted by the parser" \
+        "advised --system, but running it gave rc=$RC: $(cat "$D/out")"
+  fi
+else
+  bad "the refusal advises --system" "$(cat "$D/out")"
+fi
+rm -rf "$D"
+
+# --system on the root-owned host completes the window: units captured AND
+# the image digest recorded. Under the old script this branch yielded nothing.
+D="$(mktemp -d)"; make_host "$D" "${ROOT_OWNED[@]}"
+RC="$(run_capture "$D" "$SCRIPT" --system)"
+if [ "$RC" = 0 ] && jq -e '(.networkUnits | length) == 2' "$D/ev.json" >/dev/null 2>&1; then
+  ok "--system captures the root-owned units"
+else
+  bad "--system captures the root-owned units" "rc=$RC: $(cat "$D/out")"
+fi
+jq -e '.image.candidate | test("^[0-9a-f]{64}$")' "$D/ev.json" >/dev/null 2>&1 \
+  && ok "--system window still records the image digest (the other host-gated red)" \
+  || bad "--system window still records the image digest" "$(jq -c '.image' "$D/ev.json" 2>&1)"
+
+# Self-describing: "no units" from the wrong instance and "no units" from a
+# genuinely absent unit are identical bytes unless the instance is recorded.
+jq -e '.systemdInstance == "system"' "$D/ev.json" >/dev/null 2>&1 \
+  && ok "evidence records which systemd instance was queried" \
+  || bad "evidence records the instance" "$(jq -c '.systemdInstance' "$D/ev.json" 2>&1)"
+rm -rf "$D"
+
+D="$(mktemp -d)"; make_host "$D"
+run_capture "$D" >/dev/null
+jq -e '.systemdInstance == "user"' "$D/ev.json" >/dev/null 2>&1 \
+  && ok "the default instance is recorded as user" \
+  || bad "the default instance is recorded as user" "$(jq -c '.systemdInstance' "$D/ev.json" 2>&1)"
+rm -rf "$D"
+
+# --system must NOT become a way to manufacture units that are not there:
+# when BOTH instances are empty the units are genuinely absent, which is the
+# real TOG-657 red, and the guard must still refuse.
+refuses no_network_units "units absent in BOTH instances still refuses" \
+  --units '' --sys-units ''
+
+# MUTATION GATE. Prove the flag is what reaches the system instance, rather
+# than the stub answering identically either way. Break the scope plumbing and
+# the root-owned capture must go RED.
+D="$(mktemp -d)"; make_host "$D" "${ROOT_OWNED[@]}"
+sed 's/systemctl "\$SYSTEMD_SCOPE" list-unit-files/systemctl --user list-unit-files/' \
+    "$SCRIPT" > "$D/mutated.sh"
+if cmp -s "$SCRIPT" "$D/mutated.sh"; then
+  bad "MUTATION: scope plumbing is load-bearing" "mutation did not apply — anchor drifted"
+else
+  RC="$(run_capture "$D" "$D/mutated.sh" --system)"
+  if [ "$RC" = 2 ]; then
+    ok "MUTATION: hard-coding --user makes the root-owned capture refuse again"
+  else
+    bad "MUTATION: hard-coding --user makes the root-owned capture refuse again" \
+        "expected rc=2, got $RC — the --system path may not be what reads the units"
+  fi
+fi
 rm -rf "$D"
 
 # =========================================================================

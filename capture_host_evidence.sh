@@ -22,8 +22,15 @@
 # (or the reverse) reproduces the unsatisfiable gate fixed at d58d9899.
 #
 #   ./capture_host_evidence.sh [--container paperclip] [--out evidence.json]
+#                              [--image paperclip-local] [--user | --system]
 #       -> exit 0   evidence written, both arrays non-empty and well-formed
 #       -> exit 2   REFUSED to write evidence, naming what failed
+#
+#   --user (default) / --system  which systemd instance .networkUnits[] is read
+#   from. Rootless Quadlet keeps units in --user; a root-owned deployment keeps
+#   them in --system, where a --user query reports nothing at all. The instance
+#   actually used is recorded as .systemdInstance, so evidence is
+#   self-describing rather than needing prose alongside it.
 #
 # IT ALSO CAPTURES THE IMAGE DIGEST, AND WHY THAT IS NOT OPTIONAL.
 # The carrier ships `Image=paperclip-local@sha256:REPLACE_WITH_APPROVED_IMAGE_
@@ -68,12 +75,22 @@ set -euo pipefail
 CONTAINER=paperclip
 OUT=host-evidence.json
 IMAGE=paperclip-local
+# Which systemd instance .networkUnits[] is read from. `--user` is correct for
+# a rootless Quadlet deployment (the carrier's WantedBy=default.target says
+# rootless), but a root-owned deployment keeps its units in the system
+# instance, where a --user query reports nothing. Recorded in the evidence as
+# .systemdInstance so a capture is self-describing: "no units" from the wrong
+# instance and "no units" from a genuinely absent unit are the same bytes
+# otherwise, and the gate would refuse a CORRECT carrier on the difference.
+SYSTEMD_SCOPE=--user
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --container) CONTAINER="${2:?--container needs a value}"; shift 2 ;;
     --image)     IMAGE="${2:?--image needs a value}"; shift 2 ;;
     --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
+    --user)      SYSTEMD_SCOPE=--user; shift ;;
+    --system)    SYSTEMD_SCOPE=--system; shift ;;
     -h|--help)   sed -n '2,49p' "$0"; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -118,7 +135,7 @@ n_networks="$(printf '%s' "$networks_json" | jq -r 'length')"
 # Quadlet generates from .network files: `paperclip-network.service` comes
 # from `paperclip.network`. Map back to the unit name the CARRIER declares.
 # --no-legend/--plain keep the table stable across systemd versions.
-units_raw="$(systemctl --user list-unit-files '*-network.service' --no-legend --plain 2>/dev/null || true)"
+units_raw="$(systemctl "$SYSTEMD_SCOPE" list-unit-files '*-network.service' --no-legend --plain 2>/dev/null || true)"
 
 units_json="$(printf '%s\n' "$units_raw" \
   | awk 'NF {print $1}' \
@@ -133,9 +150,14 @@ if [ "${n_units:-0}" -eq 0 ]; then
   # silently recording "no units" would make the gate refuse a correct carrier
   # as network_unit_absent. Refuse instead of writing an absence we cannot
   # distinguish from a mis-query.
+  if [ "$SYSTEMD_SCOPE" = --user ]; then
+    next="the deployment may be root-owned. Re-run this script with --system: $0 --system --out $OUT   (the instance used is recorded in the evidence as .systemdInstance)"
+  else
+    next="both instances have now been asked. Confirm by hand with: systemctl --system list-unit-files '*-network.service'   and systemctl --user list-unit-files '*-network.service'. If both are genuinely empty, the units are absent and that is the real TOG-657 red — report it on TOG-716 rather than creating units to clear it"
+  fi
   refuse no_network_units \
-    "systemctl --user reported no *-network.service units. This is indistinguishable from querying the wrong systemd instance, and recording it as absence would make the gate refuse a CORRECT carrier" \
-    "if this deployment is rootless, confirm with: systemctl --user list-unit-files '*-network.service'. If it is root-owned, re-capture with --system and record which instance was used"
+    "systemctl $SYSTEMD_SCOPE reported no *-network.service units. This is indistinguishable from querying the wrong systemd instance, and recording it as absence would make the gate refuse a CORRECT carrier" \
+    "$next"
 fi
 
 # --- .image — the host-local candidate digest, READ not approved -------------
@@ -175,7 +197,9 @@ tmp="${OUT}.partial.$$"
 trap 'rm -f "$tmp"' EXIT
 jq -n --argjson networks "$networks_json" --argjson networkUnits "$units_json" \
       --arg image "$IMAGE" --arg candidate "$image_digest" --arg running "$running_digest" \
+      --arg systemdInstance "${SYSTEMD_SCOPE#--}" \
   '{networks: $networks, networkUnits: $networkUnits,
+    systemdInstance: $systemdInstance,
     image: {name: $image, candidate: $candidate,
             running: (if $running == "" then null else $running end),
             matchesRunning: ($running != "" and $running == $candidate)}}' > "$tmp"
