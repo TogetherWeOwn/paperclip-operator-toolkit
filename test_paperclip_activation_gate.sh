@@ -386,8 +386,15 @@ if [ -f "$HERE/deploy/paperclip-immutable/paperclip.container" ]; then
   else bad "the in-tree carrier PASSED — it should not"; fi
   if grep -qF '[image_digest_placeholder]' <<<"$o"; then ok "  … because the digest is still a placeholder"
   else bad "  … expected the placeholder refusal"; fi
-  if grep -qF '[network_leg_dropped]' <<<"$o"; then ok "  … and because it declares one leg against a two-leg host"
-  else bad "  … expected the dropped-leg refusal"; fi
+  # TOG-714 declared the second leg, so the carrier must no longer be refused
+  # for DROPPING one. Assert the absence positively: if this ever comes back,
+  # the carrier regressed to a form that recreates with green health and no
+  # model gateway.
+  if grep -qF '[network_leg_dropped]' <<<"$o"; then bad "  … the dropped-leg refusal is back — the carrier regressed to one leg"
+  else ok "  … and NOT for a dropped leg: both legs are declared (TOG-714)"; fi
+  if grep -qE '\[network_leg_(mismatched|duplicated|unmanaged)\]|\[network_unit_absent\]' <<<"$o"
+  then bad "  … unexpected network refusal on the two-leg carrier"
+  else ok "  … and no other network refusal stands against two-leg evidence"; fi
 else
   ok "in-tree carrier not present in this checkout (skipped)"
 fi
