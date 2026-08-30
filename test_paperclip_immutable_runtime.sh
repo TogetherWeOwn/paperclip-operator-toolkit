@@ -23,6 +23,7 @@ assert_count() {
 
 for line in \
   'Network=paperclip.network' \
+  'Network=omniroute.network' \
   'ReadOnly=true' \
   'ReadOnlyTmpfs=false' \
   'Volume=%h/.local/share/paperclip:/paperclip:Z' \
@@ -34,6 +35,12 @@ do
   assert_contains "$CARRIER" "$line"
 done
 assert_count "$CARRIER" 1 '^ReadOnly=true$'
+# Both legs, each exactly once and each in the UNIT namespace. `Network=systemd-X`
+# reaches the right leg but is a literal reference with no Requires=/After=, so it
+# races network creation at boot and passes every manual test.
+assert_count "$CARRIER" 1 '^Network=paperclip\.network$'
+assert_count "$CARRIER" 1 '^Network=omniroute\.network$'
+assert_count "$CARRIER" 0 '^Network=systemd-'
 assert_count "$CARRIER" 0 '^ReadOnly=/'
 assert_count "$CARRIER" 0 '^Pod='
 grep -Eq '^Image=[^[:space:]]+@sha256:' "$CARRIER" || fail 'server image is not digest-shaped'
@@ -132,7 +139,18 @@ for exec_start in "$server_exec" "$run_exec"; do
   [ "$(grep -oE -- '(^|[[:space:]])--read-only([=[:space:]]|$)' <<<"$exec_start" | wc -l)" -eq 1 ] || fail 'generated ExecStart lacks exactly one whole-root --read-only'
   ! grep -q -- '--read-only=false' <<<"$exec_start" || fail 'generated ExecStart contains fail-open --read-only=false'
 done
-grep -Eq -- '(^|[[:space:]])--network=systemd-paperclip([[:space:]]|$)' <<<"$server_exec" || fail 'server ExecStart lacks generated host-compatible network'
+# Assert BOTH legs by identity, from the host-produced render. Checking only
+# systemd-paperclip fails open in exactly the case this issue exists to prevent:
+# a fresh render of the two-leg carrier whose OmniRoute leg did not generate
+# still passed, so loopback /api/health would be GREEN with no model gateway.
+# Compare the leg SET, not a count -- two identical Network= keys render two
+# identical tokens and would satisfy any count-based check.
+mapfile -t server_legs < <(grep -oE -- '--network=[^[:space:]]+' <<<"$server_exec" | sed 's/^--network=//' | sort -u)
+for required_leg in systemd-paperclip systemd-omniroute; do
+  printf '%s\n' "${server_legs[@]}" | grep -Fqx "$required_leg" \
+    || fail "server ExecStart lacks generated leg --network=$required_leg (generated legs: ${server_legs[*]:-none}). A carrier leg that does not appear here did not generate on the host; recreating drops it while loopback /api/health stays GREEN."
+done
+[ "${#server_legs[@]}" -eq 2 ] || fail "server ExecStart generated ${#server_legs[@]} distinct legs, expected exactly 2 (got: ${server_legs[*]:-none})"
 grep -Fq -- '--tmpfs /tmp:rw,nosuid,nodev,noexec,size=24g,mode=1777' <<<"$server_exec" || fail 'server ExecStart lacks generated measured /tmp sizing'
 grep -Eq -- '(^|[[:space:]])--network=none([[:space:]]|$)' <<<"$run_exec" || fail 'run ExecStart is not network-isolated'
 grep -Eq -- '(^|[[:space:]])--user 61111:61112([[:space:]]|$)' <<<"$run_exec" || fail 'run ExecStart lacks distinct run identity'
