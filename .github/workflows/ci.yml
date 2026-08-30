@@ -104,6 +104,12 @@ name: CI
 #                                       for is already back — and whether a null
 #                                       five-hour reading is ever scored as
 #                                       headroom — TOG-487
+#     test_model_lane_probe.sh          model_lane_probe.sh: whether the cheap/
+#                                       small-fast lane is dead OR has come
+#                                       UNPINNED. A bare model id answers 200 and
+#                                       bills a PAYG leg, so status alone cannot
+#                                       see it. Covers both drifting surfaces —
+#                                       TOG-682
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
@@ -955,6 +961,35 @@ jobs:
       # *_CMD seams, so there is no database and no host file.
       - name: cold-start detector suite
         run: ./test_cold_start_detector.sh
+
+      # TOG-682. model_lane_probe.sh watches the cheap/small-fast lane — the
+      # profile status-recovery itself runs on, so a dead value blocks the
+      # mechanism that would otherwise notice.
+      #
+      # THE ASSERTION THAT MATTERS MOST IS §2, AND IT IS NOT AN UPTIME CHECK.
+      # Measured against the live gateway 2026-08-30: the pinned id
+      # `cliproxy/claude-haiku-4-5-20251001` returns 200 — and so does the BARE
+      # `claude-haiku-4-5-20251001`. A bare id is a fully working lane billed to
+      # a pay-as-you-go leg instead of the owner's subscription; the prefix is
+      # what makes it fail CLOSED. So an unpinned lane is green by every HTTP
+      # measure and is HARDER to see than a dead one. §2 pins that a bare id at
+      # 200 is an ALARM. If that ever "simplifies" to "200 is fine", the tool
+      # stops detecting the failure it was built for.
+      #
+      # §3 replays the TOG-679/TOG-680 disagreement: adapterConfig pinned and
+      # healthy while runtimeConfig.modelProfiles.cheap is undated and 400. The
+      # two surfaces drift independently and a tool that coalesced them would
+      # report the healthy one and exit 0.
+      #
+      # §4 is the blind-monitor half: an unreadable source, zero surface rows, a
+      # short read, and HTTP 000 all exit 5 and never 0. 000 is curl's "no
+      # response completed" and it parses as an integer that is not 200, so the
+      # naive ordering reports an unreachable gateway as a dead lane.
+      #
+      # Offline: the surface rows and the HTTP result both arrive through *_CMD
+      # seams, so there is no database and no gateway.
+      - name: model lane probe suite
+        run: ./test_model_lane_probe.sh
 
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts

@@ -106,6 +106,50 @@ const ROSTER_SQL = `
      and a.status <> 'terminated'
    order by a.name`;
 
+// TOG-682. The model ids the fleet actually references, on BOTH surfaces that
+// carry one, emitted one row per (agent, surface) rather than one row per agent.
+//
+// WHY BOTH SURFACES, AND WHY THEY ARE SEPARATE ROWS.
+// A cheap-lane model id lives in two independent places and they drift apart:
+//
+//   adapter_config->'env'->'ANTHROPIC_SMALL_FAST_MODEL'->>'value'    console-only
+//   adapter_config->'env'->'ANTHROPIC_DEFAULT_HAIKU_MODEL'->>'value' console-only
+//   runtime_config->'modelProfiles'->'cheap'->'adapterConfig'->>'model'  agent-writable
+//
+// TOG-679 and TOG-680 disagreed precisely because one was fixed and the other
+// was not. Collapsing them into a per-agent row — or a `coalesce(...)` chain —
+// would report the surface that happens to be listed first and hide the other,
+// which is the whole defect. So each surface is its own row and the probe
+// reports per surface.
+//
+// WHY THIS IS NOT READ FROM THE API. `GET /api/agents/{id}` returns
+// adapterConfig and runtimeConfig for YOURSELF and redacts both for every other
+// agent — measured 2026-08-30: my own row carried the env, three peers' rows
+// came back `{}` at HTTP 200. A probe built on that route would report one
+// agent's lane and score the other 46 as "no id referenced", which reads green.
+// The database is the only vantage point that sees all 47.
+//
+// NOTE ON `->>'value'`. adapter_config env entries are BINDING OBJECTS
+// (`{"type":"plain","value":"..."}`), not bare strings; a secret_ref binding has
+// no `value` at all. `->>'value'` on one yields NULL, which arrives as an empty
+// cell and is reported as unreadable rather than as an id — never as absent.
+const MODEL_SURFACES_SQL = `
+  select a.id, a.name, s.surface,
+         coalesce(s.model, '')
+    from agents a
+    cross join lateral (values
+      ('adapterConfig.env.ANTHROPIC_SMALL_FAST_MODEL',
+       a.adapter_config->'env'->'ANTHROPIC_SMALL_FAST_MODEL'->>'value'),
+      ('adapterConfig.env.ANTHROPIC_DEFAULT_HAIKU_MODEL',
+       a.adapter_config->'env'->'ANTHROPIC_DEFAULT_HAIKU_MODEL'->>'value'),
+      ('runtimeConfig.modelProfiles.cheap',
+       a.runtime_config->'modelProfiles'->'cheap'->'adapterConfig'->>'model')
+    ) as s(surface, model)
+   where a.company_id = $1
+     and a.status <> 'terminated'
+     and s.model is not null
+   order by a.name, s.surface`;
+
 // Mirrors quota_brake.sh's refusal_sql(), including the three reasons it
 // counts. The window is an interval literal built from a validated integer —
 // never interpolated text — because this is the one place a caller-supplied
@@ -142,11 +186,12 @@ async function main() {
     refuse(`unknown argument: ${argv[i]}`);
   }
 
-  if (mode !== "roster" && mode !== "refusals") {
+  if (mode !== "roster" && mode !== "refusals" && mode !== "model-surfaces") {
     process.stderr.write(
-      "usage: pg_source.js roster|refusals [--company UUID] [--since-min N]\n" +
-      "  roster    -> id\\tname\\tstatus\\twakeOnDemand\\tmaxConcurrentRuns\\tbaseline\\tcritical\\truntimeConfig\n" +
-      "  refusals  -> reason\\tagent\\tcount\n");
+      "usage: pg_source.js roster|refusals|model-surfaces [--company UUID] [--since-min N]\n" +
+      "  roster          -> id\\tname\\tstatus\\twakeOnDemand\\tmaxConcurrentRuns\\tbaseline\\tcritical\\truntimeConfig\n" +
+      "  refusals        -> reason\\tagent\\tcount\n" +
+      "  model-surfaces  -> agentId\\tagentName\\tsurface\\tmodelId\n");
     process.exit(2);
   }
   if (!company) {
@@ -177,9 +222,14 @@ async function main() {
     // `id, name, status, runtimeConfig` — the whole config landed in the
     // wakeOnDemand column, four fields short, and the shell split it happily.
     // Positional rows are the TSV's actual contract, so ask for positions.
-    const res = mode === "roster"
-      ? await client.query({ text: ROSTER_SQL, values: [company], rowMode: "array" })
-      : await client.query({ text: REFUSAL_SQL, values: [company, String(sinceMin)], rowMode: "array" });
+    let res;
+    if (mode === "roster") {
+      res = await client.query({ text: ROSTER_SQL, values: [company], rowMode: "array" });
+    } else if (mode === "model-surfaces") {
+      res = await client.query({ text: MODEL_SURFACES_SQL, values: [company], rowMode: "array" });
+    } else {
+      res = await client.query({ text: REFUSAL_SQL, values: [company, String(sinceMin)], rowMode: "array" });
+    }
     const out = res.rows
       .map((r) => r.map(cell).join("\t"))
       .join("\n");
