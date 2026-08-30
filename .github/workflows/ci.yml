@@ -99,6 +99,12 @@ name: CI
 #                                       whether permission_pins.txt still
 #                                       describes this checkout's default —
 #                                       TOG-346
+#     test_discord_job_health.sh        scripts/discord_job_health.js: whether a
+#                                       time-gated Discord job that throws NO
+#                                       error and still posts NOTHING can read
+#                                       green — the state the forbidden
+#                                       cross-company config workaround
+#                                       produces — TOG-676
 #     test_cold_start_detector.sh       cold_start_detector.sh: whether the company
 #                                       is STOPPED while the quota it was waiting
 #                                       for is already back — and whether a null
@@ -783,6 +789,32 @@ jobs:
       - name: interaction routing suite
         run: ./test_interaction_route.sh
 
+      # TOG-676. The Discord daily digest has never posted — not once, in any
+      # channel, on any day. It read as healthy for two consecutive write-ups
+      # because 37 of its 38 hourly rows are `succeeded` after returning at the
+      # vendor's hour gate without doing any work.
+      #
+      # The detector that was supposed to catch that had the same hole in a
+      # smaller form: it inferred the digest's health from its FAILURE count,
+      # so it could only ever see a digest that died loudly. §2 of this suite
+      # feeds the state the cheapest "remedy" produces — plugin_config rows
+      # added for the other three companies, every denial gone, still nothing
+      # posted — and pins NOT_DELIVERED and exit 1. The old logic exited 0
+      # there. That matters beyond tidiness: that workaround routes other
+      # companies' issue and agent counts into OUR private #control-room via
+      # resolveChannel's defaultChannelId fallback, so a green detector would
+      # have certified a cross-company data leak as the fix.
+      #
+      # §3 is the guard against the opposite error. It is byte-identical to §2
+      # except one delivery metric exists, and must exit 0 — without it, a
+      # script hardcoded to always say NOT_DELIVERED would satisfy §2 and this
+      # suite would measure nothing.
+      #
+      # Offline by construction: DISCORD_JOB_HEALTH_SOURCE_CMD replaces the
+      # database read with `cat` over a fixture, so CI needs no DATABASE_URL.
+      - name: Discord scheduled-job delivery suite
+        run: ./test_discord_job_health.sh
+
       # TOG-419. The quota brake, after it took the company off the air: a
       # sweep set heartbeat.wakeOnDemand=false on 44 of 47 agents nine seconds
       # after the owner created a task, and the owner's own Chief of Staff was
@@ -1112,6 +1144,17 @@ jobs:
       # the plan names, which is what the shift actually breaks.
       - name: cold-start detector refusals are not vacuous (mutation-gated)
         run: ./verification/tog-487-mutation-gate.sh
+
+      # TOG-676. Same shape, and the limb at risk is the delivery check itself.
+      # It reads as redundant with the failure count — every digest that has
+      # ever broken here broke loudly — so "simplify it away" is the obvious
+      # edit, and it is the edit that makes this detector go green on the one
+      # remedy that leaks other companies' data into our private #control-room.
+      # Mutation 2 exists for the opposite error: a detector that never
+      # believes a delivery satisfies the NOT_DELIVERED case while measuring
+      # nothing, so a real send is pinned green too.
+      - name: Discord delivery proof is not vacuous (mutation-gated)
+        run: ./verification/tog-676-mutation-gate.sh
 
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
