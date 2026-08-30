@@ -289,7 +289,7 @@ gate_networks() {
 
   if [ "${#missing_legs[@]}" -gt 0 ] && [ "${#declared[@]}" -lt "$host_n" ]; then
     refuse network_leg_dropped \
-      "carrier declares ${#declared[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops $(( host_n - ${#declared[@]} )) (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
+      "carrier declares ${#declared[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops ${#missing_legs[@]} (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
       "add the missing Network= key(s) to $CARRIER_REL. That is a carrier change and needs fresh CISO gate-1 review"
     return
   fi
