@@ -219,14 +219,15 @@ jq -n \
   --slurpfile issue "$ISSUE_JSON" \
   --rawfile comment "$COMMENT" \
   --arg next "$NEXT_CHECK" \
-  --arg interval "$INTERVAL_HOURS" '
+  --arg interval "$INTERVAL_HOURS" \
+  --arg retry "$ERROR_RETRY_HOURS" '
   ($issue[0].executionPolicy // {}) as $policy
   | {
       comment: $comment,
       executionPolicy: ($policy + {
         monitor: {
           nextCheckAt: $next,
-          notes: ("Run ./discord_job_health_monitor.sh; normal interval " + $interval + "h. A succeeded job row is never a post; only discord_digest_sent is."),
+          notes: ("Do NOT run ./discord_job_health_monitor.sh directly: the shared workspace sits on whatever branch the last run left, the script is absent there, and the exit 127 never re-arms this clock. Run the git-show block in this card description verbatim (reads origin/main into scratch; no network, no token). Normal interval " + $interval + "h, detector/API failure " + $retry + "h. Exit 1 every cycle is the EXPECTED steady state until the vendor fixes TOG-676. A succeeded job row is never a post; only discord_digest_sent is."),
           scheduledBy: "assignee",
           kind: "external_service",
           serviceName: "Discord scheduled-job delivery",

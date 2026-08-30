@@ -196,5 +196,43 @@ MONITOR_OMIT_STORED_COLUMN=1 run_case "$FAILING_JSON" 1
   && ok "the nested executionPolicy echo cannot stand in for the column" \
   || bad "expected exit 2 when the column is missing, got $CASE_RC (the nested fallback fails open)"
 
+# --- TOG-720: the re-arm must not overwrite the card's own warning ----------
+# The notes this wrapper PATCHes replace the card's monitorNotes every cycle.
+# The heartbeat operator reads that field to decide how to invoke the monitor.
+# Telling them to run the bare `./discord_job_health_monitor.sh` is the one
+# instruction that is known to exit 127 in the shared workspace -- and a cycle
+# that exits 127 never re-arms, so the clock stops permanently and silently.
+# The wrapper must therefore write back guidance that still routes through
+# `git show origin/main:`.
+
+hdr "11. The re-arm never tells the next operator to run the bare command"
+run_case "$FAILING_JSON" 1
+notes="$(jq -r '.executionPolicy.monitor.notes' "$WORK/patch.json")"
+grep -qE '(^|[^-])Run \./discord_job_health_monitor\.sh' <<<"$notes" \
+  && bad "re-arm notes instruct the bare invocation that exits 127 and stops the clock" \
+  || ok "re-arm notes never instruct the bare invocation"
+grep -qF 'card description' <<<"$notes" \
+  && ok "re-arm notes route the operator to the card description that holds the command" \
+  || bad "re-arm notes omit the pointer to the recorded command"
+grep -qF 'git-show' <<<"$notes" \
+  && ok "re-arm notes name the git-show mechanism" \
+  || bad "re-arm notes omit the git-show mechanism"
+
+hdr "12. The re-arm notes fit the 500-char monitorNotes cap"
+# Over the cap the server 400s the WHOLE arming PATCH: nextCheckAt never lands
+# either, so an over-long notes string silently leaves this card unarmed.
+notes="$(jq -r '.executionPolicy.monitor.notes' "$WORK/patch.json")"
+[[ "${#notes}" -le 500 ]] \
+  && ok "re-arm notes are ${#notes} chars, within the 500-char cap" \
+  || bad "re-arm notes are ${#notes} chars, over the 500-char cap: the whole arming PATCH would 400"
+[[ "${#notes}" -gt 0 ]] && ok "re-arm notes are non-empty" || bad "re-arm notes are empty"
+
+hdr "13. The re-arm still carries the two standing facts"
+notes="$(jq -r '.executionPolicy.monitor.notes' "$WORK/patch.json")"
+grep -qF 'discord_digest_sent' <<<"$notes" \
+  && ok "re-arm notes keep the delivery-metric fact" || bad "re-arm notes dropped the delivery-metric fact"
+grep -qiF 'expected' <<<"$notes" \
+  && ok "re-arm notes keep the expected-steady-state fact" || bad "re-arm notes dropped the steady-state fact"
+
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
