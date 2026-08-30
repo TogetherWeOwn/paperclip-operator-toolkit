@@ -250,9 +250,28 @@ case "$PATCH_STATUS" in
 esac
 
 # Verify the artifact returned by the write, not merely the request we intended.
-STORED_NEXT="$(jq -r '.monitorNextCheckAt // .executionPolicy.monitor.nextCheckAt // empty' "$PATCH_RESPONSE" 2>/dev/null)"
-if [[ "$STORED_NEXT" != "$NEXT_CHECK" ]]; then
-  echo "ERROR: Paperclip returned HTTP $PATCH_STATUS but did not store nextCheckAt=$NEXT_CHECK" >&2
+#
+# Read ONLY the top-level `monitorNextCheckAt` column. That column is what the
+# scheduler queries (server heartbeat.js selects on `issues.monitorNextCheckAt`);
+# `executionPolicy.monitor` is the write-side shape and is echoed back verbatim
+# whether or not the column was set. Falling back to the nested path therefore
+# accepts our own request as evidence of the write it was supposed to verify —
+# an unarmed issue would score armed.
+STORED_NEXT="$(jq -r '.monitorNextCheckAt // empty' "$PATCH_RESPONSE" 2>/dev/null)"
+if [[ -z "$STORED_NEXT" ]]; then
+  echo "ERROR: Paperclip returned HTTP $PATCH_STATUS but stored no monitorNextCheckAt column" >&2
+  exit 2
+fi
+
+# Compare the INSTANT, not the string. The server normalises to millisecond
+# precision, so a request for `2026-08-30T14:49:41Z` reads back as
+# `2026-08-30T14:49:41.000Z`. Those are the same moment; a string compare calls
+# a correct arming a failure, and reports exit 2 over the detector's real
+# verdict on every single cycle.
+STORED_EPOCH="$(date -u -d "$STORED_NEXT" +%s 2>/dev/null)" \
+  || { echo "ERROR: Paperclip stored an unparseable monitorNextCheckAt: $STORED_NEXT" >&2; exit 2; }
+if [[ "$STORED_EPOCH" != "$NEXT_EPOCH" ]]; then
+  echo "ERROR: Paperclip returned HTTP $PATCH_STATUS but stored nextCheckAt=$STORED_NEXT, not $NEXT_CHECK" >&2
   exit 2
 fi
 

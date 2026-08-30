@@ -66,8 +66,22 @@ if [[ "$method" == GET ]]; then
   cp "$ISSUE_SRC" "$out"
 else
   cp "$body" "$PATCH_LOG"
-  jq --slurpfile p "$body" '. + {executionPolicy:$p[0].executionPolicy, monitorNextCheckAt:$p[0].executionPolicy.monitor.nextCheckAt}' \
-    "$ISSUE_SRC" > "$out"
+  # Model the REAL server: `executionPolicy.monitor` is echoed back verbatim,
+  # but the authoritative top-level `monitorNextCheckAt` column is a timestamp
+  # rendered at millisecond precision. So a request for `...:41Z` reads back as
+  # `...:41.000Z`. Echoing the request string instead would make this stub
+  # agree with any string compare and hide the exact defect measured against
+  # production on 2026-08-30 (TOG-718).
+  requested="$(jq -r '.executionPolicy.monitor.nextCheckAt' "$body")"
+  stored="${MONITOR_STORED_NEXT_OVERRIDE:-${requested/%Z/.000Z}}"
+  if [[ "${MONITOR_OMIT_STORED_COLUMN:-}" == 1 ]]; then
+    jq --slurpfile p "$body" '. + {executionPolicy:$p[0].executionPolicy} | del(.monitorNextCheckAt)' \
+      "$ISSUE_SRC" > "$out"
+  else
+    jq --slurpfile p "$body" --arg stored "$stored" \
+      '. + {executionPolicy:$p[0].executionPolicy, monitorNextCheckAt:$stored}' \
+      "$ISSUE_SRC" > "$out"
+  fi
 fi
 printf 200
 STUB
@@ -92,6 +106,8 @@ run_case() {
     DETECTOR_JSON="$1" DETECTOR_RC="$2" \
     ARGV_LOG="$WORK/argv.log" CFG_LOG="$WORK/cfg.log" \
     REQUEST_LOG="$WORK/requests.log" PATCH_LOG="$WORK/patch.json" ISSUE_SRC="$WORK/issue.json" \
+    MONITOR_STORED_NEXT_OVERRIDE="${MONITOR_STORED_NEXT_OVERRIDE:-}" \
+    MONITOR_OMIT_STORED_COLUMN="${MONITOR_OMIT_STORED_COLUMN:-}" \
     "$TOOL" > "$WORK/out.txt" 2> "$WORK/err.txt"
   CASE_RC=$?
 }
@@ -154,6 +170,31 @@ grep -qF 'pc_CANARY_monitor_key' "$WORK/cfg.log" && ok "bearer token travels in 
 hdr "7. The monitor is re-armed even when the detector fails"
 run_case '' 5
 grep -q 'PATCH' "$WORK/requests.log" && ok "a failed measurement still issues the re-arm PATCH" || bad "no PATCH after a failed measurement"
+
+# --- TOG-718: the arming verification itself, measured against production ----
+# Case 1 above already proves the happy path survives the server's millisecond
+# normalisation, because the stub now normalises. These cases pin the two ways
+# the check can go wrong in the other direction.
+
+hdr "8. A stored instant that differs only in precision is the same moment"
+run_case "$FAILING_JSON" 1
+[[ "$CASE_RC" -eq 1 ]] \
+  && ok "millisecond-normalised readback preserves the detector verdict" \
+  || bad "expected the detector's exit 1, got $CASE_RC (a string compare would give 2)"
+grep -qF 'did not store' "$WORK/err.txt" \
+  && bad "a correctly armed monitor was reported as unstored" \
+  || ok "a correctly armed monitor reports no storage error"
+
+hdr "9. A genuinely different stored instant is still caught"
+MONITOR_STORED_NEXT_OVERRIDE="2026-08-30T09:00:00.000Z" run_case "$FAILING_JSON" 1
+[[ "$CASE_RC" -eq 2 ]] \
+  && ok "a wrong stored instant fails the run" || bad "expected exit 2 for a wrong instant, got $CASE_RC"
+
+hdr "10. An absent monitorNextCheckAt column is never satisfied by the echoed policy"
+MONITOR_OMIT_STORED_COLUMN=1 run_case "$FAILING_JSON" 1
+[[ "$CASE_RC" -eq 2 ]] \
+  && ok "the nested executionPolicy echo cannot stand in for the column" \
+  || bad "expected exit 2 when the column is missing, got $CASE_RC (the nested fallback fails open)"
 
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

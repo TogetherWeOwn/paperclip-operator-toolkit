@@ -141,5 +141,17 @@ mutate "the detector exit status swallowed" \
   'exit "$DETECTOR_RC"' \
   'exit 0'
 
+# TOG-718: the arming verification is the only thing standing between "we asked
+# for a clock" and "there is a clock". Both of its limbs were defective when the
+# wrapper was first run against production, so both are pinned here.
+
+mutate "arming verified by string, so a normalised instant reads as a failure" \
+  'if [[ "$STORED_EPOCH" != "$NEXT_EPOCH" ]]; then' \
+  'if [[ "$STORED_NEXT" != "$NEXT_CHECK" ]]; then'
+
+mutate "the nested policy echo accepted as proof the column was written" \
+  ".monitorNextCheckAt // empty" \
+  ".monitorNextCheckAt // .executionPolicy.monitor.nextCheckAt // empty"
+
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
