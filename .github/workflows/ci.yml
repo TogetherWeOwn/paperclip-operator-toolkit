@@ -1289,6 +1289,53 @@ jobs:
       - name: deployed-vs-repo drift suite is not vacuous (mutation-gated)
         run: ./verification/tog-723-mutation-gate.sh
 
+      # TOG-721. The question underneath a RESERVED decision: if the owner said
+      # "file the upstream reports" today, would anything actually happen?
+      #
+      # For weeks that decision was framed as ONE gate — the external-disclosure
+      # authorizer registry is empty, so provision a key and the queue clears.
+      # Measured on 2026-08-30 against this host, that framing is wrong. Filing
+      # is blocked by FOUR independent gates and the registry is only the first:
+      # the disclosure routes TOG-576 merged were never deployed (the sibling
+      # detector above reports exactly this, exit 4); the host builds the plugin
+      # route actor with no `actorSource`, which the broker's worker fails closed
+      # on; and the destination repository is outside GH_APP_REPOS. Provisioning
+      # a key opens one of four gates on a code path that does not run.
+      #
+      # It is a script and not a paragraph because three of those four facts are
+      # one deploy, one host upgrade or one env change away from silently
+      # becoming false, and a decision brief that says "four gates" will keep
+      # saying "four gates" long after two of them have opened.
+      #
+      # Offline: every gate reads through a seam, so the suite fabricates all
+      # four sides — registry and manifest from a throwaway git repo, deployed
+      # rows from a file, the host actor from a small JS file, the ceiling from
+      # an env var. No database, no plugin host, no network, no credential.
+      #
+      # SAME CAVEAT AS ITS SIBLINGS: green means the GATE works. It is not a
+      # statement about this company's filing readiness, which GitHub Actions
+      # cannot see. Run `./upstream_filing_readiness.sh check` where the database
+      # is reachable; on 2026-08-30 that run exited 4 with all four gates closed.
+      - name: upstream filing readiness gate suite
+        run: ./test_upstream_filing_readiness.sh
+
+      # And that suite is 23 green assertions about the evidence sitting under a
+      # reserved decision, which is worth nothing unverified. Each mutation
+      # removes ONE limb and requires the NAMED case to redden.
+      #
+      # It earned its place three times while being written. The nesting-depth
+      # mutation stayed GREEN: the decoy fixture glued a brace to the token, so
+      # the extractor rejected it for the wrong reason and the guard was never
+      # exercised — the case had to be re-cut with a comma ahead of the nested
+      # key. The IFS mutation went red on the baseline rather than the refusal
+      # case it was named for, because several refusal cases already expect
+      # exit 2 and would stay green while the tool refused for an unrelated
+      # reason. And the all-four-reported guard could not be pinned by deleting
+      # it at all — all four probes do record, so nothing observable changes; it
+      # is mutated on its THRESHOLD instead.
+      - name: upstream readiness suite is not vacuous (mutation-gated)
+        run: ./verification/tog-721-mutation-gate.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is
