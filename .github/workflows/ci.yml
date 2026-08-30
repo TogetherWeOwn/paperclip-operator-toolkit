@@ -1124,6 +1124,29 @@ jobs:
       - name: TOG-657 host-validation activation gate suite
         run: ./test_paperclip_activation_gate.sh
 
+      # TOG-716. capture_host_evidence.sh is what a human actually runs, once,
+      # in a scarce host window. It shipped with NO test and in NO CI job, on
+      # the strength of "verified against stubs" in a commit message — stubs
+      # that were never committed, so nothing re-verified it after the next
+      # edit. This is that suite, with those stubs committed.
+      #
+      # It also covers the TOG-716 addition: the window now captures the image
+      # digest as well as the networks. `paperclip-local` is a HOST-LOCAL image
+      # in no registry, so no agent can resolve its digest — capturing only the
+      # networks would have spent the one human window closing one red and left
+      # `image_digest_placeholder` still refusing.
+      #
+      # Every refusal is asserted BY NAME, never by exit status: the script is
+      # fail-closed on nearly every input, so rc=2 passes for fixtures that
+      # never reach the check under test. Section 9 deletes each guard in a
+      # staging copy and asserts the bad input is then ACCEPTED, so a control
+      # that stops doing anything cannot keep a green suite.
+      #
+      # Offline: podman and systemctl are stubs on PATH in mktemp. No host, no
+      # podman, no credential.
+      - name: TOG-716 host-evidence capture suite
+        run: ./test_capture_host_evidence.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is

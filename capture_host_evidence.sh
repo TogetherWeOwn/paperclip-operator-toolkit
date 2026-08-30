@@ -25,6 +25,22 @@
 #       -> exit 0   evidence written, both arrays non-empty and well-formed
 #       -> exit 2   REFUSED to write evidence, naming what failed
 #
+# IT ALSO CAPTURES THE IMAGE DIGEST, AND WHY THAT IS NOT OPTIONAL.
+# The carrier ships `Image=paperclip-local@sha256:REPLACE_WITH_APPROVED_IMAGE_
+# DIGEST`. `paperclip-local` is a HOST-LOCAL image: it is in no registry, so no
+# agent can resolve its digest — there is no podman binary, no podman socket and
+# no readable image store in any agent container (measured, TOG-715/TOG-716).
+# The digest is therefore host-gated exactly like the network units are.
+#
+# Capturing only the networks would spend the one human host window closing one
+# red and leave `image_digest_placeholder` still refusing. The board cannot
+# approve a digest nobody has read. So this script reads the CANDIDATE digest in
+# the same window.
+#
+# READING A DIGEST IS NOT APPROVING IT. `.image` is an observation for the board
+# to approve or reject; the gate keeps reading the digest from the CARRIER, and
+# there is deliberately no path by which this file supplies one.
+#
 # This script is READ-ONLY with respect to the host. It runs no install, no
 # image operation, no Quadlet change, no restart, and no restore. It only
 # reads. It is safe to run outside a maintenance window.
@@ -51,12 +67,14 @@ set -euo pipefail
 
 CONTAINER=paperclip
 OUT=host-evidence.json
+IMAGE=paperclip-local
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --container) CONTAINER="${2:?--container needs a value}"; shift 2 ;;
+    --image)     IMAGE="${2:?--image needs a value}"; shift 2 ;;
     --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
-    -h|--help)   sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,49p' "$0"; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -120,16 +138,63 @@ if [ "${n_units:-0}" -eq 0 ]; then
     "if this deployment is rootless, confirm with: systemctl --user list-unit-files '*-network.service'. If it is root-owned, re-capture with --system and record which instance was used"
 fi
 
+# --- .image — the host-local candidate digest, READ not approved -------------
+# Single-field projections only, never the whole object: `podman image inspect`
+# and `podman inspect` both retain .Config.Env, and this host's environment
+# carries nine live credentials (TOG-710). A digest is not a secret; the object
+# it comes from is.
+#
+# Two digests are read, and they answer different questions:
+#   .image.candidate  what `paperclip-local` resolves to NOW — the digest the
+#                     board would be approving into the carrier.
+#   .image.running    what the RUNNING container was started from. If the local
+#                     tag has been rebuilt since the service started, these
+#                     differ, and pinning the candidate silently changes the
+#                     running image. The board must see both to approve either.
+image_digest="$(podman image inspect "$IMAGE" --format '{{.Digest}}' 2>/dev/null)" || \
+  refuse image_inspect_failed \
+    "podman image inspect '$IMAGE' failed — the local image may be named differently or absent" \
+    "list candidates with: podman images --format '{{.Repository}}:{{.Tag}}'   then re-run with --image <name>"
+
+image_digest="${image_digest#sha256:}"
+if ! [[ "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
+  # An unresolvable digest must REFUSE, not record an empty string. The gate's
+  # digest check reads the carrier, but a human filling the carrier from an
+  # empty field here would produce `Image=paperclip-local@sha256:` — which is
+  # a malformed pin that no gate in the window would be re-run to catch.
+  refuse image_digest_unresolvable \
+    "'$IMAGE' produced no 64-hex digest (got '${image_digest:-<empty>}')" \
+    "confirm the image exists: podman image inspect $IMAGE --format '{{.Digest}}'"
+fi
+
+running_digest="$(podman inspect "$CONTAINER" --format '{{.ImageDigest}}' 2>/dev/null || true)"
+running_digest="${running_digest#sha256:}"
+[[ "$running_digest" =~ ^[0-9a-f]{64}$ ]] || running_digest=""
+
 tmp="${OUT}.partial.$$"
 trap 'rm -f "$tmp"' EXIT
 jq -n --argjson networks "$networks_json" --argjson networkUnits "$units_json" \
-  '{networks: $networks, networkUnits: $networkUnits}' > "$tmp"
+      --arg image "$IMAGE" --arg candidate "$image_digest" --arg running "$running_digest" \
+  '{networks: $networks, networkUnits: $networkUnits,
+    image: {name: $image, candidate: $candidate,
+            running: (if $running == "" then null else $running end),
+            matchesRunning: ($running != "" and $running == $candidate)}}' > "$tmp"
 
 # Prove the artifact before adopting it: a 0-byte or malformed file is the
 # exact thing the gate's fail-open check exists to prevent.
 [ -s "$tmp" ] || refuse empty_evidence "evidence file came out empty" "re-run; do not hand-edit"
 jq -e '.networks and .networkUnits' "$tmp" >/dev/null || \
   refuse malformed_evidence "evidence file lacks .networks/.networkUnits" "re-run; do not hand-edit"
+jq -e '.image.candidate | test("^[0-9a-f]{64}$")' "$tmp" >/dev/null || \
+  refuse malformed_image_evidence "evidence file lacks a 64-hex .image.candidate" "re-run; do not hand-edit"
+
+# A whole-object inspect would have retained .Config.Env. Prove no environment
+# reached the artifact rather than asserting it — this is the check that would
+# fire if someone "improved" the captures above into bare inspects.
+jq -e 'any(..; type == "object" and (has("Env") or has("Config"))) | not' "$tmp" >/dev/null || \
+  refuse credential_bearing_evidence \
+    "evidence carries a Config/Env object — a whole-object inspect leaked EnvironmentFile secrets" \
+    "capture single fields only; never a bare podman inspect"
 
 mv "$tmp" "$OUT"
 trap - EXIT
@@ -137,5 +202,17 @@ trap - EXIT
 printf 'wrote %s\n' "$OUT"
 printf '  .networks[]      %s leg(s)   %s\n' "$n_networks" "$(jq -rc '.networks' "$OUT")"
 printf '  .networkUnits[]  %s unit(s)  %s\n' "$n_units" "$(jq -rc '.networkUnits' "$OUT")"
-printf '\nNo secret is captured: only network NAMES are read, never .Config.Env.\n'
+printf '  .image           %s @sha256:%s\n' "$IMAGE" "$image_digest"
+if [ -z "$running_digest" ]; then
+  printf '                   running digest UNREADABLE — the board approves the candidate blind to drift\n'
+elif [ "$running_digest" != "$image_digest" ]; then
+  printf '                   ** DRIFT: running container is on sha256:%s\n' "$running_digest"
+  printf '                   the local tag was rebuilt since the service started; pinning the\n'
+  printf '                   candidate CHANGES the running image. Say so in the approval ask.\n'
+else
+  printf '                   matches the running container\n'
+fi
+printf '\nNo secret is captured: only names and digests are read, never .Config.Env.\n'
+printf 'The digest is READ, not approved. The board approves it; the gate reads it\n'
+printf 'from the carrier. Nothing here fills the carrier placeholder.\n'
 printf 'Feed it to the gate with:\n  HOST_EVIDENCE=%s ./paperclip_activation_gate.sh check --repo . --commit <sha>\n' "$OUT"
