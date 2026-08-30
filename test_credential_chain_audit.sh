@@ -94,14 +94,67 @@ expect_path "absent config several mkdir -p levels down is a hole" \
   HOLE "$TMP/a/b/c/config"
 
 # And the live-system instance of it, which is the one that matters for TOG-310.
+#
+# This assertion used to hardcode HOLE.  That was true when it was written and
+# is not true now: on 2026-08-27 root created /paperclip/.config/git
+# (root:root 0755) inside a sticky 1777 /paperclip/.config, which closes the
+# exact hole TOG-310 named.  A hardcoded verdict about live host state is a test
+# that goes red the day the thing it asks for gets FIXED -- and this one did,
+# taking CI red with it and blocking unrelated work.
+#
+# So the verdict is no longer written down here; it is probed, the way the rest
+# of this suite works (see the header): ask the host whether the path is really
+# substitutable, then require the audit to agree.  Two independent probes,
+# because there are two distinct ways to own that config file:
+#
+#   write-into  can this uid create /paperclip/.config/git/config itself?
+#   displace    can this uid unlink or rename the directory out of the way?
+#
+# The displace probe is `rmdir` on a NON-EMPTY directory.  It cannot succeed and
+# therefore cannot mutate anything; it is run only to read its errno.  EPERM or
+# EACCES means the parent genuinely holds, ENOTEMPTY means we had the right and
+# were stopped only by the contents.  It is guarded on non-emptiness so it can
+# never be the call that actually removes something.  Both probes must say
+# "cannot" before this suite will accept OK -- doubt resolves to HOLE.
 if [[ -d /paperclip/.config ]]; then
-  expect_path "the XDG global config path is a hole on this host" \
-    HOLE /paperclip/.config/git/config
-  rmdir /paperclip/.config/git 2>/dev/null   # audit must not have created it
-  if [[ -d /paperclip/.config/git ]]; then
-    bad "audit created /paperclip/.config/git as a side effect"
+  xdg_dir=/paperclip/.config/git
+  # Snapshot BEFORE the audit runs -- this is what makes the side-effect check
+  # below able to distinguish "the audit created it" from "it was already there".
+  xdg_pre_existed=0; [[ -d "$xdg_dir" ]] && xdg_pre_existed=1
+
+  xdg_want=HOLE
+  if [[ $xdg_pre_existed -eq 1 && -n "$(ls -A "$xdg_dir" 2>/dev/null)" ]]; then
+    xdg_probe="$xdg_dir/.tog310-probe.$$"
+    if touch "$xdg_probe" 2>/dev/null; then
+      rm -f "$xdg_probe" 2>/dev/null          # we could write into it: HOLE
+    else
+      case "$(rmdir "$xdg_dir" 2>&1)" in
+        *"Operation not permitted"*|*"Permission denied"*) xdg_want=OK ;;
+      esac
+    fi
+  fi
+  note_probe="probed: cannot write into and cannot displace"
+  [[ "$xdg_want" == HOLE ]] && note_probe="probed: substitutable by $AS_USER"
+  printf '  (%s -> expecting %s)\n' "$note_probe" "$xdg_want"
+
+  expect_path "the audit agrees with a live substitution probe on the XDG global config path" \
+    "$xdg_want" "$xdg_dir/config"
+
+  # The audit must not create the path it was asked about.  This is only
+  # answerable when the path did not already exist: the previous version ran a
+  # bare `rmdir` and then blamed the audit for any directory that survived it,
+  # which on this host means accusing the audit of having created a root-owned
+  # directory it cannot even write to.  A test that reports a false positive
+  # about its own tool gets muted, and then it is not a test.
+  if [[ $xdg_pre_existed -eq 0 ]]; then
+    rmdir "$xdg_dir" 2>/dev/null
+    if [[ -d "$xdg_dir" ]]; then
+      bad "audit created $xdg_dir as a side effect"
+    else
+      ok "audit did not create the path it was asked about"
+    fi
   else
-    ok "audit did not create the path it was asked about"
+    ok "audit did not create the path it was asked about (pre-existing, root-owned)"
   fi
 fi
 
