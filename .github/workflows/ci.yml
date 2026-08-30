@@ -99,11 +99,23 @@ name: CI
 #                                       whether permission_pins.txt still
 #                                       describes this checkout's default —
 #                                       TOG-346
+#     test_discord_job_health.sh        scripts/discord_job_health.js: whether a
+#                                       time-gated Discord job that throws NO
+#                                       error and still posts NOTHING can read
+#                                       green — the state the forbidden
+#                                       cross-company config workaround
+#                                       produces — TOG-676
 #     test_cold_start_detector.sh       cold_start_detector.sh: whether the company
 #                                       is STOPPED while the quota it was waiting
 #                                       for is already back — and whether a null
 #                                       five-hour reading is ever scored as
 #                                       headroom — TOG-487
+#     test_model_lane_probe.sh          model_lane_probe.sh: whether the cheap/
+#                                       small-fast lane is dead OR has come
+#                                       UNPINNED. A bare model id answers 200 and
+#                                       bills a PAYG leg, so status alone cannot
+#                                       see it. Covers both drifting surfaces —
+#                                       TOG-682
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
@@ -777,6 +789,44 @@ jobs:
       - name: interaction routing suite
         run: ./test_interaction_route.sh
 
+      # TOG-676. The Discord daily digest has never posted — not once, in any
+      # channel, on any day. It read as healthy for two consecutive write-ups
+      # because 37 of its 38 hourly rows are `succeeded` after returning at the
+      # vendor's hour gate without doing any work.
+      #
+      # The detector that was supposed to catch that had the same hole in a
+      # smaller form: it inferred the digest's health from its FAILURE count,
+      # so it could only ever see a digest that died loudly. §2 of this suite
+      # feeds the state the cheapest "remedy" produces — plugin_config rows
+      # added for the other three companies, every denial gone, still nothing
+      # posted — and pins NOT_DELIVERED and exit 1. The old logic exited 0
+      # there. That matters beyond tidiness: that workaround routes other
+      # companies' issue and agent counts into OUR private #control-room via
+      # resolveChannel's defaultChannelId fallback, so a green detector would
+      # have certified a cross-company data leak as the fix.
+      #
+      # §3 is the guard against the opposite error. It is byte-identical to §2
+      # except one delivery metric exists, and must exit 0 — without it, a
+      # script hardcoded to always say NOT_DELIVERED would satisfy §2 and this
+      # suite would measure nothing.
+      #
+      # Offline by construction: DISCORD_JOB_HEALTH_SOURCE_CMD replaces the
+      # database read with `cat` over a fixture, so CI needs no DATABASE_URL.
+      - name: Discord scheduled-job delivery suite
+        run: ./test_discord_job_health.sh
+
+      # TOG-676. The detector above is only ever run here, against a fixture --
+      # this workflow has no database, so CI never measures the installation.
+      # Until the monitor wrapper existed, nothing ran the detector against
+      # production on any clock, and the defect it watches is silent: the
+      # digest is time-gated, so 23 of every 24 runs record `succeeded` having
+      # posted nothing. This suite pins the wrapper's refusals -- an
+      # unmeasurable detector must never re-arm as healthy, and a failing
+      # measurement must retry on the SHORT interval rather than sleeping six
+      # hours on a known-broken feature.
+      - name: Discord delivery monitor suite
+        run: ./test_discord_job_health_monitor.sh
+
       # TOG-419. The quota brake, after it took the company off the air: a
       # sweep set heartbeat.wakeOnDemand=false on 44 of 47 agents nine seconds
       # after the owner created a task, and the owner's own Chief of Staff was
@@ -956,6 +1006,35 @@ jobs:
       - name: cold-start detector suite
         run: ./test_cold_start_detector.sh
 
+      # TOG-682. model_lane_probe.sh watches the cheap/small-fast lane — the
+      # profile status-recovery itself runs on, so a dead value blocks the
+      # mechanism that would otherwise notice.
+      #
+      # THE ASSERTION THAT MATTERS MOST IS §2, AND IT IS NOT AN UPTIME CHECK.
+      # Measured against the live gateway 2026-08-30: the pinned id
+      # `cliproxy/claude-haiku-4-5-20251001` returns 200 — and so does the BARE
+      # `claude-haiku-4-5-20251001`. A bare id is a fully working lane billed to
+      # a pay-as-you-go leg instead of the owner's subscription; the prefix is
+      # what makes it fail CLOSED. So an unpinned lane is green by every HTTP
+      # measure and is HARDER to see than a dead one. §2 pins that a bare id at
+      # 200 is an ALARM. If that ever "simplifies" to "200 is fine", the tool
+      # stops detecting the failure it was built for.
+      #
+      # §3 replays the TOG-679/TOG-680 disagreement: adapterConfig pinned and
+      # healthy while runtimeConfig.modelProfiles.cheap is undated and 400. The
+      # two surfaces drift independently and a tool that coalesced them would
+      # report the healthy one and exit 0.
+      #
+      # §4 is the blind-monitor half: an unreadable source, zero surface rows, a
+      # short read, and HTTP 000 all exit 5 and never 0. 000 is curl's "no
+      # response completed" and it parses as an integer that is not 200, so the
+      # naive ordering reports an unreachable gateway as a dead lane.
+      #
+      # Offline: the surface rows and the HTTP result both arrive through *_CMD
+      # seams, so there is no database and no gateway.
+      - name: model lane probe suite
+        run: ./test_model_lane_probe.sh
+
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
       # recording fakes for `podman` and `psql` on PATH and asserts the exact
@@ -1077,6 +1156,26 @@ jobs:
       # the plan names, which is what the shift actually breaks.
       - name: cold-start detector refusals are not vacuous (mutation-gated)
         run: ./verification/tog-487-mutation-gate.sh
+
+      # TOG-676. Same shape, and the limb at risk is the delivery check itself.
+      # It reads as redundant with the failure count — every digest that has
+      # ever broken here broke loudly — so "simplify it away" is the obvious
+      # edit, and it is the edit that makes this detector go green on the one
+      # remedy that leaks other companies' data into our private #control-room.
+      # Mutation 2 exists for the opposite error: a detector that never
+      # believes a delivery satisfies the NOT_DELIVERED case while measuring
+      # nothing, so a real send is pinned green too.
+      - name: Discord delivery proof is not vacuous (mutation-gated)
+        run: ./verification/tog-676-mutation-gate.sh
+
+      # TOG-676, the wrapper half. The limb at risk here is the UNKNOWN branch:
+      # a wrapper that reports an unmeasurable detector as healthy looks like a
+      # tidier comment and silently converts the whole monitor into a false
+      # green. This gate also refuses to score a mutant that only ever landed
+      # in a comment -- the first draft "killed" a mutation that had edited
+      # header prose and changed no behaviour at all.
+      - name: Discord delivery monitor is not vacuous (mutation-gated)
+        run: ./verification/tog-676-monitor-mutation-gate.sh
 
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the

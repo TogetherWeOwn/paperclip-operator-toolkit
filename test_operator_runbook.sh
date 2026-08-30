@@ -306,12 +306,59 @@ if [[ -f "$REAL" ]]; then
     || bad "wrong class in items: $(tr '\n' ' ' <<<"$bad_class")"
   bad_blast="$(jq -r '.items | to_entries[] | select(.value.blast < 1 or .value.blast > 4) | .key' "$REAL")"
   [[ -z "$bad_blast" ]] && ok "every blast radius is in 1..4" || bad "bad blast radius: $bad_blast"
-  # An identifier may not appear in two classes at once.
-  dupes="$(jq -r '[(.items|keys[]),(.decisions|keys[]),(.misrouted|keys[])] | group_by(.) | map(select(length>1)) | flatten | unique[]' "$REAL")"
+  # An identifier may not appear in two classes at once. `closed` is included:
+  # a retired line that is ALSO still live is the ambiguity that would let an
+  # operator read "done" and "do this" about the same ask on one page.
+  dupes="$(jq -r '[(.items|keys[]),(.decisions|keys[]),(.misrouted|keys[]),((.closed//{})|keys[])] | group_by(.) | map(select(length>1)) | flatten | unique[]' "$REAL")"
   [[ -z "$dupes" ]] && ok "no identifier is classified twice" || bad "classified twice: $dupes"
+  # A retired line must carry the MEASUREMENT that retired it. Without it the
+  # section degrades into a list of things someone decided to stop tracking,
+  # and TOG-174 — cancelled with the key still un-rotated — is precisely the
+  # entry that must never be read as "completed".
+  thin="$(jq -r '(.closed//{}) | to_entries[] | select(((.value.outcome//"")|length)==0 or ((.value.evidence//"")|length)==0) | .key' "$REAL")"
+  [[ -z "$thin" ]] && ok "every retired line carries an outcome and its evidence" \
+    || bad "retired lines missing outcome/evidence: $(tr '\n' ' ' <<<"$thin")"
   "$TOOL" render </dev/null >/dev/null 2>&1 && ok "shipped classification renders" || bad "shipped classification fails to render"
 else
   bad "shipped classification file not found at $REAL"
+fi
+
+# ---------------------------------------------------------------------------
+section "8. retired lines are recorded, never silently dropped"
+# The failure this pins: a line leaves the live list and simply vanishes, so the
+# next operator reads its absence as "never asked" or "already done". One entry
+# in the shipped file (TOG-174) was CANCELLED WITHOUT THE WORK BEING DONE, so
+# the distinction is load-bearing, not decorative.
+CLOSED_ONE="$STAGE/closed_one.json"
+cat >"$CLOSED_ONE" <<'JSON'
+{ "items": { "TOG-1": { "class":"CAPABILITY","blast":1,"credential":"root",
+    "changes":"c","verify":"v","undo":"u","moved":true } },
+  "decisions": {}, "misrouted": {},
+  "closed": { "TOG-2": { "blast":1,"outcome":"cancelled, NOT performed","evidence":"probe X measured it unchanged" } } }
+JSON
+out="$("$TOOL" render --classification "$CLOSED_ONE" </dev/null 2>&1)"
+grep -q 'TOG-2' <<<"$out" && ok "a retired line still appears in the document" \
+  || bad "a retired line vanished from the render — absence reads as 'never asked'"
+grep -q 'cancelled, NOT performed' <<<"$out" && ok "its outcome is carried" || bad "outcome dropped"
+grep -q 'probe X measured it unchanged' <<<"$out" && ok "its evidence is carried" || bad "evidence dropped"
+# It must NOT be renumbered into the live list — that would send an operator to
+# redo finished work, or worse, treat a live line as finished.
+grep -q '### 2\. TOG-2' <<<"$out" && bad "retired line was numbered into the live runbook list" \
+  || ok "retired line is not numbered into the live list"
+# And the live count must not include it.
+grep -q '| Runbook lines (capability requests) | 1 |' <<<"$out" \
+  && ok "the live count excludes retired lines" || bad "retired line leaked into the live count"
+# Empty decisions must SAY so, not render a bare heading that reads as
+# "nothing is reserved to the owner".
+grep -q '_None open._' <<<"$out" && ok "an empty decisions list says so explicitly" \
+  || bad "empty decisions rendered as a bare heading"
+# Back-compat: a classification with no `closed` key at all must still render.
+NOCLOSED="$STAGE/noclosed.json"
+jq 'del(.closed)' "$CLOSED_ONE" >"$NOCLOSED"
+if "$TOOL" render --classification "$NOCLOSED" </dev/null >/dev/null 2>&1; then
+  ok "a classification with no closed section still renders"
+else
+  bad "render broke on a classification without a closed section"
 fi
 
 printf '\n== totals\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"

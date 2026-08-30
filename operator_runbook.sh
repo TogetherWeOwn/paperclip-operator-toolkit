@@ -239,6 +239,12 @@ cmd_render() {
     (.items | to_entries | sort_by(.value.blast, .key)) as $items
     | (.decisions | to_entries | sort_by(.key)) as $decisions
     | (.misrouted | to_entries | sort_by(.key)) as $misrouted
+    # Retired lines. A runbook that silently DROPS a line reads, to the next
+    # operator, as "this was never asked" — and one of the entries below was
+    # cancelled without the underlying change ever being made, which is exactly
+    # the state that must not disappear quietly. So closure is recorded with the
+    # measurement that closed it, and never re-numbered into the live list.
+    | ((.closed // {}) | to_entries | sort_by(.key)) as $closed
     # The lines whose standing interaction has been WITHDRAWN. Numbered here,
     # from the same sorted array the body is rendered from, so the reference
     # cannot drift from the line it points at the way a hand-written list does.
@@ -266,6 +272,7 @@ cmd_render() {
     + "| — of those, whose ONLY home is this document | \($only_home|length) |\n"
     + "| Genuine decisions, correctly reserved | \($decisions|length) |\n"
     + "| Misrouted — an agent can answer these | \($misrouted|length) |\n"
+    + "| Retired since the last revision (recorded, not deleted) | \($closed|length) |\n"
     + "\n"
     + "\($note)\n"
     + "\n---\n\n"
@@ -283,13 +290,28 @@ cmd_render() {
     + "## Not runbook lines — genuine decisions\n\n"
     + "These name a reserved matter and stay in the decision queue. They are listed\n"
     + "here only so the queue can be reconciled against one document.\n\n"
-    + ([ $decisions[] | "- **\(.key)** — _reserved clause \(.value.clause)._ \(.value.summary)" ] | join("\n"))
+    # An EMPTY list under this heading would read as "nothing is reserved to the
+    # owner", which is the opposite of true — it means every reserved question
+    # that was open has been answered. Say which one it is.
+    + (if ($decisions|length) == 0
+       then "_None open._ Every decision previously listed here has been answered; each is\nrecorded in the retired section below with its outcome. This is not a statement\nthat nothing is reserved — the five reserved matters are unchanged."
+       else ([ $decisions[] | "- **\(.key)** — _reserved clause \(.value.clause)._ \(.value.summary)" ] | join("\n")) end)
     + "\n\n---\n\n"
     + "## Not runbook lines — misrouted\n\n"
     + "No agent is blocked on the owner for these. Each reached the owner because its\n"
     + "author hand-typed `board_only`. They should be re-cut as `board_or_agents`\n"
     + "and answered internally.\n\n"
-    + ([ $misrouted[] | "- **\(.key)** — resolvable by \(.value.resolver). \(.value.summary)" ] | join("\n"))
+    + (if ($misrouted|length) == 0
+       then "_None open._ All three previously listed here were answered internally on\n2026-08-27; see the retired section below."
+       else ([ $misrouted[] | "- **\(.key)** — resolvable by \(.value.resolver). \(.value.summary)" ] | join("\n")) end)
+    + (if ($closed|length) > 0
+       then "\n\n---\n\n"
+          + "## Retired — do not work these, but do not assume they were done\n\n"
+          + "These left the live list since the last revision. Each carries the measurement\n"
+          + "that retired it, because \"absent from the runbook\" and \"actually completed\" are\n"
+          + "not the same thing and one of the entries below is the difference.\n\n"
+          + ([ $closed[] | "- **\(.key)** — \(.value.outcome)\n  \(.value.evidence)" ] | join("\n"))
+       else "" end)
     + "\n"
   ' "$CLASSIFICATION"
 }
