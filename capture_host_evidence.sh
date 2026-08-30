@@ -72,6 +72,17 @@
 # ===========================================================================
 set -euo pipefail
 
+# `--help` used to print `sed -n '2,49p'`, a hard-coded window onto the header.
+# Documenting --system pushed the header down six lines and silently truncated
+# the help mid-sentence -- it stopped printing the READ-ONLY paragraph, which is
+# the one line an operator checks before running this in a host window. Print
+# the contiguous comment block after the shebang and stop at the first line of
+# code, so the range can never drift out of sync with the header again. Same fix
+# dropchannel_scan.sh:1387 already carries, for the identical failure.
+print_header() {
+  awk 'NR>=2 { if ($0 ~ /^#/) { print; next } exit }' "${BASH_SOURCE[0]}"
+}
+
 CONTAINER=paperclip
 OUT=host-evidence.json
 IMAGE=paperclip-local
@@ -91,7 +102,7 @@ while [ $# -gt 0 ]; do
     --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
     --user)      SYSTEMD_SCOPE=--user; shift ;;
     --system)    SYSTEMD_SCOPE=--system; shift ;;
-    -h|--help)   sed -n '2,49p' "$0"; exit 0 ;;
+    -h|--help)   print_header; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done

@@ -83,6 +83,14 @@
 # ===========================================================================
 set -euo pipefail
 
+# `--help` printed `sed -n '2,80p'`, a hard-coded window that already stopped
+# three lines short of the header -- cutting mid-sentence, in the paragraph that
+# tells the operator this never reads or expands the credential file. Print the
+# comment block and stop at the first line of code, so the range cannot drift.
+print_header() {
+  awk 'NR>=2 { if ($0 ~ /^#/) { print; next } exit }' "${BASH_SOURCE[0]}"
+}
+
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 CARRIER="$HERE/deploy/paperclip-immutable/paperclip.container"
 RUN_CARRIER="$HERE/deploy/paperclip-immutable/agent-run.container.in"
@@ -109,7 +117,7 @@ while [ $# -gt 0 ]; do
     --out)           OUT="${2:?--out needs a value}"; shift 2 ;;
     --fixture-image) FIXTURE_IMAGE="${2:?--fixture-image needs a value}"; shift 2 ;;
     --generator)     GENERATOR="${2:?--generator needs a value}"; shift 2 ;;
-    -h|--help)       sed -n '2,80p' "$0"; exit 0 ;;
+    -h|--help)       print_header; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done

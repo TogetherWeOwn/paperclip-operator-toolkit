@@ -446,5 +446,57 @@ mutate_and_expect_red \
   's/refuse no_network_units/: no_network_units_DISABLED/' \
   --units ''
 
+# =========================================================================
+section "10. --help prints the WHOLE header, not a hard-coded window"
+# =========================================================================
+# WHY. `--help` printed `sed -n '2,49p'`, a fixed line range. Documenting
+# --system pushed the header down six lines and the help silently truncated,
+# dropping the READ-ONLY paragraph -- the one thing an operator checks before
+# running this in a scarce host window. A hard-coded range is a claim about
+# line numbers that no test held, so editing the header broke the help and
+# every suite stayed green. Assert the CONTRACT (help == header) rather than
+# any particular range, so the next header edit cannot reintroduce it.
+help_covers_header() {
+  # $1 = script path. Compares --help output against the contiguous comment
+  # block after the shebang, which is what the header IS.
+  local s="$1" d; d="$(mktemp -d)"
+  bash "$s" --help >"$d/help" 2>&1
+  awk 'NR>=2 { if ($0 ~ /^#/) { print; next } exit }' "$s" >"$d/header"
+  cmp -s "$d/help" "$d/header"; local rc=$?
+  rm -rf "$d"; return $rc
+}
+
+for s in "$SCRIPT" "$HERE/capture_host_render.sh"; do
+  n="$(basename "$s")"
+  if help_covers_header "$s"; then
+    ok "$n --help prints the entire header"
+  else
+    bad "$n --help prints the entire header" \
+        "help output and header differ — a truncating range is back"
+  fi
+done
+
+# The operator-facing guarantee, asserted by content and not by line count:
+# whatever else changes, --help must still say this script only reads.
+./capture_host_evidence.sh --help 2>/dev/null | grep -q 'READ-ONLY with respect to the host' \
+  && ok "--help still states the script is READ-ONLY" \
+  || bad "--help still states the script is READ-ONLY" "the READ-ONLY paragraph is not in the help output"
+
+# MUTATION GATE. A truncating help is exactly what shipped, so prove this
+# section FIRES on it rather than passing because both sides are empty.
+D="$(mktemp -d)"
+sed 's/-h|--help)   print_header; exit 0 ;;/-h|--help)   sed -n "2,49p" "$0"; exit 0 ;;/' \
+    "$SCRIPT" > "$D/mutated.sh"
+chmod +x "$D/mutated.sh"
+if cmp -s "$SCRIPT" "$D/mutated.sh"; then
+  bad "MUTATION: the help contract is load-bearing" "mutation did not apply — anchor drifted"
+elif help_covers_header "$D/mutated.sh"; then
+  bad "MUTATION: restoring the hard-coded range makes the help test go red" \
+      "a truncated help still compared equal — the check is inert"
+else
+  ok "MUTATION: restoring the hard-coded range makes the help test go red"
+fi
+rm -rf "$D"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
