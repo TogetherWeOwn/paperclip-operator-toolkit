@@ -1177,6 +1177,45 @@ jobs:
       - name: Discord delivery monitor is not vacuous (mutation-gated)
         run: ./verification/tog-676-monitor-mutation-gate.sh
 
+      # TOG-720, the third half: the command itself. The two gates above prove
+      # the wrapper and the detector behave. Neither proves the monitor can
+      # still FIND them. TOG-720's heartbeat command lives in prose -- in the
+      # card description and, separately, in its monitorNotes -- and prose has
+      # no gate that ever executes it. On 2026-08-30 those two copies disagreed
+      # and one told the reader to run the wrapper bare from a shared workspace
+      # that sits on whatever branch the last run left; the script is absent
+      # there, so it exited 127, and a wrapper that never runs never re-arms.
+      # That is a monitor that stops permanently and silently, with nothing red.
+      #
+      # The specific hole this closes: the steps above run both scripts BY PATH
+      # from this file. Rename either one and update ci.yml in the same commit
+      # -- the careful thing to do -- and every check stays green while the
+      # recorded command starts exiting 128. This gate reads the paths out of
+      # the checked-in copy of the command and proves they still resolve and
+      # still run as a closed set, with rename/move/flatten mutants to prove it
+      # can go red.
+      #
+      # The closed-set limb runs the wrapper twice and requires the two runs
+      # to DISAGREE: once with the detector present, once with it deleted. It
+      # used to run `--help`, which returns in the argument loop sixteen lines
+      # before the wrapper resolves its detector -- so it passed on a directory
+      # holding the wrapper and nothing else, and the one limb advertised as
+      # catching what existence checks miss was the one limb that could not
+      # fail. The mutant that isolates it (detector moved to lib/ AND the card
+      # updated to match, which is the careful edit) is now mutant 4, and a
+      # fifth mutant re-breaks the probe itself so the regression cannot
+      # return unnoticed.
+      #
+      # A third run -- the DECOY control -- adds a file the recorded command
+      # does not name and requires the outcome to be UNCHANGED. Requiring the
+      # two runs to differ proves the wrapper is sensitive to something about
+      # the tree, not that the something is the detector: a wrapper that
+      # resolves nothing but echoes a file COUNT differs between the two runs
+      # (the negative tree has one file fewer) and passed the difference-only
+      # rule. That is mutant 6, and it is what the decoy limb exists to catch.
+      - name: The TOG-720 monitor's recorded command still runs from a clean tree
+        run: ./verification/tog-720-recorded-command.sh
+
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
       # difference changes what the plugin is ALLOWED TO DO. The host adopts a
