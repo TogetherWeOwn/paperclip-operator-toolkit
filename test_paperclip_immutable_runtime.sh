@@ -83,6 +83,7 @@ mapfile -t generated_values < <(python3 - \
   "$GENERATOR_EVIDENCE_CANDIDATE" "$GENERATOR_EVIDENCE_TREE" "$GENERATOR_EVIDENCE_PARENT" <<'PY'
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -92,6 +93,15 @@ evidence = json.loads(evidence_path.read_text())
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+IMAGE_LINE = re.compile(rb"(?m)^Image=.*$")
+
+def normalized_digest(path):
+    # Collapse every `Image=` line to one constant, mirroring exactly what
+    # capture_host_render.sh does before handing the unit to the generator.
+    return hashlib.sha256(
+        IMAGE_LINE.sub(b"Image=<SUBSTITUTED>", path.read_bytes())
+    ).hexdigest()
 
 candidate = evidence["candidate"]
 if candidate["commit"] != expected_commit:
@@ -105,8 +115,37 @@ expected = {
     "server": candidate["serverCarrierSha256"],
     "run": candidate["runCarrierSha256"],
 }
+norm_actual = {"server": normalized_digest(server_path), "run": normalized_digest(run_path)}
+norm_expected = {
+    "server": candidate.get("serverCarrierNormalizedSha256"),
+    "run": candidate.get("runCarrierNormalizedSha256"),
+}
+
 for key in ("server", "run"):
-    if expected[key] != actual[key]:
+    # The raw bytes moving is tolerated ONLY when the sole difference is the
+    # `Image=` line, which capture_host_render.sh substitutes away before the
+    # generator ever sees the unit — so it cannot have changed what was
+    # rendered. Sharing a normalized hash proves the files are identical
+    # everywhere else, because normalization rewrites only `^Image=` lines.
+    #
+    # This exists so that pinning the board-approved digest (step 3 of the
+    # activation sequence) does not re-stale a fresh render and cost a SECOND
+    # scarce human host window. Any edit outside that one line moves the
+    # normalized hash too and is STALE, as it must be.
+    #
+    # Computed as a flag rather than `continue`d on: an early continue here
+    # would also skip the exitCode check below, silently accepting a render
+    # whose generator failed.
+    #
+    # ONE expression, deliberately. An earlier two-clause version read
+    #     norm_expected[key] is not None and norm_expected[key] == norm_actual[key]
+    # and deleting the equality clause left `is not None` — which is TRUE for
+    # every fresh render, so the relaxation would have swallowed ANY carrier
+    # edit. A guard whose parts fail open when separated should not have parts.
+    # No None check is needed: norm_actual is always a 64-hex digest, so a
+    # missing (None) norm_expected simply compares unequal and stays STALE.
+    image_line_only = norm_expected[key] == norm_actual[key]
+    if expected[key] != actual[key] and not image_line_only:
         # The render is a HOST-produced artifact: it records what the installed
         # Quadlet generator actually emitted for one exact set of carrier bytes.
         # A carrier edit therefore invalidates it, and the ONLY way to restore

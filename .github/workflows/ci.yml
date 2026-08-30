@@ -1169,6 +1169,63 @@ jobs:
       - name: TOG-716 host-evidence capture suite
         run: ./test_capture_host_evidence.sh
 
+      # TOG-716. The SECOND operator script for the same host window.
+      # `capture_host_render.sh` re-runs the Quadlet generator against the
+      # two-leg carrier, which no host has ever generated: the checked-in
+      # render was captured when the carrier declared ONE leg, so the binding
+      # suite above is red and cannot go green from inside a container.
+      #
+      # Its decisive case is the one a naive script gets wrong. If the
+      # generator emits ONE leg for a two-leg carrier, the script must WRITE
+      # THAT DOWN and exit 0 while shouting — never refuse, never adjust the
+      # output toward what we hoped for. A refusal there is indistinguishable
+      # from a broken generator, and an operator would "fix" the carrier to
+      # make it stop. Section 4 of the suite pins exactly that: rc=0, the
+      # render written, the verdict shouted, and requiredTokens honestly
+      # holding one leg.
+      #
+      # Section 8 deletes each guard in a staging copy — and asserts the
+      # UNMUTATED script refuses that fixture FIRST. Without the baseline half,
+      # "not refused after deletion" reads the same whether the guard is absent
+      # or merely inert, which is how the first credential guard here (it
+      # scanned the wrong side of KEY=value) scored green while section 6 was
+      # red.
+      #
+      # Offline: podman, systemctl and the Quadlet generator are stubs on PATH
+      # in mktemp; the fixture is a throwaway git repo holding the real
+      # carriers. No host, no podman, no credential.
+      - name: TOG-716 host-render capture suite
+        run: ./test_capture_host_render.sh
+
+      # TOG-716. A relaxation of a fail-closed check, and its guard.
+      #
+      # Pinning the board-approved digest (step 3 of activation) edits
+      # `Image=`, which changes the carrier bytes and would re-stale a
+      # just-captured render — demanding a SECOND scarce human host window for
+      # a render that could not have come out differently, since the capture
+      # substitutes `Image=` away before the generator sees the unit. So the
+      # binding now also compares a NORMALIZED hash and tolerates a raw
+      # mismatch when only `^Image=` lines moved.
+      #
+      # That is a hole in a check whose whole job is to fail closed, so it is
+      # mutated in BOTH directions: an Image= edit alone must be accepted, and
+      # a dropped Network= leg, a flipped ReadOnly, a run-carrier edit, an
+      # Image= edit BUNDLED with a capability edit, and a failed generator must
+      # all still be refused.
+      #
+      # It has already earned its place twice. It caught the relaxation written
+      # as two `and`-joined clauses — deleting the comparison left `is not
+      # None`, true for every render, which would have swallowed ANY carrier
+      # edit. And section 6 checks its own mutation by CONTENT, because this
+      # mutation rewrites a line in place and a line-count check reports
+      # "matched nothing" on a mutation that worked.
+      #
+      # Offline: fixture carriers and a synthesized render in mktemp, run
+      # against the binding logic extracted from the suite itself so a copy
+      # cannot drift. No host, no podman, no credential.
+      - name: TOG-716 carrier/render binding normalization
+        run: ./test_render_binding_normalization.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is
