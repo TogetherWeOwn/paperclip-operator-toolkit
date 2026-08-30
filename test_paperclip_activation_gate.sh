@@ -85,8 +85,16 @@ tar -tzf backup.tgz
 systemctl --user daemon-reload
 podman image inspect x
 EOF
-  touch "$r/deploy/paperclip-immutable/paperclip.network"
-  touch "$r/deploy/paperclip-immutable/omniroute.network"
+  # Real units, not `touch`ed placeholders. An empty file satisfies `[ -f ]`
+  # while Quadlet generates nothing from it, so a fixture built with `touch`
+  # would pin the very fail-open the gate is supposed to refuse.
+  mkunit "$r/deploy/paperclip-immutable/paperclip.network" systemd-paperclip
+  mkunit "$r/deploy/paperclip-immutable/omniroute.network" systemd-omniroute
+}
+
+# A `.network` unit that actually declares a [Network] section.
+mkunit() {  # <path> <networkname>
+  printf '[Unit]\nDescription=%s leg\n\n[Network]\nNetworkName=%s\n' "$2" "$2" > "$1"
 }
 
 # Host evidence is captured from TWO different namespaces, and conflating them
@@ -217,7 +225,22 @@ jq -n '{networks:["systemd-paperclip","systemd-omniroute"],
         networkUnits:["paperclip.network"]}' > "$TMP/ev2.json"
 refuses_because "a declared network with no unit is refused" network_unit_absent \
   env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
-touch "$R/deploy/paperclip-immutable/omniroute.network"
+
+# EXISTENCE IS NOT A UNIT. `touch omniroute.network` satisfies a file-existence
+# check and clears network_units, while Quadlet generates nothing from a file
+# with no [Network] section — the service fails to START exactly as if the unit
+# were absent. Measured on this gate before the fix: an empty shipped file
+# turned network_unit_absent into PASS [network_units]. The one-line "fix" for
+# a red gate is `touch`, which is precisely why this has to refuse.
+: > "$R/deploy/paperclip-immutable/omniroute.network"
+refuses_because "an EMPTY shipped .network file does not count as a unit" network_unit_empty \
+  env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the empty-unit refusal names the green-reading failure" "while a file-existence check reads GREEN" \
+  env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
+# A unit with a real [Network] section does count.
+mkunit "$R/deploy/paperclip-immutable/omniroute.network" systemd-omniroute
+says "a shipped unit WITH a [Network] section resolves" "PASS  [network_units]" \
+  env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 # ---------------------------------------------------------------------------
@@ -378,6 +401,17 @@ mutation_check "deleting gate_pod makes the Pod= test go green" \
   '/^  gate_pod /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
+# The empty-unit refusal needs evidence in which the unit is NOT installed on
+# the host, so the shipped file is what the gate falls back to. MUT2 supplies
+# it; without this the deleted gate would still be caught by network_unit_absent
+# and the mutation would prove nothing.
+MUT2() { HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" check --repo "$R" "$@"; }
+: > "$R/deploy/paperclip-immutable/omniroute.network"
+mutation_check "deleting the [Network]-section check makes the empty-unit test go green" \
+  '/if grep -qE .*Network.* "\$shipped"; then/s/.*/      if true; then/' \
+  MUT2 --commit "$GOOD_COMMIT" --auth "$AUTH"
+mkunit "$R/deploy/paperclip-immutable/omniroute.network" systemd-omniroute
+
 hdr "10. The real repo carrier, as it stands today, is REFUSED"
 # The point of the whole exercise: the live candidate must not pass yet.
 if [ -f "$HERE/deploy/paperclip-immutable/paperclip.container" ]; then
@@ -387,14 +421,38 @@ if [ -f "$HERE/deploy/paperclip-immutable/paperclip.container" ]; then
   if grep -qF '[image_digest_placeholder]' <<<"$o"; then ok "  … because the digest is still a placeholder"
   else bad "  … expected the placeholder refusal"; fi
   # TOG-714 declared the second leg, so the carrier must no longer be refused
-  # for DROPPING one. Assert the absence positively: if this ever comes back,
-  # the carrier regressed to a form that recreates with green health and no
-  # model gateway.
-  if grep -qF '[network_leg_dropped]' <<<"$o"; then bad "  … the dropped-leg refusal is back — the carrier regressed to one leg"
-  else ok "  … and NOT for a dropped leg: both legs are declared (TOG-714)"; fi
-  if grep -qE '\[network_leg_(mismatched|duplicated|unmanaged)\]|\[network_unit_absent\]' <<<"$o"
-  then bad "  … unexpected network refusal on the two-leg carrier"
-  else ok "  … and no other network refusal stands against two-leg evidence"; fi
+  # for DROPPING one.
+  #
+  # ASSERT THE LEGS BY IDENTITY, NOT BY THE ABSENCE OF A REFUSAL STRING. The
+  # first cut of this section was two negative greps ("no [network_leg_dropped]"
+  # + "no other network refusal"). Measured: deleting EVERY Network= key from
+  # the carrier — strictly worse than the one-leg carrier this issue exists to
+  # fix — still scored 51 passed, 0 failed, printing "both legs are declared".
+  # A zero-leg carrier refuses as [network_undeclared], which is in neither
+  # grep, so both assertions passed on absence. Same class as the count-based
+  # parity bug in 45bd90d9: the check answered a question nobody asked.
+  #
+  # So: read the legs the carrier actually declares, render them into podman's
+  # namespace, and compare that SET against the host evidence the suite feeds
+  # the gate. Nothing here can pass on a missing key.
+  declared_legs="$(sed -n 's/^Network=//p' "$HERE/deploy/paperclip-immutable/paperclip.container" \
+    | sed 's/^\(.*\)\.network$/systemd-\1/' | sort -u)"
+  host_legs="$(jq -r '.networks[]' "$EV" | sort -u)"
+  if [ "$declared_legs" = "$host_legs" ]; then
+    ok "  … and the carrier declares exactly the host's legs: $(tr '\n' ' ' <<<"$host_legs")"
+  else
+    bad "  … carrier legs != host legs. carrier renders [$(tr '\n' ' ' <<<"$declared_legs")]; host holds [$(tr '\n' ' ' <<<"$host_legs")]"
+  fi
+  # And the OmniRoute leg specifically — the one whose loss leaves /api/health
+  # GREEN while every agent loses inference — named in the UNIT namespace.
+  if grep -qxF 'Network=omniroute.network' "$HERE/deploy/paperclip-immutable/paperclip.container"
+  then ok "  … including Network=omniroute.network, in the unit namespace (TOG-714)"
+  else bad "  … the OmniRoute leg is not declared as omniroute.network"; fi
+  # Only now is the absence of a network refusal meaningful: the positive
+  # assertions above have already proven the keys are present and correct.
+  if grep -qE '\[network_(leg_(dropped|mismatched|duplicated|unmanaged)|unit_absent|undeclared)\]' <<<"$o"
+  then bad "  … unexpected network refusal on the two-leg carrier"; grep -E 'REFUSED \[network' <<<"$o" | sed 's/^/        /'
+  else ok "  … and no network gate refuses it"; fi
 else
   ok "in-tree carrier not present in this checkout (skipped)"
 fi

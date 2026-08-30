@@ -412,8 +412,24 @@ gate_networks() {
     case "$n" in *.network) ;; *) continue ;; esac
     found=0
     for u in "${units[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
-    # A unit may also ship in the deploy directory.
-    [ -f "$REPO/deploy/paperclip-immutable/$n" ] && found=1
+    # A unit may also ship in the deploy directory — but EXISTENCE IS NOT A
+    # UNIT. `touch omniroute.network` satisfies `[ -f ]` and clears this gate,
+    # while Quadlet generates nothing from a file with no [Network] section and
+    # the service fails to start exactly as if the file were absent. That is
+    # the failure mode this gate exists to stop, wearing a passing score. So
+    # the shipped file only counts if it actually declares a [Network] section.
+    local shipped="$REPO/deploy/paperclip-immutable/$n"
+    if [ "$found" -eq 0 ] && [ -f "$shipped" ]; then
+      if grep -qE '^\[Network\][[:space:]]*$' "$shipped"; then
+        found=1
+      else
+        refuse network_unit_empty \
+          "deploy/paperclip-immutable/$n exists but declares no [Network] section ($(wc -c <"$shipped") bytes). Quadlet generates nothing from it; the service fails to START exactly as if the unit were absent, while a file-existence check reads GREEN" \
+          "give $n a real [Network] section, or install the unit on the host and capture it in HOST_EVIDENCE .networkUnits[]"
+        missing=1
+        continue
+      fi
+    fi
     if [ "$found" -eq 0 ]; then
       refuse network_unit_absent \
         "Network=$n has no .network unit — none installed on the host and none shipped in deploy/paperclip-immutable/. The service generates cleanly and fails to START" \
