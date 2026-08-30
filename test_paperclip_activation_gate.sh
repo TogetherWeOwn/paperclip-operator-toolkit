@@ -58,8 +58,8 @@ mkrepo() {
 [Container]
 Image=paperclip-local@sha256:$GOOD_DIGEST
 ContainerName=paperclip
-Network=systemd-paperclip
-Network=systemd-omniroute
+Network=paperclip.network
+Network=omniroute.network
 ReadOnly=true
 ReadOnlyTmpfs=false
 Tmpfs=/tmp:rw,nosuid,nodev,noexec,size=24g,mode=1777
@@ -85,14 +85,22 @@ tar -tzf backup.tgz
 systemctl --user daemon-reload
 podman image inspect x
 EOF
-  touch "$r/deploy/paperclip-immutable/systemd-paperclip"
-  touch "$r/deploy/paperclip-immutable/systemd-omniroute"
+  touch "$r/deploy/paperclip-immutable/paperclip.network"
+  touch "$r/deploy/paperclip-immutable/omniroute.network"
 }
 
-mkevidence() {  # <file> <net...>
+# Host evidence is captured from TWO different namespaces, and conflating them
+# is the bug this fixture now pins. `.networks[]` is what `podman inspect`
+# reports — Quadlet's generated `systemd-<stem>` names. `.networkUnits[]` is
+# what `systemctl list-unit-files` reports — the `<stem>.network` unit names,
+# which is also what the carrier declares.
+mkevidence() {  # <file> <unit-stem...>   e.g. mkevidence f paperclip omniroute
   local f="$1"; shift
-  local arr; arr="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
-  jq -n --argjson n "$arr" '{networks:$n, networkUnits:$n}' > "$f"
+  local nets units
+  nets="$(printf 'systemd-%s\n' "$@" | jq -R . | jq -s .)"
+  units="$(printf '%s.network\n' "$@" | jq -R . | jq -s .)"
+  jq -n --argjson n "$nets" --argjson u "$units" \
+    '{networks:$n, networkUnits:$u}' > "$f"
 }
 
 mkauth() {  # <file> <commit> <digest> <from> <to> [ciso] [devops]
@@ -103,7 +111,7 @@ mkauth() {  # <file> <commit> <digest> <from> <to> [ciso] [devops]
 }
 
 R="$TMP/repo"; mkrepo "$R"
-EV="$TMP/ev.json"; mkevidence "$EV" systemd-paperclip systemd-omniroute
+EV="$TMP/ev.json"; mkevidence "$EV" paperclip omniroute
 AUTH="$TMP/auth.json"; mkauth "$AUTH" "$GOOD_COMMIT" "$GOOD_DIGEST" \
   "2026-09-01T02:00:00Z" "2026-09-01T06:00:00Z"
 # Inside the window.
@@ -166,7 +174,7 @@ sed -i 's/size=20g/size=24g/' "$R/deploy/paperclip-immutable/paperclip.container
 
 hdr "6. The network gate — the one that fails GREEN"
 cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c3.bak"
-sed -i '/^Network=systemd-omniroute$/d' "$R/deploy/paperclip-immutable/paperclip.container"
+sed -i '/^Network=omniroute.network$/d' "$R/deploy/paperclip-immutable/paperclip.container"
 refuses_because "a carrier declaring 1 leg against a 2-leg host is refused" network_leg_dropped \
   run --commit "$GOOD_COMMIT" --auth "$AUTH"
 says "the refusal names the green-health failure mode" "loopback /api/health stays GREEN" \
@@ -179,33 +187,69 @@ cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 # render one real leg, so a carrier that repeats a name reaches leg parity on
 # arithmetic while still dropping the OmniRoute leg at recreation — the exact
 # outage the gate exists to stop, wearing a passing score.
-sed -i 's/^Network=systemd-omniroute$/Network=systemd-paperclip/' "$R/deploy/paperclip-immutable/paperclip.container"
+sed -i 's/^Network=omniroute.network$/Network=paperclip.network/' "$R/deploy/paperclip-immutable/paperclip.container"
 refuses_because "a carrier repeating one network name does not reach leg parity" network_leg_duplicated \
   run --commit "$GOOD_COMMIT" --auth "$AUTH"
-says "the duplicate refusal names the leg that is actually dropped" "renders 1 real leg" \
+says "the duplicate refusal names the leg that is actually dropped" "render to only 1 real leg" \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the duplicate refusal names the RENDERED name that collides" "'systemd-paperclip' is named twice" \
   run --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 # Parity must be judged on identity, not arithmetic: a carrier whose legs are
 # individually well-formed but name a network the host does not hold is still
 # not the running topology.
-sed -i 's/^Network=systemd-omniroute$/Network=systemd-elsewhere/' "$R/deploy/paperclip-immutable/paperclip.container"
-mkevidence "$TMP/ev3.json" systemd-paperclip systemd-omniroute
-touch "$R/deploy/paperclip-immutable/systemd-elsewhere"
+sed -i 's/^Network=omniroute.network$/Network=elsewhere.network/' "$R/deploy/paperclip-immutable/paperclip.container"
+mkevidence "$TMP/ev3.json" paperclip omniroute
+touch "$R/deploy/paperclip-immutable/elsewhere.network"
 refuses_because "a carrier naming a network the host does not hold is refused" network_leg_mismatched \
   env HOST_EVIDENCE="$TMP/ev3.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
-rm -f "$R/deploy/paperclip-immutable/systemd-elsewhere"
+rm -f "$R/deploy/paperclip-immutable/elsewhere.network"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 # A network with no unit generates cleanly and fails to START. The legs must
 # MATCH here, or the identity check above fires first and this gate is never
-# reached — so the host holds paperclip.network but no unit is installed for it.
-sed -i 's/^Network=systemd-omniroute$/Network=paperclip.network/' "$R/deploy/paperclip-immutable/paperclip.container"
-jq -n '{networks:["systemd-paperclip","paperclip.network"],
-        networkUnits:["systemd-paperclip"]}' > "$TMP/ev2.json"
+# reached — so both legs render correctly, and the omniroute.network UNIT is
+# the thing missing. Note the two namespaces stay separate: podman reports
+# `systemd-omniroute`, the unit that must exist is `omniroute.network`.
+rm -f "$R/deploy/paperclip-immutable/omniroute.network"
+jq -n '{networks:["systemd-paperclip","systemd-omniroute"],
+        networkUnits:["paperclip.network"]}' > "$TMP/ev2.json"
 refuses_because "a declared network with no unit is refused" network_unit_absent \
   env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
+touch "$R/deploy/paperclip-immutable/omniroute.network"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# ---------------------------------------------------------------------------
+# A carrier Network= key and a podman network name are DIFFERENT NAMESPACES.
+# Quadlet turns `Network=paperclip.network` into `--network=systemd-paperclip`
+# — confirmed by the board's own generator output in board-quadlet-render.json.
+# Comparing the raw key against podman's report made this gate unsatisfiable:
+# the CORRECT carrier was refused as network_leg_mismatched, and the only
+# carrier that passed leg parity named `systemd-*` directly, which has no unit
+# and fails to START. The gate authorized nothing and blocked the fix.
+# ---------------------------------------------------------------------------
+allows "the CORRECT carrier — legs declared as .network units — passes" \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "leg parity is reported against rendered names" "renders 2 distinct leg(s)" \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# Naming podman's generated name directly must NOT pass: it satisfies parity
+# but has no unit behind it, so the service generates cleanly and fails to
+# start. This is the trap the old refusal text actively recommended.
+cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c4.bak"
+sed -i 's/^Network=paperclip.network$/Network=systemd-paperclip/; s/^Network=omniroute.network$/Network=systemd-omniroute/' \
+  "$R/deploy/paperclip-immutable/paperclip.container"
+refuses_because "declaring podman's generated systemd-* name is refused" network_leg_unmanaged \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# Two DIFFERENT keys can render to the SAME leg. Raw-name dedup misses this
+# collapse exactly as counting keys missed a repeated name.
+sed -i 's/^Network=omniroute.network$/Network=systemd-paperclip/' "$R/deploy/paperclip-immutable/paperclip.container"
+refuses_because "two different keys that render to one leg are refused" network_leg_duplicated \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 # `Network=none` on the run carrier is reserved and needs no unit — the gate
 # must not demand one, or it would cry wolf on a correct carrier.
@@ -300,23 +344,31 @@ mutation_check "deleting gate_tmp_size makes the undersized-/tmp test go green" 
   '/^  gate_tmp_size /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
 sed -i 's/size=4g/size=24g/' "$R/deploy/paperclip-immutable/paperclip.container"
 
-cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c4.bak"
-sed -i '/^Network=systemd-omniroute$/d' "$R/deploy/paperclip-immutable/paperclip.container"
+cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c9.bak"
+sed -i '/^Network=omniroute.network$/d' "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_networks makes the dropped-leg test go green" \
   '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
-cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 # The duplicate-name carrier is the one that previously scored a full PASS.
 # Deleting the gate must make it green again, or the new refusal is decoration.
-sed -i 's/^Network=systemd-omniroute$/Network=systemd-paperclip/' "$R/deploy/paperclip-immutable/paperclip.container"
+sed -i 's/^Network=omniroute.network$/Network=paperclip.network/' "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_networks makes the duplicate-leg test go green" \
   '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
-cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# The unmanaged-leg refusal must be load-bearing too: the systemd-* carrier
+# renders the correct legs, so with the gate deleted nothing else catches it.
+sed -i 's/^Network=paperclip.network$/Network=systemd-paperclip/; s/^Network=omniroute.network$/Network=systemd-omniroute/' \
+  "$R/deploy/paperclip-immutable/paperclip.container"
+mutation_check "deleting gate_networks makes the unmanaged systemd-* test go green" \
+  '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 echo 'ReadOnly=/app' >> "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_readonly makes the fail-open test go green" \
   '/^  gate_readonly /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
-cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 mutation_check "deleting gate_authorization makes the unauthorized test go green" \
   '/^  gate_authorization /d' MUT --commit "$GOOD_COMMIT"
@@ -324,7 +376,7 @@ mutation_check "deleting gate_authorization makes the unauthorized test go green
 echo 'Pod=paperclip.pod' >> "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_pod makes the Pod= test go green" \
   '/^  gate_pod /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
-cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 hdr "10. The real repo carrier, as it stands today, is REFUSED"
 # The point of the whole exercise: the live candidate must not pass yet.

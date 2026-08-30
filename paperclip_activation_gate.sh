@@ -62,20 +62,57 @@
 # failure class as the rejected `Pod=` key — generates exit 0, fails at
 # runtime — except this one fails green.
 #
-# So the gate compares the carrier's declared leg count against host evidence
-# and refuses on a mismatch. It also refuses when a declared network has no
-# unit to resolve to: `Network=paperclip.network` requires a pre-existing
-# `paperclip.network`, and no `.network` unit ships in the deploy directory.
-# Podman's reserved names (none/host/bridge/pasta/slirp4netns, and the
-# container:/ns: forms) need no unit and are exempt.
+# So the gate compares the carrier's legs against host evidence and refuses on
+# a mismatch. It also refuses when a declared network has no unit to resolve
+# to: `Network=paperclip.network` requires a pre-existing `paperclip.network`,
+# and no `.network` unit ships in the deploy directory. Podman's reserved names
+# (none/host/bridge/pasta/slirp4netns, and the container:/ns: forms) need no
+# unit and are exempt.
+#
+# THAT COMPARISON WAS ACROSS TWO NAMESPACES, AND IT MADE THE GATE UNSATISFIABLE
+# ---------------------------------------------------------------------------
+# A carrier key and a podman network name are not the same string. Quadlet:
+# "if the name of the network ends with .network, a Podman network called
+# systemd-$name is used" — so `Network=paperclip.network` renders as
+# `--network=systemd-paperclip`, exactly as the board's own generator recorded
+# in `generated/board-quadlet-render.json`. Comparing the raw key against
+# podman's report meant:
+#
+#   carrier declares            gate verdict          what would really happen
+#   paperclip.network  (correct) network_leg_mismatched  correct, and REFUSED
+#   systemd-paperclip            network_legs PASS       no unit -> fails to
+#                                + network_unit_absent   START
+#
+# No carrier string could satisfy both sub-checks: the gate refused the fix and
+# the refusal text recommended the broken form. Worse, `systemd-paperclip`
+# renders the right leg but is a LITERAL reference — Quadlet only emits a
+# dependency on `<stem>-network.service` for a `.network` key — so that carrier
+# silently loses its startup ordering and races network creation at boot.
+# `network_leg_unmanaged` refuses it.
+#
+# Every declared key is therefore translated to the name it RENDERS to before
+# any comparison, and dedup is judged on the rendered name too, since two
+# distinct keys can collapse to one leg.
 #
 # ===========================================================================
 # SEAMS — this suite runs offline, with no podman, no host, no credentials
 # ===========================================================================
 #   HOST_EVIDENCE   JSON captured read-only from the host, read instead of
-#                   shelling to podman. Shape:
-#                     { "networks": ["systemd-paperclip", "..."],
-#                       "networkUnits": ["paperclip.network"] }
+#                   shelling to podman. The two arrays come from two DIFFERENT
+#                   namespaces and must not be conflated:
+#                     .networks[]      what `podman inspect` reports —
+#                                      Quadlet's generated `systemd-<stem>`
+#                     .networkUnits[]  what `systemctl list-unit-files` reports
+#                                      — `<stem>.network`, which is also the
+#                                      form the carrier declares
+#                   Shape:
+#                     { "networks": ["systemd-paperclip", "systemd-omniroute"],
+#                       "networkUnits": ["paperclip.network",
+#                                        "omniroute.network"] }
+#                   Capture both with:
+#                     podman inspect paperclip \
+#                       --format '{{json .NetworkSettings.Networks}}'
+#                     systemctl --user list-unit-files '*-network.service'
 #   ACTIVATION_NOW  unix seconds, read instead of `date -u +%s`, so the
 #                   maintenance-window gate is deterministic under test.
 # ===========================================================================
@@ -104,6 +141,31 @@ is_reserved_network() {
     none|host|bridge|pasta|slirp4netns) return 0 ;;
     container:*|ns:*) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+# A carrier `Network=` key and a `podman inspect` network name are two DIFFERENT
+# namespaces, and comparing them directly is why this gate could not be
+# satisfied by any carrier at all.
+#
+# Quadlet: "If the name of the network ends with .network, a Podman network
+# called systemd-$name is used." So `Network=paperclip.network` RENDERS as
+# `--network=systemd-paperclip` — which is exactly what the board's own
+# generator produced in board-quadlet-render.json:
+#     "--network=systemd-paperclip"
+# from a carrier whose only key is `Network=paperclip.network`.
+#
+# Comparing the raw key against podman's name refused the CORRECT carrier
+# (network_leg_mismatched), while rewriting the carrier to name podman's
+# networks directly passed leg parity and then failed to START, because
+# `systemd-paperclip` is a generated name with no unit behind it. Both
+# directions were wrong, so the gate translated to podman's namespace before
+# comparing. A `.network` suffix maps to systemd-<stem>; any other value is a
+# pre-existing podman network and is already in podman's namespace.
+carrier_key_to_podman_network() {
+  case "$1" in
+    *.network) printf 'systemd-%s\n' "${1%.network}" ;;
+    *)         printf '%s\n' "$1" ;;
   esac
 }
 
@@ -258,55 +320,96 @@ gate_networks() {
     return
   fi
 
-  local -a uniq=() dupes=()
+  # Translate every declared key into the podman name it RENDERS to before
+  # comparing against podman's own report. Dedup must also be judged on the
+  # rendered name: `Network=paperclip.network` and `Network=systemd-paperclip`
+  # are two distinct keys that render to ONE leg, so comparing raw keys would
+  # miss that collapse exactly as counting keys missed a repeated name.
+  local -a rendered=()
   local n u seen found
   for n in "${declared[@]}"; do
+    rendered+=("$(carrier_key_to_podman_network "$n")")
+  done
+
+  local -a uniq=() dupes=()
+  for n in "${rendered[@]}"; do
     seen=0
     for u in ${uniq[@]+"${uniq[@]}"}; do [ "$u" = "$n" ] && seen=1 && break; done
     if [ "$seen" -eq 1 ]; then dupes+=("$n"); else uniq+=("$n"); fi
   done
   if [ "${#dupes[@]}" -gt 0 ]; then
     refuse network_leg_duplicated \
-      "$CARRIER_REL repeats Network=${dupes[0]}: ${#declared[@]} key(s) but renders ${#uniq[@]} real leg(s) against a $host_n-leg host. Repeating a name reaches leg parity on arithmetic while still dropping a leg" \
+      "$CARRIER_REL declares ${#declared[@]} Network= key(s) (${declared[*]}) that render to only ${#uniq[@]} real leg(s) against a $host_n-leg host — '${dupes[0]}' is named twice. Reaching leg parity on arithmetic while still dropping a leg" \
       "give each leg its own distinct Network= name, one per network the running service holds"
     return
   fi
 
-  # Each declared leg must name a network the running service actually holds.
-  # Equal counts of different names is not the running topology.
+  # Each declared leg must render to a network the running service actually
+  # holds. Equal counts of different names is not the running topology.
   local -a missing_legs=() extra_legs=()
   for n in "${hostnets[@]}"; do
     found=0
-    for u in "${declared[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
+    for u in "${rendered[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
     [ "$found" -eq 0 ] && missing_legs+=("$n")
   done
-  for n in "${declared[@]}"; do
-    is_reserved_network "$n" && continue
+  local i=0
+  for n in "${rendered[@]}"; do
+    if is_reserved_network "${declared[$i]}"; then i=$((i+1)); continue; fi
     found=0
     for u in "${hostnets[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
-    [ "$found" -eq 0 ] && extra_legs+=("$n")
+    # Report the carrier's own key alongside what it renders to, so the
+    # refusal names the line the operator has to edit.
+    [ "$found" -eq 0 ] && extra_legs+=("${declared[$i]} (renders ${n})")
+    i=$((i+1))
   done
 
-  if [ "${#missing_legs[@]}" -gt 0 ] && [ "${#declared[@]}" -lt "$host_n" ]; then
+  if [ "${#missing_legs[@]}" -gt 0 ] && [ "${#uniq[@]}" -lt "$host_n" ]; then
     refuse network_leg_dropped \
-      "carrier declares ${#declared[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops ${#missing_legs[@]} (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
-      "add the missing Network= key(s) to $CARRIER_REL. That is a carrier change and needs fresh CISO gate-1 review"
+      "carrier renders ${#uniq[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops ${#missing_legs[@]} (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
+      "add the missing Network= key(s) to $CARRIER_REL. A leg podman reports as 'systemd-X' is declared as 'X.network'. That is a carrier change and needs fresh CISO gate-1 review"
     return
   fi
   if [ "${#missing_legs[@]}" -gt 0 ] || [ "${#extra_legs[@]}" -gt 0 ]; then
     refuse network_leg_mismatched \
-      "carrier legs do not match the running service. Host holds (${hostnets[*]}); carrier declares (${declared[*]}). Not on the carrier: ${missing_legs[*]:-none}. Not on the host: ${extra_legs[*]:-none}" \
-      "declare exactly the networks the running service holds, by name, in $CARRIER_REL"
+      "carrier legs do not match the running service. Host holds (${hostnets[*]}); carrier renders (${rendered[*]}) from keys (${declared[*]}). Not on the carrier: ${missing_legs[*]:-none}. Not on the host: ${extra_legs[*]:-none}" \
+      "declare exactly the networks the running service holds, in $CARRIER_REL. A leg podman reports as 'systemd-X' is declared as 'X.network', not as 'systemd-X'"
     return
   fi
-  pass network_legs "carrier declares $host_n distinct leg(s), matching the running service by name"
+  pass network_legs "carrier renders $host_n distinct leg(s), matching the running service by name"
 
-  # Every declared non-reserved network needs a unit to resolve to, or the
-  # service generates cleanly and fails to start.
+  # Naming podman's GENERATED name directly reaches the right leg and silently
+  # drops the startup ordering. Quadlet only emits a dependency on
+  # `<stem>-network.service` when the key ends in `.network`; a bare name is a
+  # literal reference with no Requires=/After=. The container then races the
+  # network's creation at boot — it works whenever the network happens to
+  # already exist, which is every manual test and not necessarily a cold boot.
+  # This is the form the old refusal text actively recommended.
+  local -a unmanaged=()
+  for n in "${declared[@]}"; do
+    is_reserved_network "$n" && continue
+    case "$n" in
+      systemd-*) unmanaged+=("$n") ;;
+    esac
+  done
+  if [ "${#unmanaged[@]}" -gt 0 ]; then
+    refuse network_leg_unmanaged \
+      "$CARRIER_REL names podman's generated network(s) directly (${unmanaged[*]}). Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \
+      "declare ${unmanaged[0]} as ${unmanaged[0]#systemd-}.network so Quadlet orders the unit, rather than naming the generated network"
+    return
+  fi
+
+  # A `.network` key is Quadlet-managed and needs a unit to resolve to, or the
+  # service generates cleanly and fails to start. A key WITHOUT that suffix
+  # names a pre-existing podman network and correctly has no unit — demanding
+  # one there is what made this gate unsatisfiable, since the only way to
+  # satisfy leg parity under the old raw comparison was to write podman's
+  # generated `systemd-*` name, which by construction has no unit behind it.
+  # Its existence is already proven by the parity check above.
   mapfile -t units < <(jq -r '.networkUnits[]?' "$HOST_EVIDENCE" 2>/dev/null)
   local missing=0 n u found
   for n in "${declared[@]}"; do
     is_reserved_network "$n" && continue
+    case "$n" in *.network) ;; *) continue ;; esac
     found=0
     for u in "${units[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
     # A unit may also ship in the deploy directory.
