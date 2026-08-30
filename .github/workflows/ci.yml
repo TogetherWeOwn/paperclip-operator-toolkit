@@ -1098,6 +1098,32 @@ jobs:
       - name: plugin manifest authority-surface suite
         run: ./test_plugin_manifest_gate.sh
 
+      # TOG-657. The activation gate for the one procedure in this company that
+      # a git revert cannot undo: stopping the live service, restoring a
+      # database, and recreating the server container from a Quadlet carrier.
+      #
+      # Its five preconditions lived only as prose in an issue body, and four
+      # separate runs re-derived them by hand from comments. Each re-derivation
+      # is a chance to read one as satisfied when it is not. This encodes them,
+      # including the three TOG-654 rejections as regression gates.
+      #
+      # The gate that matters most is `network_leg_dropped`. The live server
+      # holds TWO podman networks; the carrier declares ONE, and Quadlet
+      # renders one --network= per key. Recreating as written drops the
+      # OmniRoute leg — the model gateway every agent depends on — while
+      # loopback /api/health stays GREEN. It fails green, which is why a human
+      # reading the unit does not catch it and a comparison against host
+      # evidence does.
+      #
+      # Authorization is READ from a record naming the exact commit and digest,
+      # never declared by a flag. A gate whose green light is supplied by the
+      # party who wants to proceed is a form, not a gate.
+      #
+      # Offline: the carrier, host evidence and authorization record are all
+      # fixtures in mktemp. No podman, no host, no database, no credential.
+      - name: TOG-657 host-validation activation gate suite
+        run: ./test_paperclip_activation_gate.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is
