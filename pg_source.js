@@ -150,6 +150,41 @@ const MODEL_SURFACES_SQL = `
      and s.model is not null
    order by a.name, s.surface`;
 
+// TOG-723. The DEPLOYED plugin manifests, as the host actually serves them.
+//
+// WHY manifest_json AND NOT THE PACKAGE DIRECTORY. plugin_manifest_gate.sh
+// already compares a package directory against a git ref, and that is a
+// different question. `manifest_json` is what the host READ AT INSTALL and what
+// it dispatches from now; the package directory is what it would read at the
+// NEXT activation. gh-token-broker's row proves they are not the same fact:
+// origin/main declares four apiRoutes, the row declares two, and the deployed
+// package under /opt declares two — a package-vs-repo tool run against /opt
+// answers correctly, but only if somebody already knows to point it at /opt.
+// The row is the only side that is enumerable without knowing where each
+// plugin was installed from.
+//
+// WHY EVERY ROW AND NOT A NAMED ONE. The fleet has two deployment models in it:
+// omniroute-broker's package_path is the repo checkout, gh-token-broker's is
+// /opt/paperclip-plugin-packages. Only the first tracks main. A probe that took
+// a plugin name as an argument would be pointed at the plugin somebody already
+// suspected, which is never the one that drifted silently.
+//
+// THERE IS NO COMPANY PREDICATE HERE AND THAT IS NOT AN OVERSIGHT. `plugins`
+// carries no company_id (packages/db/src/schema/plugins.ts) — plugin installs
+// are instance-global, and the unique index is on plugin_key alone. The
+// mandatory-company rule below exists because an unfiltered `agents` read would
+// brake the wrong one of the two companies sharing this database; there is no
+// such hazard on a table with no company column, and adding a filter that
+// silently matches nothing would be worse than having none.
+const PLUGINS_SQL = `
+  select p.plugin_key,
+         coalesce(p.package_path, ''),
+         p.status,
+         p.version,
+         coalesce(p.manifest_json::text, '')
+    from plugins p
+   order by p.plugin_key`;
+
 // Mirrors quota_brake.sh's refusal_sql(), including the three reasons it
 // counts. The window is an interval literal built from a validated integer —
 // never interpolated text — because this is the one place a caller-supplied
@@ -186,15 +221,20 @@ async function main() {
     refuse(`unknown argument: ${argv[i]}`);
   }
 
-  if (mode !== "roster" && mode !== "refusals" && mode !== "model-surfaces") {
+  if (mode !== "roster" && mode !== "refusals" && mode !== "model-surfaces" &&
+      mode !== "plugins") {
     process.stderr.write(
-      "usage: pg_source.js roster|refusals|model-surfaces [--company UUID] [--since-min N]\n" +
+      "usage: pg_source.js roster|refusals|model-surfaces|plugins [--company UUID] [--since-min N]\n" +
       "  roster          -> id\\tname\\tstatus\\twakeOnDemand\\tmaxConcurrentRuns\\tbaseline\\tcritical\\truntimeConfig\n" +
       "  refusals        -> reason\\tagent\\tcount\n" +
-      "  model-surfaces  -> agentId\\tagentName\\tsurface\\tmodelId\n");
+      "  model-surfaces  -> agentId\\tagentName\\tsurface\\tmodelId\n" +
+      "  plugins         -> pluginKey\\tpackagePath\\tstatus\\tversion\\tmanifestJson\n");
     process.exit(2);
   }
-  if (!company) {
+  // `plugins` is instance-global and has no company column, so requiring a
+  // company here would demand an argument the query cannot honour. See
+  // PLUGINS_SQL.
+  if (!company && mode !== "plugins") {
     refuse("no company. Set PAPERCLIP_COMPANY_ID or pass --company; two companies share this database " +
            "and an unfiltered roster would brake the wrong one (TOG-477).");
   }
@@ -227,6 +267,8 @@ async function main() {
       res = await client.query({ text: ROSTER_SQL, values: [company], rowMode: "array" });
     } else if (mode === "model-surfaces") {
       res = await client.query({ text: MODEL_SURFACES_SQL, values: [company], rowMode: "array" });
+    } else if (mode === "plugins") {
+      res = await client.query({ text: PLUGINS_SQL, rowMode: "array" });
     } else {
       res = await client.query({ text: REFUSAL_SQL, values: [company, String(sinceMin)], rowMode: "array" });
     }

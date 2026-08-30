@@ -1197,6 +1197,59 @@ jobs:
       - name: plugin manifest authority-surface suite
         run: ./test_plugin_manifest_gate.sh
 
+      # TOG-723. The gate above asks "if somebody ACTIVATES this package, does
+      # the plugin's authority change". This asks the question nobody was
+      # asking: is the manifest the host is SERVING RIGHT NOW the manifest we
+      # merged. Those are different facts and the difference cost days.
+      #
+      # TOG-576 merged an external-disclosure route into gh-token-broker. CI was
+      # green, main was merged, and the route did not exist in the running
+      # system — measured 2026-08-30, the `plugins` row declares whoami and mint
+      # while origin/main declares four, and a live probe of the disclosure route
+      # returns 404. Nothing detected that, because every existing check runs
+      # against the repo and the repo was correct. It is the same class as *a
+      # detector in CI is not a detector on a clock*.
+      #
+      # It generalizes past the one plugin: omniroute-broker installs from the
+      # repo checkout and gh-token-broker installs from /opt, so two deployment
+      # models share one fleet and only one of them tracks main. The detector
+      # ENUMERATES the registry rather than taking a plugin name, because a
+      # plugin somebody already suspects is never the one that drifted silently.
+      #
+      # Offline: the deployed side arrives through PLUGINS_SOURCE_CMD, fed the
+      # verbatim `pg_source.js plugins` output captured from this host, and the
+      # repo side is a throwaway git repo in mktemp. No database, no plugin
+      # host, no network, no credential.
+      #
+      # SAME CAVEAT AS ITS SIBLINGS, AND HERE IT IS THE WHOLE POINT: green means
+      # the DETECTOR works. It is NOT a statement about the running fleet, which
+      # GitHub Actions cannot see — CI has no `plugins` table. Shipping this and
+      # believing the fleet is clean would repeat TOG-723 one level up. Run
+      # `./plugin_deploy_drift.sh check` where the database is reachable; on
+      # 2026-08-30 that run exited 4.
+      - name: deployed-vs-repo plugin manifest drift suite
+        run: ./test_plugin_deploy_drift.sh
+
+      # And the suite above is 22 green assertions about a detector, which is
+      # worth nothing until somebody breaks the detector and watches them go red.
+      # Each mutation removes ONE limb from a staged copy and requires the NAMED
+      # case to redden, after asserting the unmutated copy is green in the same
+      # directory — the reds are unattributable without that baseline.
+      #
+      # It earned its place three times while being written. It found a real
+      # defect in the detector: `read_deployed` returned its count on stdout, so
+      # every caller ran it in `$(...)`, and `die` inside a subshell exits the
+      # SUBSHELL — the tool printed its own refusal, carried on, and exited 2
+      # only because an unrelated later guard happened to catch it. It then found
+      # that two refusal cases were being satisfied by that same backstop rather
+      # than by the limb they were named for: with the empty-source refusal
+      # deleted outright, `check` still exits 2 via "compared 0 plugins", so the
+      # case had to be re-pinned to `routes`, which has no backstop. And it found
+      # that the unparseable-manifest case only held because ALL its rows were
+      # broken; one broken row among good ones was silently skipped at exit 0.
+      - name: deployed-vs-repo drift suite is not vacuous (mutation-gated)
+        run: ./verification/tog-723-mutation-gate.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is
