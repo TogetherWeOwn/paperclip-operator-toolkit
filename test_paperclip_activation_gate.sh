@@ -175,9 +175,34 @@ says "the refusal says a carrier change needs fresh CISO review" "needs fresh CI
   run --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
-# A network with no unit generates cleanly and fails to START.
+# Counting keys is not the same as counting LEGS. Two identical Network= keys
+# render one real leg, so a carrier that repeats a name reaches leg parity on
+# arithmetic while still dropping the OmniRoute leg at recreation — the exact
+# outage the gate exists to stop, wearing a passing score.
+sed -i 's/^Network=systemd-omniroute$/Network=systemd-paperclip/' "$R/deploy/paperclip-immutable/paperclip.container"
+refuses_because "a carrier repeating one network name does not reach leg parity" network_leg_duplicated \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the duplicate refusal names the leg that is actually dropped" "renders 1 real leg" \
+  run --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# Parity must be judged on identity, not arithmetic: a carrier whose legs are
+# individually well-formed but name a network the host does not hold is still
+# not the running topology.
+sed -i 's/^Network=systemd-omniroute$/Network=systemd-elsewhere/' "$R/deploy/paperclip-immutable/paperclip.container"
+mkevidence "$TMP/ev3.json" systemd-paperclip systemd-omniroute
+touch "$R/deploy/paperclip-immutable/systemd-elsewhere"
+refuses_because "a carrier naming a network the host does not hold is refused" network_leg_mismatched \
+  env HOST_EVIDENCE="$TMP/ev3.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
+rm -f "$R/deploy/paperclip-immutable/systemd-elsewhere"
+cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# A network with no unit generates cleanly and fails to START. The legs must
+# MATCH here, or the identity check above fires first and this gate is never
+# reached — so the host holds paperclip.network but no unit is installed for it.
 sed -i 's/^Network=systemd-omniroute$/Network=paperclip.network/' "$R/deploy/paperclip-immutable/paperclip.container"
-mkevidence "$TMP/ev2.json" systemd-paperclip systemd-omniroute
+jq -n '{networks:["systemd-paperclip","paperclip.network"],
+        networkUnits:["systemd-paperclip"]}' > "$TMP/ev2.json"
 refuses_because "a declared network with no unit is refused" network_unit_absent \
   env HOST_EVIDENCE="$TMP/ev2.json" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c3.bak" "$R/deploy/paperclip-immutable/paperclip.container"
@@ -278,6 +303,13 @@ sed -i 's/size=4g/size=24g/' "$R/deploy/paperclip-immutable/paperclip.container"
 cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c4.bak"
 sed -i '/^Network=systemd-omniroute$/d' "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_networks makes the dropped-leg test go green" \
+  '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# The duplicate-name carrier is the one that previously scored a full PASS.
+# Deleting the gate must make it green again, or the new refusal is decoration.
+sed -i 's/^Network=systemd-omniroute$/Network=systemd-paperclip/' "$R/deploy/paperclip-immutable/paperclip.container"
+mutation_check "deleting gate_networks makes the duplicate-leg test go green" \
   '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/c4.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 

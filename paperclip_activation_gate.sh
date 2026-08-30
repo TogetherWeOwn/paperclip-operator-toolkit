@@ -245,8 +245,11 @@ gate_networks() {
     return
   fi
 
-  # Leg parity. A carrier with fewer legs than the running service silently
-  # drops one, and loopback health stays green while it does.
+  # Leg parity, judged on IDENTITY rather than on how many keys are present.
+  # Podman renders one --network= per key and de-duplicates by name, so a
+  # carrier that repeats a name reaches an equal COUNT while still rendering
+  # fewer real legs. Counting keys would score that carrier as correct and
+  # authorize the very recreation that drops the OmniRoute leg.
   mapfile -t hostnets < <(jq -r '.networks[]?' "$HOST_EVIDENCE" 2>/dev/null)
   host_n="${#hostnets[@]}"
   if [ "$host_n" -eq 0 ]; then
@@ -254,13 +257,49 @@ gate_networks() {
       "capture it in the documented shape"
     return
   fi
-  if [ "${#declared[@]}" -ne "$host_n" ]; then
+
+  local -a uniq=() dupes=()
+  local n u seen found
+  for n in "${declared[@]}"; do
+    seen=0
+    for u in ${uniq[@]+"${uniq[@]}"}; do [ "$u" = "$n" ] && seen=1 && break; done
+    if [ "$seen" -eq 1 ]; then dupes+=("$n"); else uniq+=("$n"); fi
+  done
+  if [ "${#dupes[@]}" -gt 0 ]; then
+    refuse network_leg_duplicated \
+      "$CARRIER_REL repeats Network=${dupes[0]}: ${#declared[@]} key(s) but renders ${#uniq[@]} real leg(s) against a $host_n-leg host. Repeating a name reaches leg parity on arithmetic while still dropping a leg" \
+      "give each leg its own distinct Network= name, one per network the running service holds"
+    return
+  fi
+
+  # Each declared leg must name a network the running service actually holds.
+  # Equal counts of different names is not the running topology.
+  local -a missing_legs=() extra_legs=()
+  for n in "${hostnets[@]}"; do
+    found=0
+    for u in "${declared[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
+    [ "$found" -eq 0 ] && missing_legs+=("$n")
+  done
+  for n in "${declared[@]}"; do
+    is_reserved_network "$n" && continue
+    found=0
+    for u in "${hostnets[@]}"; do [ "$u" = "$n" ] && found=1 && break; done
+    [ "$found" -eq 0 ] && extra_legs+=("$n")
+  done
+
+  if [ "${#missing_legs[@]}" -gt 0 ] && [ "${#declared[@]}" -lt "$host_n" ]; then
     refuse network_leg_dropped \
-      "carrier declares ${#declared[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops $(( host_n - ${#declared[@]} )) — loopback /api/health stays GREEN while every agent loses its model gateway" \
+      "carrier declares ${#declared[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops $(( host_n - ${#declared[@]} )) (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
       "add the missing Network= key(s) to $CARRIER_REL. That is a carrier change and needs fresh CISO gate-1 review"
     return
   fi
-  pass network_legs "carrier declares $host_n leg(s), matching the running service"
+  if [ "${#missing_legs[@]}" -gt 0 ] || [ "${#extra_legs[@]}" -gt 0 ]; then
+    refuse network_leg_mismatched \
+      "carrier legs do not match the running service. Host holds (${hostnets[*]}); carrier declares (${declared[*]}). Not on the carrier: ${missing_legs[*]:-none}. Not on the host: ${extra_legs[*]:-none}" \
+      "declare exactly the networks the running service holds, by name, in $CARRIER_REL"
+    return
+  fi
+  pass network_legs "carrier declares $host_n distinct leg(s), matching the running service by name"
 
   # Every declared non-reserved network needs a unit to resolve to, or the
   # service generates cleanly and fails to start.
