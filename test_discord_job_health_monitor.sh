@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Regression suite for the TOG-676 scheduled monitor wrapper.
+#
+# The wrapper's load-bearing properties are that a FAILING detector never
+# becomes a healthy claim, that an unmeasurable detector is never scored clean,
+# and that every outcome re-arms a native Paperclip issue monitor. Offline:
+# detector and curl are recording stubs, and the clock is fixed.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="${DISCORD_JOB_HEALTH_MONITOR_SH:-$HERE/discord_job_health_monitor.sh}"
+PASS=0; FAIL=0
+
+ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
+bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
+hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+[[ -x "$TOOL" ]] || { echo "ERROR: $TOOL is not executable" >&2; exit 1; }
+command -v jq >/dev/null || { echo "ERROR: jq is required" >&2; exit 1; }
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/test_discord_job_health_monitor.XXXXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/bin"
+
+cat > "$WORK/issue.json" <<'EOF'
+{
+  "id":"issue-monitor",
+  "identifier":"TOG-676",
+  "status":"in_progress",
+  "monitorNextCheckAt":null,
+  "executionPolicy":{
+    "mode":"normal",
+    "commentRequired":true,
+    "stages":[],
+    "maxReviewRounds":null,
+    "monitor":null
+  }
+}
+EOF
+
+# The detector stub stands in for `node scripts/discord_job_health.js`. The
+# wrapper invokes it as `$NODE_BIN $DETECTOR --json ...`, so the stub is the
+# node binary and ignores argv.
+cat > "$WORK/bin/fakenode" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$DETECTOR_JSON"
+exit "$DETECTOR_RC"
+STUB
+chmod +x "$WORK/bin/fakenode"
+
+cat > "$WORK/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+cfg=""
+for ((i=1; i<=$#; i++)); do
+  if [[ "${!i}" == "--config" ]]; then j=$((i+1)); cfg="${!j}"; fi
+done
+[[ -n "$cfg" ]] || exit 90
+tr '\0' '\n' < "/proc/$$/cmdline" >> "$ARGV_LOG"
+cat "$cfg" >> "$CFG_LOG"
+url="$(sed -n 's/^url = "\(.*\)"$/\1/p' "$cfg")"
+method="$(sed -n 's/^request = "\(.*\)"$/\1/p' "$cfg")"
+out="$(sed -n 's/^output = "\(.*\)"$/\1/p' "$cfg")"
+body="$(sed -n 's/^data-binary = "@\(.*\)"$/\1/p' "$cfg")"
+printf '%s\t%s\t%s\n' "$method" "$url" "$body" >> "$REQUEST_LOG"
+if [[ "$method" == GET ]]; then
+  cp "$ISSUE_SRC" "$out"
+else
+  cp "$body" "$PATCH_LOG"
+  jq --slurpfile p "$body" '. + {executionPolicy:$p[0].executionPolicy, monitorNextCheckAt:$p[0].executionPolicy.monitor.nextCheckAt}' \
+    "$ISSUE_SRC" > "$out"
+fi
+printf 200
+STUB
+chmod +x "$WORK/bin/curl"
+
+FAILING_JSON='{"plugin":"paperclip-plugin-discord","windowHours":48,"jobs":[
+ {"jobKey":"check-budget-thresholds","schedule":"*/5 * * * *","enabled":true,"runs":481,"succeeded":481,"scopeDenied":0,"otherFailures":0,"deliveryMetric":null,"sendOpportunities":0,"delivered":0,"verdict":"healthy","latestError":null},
+ {"jobKey":"discord-daily-digest","schedule":"0 * * * *","enabled":true,"runs":40,"succeeded":39,"scopeDenied":1,"otherFailures":0,"deliveryMetric":"discord_digest_sent","sendOpportunities":2,"delivered":0,"verdict":"FAILING","latestError":"company context is required"}]}'
+
+HEALTHY_JSON='{"plugin":"paperclip-plugin-discord","windowHours":48,"jobs":[
+ {"jobKey":"discord-daily-digest","schedule":"0 * * * *","enabled":true,"runs":40,"succeeded":40,"scopeDenied":0,"otherFailures":0,"deliveryMetric":"discord_digest_sent","sendOpportunities":2,"delivered":2,"verdict":"healthy","latestError":null}]}'
+
+run_case() {
+  : > "$WORK/argv.log"; : > "$WORK/cfg.log"; : > "$WORK/requests.log"; : > "$WORK/patch.json"
+  env -i PATH="$WORK/bin:$PATH" HOME="$WORK" TMPDIR="$WORK" \
+    PAPERCLIP_API_URL="https://paperclip.invalid/api" \
+    PAPERCLIP_API_KEY="pc_CANARY_monitor_key" \
+    PAPERCLIP_TASK_ID="issue-monitor" \
+    DISCORD_JOB_HEALTH_MONITOR_NOW="2026-08-30T00:00:00Z" \
+    DISCORD_JOB_HEALTH_NODE="$WORK/bin/fakenode" \
+    DISCORD_JOB_HEALTH_JS="$WORK/detector.js" \
+    DETECTOR_JSON="$1" DETECTOR_RC="$2" \
+    ARGV_LOG="$WORK/argv.log" CFG_LOG="$WORK/cfg.log" \
+    REQUEST_LOG="$WORK/requests.log" PATCH_LOG="$WORK/patch.json" ISSUE_SRC="$WORK/issue.json" \
+    "$TOOL" > "$WORK/out.txt" 2> "$WORK/err.txt"
+  CASE_RC=$?
+}
+: > "$WORK/detector.js"
+
+hdr "1. A failing job is reported and re-armed"
+run_case "$FAILING_JSON" 1
+[[ "$CASE_RC" -eq 1 ]] && ok "preserves detector exit 1 after a successful re-arm" || bad "expected exit 1, got $CASE_RC"
+[[ "$(jq -r '.executionPolicy.monitor.nextCheckAt' "$WORK/patch.json")" == "2026-08-30T06:00:00Z" ]] \
+  && ok "normal outcome re-arms exactly six hours later" || bad "normal interval was not six hours"
+[[ "$(jq -r '.executionPolicy.mode' "$WORK/patch.json")" == normal ]] \
+  && ok "preserves the existing execution policy outside .monitor" || bad "existing execution policy was replaced"
+[[ "$(jq -r '.executionPolicy.monitor.serviceName' "$WORK/patch.json")" == "Discord scheduled-job delivery" ]] \
+  && ok "stores a named monitor service" || bad "monitor service name missing"
+comment="$(jq -r '.comment' "$WORK/patch.json")"
+grep -qF '1 Discord scheduled job(s) are not delivering' <<<"$comment" && ok "comment names the broken job count" || bad "comment omitted the broken count"
+grep -qF 'discord-daily-digest' <<<"$comment" && ok "comment names the failing job" || bad "comment omitted the failing job"
+grep -qF '0 / 2 opportunities' <<<"$comment" && ok "comment reports delivery against send opportunities" || bad "comment omitted the delivery column"
+grep -qF 'succeeded' <<<"$comment" && ok "comment warns a succeeded row is not a post" || bad "comment omitted the time-gate warning"
+grep -qF 'until a vendor release lands' <<<"$comment" && ok "comment states the failure is the expected steady state" || bad "comment omitted the steady-state note"
+
+hdr "2. A healthy measurement is allowed to say so"
+run_case "$HEALTHY_JSON" 0
+[[ "$CASE_RC" -eq 0 ]] && ok "preserves detector exit 0" || bad "expected exit 0, got $CASE_RC"
+comment="$(jq -r '.comment' "$WORK/patch.json")"
+grep -qF 'All Discord scheduled jobs healthy' <<<"$comment" && ok "healthy run reports healthy" || bad "healthy run did not report healthy"
+grep -qF 'until a vendor release lands' <<<"$comment" && bad "healthy run wrongly carried the steady-state failure note" || ok "healthy run omits the steady-state failure note"
+
+hdr "3. An unmeasurable detector is never scored clean"
+run_case '' 5
+[[ "$CASE_RC" -eq 5 ]] && ok "preserves the unmeasurable exit 5" || bad "expected exit 5, got $CASE_RC"
+comment="$(jq -r '.comment' "$WORK/patch.json")"
+grep -qF 'UNKNOWN' <<<"$comment" && ok "unmeasurable run says UNKNOWN" || bad "unmeasurable run did not say UNKNOWN"
+# Assert on the affirmative claim, not the bare word: the UNKNOWN comment says
+# "Nothing was scored healthy", which is a denial and must stay allowed.
+grep -qF 'All Discord scheduled jobs healthy' <<<"$comment" \
+  && bad "unmeasurable run made an affirmative healthy claim" \
+  || ok "unmeasurable run never claims healthy"
+grep -qF 'Nothing was scored healthy' <<<"$comment" \
+  && ok "unmeasurable run explicitly denies a healthy result" \
+  || bad "unmeasurable run omitted the explicit denial"
+[[ "$(jq -r '.executionPolicy.monitor.nextCheckAt' "$WORK/patch.json")" == "2026-08-30T01:00:00Z" ]] \
+  && ok "failure retries on the shorter one-hour interval" || bad "error retry was not one hour"
+
+hdr "4. A zero exit with a garbage payload is a failure, not a pass"
+run_case 'not json at all' 0
+[[ "$CASE_RC" -eq 2 ]] && ok "garbage payload with exit 0 becomes exit 2" || bad "expected exit 2, got $CASE_RC"
+comment="$(jq -r '.comment' "$WORK/patch.json")"
+grep -qF 'UNKNOWN' <<<"$comment" && ok "garbage payload reports UNKNOWN" || bad "garbage payload did not report UNKNOWN"
+
+hdr "5. A well-formed payload with no jobs is not a pass"
+run_case '{"plugin":"paperclip-plugin-discord","jobs":[]}' 0
+[[ "$CASE_RC" -eq 2 ]] && ok "empty job list is refused rather than scored clean" || bad "expected exit 2, got $CASE_RC"
+
+hdr "6. The bearer token never reaches argv"
+run_case "$FAILING_JSON" 1
+grep -qF 'pc_CANARY_monitor_key' "$WORK/argv.log" && bad "bearer token appeared in curl argv" || ok "bearer token stays out of argv"
+grep -qF 'pc_CANARY_monitor_key' "$WORK/cfg.log" && ok "bearer token travels in the curl config" || bad "bearer token was not in the curl config"
+
+hdr "7. The monitor is re-armed even when the detector fails"
+run_case '' 5
+grep -q 'PATCH' "$WORK/requests.log" && ok "a failed measurement still issues the re-arm PATCH" || bad "no PATCH after a failed measurement"
+
+printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]] || exit 1

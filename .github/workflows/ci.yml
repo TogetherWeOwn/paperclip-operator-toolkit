@@ -815,6 +815,18 @@ jobs:
       - name: Discord scheduled-job delivery suite
         run: ./test_discord_job_health.sh
 
+      # TOG-676. The detector above is only ever run here, against a fixture --
+      # this workflow has no database, so CI never measures the installation.
+      # Until the monitor wrapper existed, nothing ran the detector against
+      # production on any clock, and the defect it watches is silent: the
+      # digest is time-gated, so 23 of every 24 runs record `succeeded` having
+      # posted nothing. This suite pins the wrapper's refusals -- an
+      # unmeasurable detector must never re-arm as healthy, and a failing
+      # measurement must retry on the SHORT interval rather than sleeping six
+      # hours on a known-broken feature.
+      - name: Discord delivery monitor suite
+        run: ./test_discord_job_health_monitor.sh
+
       # TOG-419. The quota brake, after it took the company off the air: a
       # sweep set heartbeat.wakeOnDemand=false on 44 of 47 agents nine seconds
       # after the owner created a task, and the owner's own Chief of Staff was
@@ -1155,6 +1167,15 @@ jobs:
       # nothing, so a real send is pinned green too.
       - name: Discord delivery proof is not vacuous (mutation-gated)
         run: ./verification/tog-676-mutation-gate.sh
+
+      # TOG-676, the wrapper half. The limb at risk here is the UNKNOWN branch:
+      # a wrapper that reports an unmeasurable detector as healthy looks like a
+      # tidier comment and silently converts the whole monitor into a false
+      # green. This gate also refuses to score a mutant that only ever landed
+      # in a comment -- the first draft "killed" a mutation that had edited
+      # header prose and changed no behaviour at all.
+      - name: Discord delivery monitor is not vacuous (mutation-gated)
+        run: ./verification/tog-676-monitor-mutation-gate.sh
 
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
