@@ -5,6 +5,8 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ACTION=$HERE/omniroute/rehearsal/operator-action.sh
 PREPARE=$HERE/omniroute/rehearsal/prepare-db-preimage.sh
 VERIFY=$HERE/omniroute/rehearsal/verify-package.sh
+PREFLIGHT=$HERE/rehearsal_endpoint_preflight.sh
+AUTHORIZED_PREFLIGHT=$HERE/rehearsal_authorized_preflight.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 PASS=0
@@ -15,7 +17,7 @@ bad() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [[ -z ${2:-} ]] || printf
 section() { printf '\n== %s\n' "$1"; }
 
 section '1. static syntax and secret boundary'
-for script in "$ACTION" "$PREPARE" "$VERIFY"; do
+for script in "$ACTION" "$PREPARE" "$VERIFY" "$PREFLIGHT" "$AUTHORIZED_PREFLIGHT"; do
   if bash -n "$script"; then ok "bash syntax: ${script##*/}"; else bad "bash syntax: ${script##*/}"; fi
 done
 if grep -RInE --exclude='test_omniroute_rehearsal.sh' '(OMNIROUTE_(API|MGMT)_KEY|Authorization:|Bearer |DATABASE_URL|postgres(ql)?://|sk_[A-Za-z0-9])' "$HERE/omniroute/rehearsal" >/dev/null; then
@@ -88,6 +90,28 @@ printf 'drift\n' >> "$TMP/verify-home/package/runtime.env"
 out=$(PATH="$TMP/verify-bin:$PATH" HOME="$TMP/verify-home" OMNIROUTE_TEST_ARTIFACT="$TMP/omniroute.tgz" OMNIROUTE_TEST_PACKAGE="$TMP/verify-home/package/package.json" "$TMP/verify-home/package/verify-package.sh" 2>&1); rc=$?
 (( rc != 0 )) && grep -q 'runtime-config SHA-256 mismatch' <<<"$out" \
   && ok 'runtime config drift is refused' || bad 'runtime config drift was not refused' "$out"
+# Reproduce the documented clean-lane property with a local clone: umask 077 must
+# make every checkout ancestor private, while an ordinary 0755 lane is refused
+# before any package hash can be trusted.
+git init -q "$TMP/private-source"
+cp -a "$HERE/omniroute" "$TMP/private-source/"
+git -C "$TMP/private-source" add omniroute/rehearsal
+git -C "$TMP/private-source" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+(
+  umask 077
+  git clone -q "$TMP/private-source" "$TMP/clean-clone"
+)
+clean_private=true
+for path in "$TMP/clean-clone" "$TMP/clean-clone/omniroute" "$TMP/clean-clone/omniroute/rehearsal"; do
+  mode=$(stat -c '%a' "$path")
+  (( (8#$mode & 077) == 0 )) || clean_private=false
+done
+[[ $clean_private == true ]] \
+  && ok 'documented umask-077 clean clone creates private checkout ancestry' || bad 'clean clone ancestry was not private'
+chmod 0755 "$TMP/clean-clone"
+out=$(HOME="$TMP" "$TMP/clean-clone/omniroute/rehearsal/verify-package.sh" 2>&1); rc=$?
+(( rc != 0 )) && grep -q 'package ancestry must be private' <<<"$out" \
+  && ok 'verify-package refuses a 0755 clean-clone ancestor before hash verification' || bad 'public clone ancestry was not refused' "$out"
 
 section '3. fake Podman success, replay, and undo'
 FAKE=$TMP/fake
@@ -119,11 +143,21 @@ case "$cmd" in
     case "$sub" in
       exists) [[ $1 == agent-net ]] ;;
       inspect)
-        if [[ $* == *Internal* ]]; then printf 'false\n'; else printf '{"live":{"Name":"omniroute"}}\n'; fi ;;
+        if [[ $* == *Internal* ]]; then
+          printf 'false\n'
+        else
+          jq -cn --slurpfile rehearsal "$state/rehearsal.json" '
+            {live:{Name:"omniroute"}}
+            + (if $rehearsal[0].attached then {($rehearsal[0].id):{Name:"omniroute-rehearse"}} else {} end)
+            + (if $rehearsal[0].duplicateAlias then {stale:{Name:"stale-rehearsal"}} else {} end)
+          '
+        fi ;;
       connect)
-        jq '.attached=true' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
+        target=${!#}
+        jq --arg target "$target" 'if (.id // "") != $target then error("wrong connect target") else .attached=true end' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
       disconnect)
-        jq '.attached=false' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
+        target=${!#}
+        jq --arg target "$target" 'if (.id // "") != $target then error("wrong disconnect target") else .attached=false end' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
     esac ;;
   container)
     [[ $1 == exists ]]
@@ -146,18 +180,43 @@ case "$cmd" in
     while (($#)); do
       case "$1" in -f) format=$2; shift 2 ;; *) target=$1; shift ;; esac
     done
+    if [[ ${FAKE_REBIND_NAME_BEFORE_MARKER:-0} == 1 && $target == omniroute-rehearse && $format == *'{{.Id}}'* && -e $state/rebind-armed ]]; then
+      rm -f "$state/rebind-armed"
+      jq --arg id "${FAKE_REPLACEMENT_ID:-2222222222222222222222222222222222222222222222222222222222222222}" '.id=$id' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json"
+    fi
     if [[ $target == omniroute ]]; then
       printf 'running|2026-08-20T00:00:00Z|sha256:live|{"agent-net":{}}|{}\n'
+    elif [[ $target == live ]]; then
+      case "$format" in
+        *NetworkSettings.Networks*) printf '{"agent-net":{"Aliases":["omniroute"],"IPAddress":"10.89.1.2"}}\n' ;;
+        *'{{.Id}}'*) printf 'live\n' ;;
+        *) printf 'unknown-live-format\n' ;;
+      esac
     elif [[ $target == probe ]]; then
       if [[ $format == *State.Running* ]]; then printf 'true\n'; else printf '{"agent-net":{"Aliases":["probe"]}}\n'; fi
+    elif [[ $target == stale ]]; then
+      case "$format" in
+        *NetworkSettings.Networks*) printf '{"agent-net":{"Aliases":["omniroute-rehearse"],"IPAddress":"10.89.1.77"}}\n' ;;
+        *'{{.Id}}'*) printf 'stale\n' ;;
+        *) printf 'unknown-stale-format\n' ;;
+      esac
     else
       case "$format" in
         *State.Running*) jq -r '.running' "$state/rehearsal.json" ;;
         *State.Status*) jq -r 'if .running then "running" else "created" end' "$state/rehearsal.json" ;;
         *'{{.Id}}'*) jq -r '.id // "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' "$state/rehearsal.json" ;;
-        *'{{.Image}}'*) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+        *'{{.Image}}'*)
+          count_file=$state/image-inspect-count
+          count=0
+          [[ ! -f $count_file ]] || count=$(cat "$count_file")
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$count_file"
+          if [[ ${FAKE_MUTATE_IMAGE_ON_INSPECT_COUNT:-0} == "$count" ]]; then
+            jq '.image="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json"
+          fi
+          jq -r '.image // "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$state/rehearsal.json" ;;
         *HostConfig.PortBindings*) jq -c '.ports' "$state/rehearsal.json" ;;
-        *NetworkSettings.Networks*) jq -c 'if .otherNetwork then {"other-net":{"Aliases":["omniroute-rehearse"]}} elif .attached then {"agent-net":{"Aliases":["omniroute-rehearse"]}} else {} end' "$state/rehearsal.json" ;;
+        *NetworkSettings.Networks*) jq -c 'if .otherNetwork then {"other-net":{"Aliases":["omniroute-rehearse"]}} elif .attached then {"agent-net":{"Aliases":["omniroute-rehearse"],"IPAddress":"10.89.1.99"}} else {} end' "$state/rehearsal.json" ;;
         *rehearsal.version*) label 'io.togetherweown.omniroute.rehearsal.version' ;;
         *rehearsal.package*) label 'io.togetherweown.omniroute.rehearsal.package' ;;
         *source-image-digest*) label 'io.togetherweown.omniroute.rehearsal.source-image-digest' ;;
@@ -178,10 +237,15 @@ case "$cmd" in
   build)
     exit 0 ;;
   start)
-    jq '.running=true' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
+    target=${1:-}
+    jq --arg target "$target" 'if (.id // "") != $target then error("wrong start target") else .running=true end' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
   stop)
-    jq '.running=false' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
+    target=${1:-}
+    jq --arg target "$target" 'if (.id // "") != $target then error("wrong stop target") else .running=false end' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
   rm)
+    target=${!#}
+    current_id=$(jq -r '.id // ""' "$state/rehearsal.json")
+    [[ $target == "$current_id" ]] || exit 87
     [[ ${FAKE_RM_FAIL:-0} != 1 ]] || exit 29
     [[ ${FAKE_RM_FALSE_SUCCESS:-0} != 1 ]] || exit 0
     jq '.exists=false | .running=false | .attached=false' "$state/rehearsal.json" > "$state/t" && mv "$state/t" "$state/rehearsal.json" ;;
@@ -189,8 +253,10 @@ case "$cmd" in
     target=${1:-}; shift || true
     if [[ $target == probe ]]; then
       if [[ ${FAKE_PROBE_FAIL:-0} == 1 ]]; then exit 17; fi
-      printf '10.89.1.99 omniroute-rehearse\n%s' "${FAKE_HTTP_STATUS:-401}"
-    elif [[ $target == omniroute-rehearse ]]; then
+      printf '%b' "${FAKE_PROBE_ADDRESSES:-10.89.1.99 omniroute-rehearse\\n}"
+      printf '__TOG554_DNS_END__\n%s' "${FAKE_HTTP_STATUS:-401}"
+      [[ ${FAKE_REBIND_NAME_BEFORE_MARKER:-0} != 1 ]] || : > "$state/rebind-armed"
+    elif jq -e --arg target "$target" '.id==$target' "$state/rehearsal.json" >/dev/null 2>&1; then
       jq -e '.running==true' "$state/rehearsal.json" >/dev/null || exit 125
       if [[ $* == *createHash* ]]; then
         label 'io.togetherweown.omniroute.rehearsal.storage-encryption-key-sha256'
@@ -224,27 +290,47 @@ manifest_sha=$(sha256sum "$FAKE/home/private-db/db-preimage.json" | cut -d' ' -f
 config_sha=$(sha256sum "$FAKE/home/runtime.env" | cut -d' ' -f1)
 translator_sha=$(jq -r '.build.translatorSha256' "$FAKE/home/package.json")
 cat > "$FAKE/state/expected.json" <<EOF
-{"exists":true,"running":false,"attached":false,"otherNetwork":false,"ports":{},"labels":{"io.togetherweown.omniroute.rehearsal.version":"3.8.49","io.togetherweown.omniroute.rehearsal.package":"omniroute-3.8.49-tog554-r1","io.togetherweown.omniroute.rehearsal.source-image-digest":"sha256:2bf79cf167478bf283c633ffef2e1e26ba746882e7267fab9320c09df56e8b57","io.togetherweown.omniroute.rehearsal.translator-sha256":"$translator_sha","io.togetherweown.omniroute.rehearsal.config-sha256":"$config_sha","io.togetherweown.omniroute.rehearsal.db-manifest-sha256":"$manifest_sha","io.togetherweown.omniroute.rehearsal.db-sha256":"$db_sha","io.togetherweown.omniroute.rehearsal.storage-encryption-key-sha256":"$key_sha"}}
+{"id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","exists":true,"running":false,"attached":false,"otherNetwork":false,"duplicateAlias":false,"ports":{},"labels":{"io.togetherweown.omniroute.rehearsal.version":"3.8.49","io.togetherweown.omniroute.rehearsal.package":"omniroute-3.8.49-tog554-r1","io.togetherweown.omniroute.rehearsal.source-image-digest":"sha256:2bf79cf167478bf283c633ffef2e1e26ba746882e7267fab9320c09df56e8b57","io.togetherweown.omniroute.rehearsal.translator-sha256":"$translator_sha","io.togetherweown.omniroute.rehearsal.config-sha256":"$config_sha","io.togetherweown.omniroute.rehearsal.db-manifest-sha256":"$manifest_sha","io.togetherweown.omniroute.rehearsal.db-sha256":"$db_sha","io.togetherweown.omniroute.rehearsal.storage-encryption-key-sha256":"$key_sha"}}
 EOF
 printf '{"exists":false,"running":false,"attached":false,"ports":{},"labels":{}}\n' > "$FAKE/state/rehearsal.json"
 printf 'tog554-success-action-0001\n' > "$FAKE/home/action"
 chmod 0600 "$FAKE/home/action"
 run_action() {
+  [[ ${FAKE_PRESERVE_IMAGE_INSPECT_COUNT:-0} == 1 ]] || rm -f "$FAKE/state/image-inspect-count"
   env PATH="$FAKE/bin:/usr/bin:/bin" HOME="$FAKE/home" FAKE_PODMAN_STATE="$FAKE/state" \
-    FAKE_TRANSLATOR_SHA256="$translator_sha" OMNIROUTE_EXPECTED_USER=ubuntu OMNIROUTE_REHEARSAL_PACKAGE="$FAKE/home/package.json" \
+    FAKE_TRANSLATOR_SHA256="$translator_sha" FAKE_MUTATE_IMAGE_ON_INSPECT_COUNT="${FAKE_MUTATE_IMAGE_ON_INSPECT_COUNT:-0}" \
+    OMNIROUTE_EXPECTED_USER=ubuntu OMNIROUTE_REHEARSAL_PACKAGE="$FAKE/home/package.json" \
     OMNIROUTE_REHEARSAL_DB_DIR="$FAKE/home/private-db" OMNIROUTE_AGENT_NETWORK=agent-net \
     OMNIROUTE_PROBE_CONTAINER=probe OMNIROUTE_ACTION_ID_FILE="$FAKE/home/action" \
     OMNIROUTE_REHEARSAL_STATE_DIR="$FAKE/home/state" \
     "$ACTION_RUNTIME" "$@"
+}
+complete_marker() {
+  local type=$1 container_id=$2 image_id=$3
+  jq -cn --arg type "$type" --arg containerId "$container_id" --arg imageId "$image_id" \
+    --arg packageId omniroute-3.8.49-tog554-r1 --arg version 3.8.49 \
+    --arg sourceImageDigest sha256:2bf79cf167478bf283c633ffef2e1e26ba746882e7267fab9320c09df56e8b57 \
+    --arg translatorSha256 "$translator_sha" --arg configSha256 "$config_sha" \
+    --arg network agent-net --arg alias omniroute-rehearse \
+    --arg dbManifestSha256 "$manifest_sha" --arg dbSha256 "$db_sha" \
+    --arg storageEncryptionKeySha256 "$key_sha" \
+    --argjson wasRunning false \
+    '{type:$type,containerId:$containerId,imageId:$imageId,wasRunning:$wasRunning,packageId:$packageId,version:$version,sourceImageDigest:$sourceImageDigest,translatorSha256:$translatorSha256,configSha256:$configSha256,network:$network,alias:$alias,dbManifestSha256:$dbManifestSha256,dbSha256:$dbSha256,storageEncryptionKeySha256:$storageEncryptionKeySha256}'
+}
+write_complete_marker() {
+  complete_marker "$@" > "$marker"
+  chmod 0600 "$marker"
 }
 out=$(run_action --apply 2>&1); rc=$?
 (( rc == 0 )) && grep -q 'SUCCESS: rehearsal package verified and reachable' <<<"$out" \
   && ok 'create success path reaches DNS/TCP/anonymous HTTP postconditions' || bad "create success path failed ($rc)" "$out"
 [[ $(jq -r '.exists and .running and .attached' "$FAKE/state/rehearsal.json") == true ]] \
   && ok 'success path leaves only the disposable rehearsal attached' || bad 'success path state is wrong'
-[[ $(wc -l < "$FAKE/home/state/evidence/evidence.jsonl") == 1 ]] \
-  && jq -e 'select(.result=="success" and .tcp==true and .anonymousHttpStatus=="401" and .alias=="omniroute-rehearse")' "$FAKE/home/state/evidence/evidence.jsonl" >/dev/null \
-  && ok 'success writes one sanitized append-only evidence row' || bad 'success evidence row is missing or malformed'
+evidence_row=$FAKE/home/state/evidence/evidence.jsonl
+[[ $(wc -l < "$evidence_row") == 1 ]] \
+  && jq -e --arg keySha "$key_sha" 'select(.result=="success" and .tcp==true and .anonymousHttpStatus=="401" and .alias=="omniroute-rehearse" and .storageEncryptionKeySha256==$keySha and (.containerId|test("^[0-9a-f]{12,64}$")))' "$evidence_row" >/dev/null \
+  && jq -e --slurpfile package "$HERE/omniroute/rehearsal/package.json" '([keys[]] | sort) == ($package[0].evidence.sanitizedFields | sort)' "$evidence_row" >/dev/null \
+  && ok 'success writes exactly the declared sanitized evidence fields' || bad 'success evidence row is missing, undeclared, or malformed'
 out=$(run_action --apply 2>&1); rc=$?
 (( rc != 0 )) && grep -q 'replay refused' <<<"$out" \
   && ok 'used action id is refused before replay' || bad 'action replay was not refused' "$out"
@@ -363,6 +449,19 @@ out=$(FAKE_PROBE_FAIL=1 run_action --apply 2>&1); rc=$?
   && ok 'descriptor-based evidence append refuses symlink without changing victim' || bad 'evidence symlink changed victim' "$out"
 rm -f "$evidence"
 
+# Marker identity must remain bound to the container that passed postconditions.
+# Substitute the mutable name after the probe succeeds but before publication;
+# apply must refuse, preserve the replacement, and publish no marker for it.
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+printf 'tog554-marker-identity-race\n' > "$FAKE/home/action"
+rm -f "$marker" "$FAKE/state/rebind-armed"
+replacement_id=2222222222222222222222222222222222222222222222222222222222222222
+out=$(FAKE_REBIND_NAME_BEFORE_MARKER=1 FAKE_REPLACEMENT_ID="$replacement_id" run_action --apply 2>&1); rc=$?
+(( rc != 0 )) && [[ $(jq -r '.id' "$FAKE/state/rehearsal.json") == "$replacement_id" ]] \
+  && [[ $(jq -r '.exists' "$FAKE/state/rehearsal.json") == true ]] && [[ ! -e $marker ]] \
+  && grep -q 'name was rebound before marker publication' <<<"$out" \
+  && ok 'marker publication refuses a replacement under the mutable name' || bad 'marker publication authenticated a replacement container' "$out"
+
 # Marker publication must be exclusive. GNU mv -n reports success when it skips,
 # so exercise the hard-link boundary directly by creating a marker just before
 # publication and prove the older marker survives byte-identically.
@@ -387,16 +486,63 @@ out=$(env PATH="$FAKE/bin-marker-race:$FAKE/bin:/usr/bin:/bin" HOME="$FAKE/home"
 (( rc != 0 )) && [[ $(jq -r '.type' "$marker") == older-action ]] \
   && ok 'concurrent marker publication is refused without replacing the older marker' || bad 'marker publication race was not refused safely' "$out"
 
-# An old marker cannot act on a replacement container even if all reproducible
-# package labels are identical.
+# Undo tests use the complete publication schema so only the intended immutable
+# identity gate can answer them. First prove the unmutated marker reaches and
+# completes the attach undo branch.
+recorded_id=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+recorded_image=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
 jq '.running=true | .attached=true' "$FAKE/state/rehearsal.json" > "$FAKE/state/t" && mv "$FAKE/state/t" "$FAKE/state/rehearsal.json"
-printf '{"type":"attach","containerId":"replacement-id","imageId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wasRunning":true,"dbManifestSha256":"%s","dbSha256":"%s"}\n' "$manifest_sha" "$db_sha" > "$marker"
+write_complete_marker attach "$recorded_id" "$recorded_image"
+printf 'tog554-complete-undo-base\n' > "$FAKE/home/action"
+out=$(run_action --undo 2>&1); rc=$?
+(( rc == 0 )) && [[ $(jq -r '.exists and (.attached|not) and (.running|not)' "$FAKE/state/rehearsal.json") == true ]] && [[ ! -e $marker ]] \
+  && ok 'complete unmutated marker reaches and completes attach undo' || bad 'complete undo baseline did not reach the intended branch' "$out"
+
+# An old complete marker cannot act on a replacement container even if all
+# reproducible package labels are identical.
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+jq '.running=true | .attached=true' "$FAKE/state/rehearsal.json" > "$FAKE/state/t" && mv "$FAKE/state/t" "$FAKE/state/rehearsal.json"
+write_complete_marker attach replacement-id "$recorded_image"
 printf 'tog554-replacement-undo09\n' > "$FAKE/home/action"
 out=$(run_action --undo 2>&1); rc=$?
-(( rc != 0 )) && [[ $(jq -r '.attached' "$FAKE/state/rehearsal.json") == true ]] && [[ -f $marker ]] \
-  && ok 'undo refuses a replacement container with matching package labels' || bad 'undo acted on a replacement container' "$out"
+(( rc != 0 )) && grep -q 'recorded rehearsal container or immutable image changed' <<<"$out" \
+  && [[ $(jq -r '.running and .attached' "$FAKE/state/rehearsal.json") == true ]] && [[ -f $marker ]] \
+  && ok 'undo refuses a replacement container at the immutable-identity gate' || bad 'undo replacement test was answered by the wrong gate' "$out"
 rm -f "$marker"
+
+# Mutate the immutable image immediately before disconnect and before stop. The
+# complete marker must pass initial validation, then refuse at the named gate.
+for mutation in disconnect:3 stop:4; do
+  name=${mutation%%:*}; count=${mutation##*:}
+  cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+  jq '.running=true | .attached=true' "$FAKE/state/rehearsal.json" > "$FAKE/state/t" && mv "$FAKE/state/t" "$FAKE/state/rehearsal.json"
+  write_complete_marker attach "$recorded_id" "$recorded_image"
+  printf 'tog554-image-%s-undo\n' "$name" > "$FAKE/home/action"
+  rm -f "$FAKE/state/image-inspect-count"
+  out=$(FAKE_PRESERVE_IMAGE_INSPECT_COUNT=1 FAKE_MUTATE_IMAGE_ON_INSPECT_COUNT="$count" run_action --undo 2>&1); rc=$?
+  (( rc != 0 )) && grep -q "image changed before $name" <<<"$out" && [[ -f $marker ]] \
+    && [[ $(jq -r '.exists' "$FAKE/state/rehearsal.json") == true ]] \
+    && ok "undo revalidates immutable image immediately before $name" || bad "undo $name image mutation reached the wrong gate" "$out"
+  rm -f "$marker"
+done
+
+# A disposable rehearsal must also revalidate its immutable image immediately
+# before remove, after the marker has moved into the recovery stage.
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+jq '.running=true | .attached=true' "$FAKE/state/rehearsal.json" > "$FAKE/state/t" && mv "$FAKE/state/t" "$FAKE/state/rehearsal.json"
+mkdir -p "$FAKE/home/state/data.remove-mutation"
+complete_marker create "$recorded_id" "$recorded_image" \
+  | jq --arg dataDir "$FAKE/home/state/data.remove-mutation" '. + {dataDir:$dataDir}' > "$marker"
+chmod 0600 "$marker"
+printf 'tog554-image-remove-undo\n' > "$FAKE/home/action"
+rm -f "$FAKE/state/image-inspect-count"
+out=$(FAKE_PRESERVE_IMAGE_INSPECT_COUNT=1 FAKE_MUTATE_IMAGE_ON_INSPECT_COUNT=3 run_action --undo 2>&1); rc=$?
+(( rc != 0 )) && grep -q 'image changed before removal' <<<"$out" \
+  && [[ $(jq -r '.undoStage' "$marker") == container-removing ]] \
+  && [[ $(jq -r '.exists' "$FAKE/state/rehearsal.json") == true ]] \
+  && ok 'undo revalidates immutable image immediately before remove' || bad 'undo remove image mutation reached the wrong gate' "$out"
+rm -rf "$FAKE/home/state/data.remove-mutation" "$marker"
 
 # Destructive undo must prove the evidence destination is writable before it
 # disconnects or removes anything.
@@ -461,6 +607,13 @@ refuse_case config "jq '.labels[\"io.togetherweown.omniroute.rehearsal.config-sh
 refuse_case db "jq '.labels[\"io.togetherweown.omniroute.rehearsal.db-sha256\"]=\"wrong\"' '$FAKE/state/rehearsal.json' > '$FAKE/state/t' && mv '$FAKE/state/t' '$FAKE/state/rehearsal.json'" 'does not match'
 refuse_case port "jq '.ports={\"20128/tcp\":[{\"HostPort\":\"20129\"}]}' '$FAKE/state/rehearsal.json' > '$FAKE/state/t' && mv '$FAKE/state/t' '$FAKE/state/rehearsal.json'" 'does not match'
 refuse_case other-network "jq '.otherNetwork=true' '$FAKE/state/rehearsal.json' > '$FAKE/state/t' && mv '$FAKE/state/t' '$FAKE/state/rehearsal.json'" 'does not match'
+refuse_case duplicate-alias "jq '.duplicateAlias=true' '$FAKE/state/rehearsal.json' > '$FAKE/state/t' && mv '$FAKE/state/t' '$FAKE/state/rehearsal.json'" 'alias is already owned'
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+printf 'tog554-address-mismatch-01\n' > "$FAKE/home/action"
+out=$(FAKE_PROBE_ADDRESSES=$'10.89.1.99 omniroute-rehearse\n10.89.1.77 omniroute-rehearse\n' run_action --apply 2>&1); rc=$?
+(( rc != 0 )) && grep -q 'DNS address set does not exactly match' <<<"$out" \
+  && [[ $(jq -r '(.attached|not) and (.running|not)' "$FAKE/state/rehearsal.json") == true ]] \
+  && ok 'extra DNS address is refused and rolled back before authorization' || bad 'extra DNS address was accepted' "$out"
 # Missing or wrong network and live alias are hard preconditions, not best-effort warnings.
 cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
 printf 'tog554-missing-network-001\n' > "$FAKE/home/action"
@@ -471,20 +624,15 @@ out=$(env PATH="$FAKE/bin:/usr/bin:/bin" HOME="$FAKE/home" FAKE_PODMAN_STATE="$F
   OMNIROUTE_REHEARSAL_STATE_DIR="$FAKE/home/state" "$ACTION_RUNTIME" --apply 2>&1); rc=$?
 (( rc != 0 )) && grep -q 'target network is missing' <<<"$out" && ok 'refuses missing network' || bad 'missing network was not refused' "$out"
 mkdir -p "$FAKE/bin-wrong-network"
-cp "$FAKE/bin/podman" "$FAKE/bin-wrong-network/podman"
-python3 - "$FAKE/bin-wrong-network/podman" <<'PY'
-from pathlib import Path
-import sys
-
-p = Path(sys.argv[1])
-s = p.read_text()
-s = s.replace(
-    "printf '{\"live\":{\"Name\":\"omniroute\"}}\\n'",
-    "printf '{}\\n'",
-)
-p.write_text(s)
-PY
-chmod +x "$FAKE/bin-wrong-network/podman"
+cat > "$FAKE/bin-wrong-network/jq" <<'SH'
+#!/usr/bin/env bash
+if [[ $* == *'to_entries | any(.value.Name == "omniroute")'* ]]; then
+  printf 'false\n'
+  exit 0
+fi
+exec /usr/bin/jq "$@"
+SH
+chmod +x "$FAKE/bin-wrong-network/jq"
 printf 'tog554-wrong-network-0001\n' > "$FAKE/home/action"
 out=$(env PATH="$FAKE/bin-wrong-network:$FAKE/bin:/usr/bin:/bin" HOME="$FAKE/home" FAKE_PODMAN_STATE="$FAKE/state" \
   OMNIROUTE_EXPECTED_USER=ubuntu OMNIROUTE_REHEARSAL_PACKAGE="$FAKE/home/package.json" \
@@ -504,7 +652,239 @@ $HERE/operator_runbook.sh render > "$rendered_file" 2>&1; rc=$?
 (( rc == 0 )) && cmp -s "$rendered_file" "$HERE/docs/OPERATOR-RUNBOOK.md" \
   && ok 'canonical operator runbook matches its generator source' || bad 'canonical operator runbook is stale' "$(diff -u "$HERE/docs/OPERATOR-RUNBOOK.md" "$rendered_file" | head -80)"
 grep -q 'omniroute/rehearsal/operator-action.sh --apply' "$HERE/operator_runbook_classification.json" \
-  && ok 'runbook source carries the fixed TOG-554 action' || bad 'runbook source lacks the fixed TOG-554 action'
+  && grep -q 'umask 077\\ngit clone' "$HERE/operator_runbook_classification.json" \
+  && ok 'runbook source carries the fixed action and exact private clean-clone lane' || bad 'runbook source lacks the fixed TOG-554 clean lane'
+tog521_commands=$(jq -er '.items["TOG-521"].commands' "$HERE/operator_runbook_classification.json")
+[[ $tog521_commands == *'./rehearsal_authorized_preflight.sh'* ]] \
+  && [[ $tog521_commands != *'jq -sc'* ]] \
+  && [[ $tog521_commands != *$'\n./rehearsal_endpoint_preflight.sh\n'* ]] \
+  && grep -q 'trap cleanup EXIT' "$AUTHORIZED_PREFLIGHT" \
+  && grep -q 'podman exec -u node "$AGENT_CONTAINER" sh -ceu' "$AUTHORIZED_PREFLIGHT" \
+  && grep -q 'export OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE="$authorization_file"' "$AUTHORIZED_PREFLIGHT" \
+  && ok 'canonical runbook delegates the exact container-local lifecycle to one reviewed helper' || bad 'canonical preflight command still improvises the authorization lifecycle'
+
+section '7. canonical authorization namespace lifecycle'
+LIFECYCLE=$TMP/lifecycle
+mkdir -p "$LIFECYCLE/bin" "$LIFECYCLE/home/state/evidence" "$LIFECYCLE/container"
+chmod 0700 "$LIFECYCLE/home" "$LIFECYCLE/home/state"
+lifecycle_address_sha=$(printf '10.89.1.99\n' | sha256sum | cut -d' ' -f1)
+printf '{"mode":"apply","result":"success","alias":"omniroute-rehearse","containerId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dnsAddressSha256":"%s"}\n' "$lifecycle_address_sha" > "$LIFECYCLE/home/state/evidence/evidence.jsonl"
+chmod 0600 "$LIFECYCLE/home/state/evidence/evidence.jsonl"
+# The host namespace must be inert across EVERY run below: the authorization is
+# streamed straight into the agent container, so nothing under the operator's
+# writable HOME may be created, deleted, or have its type/mode/content changed.
+# Snapshot path+type+mode+content-hash of the pristine fixture here, before any
+# lifecycle has run -- a snapshot taken later would already contain a file an
+# earlier run leaked, and would compare it against itself.
+host_namespace_snapshot() {
+  find "$LIFECYCLE/home" \( -type f -o -type d -o -type l \) -printf '%y %m %p\n' 2>/dev/null \
+    | LC_ALL=C sort \
+    | while read -r entry_type entry_mode entry_path; do
+        case $entry_type in
+          f) printf '%s %s %s %s\n' "$entry_type" "$entry_mode" "$entry_path" "$(sha256sum < "$entry_path" | cut -d' ' -f1)" ;;
+          l) printf '%s %s %s -> %s\n' "$entry_type" "$entry_mode" "$entry_path" "$(readlink "$entry_path")" ;;
+          *) printf '%s %s %s\n' "$entry_type" "$entry_mode" "$entry_path" ;;
+        esac
+      done
+}
+HOST_SNAPSHOT_BEFORE=$LIFECYCLE/host-namespace-before
+HOST_SNAPSHOT_AFTER=$LIFECYCLE/host-namespace-after
+host_namespace_snapshot > "$HOST_SNAPSHOT_BEFORE"
+cat > "$LIFECYCLE/bin/podman" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${1:-} == exec ]] || exit 90
+shift
+interactive=0
+[[ ${1:-} == -i ]] && { interactive=1; shift; }
+[[ ${1:-} == -u && ${2:-} == node ]] || exit 91
+shift 2
+container=$1; shift
+[[ $container == reviewed-agent ]] || exit 92
+map_path() {
+  case $1 in
+    /tmp/omniroute-rehearsal-auth-tog554*) printf '%s/auth%s' "$FAKE_CONTAINER_ROOT" "${1#/tmp/omniroute-rehearsal-auth-tog554}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+if (( interactive == 1 )); then
+  [[ ${1:-} == python3 && ${2:-} == -c ]] || exit 93
+  python_source=$3
+  destination=$(map_path "$4")
+  mode=$5
+  stream_count=0
+  [[ ! -f $FAKE_CONTAINER_STREAM_COUNT ]] || stream_count=$(cat "$FAKE_CONTAINER_STREAM_COUNT")
+  stream_count=$((stream_count + 1))
+  printf '%s\n' "$stream_count" > "$FAKE_CONTAINER_STREAM_COUNT"
+  if [[ ${FAKE_CONTAINER_STREAM_FAIL_ON:-0} == "$stream_count" ]]; then
+    python3 -c '
+import os, sys
+path = sys.argv[1]
+mode = int(sys.argv[2], 8)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+try:
+    prefix = sys.stdin.buffer.read(16)
+    if prefix:
+        os.write(fd, prefix)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+raise SystemExit(88)
+' "$destination" "$mode"
+  fi
+  python3 -c "$python_source" "$destination" "$mode"
+  chmod "$mode" "$destination"
+  exit
+fi
+[[ ${1:-} == sh && ${2:-} == -ceu ]] || exit 94
+script=$3
+shift 3
+[[ ${1:-} == sh ]] || exit 95
+shift
+mapped=()
+for arg in "$@"; do mapped+=("$(map_path "$arg")"); done
+if [[ $script == *'"$authorization_wrapper"'* ]]; then
+  wrapper=${mapped[2]}
+  cat > "$wrapper" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -f $OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE ]]
+[[ ! -L $OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE ]]
+[[ $(stat -c %a "$OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE") == 600 ]]
+printf '1\n' >> "$WRAPPER_COUNT_FILE"
+[[ $WRAPPER_SLEEP != 1 ]] || sleep 1
+if [[ $WRAPPER_RC == 0 ]]; then exit 0; else exit "$WRAPPER_RC"; fi
+WRAPPER
+  sed -i \
+    -e "s|\$WRAPPER_COUNT_FILE|$(printf %q "$FAKE_CONTAINER_WRAPPER_COUNT")|" \
+    -e "s|\$WRAPPER_SLEEP|$(printf %q "${FAKE_CONTAINER_WRAPPER_SLEEP:-0}")|" \
+    -e "s|\$WRAPPER_RC|$(printf %q "${FAKE_CONTAINER_WRAPPER_RC:-0}")|g" \
+    "$wrapper"
+  chmod 0700 "$wrapper"
+  expected_wrapper_sha=$(sha256sum "$wrapper" | cut -d' ' -f1)
+  mapped[4]=$expected_wrapper_sha
+fi
+sh -ceu "$script" sh "${mapped[@]}"
+SH
+chmod +x "$LIFECYCLE/bin/podman"
+run_lifecycle() {
+  local wrapper_rc=$1 signal_mode=${2:-none} stream_fail_on=${3:-0}
+  rm -rf "$LIFECYCLE/container" "$LIFECYCLE/wrapper-count" "$LIFECYCLE/stream-count"
+  mkdir -p "$LIFECYCLE/container"
+  : > "$LIFECYCLE/wrapper-count"
+  : > "$LIFECYCLE/stream-count"
+  if [[ $signal_mode == term ]]; then
+    FAKE_CONTAINER_WRAPPER_RC="$wrapper_rc" FAKE_CONTAINER_WRAPPER_SLEEP=1 FAKE_CONTAINER_STREAM_FAIL_ON="$stream_fail_on" \
+      FAKE_CONTAINER_ROOT="$LIFECYCLE/container" FAKE_CONTAINER_WRAPPER_COUNT="$LIFECYCLE/wrapper-count" FAKE_CONTAINER_STREAM_COUNT="$LIFECYCLE/stream-count" \
+      PATH="$LIFECYCLE/bin:/usr/bin:/bin" HOME="$LIFECYCLE/home" \
+      OMNIROUTE_PROBE_CONTAINER=reviewed-agent OMNIROUTE_REHEARSAL_EVIDENCE_LOG="$LIFECYCLE/home/state/evidence/evidence.jsonl" \
+        "$AUTHORIZED_PREFLIGHT" > "$LIFECYCLE/out" 2>&1 &
+    lifecycle_pid=$!
+    while [[ ! -s $LIFECYCLE/wrapper-count ]]; do kill -0 "$lifecycle_pid" 2>/dev/null || break; done
+    kill -TERM "$lifecycle_pid" 2>/dev/null || true
+    wait "$lifecycle_pid"; return $?
+  fi
+  FAKE_CONTAINER_WRAPPER_RC="$wrapper_rc" FAKE_CONTAINER_WRAPPER_SLEEP=0 FAKE_CONTAINER_STREAM_FAIL_ON="$stream_fail_on" \
+    FAKE_CONTAINER_ROOT="$LIFECYCLE/container" FAKE_CONTAINER_WRAPPER_COUNT="$LIFECYCLE/wrapper-count" FAKE_CONTAINER_STREAM_COUNT="$LIFECYCLE/stream-count" \
+    PATH="$LIFECYCLE/bin:/usr/bin:/bin" HOME="$LIFECYCLE/home" \
+    OMNIROUTE_PROBE_CONTAINER=reviewed-agent OMNIROUTE_REHEARSAL_EVIDENCE_LOG="$LIFECYCLE/home/state/evidence/evidence.jsonl" \
+    "$AUTHORIZED_PREFLIGHT" > "$LIFECYCLE/out" 2>&1
+}
+set +e
+run_lifecycle 0; rc=$?
+set -e
+(( rc == 0 )) && [[ $(wc -l < "$LIFECYCLE/wrapper-count") == 1 ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/evidence.json && ! -L $LIFECYCLE/container/auth/evidence.json ]] \
+  && [[ ! -e $LIFECYCLE/container/auth && ! -L $LIFECYCLE/container/auth ]] \
+  && [[ ! -e $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json \
+    && ! -L $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json ]] \
+  && ok 'canonical lifecycle invokes the container-local wrapper once and cleans both namespaces on exit 0' || bad "canonical lifecycle success path leaked or crossed namespaces rc=$rc count=$(wc -l < "$LIFECYCLE/wrapper-count")" "$(cat "$LIFECYCLE/out"; find "$LIFECYCLE/container" -maxdepth 2 -printf '%m %p\n' 2>/dev/null)"
+set +e
+run_lifecycle 23; rc=$?
+set -e
+(( rc == 23 )) && [[ $(wc -l < "$LIFECYCLE/wrapper-count") == 1 ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/evidence.json && ! -L $LIFECYCLE/container/auth/evidence.json ]] \
+  && [[ ! -e $LIFECYCLE/container/auth && ! -L $LIFECYCLE/container/auth ]] \
+  && [[ ! -e $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json \
+    && ! -L $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json ]] \
+  && ok 'canonical lifecycle preserves wrapper failure and cleans both namespaces' || bad 'canonical lifecycle failure path leaked or hid the wrapper status' "$(cat "$LIFECYCLE/out")"
+set +e
+run_lifecycle 0 none 2; rc=$?
+set -e
+(( rc == 88 )) && [[ $(wc -l < "$LIFECYCLE/wrapper-count") == 0 ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/rehearsal_endpoint_preflight.sh \
+    && ! -L $LIFECYCLE/container/auth/rehearsal_endpoint_preflight.sh ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/evidence.json && ! -L $LIFECYCLE/container/auth/evidence.json ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/agent_endpoint_preflight.sh \
+    && ! -L $LIFECYCLE/container/auth/agent_endpoint_preflight.sh ]] \
+  && [[ ! -e $LIFECYCLE/container/auth && ! -L $LIFECYCLE/container/auth ]] \
+  && [[ ! -e $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json \
+    && ! -L $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json ]] \
+  && ok 'canonical lifecycle removes a prefix stream and both namespaces before EOF' || bad 'canonical lifecycle partial-stream path leaked authorization' "$(cat "$LIFECYCLE/out"; find "$LIFECYCLE/container" -maxdepth 2 -printf '%m %y %p -> %l\n' 2>/dev/null)"
+[[ ! -e $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json \
+  && ! -L $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json ]] \
+  && ok 'canonical lifecycle never creates an ephemeral host authorization pathname' || bad 'canonical lifecycle created a mutable host authorization pathname'
+# Compare the pristine pre-run snapshot against the namespace as it stands after
+# every lifecycle above has run. Any create, delete, chmod, rewrite or symlink
+# swap anywhere under the operator's writable HOME shows up as a diff.
+set +e
+run_lifecycle 0; rc=$?
+set -e
+host_namespace_snapshot > "$HOST_SNAPSHOT_AFTER"
+(( rc == 0 )) && [[ -s $HOST_SNAPSHOT_BEFORE ]] \
+  && diff -u "$HOST_SNAPSHOT_BEFORE" "$HOST_SNAPSHOT_AFTER" > "$LIFECYCLE/host-namespace-diff" 2>&1 \
+  && [[ $(wc -l < "$LIFECYCLE/wrapper-count") == 1 ]] \
+  && [[ ! -e $LIFECYCLE/container/auth && ! -L $LIFECYCLE/container/auth ]] \
+  && ok 'canonical lifecycle leaves the writable host namespace byte-identical' || bad 'canonical lifecycle mutated the writable host namespace' "$(cat "$LIFECYCLE/out"; cat "$LIFECYCLE/host-namespace-diff" 2>/dev/null)"
+set +e
+run_lifecycle 0 term; rc=$?
+set -e
+(( rc == 143 )) && [[ $(wc -l < "$LIFECYCLE/wrapper-count") == 1 ]] \
+  && [[ ! -e $LIFECYCLE/container/auth/evidence.json && ! -L $LIFECYCLE/container/auth/evidence.json ]] \
+  && [[ ! -e $LIFECYCLE/container/auth && ! -L $LIFECYCLE/container/auth ]] \
+  && [[ ! -e $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json \
+    && ! -L $LIFECYCLE/home/state/authorization/omniroute-rehearsal-preflight.json ]] \
+  && ok 'canonical lifecycle cleans both namespaces on termination' || bad 'canonical lifecycle signal path leaked authorization' "$(cat "$LIFECYCLE/out")"
+
+section '8. credentialed preflight authorization seam'
+PREFLIGHT_FIXTURE=$TMP/preflight
+mkdir -p "$PREFLIGHT_FIXTURE/bin"
+cat > "$PREFLIGHT_FIXTURE/bin/getent" <<'SH'
+#!/usr/bin/env bash
+printf '%b' "${FAKE_PREFLIGHT_ADDRESSES:-10.89.1.99 omniroute-rehearse\\n}"
+SH
+cat > "$PREFLIGHT_FIXTURE/preflight-tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FAKE_PREFLIGHT_CALLED"
+SH
+chmod +x "$PREFLIGHT_FIXTURE/bin/getent" "$PREFLIGHT_FIXTURE/preflight-tool"
+preflight_evidence=$PREFLIGHT_FIXTURE/evidence.json
+preflight_called=$PREFLIGHT_FIXTURE/called
+printf '{"mode":"apply","result":"success","alias":"omniroute-rehearse","containerId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dnsAddressSha256":"%s"}\n' "$(printf '10.89.1.99\n' | sha256sum | cut -d' ' -f1)" > "$preflight_evidence"
+chmod 0600 "$preflight_evidence"
+set +e
+out=$(OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE="$PREFLIGHT_FIXTURE/missing" \
+  OMNIROUTE_REHEARSAL_GETENT_BIN="$PREFLIGHT_FIXTURE/bin/getent" \
+  OMNIROUTE_REHEARSAL_PREFLIGHT_TOOL="$PREFLIGHT_FIXTURE/preflight-tool" \
+  FAKE_PREFLIGHT_CALLED="$preflight_called" "$PREFLIGHT" 2>&1); rc=$?
+set -e
+(( rc != 0 )) && [[ ! -e $preflight_called ]] \
+  && ok 'preflight refuses missing host authorization before credentialed tool' || bad 'preflight reached credentialed tool without authorization' "$out"
+set +e
+out=$(FAKE_PREFLIGHT_ADDRESSES=$'10.89.1.77 omniroute-rehearse\n' \
+  OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE="$preflight_evidence" \
+  OMNIROUTE_REHEARSAL_GETENT_BIN="$PREFLIGHT_FIXTURE/bin/getent" \
+  OMNIROUTE_REHEARSAL_PREFLIGHT_TOOL="$PREFLIGHT_FIXTURE/preflight-tool" \
+  FAKE_PREFLIGHT_CALLED="$preflight_called" "$PREFLIGHT" 2>&1); rc=$?
+set -e
+(( rc != 0 )) && grep -q 'address set changed' <<<"$out" && [[ ! -e $preflight_called ]] \
+  && ok 'preflight refuses stale alias addresses before credentialed tool' || bad 'preflight accepted stale alias addresses' "$out"
+out=$(OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE="$preflight_evidence" \
+  OMNIROUTE_REHEARSAL_GETENT_BIN="$PREFLIGHT_FIXTURE/bin/getent" \
+  OMNIROUTE_REHEARSAL_PREFLIGHT_TOOL="$PREFLIGHT_FIXTURE/preflight-tool" \
+  FAKE_PREFLIGHT_CALLED="$preflight_called" "$PREFLIGHT" 2>&1); rc=$?
+(( rc == 0 )) && grep -q -- '--model claude-sonnet-5' "$preflight_called" \
+  && ok 'matching immutable address proof reaches the credentialed gate exactly once' || bad 'matching preflight authorization did not reach the gate' "$out"
 
 printf '\n== totals\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

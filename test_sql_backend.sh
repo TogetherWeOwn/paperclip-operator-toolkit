@@ -251,6 +251,20 @@ podman_site_allowed() { # <file> <line>
       # accepting it under a database-backend gate would let the assertion
       # above be satisfied by something it does not test.
       [[ "$2" == *PAPERCLIP_SERVER_CTR* ]] && return 0 ;;
+    rehearsal_authorized_preflight.sh)
+      # The AGENT container, not the database: this is the reviewed helper that
+      # streams a rehearsal authorization into the agent and reads back its
+      # container-local state. Same reasoning as gh_access.sh above — keyed on
+      # the line, not the file, so a database-container site in this script is
+      # still a failure.
+      [[ "$2" == *AGENT_CONTAINER* ]] && return 0 ;;
+    test_omniroute_rehearsal.sh)
+      # A quoted grep PATTERN, not an invocation: the suite asserts that the
+      # helper above still delegates to that exact container-local command. The
+      # sweep cannot tell a pattern from a call, so it is named here rather than
+      # reworded — rewording it would decouple the assertion from the text it
+      # pins. Keyed on the line for the same reason as the two entries above.
+      [[ "$2" == *AGENT_CONTAINER* ]] && return 0 ;;
   esac
   return 1
 }

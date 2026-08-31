@@ -31,11 +31,12 @@ const compiledFile = path.join(moduleDir, "responseTranslator.js");
 fs.writeFileSync(
   sourceFile,
   [
+    "declare const process: { env: Record<string, string | undefined> };",
     'const FORMATS = { OPENAI: "openai", OPENAI_RESPONSES: "openai-responses", CLAUDE: "claude", GEMINI: "gemini", ANTIGRAVITY: "antigravity" };',
-    "const buildGeminiThoughtSignatureKey = () => '';",
-    "const storeGeminiThoughtSignature = () => {};",
+    "const buildGeminiThoughtSignatureKey = (..._args) => '';",
+    "const storeGeminiThoughtSignature = (..._args) => {};",
     "const normalizeOpenAICompatibleFinishReasonString = (reason) => reason;",
-    "const containsTextualToolCallMarker = () => false;",
+    "const containsTextualToolCallMarker = (..._args) => false;",
     'const getAnyReasoningValue = (message) => message.reasoning_content ?? message.reasoning ?? "";',
     withoutImports,
   ].join("\n"),
@@ -48,21 +49,46 @@ const compiler = process.env.TSC_BIN ?? path.join(
   "bin",
   "tsc",
 );
-const result = spawnSync(process.execPath, [
+const compile = (inputFile, outputDir) => spawnSync(process.execPath, [
   compiler,
-  sourceFile,
+  inputFile,
   "--target", "ES2022",
   "--module", "ES2022",
   "--skipLibCheck",
-  "--outDir", moduleDir,
+  "--outDir", outputDir,
 ], { encoding: "utf8" });
+const requireCompilerSuccess = (result, inputFile) => {
+  if (result.error) throw result.error;
+  if (result.signal || result.status !== 0) {
+    throw new Error(
+      `tsc failed for ${inputFile} (status=${result.status}, signal=${result.signal ?? "none"}):\n${result.stdout}\n${result.stderr}`,
+    );
+  }
+};
+const result = compile(sourceFile, moduleDir);
+requireCompilerSuccess(result, sourceFile);
 if (!fs.existsSync(compiledFile)) {
-  throw new Error(`tsc did not emit responseTranslator.js:\n${result.stdout}\n${result.stderr}`);
+  throw new Error(`tsc exited 0 but did not emit responseTranslator.js:\n${result.stdout}\n${result.stderr}`);
 }
 const {
   convertOpenAINonStreamingToClaude,
   translateNonStreamingResponse,
 } = await import(pathToFileURL(compiledFile));
+
+test("treats a nonzero TypeScript compiler status as fatal even when JavaScript emits", () => {
+  const mutationDir = fs.mkdtempSync(path.join(os.tmpdir(), "tog554-compiler-status-"));
+  const mutationSource = path.join(mutationDir, "compilerFailure.ts");
+  const mutationOutput = path.join(mutationDir, "compilerFailure.js");
+  fs.writeFileSync(mutationSource, "const compilerFailure: string = 42;\n");
+
+  const mutationResult = compile(mutationSource, mutationDir);
+  assert.equal(mutationResult.status, 2);
+  assert.equal(fs.existsSync(mutationOutput), true, "fixture requires tsc to emit JavaScript despite the type error");
+  assert.throws(
+    () => requireCompilerSuccess(mutationResult, mutationSource),
+    /tsc failed/,
+  );
+});
 
 const response = (usage) => ({
   id: "msg_test",
