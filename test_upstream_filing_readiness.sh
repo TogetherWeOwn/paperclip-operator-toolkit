@@ -77,11 +77,31 @@ DEST="paperclipai/paperclip"
 
 # --- the all-open fixture world ---------------------------------------------
 
-# A registry with one usable key.
-REG_FULL='{"version":1,"keys":[{"keyId":"owner-key-1","publicKey":"MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE="}]}'
+# A real Ed25519 SPKI PEM. Public half only — there is no private key anywhere in
+# this suite and nothing here can sign.
+PEM_1='-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n-----END PUBLIC KEY-----\n'
+PEM_2='-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAv2i1oJ0nsHNCoBNMXCWJhMSVSCJ2ozgVAvWQKX2FbEg=\n-----END PUBLIC KEY-----\n'
+
+# A registry with one usable key, in the shape the CONSUMER enforces
+# (external_disclosure.js:readTrustStore -> exactKeys keyId, algorithm,
+# authorizingPrincipal, publicKeyPem). Anything else the consumer refuses, so
+# anything else this gate must score closed.
+REG_FULL="{\"version\":1,\"keys\":[{\"keyId\":\"owner-key-1\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"ciso\"},\"publicKeyPem\":\"$PEM_1\"}]}"
 # Non-empty array, unusable entry. The false green for a length check.
 REG_PLACEHOLDER='{"version":1,"keys":[{"keyId":"owner-key-1"}]}'
 REG_EMPTY='{"version":1,"keys":[]}'
+# TOG-762 regressions. Each of these was scored WRONG by the pre-fix probe.
+#   the old field name: complete but for `publicKey` where the consumer reads
+#   `publicKeyPem`. The consumer dies on exactKeys; the old probe scored it OPEN.
+REG_WRONG_FIELD='{"version":1,"keys":[{"keyId":"owner-key-1","publicKey":"MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE="}]}'
+#   a well-formed-looking PEM field holding something that is not a key at all.
+REG_BAD_PEM="{\"version\":1,\"keys\":[{\"keyId\":\"owner-key-1\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"ciso\"},\"publicKeyPem\":\"not-a-pem\"}]}"
+#   an RSA key where the consumer demands ed25519.
+REG_WRONG_ALG="{\"version\":1,\"keys\":[{\"keyId\":\"owner-key-1\",\"algorithm\":\"rsa\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"ciso\"},\"publicKeyPem\":\"$PEM_1\"}]}"
+#   two entries sharing a keyId: the consumer dies, so the registry trusts NOTHING.
+REG_DUP="{\"version\":1,\"keys\":[{\"keyId\":\"dup\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"ciso\"},\"publicKeyPem\":\"$PEM_1\"},{\"keyId\":\"dup\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"cos\"},\"publicKeyPem\":\"$PEM_2\"}]}"
+#   the two-key registry TOG-762 was asked to land. Two DISTINCT principals.
+REG_TWO_KEY="{\"version\":1,\"keys\":[{\"keyId\":\"ciso-1\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"ciso\"},\"publicKeyPem\":\"$PEM_1\"},{\"keyId\":\"cos-1\",\"algorithm\":\"ed25519\",\"authorizingPrincipal\":{\"principalClass\":\"agent\",\"principalId\":\"cos\"},\"publicKeyPem\":\"$PEM_2\"}]}"
 
 # Build the throwaway repo holding the registry at a committed ref.
 build_repo() {
@@ -234,10 +254,66 @@ fi
 build_repo "$REG_PLACEHOLDER"
 run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
 if [ "$RC" -eq 4 ] && gate_is authorizer-registry closed; then
-  ok "a key entry with no publicKey does not count as a usable authorizer"
+  ok "a key entry with no public key does not count as a usable authorizer"
 else
-  bad "a key entry with no publicKey does not count as a usable authorizer" "rc=$RC; $OUT"
+  bad "a key entry with no public key does not count as a usable authorizer" "rc=$RC; $OUT"
 fi
+
+# --- A'': TOG-762 — the gate must read the CONSUMER's field name ------------
+# The probe once required `publicKey`; the consumer requires `publicKeyPem` and
+# dies on exactKeys otherwise. That is a FALSE OPEN: the gate would report the
+# registry as trusted while every real grant is refused.
+build_repo "$REG_WRONG_FIELD"
+run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
+if [ "$RC" -eq 4 ] && gate_is authorizer-registry closed; then
+  ok "a key using publicKey (not publicKeyPem) is not scored as trusted"
+else
+  bad "a key using publicKey (not publicKeyPem) is not scored as trusted" "rc=$RC; $OUT"
+fi
+
+# A PEM field that is not a key. Length is non-zero, so a typeof/length check
+# passes it; the consumer's createPublicKey throws.
+build_repo "$REG_BAD_PEM"
+run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
+if [ "$RC" -eq 4 ] && gate_is authorizer-registry closed; then
+  ok "a publicKeyPem that does not parse is not scored as trusted"
+else
+  bad "a publicKeyPem that does not parse is not scored as trusted" "rc=$RC; $OUT"
+fi
+
+# Right shape, wrong algorithm. The consumer requires ed25519 explicitly.
+build_repo "$REG_WRONG_ALG"
+run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
+if [ "$RC" -eq 4 ] && gate_is authorizer-registry closed; then
+  ok "a non-ed25519 algorithm is not scored as trusted"
+else
+  bad "a non-ed25519 algorithm is not scored as trusted" "rc=$RC; $OUT"
+fi
+
+# A duplicate keyId makes the consumer die, so the registry trusts NOTHING —
+# not "one of the two". Counting survivors would score this open.
+build_repo "$REG_DUP"
+run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
+if [ "$RC" -eq 4 ] && gate_is authorizer-registry closed; then
+  ok "a duplicate keyId makes the whole registry untrusted"
+else
+  bad "a duplicate keyId makes the whole registry untrusted" "rc=$RC; $OUT"
+fi
+
+# THE POSITIVE CONTROL FOR THIS FIX. Without it every case above is satisfiable
+# by a probe that always reports closed — which is exactly the false CLOSED the
+# fix removes. A real two-key registry must flip the gate OPEN and count 2.
+build_repo "$REG_TWO_KEY"
+run_gates "$ROWS" "$SERVER" "paperclip-ops-tooling,paperclip" "$DEST"
+if [ "$RC" -eq 0 ] && gate_is authorizer-registry open; then
+  ok "a real-shape two-key registry opens authorizer-registry"
+else
+  bad "a real-shape two-key registry opens authorizer-registry" "rc=$RC; $OUT"
+fi
+case "$OUT" in
+  *"2 usable authorizer key(s)"*) ok "the two-key registry is counted as 2 usable keys" ;;
+  *) bad "the two-key registry is counted as 2 usable keys" "$OUT" ;;
+esac
 
 # --- B: the disclosure routes not deployed ----------------------------------
 # The repo side is untouched; only the DEPLOYED manifest loses them. This is the

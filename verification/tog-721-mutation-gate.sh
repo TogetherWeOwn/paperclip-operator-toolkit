@@ -108,18 +108,23 @@ PY
 
 echo "=== each limb of the readiness gate, removed one at a time ==="
 
-# 1. GATE A DEGRADED TO A LENGTH CHECK. The registry probe filters for entries that
-#    actually carry a keyId AND a publicKey. Replacing that with `keys.length` scores a
-#    placeholder entry as a trusted authorizer — the gate reports "an authorizer is
-#    provisioned" when nothing would verify. This is the most likely way someone
-#    "fixes" this file while opening a hole.
+# 1. GATE A DEGRADED TO A LENGTH CHECK. The registry probe filters for entries the
+#    CONSUMER would actually trust — exact key set, ed25519, and a PEM that parses.
+#    Replacing that with `keys.length` scores a placeholder entry as a trusted
+#    authorizer: the gate reports "an authorizer is provisioned" when nothing would
+#    verify. This is the most likely way someone "fixes" this file while opening a hole.
+#
+#    The mutation is anchored on the LAST line of the filter plus the write, not on the
+#    whole predicate body. TOG-762 rewrote that predicate (it had been reading
+#    `publicKey`, a field no consumer reads) and this mutation silently stopped
+#    applying — "mutation target appears 0 times", which the harness correctly reddens
+#    rather than skipping. A narrower anchor keeps the mutation meaningful across edits
+#    to the predicate it is protecting.
 mutate "the authorizer usability filter degraded to an array length" \
-  '    const usable = v.keys.filter((k) => k && typeof k === "object"
-      && typeof k.keyId === "string" && k.keyId.length > 0
-      && typeof k.publicKey === "string" && k.publicKey.length > 0);
-    process.stdout.write(String(usable.length));' \
+  '    const ids = new Set(usable.map((k) => k.keyId));
+    process.stdout.write(String(ids.size === usable.length ? usable.length : 0));' \
   '    process.stdout.write(String(v.keys.length));' \
-  "a key entry with no publicKey does not count as a usable authorizer"
+  "a key entry with no public key does not count as a usable authorizer"
 
 # 2. GATE B DEGRADED TO A ROUTE COUNT. The same mutation TOG-723 exists for, one level
 #    up: a count check passes when one route is swapped for another. Four routes before,

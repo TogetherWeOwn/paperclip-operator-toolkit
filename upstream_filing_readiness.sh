@@ -131,12 +131,45 @@ gate_registry() {
     let v;
     try { v = JSON.parse(t); } catch { process.exit(9); }
     if (!v || !Array.isArray(v.keys)) process.exit(9);
-    // A key with no keyId or no public key is not a usable authorizer. Counting
-    // array length alone would score a placeholder entry as an open gate.
-    const usable = v.keys.filter((k) => k && typeof k === "object"
-      && typeof k.keyId === "string" && k.keyId.length > 0
-      && typeof k.publicKey === "string" && k.publicKey.length > 0);
-    process.stdout.write(String(usable.length));
+    // "Usable" must mean usable TO THE CONSUMER, not merely well-populated. The
+    // consumer is external_disclosure.js:readTrustStore(), which calls
+    // exactKeys(entry, ["keyId","algorithm","authorizingPrincipal","publicKeyPem"])
+    // and then crypto.createPublicKey() on the PEM. Measured 2026-08-31 (TOG-762):
+    // this probe previously required `publicKey`, a field name that appears in NO
+    // consumer. Both directions were wrong and both were silent:
+    //
+    //   - false CLOSED: a correctly-shaped registry ({...,publicKeyPem}) scored 0
+    //     usable keys, so the gate stayed red at the exact moment it should flip.
+    //     Verified: a two-key real-shape registry read `closed` while the consumer
+    //     accepted the same file and verified a signature against it.
+    //   - false OPEN: {keyId, publicKey:"not-a-key"} scored usable, while the
+    //     consumer dies on exactKeys before ever reaching the crypto.
+    //
+    // So the shape is checked exactly as the consumer checks it, and the PEM is
+    // parsed rather than merely measured for length. An entry that would make the
+    // consumer die is not an authorizer this gate will score as trust.
+    const crypto = require("crypto");
+    const EXACT = ["algorithm", "authorizingPrincipal", "keyId", "publicKeyPem"];
+    const usable = v.keys.filter((k) => {
+      if (!k || typeof k !== "object" || Array.isArray(k)) return false;
+      const got = Object.keys(k).sort();
+      if (got.length !== EXACT.length) return false;
+      if (!got.every((n, i) => n === EXACT[i])) return false;
+      if (k.algorithm !== "ed25519") return false;
+      if (typeof k.keyId !== "string" || !k.keyId) return false;
+      const p = k.authorizingPrincipal;
+      if (!p || typeof p !== "object" || Array.isArray(p)) return false;
+      if (typeof p.principalClass !== "string" || !p.principalClass) return false;
+      if (typeof p.principalId !== "string" || !p.principalId) return false;
+      if (typeof k.publicKeyPem !== "string" || !k.publicKeyPem) return false;
+      try {
+        return crypto.createPublicKey(k.publicKeyPem).asymmetricKeyType === "ed25519";
+      } catch { return false; }
+    });
+    // A duplicate keyId makes the consumer die outright, so the whole registry is
+    // unusable — not "usable minus one". Score it as trusting nothing.
+    const ids = new Set(usable.map((k) => k.keyId));
+    process.stdout.write(String(ids.size === usable.length ? usable.length : 0));
   ' 2>/dev/null)" \
     || die "external_disclosure_authorizers.json at $REF is not the shape this gate reads ({version, keys[]}). Refusing rather than scoring it."
 
