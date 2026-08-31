@@ -15,7 +15,7 @@ from any agent container, whose stdout went nowhere durable.
 | | |
 |---|---|
 | Code | complete — 4 modules, hand-written `dist/` |
-| Tests | 43, `node --test`, no network and no host. 9-mutant sensitivity check run, 9 killed |
+| Tests | 43, `node --test`, no network and no host. Mutation-gated by `verification/tog-747-mutation-gate.sh`: 21 mutants, 21 killed, 0 survivors |
 | Manifest | validated against the **host's own** validators — `pluginManifestV1Schema` PASS, `validateManifestCapabilities` → `{allowed:true, missing:[], pluginId:"dispatch"}` |
 | Installed | **no** — install needs an operator (`/api/plugins` returns `403 Board access required` to an agent key) |
 | Wake action | **off**, and stays off. Enabling it is a separate, evidence-gated step — see "The gate" |
@@ -251,12 +251,28 @@ directly against hand-built populations, and the harness covers the wiring:
 capability enforcement, company enumeration, the metric contract, the activity
 threshold, the state round-trip and the wake gate.
 
-Sensitivity was checked by mutation rather than asserted: nine mutants — idle
-anchored on `updatedAt`, rails 1 and 2 swapped, `wakeEnabled` defaulted true,
-`deadlocked_agents` written as `0`, rail 4 folded into `refused_blocked`, the focus
-filter moved before the counters, the wake loop aborting on the first refusal, the
-sweep reading only `companies[0]`, and activity logged unconditionally. All nine
-were killed; an unmutated decoy run stayed green.
+Sensitivity is checked by mutation rather than asserted, and the check is a
+committed script rather than a run someone did once:
+
+```bash
+verification/tog-747-mutation-gate.sh     # from the repo root
+```
+
+It breaks one load-bearing behaviour at a time and requires the suite to go red
+for each: idle anchored on `updatedAt` or counting another issue's runs, rails 1
+and 2 swapped, a `done` blocker still refusing, the park rail dropped, two picks
+for one agent, `wakeEnabled` defaulted true, absent config reading as enabled,
+`deadlocked_agents` fabricated as `0` or written as a metric, metrics suppressed,
+activity logged unconditionally, idle ms folded into the state comparison, the
+wake loop aborting on the first refusal, report-only waking, and one company's
+failure aborting the sweep.
+
+**21 mutants, 21 killed, 0 survivors** against the merged tree.
+
+The gate guards itself, because a mutation harness that fails open is worse than
+none: it aborts unless the baseline is green, reports a pattern that matched
+nothing as a `BROKEN GATE` instead of a pass, and runs `node --check` on every
+mutant so a syntax error is never miscounted as a caught mutation.
 
 ## Constraints this build holds to (TOG-706, non-negotiable)
 
