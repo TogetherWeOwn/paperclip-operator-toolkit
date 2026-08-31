@@ -119,6 +119,7 @@ name: CI
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
+#     plugins/dispatch                  see the `dispatch-suite` job below
 #     gh-event-capture                  see the `capture-suite` job below
 #     mcp/                              see the `mcp-suite` job below
 #
@@ -3478,6 +3479,149 @@ jobs:
           }
           console.log('credential mint, reveal and regeneration surfaces: absent')
           NODE
+
+  # ---------------------------------------------------------------------------
+  # dispatch (TOG-747, implementing the TOG-706 design).
+  #
+  # The native replacement for `dispatcher.py` / `paperclip-dispatcher.timer` —
+  # a host-side script outside any repo whose stdout went nowhere durable.
+  #
+  # Its own job, for the same reason as `broker-suite`: this is a Node runtime
+  # on the version the Paperclip host actually executes plugins on, not a shell
+  # suite, and a failure here should read as "the dispatch suite went red"
+  # rather than as one opaque "CI failed".
+  #
+  # Offline: no credential, no network, no host. The suite is two layers because
+  # the SDK forces it — `createTestHarness` returns a hard-coded `runs: []` and
+  # `invocationBlocks: []` from `getOrchestration`, so the idle rail and the
+  # budget rail cannot be reached through `runJob` at all. The policy is
+  # therefore tested directly against hand-built populations and the harness
+  # covers the wiring.
+  dispatch-suite:
+    name: dispatch suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/dispatch
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: the version the instance runs plugins on. `node --test`
+      # semantics have moved between majors, so testing on another one would be
+      # testing a different program than the one installed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/dispatch/package-lock.json
+
+      # --include=dev is NOT redundant. The SDK is a devDependency (the host
+      # supplies it at runtime), and npm implies --omit=dev whenever NODE_ENV is
+      # `production` — which the Paperclip instance sets. There, a bare `npm ci`
+      # installs nothing, exits 0, prints "up to date", and every test then dies
+      # ERR_MODULE_NOT_FOUND. See broker-suite's note; same trap, same flag.
+      - name: Install pinned host packages
+        run: npm ci --include=dev --ignore-scripts
+
+      # Guard the above rather than trusting it, so a silent no-op fails HERE
+      # with the reason instead of later as an unexplained module error.
+      - name: Verify the install actually landed
+        run: |
+          set -euo pipefail
+          [ -d "node_modules/@paperclipai/plugin-sdk" ] || {
+            echo "::error::@paperclipai/plugin-sdk is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
+            exit 1
+          }
+          echo "install ok: plugin-sdk present"
+
+      # Pass the FILE, not the directory: `node --test test/` resolves `test` as
+      # a module specifier on Node 24 and dies before running anything, which
+      # looks exactly like a broken suite and is not. package.json's `test`
+      # script passes the file, and is invoked here so the two cannot drift.
+      - name: Dispatch suite
+        run: npm test
+
+      # The wake action is bought with a week of report-only evidence, not with
+      # an argument (TOG-706 Q1, retirement plan step 3). A default of `true`
+      # would make INSTALLING the plugin the thing that enables it — precisely
+      # the step the gate exists to hold. The suite asserts this too; it is
+      # asserted again here because this is the one property whose regression
+      # would be an unreviewed behaviour change in production rather than a red
+      # test somebody triages.
+      - name: Prove the wake action still ships disabled
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { manifest } from './dist/manifest.js'
+          const wake = manifest.instanceConfigSchema?.properties?.wakeEnabled
+          if (!wake) throw new Error('wakeEnabled is no longer a config key')
+          if (wake.default !== false) {
+            throw new Error(`wakeEnabled defaults to ${wake.default}; it must ship false until the evidence gate passes`)
+          }
+          console.log('wake action: ships disabled')
+          NODE
+
+      # Capabilities are STATIC: the host pins them at install, and adding one
+      # later puts the plugin into upgrade_pending (PLUGIN_SPEC.md §15.3). So
+      # this is an exact-set equality against the reviewed list, not a denylist
+      # of bad ones — a capability appearing OR disappearing both invalidate the
+      # report-only week as evidence for the thing that eventually ships.
+      #   `database` is absent deliberately: declaring it would require
+      # `database.namespace.migrate`, i.e. a read-only reporter holding a DDL
+      # capability to do a SELECT.
+      - name: Prove the capability set is exactly the reviewed one
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { manifest } from './dist/manifest.js'
+          const reviewed = [
+            'activity.log.write',
+            'agents.read',
+            'companies.read',
+            'issue.relations.read',
+            'issues.orchestration.read',
+            'issues.read',
+            'issues.wakeup',
+            'jobs.schedule',
+            'metrics.write',
+            'plugin.state.read',
+            'plugin.state.write',
+          ]
+          const declared = [...manifest.capabilities].sort()
+          const added = declared.filter((c) => !reviewed.includes(c))
+          const removed = reviewed.filter((c) => !declared.includes(c))
+          if (added.length) throw new Error(`undeclared-in-review capabilities added: ${added.join(', ')}`)
+          if (removed.length) throw new Error(`reviewed capabilities removed: ${removed.join(', ')}`)
+          if (manifest.database) throw new Error('manifest.database would force database.namespace.migrate on a read-only reporter')
+          console.log(`capability set: exactly the reviewed ${declared.length}`)
+          NODE
+
+      # This plugin reports and, when enabled, wakes. It NEVER assigns and never
+      # writes an issue — TOG-706 scope item 4. A source-level assertion because
+      # it is cheaper than any test and the constraint is absolute.
+      - name: Prove the plugin never writes an issue
+        run: |
+          set -uo pipefail
+          rc=0
+          for bad in "issues.update" "issues.create" "issues.assign" "setBlockedBy" "assigneeAgentId:"; do
+            if grep -nF "$bad" dist/*.js; then
+              echo "::error::dist/ reaches an issue-write surface ($bad); this plugin reports and wakes, it never assigns"
+              rc=1
+            fi
+          done
+          # requestWakeups (plural) throws on the first refusal AFTER waking every
+          # prior issue and discards the whole result set (ADR 0004). The singular
+          # call in its own try/catch is the only form used, at any batch size.
+          #   Matched as a MEMBER CALL (`.requestWakeups(`) rather than as the bare
+          # name, because worker.js's header comment explains at length why the
+          # batch call is never used and a bare-name grep would fail on the
+          # explanation instead of on the defect.
+          if grep -nE '\.requestWakeups[[:space:]]*\(' dist/*.js; then
+            echo "::error::dist/ calls the batch requestWakeups; ADR 0004 requires one call per issue in its own try/catch"
+            rc=1
+          fi
+          [ $rc -eq 0 ] && echo "issue-write surface: absent; wake path: per-issue only"
+          exit $rc
 
   # ---------------------------------------------------------------------------
   # gh-event-capture (TOG-289 / TOG-244).

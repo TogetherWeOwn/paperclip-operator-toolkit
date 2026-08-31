@@ -57,3 +57,10 @@ node_modules/
 # silently make the authoritative broker disappear from a fresh clone or CI.
 !plugins/omniroute-broker/dist/
 !plugins/omniroute-broker/dist/*.js
+
+# Same for dispatch: dist/ is the hand-written entrypoint the manifest points
+# at, not a build artefact. Neither is currently ignored, but a blanket dist/
+# rule added later would delete the plugin from a fresh clone without failing
+# anything visible until an install went looking for the worker.
+!plugins/dispatch/dist/
+!plugins/dispatch/dist/*.js

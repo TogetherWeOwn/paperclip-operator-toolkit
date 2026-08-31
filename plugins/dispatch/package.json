@@ -1,0 +1,20 @@
+{
+  "name": "paperclip-plugin-dispatch",
+  "version": "0.1.0",
+  "description": "Reports, and once evidence-gated wakes, stalled assigned work that no state change would otherwise wake. Native replacement for the host-side paperclip-dispatcher timer.",
+  "type": "module",
+  "private": true,
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "scripts": {
+    "test": "node --test test/dispatch.test.mjs"
+  },
+  "peerDependencies": {
+    "@paperclipai/plugin-sdk": "*"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "2026.817.0"
+  }
+}
