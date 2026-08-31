@@ -663,6 +663,54 @@ tog521_commands=$(jq -er '.items["TOG-521"].commands' "$HERE/operator_runbook_cl
   && grep -q 'export OMNIROUTE_REHEARSAL_AUTHORIZATION_FILE="$authorization_file"' "$AUTHORIZED_PREFLIGHT" \
   && ok 'canonical runbook delegates the exact container-local lifecycle to one reviewed helper' || bad 'canonical preflight command still improvises the authorization lifecycle'
 
+# TOG-521. The runbook is executed verbatim by a human on the VPS, so an
+# unresolved <placeholder> is not a formatting nit -- it is the operator
+# guessing. Measured 2026-08-31: `git checkout --detach <reviewed-commit-for-TOG-554>`
+# invited the TOG-554 merge 5ddf2785, where step 5's rehearsal_authorized_preflight.sh
+# does not exist and the lane dies exit 127 AFTER the attach has already happened.
+checkout_line=$(grep -m1 '^git checkout --detach ' <<<"$tog521_commands" || true)
+[[ $checkout_line =~ ^git\ checkout\ --detach\ [0-9a-f]{40}$ ]] \
+  && ok 'runbook pins a full 40-hex reviewed commit, not a placeholder' \
+  || bad 'runbook checkout is unpinned or still a placeholder' "$checkout_line"
+
+# The pinned commit must be one that actually carries every executable the lane
+# invokes. "Exists in this reviewed tree" is the honest assertion: the suite
+# runs from a checkout, and a shallow CI clone cannot resolve an arbitrary
+# older object to check it there.
+for lane_script in omniroute/rehearsal/verify-package.sh \
+  omniroute/rehearsal/prepare-db-preimage.sh omniroute/rehearsal/operator-action.sh \
+  rehearsal_authorized_preflight.sh rehearsal_endpoint_preflight.sh \
+  agent_endpoint_preflight.sh; do
+  [[ -f $HERE/$lane_script ]] || bad "runbook lane invokes a missing script: $lane_script"
+done
+ok 'every script the TOG-521 lane invokes exists in the reviewed tree'
+
+# The step-0 hash block must equal the real files. This is the part that keeps
+# working after today: edit operator-action.sh without repinning and CI goes red
+# here, instead of the operator discovering it mid-apply on the VPS.
+pinned_sums=$(sed -n '/^sha256sum --check --strict <<.SUMS.$/,/^SUMS$/p' <<<"$tog521_commands" \
+  | sed '1d;$d')
+[[ -n ${pinned_sums//[[:space:]]/} ]] \
+  && ok 'runbook carries a step-0 hash block for the lane executables' \
+  || bad 'runbook step-0 hash block is missing entirely'
+sums_drift=0
+sums_counted=0
+while read -r pinned_hash pinned_path; do
+  [[ -n $pinned_hash ]] || continue
+  sums_counted=$(( sums_counted + 1 ))
+  actual_hash=$(sha256sum "$HERE/$pinned_path" 2>/dev/null | cut -d' ' -f1)
+  [[ $actual_hash == "$pinned_hash" ]] || {
+    sums_drift=1
+    printf '    drift: %s pinned=%s actual=%s\n' "$pinned_path" "$pinned_hash" "${actual_hash:-<unreadable>}" >&2
+  }
+done <<<"$pinned_sums"
+(( sums_counted == 6 )) \
+  && ok 'step-0 pins all six lane executables' \
+  || bad "step-0 pins $sums_counted executables, expected 6"
+(( sums_drift == 0 )) \
+  && ok 'every step-0 pinned hash matches the reviewed file on disk' \
+  || bad 'a step-0 pinned hash has drifted from the file the operator will execute'
+
 section '7. canonical authorization namespace lifecycle'
 LIFECYCLE=$TMP/lifecycle
 mkdir -p "$LIFECYCLE/bin" "$LIFECYCLE/home/state/evidence" "$LIFECYCLE/container"
