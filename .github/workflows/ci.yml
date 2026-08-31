@@ -39,6 +39,11 @@ name: CI
 #     test_capability_gate.sh           who may decide a CAPABILITY request, and
 #                                       which four asks stop for the owner
 #                                       whatever any agent says — TOG-387
+#     test_host_ops_broker.py           fixed read-only host verbs, executor
+#                                       previews, replay/expiry, signed evidence,
+#                                       and the disabled write gate — TOG-520
+#     test_host_ops_install.sh          the installer's service-identity, key and
+#                                       sudoers contracts — TOG-520
 #     test_interaction_route.sh         where an ask belongs — the owner, an
 #                                       agent, or an operator runbook; and
 #                                       whether it could be answered at all
@@ -426,7 +431,9 @@ jobs:
           # surface no runner can reach (TOG-371/TOG-554). The rehearsal suite
           # below exercises its Podman paths with a fake runtime, but this parse
           # gate also covers the nested scripts directly.
-          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # host-ops/*.sh is included for the same reason: the installer runs on
+          # the VPS in front of an operator, and no runner can reach that host.
+          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh host-ops/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           # The repo's first Python. Same argument as the shell gate above: these
           # are operator-run and have no suite, so a parse error would otherwise
@@ -443,6 +450,17 @@ jobs:
             node --check --input-type=module < "$f" || { echo "::error file=$f::node parse error"; rc=1; }
           done
           exit $rc
+
+      # TOG-520. The fixed read-only host verb table, executor-rendered
+      # previews, expiry, single-use replay refusal, audit-chain integrity,
+      # signed evidence, and the production refusal of both typed write
+      # specifications. Offline: the suite fakes every host interface, so it
+      # never needs the VPS, podman, or systemd.
+      - name: host operations broker suite
+        run: python3 ./test_host_ops_broker.py
+
+      - name: host operations installer contract suite
+        run: ./test_host_ops_install.sh
 
       # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
       # generated throwaway RSA key, and fabricated token-shaped canaries.
