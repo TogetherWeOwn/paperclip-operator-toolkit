@@ -670,6 +670,15 @@ jobs:
       - name: provisioner create-policy suite
         run: ./test_provisioning_policy.sh
 
+      # TOG-689. A newly provisioned claude_local agent must be BORN with an
+      # explicitly falsy `effort` on its cheap model profile: the ACP lane
+      # refuses that config option, and merely OMITTING the key does not help,
+      # because the host spreads the adapter default ("low") first and the
+      # stored profile second. Runs fully offline with pc/psql stubbed -- no
+      # database, API, credential or agent mutation.
+      - name: provisioned agents are born ACP-safe
+        run: ./test_provisioned_cheap_profile.sh
+
       # The widened-catalog cases above are absence assertions: they also pass if
       # their setup never reaches the named gate. Delete each independent guard
       # from a staging copy, after a green baseline, and require its owning case

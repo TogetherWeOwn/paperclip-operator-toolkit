@@ -113,8 +113,8 @@ mutant caller-placement test_privilege_ceilings.sh org_provisioner.sh \
   $'--reports-to|--parent)\n        caller_parent="$2"; shift 2;;' \
   'DIRECTOR create payload accepted caller-controlled placement' true mutate_caller_placement || rc=1
 mutant dormant-payload test_privilege_ceilings.sh org_provisioner.sh \
-  'runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}}' \
-  'runtimeConfig:{heartbeat:{enabled:true, wakeOnDemand:true}}' \
+  'runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}' \
+  'runtimeConfig:({heartbeat:{enabled:true, wakeOnDemand:true}}' \
   'DIRECTOR not dormant' || rc=1
 mutant protected-create-payload test_privilege_ceilings.sh org_provisioner.sh \
   'authorizationPolicy:{assignmentPolicy:{mode:"protected"}}' \

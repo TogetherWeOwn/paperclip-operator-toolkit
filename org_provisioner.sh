@@ -361,15 +361,44 @@ cmd_create() {
   fi
 
   # Create natively. Invariant 1/3: reportsTo is the CALLER, chosen here.
-  local payload out new_id
+  #
+  # Invariant 13 (TOG-689): the cheap model profile is born with an explicitly
+  # FALSY `effort`. `effort` is valid on the claude_local CLI lane and ships in
+  # that adapter's own default cheap profile, but the ACP engine lane refuses
+  # it -- "does not advertise config option 'effort'" -- and an agent that dies
+  # that way cannot self-heal, because self-repair requires it to be running.
+  #
+  # OMITTING the key does not work. resolveModelProfileApplication spreads the
+  # ADAPTER DEFAULT FIRST and the stored profile second, so an absent key is
+  # re-supplied as "low" at run time. Both lanes guard on TRUTHINESS, so ""
+  # suppresses the ACP option while leaving the CLI lane working.
+  #
+  # We write it even though the host currently normalizes an absent cheap
+  # profile to {enabled:false}, which never reaches the merge and so is already
+  # safe TODAY. That safety is incidental, not defensive: the moment anyone
+  # flips enabled:true -- the single most likely edit to this profile -- the
+  # adapter default reappears and the agent is fatal again. Pinning "" here
+  # makes the born state safe in BOTH positions.
+  #
+  # Scoped to claude_local because that is the adapter whose cheap profile
+  # carries `effort`. ADAPTER_TYPE is overridable, and writing a cheap profile
+  # for an adapter that does not declare one would invent config the host would
+  # then have to validate. Adapters are opted in here explicitly, never by
+  # default -- a new adapter with the same defect must be added to this list.
+  local payload out new_id cheap_profile_json='{}'
+  case "$ADAPTER_TYPE" in
+    claude_local) cheap_profile_json='{"cheap":{"enabled":false,"adapterConfig":{"effort":""}}}' ;;
+  esac
   payload="$(jq -cn \
     --arg name "$title" --arg title "$title" --arg parent "$caller_id" \
     --arg adapter "$ADAPTER_TYPE" --arg tpl "$template" --arg cap "$capabilities" \
+    --argjson cheap "$cheap_profile_json" \
     --argjson budget "$AGENT_BUDGET_CENTS" '
     {
       name:$name, role:"general", title:$title, capabilities:$cap,
       adapterType:$adapter, adapterConfig:{},
-      runtimeConfig:{heartbeat:{enabled:false, wakeOnDemand:false}},
+      runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}
+                     + (if ($cheap|length) > 0 then {modelProfiles:$cheap} else {} end)),
       budgetMonthlyCents:$budget,
       permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:false,
                    authorizationPolicy:{assignmentPolicy:{mode:"protected"}}},
