@@ -155,6 +155,7 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 ./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
 ./test_channel_drift.sh             # channel_drift.sh: staged-but-never-committed detection
 ./test_cold_start_detector.sh       # cold_start_detector.sh: cold-with-headroom detection
+./test_orgdb_fixture.sh             # the privilege-suite org fixture, stub and schema_drift.sh
 ./verification/tog-487-mutation-gate.sh   # ...and proof those refusals are not vacuous
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 
@@ -308,6 +309,45 @@ measurement.
 
 The same caveat applies as above and for the same reason: CI runs `test_channel_drift.sh`, which
 proves the detector works. It cannot run `check` — GitHub has no view of `/paperclip`.
+
+### And the schema half — `schema_drift.sh`
+
+The two privilege suites run against a vendored six-table fixture
+(`test/fixtures/orgdb/schema.sql`), which is a snapshot of the production schema. Snapshots rot, and
+a rotted one is worse than no fixture: the suites stay green while testing a shape the database no
+longer has. So the dump ships with a drift check.
+
+It is the same two-sided operation as the tools above — **fingerprint where production lives,
+compare in a clone** — and, like them, CI can only run the detector, never the comparison, because
+GitHub has no route to the VPS.
+
+```bash
+# 1. On the VPS. The default backend is podman, so this needs no arguments and
+#    no psql — the same 'podman exec paperclip-db' every operator tool uses.
+./schema_drift.sh fingerprint > /tmp/production-schema.fp
+
+# 2. In a clone, against a database loaded from test/fixtures/orgdb/schema.sql.
+PAPERCLIP_SQL_BACKEND=psql ./schema_drift.sh compare /tmp/production-schema.fp
+```
+
+The contract is columns (type, nullability, default) plus indexes on those six tables. It excludes
+foreign keys, non-index constraints and triggers on purpose: the fixture is query-compatible, not a
+replica, and widening the contract to things the fixture never claimed would make it red forever —
+the `channel_drift.sh` failure mode above.
+
+Two things are worth knowing before you trust an exit code. It reaches Postgres through
+[`lib/pcsql.sh`](lib/pcsql.sh) like every other tool here, which is load-bearing rather than tidy:
+this shipped calling `psql` directly, and `psql` is the one backend the operator half does not have,
+so `fingerprint` — the half that has to work on the VPS — was the half that refused. The worse
+direction is that a bare `psql` connects to whatever *that* psql defaults to, and every column it
+reports is real, so a fingerprint of some unrelated database on the same host is indistinguishable
+from a measurement of Paperclip. The six-table guard is the backstop, and the backend is now chosen
+explicitly instead of inherited from `PATH`.
+
+Second: **exit `2` means nothing was measured, and it is not a pass.** The backend is checked with a
+real `SELECT 1` round-trip rather than `command -v`, because a host with podman but no
+`paperclip-db`, or a psql pointed at a dead server, passes a binary check and then compares against
+nothing. Exit `0` match · `2` refused · `3` drift.
 
 `test_responsible_leader.sh` needs `jq` and nothing else. It fabricates the whole world it tests:
 a TSV org fixture read through the `ORG_SNAPSHOT` seam instead of the database, and a stub

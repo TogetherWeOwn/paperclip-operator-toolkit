@@ -589,5 +589,129 @@ else
   bad "CI does not execute the type modifier extractor mutant"
 fi
 
+# ---------------------------------------------------------------------------
+# 12. The drift detector's OPERATOR half must actually run on the VPS.
+#
+# schema_drift.sh shipped calling `psql` directly. CI has psql, so CI was green
+# on every mutation above — but production is reached with `podman exec
+# paperclip-db`, so `fingerprint` on the VPS refused, and the fingerprint is the
+# half the whole check depends on. A detector that only runs on one side of its
+# own comparison never renders a verdict. These drive the real script through
+# fake backends and assert both directions, so a revert to a bare `psql` (or a
+# `command -v` in place of a round trip) reddens here by name.
+# ---------------------------------------------------------------------------
+drift_bin="$TMP/drift-bin"; mkdir -p "$drift_bin"
+cat > "$drift_bin/podman" <<'PODMAN'
+#!/usr/bin/env bash
+echo "$*" >> "${PODMAN_TRACE:?}"
+sql="$(cat)"
+case "$sql" in
+  *"SELECT 1"*)                     echo 1 ;;
+  *"count(*)"*pg_catalog.pg_class*) echo "${FAKE_TABLE_COUNT:-6}" ;;
+  *pg_attribute*)                   printf 'column|agents|---|name|text|not-null|(none)\n' ;;
+  *) echo "fake podman: unexpected SQL" >&2; exit 9 ;;
+esac
+PODMAN
+chmod +x "$drift_bin/podman"
+
+# The operator's literal invocation: no PAPERCLIP_SQL_BACKEND, no psql anywhere.
+drift_fp="$TMP/drift.fp"; drift_trace="$TMP/podman.trace"; : > "$drift_trace"
+if env -u PAPERCLIP_SQL_BACKEND -u DATABASE_URL PODMAN_TRACE="$drift_trace" \
+     PATH="$drift_bin:/usr/bin:/bin" "$HERE/schema_drift.sh" fingerprint > "$drift_fp" 2>"$TMP/drift.err"; then
+  ok "schema_drift fingerprint runs on the operator's podman backend with no psql on PATH"
+else
+  bad "schema_drift fingerprint refuses the operator's podman backend: $(tr '\n' ' ' < "$TMP/drift.err")"
+fi
+grep -q 'paperclip-db' "$drift_trace" \
+  && ok "schema_drift reaches production through the paperclip-db container" \
+  || bad "schema_drift did not use the podman backend container"
+grep -q '^column|agents|---|name|' "$drift_fp" \
+  && ok "the podman-backed fingerprint carries real column rows" \
+  || bad "the podman-backed fingerprint is empty"
+
+# Positive control: the same fingerprint must still detect drift, so the pass
+# above cannot be a detector that reports everything as matching.
+if env -u PAPERCLIP_SQL_BACKEND -u DATABASE_URL PODMAN_TRACE="$drift_trace" \
+     PATH="$drift_bin:/usr/bin:/bin" "$HERE/schema_drift.sh" compare "$drift_fp" >/dev/null 2>&1; then
+  ok "an unmutated fingerprint compares clean over podman"
+else
+  bad "an unmutated fingerprint did not compare clean over podman"
+fi
+sed 's/|name|/|name_mutant|/' "$drift_fp" > "$TMP/drift-mutant.fp"
+env -u PAPERCLIP_SQL_BACKEND -u DATABASE_URL PODMAN_TRACE="$drift_trace" \
+  PATH="$drift_bin:/usr/bin:/bin" "$HERE/schema_drift.sh" compare "$TMP/drift-mutant.fp" >"$TMP/drift-mutant.out" 2>&1
+drift_mutant_rc=$?
+if [[ $drift_mutant_rc -eq 3 ]] && grep -q 'name_mutant' "$TMP/drift-mutant.out"; then
+  ok "a drifted column is detected over podman with exit 3"
+else
+  bad "podman-backed compare did not report drift as exit 3 (exit $drift_mutant_rc)"
+fi
+
+# The wrong-database direction. A psql on PATH pointed somewhere that is not
+# Paperclip answers every query truthfully about the wrong schema. The six-table
+# guard must refuse rather than fingerprint it.
+cat > "$drift_bin/psql" <<'WRONGPG'
+#!/usr/bin/env bash
+sql="$(cat)"
+case "$sql" in
+  *"SELECT 1"*)                     echo 1 ;;
+  *"count(*)"*pg_catalog.pg_class*) echo 0 ;;
+  *) printf 'column|something_else|---|x|text|nullable|(none)\n' ;;
+esac
+WRONGPG
+chmod +x "$drift_bin/psql"
+PAPERCLIP_SQL_BACKEND=psql PGHOST=127.0.0.1 PGDATABASE=not_paperclip \
+  PATH="$drift_bin:/usr/bin:/bin" "$HERE/schema_drift.sh" fingerprint >"$TMP/wrong.out" 2>&1
+wrong_rc=$?
+if [[ $wrong_rc -eq 2 ]] && ! grep -q '^column|' "$TMP/wrong.out"; then
+  ok "a database that is not Paperclip is refused, not fingerprinted"
+else
+  bad "fingerprinted a non-Paperclip database (exit $wrong_rc)"
+fi
+
+# An unreachable backend must refuse. Exit 2 alone does not prove the preflight
+# ran: a dead backend fails the schema query too, and that failure is also a
+# refusal with the same code, so a `command -v` substitution passes this on the
+# exit code. What distinguishes them is WHEN the refusal lands. The preflight is
+# a `SELECT 1` round-trip that must reject the host before any schema query is
+# issued, so the discriminator is that no `pg_attribute` query ever reaches the
+# backend — the trace stays clean. Assert the ordering, not just the outcome.
+cat > "$drift_bin/psql" <<'DEADPG'
+#!/usr/bin/env bash
+sql="$(cat)"; printf '%s\n' "$sql" >> "${PSQL_TRACE:?}"
+echo "could not connect to server" >&2; exit 2
+DEADPG
+chmod +x "$drift_bin/psql"
+dead_trace="$TMP/dead-trace"; : > "$dead_trace"
+PAPERCLIP_SQL_BACKEND=psql PGHOST=127.0.0.1 PGDATABASE=org_fixture PSQL_TRACE="$dead_trace" \
+  PATH="$drift_bin:/usr/bin:/bin" "$HERE/schema_drift.sh" compare "$drift_fp" >"$TMP/dead.out" 2>&1
+dead_rc=$?
+if [[ $dead_rc -eq 2 ]] && ! grep -q 'matches fingerprint' "$TMP/dead.out"; then
+  ok "an unreachable backend refuses instead of comparing against nothing"
+else
+  bad "an unreachable backend did not refuse (exit $dead_rc)"
+fi
+# Positive control: the round-trip must have been attempted at all, or the
+# ordering assertion below is vacuous — it would also "pass" if nothing ran.
+if grep -q 'SELECT 1' "$dead_trace"; then
+  ok "the unreachable backend was probed with a preflight round-trip"
+else
+  bad "no preflight round-trip reached the unreachable backend; the ordering check is vacuous"
+fi
+if grep -q 'pg_attribute' "$dead_trace"; then
+  bad "a schema query was issued to an unreachable backend; the preflight is a binary check, not a round-trip"
+else
+  ok "an unreachable backend is refused before any schema query is issued"
+fi
+
+# The seam itself. Both of these would be green with a bare `psql` call, which
+# is exactly the regression this section exists to catch.
+grep -q 'lib/pcsql.sh' "$HERE/schema_drift.sh" \
+  && ok "schema_drift selects its backend through lib/pcsql.sh" \
+  || bad "schema_drift no longer sources lib/pcsql.sh"
+grep -qE '^\s*psql ' "$HERE/schema_drift.sh" \
+  && bad "schema_drift calls psql directly, bypassing the backend seam" \
+  || ok "schema_drift makes no direct psql call"
+
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
