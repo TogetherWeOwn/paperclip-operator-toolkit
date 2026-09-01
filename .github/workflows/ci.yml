@@ -1362,7 +1362,7 @@ jobs:
       - name: upstream filing readiness gate suite
         run: ./test_upstream_filing_readiness.sh
 
-      # And that suite is 23 green assertions about the evidence sitting under a
+      # And every assertion in that suite is about the evidence sitting under a
       # reserved decision, which is worth nothing unverified. Each mutation
       # removes ONE limb and requires the NAMED case to redden.
       #
