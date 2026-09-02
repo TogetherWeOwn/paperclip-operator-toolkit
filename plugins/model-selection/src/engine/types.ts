@@ -1,0 +1,157 @@
+import type { Tier } from "../constants.js";
+
+/**
+ * A model this company is willing to run a harness on, with the three rates
+ * that actually appear on the bill.
+ *
+ * Rates are `$/Mtok` recovered by solving `usage_json.costUsd` against the
+ * token counts on our own runs — not a vendor list price (ADR-0001: we have no
+ * trustworthy external price signal). `docs/adr/0011` records the derivation.
+ */
+export interface ModelEntry {
+  id: string;
+  tier: Tier;
+  enabled: boolean;
+  costPerMTokIn: number;
+  costPerMTokOut: number;
+  /**
+   * Cache-read rate. Separate from `costPerMTokIn` because cache read is 44%
+   * of the opus bill (ADR-0002) and folding it into input is exactly the
+   * blindness the reference engine had.
+   */
+  costPerMTokCacheRead: number;
+  /**
+   * Capabilities this model is trusted for, as observed on our runs. A model
+   * missing a capability is excluded, never merely down-ranked.
+   */
+  capabilities: readonly string[];
+  contextWindow: number;
+}
+
+/**
+ * Measured token shape of a run at a given tier, from this company's own
+ * `heartbeat_runs`. This is the volume term. It is a *measured multi-turn
+ * total*, not a single-request estimate — the distinction the Round-4 record
+ * identified as the reference engine's structural blind spot.
+ */
+export interface VolumeProfile {
+  tier: Tier;
+  /** Runs the profile was computed from. Below `minSamples` it is not trusted. */
+  sampleCount: number;
+  /** ISO timestamp the profile was computed. Drives the staleness guard. */
+  computedAt: string;
+  avgInputTokens: number;
+  avgCacheReadTokens: number;
+  avgOutputTokens: number;
+}
+
+/**
+ * Quality signals per tier, from `queries/06-escalation-rate.sql` and the
+ * human reopen/reject tripwire. Feeds the escalation-risk term.
+ */
+export interface QualitySignal {
+  tier: Tier;
+  escalationRate: number;
+  /** Human reopen/reject count in window. Weighted 10x (ADR-0005). */
+  silentFailureCount: number;
+  sampleCount: number;
+  computedAt: string;
+}
+
+/**
+ * The capability-exclusion answer for one issue. Recorded judgement, never
+ * inferred from issue text (ADR-0004: the boundary is capability, not
+ * difficulty — a trivial config edit is excluded).
+ */
+export interface CapabilityExclusion {
+  excluded: boolean;
+  reasons: readonly string[];
+}
+
+/**
+ * Where a tier judgement came from. Ordered most to least authoritative.
+ * `agent-floor` is the always-valid fallback: a missing label is not a missing
+ * decision (ADR-0008).
+ */
+export type TierSource =
+  | "capability-exclusion"
+  | "issue-override"
+  | "issue-label"
+  | "agent-floor"
+  | "config-default";
+
+export interface TierJudgement {
+  tier: Tier;
+  source: TierSource;
+  detail: string;
+}
+
+export interface IssueDescriptor {
+  issueId: string;
+  /** `tier:*` label names already on the issue. The durable record. */
+  labelNames?: readonly string[];
+  /** Existing `assigneeAdapterOverrides.adapterConfig.model`, if pinned. */
+  pinnedModelId?: string | null;
+  /** Recorded capability-exclusion answer. Supplied, never guessed. */
+  exclusion?: CapabilityExclusion;
+  /** Assignee agent's `adapterConfig.model` — the tier floor. */
+  agentFloorModelId?: string | null;
+  /** Model already used on this issue, if any. Sticky driver. */
+  stickyModelId?: string | null;
+  requiredCapabilities?: readonly string[];
+  requiredContextTokens?: number;
+}
+
+export interface CostBreakdown {
+  modelId: string;
+  /** Direct cost of one run at this model, from the volume profile. */
+  runCostUsd: number;
+  inputCostUsd: number;
+  cacheReadCostUsd: number;
+  outputCostUsd: number;
+  /** Expected extra cost from escalating to the tier above, if it happens. */
+  escalationRiskUsd: number;
+  /** runCostUsd + escalationRiskUsd. The number selection actually orders on. */
+  expectedCostUsd: number;
+  /** Which profile was used, and whether it was trusted. */
+  profileTier: Tier;
+  profileTrusted: boolean;
+}
+
+export type Outcome =
+  | "selected"
+  | "no-eligible-model"
+  | "disabled"
+  | "held-at-floor";
+
+export interface Candidate extends CostBreakdown {
+  tier: Tier;
+}
+
+export interface Rejection {
+  modelId: string;
+  /**
+   * `tier-ceiling` is a cost preference and yields to a hard requirement.
+   * `tier-floor` is a safety constraint and never yields — it is how a
+   * capability exclusion keeps excluded work off a cheap model.
+   */
+  stage: "disabled" | "capability" | "context-window" | "tier-ceiling" | "tier-floor" | "no-profile";
+  reason: string;
+}
+
+export interface SelectionDecision {
+  outcome: Outcome;
+  modelId: string | null;
+  /** The tier judgement that keyed this decision, and where it came from. */
+  judgement: TierJudgement;
+  /** Tier actually selected from, after any floor-lift. */
+  effectiveTier: Tier | null;
+  candidates: Candidate[];
+  rejections: Rejection[];
+  /** Human-readable decision path. Every branch appends one line. */
+  trace: string[];
+  /** True when the decision is advice only and no write should follow. */
+  advisory: boolean;
+  /** Set when we deliberately declined to move off the agent floor. */
+  heldReason: string | null;
+}

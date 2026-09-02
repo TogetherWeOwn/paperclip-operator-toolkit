@@ -1,0 +1,36 @@
+{
+  "name": "@togetherweown/paperclip-model-selection",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paperclip plugin: choose the cheapest fully-capable model for each harness run, from a recorded tier judgement and a volume-aware cost term.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm run test && npm run build",
+    "profiles:refresh": "node scripts/refresh-volume-profiles.mjs",
+    "gate:stage2": "node scripts/check-stage2-gate.mjs"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.824.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

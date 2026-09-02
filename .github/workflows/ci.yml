@@ -4162,3 +4162,58 @@ jobs:
           done
           [ $rc -eq 0 ] && echo "transport surface: clean"
           exit $rc
+
+  # ---------------------------------------------------------------------------
+  # model-selection (Stage 3 Paperclip plugin).
+  #
+  # The cost-aware model selection plugin that advises or enforces model routing
+  # based on recorded tier judgements and volume-aware cost profiles.
+  #
+  # Its own job for the same reason as `broker-suite`: this is a Node runtime
+  # on the version the Paperclip host actually executes plugins on, not a shell
+  # suite, and a failure here should read as "the model-selection suite went
+  # red" rather than as one opaque "CI failed".
+  #
+  # Offline: no credential, no network, no host. Tests are written for Vitest.
+  model-selection-suite:
+    name: model-selection suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/model-selection
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: the version the instance runs plugins on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/model-selection/package-lock.json
+
+      # --include=dev is required for plugin-sdk devDependency.
+      - name: Install pinned host packages
+        run: npm ci --include=dev --ignore-scripts
+
+      # Guard the install.
+      - name: Verify the install actually landed
+        run: |
+          set -euo pipefail
+          [ -d "node_modules/@paperclipai/plugin-sdk" ] || {
+            echo "::error::@paperclipai/plugin-sdk is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
+            exit 1
+          }
+          echo "install ok: plugin-sdk present"
+
+      # Run the Vitest suite.
+      - name: Model selection suite
+        run: npm test
+
+      # Verify the plugin still builds.
+      - name: Verify the plugin builds
+        run: npm run build
+
+      # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access
+      # (PAPERCLIP_API_KEY, PAPERCLIP_COMPANY_ID). It is designed for the
+      # operator's environment, not for CI. The operator must run it separately
+      # on the archive extract per TOG-809 §3.
