@@ -121,6 +121,12 @@ name: CI
 #                                       bills a PAYG leg, so status alone cannot
 #                                       see it. Covers both drifting surfaces —
 #                                       TOG-682
+#     test_breaker_cotenancy_probe.sh   breaker_cotenancy_probe.sh: how many
+#                                       lanes still let ONE out-of-credits model
+#                                       terminal-state every Claude id on the
+#                                       same connection. Alias lanes collapse to
+#                                       one finding; a short read is UNKNOWN,
+#                                       never clean — TOG-833
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
@@ -1077,6 +1083,33 @@ jobs:
       # seams, so there is no database and no gateway.
       - name: model lane probe suite
         run: ./test_model_lane_probe.sh
+
+      # TOG-833. breaker_cotenancy_probe.sh counts the lanes where ONE
+      # out-of-credits model can terminal-state every Claude id sharing its
+      # connection. OmniRoute's per-model-quota lockout branch handles
+      # 404/429/>=500 and omits 402, so a model-level 402 escalates to the
+      # whole connection. That took the fleet down twice: 2026-09-02 (28 failed
+      # runs) and 2026-09-03 (45).
+      #
+      # The mitigation was to disable the credit-less xai account inside
+      # CLIProxy, which clears `grok*` from ONE lane. The defect is not
+      # lane-scoped, so this exists to keep counting the others.
+      #
+      # §3 is the assertion most worth defending: an unreadable source, empty
+      # output, unparseable JSON and a SHORT READ all exit 5, never 0. "No lane
+      # is exposed" and "no lane was examined" are both zero findings, and a
+      # partial catalogue can omit the exposed lane itself.
+      #
+      # §2 pins alias collapsing. `cliproxy` and
+      # `openai-compatible-chat-1628780c-…` advertise byte-identical id sets;
+      # counting prefixes would double-report one connection and inflate the
+      # number a decision gets made on.
+      #
+      # Offline: the catalogue arrives through CATALOGUE_SOURCE_CMD, so there
+      # is no gateway. The tool never invokes a metered model — reproducing
+      # this defect live IS the outage.
+      - name: breaker co-tenancy probe suite
+        run: ./test_breaker_cotenancy_probe.sh
 
       # lib/pcsql.sh decides how every DB-touching tool reaches PostgreSQL. It
       # is a dispatcher, so it is testable without a database: the suite puts
