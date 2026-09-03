@@ -253,8 +253,12 @@ on:
   push:
   pull_request:
 
+# `actions: read` is the narrowest grant that lets the TOG-910 dark-step
+# reporter list this run's own job steps; it is read-only and repo-scoped.
+# Everything else stays at the default deny.
 permissions:
   contents: read
+  actions: read
 
 jobs:
   privilege-suites:
@@ -1158,6 +1162,118 @@ jobs:
       # prove the reader agrees with whoever typed it.
       - name: fail-closed CI status suite
         run: ./test_gh_ci_status.sh
+
+      # TOG-910. The dark-step reporter, which names the steps a fail-fast abort
+      # skipped. Both fixtures are verbatim `actions/jobs/{id}` responses: the
+      # 2026-09-03 outage on pristine main (79 of 93 skipped) and the same job
+      # once the expiry was re-issued (0 skipped). The suite pins the silent
+      # case as hard as the loud one — a reporter that warns on every run is one
+      # reviewers learn to scroll past.
+      - name: dark-step reporter suite
+        run: ./test_ci_dark_steps.sh
+
+      # TOG-910. The dark-step reporter's own vacuity gate.
+      #
+      # This reporter exists to make an invisible failure visible, so the way it
+      # regresses is by going quiet — and a quiet reporter is indistinguishable
+      # from a healthy CI at exactly the moment you need it. Nothing about
+      # "20 passed, 0 failed" would tell anyone that. Hence the same contract
+      # every other gate here uses: baseline must pass in the staging directory,
+      # the named assertion must be PRESENT and GREEN before mutation, the
+      # mutation must actually change the file and still parse, and the suite
+      # must go red ON THE NAMED TEST rather than merely somewhere (TOG-339).
+      - name: Prove the dark-step reporter still detects a silenced report
+        run: |
+          set -uo pipefail
+          rc=0
+          # dark_mutation <label> <file> <sed-expr> <named test that must go red>
+          dark_mutation() {
+            local label="$1" file="$2" expr="$3" expect="$4"
+            local mut; mut="$(mktemp -d)"
+            cp ci_dark_steps.sh test_ci_dark_steps.sh "$mut/"
+            mkdir -p "$mut/test/fixtures" "$mut/.github/workflows"
+            cp -R test/fixtures/ci_dark_steps "$mut/test/fixtures/"
+            # The suite asserts the ci.yml wiring, so the staging copy needs it.
+            cp .github/workflows/ci.yml "$mut/.github/workflows/"
+
+            local base
+            base="$(cd "$mut" && ./test_ci_dark_steps.sh 2>&1)"
+            if [ $? -ne 0 ]; then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              printf '%s\n' "$base" | grep -a 'FAIL' | head -20; rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "PASS.*$expect" <<< "$base"; then
+              echo "::error::$label: no PASSING test matching /$expect/ in the baseline — the assertion this mutation pins has been renamed or deleted"
+              rm -rf "$mut"; return 1
+            fi
+
+            sed -i "$expr" "$mut/$file"
+            case "$file" in
+              *.sh)
+                if ! bash -n "$mut/$file"; then
+                  echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+                  rm -rf "$mut"; return 1
+                fi ;;
+            esac
+            if cmp -s "$file" "$mut/$file"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+
+            local out status
+            out="$(cd "$mut" && ./test_ci_dark_steps.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the dark-step suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # 1. The outage itself, restated: a dark run that reports zero dark
+          #    steps. This is the exact false green the card was filed for.
+          dark_mutation "skipped-steps-counted-as-zero" ci_dark_steps.sh \
+            's/^DARK="\$(jq.*$/DARK=0/' \
+            'names the count of steps that did not execute' || rc=1
+
+          # 2. Keep the report but drop the ::error annotation, so it exists
+          #    only inside a 6000-line log nobody opens. That is precisely how
+          #    the 2026-09-03 outage stayed invisible for ~21 hours.
+          dark_mutation "error-annotation-downgraded" ci_dark_steps.sh \
+            "s/::error title=/note: /" \
+            'emits a ::error annotation' || rc=1
+
+          # 3. An unobservable step list reports clean instead of refusing —
+          #    TOG-357's rule that a check which did not happen is not an answer.
+          dark_mutation "unobservable-reads-as-clean" ci_dark_steps.sh \
+            's/|| refuse "the job object carries no step list; nothing was measured"/|| true/' \
+            'REFUSES rather than reporting zero dark steps' || rc=1
+
+          # 4. Stop attributing the aborting step. "79 steps did not run" without
+          #    "because step 12 failed" sends the reader back to bisecting a log.
+          dark_mutation "culprit-no-longer-attributed" ci_dark_steps.sh \
+            's/^CULPRIT="\$(jq.*$/CULPRIT=""/' \
+            'names the step that aborted the job' || rc=1
+
+          # 5. Cry wolf on clean runs. A warning on all 89-of-89 runs is one
+          #    every reviewer learns to scroll past, which is the same as absent.
+          dark_mutation "warns-on-a-clean-run" ci_dark_steps.sh \
+            's/^if \[\[ "\$DARK" -eq 0 \]\]; then/if [[ "$DARK" -lt 0 ]]; then/' \
+            'raises no error annotation' || rc=1
+
+          # 6. Drop `if: always()` from the wiring. This silently re-blinds the
+          #    job: the reporter is then skipped by the very abort it describes,
+          #    and prints only on the runs that did not need it. The suite pins
+          #    the workflow file for this one reason.
+          dark_mutation "if-always-dropped-from-wiring" .github/workflows/ci.yml \
+            '/- name: Report steps that never ran/{n;/if: always()/d;}' \
+            'wired with if: always()' || rc=1
+
+          exit $rc
 
       # TOG-345. Whether two runs of one agent can implement one issue twice.
       # They can, and did — TOG-253 (#15/#16) and TOG-258 (#27/#28), each a full
@@ -3467,6 +3583,37 @@ jobs:
             'a ref with no canonical blob REFUSES rather than passing or failing' || rc=1
 
           exit $rc
+
+      # TOG-910. THE ONLY STEP IN THIS JOB THAT IS ALLOWED AN `if:`, AND THE
+      # REASON IS THE WHOLE POINT OF THE CARD.
+      #
+      # This job is fail-fast on purpose: no `continue-on-error`, no conditions,
+      # so the first red aborts everything after it and a broken gate is loud.
+      # The cost of that design is invisible. When the OmniRoute rehearsal
+      # package's expiresAt lapsed on 2026-09-03T00:00:00Z, step 12 of 89 went
+      # red and the other 79 were SKIPPED — `Secret scan` and every
+      # "Prove the suite still detects..." mutation gate among them — for ~21
+      # hours, on every PR. The checks list said only "Offline suites: failing",
+      # so a reviewer looking at "14 of 16 green" had no way to see that one red
+      # had taken 77 suites down with it. Two suites merged into main in that
+      # window having never executed in CI anywhere.
+      #
+      # So this step reports which steps did not run. `if: always()` is
+      # load-bearing rather than decorative: without it the reporter is skipped
+      # by the very abort it exists to describe, and prints only on the runs
+      # that do not need it. It never fails the build — the job's real verdict
+      # belongs to the suite that actually broke, and replacing an attributable
+      # failure with "the reporter failed" is the TOG-339 problem again. It does
+      # REFUSE (exit 3) if it cannot read the step list, because a check that
+      # did not happen must never read as clean.
+      #
+      # Pinned by test_ci_dark_steps.sh, which asserts this wiring so a future
+      # edit cannot quietly drop the `if:` and re-blind the job.
+      - name: Report steps that never ran
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./ci_dark_steps.sh report || true
 
   # ---------------------------------------------------------------------------
   # The gh-token-broker plugin suite (TOG-213 / TOG-174).
