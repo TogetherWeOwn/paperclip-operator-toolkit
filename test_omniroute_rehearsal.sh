@@ -127,6 +127,26 @@ cat > "$FAKE/bin/id" <<'SH'
 #!/usr/bin/env bash
 case ${1:-} in -un) printf '%s\n' "${OMNIROUTE_EXPECTED_USER:-ubuntu}" ;; -u) /usr/bin/id -u ;; *) /usr/bin/id "$@" ;; esac
 SH
+# Fixture clock. The package carries a real expiresAt and operator-action.sh
+# hard-fails once it lapses -- correct on a host, but it made every run after
+# 2026-09-03T00:00:00Z red on an unmodified main (TOG-849/TOG-884: 45 passed,
+# 24 failed, all "package expired at"). Pinning "now" to a fixture instant
+# makes the suite depend on the package, not on the wall clock. Only bare
+# "now" reads are pinned: an explicit -d/--date still parses for real, so the
+# expiry arithmetic is exercised end to end rather than stubbed out. Section 3b
+# drives this clock past the boundary to prove the refusal still fires.
+cat > "$FAKE/bin/date" <<'SH'
+#!/usr/bin/env bash
+if [[ -n ${FAKE_CLOCK_EPOCH:-} ]]; then
+  for arg in "$@"; do
+    case $arg in -d|--date|-d*|--date=*) exec /usr/bin/date "$@" ;; esac
+  done
+  exec /usr/bin/date -d "@$FAKE_CLOCK_EPOCH" "$@"
+fi
+exec /usr/bin/date "$@"
+SH
+# 2026-09-01T12:00:00Z -- inside the shipped package's validity window.
+export FAKE_CLOCK_EPOCH=1788264000
 cat > "$FAKE/bin/sqlite3" <<'SH'
 #!/usr/bin/env bash
 printf 'ok\n'
@@ -274,7 +294,7 @@ case "$cmd" in
   *) printf 'unexpected podman command: %s\n' "$cmd" >&2; exit 90 ;;
 esac
 SH
-chmod +x "$FAKE/bin/id" "$FAKE/bin/sqlite3" "$FAKE/bin/podman"
+chmod +x "$FAKE/bin/id" "$FAKE/bin/sqlite3" "$FAKE/bin/podman" "$FAKE/bin/date"
 cp "$HERE/omniroute/rehearsal/package.json" "$HERE/omniroute/rehearsal/runtime.env" "$HERE/omniroute/rehearsal/responseTranslator.ts" "$HERE/omniroute/rehearsal/Containerfile" "$FAKE/home/"
 printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$FAKE/home/clone/omniroute/rehearsal/private-image-id"
 chmod 0600 "$FAKE/home/clone/omniroute/rehearsal/private-image-id"
@@ -645,6 +665,47 @@ jq '.attached=true' "$FAKE/state/rehearsal.json" > "$FAKE/state/t" && mv "$FAKE/
 # Fake Podman emits only the approved alias. Pin the source itself against the
 # forbidden alias branch so this assertion cannot be satisfied by a neighbour.
 grep -q 'index("omniroute") == null' "$ACTION" && ok 'source refuses live omniroute alias across all networks' || bad 'live alias refusal is missing'
+
+# TOG-849/TOG-884. The expiry check had no test of its own, so when the shipped
+# package lapsed at 2026-09-03T00:00:00Z the only signal was 24 unrelated-looking
+# failures across the whole suite. These three cases pin the boundary directly by
+# moving the fixture clock, not by editing the package: expired refuses, valid
+# proceeds, and a garbage expiresAt is refused rather than silently treated as
+# valid. Failure here now says "expiry" instead of rotting every other case.
+package_expiry_at=$(jq -er '.expiresAt' "$FAKE/home/package.json")
+expiry_epoch=$(date -u -d "$package_expiry_at" +%s)
+
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+printf 'tog849-expired-0001\n' > "$FAKE/home/action"
+out=$(FAKE_CLOCK_EPOCH=$expiry_epoch run_action --apply 2>&1); rc=$?
+(( rc != 0 )) && grep -q "package expired at $package_expiry_at" <<<"$out" \
+  && ok 'refuses to act on a package whose expiresAt has lapsed' || bad 'lapsed package was not refused' "$out"
+
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+printf 'tog849-valid-edge-0001\n' > "$FAKE/home/action"
+out=$(FAKE_CLOCK_EPOCH=$(( expiry_epoch - 1 )) run_action --apply 2>&1); rc=$?
+(( rc == 0 )) && ! grep -q 'package expired at' <<<"$out" \
+  && ok 'acts on the package one second before expiresAt' || bad 'valid package was refused as expired' "$out"
+
+cp "$FAKE/state/expected.json" "$FAKE/state/rehearsal.json"
+jq '.expiresAt="not-a-timestamp"' "$FAKE/home/package.json" > "$FAKE/home/package.expiry-mutation.json"
+printf 'tog849-bad-expiry-0001\n' > "$FAKE/home/action"
+out=$(env PATH="$FAKE/bin:/usr/bin:/bin" HOME="$FAKE/home" FAKE_PODMAN_STATE="$FAKE/state" \
+  FAKE_CLOCK_EPOCH="$FAKE_CLOCK_EPOCH" FAKE_TRANSLATOR_SHA256="$translator_sha" \
+  OMNIROUTE_EXPECTED_USER=ubuntu OMNIROUTE_REHEARSAL_PACKAGE="$FAKE/home/package.expiry-mutation.json" \
+  OMNIROUTE_REHEARSAL_DB_DIR="$FAKE/home/private-db" OMNIROUTE_AGENT_NETWORK=agent-net \
+  OMNIROUTE_PROBE_CONTAINER=probe OMNIROUTE_ACTION_ID_FILE="$FAKE/home/action" \
+  OMNIROUTE_REHEARSAL_STATE_DIR="$FAKE/home/state" "$ACTION_RUNTIME" --apply 2>&1); rc=$?
+(( rc != 0 )) && grep -q 'package expiry is invalid' <<<"$out" \
+  && ok 'refuses an unparseable expiresAt instead of treating it as valid' || bad 'invalid expiry was not refused' "$out"
+
+# The suite must never go green by pinning a clock past the shipped window. If
+# the package lapses again, this is the case that names it -- once, in one line.
+if (( $(date -u +%s) < expiry_epoch )); then
+  ok "shipped package is still within its validity window (expires $package_expiry_at)"
+else
+  bad "shipped rehearsal package expired at $package_expiry_at -- re-issue it or park the lane (TOG-849)"
+fi
 
 section '6. generated canonical runbook'
 rendered_file="$TMP/operator-runbook.md"
