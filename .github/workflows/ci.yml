@@ -127,6 +127,16 @@ name: CI
 #                                       same connection. Alias lanes collapse to
 #                                       one finding; a short read is UNKNOWN,
 #                                       never clean — TOG-833
+#     test_stale_descriptor_sweep.sh    scripts/stale_descriptor_sweep.js:
+#                                       whether a card parked `blocked` is
+#                                       waiting on an interaction that will
+#                                       never resolve — routed to every reader,
+#                                       and stalled. Also whether the sweep
+#                                       REFUSES when it read nothing, rather
+#                                       than reporting a clean board — TOG-890.
+#                                       Also whether a card's LIVE ask is hosted
+#                                       on a DIFFERENT card, which dies silently
+#                                       when that card closes — TOG-908
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
@@ -440,7 +450,10 @@ jobs:
           # host-ops/*.sh is included for the same reason: the installer runs on
           # the VPS in front of an operator, and no runner can reach that host.
           for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh host-ops/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
-          for f in *.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
+          # scripts/*.js is included explicitly for the same reason as lib/: a
+          # bare `*.js` glob does not descend, and until TOG-890 the two tools
+          # under scripts/ were never parse-checked at all.
+          for f in *.js scripts/*.js; do node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }; done
           # The repo's first Python. Same argument as the shell gate above: these
           # are operator-run and have no suite, so a parse error would otherwise
           # be found by a human mid-install.
@@ -1252,6 +1265,55 @@ jobs:
       # header prose and changed no behaviour at all.
       - name: Discord delivery monitor is not vacuous (mutation-gated)
         run: ./verification/tog-676-monitor-mutation-gate.sh
+
+      # TOG-890. A card parked `blocked` whose unblockDescriptor says "waiting
+      # on interaction X", where X was since withdrawn, rejected, expired or
+      # answered, is INVISIBLY STALLED: it still reads as correctly routed, so
+      # every recovery sweep and every agent who opens it concludes somebody
+      # else is handling it. Nothing will ever wake it. That is strictly worse
+      # than an unrouted card, which at least looks wrong.
+      #
+      # Measured on this company 2026-09-03: 4 of 60 blocked cards carrying a
+      # descriptor cite an interaction that will never resolve.
+      #
+      # THE SECTION TO READ IF THIS GOES RED IS §4, and it is the whole reason
+      # the tool has an exit 5. This detector's failure mode is silence: if the
+      # interaction read returns zero rows, every descriptor classifies as
+      # `no-citation` and the sweep reports a clean board having joined against
+      # an empty set. That state is REACHABLE — a mis-scoped query returns no
+      # rows rather than an error — so both empty inputs refuse with 5 instead.
+      #
+      # §3 pins the other direction. `unblockDescriptor.owner.agentId` is a full
+      # UUID sitting in the same blob as the prose, and agents cite interactions
+      # by their 8-char short form, so an unmasked short scan can read a card's
+      # OWN OWNER FIELD as a citation of a dead ask. Measured on this host there
+      # are zero such collisions among 466 interactions; the mask is what keeps
+      # the tool correct when that stops being true.
+      #
+      # Offline: every case is a synthetic document fed through
+      # STALE_DESCRIPTOR_SOURCE_CMD, so CI needs no DATABASE_URL. Green here
+      # means the DETECTOR works — it is NOT a statement about the board, which
+      # GitHub Actions cannot see. Run the sweep where the database is
+      # reachable; on 2026-09-03 that run exited 1 with 2 stale descriptors and
+      # 7 cards whose live ask is hosted on a DIFFERENT card (TOG-908). That
+      # second grade exists because an interaction dies with its host issue:
+      # closing TOG-814 auto-expired the asks TOG-64 and TOG-740 were both
+      # citing, and neither card was notified.
+      - name: stale unblock-descriptor sweep suite
+        run: ./test_stale_descriptor_sweep.sh
+
+      # And those are 40 green assertions about a detector, which is worth
+      # nothing until somebody breaks the detector and watches them go red. Each
+      # mutation removes ONE limb and requires the NAMED case to redden, after a
+      # baseline on the unmutated copy in the same staging directory.
+      #
+      # It earned its place while being written: the mask mutation reported
+      # "target appears 0 times" against a source that visibly contained it —
+      # a stray NUL byte had landed mid-literal, which also made `grep` treat
+      # the file as binary and return nothing. A gate that only asserted "the
+      # suite went red" would have scored that as a pass.
+      - name: stale-descriptor sweep is not vacuous (mutation-gated)
+        run: ./verification/tog-890-mutation-gate.sh
 
       # TOG-720, the third half: the command itself. The two gates above prove
       # the wrapper and the detector behave. Neither proves the monitor can
