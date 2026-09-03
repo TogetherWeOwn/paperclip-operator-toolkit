@@ -523,10 +523,19 @@ for r in sorted(rows,key=lambda x:str(x.get("name"))):
 PY
 say "G11: captured $(wc -l < "$OUT/protected-before.txt") protected auto/* + hindsight/* combos"
 
-# ── Combo shape: TWO PINNED Go legs + a non-gpt-oss terminal leg. ────────────
+# ── Combo shape: TWO PINNED Go legs + an OpenRouter terminal leg. ────────────
 # Pinning is what makes per-connection rotation possible for the non-expanding strategies.
-# Terminal leg is z-ai/glm-5, NOT gpt-oss-*: per TOG-177 the stream:false 502 is a
-# gpt-oss-* property, not an OpenRouter one.
+# Terminal leg is z-ai/glm-5.
+#
+# CORRECTED 2026-09-03 (TOG-876). This note previously justified the leg with "per TOG-177 the
+# stream:false 502 is a gpt-oss-* property, not an OpenRouter one". Both halves are wrong, and
+# the justification was self-defeating: TOG-177 §3a measured `z-ai/glm-5` — this exact leg — at
+# 502 non-streaming. The 502 is not scoped to any model family. It fires when `max_tokens`
+# truncates a reasoning model before its first content token, which is a property of the call
+# (§3b: identical input, 502 twice and 200 once).
+# So this leg is NOT chosen for stream:false safety, and no model choice could give that. What
+# actually keeps this harness safe is guard G3 below: every probe is stream:true, and the 502
+# requires stream:false.
 LEGS_JSON=$(cat <<EOF
 [
   {"kind":"model","model":"glm-5","providerId":"opencode-go","connectionId":"$MAIN_ID"},
@@ -733,11 +742,18 @@ EOF
     # collapse if the header path ever regresses. The two mitigations are independent.
     SESS="tog207-$arm-$i-$$"
     PROMPT="say ok #$arm-$i"
-    # G3: stream:true on every request. Non-streaming kills the OpenRouter leg outright
-    #     (9/9 HTTP 502 vs 14/14 healthy streaming, TOG-177). A non-streaming bake-off scores
-    #     every arm "100% Go, PAYG unreachable" -- perfect-looking, entirely artifact.
+    # G3: stream:true on every request. Non-streaming at THIS max_tokens kills the OpenRouter
+    #     leg (9/9 HTTP 502 vs 14/14 healthy streaming, TOG-177). A non-streaming bake-off
+    #     scores every arm "100% Go, PAYG unreachable" -- perfect-looking, entirely artifact.
+    #     CORRECTED 2026-09-03 (TOG-876): "kills the OpenRouter leg outright" overstated it.
+    #     The leg is not broken and OpenRouter is not at fault — TOG-177 §3c drove the same
+    #     models to 0/3 502 at max_tokens 600. The 9/9 above is what stream:false + a 16-token
+    #     budget does to a reasoning model, not a standing property of the provider.
     # G4: max_tokens >= 16. max_tokens:1 trips the combo quality validator into a synthetic
     #     502 that reads as a genuine fallthrough.
+    #     G3 and G4 are coupled: 16 tokens is only safe BECAUSE G3 forces stream:true. If you
+    #     ever relax G3, this budget becomes the exact truncation condition that triggers the
+    #     502 — raise max_tokens well above the reasoning preamble (>=600) in that same edit.
     #
     # Backgrounded + `wait` ON PURPOSE, and it is load-bearing for the restore guarantee:
     # bash defers a trapped signal until the running foreground command returns, so a
