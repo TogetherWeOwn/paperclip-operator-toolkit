@@ -1200,6 +1200,36 @@ jobs:
       - name: model lane probe suite
         run: ./test_model_lane_probe.sh
 
+      # TOG-894 ask 2. opencode_shared_budget_probe.sh decides whether the paid
+      # OpenCode budget is SHARED across lanes or throttled per lane. The two
+      # have opposite control surfaces: under sharing, a per-lane enable/disable
+      # flag is actively harmful, because it moves the same demand onto a
+      # sibling drawing the same pool.
+      #
+      # §1 and §2 are the assertions worth defending. They feed a KNOWN-SHARED
+      # and a KNOWN-PER-LANE world carrying the SAME number of throttles and
+      # demand different verdicts. The discriminator is coincidence in time, not
+      # failure count — counting cannot separate the hypotheses at all, since
+      # both eventually fail every lane. A tool that counted passes neither.
+      #
+      # §4 fails the CROSS-PROVIDER control in the same rounds every lane fails.
+      # Those rounds must be excluded, or a gateway blip reads as proof of a
+      # shared budget — an in-namespace control cannot tell the two apart.
+      #
+      # §3 pins that a quiet window is INCONCLUSIVE (exit 3), never "healthy".
+      # Reading a quiet sweep as health is the artifact that made TOG-842's
+      # "19/23 lanes verified" wrong.
+      #
+      # §5/§6 keep the capacity count honest in both directions: the
+      # deterministic gpt-5.6-luna 500 never counts as capacity, and a
+      # prefix-less "Missing API key" stays a real credential fault.
+      #
+      # Offline: HTTP results arrive through OPENCODE_PROBE_CMD, which defaults
+      # to `false`, so a test that fell through to the live gateway fails rather
+      # than passing quietly.
+      - name: opencode shared-budget probe suite
+        run: ./test_opencode_shared_budget_probe.sh
+
       # TOG-833. breaker_cotenancy_probe.sh counts the lanes where ONE
       # out-of-credits model can terminal-state every Claude id sharing its
       # connection. OmniRoute's per-model-quota lockout branch handles
