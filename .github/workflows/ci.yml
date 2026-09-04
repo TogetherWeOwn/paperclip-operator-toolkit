@@ -683,6 +683,32 @@ jobs:
       - name: secret-exposure audit regression suite
         run: ./test_secret_exposure_audit.sh
 
+      # TOG-893. A broker token belongs in a credential-helper invocation for
+      # the length of one push. Written into a remote URL instead it lands in
+      # `.git/config`, which outlives the run and is world-readable to every
+      # agent on this same-uid host. Two such configs were found and scrubbed
+      # on 2026-09-03.
+      #
+      # This is NOT the check credential_chain_audit.sh performs. That one asks
+      # who can SUBSTITUTE the helper, and deliberately treats per-repo
+      # .git/config as residual-by-design; it never asks whether that config
+      # contains a secret. Different property, same file.
+      #
+      # The suite guards the two ways the obvious one-liner is wrong, both
+      # measured on this host: a bounded find depth misses nested checkouts
+      # (the original draft saw 9 of 13 configs and missed a real finding at
+      # depth 9), and matching userinfo without requiring a colon flags
+      # `https://x-access-token@` — a remote that carries no secret and is
+      # exactly what a correct broker setup looks like. Case 7 reintroduces the
+      # depth bug through the supported flag to prove case 1 is load-bearing.
+      #
+      # Offline: fabricated configs under a temp dir, token-shaped sentinels,
+      # no git invocation and no network. One case asserts the sentinel never
+      # reaches stdout or stderr, which is what keeps a credential scan from
+      # becoming a credential disclosure.
+      - name: git remote-URL credential scan regression suite
+        run: ./test_git_remote_credential_scan.sh
+
       # The pin half of that audit is a DETECTOR, not a boundary: the pin file
       # sits next to the helper, in reach of the same uid, so anyone who can
       # swap the helper can rewrite the pin. All it buys is that a swap has to
