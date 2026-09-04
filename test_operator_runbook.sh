@@ -291,6 +291,114 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "6b. check-handoff — a runbook that never filed an interaction (TOG-851)"
+# The hole this closes: `check` is driven by the pending interaction set, so an
+# ask that filed NO interaction is not in its input and cannot fail any of its
+# branches. TOG-846 shipped a complete operator runbook, filed zero
+# interactions, was closed done, and every gate passed while the artifact sat on
+# disk with no delivery path. These tests pin the second input.
+HDIR_OK="$TMP/handoff_ok";   mkdir -p "$HDIR_OK"
+HDIR_BAD="$TMP/handoff_bad"; mkdir -p "$HDIR_BAD"
+HCLS="$TMP/hcls.json"
+cat > "$HCLS" <<'JSON'
+{ "items": { "TOG-846": { "class":"CAPABILITY","blast":2,"credential":"host",
+    "changes":"c","verify":"v","undo":"u","moved":true,"never_carded":true } },
+  "decisions": {}, "misrouted": {}, "closed": {} }
+JSON
+: > "$HDIR_OK/TOG-846-cliproxy-update-runbook.md"
+: > "$HDIR_BAD/TOG-846-cliproxy-update-runbook.md"
+: > "$HDIR_BAD/TOG-999-orphan-runbook.md"
+
+out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_OK" 2>&1)"; rc=$?
+(( rc == 0 )) && ok "exit 0 when every runbook artifact is classified" \
+              || bad "expected exit 0, got $rc" "$out"
+
+out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_BAD" 2>&1)"; rc=$?
+(( rc == 3 )) && ok "exit 3 on a runbook artifact with no classification entry" \
+              || bad "expected exit 3, got $rc" "$out"
+grep -q 'UNREGISTERED' <<<"$out" && grep -q 'TOG-999' <<<"$out" \
+  && ok "names the UNREGISTERED branch and the stranded identifier" \
+  || bad "expected UNREGISTERED + TOG-999" "$out"
+# The classified one must NOT be reported: a gate that also names the line that
+# IS registered is noise, and noise is what stops these being read.
+grep -q 'TOG-846' <<<"$out" \
+  && bad "TOG-846 is classified and must not be reported as unregistered" "$out" \
+  || ok "does not report a correctly-registered artifact"
+
+# THE REGRESSION THAT MATTERS. This is the literal TOG-846 defect: the artifact
+# exists, it filed no interaction, and it is absent from the classification file.
+# If this ever goes green again, the hole is back.
+HCLS_EMPTY="$TMP/hcls_empty.json"
+jq '.items = {}' "$HCLS" > "$HCLS_EMPTY"
+rc=$("$TOOL" check-handoff --classification "$HCLS_EMPTY" --handoff "$HDIR_OK" >/dev/null 2>&1; echo $?)
+(( rc == 3 )) && ok "TOG-846's own failure mode is caught (artifact on disk, no entry, no card)" \
+              || bad "THE TOG-846 HOLE IS OPEN: a stranded runbook passed clean (exit $rc)"
+
+# An entry anywhere in the file counts as registered — decisions/misrouted/closed
+# are classifications too, and demanding an `items` entry would force a genuine
+# decision to be mis-filed as a runbook line to silence the gate.
+for sect in decisions misrouted closed; do
+  C2="$TMP/hcls_$sect.json"
+  jq --arg s "$sect" '.items = {} | .[$s] = {"TOG-846":{"clause":"1","summary":"s","resolver":"r","outcome":"o","evidence":"e"}}' "$HCLS" > "$C2"
+  rc=$("$TOOL" check-handoff --classification "$C2" --handoff "$HDIR_OK" >/dev/null 2>&1; echo $?)
+  (( rc == 0 )) && ok "an entry in .$sect counts as registered" \
+                || bad "an entry in .$sect should satisfy the gate, got $rc"
+done
+
+# Fail-open guards. An unread directory must never read as "nothing stranded" —
+# the same failure §4 pins for `check`.
+out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$TMP/no_such_dir" 2>&1)"; rc=$?
+(( rc == 2 )) && ok "exit 2 on a missing handoff directory" || bad "expected exit 2, got $rc" "$out"
+grep -qi 'OK:' <<<"$out" \
+  && bad "FAIL-OPEN: an unreadable handoff directory reported clean" "$out" \
+  || ok "a missing handoff directory does not report clean"
+out="$("$TOOL" check-handoff --classification "$TMP/does-not-exist.json" --handoff "$HDIR_OK" 2>&1)"; rc=$?
+(( rc == 2 )) && ok "exit 2 on a missing classification file" || bad "expected exit 2, got $rc" "$out"
+
+# Case-insensitivity is load-bearing: a real file in the handoff directory is
+# named `tog-351`, and a gate that missed it on case would pass silently.
+HDIR_LC="$TMP/handoff_lc"; mkdir -p "$HDIR_LC"; : > "$HDIR_LC/tog-555-lower-runbook.md"
+out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_LC" 2>&1)"; rc=$?
+(( rc == 3 )) && grep -q 'TOG-555' <<<"$out" \
+  && ok "a lowercase tog-* filename is caught and normalised to TOG-555" \
+  || bad "lowercase filename slipped past the gate (exit $rc)" "$out"
+
+# A non-runbook file must not trip it, or the gate becomes noise and stops being read.
+HDIR_N="$TMP/handoff_noise"; mkdir -p "$HDIR_N"
+: > "$HDIR_N/TOG-777-findings.md"; : > "$HDIR_N/TOG-778-verify.sh"; : > "$HDIR_N/README.md"
+rc=$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_N" >/dev/null 2>&1; echo $?)
+(( rc == 0 )) && ok "non-runbook files in the handoff directory are ignored" \
+              || bad "a findings/script/README file tripped the gate (exit $rc)"
+
+# Mutation D: neuter the unregistered branch of check-handoff. Placed here, not
+# with A-C, because it needs the fixtures section 6b builds above.
+sed 's/^  if \[\[ -n "${unregistered\/\/\[\[:space:\]\]\/}" \]\]; then/  if false; then/' \
+  "$TOOL" > "$STAGE/mut_d.sh"; chmod +x "$STAGE/mut_d.sh"
+if ! cmp -s "$TOOL" "$STAGE/mut_d.sh"; then
+  base_unreg=$("$STAGE/operator_runbook.sh" check-handoff --classification "$HCLS" --handoff "$HDIR_BAD" >/dev/null 2>&1; echo $?)
+  (( base_unreg == 3 )) && ok "BASELINE: the unmutated copy detects the unregistered branch" \
+                        || bad "BASELINE FAILED (unreg=$base_unreg) — mutation D below is meaningless"
+  rc=$("$STAGE/mut_d.sh" check-handoff --classification "$HCLS" --handoff "$HDIR_BAD" >/dev/null 2>&1; echo $?)
+  (( rc != 3 )) && ok "removing the UNREGISTERED branch makes section 6b go red (exit $rc)" \
+                || bad "mutation D changed nothing — section 6b is not pinned to that branch"
+else
+  bad "mutation D did not apply — the sed pattern no longer matches the source"
+fi
+
+# ---------------------------------------------------------------------------
+section "6c. the shipped tree passes check-handoff"
+# The grandfather list is enumerated in the tool. If someone adds a runbook file
+# and neither classifies nor grandfathers it, this goes red in CI on their push
+# — which is the entire point of building this half.
+if [[ -d /paperclip/operator-handoff ]]; then
+  out="$("$TOOL" check-handoff 2>&1)"; rc=$?
+  (( rc == 0 )) && ok "the live handoff directory is fully registered or grandfathered" \
+                || bad "a runbook artifact on this host is stranded" "$out"
+else
+  ok "handoff directory absent on this runner — skipped (CI has no /paperclip)"
+fi
+
+# ---------------------------------------------------------------------------
 section "7. the shipped classification file is well-formed"
 REAL="$HERE/operator_runbook_classification.json"
 if [[ -f "$REAL" ]]; then

@@ -46,8 +46,9 @@
 #
 # ---------------------------------------------------------------------------
 # USAGE
-#   operator_runbook.sh check  [--classification F] < pending.json
-#   operator_runbook.sh render [--classification F]  > docs/OPERATOR-RUNBOOK.md
+#   operator_runbook.sh check         [--classification F] < pending.json
+#   operator_runbook.sh check-handoff [--classification F] [--handoff DIR]
+#   operator_runbook.sh render        [--classification F]  > docs/OPERATOR-RUNBOOK.md
 #   operator_runbook.sh explain
 #
 # `check` reads the live pending set on stdin — the same JSON array
@@ -56,6 +57,29 @@
 #
 # `render` reads NOTHING but the classification file, so CI can regenerate the
 # document and diff it without any board access.
+#
+# ---------------------------------------------------------------------------
+# THE HOLE `check` CANNOT SEE, AND WHY check-handoff EXISTS (TOG-851)
+# ---------------------------------------------------------------------------
+# `check` is driven by the PENDING INTERACTION SET. That makes it blind in one
+# specific direction: an ask that never filed an interaction at all is not in
+# its input, so it cannot be unclassified, cannot be stale, and cannot be
+# not-withdrawn. It is simply invisible, and `check` passes clean.
+#
+# That is not hypothetical. TOG-846 shipped a complete, live-verified operator
+# runbook — a one-key CLIProxy config change unlocking claude-fable-5-1 at
+# identical price — filed ZERO interactions, was closed `done`, and had no entry
+# in the classification file. Every gate in this tool passed while the artifact
+# sat in /paperclip/operator-handoff/ with no path to a human. The guard built to
+# stop capability asks from dying silently could not see the one that was.
+#
+# So `check-handoff` takes the OTHER input: the runbook files on disk. A file
+# named TOG-<n>-*runbook*.md in the handoff directory with no entry anywhere in
+# the classification file is an ERROR (exit 3). Two inputs, two failure modes:
+#   check          catches an ask that filed a card nobody classified.
+#   check-handoff  catches an ask that wrote a runbook and filed no card at all.
+#
+# It needs no board access and no credentials, so unlike `check` it runs in CI.
 # ===========================================================================
 set -uo pipefail
 
@@ -63,6 +87,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v jq >/dev/null || { echo "ERROR: jq required" >&2; exit 1; }
 
 CLASSIFICATION="$HERE/operator_runbook_classification.json"
+HANDOFF="${HANDOFF_DIR:-/paperclip/operator-handoff}"
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 
@@ -107,6 +132,28 @@ BLAST RADIUS ORDERING
 
 INPUT
   The same JSON array interaction_triage.sh consumes. See its `explain`.
+
+TWO INPUTS, TWO FAILURE MODES (TOG-851)
+  `check` is driven by the pending interaction set. That makes it blind in one
+  direction: an ask that never filed an interaction is not in its input, so it
+  cannot be unclassified, cannot be stale, and cannot be not-withdrawn. It is
+  invisible, and check passes clean.
+
+  TOG-846 was exactly that. A complete, live-verified operator runbook — a
+  one-key CLIProxy config change unlocking claude-fable-5-1 at identical price —
+  with ZERO interactions, closed `done`, and no entry in the classification
+  file. Every gate here passed while the artifact sat in the handoff directory
+  with no path to a human.
+
+  `check-handoff` takes the other input, the runbook FILES on disk:
+    check          an ask that filed a card nobody classified.
+    check-handoff  an ask that wrote a runbook and filed no card at all.
+
+  A file named TOG-<n>-*runbook*.md in the handoff directory with no entry
+  anywhere in the classification file is an ERROR (exit 3). Files that predate
+  the gate are enumerated in GRANDFATHERED_HANDOFF with the reason each is not a
+  stranded ask — an explicit list, so removing one is a visible diff. It reads
+  no board and needs no credentials, so it runs in CI; `check` still cannot.
 EXPLAIN
 }
 
@@ -194,8 +241,88 @@ cmd_check() {
   if (( rc == 0 )); then
     echo "OK: every pending board_only interaction is classified; every moved line"
     echo "has actually been withdrawn; nothing classified has gone stale."
+    echo
+    echo "NOTE: this half is driven by the pending interaction set, so it cannot see a"
+    echo "runbook that never filed an interaction (TOG-846 was exactly that). Run"
+    echo "\`check-handoff\` for that direction — clean here does not mean nothing is stranded."
   fi
   return $rc
+}
+
+# --- check-handoff ---------------------------------------------------------
+# The second input. See the header block: `check` is driven by the pending
+# interaction set and is structurally blind to an ask that never filed one.
+# This half is driven by the FILES, so it catches the opposite failure.
+#
+# Deliberately NOT reading the board: it needs no credentials, which is what
+# lets CI run it on every push. `check` still cannot run there.
+#
+# GRANDFATHERED is an explicit, enumerated list rather than a date cutoff or a
+# silent skip. Thirteen runbook files predate this gate; suppressing them
+# quietly would make the gate's first run green and teach nobody anything, and a
+# date cutoff rots invisibly the moment someone backdates a file. Each entry is
+# named, with the reason it is not a stranded ask, so removing one is a visible
+# diff someone has to justify. Anything NOT on this list and NOT classified is
+# an error — which is precisely how TOG-846 would have been caught on the day it
+# landed.
+GRANDFATHERED_HANDOFF=(
+  # id       reason it is not a stranded capability ask
+  "TOG-111"  # already a live runbook line; this file is a correction note to it
+  "TOG-151"  # done. superseded by the TOG-178 apply bundle
+  "TOG-156"  # cancelled on the board; the plugin was never installed from this card
+  "TOG-178"  # done. deployment deliberately STOPPED on provider callability, recorded on the card
+  "TOG-196"  # done. the live runbook moved into git (mcp/deploy/install-runbook.md); the handoff file is a signpost
+  "TOG-308"  # done. the restore was performed and verified on the incident thread
+  "TOG-419"  # done. canonical source is PR #65 in this repo, not the handoff copy
+  "TOG-485"  # done. the switch was executed and its verify chain ran green
+  "TOG-514"  # done. executed 2026-08-26; the file now preserves the procedure, it is not an ask
+  "TOG-679"  # done. the 47-agent repoint was completed via the console
+  "TOG-747"  # blocked on TOG-881, which carries the deploy; tracked there, not stranded
+)
+
+cmd_check_handoff() {
+  [[ -f "$CLASSIFICATION" ]] || die "classification file not found: $CLASSIFICATION"
+  jq -e 'type=="object"' >/dev/null 2>&1 <"$CLASSIFICATION" || die "classification file is not a JSON object"
+  # A missing handoff directory must not read as "nothing is stranded" — that is
+  # the same fail-open `check` was fixed for. Say it measured nothing.
+  [[ -d "$HANDOFF" ]] || die "handoff directory not found: $HANDOFF (refusing to report an unread directory as clean)"
+
+  local classified; classified="$(jq -r '(.items|keys[]),(.decisions|keys[]),(.misrouted|keys[]),((.closed//{})|keys[])' "$CLASSIFICATION" | sort -u)"
+
+  # Identifiers that have a runbook artifact sitting in the handoff directory.
+  # Case-insensitive on the TOG- prefix and normalised upward: one real file is
+  # named `tog-351`, and a gate that missed it because of case would be exactly
+  # the silent pass this is meant to remove.
+  local present; present="$(
+    find "$HANDOFF" -maxdepth 1 -type f \( -iname 'TOG-*runbook*.md' -o -iname 'TOG-*runbook*.markdown' \) -printf '%f\n' 2>/dev/null \
+      | grep -oiE '^TOG-[0-9]+' | tr '[:lower:]' '[:upper:]' | sort -u
+  )"
+
+  local grandfathered; grandfathered="$(printf '%s\n' "${GRANDFATHERED_HANDOFF[@]}" | sort -u)"
+  local unregistered
+  unregistered="$(comm -23 <(printf '%s\n' "$present") <(printf '%s\n' "$classified") \
+                  | comm -23 - <(printf '%s\n' "$grandfathered"))"
+
+  local n_present n_gf
+  n_present="$(printf '%s\n' "$present" | grep -c . || true)"
+  n_gf="$(printf '%s\n' "$grandfathered" | grep -c . || true)"
+  echo "handoff directory: $HANDOFF"
+  echo "runbook artifacts found: $n_present"
+  echo "grandfathered (predate this gate): $n_gf"
+
+  if [[ -n "${unregistered//[[:space:]]/}" ]]; then
+    echo
+    echo "UNREGISTERED — a runbook artifact exists for these, but they appear NOWHERE in"
+    echo "$(basename "$CLASSIFICATION"). Nothing will ever deliver them to a human: they"
+    echo "filed no interaction, so \`check\` cannot see them either. Add an entry (or"
+    echo "grandfather it here with the reason it is not an ask):"
+    printf '  %s\n' $unregistered
+    return 3
+  fi
+
+  echo "OK: every runbook artifact in the handoff directory is registered or explicitly"
+  echo "grandfathered. No capability-bound ask is stranded on disk."
+  return 0
 }
 
 # --- render ----------------------------------------------------------------
@@ -220,10 +347,22 @@ cmd_render() {
       + (if v.class == "MIXED" then "  ·  **MIXED — part of this is owner-reserved**" else "" end)
       + (if v.moved == true then "  ·  **ONLY HOME — no other card carries this ask**" else "" end)
       + "\n\n"
+      # Two different ways a line can be the only home, and they must not be
+      # narrated the same way. The common case is a card that WAS raised and has
+      # since been withdrawn. The other is TOG-846: an ask that never filed an
+      # interaction at all, so there was never anything to withdraw. Printing
+      # "its interaction has been withdrawn" over that one states a fact that did
+      # not happen, and an operator who goes looking for the withdrawn card finds
+      # no trace — which reads as a bookkeeping error and undermines the line.
       + (if v.moved == true
-         then "> **This line is the only remaining home for this ask.** Its standing\n"
-            + "> interaction has been withdrawn, so if you skip it here, nothing else\n"
-            + "> will surface it.\n\n"
+         then (if v.never_carded == true
+               then "> **This line is the only home this ask has ever had.** It never filed an\n"
+                  + "> interaction, so there is no card to withdraw and no thread to find —\n"
+                  + "> if you skip it here, nothing else will surface it.\n\n"
+               else "> **This line is the only remaining home for this ask.** Its standing\n"
+                  + "> interaction has been withdrawn, so if you skip it here, nothing else\n"
+                  + "> will surface it.\n\n"
+               end)
          else "" end)
       + "**What it changes.** \(v.changes)\n\n"
       + (if (v.warning // "") != "" then "> ⚠️ **\(v.warning)**\n\n" else "" end)
@@ -233,7 +372,12 @@ cmd_render() {
       + (if (v.note // "") != "" then "**Note.** \(v.note)\n\n" else "" end)
       + (if (v.commands // "") != ""
          then "**Exact commands.**\n\n```\n\(v.commands)\n```\n"
-         else "**Exact commands.** In the **\(id) issue thread** — the author verified them there. (Deliberately the issue thread, not the interaction: the interaction gets withdrawn once this line exists, and a runbook that points at a withdrawn card points at nothing.)\n"
+         else "**Exact commands.** In the **\(id) issue thread** — the author verified them there. (Deliberately the issue thread, not the interaction: "
+            + (if v.never_carded == true
+               then "this ask never filed an interaction at all, so the thread is the only place they exist."
+               else "the interaction gets withdrawn once this line exists, and a runbook that points at a withdrawn card points at nothing."
+               end)
+            + ")\n"
          end);
 
     (.items | to_entries | sort_by(.value.blast, .key)) as $items
@@ -323,17 +467,20 @@ main() {
     case "$1" in
       --classification) CLASSIFICATION="${2:-}"; shift 2 ;;
       --classification=*) CLASSIFICATION="${1#*=}"; shift ;;
+      --handoff) HANDOFF="${2:-}"; shift 2 ;;
+      --handoff=*) HANDOFF="${1#*=}"; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done
   case "$sub" in
     render)  cmd_render ;;
     check)   cmd_check ;;
+    check-handoff) cmd_check_handoff ;;
     explain) cmd_explain ;;
     ""|-h|--help|help)
       sed -n '/^# USAGE/,/^# ====/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       ;;
-    *) die "unknown subcommand: $sub (try: render, check, explain)" ;;
+    *) die "unknown subcommand: $sub (try: render, check, check-handoff, explain)" ;;
   esac
 }
 main "$@"

@@ -1045,6 +1045,38 @@ jobs:
         run: |
           ./operator_runbook.sh render > /tmp/runbook.regenerated.md
           diff -u docs/OPERATOR-RUNBOOK.md /tmp/runbook.regenerated.md
+
+      # TOG-851. `check` is driven by the pending INTERACTION set, so it is
+      # structurally blind to an ask that never filed one: not in the input,
+      # therefore not unclassified, therefore green. TOG-846 shipped a complete
+      # live-verified operator runbook, filed ZERO interactions, was closed
+      # `done`, and sat on disk with no delivery path while every gate passed.
+      #
+      # This half is driven by the FILES instead, so it catches that direction.
+      # It needs no board access and no credentials, which is exactly why it can
+      # run here when `check` cannot.
+      #
+      # On a CI runner /paperclip does not exist, so this step points the gate at
+      # a fixture rather than skipping: a gate that silently no-ops on the runner
+      # is a green tick that measured nothing. The fixture asserts BOTH
+      # directions — a registered artifact passes, a stranded one exits 3 — so
+      # this step fails if the branch is ever gutted, without needing the host.
+      - name: operator runbook — no capability ask stranded on disk
+        run: |
+          set -euo pipefail
+          if [ -d /paperclip/operator-handoff ]; then
+            ./operator_runbook.sh check-handoff
+          fi
+          fix="$(mktemp -d)"
+          : > "$fix/TOG-846-cliproxy-update-runbook.md"
+          ./operator_runbook.sh check-handoff --handoff "$fix"
+          echo "registered artifact passes"
+          : > "$fix/TOG-999-orphan-runbook.md"
+          if ./operator_runbook.sh check-handoff --handoff "$fix"; then
+            echo "FAIL: a stranded runbook passed clean — the TOG-846 hole is open" >&2
+            exit 1
+          fi
+          echo "stranded artifact correctly exits non-zero"
       # TOG-396. The sibling problem to the one above: routing decides WHERE an
       # ask goes, this decides whether the JSON you are about to POST says what
       # you think it says. `POST /issues/{id}/interactions` validates against a
