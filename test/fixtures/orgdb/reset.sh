@@ -64,7 +64,7 @@ SQL
 fi
 [[ $# -eq 0 ]] || refuse "usage: reset.sh [--init]"
 
-# The sentinel is deliberately outside the six-table fixture and survives each
+# The sentinel is deliberately outside the fixture's own tables and survives each
 # reset. The server-side database name, marker, DROP, schema, and data load share
 # one connection and transaction so a failover/load balancer cannot validate
 # one backend and execute any reset write on another.
@@ -97,7 +97,8 @@ END
 $reset_guard$;
 DROP TABLE IF EXISTS public.heartbeat_runs, public.budget_policies,
   public.company_secret_bindings, public.company_memberships,
-  public.principal_permission_grants, public.agents CASCADE;
+  public.principal_permission_grants, public.agents,
+  public.activity_log CASCADE;
 SQL
   cat "$HERE/schema.sql" "$HERE/org.sql"
   printf 'COMMIT;\n'

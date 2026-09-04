@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Compare the six-table CI fixture with a fingerprint taken from the running
-# Paperclip database. The contract is columns (including type, nullability and
-# default) plus indexes on those six tables. It intentionally excludes foreign
+# Compare the CI fixture with a fingerprint taken from the running Paperclip
+# database. The tables are the `TABLES` list below and nothing else. The
+# contract is columns (including type, nullability and default) plus indexes on
+# those tables. It intentionally excludes foreign
 # keys, non-index constraints and triggers because the query-compatible fixture
 # omits platform behaviour outside the two privilege suites. CI tests the
 # detector; the operator comparison still runs where production is reachable.
@@ -22,14 +23,22 @@
 # operators to install psql. A bare `psql` connects to whatever that psql
 # defaults to — some other database on the same host — and every column it
 # reports is real, so the output looks exactly like a measurement of Paperclip.
-# The six-table guard below is the backstop for that, and the backend seam
+# The table-count guard below is the backstop for that, and the backend seam
 # means the destination is now chosen explicitly rather than inherited from
 # whatever happens to be on PATH. Preflight makes "could not reach it" a
 # refusal instead of a comparison against nothing.
 set -uo pipefail
 ME="$(basename "${BASH_SOURCE[0]}")"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TABLES="agents budget_policies company_memberships company_secret_bindings heartbeat_runs principal_permission_grants"
+TABLES="activity_log agents budget_policies company_memberships company_secret_bindings heartbeat_runs principal_permission_grants"
+# TOG-870 added activity_log as the seventh table. Until then TABLES was set
+# here and never read, while the three queries below carried their own literal
+# copies of the list — so the count guard, the column fingerprint and the index
+# fingerprint could each disagree with this line and with each other, silently.
+# They are now derived from it. `TABLE_COUNT` is derived too: a hardcoded "7"
+# next to a seven-name list is the same defect one release later.
+TABLE_LIST="$(printf "'%s'," $TABLES)"; TABLE_LIST="${TABLE_LIST%,}"
+TABLE_COUNT="$(printf '%s\n' $TABLES | grep -c .)"
 EXIT_OK=0; EXIT_REFUSED=2; EXIT_DRIFT=3
 
 die() { echo "REFUSED: $ME: $*" >&2; exit $EXIT_REFUSED; }
@@ -45,11 +54,11 @@ FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
   AND c.relkind IN ('r','p')
-  AND c.relname IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants');
+  AND c.relname IN (${TABLE_LIST});
 SQL
 )" || return 2
-  [[ "$table_count" == "6" ]] || {
-    echo "REFUSED: $ME: expected all six Paperclip fixture tables, found ${table_count:-no measurable count}" >&2
+  [[ "$table_count" == "$TABLE_COUNT" ]] || {
+    echo "REFUSED: $ME: expected all $TABLE_COUNT Paperclip fixture tables, found ${table_count:-no measurable count}" >&2
     return 2
   }
 
@@ -67,14 +76,14 @@ WHERE n.nspname='public'
   AND c.relkind IN ('r','p')
   AND a.attnum > 0
   AND NOT a.attisdropped
-  AND c.relname IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
+  AND c.relname IN (${TABLE_LIST})
 UNION ALL
 SELECT 'index', tablename, '---', indexname,
        regexp_replace(indexdef, ' ON public\\.', ' ON '),
        '(none)', '(none)'
 FROM pg_indexes
 WHERE schemaname='public'
-  AND tablename IN ('agents','budget_policies','company_memberships','company_secret_bindings','heartbeat_runs','principal_permission_grants')
+  AND tablename IN (${TABLE_LIST})
 ORDER BY 2, 1, 4;
 SQL
 }

@@ -312,7 +312,7 @@ proves the detector works. It cannot run `check` — GitHub has no view of `/pap
 
 ### And the schema half — `schema_drift.sh`
 
-The two privilege suites run against a vendored six-table fixture
+The two privilege suites run against a small vendored fixture
 (`test/fixtures/orgdb/schema.sql`), which is a snapshot of the production schema. Snapshots rot, and
 a rotted one is worse than no fixture: the suites stay green while testing a shape the database no
 longer has. So the dump ships with a drift check.
@@ -330,7 +330,9 @@ GitHub has no route to the VPS.
 PAPERCLIP_SQL_BACKEND=psql ./schema_drift.sh compare /tmp/production-schema.fp
 ```
 
-The contract is columns (type, nullability, default) plus indexes on those six tables. It excludes
+The contract is columns (type, nullability, default) plus indexes on the tables named in the
+script's `TABLES` list — seven as of TOG-870, and derived from that one line rather than restated,
+because a count written down in a second place is a count that goes stale. It excludes
 foreign keys, non-index constraints and triggers on purpose: the fixture is query-compatible, not a
 replica, and widening the contract to things the fixture never claimed would make it red forever —
 the `channel_drift.sh` failure mode above.
@@ -341,7 +343,7 @@ this shipped calling `psql` directly, and `psql` is the one backend the operator
 so `fingerprint` — the half that has to work on the VPS — was the half that refused. The worse
 direction is that a bare `psql` connects to whatever *that* psql defaults to, and every column it
 reports is real, so a fingerprint of some unrelated database on the same host is indistinguishable
-from a measurement of Paperclip. The six-table guard is the backstop, and the backend is now chosen
+from a measurement of Paperclip. The table-count guard is the backstop, and the backend is now chosen
 explicitly instead of inherited from `PATH`.
 
 Second: **exit `2` means nothing was measured, and it is not a pass.** The backend is checked with a

@@ -1,10 +1,12 @@
 -- TOG-480 CI fixture schema.
 --
 -- Extracted from the ordered /app/packages/db/src/migrations inputs and
--- meta/0211_snapshot.json on 2026-08-27. These are the six platform tables the
--- operator suites read or write. This is a query-compatible fixture, not a
--- second Paperclip schema. Its drift contract is deliberately limited to every
--- column (type, nullability, default) and every index on those six tables.
+-- meta/0211_snapshot.json on 2026-08-27; `activity_log` added 2026-09-03
+-- (TOG-870), extracted from the running database. These are the seven platform
+-- tables the operator suites read or write. This is a query-compatible fixture,
+-- not a second Paperclip schema. Its drift contract is deliberately limited to
+-- every column (type, nullability, default) and every index on those seven
+-- tables.
 -- Foreign keys, CHECK/UNIQUE constraints not represented by indexes, and
 -- triggers are outside that contract: foreign keys to tables outside the
 -- fixture are intentionally omitted, and the suites do not exercise platform
@@ -194,3 +196,36 @@ CREATE INDEX heartbeat_runs_company_ctx_task_created_idx
   ON heartbeat_runs (company_id, ((context_snapshot ->> 'taskId')), created_at DESC);
 CREATE INDEX heartbeat_runs_company_ctx_taskkey_created_idx
   ON heartbeat_runs (company_id, ((context_snapshot ->> 'taskKey')), created_at DESC);
+
+-- TOG-870. The seventh table. `apply_exact_grants` writes the grant and its
+-- attribution row in ONE transaction, so without this table the provisioner
+-- cannot create an agent at all and every ceiling assertion fails for a reason
+-- that has nothing to do with ceilings.
+--
+-- Extracted verbatim from the running platform database on 2026-09-03 by the
+-- same pg_catalog query schema_drift.sh uses, not hand-written: `details` and
+-- `responsible_user_id` are exactly the columns the attribution join reads, and
+-- a fixture that guessed their types would let a real type error pass here.
+-- Note `run_id` and `responsible_user_id` trail `created_at` in attnum order —
+-- they were added by a later migration, and the column ORDER is part of what
+-- schema_drift.sh compares.
+CREATE TABLE activity_log (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  company_id uuid NOT NULL,
+  actor_type text DEFAULT 'system'::text NOT NULL,
+  actor_id text NOT NULL,
+  action text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id text NOT NULL,
+  agent_id uuid,
+  details jsonb,
+  created_at timestamp with time zone DEFAULT now() NOT NULL,
+  run_id uuid,
+  responsible_user_id text
+);
+CREATE INDEX activity_log_company_created_idx ON activity_log (company_id, created_at);
+CREATE INDEX activity_log_run_id_idx ON activity_log (run_id);
+CREATE INDEX activity_log_entity_type_id_idx ON activity_log (entity_type, entity_id);
+CREATE INDEX activity_log_company_agent_created_idx ON activity_log (company_id, agent_id, created_at);
+CREATE INDEX activity_log_company_responsible_user_created_idx
+  ON activity_log (company_id, responsible_user_id, created_at);

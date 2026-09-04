@@ -11,9 +11,20 @@ for f in test/fixtures/orgdb/paperclipai test/fixtures/orgdb/reset.sh schema_dri
   bash -n "$HERE/$f" && ok "$f parses" || bad "$f does not parse"
 done
 
-for t in agents principal_permission_grants company_memberships company_secret_bindings budget_policies heartbeat_runs; do
-  grep -q "CREATE TABLE $t" "$HERE/test/fixtures/orgdb/schema.sql" && ok "schema contains $t" || bad "schema misses $t"
+# The trailing " (" is load-bearing, not punctuation. `grep -q "CREATE TABLE
+# activity_log"` also matches `CREATE TABLE activity_log_renamed`, so a rename —
+# exactly the drift this fixture exists to catch — reads as present. Anchor on
+# the full declaration.
+for t in agents principal_permission_grants company_memberships company_secret_bindings budget_policies heartbeat_runs activity_log; do
+  grep -q "CREATE TABLE $t (" "$HERE/test/fixtures/orgdb/schema.sql" && ok "schema contains $t" || bad "schema misses $t"
 done
+# TOG-870. The one 'user' row. Every other membership is principal_type 'agent',
+# and without a single active owner `resolve_operator_user_id` refuses — which
+# reddens every provisioning assertion in both ceiling suites for a reason that
+# looks nothing like its cause.
+grep -q "'user', 'FixtureOperatorUser" "$HERE/test/fixtures/orgdb/org.sql" \
+  && ok "fixture seeds exactly one active owner for the operator lookup" \
+  || bad "fixture has no user-typed owner; apply_exact_grants cannot resolve an operator"
 for r in P0 O1 O2 O3 A0 T0 S0 F0; do
   grep -q "orgRoleId.*$r" "$HERE/test/fixtures/orgdb/org.sql" && ok "fixture contains $r" || bad "fixture misses $r"
 done
@@ -255,7 +266,7 @@ if node - "$mutant" <<'NODE'
 const fs=require('fs'), p=process.argv[2], s=fs.readFileSync(p,'utf8')
 const start=s.indexOf('DO $reset_guard$'), end=s.indexOf('$reset_guard$;', start)
 if (start < 0 || end < 0) throw Error('reset guard block anchor missing')
-const drop="DROP TABLE IF EXISTS public.heartbeat_runs, public.budget_policies,\n  public.company_secret_bindings, public.company_memberships,\n  public.principal_permission_grants, public.agents CASCADE;\n"
+const drop="DROP TABLE IF EXISTS public.heartbeat_runs, public.budget_policies,\n  public.company_secret_bindings, public.company_memberships,\n  public.principal_permission_grants, public.agents,\n  public.activity_log CASCADE;\n"
 const dropAt=s.indexOf(drop, end)
 if (dropAt < 0) throw Error('reset DROP mutation anchor missing')
 const guard=s.slice(start, end)
@@ -601,13 +612,33 @@ fi
 # `command -v` in place of a round trip) reddens here by name.
 # ---------------------------------------------------------------------------
 drift_bin="$TMP/drift-bin"; mkdir -p "$drift_bin"
+# The fake backend has to answer the table-count guard with the number of tables
+# schema_drift.sh actually asks for, and that number changed when TOG-870 added
+# activity_log. Read it from the script under test rather than restating it: a
+# stub with its own literal is a stub that goes stale silently, and the failure
+# it produces is "the podman backend refused", which reads like a backend bug.
+drift_table_count="$(
+  set -- $(sed -n 's/^TABLES="\(.*\)"$/\1/p' "$HERE/schema_drift.sh"); echo $#
+)"
+[[ "$drift_table_count" -gt 0 ]] \
+  && ok "the drift stub derives its table count ($drift_table_count) from schema_drift.sh" \
+  || bad "could not read TABLES from schema_drift.sh; the drift stub would answer a stale count"
+export FAKE_TABLE_COUNT="$drift_table_count"
+# Same list, other side of the comparison: every table schema_drift.sh
+# fingerprints must exist in the fixture, or the operator's compare refuses
+# against a clone that cannot possibly match.
+for t in $(sed -n 's/^TABLES="\(.*\)"$/\1/p' "$HERE/schema_drift.sh"); do
+  grep -q "CREATE TABLE $t (" "$HERE/test/fixtures/orgdb/schema.sql" \
+    && ok "schema_drift table $t exists in the fixture" \
+    || bad "schema_drift fingerprints $t but the fixture does not create it"
+done
 cat > "$drift_bin/podman" <<'PODMAN'
 #!/usr/bin/env bash
 echo "$*" >> "${PODMAN_TRACE:?}"
 sql="$(cat)"
 case "$sql" in
   *"SELECT 1"*)                     echo 1 ;;
-  *"count(*)"*pg_catalog.pg_class*) echo "${FAKE_TABLE_COUNT:-6}" ;;
+  *"count(*)"*pg_catalog.pg_class*) echo "${FAKE_TABLE_COUNT:?}" ;;
   *pg_attribute*)                   printf 'column|agents|---|name|text|not-null|(none)\n' ;;
   *) echo "fake podman: unexpected SQL" >&2; exit 9 ;;
 esac
@@ -648,7 +679,7 @@ else
 fi
 
 # The wrong-database direction. A psql on PATH pointed somewhere that is not
-# Paperclip answers every query truthfully about the wrong schema. The six-table
+# Paperclip answers every query truthfully about the wrong schema. The table-count
 # guard must refuse rather than fingerprint it.
 cat > "$drift_bin/psql" <<'WRONGPG'
 #!/usr/bin/env bash

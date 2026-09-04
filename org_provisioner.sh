@@ -275,9 +275,66 @@ log_event() {
   chmod 0600 "$GRANT_LOG" 2>/dev/null || true
 }
 
+# The human user id this provisioner writes into `granted_by_user_id`.
+#
+# The column is USER-TYPED — there is no agent-typed grantor column anywhere in
+# `principal_permission_grants` — and this tool is operator-run by design (see
+# the header). So the truthful value is the operator who executed the command,
+# with the REQUESTING AGENT recorded separately in activity_log. That is the
+# two-key shape the grant log needs: who asked, and who actually ran it.
+#
+# This RESOLVES rather than guesses. If the company does not have exactly one
+# active owner, it refuses instead of picking one — attributing a grant to the
+# wrong human is worse than the null this whole change exists to remove.
+PROVISIONER_OPERATOR_USER_ID="${PROVISIONER_OPERATOR_USER_ID:-}"
+resolve_operator_user_id() {
+  [[ -n "$PROVISIONER_OPERATOR_USER_ID" ]] && { printf '%s' "$PROVISIONER_OPERATOR_USER_ID"; return; }
+  local rows n
+  rows="$(PGV_COMPANY_ID="$COMPANY_ID" pcsql -Atq <<'SQL'
+SELECT principal_id FROM company_memberships
+WHERE company_id = :'company_id'::uuid
+  AND principal_type = 'user' AND membership_role = 'owner' AND status = 'active';
+SQL
+)"
+  # `grep -c .` counts NON-EMPTY lines. `wc -l` would score the empty string as
+  # 1 on some shells and 0 on others, and "found 1 owner" from an empty read is
+  # the failure this whole card is about.
+  n="$(grep -c . <<<"$rows" || true)"
+  [[ "$n" == "1" ]] || die "cannot resolve the operator user id: found $n active owners for this company. Set PROVISIONER_OPERATOR_USER_ID explicitly."
+  printf '%s' "$rows"
+}
+
+# apply_exact_grants <agent_id> <grants_json> <requesting_agent_id>
+#
+# TOG-870. This function used to write grants with a raw INSERT that named no
+# grantor at all, and it is the reason 25 rows on this board are the only ones
+# whose author cannot be recovered by ANY means. Every other anonymous row can
+# be recovered by joining activity_log on (entity_id, timestamp); these could
+# not, because bypassing the API meant no activity_log row was ever written.
+#
+# TWO columns now carry attribution and BOTH are required:
+#
+#   granted_by_user_id  the operator who ran the command. It is the only
+#                       attribution the grants table itself can hold.
+#   an activity_log row the REQUESTING AGENT, which the user-typed column
+#                       cannot express. This is what the recovery join reads,
+#                       and it is what makes an agent-initiated grant
+#                       attributable at all.
+#
+# Both are written INSIDE the same transaction as the grants. A grant that
+# commits without its attribution is the exact defect being fixed here, and
+# leaving the activity insert outside the transaction would reintroduce it on
+# any partial failure.
+#
+# The requesting agent id is a REQUIRED argument with no default. A default
+# would silently restore anonymous rows the first time a new call site forgot
+# to pass it — which is precisely how the original 25 were written.
 apply_exact_grants() {
-  local agent_id="$1" grants_json="$2"
+  local agent_id="$1" grants_json="$2" requested_by="${3:-}" operator
+  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (TOG-870: an unattributed grant is unrecoverable)."
+  operator="$(resolve_operator_user_id)" || return 1
   PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="$agent_id" PGV_GRANTS="$grants_json" \
+  PGV_A="$operator" PGV_B="$requested_by" \
     pcsql -q >/dev/null <<'SQL'
 BEGIN;
 INSERT INTO company_memberships (company_id, principal_type, principal_id, status, membership_role)
@@ -292,10 +349,27 @@ WHERE company_id = :'company_id'::uuid
   AND principal_type = 'agent'
   AND principal_id = :'agent_id';
 
-INSERT INTO principal_permission_grants (company_id, principal_type, principal_id, permission_key, scope)
+INSERT INTO principal_permission_grants (company_id, principal_type, principal_id, permission_key, scope, granted_by_user_id)
 SELECT :'company_id'::uuid, 'agent', :'agent_id', g->>'permissionKey',
-       CASE WHEN g->'scope' IS NULL OR g->'scope' = 'null'::jsonb THEN NULL ELSE g->'scope' END
+       CASE WHEN g->'scope' IS NULL OR g->'scope' = 'null'::jsonb THEN NULL ELSE g->'scope' END,
+       :'a'
 FROM jsonb_array_elements(:'grants'::jsonb) AS g;
+
+-- The recovery row. `entity_id` is the principal RECEIVING the grants, which
+-- is the key the attribution join uses; `actor_id` is the agent that asked.
+-- The action must stay one of the strings scripts/grant_attribution.js reads
+-- as grant-bearing, or these rows become invisible to the audit again.
+INSERT INTO activity_log
+  (company_id, actor_type, actor_id, action, entity_type, entity_id, agent_id, details, responsible_user_id)
+VALUES
+  (:'company_id'::uuid, 'agent', :'b', 'agent.permissions_updated', 'agent', :'agent_id',
+   :'b'::uuid,
+   jsonb_build_object(
+     'source', 'org_provisioner.sh',
+     'operatorUserId', :'a',
+     'permissionKeys', (SELECT COALESCE(jsonb_agg(g->>'permissionKey'), '[]'::jsonb)
+                          FROM jsonb_array_elements(:'grants'::jsonb) AS g)),
+   :'a');
 COMMIT;
 SQL
 }
@@ -422,7 +496,9 @@ cmd_create() {
                  scope: (if .self then {subtreeRootAgentId:$id} else null end)})' \
     <<<"$TEMPLATES_JSON")"
 
-  apply_exact_grants "$new_id" "$grants_json"
+  # The CALLER is the requesting agent: invariant 1 makes it this agent's parent
+  # and the principal whose ceiling authorized the template.
+  apply_exact_grants "$new_id" "$grants_json" "$caller_id"
 
   log_event "$(jq -cn --arg cid "$caller_id" --arg ct "$caller_template" --arg nid "$new_id" \
     --arg t "$template" --arg title "$title" --argjson g "$grants_json" \
@@ -452,7 +528,10 @@ cmd_deactivate() {
   # Invariant 1: descendants only — never a peer, parent, or another subtree.
   is_descendant_of "$caller_id" "$target_id" \
     || die "$target_ref is not inside $caller_ref's reporting subtree."
-  apply_exact_grants "$target_id" '[]'
+  # A revocation is an attributable act too — arguably more so than a grant.
+  # The empty grants array means the activity row is the ONLY record of who
+  # stripped this agent's authority.
+  apply_exact_grants "$target_id" '[]' "$caller_id"
   pc agent terminate "$target_id" --json >/dev/null
   # Terminating the agent does not retire its company membership, and a stale
   # 'active' membership is exactly the drift the access review flags. Archive it

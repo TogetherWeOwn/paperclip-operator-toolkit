@@ -137,6 +137,21 @@ name: CI
 #                                       Also whether a card's LIVE ask is hosted
 #                                       on a DIFFERENT card, which dies silently
 #                                       when that card closes — TOG-908
+#     test_grant_attribution.sh         scripts/grant_attribution.js: who granted
+#                                       a permission, when the grants table's
+#                                       only grantor column is USER-typed and an
+#                                       agent actor is written as null. Recovers
+#                                       the grantor from activity_log, reports it
+#                                       as DERIVED, and refuses (exit 5) when it
+#                                       measured nothing rather than calling an
+#                                       empty read a perfect audit — TOG-870
+#     test_grant_write_attribution.sh   org_provisioner.sh: whether a grant can
+#                                       still be written with NO grantor. Its raw
+#                                       INSERT bypassed the API, so those rows
+#                                       have no activity_log row either and are
+#                                       unrecoverable. Both attribution facts now
+#                                       land in ONE transaction, and a missing
+#                                       requester REFUSES — never defaults — TOG-870
 #     syntax + secret scan              see the steps below
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
@@ -232,7 +247,7 @@ name: CI
 #   this fixture. Green CI proves the detector and fixture work, never that the
 #   deployed schema has not drifted.
 #
-#   NOT YET RUN HERE: org_access_review.sh. It is read-only and the six required
+#   NOT YET RUN HERE: org_access_review.sh. It is read-only and the required
 #   tables are now present, but its wider report semantics are outside TOG-480.
 #
 #   READ THIS BEFORE TRUSTING THE DRIFT SUITE'S GREEN (TOG-212). CI runs
@@ -701,6 +716,32 @@ jobs:
       # database, API, credential or agent mutation.
       - name: provisioned agents are born ACP-safe
         run: ./test_provisioned_cheap_profile.sh
+
+      # TOG-870. The grant table's only attribution column is USER-typed, so an
+      # agent-made grant writes null. This resolver recovers the grantor by
+      # joining activity_log on (entity_id, |dt|), and reports derived
+      # attribution as DERIVED -- it is never written back into the table.
+      # Runs fully offline behind the *_SOURCE_CMD seam: no database, API,
+      # credential or agent.
+      - name: grant-attribution resolver suite
+        run: ./test_grant_attribution.sh
+
+      # TOG-870. The other half: org_provisioner.sh wrote grants with a raw
+      # INSERT naming no grantor, and it is the sole cause of the only 25 rows
+      # on this board whose author is unrecoverable by ANY means -- bypassing
+      # the API meant no activity_log row was ever written either. This suite
+      # holds the write path to both attribution facts, in one transaction.
+      - name: provisioner grant-write attribution suite
+        run: ./test_grant_write_attribution.sh
+
+      # Both suites above are largely ABSENCE assertions ("no anonymous row was
+      # written", "an empty read does not render as a perfect audit"), which
+      # also pass if the setup never reaches the gate. Delete each limb of the
+      # resolver and each attribution write from a staging copy, after a green
+      # baseline, and require the owning case to go red. Includes a rename
+      # mutant, because an unanchored presence check passes on a rename.
+      - name: grant attribution is load-bearing (mutation-gated)
+        run: ./verification/tog-870-mutation-gate.sh
 
       # The widened-catalog cases above are absence assertions: they also pass if
       # their setup never reaches the named gate. Delete each independent guard
