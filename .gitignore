@@ -64,3 +64,25 @@ node_modules/
 # anything visible until an install went looking for the worker.
 !plugins/dispatch/dist/
 !plugins/dispatch/dist/*.js
+
+# Python bytecode. Until TOG-917 this was covered only BY ACCIDENT: `.claude/`
+# above ignores every __pycache__ that happens to sit under a worktree, and
+# nothing covered one created next to a tracked .py. CI's own parse gate makes
+# them — `python3 -m py_compile` over `omniroute/*.py *.py` — and the "Syntax
+# check every script" step cleans up with a hand-maintained
+# `rm -rf omniroute/__pycache__ __pycache__`. That list is NOT complete:
+# test_host_ops_broker.py imports host-ops/broker.py and leaves a THIRD
+# directory, host-ops/__pycache__, behind after the rm has already run.
+# Measured, not assumed — five .pyc from the parse gate, one more from the
+# broker suite, all `?? `-offered to `git add -A`.
+#   Why a compiled artifact is worth a rule: a .pyc carries its source's
+# contents. This repo's Python is host-ops/broker.py (reads a management key)
+# and the redaction library whose entire job is keeping credential-shaped data
+# out of a world-readable file. A stray committed .pyc is a silent second copy
+# of code we otherwise review line by line.
+#   BOTH forms, for the same reason the node_modules block above gives: the
+# trailing slash matches DIRECTORIES ONLY, so `__pycache__/` alone would miss a
+# loose `.pyc` written anywhere else (PYTHONDONTWRITEBYTECODE unset plus a
+# sys.path entry, or an operator's stray build). Verified with `git check-ignore`.
+__pycache__/
+*.pyc
