@@ -96,6 +96,19 @@ class GateFixture(unittest.TestCase):
         # cases are about staged scripts, so empty it -- otherwise every
         # single_card() assertion would also see the live TOG-586 row.
         self.gate.BUILT = {}
+        # Same for ANCHORS (TOG-997): the live table names a ref in the real
+        # governor tree, which STAGING no longer points at, so leaving it
+        # populated would add an ANCHOR_TREE_UNREADABLE row to every fixture
+        # and turn row()'s single-row assertion into a failure. Anchors are
+        # tested directly in TestDeployLineAnchor.
+        self.gate.ANCHORS = {}
+        # Same isolation for the real WITHDRAWN table. These fixtures name
+        # TOG-916 as a superseding runner, and in the live table TOG-916 is
+        # withdrawn -- which would (correctly) trip withdrawal_invariant() and
+        # turn every superseded fixture into exit 2. The invariant is tested
+        # directly in TestOwnerWithdrawal instead, against a fixture that
+        # actually models it.
+        self.gate.WITHDRAWN = {}
 
     def stage_script(self, name: str, head: str | None) -> str:
         """Write an operator script pinning `head`; return its sha256."""
@@ -380,6 +393,247 @@ class TestBuiltAtInstallTimeCards(GateFixture):
         payload = jsonlib.loads(buffer.getvalue())
         self.assertEqual(payload["verdict"], "READY")
         self.assertEqual(payload["entries"][0]["revision"], self.pin)
+
+
+class TestOwnerWithdrawal(GateFixture):
+    """Owner ruling 2026-09-05 05:07Z: no fork. Authorisation, not bytes.
+
+    The hazard these cover is specific: a withdrawn card's hash is still
+    PERFECT, so nothing in the hash path can notice it. The gate printed
+    `[ok] TOG-916 OK` -- read by an operator as RUN THIS -- for a script that
+    builds a forked vendor image.
+    """
+
+    def test_a_withdrawn_card_is_stopped_despite_a_perfect_hash(self) -> None:
+        """The bytes match exactly; only the authorisation changed."""
+        self.single_card(head=self.pin)
+        self.gate.WITHDRAWN = {"TOG-TEST": ("vendor patch", "re-scope")}
+        row = self.row()
+        self.assertEqual(row["state"], "WITHDRAWN")
+        # It must never be reported as runnable...
+        self.assertNotIn(row["state"], ("OK", "SUPERSEDED_OK", "BUILT_PIN_OK"))
+        # ...and it must not close the window for the cards that remain.
+        self.assertEqual(row["code"], 0)
+
+    def test_withdrawal_beats_a_hash_mismatch_too(self) -> None:
+        """Withdrawn is checked FIRST, so it short-circuits even a tamper.
+
+        Both verdicts mean "do not run"; the ruling is the more fundamental
+        reason and must not be masked by a byte comparison.
+        """
+        self.single_card(head=self.pin)
+        self.gate.MANIFEST = {"TOG-TEST": ("OP.sh", "f" * 64)}
+        self.gate.WITHDRAWN = {"TOG-TEST": ("vendor patch", "re-scope")}
+        self.assertEqual(self.row()["state"], "WITHDRAWN")
+
+    def test_a_withdrawn_card_still_stops_when_its_script_is_gone(self) -> None:
+        self.single_card(head=self.pin)
+        (self.staging / "OP.sh").unlink()
+        self.gate.WITHDRAWN = {"TOG-TEST": ("vendor patch", "re-scope")}
+        row = self.row()
+        self.assertEqual(row["state"], "WITHDRAWN")
+        self.assertFalse(row["present"])
+
+    def test_withdrawing_a_runner_but_not_its_superseded_card_is_exit_2(self) -> None:
+        """The coupling fault: advice to run a forbidden script.
+
+        Leaving a superseded card enrolled while withdrawing the script that
+        carries its payload makes the gate print "superseded by X's script" at
+        an operator forbidden to run X. That is a gate that can no longer
+        answer its own question -- exit 2, not a green with a footnote.
+        """
+        self.single_card(head=self.payload,
+                         superseded=(self.payload, "TOG-RUNNER"))
+        self.gate.WITHDRAWN = {"TOG-RUNNER": ("vendor patch", "re-scope")}
+        code, _ = self.gate.evaluate()
+        self.assertEqual(code, 2)
+        fault = self.gate.withdrawal_invariant()
+        self.assertIsNotNone(fault)
+        self.assertIn("TOG-RUNNER", fault)
+
+    def test_withdrawing_both_is_consistent(self) -> None:
+        """Withdrawing the runner AND the card it carries is not a fault."""
+        self.single_card(head=self.payload,
+                         superseded=(self.payload, "TOG-RUNNER"))
+        self.gate.WITHDRAWN = {
+            "TOG-RUNNER": ("vendor patch", "re-scope"),
+            "TOG-TEST": ("vendor patch", "re-scope"),
+        }
+        self.assertIsNone(self.gate.withdrawal_invariant())
+        self.assertEqual(self.row()["state"], "WITHDRAWN")
+
+    def test_the_live_tables_are_self_consistent(self) -> None:
+        """Guards the REAL tables, not a fixture -- this is the shipping check."""
+        live = load_gate()
+        self.assertIsNone(live.withdrawal_invariant())
+
+    def test_the_live_window_authorises_only_what_the_owner_kept(self) -> None:
+        """TOG-916 and the other vendor patches must not be runnable."""
+        live = load_gate()
+        for card in ("TOG-703", "TOG-749", "TOG-754", "TOG-916", "TOG-847"):
+            self.assertIn(card, live.WITHDRAWN, f"{card} must be withdrawn")
+        for card in ("TOG-881",):
+            self.assertNotIn(card, live.WITHDRAWN, f"{card} must remain runnable")
+
+
+class TestDeployLineAnchor(GateFixture):
+    """TOG-997: the deploy line must be a NAME, not a checkout.
+
+    The defect these cover: every other check in this gate reads
+    `rev-parse HEAD` on a shared, mutable tree, so an unrelated run's
+    `git checkout` invalidates the window. Measured on the real tree, 7
+    such excursions in 26.15 h with ZERO commits. Worse, the reviewed
+    commits themselves were held by nothing but an unrelated feature
+    branch that happened to descend from them.
+    """
+
+    REF = "refs/deploy-line/test"
+
+    def anchor(self, expected: str) -> dict:
+        """Point the gate's ANCHORS at this fixture and return the one row."""
+        self.gate.ANCHORS = {
+            self.REF: ("tree", expected, "test line"),
+        }
+        rows = self.gate.evaluate_anchors()
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_an_existing_ref_at_the_reviewed_commit_is_green(self) -> None:
+        git(self.tree, "update-ref", self.REF, self.pin)
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_OK")
+
+    def test_a_line_with_no_ref_of_its_own_is_red(self) -> None:
+        """The measured live state before this table existed.
+
+        The commit is perfectly reachable -- HEAD is sitting on it -- and
+        that is exactly the false green: reachability today via a branch
+        that happens to descend from it is not an anchor.
+        """
+        row = self.anchor(self.pin)
+        self.assertEqual(row["state"], "ANCHOR_MISSING")
+        self.assertIsNone(row["actual"])
+
+    def test_a_ref_pointing_somewhere_else_is_red_and_not_silently_accepted(self) -> None:
+        """A re-pointed line must not pass as 'anchored'."""
+        git(self.tree, "update-ref", self.REF, self.feature)
+        row = self.anchor(self.pin)
+        self.assertEqual(row["state"], "ANCHOR_MOVED")
+        self.assertEqual(row["actual"], self.feature)
+
+    def test_an_unreadable_tree_is_distinguished_from_a_missing_ref(self) -> None:
+        """Different repairs: missing checkout vs missing ref.
+
+        Collapsing these prints 'run update-ref' at an operator whose
+        actual problem is that the tree is not there -- the TOG-998
+        failure mode, the right red with the wrong instruction.
+        """
+        self.gate.ANCHORS = {self.REF: ("no-such-tree", self.pin, "test line")}
+        rows = self.gate.evaluate_anchors()
+        self.assertEqual(rows[0]["state"], "ANCHOR_TREE_UNREADABLE")
+
+    def test_the_anchor_survives_a_stray_checkout(self) -> None:
+        """The whole point: HEAD moves, the line does not.
+
+        This is the 7/7 measured scenario. Under the old HEAD-only checks
+        this state was red; the anchor is what makes it a non-event.
+        """
+        git(self.tree, "update-ref", self.REF, self.pin)
+        git(self.tree, "checkout", "-q", self.feature)
+        self.assertNotEqual(git(self.tree, "rev-parse", "HEAD"), self.pin)
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_OK")
+
+    def test_a_tag_shaped_ref_is_peeled_to_a_commit(self) -> None:
+        """`^{commit}` is load-bearing: an annotated tag must not pass as
+        the commit's own object id, and must resolve to what it points at."""
+        git(self.tree, "tag", "-a", "-m", "t", "annotated", self.pin)
+        git(self.tree, "update-ref", self.REF, "refs/tags/annotated")
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_OK")
+
+    def test_an_unanchored_line_closes_the_window(self) -> None:
+        """A red anchor must reach the verdict, not just the row.
+
+        An anchor row that reddens nothing is a comment, not a gate.
+        """
+        self.single_card(head=self.pin)
+        self.gate.ANCHORS = {self.REF: ("tree", self.pin, "test line")}
+        code, rows = self.gate.evaluate()
+        self.assertEqual(code, 1)
+        self.assertIn("ANCHOR_MISSING", [r["state"] for r in rows])
+
+    def test_a_withdrawn_window_still_requires_its_anchor(self) -> None:
+        """The line outlives the scripts that pinned it.
+
+        Every card that pinned the real line is WITHDRAWN, but the commits
+        are TOG-1010's re-test specification. Withdrawal must not be
+        allowed to take the anchor down with it.
+        """
+        self.single_card(head=self.pin)
+        self.gate.WITHDRAWN = {"TOG-TEST": ("vendor patch", "re-scope")}
+        self.gate.ANCHORS = {self.REF: ("tree", self.pin, "test line")}
+        code, _ = self.gate.evaluate()
+        self.assertEqual(code, 1)
+
+    def test_the_gate_never_creates_the_ref_it_asserts(self) -> None:
+        """A gate that repairs itself can never report the fault.
+
+        If evaluate_anchors() created a missing ref, the check would assert
+        only that the gate can write, and a genuinely lost line would read
+        green forever.
+        """
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_MISSING")
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_MISSING")
+        listed = git(self.tree, "for-each-ref", "--format=%(refname)",
+                     "refs/deploy-line/")
+        self.assertEqual(listed, "")
+
+    def test_a_ref_is_a_gc_root_and_without_it_the_commit_dies(self) -> None:
+        """The premise of the whole design, proved in two arms.
+
+        Arm A alone would be vacuous -- a commit can survive gc for many
+        reasons. The control arm is what makes it evidence.
+        """
+        git(self.tree, "checkout", "-q", "--detach", self.payload)
+        # Nothing but the ref may reach self.pin: move every branch off it.
+        for branch in ("feature",):
+            git(self.tree, "branch", "-q", "-D", branch)
+        head_branch = git(self.tree, "for-each-ref", "--format=%(refname)",
+                          "refs/heads/")
+        for ref in [r for r in head_branch.splitlines() if r]:
+            git(self.tree, "update-ref", "-d", ref)
+
+        def collect() -> None:
+            git(self.tree, "reflog", "expire", "--expire=now",
+                "--expire-unreachable=now", "--all")
+            git(self.tree, "gc", "--prune=now", "-q")
+
+        def alive(commit: str) -> bool:
+            return subprocess.run(
+                ["git", "-C", str(self.tree), "cat-file", "-e", f"{commit}^{{commit}}"],
+                capture_output=True,
+            ).returncode == 0
+
+        # Arm A: with the ref, the reviewed commit survives collection.
+        git(self.tree, "update-ref", self.REF, self.pin)
+        collect()
+        self.assertTrue(alive(self.pin), "a ref must be a gc root")
+        self.assertEqual(self.anchor(self.pin)["state"], "ANCHOR_OK")
+
+        # Arm B (control): drop the ref, collect again, and it is gone.
+        git(self.tree, "update-ref", "-d", self.REF)
+        collect()
+        self.assertFalse(
+            alive(self.pin),
+            "control failed: gc did not prune, so arm A proved nothing",
+        )
+
+    def test_the_live_anchor_table_names_the_tog_1010_specification(self) -> None:
+        """Guards the REAL table. The tree is named relative to STAGING and
+        the commit is the tip of the fork line TOG-1010 must re-test."""
+        live = load_gate()
+        self.assertIn("refs/deploy-line/tog-516-governor", live.ANCHORS)
+        tree, commit, _purpose = live.ANCHORS["refs/deploy-line/tog-516-governor"]
+        self.assertEqual(tree, "TOG-516-paperclip-v2026.817.0-governor")
+        self.assertEqual(commit, "f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a")
 
 
 if __name__ == "__main__":

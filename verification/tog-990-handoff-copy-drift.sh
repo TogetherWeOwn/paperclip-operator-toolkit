@@ -62,10 +62,10 @@ set -Eeuo pipefail
 
 # The reviewed revision. PINNED_BLOB is the immutable object actually read; PINNED_REV
 # and the path are recorded so a human can see where the blob came from.
-PINNED_REV="f58f07355db6193665de43db844b094ca08eda7d"
+PINNED_REV="2d0db03b217f50d75e460c464f356014d0ca3a16"
 PINNED_PATH="deploy_window_manifest.py"
-PINNED_BLOB="0f8f9e7fe2805b559197170745b14eac4e11d3d9"
-PINNED_SHA256="b91abbbfa67cf080a889086b0c92f9cc76232d3c2be08b66215ab440b4a431c9"
+PINNED_BLOB="254dc6a2503e94e7fb9dc93ab07ae46481e1456e"
+PINNED_SHA256="24e5d8d49f34f571de2a697dd6d464a6be9c0fe4a78e0103fba3727e37ed934d"
 
 # Both overridable so the mutation gate can stage this script outside the repo. Neither
 # override can weaken the check: HOST_COPY only chooses which file is under test, and

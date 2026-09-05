@@ -36,8 +36,14 @@ gets verified is the thing that can actually be wrong: that its pinned revision
 is a real commit on the trusted line. See the BUILT table for why the builder's
 own ancestry check is not a substitute for this pin.
 
-  exit 0  READY    every entry present, hash-matched, and tree-pin current
-  exit 1  DRIFT    an entry is missing, hash-mismatched, or pins a stale tree
+TOG-997: a deploy line must be a NAME, not a checkout. Every check above reads
+`rev-parse HEAD` on a shared, mutable tree, so a stray `git checkout` by an
+unrelated run invalidates the whole window at once. The durable question is
+whether the reviewed commit still EXISTS and is still ANCHORED -- which is what
+ANCHORS below asserts, against a ref no checkout can move. See that table.
+
+  exit 0  READY    every entry present, hash-matched, tree-pin current, anchored
+  exit 1  DRIFT    an entry is missing, hash-mismatched, stale, or unanchored
   exit 2  ERROR    could not evaluate
 
 Usage:  python3 deploy-window-manifest.py [--json]
@@ -149,6 +155,183 @@ SUPERSEDED_BY: dict[str, tuple[str, str]] = {
     "TOG-754": ("c06dd0bc09557b8292803909d1e71790ad8c4447", "TOG-916"),
     "TOG-847": ("51ee6c01b472dfe839ca4ac38c6a58a11e9dc65f", "TOG-916"),
 }
+
+# CARDS THE OWNER WITHDREW FROM THIS WINDOW -- 2026-09-05 05:07Z.
+#
+# A HASH GATE ANSWERS "ARE THESE THE REVIEWED BYTES", NEVER "MAY THIS BE RUN".
+#
+# The owner ruled: no fork of Paperclip -- no /app patches, no governor image.
+# The approved path is an upstream upgrade to v2026.831.1, re-testing each
+# patched concern there, and sending upstream whatever remains.
+#
+# Every hash in MANIFEST above was still correct when that ruling landed, so the
+# gate went on printing `[ok] TOG-916 OK` -- which an operator reads as RUN THIS.
+# Measured 2026-09-05 05:11Z, after the ruling: VERDICT READY, exit 0, over six
+# staged cards of which five are now forbidden. TOG-916-operator-v5.sh:217 runs
+# `podman build --build-arg PAPERCLIP_BUILD_VERSION=2026.817.0` against the
+# staging tree and :236 rewrites the quadlet `Image=` to that tag: it BUILDS THE
+# FORK, pinned to the version being upgraded away from tonight. The four
+# SUPERSEDED_OK rows compound it -- each names TOG-916's script as the thing that
+# carries its payload, so the whole chain points at the forbidden build.
+#
+# This is the failure mode a gate is supposed to prevent, arriving through the
+# one door it did not watch: the bytes never drifted, the AUTHORIZATION did. So
+# withdrawal is checked FIRST, ahead of any hash, and no verdict can promote a
+# withdrawn card back to runnable.
+#
+# Kept here rather than deleted from MANIFEST on purpose. Deleting the rows would
+# make a forbidden card indistinguishable from one that was never enrolled, and
+# the next reader would re-add it from the card's own unblockDescriptor, which
+# still says "staged, reviewed, ready". The refusal has to be louder than the
+# artifact, and it has to state its own expiry condition.
+#
+# card -> (disposition, what has to happen before it could return)
+WITHDRAWN: dict[str, tuple[str, str]] = {
+    "TOG-703": (
+        "vendor patch - excluded, no fork",
+        "re-scope to: verify on v2026.831.1; if still needed, prepare an upstream PR",
+    ),
+    "TOG-749": (
+        "vendor patch - excluded, no fork",
+        "re-scope to: verify on v2026.831.1; if still needed, prepare an upstream PR",
+    ),
+    "TOG-754": (
+        "vendor patch - excluded, no fork",
+        "re-scope to: verify on v2026.831.1; if still needed, prepare an upstream PR",
+    ),
+    "TOG-916": (
+        "vendor patch - excluded, no fork",
+        "re-scope to: verify on v2026.831.1; if still needed, prepare an upstream PR",
+    ),
+    "TOG-847": (
+        "CANCELLED - governor image is a hard fork",
+        "nothing; the card is cancelled and its script must never run",
+    ),
+}
+
+
+def withdrawal_invariant() -> str | None:
+    """Return a fault string if the tables could still advise a forbidden run.
+
+    A superseded card is only safe because some OTHER card's script carries its
+    payload. Withdraw that runner while leaving the superseded card enrolled and
+    the gate would print `DO NOT RUN - superseded by TOG-916's script` at an
+    operator who must not run TOG-916 either: advice to execute a forbidden
+    artifact, produced by a green gate. The four/one split here is one editing
+    slip away from exactly that, so the coupling is asserted rather than trusted.
+    """
+    for card, (_payload, runner) in sorted(SUPERSEDED_BY.items()):
+        if runner in WITHDRAWN and card not in WITHDRAWN:
+            return (
+                f"{card} is superseded by {runner}, but {runner} is WITHDRAWN and"
+                f" {card} is not. The gate would name a forbidden script as"
+                f" {card}'s payload carrier. Withdraw {card} too, or give it a"
+                f" runner that is still in the window."
+            )
+    return None
+
+
+# THE DEPLOY LINE IS A NAME, NOT A CHECKOUT (TOG-997).
+#
+# Everything above asks `rev-parse HEAD`. HEAD is the single most volatile thing
+# in a shared tree: one `git checkout` by an unrelated run moves it, and measured
+# 2026-09-05 that happened 7 times in 26.15 h with ZERO commits. A window whose
+# validity is a property of HEAD is invalid 27.8% of the time by accident.
+#
+# The durable question is not "where is HEAD" but "does the reviewed line still
+# EXIST, under a name that a checkout cannot move". That is a ref. Measured
+# 2026-09-05, before this table existed, the answer was NO:
+#
+#   f471ef3c0 (the deploy pin, tip of the 10-commit fork line) was held by
+#   exactly ONE ref -- refs/heads/tog-942-agent-model-picker, an unrelated
+#   feature branch that merely happened to be cut from it. No tag, no remote,
+#   no ref of its own. Delete or rebase that branch and all 10 commits become
+#   unreachable; `git gc` then deletes them.
+#
+# That line is not disposable. TOG-1010 (the owner-approved successor to the
+# cancelled fork track) says in terms: "Do NOT delete this tree -- it is the
+# specification for the re-test", and names 5 of these commits as the worklist
+# mapping each forked concern to the defect it fixes. Losing it does not cost a
+# deploy -- the deploys are withdrawn -- it costs the SPECIFICATION for the
+# upstream work that replaced them.
+#
+# So each line gets a ref in its own namespace, and this gate asserts the ref
+# still exists AND still resolves to the reviewed commit. A ref is a gc root:
+# proved on a throwaway fixture in verification/tog-997-deploy-line-anchor-gate.sh
+# with a two-arm test -- with the ref, the commit survives
+# `git gc --prune=now` after `reflog expire --expire-unreachable=now`; with the
+# ref deleted and nothing else pointing at it, the same gc DELETES it.
+#
+# WHY THE REF IS ASSERTED AND NOT SILENTLY CREATED. Creating it on the fly would
+# make the gate green by construction and it would never report a lost line --
+# the check would assert only that the gate can write. The ref is created once,
+# deliberately, by an operator or by the card that establishes the line; this
+# gate only ever READS. An absent ref is a red with a one-command repair.
+#
+# line name -> (tree, commit the ref must resolve to, what the line is for)
+ANCHORS: dict[str, tuple[str, str, str]] = {
+    "refs/deploy-line/tog-516-governor": (
+        "TOG-516-paperclip-v2026.817.0-governor",
+        "f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a",
+        "TOG-1010 re-test specification: the 10-commit fork line over v2026.817.0",
+    ),
+}
+
+
+def ref_target(tree: Path, ref: str) -> str | None:
+    """Commit a ref resolves to, or None if the ref does not exist.
+
+    `rev-parse --verify <ref>^{commit}` rather than plain rev-parse: a bare
+    rev-parse of a nonexistent ref can echo the argument back and exit non-zero,
+    and peeling to ^{commit} means a tag or a stale symbolic ref cannot pass as
+    a commit. Distinguishing "ref missing" from "tree unreadable" is the
+    caller's job -- it asks git_head() first, exactly as evaluate_built() does.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(tree), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def evaluate_anchors() -> list[dict[str, object]]:
+    """Rows asserting each deploy line is still held by its own ref.
+
+    Deliberately independent of HEAD, of the MANIFEST, and of WITHDRAWN: the
+    line outlives every script that pinned it. TOG-916's script is forbidden;
+    the commits it pinned are still the re-test specification, and a withdrawn
+    script must not take its line's anchor down with it.
+    """
+    rows: list[dict[str, object]] = []
+    for ref, (relative, expected, purpose) in sorted(ANCHORS.items()):
+        tree = STAGING / relative
+        row: dict[str, object] = {
+            "card": "deploy-line",
+            "kind": "anchor",
+            "ref": ref,
+            "tree": str(tree),
+            "expected": expected,
+            "purpose": purpose,
+        }
+        if git_head(tree) is None:
+            # Same discrimination as evaluate_built(): a missing checkout is a
+            # different repair from a missing ref, and ref_target() alone
+            # returns None for both.
+            row["state"] = "ANCHOR_TREE_UNREADABLE"
+        else:
+            actual = ref_target(tree, ref)
+            row["actual"] = actual
+            if actual is None:
+                row["state"] = "ANCHOR_MISSING"
+            elif actual == expected:
+                row["state"] = "ANCHOR_OK"
+            else:
+                row["state"] = "ANCHOR_MOVED"
+        rows.append(row)
+    return rows
 
 
 def commit_exists(tree: Path, rev: str) -> bool | None:
@@ -335,6 +518,24 @@ def evaluate() -> tuple[int, list[dict[str, object]]]:
     drift = False
     for card, (relative, pinned) in sorted(MANIFEST.items()):
         target = STAGING / relative
+
+        # AUTHORISATION IS CHECKED BEFORE BYTES, AND SHORT-CIRCUITS.
+        #
+        # A withdrawn card's hash is typically still perfect -- that is the whole
+        # problem -- so letting it reach the hash comparison would produce `OK`
+        # and the operator would run it. Nothing below may run for these.
+        if card in WITHDRAWN:
+            disposition, restore = WITHDRAWN[card]
+            rows.append({
+                "card": card,
+                "path": str(target),
+                "state": "WITHDRAWN",
+                "disposition": disposition,
+                "restore": restore,
+                "present": target.is_file(),
+            })
+            continue
+
         if not target.is_file():
             rows.append({"card": card, "path": str(target), "state": "MISSING"})
             drift = True
@@ -400,6 +601,24 @@ def evaluate() -> tuple[int, list[dict[str, object]]]:
         rows.append(row)
         if row["state"] != "BUILT_PIN_OK":
             drift = True
+
+    # An unanchored line is drift even when every card is withdrawn: the commits
+    # are TOG-1010's re-test specification and nothing else holds them.
+    for row in evaluate_anchors():
+        rows.append(row)
+        if row["state"] != "ANCHOR_OK":
+            drift = True
+
+    # A WITHDRAWN row is a correct, expected state, not drift: the two cards the
+    # owner left in the window (TOG-881, TOG-586) must still be able to run, so
+    # withdrawal cannot be allowed to close the window. It is excluded from the
+    # drift test above by the short-circuit, deliberately.
+    #
+    # But a table that could advise running a forbidden script is a REAL fault,
+    # and it must not be reported as a policy note -- it is exit 2, because the
+    # gate can no longer be trusted to answer the question it was asked.
+    if withdrawal_invariant() is not None:
+        return 2, rows
     return (1 if drift else 0), rows
 
 
@@ -418,16 +637,35 @@ def main() -> int:
         print(json.dumps({"verdict": "READY" if code == 0 else "DRIFT", "entries": rows}, indent=2))
         return code
 
-    staged = sum(1 for row in rows if row.get("kind") != "built")
-    built = len(rows) - staged
-    print(f"deploy-window manifest -- {staged} staged card(s),"
-          f" {built} built-at-install-time card(s)\n")
+    withdrawn = sum(1 for row in rows if row["state"] == "WITHDRAWN")
+    built = sum(1 for row in rows if row.get("kind") == "built")
+    anchors = sum(1 for row in rows if row.get("kind") == "anchor")
+    staged = len(rows) - built - anchors - withdrawn
+    print(f"deploy-window manifest -- {staged} runnable staged card(s),"
+          f" {built} built-at-install-time card(s),"
+          f" {withdrawn} withdrawn by the owner,"
+          f" {anchors} anchored deploy line(s)\n")
     for row in rows:
-        mark = "ok  " if row["state"] in ("OK", "SUPERSEDED_OK", "BUILT_PIN_OK") else "FAIL"
+        if row["state"] == "WITHDRAWN":
+            mark = "STOP"
+        elif row["state"] in ("OK", "SUPERSEDED_OK", "BUILT_PIN_OK", "ANCHOR_OK"):
+            mark = "ok  "
+        else:
+            mark = "FAIL"
         # A built card has no staged path; show the builder it is built with.
-        where = row.get("path") or f"{row.get('builder')} @ {str(row.get('revision'))[:9]}"
+        # An anchor row has neither; show the ref, which is the whole point.
+        where = (row.get("path")
+                 or (f"{row['ref']} -> {str(row.get('actual'))[:9]}"
+                     if row.get("kind") == "anchor" else None)
+                 or f"{row.get('builder')} @ {str(row.get('revision'))[:9]}")
         print(f"  [{mark}] {row['card']:<9} {row['state']:<18} {where}")
-        if row["state"] == "BUILT_PIN_OK":
+        if row["state"] == "WITHDRAWN":
+            print(f"          DO NOT RUN — {row['disposition']}")
+            print("          Owner ruling 2026-09-05 05:07Z: no fork of Paperclip.")
+            print(f"          To return to a window: {row['restore']}")
+            if not row["present"]:
+                print("          (the staged script is already gone from this host)")
+        elif row["state"] == "BUILT_PIN_OK":
             print(f"          BUILD, do not look for a staged script. Reviewed revision:")
             print(f"            {row['revision']}")
             print(f"          Build it with {row['builder']} --source-ref <that revision>.")
@@ -439,6 +677,28 @@ def main() -> int:
             print("          Fetch it, or the operator cannot build this card at all.")
         elif row["state"] == "BUILT_UNREADABLE":
             print(f"          source repo {row['repo']} could not be read")
+        elif row["state"] == "ANCHOR_OK":
+            print(f"          line is NAMED, so no checkout can invalidate it:")
+            print(f"            {row['expected']}")
+            print(f"          {row['purpose']}")
+        elif row["state"] == "ANCHOR_MISSING":
+            print(f"          the deploy line has NO ref of its own in {row['tree']}")
+            print(f"          {row['purpose']}")
+            print("          Nothing durable holds these commits: they survive only as")
+            print("          long as some unrelated branch happens to descend from them,")
+            print("          and `git gc` deletes them once it does not. Anchor it:")
+            print(f"            git -C \"{row['tree']}\" update-ref {row['ref']} {row['expected']}")
+            print("          This moves no branch and touches no working tree.")
+        elif row["state"] == "ANCHOR_MOVED":
+            print(f"          {row['ref']} exists but names the WRONG commit")
+            print(f"            expected {row['expected']}")
+            print(f"            actual   {row['actual']}")
+            print("          Someone re-pointed the line. Do NOT assume the new target is")
+            print("          equivalent: establish which commit was reviewed, then either")
+            print("          restore the ref or update this table in a reviewed commit.")
+        elif row["state"] == "ANCHOR_TREE_UNREADABLE":
+            print(f"          tree {row['tree']} could not be read at all")
+            print("          You are missing the checkout, not the ref.")
         elif row["state"] == "SUPERSEDED_OK":
             print(f"          DO NOT RUN — superseded by {row['superseded_by']}'s script")
             print(f"          payload {row['payload_commit'][:9]} is carried by live HEAD"
@@ -484,7 +744,23 @@ def main() -> int:
     print(f"\n  excluded from this window: {len(EXCLUDED)} card(s)")
     for card, why in sorted(EXCLUDED.items()):
         print(f"    {card:<9} {why}")
-    print(f"\nVERDICT: {'READY' if code == 0 else 'DRIFT'}")
+
+    fault = withdrawal_invariant()
+    if fault is not None:
+        print(f"\nVERDICT: ERROR — the manifest tables are inconsistent.\n\n  {fault}\n")
+        print("  Refusing to advise a window until this is repaired: a green here")
+        print("  could name a forbidden script as a payload carrier.")
+        return code
+
+    if code == 0:
+        runnable = [r["card"] for r in rows if r["state"] in ("OK", "BUILT_PIN_OK")]
+        print(f"\nVERDICT: READY — {len(runnable)} card(s) may be run:"
+              f" {', '.join(runnable) if runnable else 'none'}")
+        if withdrawn:
+            print(f"         {withdrawn} card(s) marked STOP above are NOT authorised."
+                  " READY never means them.")
+    else:
+        print("\nVERDICT: DRIFT")
     return code
 
 

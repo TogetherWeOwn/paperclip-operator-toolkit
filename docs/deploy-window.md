@@ -86,6 +86,46 @@ Write the *bytes* (`>`), rather than replacing the file, so the handoff copy kee
 mode — the operator invokes it directly and a lost executable bit is a real breakage.
 Then re-run `./deploy_window_open.sh`.
 
+## Owner ruling 2026-09-05 05:07Z: no fork — five cards are WITHDRAWN
+
+The owner ruled that Paperclip will **not** be forked: no `/app` patches, no governor
+image. The approved path is upgrading to upstream **v2026.831.1**, re-testing each
+patched concern there, and sending upstream whatever still matters.
+
+Five cards this window used to carry are therefore no longer runnable:
+
+| Card | Disposition |
+|---|---|
+| TOG-703, TOG-749, TOG-754, TOG-916 | vendor patches — excluded; re-scope to *verify on v2026.831.1, then prepare an upstream PR* |
+| TOG-847 | **cancelled** — the governor image is a hard fork |
+
+**A green gate never meant these.** Their hashes were still perfect when the ruling
+landed, because a hash gate answers *"are these the reviewed bytes"*, never *"may this
+be run"* — the bytes did not drift, the authorisation did. Measured 2026-09-05 05:11Z,
+after the ruling, the gate printed `VERDICT: READY` and `[ok] TOG-916 OK`, which an
+operator reads as RUN THIS. `TOG-916-operator-v5.sh:217` runs
+`podman build --build-arg PAPERCLIP_BUILD_VERSION=2026.817.0` and `:236` rewrites the
+quadlet `Image=`: it builds the fork, pinned to the very version the upgrade moves away
+from.
+
+The gate now checks withdrawal **before** any hash and prints those cards as `[STOP]`,
+and `VERDICT: READY` now names the cards it authorises rather than implying all of them:
+
+```
+VERDICT: READY — 2 card(s) may be run: TOG-881, TOG-586
+         5 card(s) marked STOP above are NOT authorised. READY never means them.
+```
+
+Only **TOG-881** (gh-token-broker to `/opt`) and **TOG-586** (reconciler timer) remain.
+Both are company-owned packages, not vendor patches. Per the ruling these do not need a
+recurring human cadence — the operator runs them at the next tick.
+
+Guarded by `verification/tog-990-withdrawal-mutation-gate.sh` (9 checks): deleting the
+withdrawal short-circuit restores the pre-ruling green over TOG-916, and that is shown
+red. Do not "tidy away" the `WITHDRAWN` table — the rows are kept deliberately, because
+deleting them would make a forbidden card indistinguishable from one that was never
+enrolled, and each card's own `unblockDescriptor` still says *staged, reviewed, ready*.
+
 ## Two kinds of card: staged, and built-at-install-time (TOG-1002)
 
 Most cards in this window are **staged**: a script already sitting under
@@ -126,6 +166,62 @@ builder accepted **both** the pinned `49374f55` and the newer commit at exit 0. 
 is a *class* check ("not off a fork"); it cannot say *which* revision was reviewed,
 because every future commit on `main` is also an ancestor of `main`. The manifest is
 what records that.
+
+## The deploy line is a name, not a HEAD (TOG-997)
+
+Every other row in this gate is a property of a checkout. The staging trees are **shared
+and mutable**, and `HEAD` is the most volatile thing in them: one `git checkout` by an
+unrelated run moves it. Measured 2026-09-05 on the governor staging tree, over the
+26.15 h since pin `f471ef3c0` was set — **7 checkout excursions, zero commits, tree
+gate-red 27.8% of the time**. A window whose validity is a property of `HEAD` is invalid
+a quarter of the time by pure accident.
+
+The deeper finding, measured the same day: the reviewed line was held by **nothing of its
+own**. `f471ef3c0` and the 10-commit fork line beneath it were reachable from exactly one
+ref — `refs/heads/tog-942-agent-model-picker`, an unrelated feature branch that merely
+happened to be cut from the pin. No tag, no remote (that branch is unpushed), no ref of
+its own. Delete or rebase that branch and `git gc` deletes the line.
+
+That is **not** a lost deploy: the five scripts pinning that tree are all WITHDRAWN by the
+no-fork ruling above. It is a lost **specification**. TOG-1010, the approved successor,
+says in terms *"Do NOT delete this tree — it is the specification for the re-test"* and
+maps 5 of those commits to the forked concerns to re-test on v2026.831.1. And the loss
+would be permanent: this tree is a shallow `blob:none` partial clone whose promisor
+remote never held the fork commits, so there is nowhere to re-fetch them from.
+
+So the line is now a **name** that no checkout can move:
+
+```bash
+git -C <tree> update-ref refs/deploy-line/tog-516-governor f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a
+```
+
+A ref is a gc root; a branch someone else owns is not. The gate now prints the anchor as
+its own row, decoupled from `HEAD`, from `MANIFEST`, and from `WITHDRAWN`:
+
+```
+[ok  ] deploy-line ANCHOR_OK   refs/deploy-line/tog-516-governor -> f471ef3c0
+```
+
+**The gate asserts the ref; it never creates it.** Self-healing would reduce the check to
+*"can I write?"* and a genuinely lost line would read green forever — the same defect
+class rejected for the drift guard in TOG-999.
+
+| state | what it means | repair |
+|---|---|---|
+| `ANCHOR_MISSING` | no ref holds the line; a `gc` may already have taken it | run the `update-ref` the gate prints — it moves no branch and touches no working tree |
+| `ANCHOR_MOVED` | the name survives, pointing at a *different* commit | do **not** assume equivalence; establish which commit is the reviewed line first |
+| `ANCHOR_TREE_UNREADABLE` | the checkout itself could not be read | you are missing the **checkout**, not the ref — `update-ref` has nowhere to run |
+
+A withdrawn window still requires its anchor. Every card that pinned this line is
+withdrawn and the line still matters; coupling the two would delete the one case the
+check exists for.
+
+`verification/tog-997-deploy-line-anchor-gate.sh` holds the evidence: a two-arm premise
+proof that a ref really is a gc root (arm A survives `gc --prune=now`; the **control**
+arm, with the ref dropped, is deleted by the same collection — without it, "the commit
+survived" is consistent with gc simply not having run), then 6 mutants of the check, each
+required to be killed by its *named* test. It builds its own throwaway fixture and never
+touches a staging tree, so it is safe to run mid-window.
 
 ## The reference is a git object, not a file (TOG-999)
 
