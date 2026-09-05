@@ -5,10 +5,10 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CARRIER="$ROOT/deploy/paperclip-immutable/paperclip.container"
 RUN_CARRIER="$ROOT/deploy/paperclip-immutable/agent-run.container.in"
 GENERATOR_EVIDENCE="$ROOT/deploy/paperclip-immutable/generated/board-quadlet-render.json"
-GENERATOR_EVIDENCE_SHA256=3ec6b0f53e767aee2ee7b9aaa574ae699b5ae2a62e0131c5b79ec5a9c821ee8d
-GENERATOR_EVIDENCE_CANDIDATE=060dc669d03d35f409abb7e0abef793fd34801c7
-GENERATOR_EVIDENCE_TREE=81ce1fcc39f20bbe786b942de9b2da17969bec12
-GENERATOR_EVIDENCE_PARENT=b6461240d12955e0a6f0b69b2dce25f204203f20
+GENERATOR_EVIDENCE_SHA256=5a90ad01ac38fa4191b5e69e95456f7a6fdba9ef6a970240d5a0778eac0bdba1
+GENERATOR_EVIDENCE_CANDIDATE=1fc7579403e84913eec7e4f7761b79db83670c06
+GENERATOR_EVIDENCE_TREE=aea5a3b896afecd47cbdf8090d1980e5d98967a7
+GENERATOR_EVIDENCE_PARENT=a34e24e1cc514b7a2683de4658240bc820f5d362
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() {
