@@ -80,20 +80,45 @@ fi
 
 # --- NEGATIVE CONTROL -----------------------------------------------------
 # The gate must be red on the ACTUAL pre-fix artifact -- not a synthetic
-# mutant, the real README `main` shipped. This is the strongest single piece
-# of evidence here: it is the defect as it existed, not as I imagine it.
+# mutant, the real README that `main` shipped up to 2026-09-05. This is the
+# strongest single piece of evidence here: it is the defect as it existed,
+# not as I imagine it.
+#
+# READ FROM A PINNED FIXTURE, NOT FROM `origin/main`.
+#
+# The first revision of this control did `git show origin/main:...`. That
+# worked exactly until the fix merged, and then the control SURVIVED -- not
+# because the gate regressed, but because its premise had expired: the ref
+# it named now holds the fixed bytes. A control whose input is a moving ref
+# tests the ref, not the gate. Caught by re-running the suite from a clean
+# checkout of main after the merge, which is why that re-run was done.
+#
+# Second reason the ref cannot be used: `actions/checkout@v4` clones at
+# depth 1, so in CI the pre-fix commit is not in the object store at all and
+# this control would silently degrade to "skipped" -- a control that reports
+# nothing while looking like it ran.
+#
+# The fixture is asserted by digest. If someone edits it to make this pass,
+# the sha check fails first and says so.
 S="$WORK/control_neg"; mkscene "$S"
-if git -C "$REPO_ROOT" cat-file -e origin/main:docs/upstream/README.md 2>/dev/null; then
-  git -C "$REPO_ROOT" show origin/main:docs/upstream/README.md > "$S/docs/upstream/README.md"
-  rc="$(run_scene "$S")"
-  if [ "$rc" -eq 1 ]; then
-    kill_ok "CONTROL-  real pre-fix README from origin/main -> rc 1"
-    note "$(grep -c FAIL "$S/.out") violation(s), incl. the superseded line-1 instruction"
-  else
-    survived "CONTROL-  real pre-fix README -> rc $rc, expected 1. The gate does NOT catch the defect it was written for."
-  fi
+FIXTURE="$REPO_ROOT/verification/fixtures/tog-1069-prefix-readme.md"
+FIXTURE_SHA=00386607117ed737c826a484f0e818e2b065fc01c74cda8ac5681fe493fae1af
+if [ ! -f "$FIXTURE" ]; then
+  survived "CONTROL-  pinned pre-fix fixture missing at verification/fixtures/tog-1069-prefix-readme.md"
 else
-  note "CONTROL-  skipped: origin/main not fetched in this checkout"
+  got="$(sha256sum "$FIXTURE" | cut -d' ' -f1)"
+  if [ "$got" != "$FIXTURE_SHA" ]; then
+    survived "CONTROL-  fixture digest mismatch: expected $FIXTURE_SHA, got $got. This fixture is the pre-fix README as main shipped it; it must not be edited."
+  else
+    cp "$FIXTURE" "$S/docs/upstream/README.md"
+    rc="$(run_scene "$S")"
+    if [ "$rc" -eq 1 ]; then
+      kill_ok "CONTROL-  real pre-fix README (pinned fixture $FIXTURE_SHA) -> rc 1"
+      note "$(grep -c FAIL "$S/.out") violation(s), incl. the superseded line-1 instruction"
+    else
+      survived "CONTROL-  real pre-fix README -> rc $rc, expected 1. The gate does NOT catch the defect it was written for."
+    fi
+  fi
 fi
 
 # --- M1: the TOG-1069 defect itself ---------------------------------------
