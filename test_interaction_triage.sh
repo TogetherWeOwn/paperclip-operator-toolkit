@@ -199,7 +199,136 @@ printf '%s' "$both" | "$T" classify --strict --only AGENT_RESOLVABLE >/dev/null 
 n="$(printf '%s' "$both" | "$T" classify --json --only INERT 2>/dev/null | wc -l)"
 [[ "$n" -eq 1 ]] && ok "--only INERT prints exactly the one INERT row" || bad "--only INERT printed $n rows"
 
-hdr "9. Mutation gate — delete a gate, prove the test that names it goes RED"
+hdr "9. The continuation gate (:1253) — 'and then what?'"
+
+# Same discipline as verdict_is: the CITATION must match, so a continuation
+# reached by the wrong branch is a failure. DEAD_WAKE has two sources (no
+# assignee, closed issue) and they must stay distinguishable.
+continuation_is() {
+  local d="$1" want="$2" why="$3" input="$4" tool="${5:-$T}"
+  local out got reason
+  out="$(printf '%s' "$input" | "$tool" classify --json 2>&1)"
+  got="$(jq -r '.continuation' <<<"$out" 2>/dev/null)"
+  reason="$(jq -r '.continuationWhy' <<<"$out" 2>/dev/null)"
+  if [[ "$got" != "$want" ]]; then
+    bad "$d — expected $want, got ${got:-<none>}"; return 1
+  fi
+  if [[ "$reason" != *"$why"* ]]; then
+    bad "$d — $want reached by the WRONG branch: $reason"; return 1
+  fi
+  ok "$d"; return 0
+}
+
+# The live TOG-38 / TOG-58 / TOG-104 shape: a healthy card nobody can act on.
+continuation_is "wake_assignee on an UNASSIGNED issue -> DEAD_WAKE" \
+  DEAD_WAKE "NO ASSIGNEE" \
+  "$(row 'continuationPolicy="wake_assignee"' 'assigneeAgentId=null')"
+
+continuation_is "wake_assignee on an assigned, open issue -> WAKES" \
+  WAKES ":1253" \
+  "$(row 'continuationPolicy="wake_assignee"' 'assigneeAgentId="owner-agent"')"
+
+# Attributed to the CLOSED branch, not the assignee branch — an assignee IS
+# present here, so a test that only checked "DEAD_WAKE" would pass on the
+# wrong gate.
+continuation_is "wake_assignee on a DONE issue -> DEAD_WAKE via isClosedIssueStatus" \
+  DEAD_WAKE ":1126" \
+  "$(row 'continuationPolicy="wake_assignee"' 'assigneeAgentId="a"' 'issueStatus="done"')"
+
+continuation_is "wake_assignee on a DONE unassigned issue -> closed DEAD_WAKE branch" \
+  DEAD_WAKE ":1126" \
+  "$(row 'continuationPolicy="wake_assignee"' 'assigneeAgentId=null' 'issueStatus="done"')"
+
+continuation_is "wake_assignee_on_accept -> a REJECTION wakes nobody" \
+  WAKES_ON_ACCEPT ":1263" \
+  "$(row 'continuationPolicy="wake_assignee_on_accept"' 'assigneeAgentId="a"')"
+
+continuation_is "a non-wake policy -> NO_WAKE_REQUESTED" \
+  NO_WAKE_REQUESTED ":1265" \
+  "$(row 'continuationPolicy="none"' 'assigneeAgentId="a"')"
+
+continuation_is "a row with no continuationPolicy -> UNKNOWN, never assumed live" \
+  UNKNOWN "NOT measured" \
+  "$(row 'assigneeAgentId="a"')"
+
+continuation_is "wake_assignee with no issueStatus -> UNKNOWN, never assumed open" \
+  UNKNOWN "no issueStatus" \
+  "$(row 'continuationPolicy="wake_assignee"' 'issueStatus=null' 'assigneeAgentId="a"')"
+
+# BACKWARD COMPATIBILITY. Adding this gate must not move a single existing
+# verdict — a diagnostic tool that reclassifies the board on upgrade is worse
+# than one that never shipped.
+before="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId=null' | "$T" classify --json | jq -c '{verdict,why}')"
+after="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId=null' 'continuationPolicy="wake_assignee"' | "$T" classify --json | jq -c '{verdict,why}')"
+[[ "$before" == "$after" ]] \
+  && ok "adding continuationPolicy leaves the resolver verdict and its citation identical" \
+  || bad "continuationPolicy changed the resolver verdict: $before -> $after"
+
+# THE DISTINCTION THE WHOLE ISSUE IS ABOUT: answerable, and yet inert.
+both="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId=null' 'continuationPolicy="wake_assignee"' \
+  | "$T" classify --json | jq -r '.verdict + "/" + .continuation')"
+[[ "$both" == "OWNER_ONLY/DEAD_WAKE" ]] \
+  && ok "a board_only card on an unassigned issue is OWNER_ONLY *and* DEAD_WAKE — not collapsed into INERT" \
+  || bad "expected OWNER_ONLY/DEAD_WAKE, got '$both'"
+
+# A DEAD_WAKE row must carry the remediation for the branch that produced it,
+# not one generic instruction that is wrong for half the states.
+warn="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId=null' 'continuationPolicy="wake_assignee"' \
+  | "$T" classify --json | jq -r '.warnings | join(" ")')"
+[[ "$warn" == *"Assign the issue"* && "$warn" != *"open status"* ]] \
+  && ok "unassigned DEAD_WAKE says to assign the issue" \
+  || bad "unassigned DEAD_WAKE gave the wrong remediation: $warn"
+
+warn="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId="a"' 'issueStatus="done"' 'continuationPolicy="wake_assignee"' \
+  | "$T" classify --json | jq -r '.warnings | join(" ")')"
+[[ "$warn" == *"open status"* && "$warn" == *"cannot repair"* && "$warn" != *"Assign the issue;"* ]] \
+  && ok "closed DEAD_WAKE says to resume the issue, not assign it" \
+  || bad "closed DEAD_WAKE gave the wrong remediation: $warn"
+
+warn="$(row 'effectiveResolverPolicy="board_only"' 'assigneeAgentId=null' 'issueStatus="done"' 'continuationPolicy="wake_assignee"' \
+  | "$T" classify --json | jq -r '.warnings | join(" ")')"
+[[ "$warn" == *"open status"* && "$warn" == *"only after reopening"* && "$warn" == *"Assignment alone cannot repair"* ]] \
+  && ok "closed+unassigned DEAD_WAKE requires reopening before assignment" \
+  || bad "closed+unassigned DEAD_WAKE gave incomplete remediation: $warn"
+
+hdr "10. --strict-wake exit codes, including the case that measured nothing"
+
+row 'continuationPolicy="wake_assignee"' 'assigneeAgentId=null' | "$T" classify >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "without --strict-wake a DEAD_WAKE row still exits 0" \
+               || bad "DEAD_WAKE changed the default exit status"
+
+row 'continuationPolicy="wake_assignee"' 'assigneeAgentId=null' | "$T" classify --strict-wake >/dev/null 2>&1
+[[ $? -eq 4 ]] && ok "--strict-wake exits 4 on a DEAD_WAKE row" \
+               || bad "--strict-wake did not exit 4 on DEAD_WAKE"
+
+row 'continuationPolicy="wake_assignee"' 'assigneeAgentId="a"' | "$T" classify --strict-wake >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "--strict-wake exits 0 when the wake path is whole" \
+               || bad "--strict-wake failed a healthy row"
+
+row 'continuationPolicy="wake_assignee"' 'issueStatus=null' 'assigneeAgentId="a"' \
+  | "$T" classify --strict-wake >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok "--strict-wake REFUSES missing issueStatus rather than assuming open" \
+               || bad "--strict-wake reported WAKES over missing issueStatus"
+
+row 'effectiveResolverPolicy="board_or_agents"' 'assigneeAgentId="author"' \
+  'continuationPolicy="wake_assignee"' 'issueStatus=null' \
+  | "$T" classify --strict --strict-wake >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok "missing issueStatus refusal takes precedence over INERT under combined strict flags" \
+               || bad "combined strict flags let INERT hide missing issueStatus"
+
+# The rule this tool exists to enforce, applied to the tool itself: a sweep
+# that measured nothing must NOT report green. Exit 2 (refusal), not 0 (pass).
+row 'assigneeAgentId="a"' | "$T" classify --strict-wake >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok "--strict-wake REFUSES (exit 2) rows with no continuationPolicy rather than passing them" \
+               || bad "--strict-wake reported clean over rows it never measured"
+
+# Precedence must be deterministic when a row trips both strict flags.
+row 'effectiveResolverPolicy="board_or_agents"' 'assigneeAgentId="author"' 'continuationPolicy="wake_assignee"' \
+  | "$T" classify --strict --strict-wake >/dev/null 2>&1
+[[ $? -eq 3 ]] && ok "--strict (INERT, exit 3) takes precedence over --strict-wake" \
+               || bad "combined strict flags gave a non-deterministic exit"
+
+hdr "11. Mutation gate — delete a gate, prove the test that names it goes RED"
 
 STAGE="$TMP/stage"; mkdir -p "$STAGE"
 cp "$T" "$STAGE/interaction_triage.sh"; chmod +x "$STAGE/interaction_triage.sh"
@@ -263,6 +392,50 @@ else
   [[ "$got" != "AGENT_REVIEW_VERDICT" ]] \
     && ok "MUTATION :2956 (review bypass removed) -> section 5 goes RED" \
     || bad "MUTATION :2956 survived — section 5 does not cover the review bypass"
+
+  # A sed that matches nothing leaves the file intact, the mutant behaves like
+  # the original, and the "mutation survived" branch reports a FAILURE that is
+  # really a broken test. So every mutation below proves it edited the file
+  # before it draws any conclusion from the result.
+  mutate() {
+    cp "$T" "$M"
+    sed -i "$1" "$M"
+    if cmp -s "$T" "$M"; then
+      bad "MUTATION '$1' matched nothing — the mutation gate below would be vacuous"
+      return 1
+    fi
+    return 0
+  }
+
+  # Mutation E: drop the assignee check from the continuation gate — i.e.
+  # pretend :1253 does not return early on an unassigned issue.
+  if mutate 's/if \$noAssignee then/if false then/'; then
+    got="$(row 'continuationPolicy="wake_assignee"' 'assigneeAgentId=null' \
+      | "$M" classify --json 2>/dev/null | jq -r '.continuation')"
+    [[ "$got" != "DEAD_WAKE" ]] \
+      && ok "MUTATION :1253 (unassigned no longer kills the wake) -> section 9 goes RED" \
+      || bad "MUTATION :1253 survived — section 9 does not cover the continuation gate"
+  fi
+
+  # Mutation F: let --strict-wake report green over rows it never measured.
+  # This one guards a RULE rather than a gate: absence of evidence must not
+  # read as evidence of health.
+  if mutate 's/"\$unmeasured" -gt 0/"$unmeasured" -gt 999999/'; then
+    row 'assigneeAgentId="a"' | "$M" classify --strict-wake >/dev/null 2>&1
+    [[ $? -ne 2 ]] \
+      && ok "MUTATION (unmeasured rows pass silently) -> the 'measured nothing' test goes RED" \
+      || bad "MUTATION survived — nothing covers the unmeasured-rows refusal"
+  fi
+
+  # Mutation G: restore the defect under correction — assume a missing
+  # issueStatus means the issue is open, allowing WAKES / strict exit 0.
+  if mutate 's/elif \$issueStatus == null or \$issueStatus == "" then/elif false then/'; then
+    got="$(row 'continuationPolicy="wake_assignee"' 'issueStatus=null' 'assigneeAgentId="a"' \
+      | "$M" classify --json 2>/dev/null | jq -r '.continuation')"
+    [[ "$got" == "WAKES" ]] \
+      && ok "MUTATION (missing issueStatus assumed open) -> the UNKNOWN regression goes RED" \
+      || bad "MUTATION did not recreate the missing-status false green: $got"
+  fi
 fi
 
 hdr "RESULT"
