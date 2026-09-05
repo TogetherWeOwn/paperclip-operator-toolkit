@@ -85,7 +85,10 @@ print_header() {
 
 CONTAINER=paperclip
 OUT=host-evidence.json
-IMAGE=paperclip-local
+# Kept as a separate constant so the recovery below can tell "the caller named
+# this image" from "nobody named one and this is just the default".
+IMAGE_DEFAULT=paperclip-local
+IMAGE="$IMAGE_DEFAULT"
 # Which systemd instance .networkUnits[] is read from. `--user` is correct for
 # a rootless Quadlet deployment (the carrier's WantedBy=default.target says
 # rootless), but a root-owned deployment keeps its units in the system
@@ -219,10 +222,59 @@ fi
 #                     tag has been rebuilt since the service started, these
 #                     differ, and pinning the candidate silently changes the
 #                     running image. The board must see both to approve either.
-image_digest="$(podman image inspect "$IMAGE" --format '{{.Digest}}' 2>/dev/null)" || \
+# A refusal here DISCARDS the networks and units already measured above, because
+# refuse() exits and the evidence file is only written further down. On
+# 2026-09-05 that cost a whole human host window: the networks and the units
+# were both present and readable, but the default `paperclip-local` existed
+# under another name (`localhost/paperclip-local:tog-516v2-51ee6c01b`), so the
+# run refused having already measured everything else it needed. Re-running with
+# `--image` would have produced complete evidence in that same window.
+#
+# So when the DEFAULT name misses, resolve it here rather than sending a human
+# away to run `podman images` and come back for a second window. This only
+# performs the suggestion the old refusal already printed; it reads no new kind
+# of object and approves nothing. It is deliberately narrow: it fires only when
+# $IMAGE was left at the default (an explicit --image that misses is a typo the
+# caller must see), and only when exactly ONE repository matches, because two
+# candidates is a real ambiguity a human must resolve rather than have guessed.
+# The recovery keys off the EXIT STATUS, never off an empty digest. `podman
+# image inspect` exiting 0 with an empty value means the image EXISTS and its
+# digest is unreadable — a different fault, which must keep reaching the
+# `image_digest_unresolvable` refusal below. Treating "empty" as "absent" would
+# send a present-but-unresolvable image down the rename path and report it under
+# the wrong name.
+if image_digest="$(podman image inspect "$IMAGE" --format '{{.Digest}}' 2>/dev/null)"; then
+  image_inspect_rc=0
+else
+  image_inspect_rc=1
+  image_digest=""
+fi
+if [ "$image_inspect_rc" -ne 0 ] && [ "$IMAGE" = "$IMAGE_DEFAULT" ]; then
+  mapfile -t image_candidates < <(
+    podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+      | grep -E '(^|/)'"$(printf '%s' "$IMAGE_DEFAULT" | sed 's/[].[*^$\\/]/\\&/g')"':' \
+      | sort -u
+  )
+  if [ "${#image_candidates[@]}" -eq 1 ]; then
+    printf 'NOTE: no image named %s; resolved the sole local match %s\n' \
+      "$IMAGE_DEFAULT" "${image_candidates[0]}" >&2
+    IMAGE="${image_candidates[0]}"
+    if image_digest="$(podman image inspect "$IMAGE" --format '{{.Digest}}' 2>/dev/null)"; then
+      image_inspect_rc=0
+    else
+      image_inspect_rc=1
+      image_digest=""
+    fi
+  elif [ "${#image_candidates[@]}" -gt 1 ]; then
+    refuse image_ambiguous \
+      "no image named '$IMAGE_DEFAULT', and ${#image_candidates[@]} local images could be it: ${image_candidates[*]}. Guessing would pin a digest the board never chose" \
+      "re-run IN THIS WINDOW naming one: --image <name>   (nothing else needs redoing)"
+  fi
+fi
+[ "$image_inspect_rc" -eq 0 ] || \
   refuse image_inspect_failed \
     "podman image inspect '$IMAGE' failed — the local image may be named differently or absent" \
-    "list candidates with: podman images --format '{{.Repository}}:{{.Tag}}'   then re-run with --image <name>"
+    "list candidates with: podman images --format '{{.Repository}}:{{.Tag}}'   then re-run IN THIS WINDOW with --image <name>; every capture step above already succeeded, so only this one is missing"
 
 image_digest="${image_digest#sha256:}"
 if ! [[ "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then

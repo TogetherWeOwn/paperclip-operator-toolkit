@@ -44,9 +44,17 @@ omniroute-network.service enabled enabled'
   # where a table belongs. The stub could express neither, so the two refusals
   # that handle them had no way to be tested.
   local units_rc=0 units_stderr=''
+  # The 2026-09-05 host window was lost to image NAMING, a state the stub could
+  # not express: `podman images` returned nothing and `image inspect` resolved
+  # every name alike. --images supplies the local image list; --img-only-name
+  # makes `image inspect` succeed for that ONE name, which is what a host looks
+  # like when `paperclip-local` exists only under a fully-qualified tag.
+  local images='' img_only_name=''
 
   while [ $# -gt 0 ]; do
     case "$1" in
+      --images)        images="$2"; shift 2 ;;
+      --img-only-name) img_only_name="$2"; shift 2 ;;
       --networks)   networks="$2"; shift 2 ;;
       --units)      units="$2"; shift 2 ;;
       --sys-units)  sys_units="$2"; sys_units_set=1; shift 2 ;;
@@ -67,9 +75,21 @@ omniroute-network.service enabled enabled'
   mkdir -p "$d/bin"
   cat >"$d/bin/podman" <<EOF
 #!/usr/bin/env bash
+if [ "\$1" = "images" ]; then
+cat <<'IMAGES'
+$images
+IMAGES
+  exit 0
+fi
 if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
   exit_code=$img_rc
   [ "\$exit_code" -ne 0 ] && exit "\$exit_code"
+  # When --img-only-name is set, every OTHER name is absent, exactly as podman
+  # reports an image that is not present under the name asked for.
+  if [ -n '$img_only_name' ] && [ "\$3" != '$img_only_name' ]; then
+    printf 'Error: %s: image not known\n' "\$3" >&2
+    exit 125
+  fi
   printf '%s\n' '$img_digest'
   exit 0
 fi
@@ -539,6 +559,94 @@ mutate_and_expect_red \
   "deleting the empty-units guard records absence it cannot distinguish" \
   's/refuse no_network_units/: no_network_units_DISABLED/' \
   --units ''
+
+# =========================================================================
+section "9b. the default image name missing does not throw away the window"
+# =========================================================================
+# WHY. On 2026-09-05 a human host window was spent and produced NO evidence
+# file. The networks and the units were both present and readable; the run
+# refused only because the default `paperclip-local` existed on that host as
+# `localhost/paperclip-local:tog-516v2-51ee6c01b`. Because refuse() exits and
+# the evidence is written at the end, everything already measured was
+# discarded, and a second scarce human window would have been needed to pass
+# one flag. Host windows are the scarcest resource this gate depends on.
+IMAGES_ONE='localhost/paperclip-local:tog-516v2-51ee6c01b
+ghcr.io/paperclipai/paperclip:2026.831.1'
+
+D="$(mktemp -d)"
+make_host "$D" --images "$IMAGES_ONE" \
+  --img-only-name 'localhost/paperclip-local:tog-516v2-51ee6c01b'
+RC="$(run_capture "$D")"
+if [ "$RC" = 0 ] && [ -f "$D/ev.json" ]; then
+  ok "the sole local paperclip-local match is resolved, and evidence IS written"
+else
+  bad "the sole local paperclip-local match is resolved, and evidence IS written" \
+    "rc=$RC: $(cat "$D/out")"
+fi
+# The evidence must name the image actually inspected. Recording the default
+# would attribute the digest to a name that does not exist on the host.
+got="$(jq -r '.image.name' "$D/ev.json" 2>/dev/null)"
+if [ "$got" = 'localhost/paperclip-local:tog-516v2-51ee6c01b' ]; then
+  ok "evidence records the RESOLVED image name, not the default"
+else
+  bad "evidence records the RESOLVED image name, not the default" "got: ${got:-<none>}"
+fi
+if grep -q 'NOTE: no image named paperclip-local' "$D/out"; then
+  ok "the substitution is announced, not silent"
+else
+  bad "the substitution is announced, not silent" "no NOTE in: $(cat "$D/out")"
+fi
+rm -rf "$D"
+
+# Two candidates is a genuine ambiguity. Guessing would pin a digest the board
+# never chose, so this must refuse -- the recovery must not become a guesser.
+refuses image_ambiguous "two paperclip-local candidates refuse rather than guess" \
+  --images 'localhost/paperclip-local:a
+localhost/paperclip-local:b' \
+  --img-only-name 'localhost/paperclip-local:a'
+
+# An EXPLICIT --image that misses is a typo the caller must see. Silently
+# resolving it would hide the mistake and capture an image nobody asked for.
+D="$(mktemp -d)"
+make_host "$D" --images "$IMAGES_ONE" \
+  --img-only-name 'localhost/paperclip-local:tog-516v2-51ee6c01b'
+RC="$(run_capture "$D" "$SCRIPT" --image paperclip-locl)"
+if [ "$RC" = 2 ] && grep -q 'REFUSED \[image_inspect_failed\]' "$D/out"; then
+  ok "an explicit --image that misses still refuses (not silently resolved)"
+else
+  bad "an explicit --image that misses still refuses (not silently resolved)" \
+    "rc=$RC: $(cat "$D/out")"
+fi
+rm -rf "$D"
+
+# The recovery keys off the EXIT STATUS, not off an empty digest. An image that
+# EXISTS but whose digest is unreadable is a different fault and must keep
+# reaching image_digest_unresolvable -- not be re-reported under another name.
+refuses image_digest_unresolvable \
+  "a present image with an empty digest is NOT treated as a naming miss" \
+  --images "$IMAGES_ONE" --img-digest ''
+
+# MUTATION: delete the recovery and the operator's exact window must go red
+# again. Without this, the greens above could pass on a script that never had
+# the recovery at all.
+D="$(mktemp -d)"
+make_host "$D" --images "$IMAGES_ONE" \
+  --img-only-name 'localhost/paperclip-local:tog-516v2-51ee6c01b'
+sed 's/^if \[ "\$image_inspect_rc" -ne 0 \] && \[ "\$IMAGE" = "\$IMAGE_DEFAULT" \]; then$/if false; then/' \
+  "$SCRIPT" > "$D/mutated.sh"
+if cmp -s "$SCRIPT" "$D/mutated.sh"; then
+  bad "MUTATION: removing the recovery re-loses the window" \
+    "sed matched nothing -- the guard moved and this gate is rotten"
+else
+  RC="$(run_capture "$D" "$D/mutated.sh")"
+  if [ "$RC" = 2 ] && [ ! -f "$D/ev.json" ]; then
+    ok "MUTATION: removing the recovery re-loses the window"
+  else
+    bad "MUTATION: removing the recovery re-loses the window" \
+      "rc=$RC and ev.json present=$([ -f "$D/ev.json" ] && echo yes || echo no)"
+  fi
+fi
+rm -rf "$D"
 
 # =========================================================================
 section "10. --help prints the WHOLE header, not a hard-coded window"
