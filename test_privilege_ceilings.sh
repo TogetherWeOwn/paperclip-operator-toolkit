@@ -87,12 +87,25 @@ grant_count() { q "SELECT count(*) FROM principal_permission_grants WHERE compan
 grant_keys()  { q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id';" "$1"; }
 self_scope_keys() { q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope = jsonb_build_object('subtreeRootAgentId', :'agent_id') AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$1"; }
 dormant()     { q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
-create_call_payload_ok() { local title="$1"; jq -ser --arg title "$title" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload | (.permissions.canCreateAgents==false and .permissions.canCreateSkills==false and .permissions.canAssignTasks==false and .permissions.authorizationPolicy.assignmentPolicy.mode=="protected")' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
+create_call_payload_ok() { local title="$1"; jq -ser --arg title "$title" --arg mode "$EXPECT_ASSIGNMENT_MODE" --argjson ca "$EXPECT_CAN_ASSIGN_TASKS" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload | (.permissions.canCreateAgents==false and .permissions.canCreateSkills==false and .permissions.canAssignTasks==$ca and .permissions.authorizationPolicy.assignmentPolicy.mode==$mode)' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
 create_call_parent() { local title="$1"; jq -ser --arg title "$title" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload.reportsTo' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
 create_call_title_for() { q "SELECT title FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 backend_is_recording_stub() { [[ -n "${PAPERCLIP_STUB_LOG:-}" && -r "${PAPERCLIP_STUB_LOG:-}" ]]; }
-protected()   { q "SELECT CASE WHEN permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode'='protected' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
-legacy_flags_off() { q "SELECT CASE WHEN permissions->'canCreateAgents'='false'::jsonb AND permissions->'canCreateSkills'='false'::jsonb AND permissions->'canAssignTasks'='false'::jsonb THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+# The assignment baseline these tests assert, TOG-984 (owner decision
+# 2026-09-05). Agents used to be born "protected" with canAssignTasks=false;
+# that posture 403'd every hand-back (TOG-54/69/586) and the owner abolished it.
+# Kept as variables, and read from the environment, so the reversal path is one
+# exported pair rather than an edit scattered across three assertions -- and so
+# these expectations move together with org_provisioner.sh's own two knobs.
+EXPECT_ASSIGNMENT_MODE="${EXPECT_ASSIGNMENT_MODE:-company_default}"
+EXPECT_CAN_ASSIGN_TASKS="${EXPECT_CAN_ASSIGN_TASKS:-true}"
+
+on_assignment_baseline() { q "SELECT CASE WHEN permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode'='$EXPECT_ASSIGNMENT_MODE' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
+# The actor-side half. company_default only unblocks the TARGET; without a
+# company-wide tasks:assign the agent still cannot hand a card back UP, because
+# a SELF-scoped tasks:assign_scope never reaches outside its own subtree.
+has_assign_grant() { q "SELECT CASE WHEN EXISTS (SELECT 1 FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND permission_key='tasks:assign' AND scope IS NULL) THEN 'yes' ELSE 'no' END;" "$1"; }
+creator_flags_off() { q "SELECT CASE WHEN permissions->'canCreateAgents'='false'::jsonb AND permissions->'canCreateSkills'='false'::jsonb THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 parent_of()   { q "SELECT COALESCE(p.metadata->>'orgRoleId', p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'agent_id'::uuid;" "$1"; }
 
 hdr "1. Upward and lateral creation must be impossible"
@@ -155,9 +168,17 @@ must_allow "O1 may seat a functional chief" CHIEF \
   create --caller O1 --template B1_FUNCTION_CHIEF --title "TEST Interim Chief"
 if [[ -n "${CHIEF:-}" ]]; then
   keys="$(grant_keys "$CHIEF")"
-  [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
-    && ok "seated chief holds exactly the B1_FUNCTION_CHIEF template" \
-    || bad "seated chief grants are '$keys'"
+  # Template keys PLUS the TOG-984 assignment baseline. `tasks:assign` is not in
+  # TEMPLATES_JSON on purpose (it would break classify_risk's totality check --
+  # see org_provisioner.sh), so it is unioned in here the same way the
+  # provisioner unions it into grants_json. Still an EXACT match: the point of
+  # this assertion is that a seated chief gets the template and nothing else.
+  want_keys="agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts"
+  [[ "$EXPECT_CAN_ASSIGN_TASKS" == "true" ]] && \
+    want_keys="$(tr ',' '\n' <<<"$want_keys,tasks:assign" | sort -u | paste -sd, -)"
+  [[ "$keys" == "$want_keys" ]] \
+    && ok "seated chief holds exactly the B1_FUNCTION_CHIEF template + assignment baseline" \
+    || bad "seated chief grants are '$keys', expected '$want_keys'"
   refuses_because "a seated chief cannot seat a peer chief" \
     "exceeds the delegation ceiling of" \
     create --caller "$CHIEF" --template B1_FUNCTION_CHIEF --title "TEST Peer Chief"
@@ -201,14 +222,25 @@ else
 fi
 # `-eq 0` on an empty string is TRUE in bash, so this ZERO-grants claim used to
 # pass against no database at all. String-compare the digits instead.
-[[ "$c_s" == "0" ]] && ok "specialist has ZERO organizational-governance grants" \
-                   || bad "specialist grant count is '$c_s', expected 0"
+# A specialist's governance grants, EXCLUDING the TOG-984 assignment baseline
+# that every agent now carries. The claim being made is still "this template
+# confers no organizational authority" -- tasks:assign is not template
+# authority, it is the company-wide floor the owner set so work can be handed
+# back. Subtracting it keeps the assertion about the template.
+want_s=0; [[ "$EXPECT_CAN_ASSIGN_TASKS" == "true" ]] && want_s=1
+[[ "$c_s" == "$want_s" ]] && ok "specialist has ZERO organizational-governance grants beyond the assignment baseline" \
+                   || bad "specialist grant count is '$c_s', expected $want_s (baseline only)"
 
-hdr "7. No descendant holds a company-wide organizational grant"
+hdr "7. No descendant holds a company-wide organizational grant beyond the baseline"
+# tasks:assign is deliberately NOT in this list any more -- see TOG-984. It is
+# asserted separately and positively in section 9 (has_assign_grant), so it is
+# still checked, just as a REQUIREMENT rather than a prohibition. Every other
+# company-wide privileged key must still be exactly zero; dropping one of those
+# from this list would be a real widening, not a baseline adjustment.
 for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
-  n="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:create','users:manage_permissions','joins:approve','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$id")"
-  [[ "$n" == "0" ]] && ok "$lbl holds no company-wide privileged grant" \
+  n="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'agent_id' AND scope IS NULL AND permission_key IN ('agents:create','users:manage_permissions','joins:approve','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$id")"
+  [[ "$n" == "0" ]] && ok "$lbl holds no company-wide privileged grant beyond the baseline" \
                     || bad "$lbl company-wide privileged grant count is '$n', expected 0"
 done
 
@@ -224,19 +256,27 @@ for row in \
     || bad "$lbl SELF scope mismatch: own-scope='$got' errors='$errors', expected '$want' and 0"
 done
 
-hdr "9. Provisioned agents are born dormant and protected"
+hdr "9. Provisioned agents are born dormant, on the assignment baseline, and non-creators"
 for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   lbl="${pair%%:*}"; id="${pair#*:}"; [[ -n "$id" ]] || continue
   [[ "$(dormant "$id")" == "yes" ]] && ok "$lbl heartbeat disabled + wakeOnDemand false" || bad "$lbl not dormant"
-  [[ "$(protected "$id")" == "yes" ]] && ok "$lbl assignment policy protected" || bad "$lbl not protected"
-  [[ "$(legacy_flags_off "$id")" == "yes" ]] \
-    && ok "$lbl legacy permission flags explicitly false" \
-    || bad "$lbl legacy permission flags are not explicitly false"
+  [[ "$(on_assignment_baseline "$id")" == "yes" ]] \
+    && ok "$lbl assignment policy is '$EXPECT_ASSIGNMENT_MODE'" \
+    || bad "$lbl assignment policy is not '$EXPECT_ASSIGNMENT_MODE'"
+  # Both halves, because either one alone still 403s a hand-back.
+  if [[ "$EXPECT_CAN_ASSIGN_TASKS" == "true" ]]; then
+    [[ "$(has_assign_grant "$id")" == "yes" ]] \
+      && ok "$lbl holds the company-wide tasks:assign grant (can hand work back up)" \
+      || bad "$lbl is missing the company-wide tasks:assign grant — hand-backs will 403 (TOG-54)"
+  fi
+  [[ "$(creator_flags_off "$id")" == "yes" ]] \
+    && ok "$lbl creator flags explicitly false" \
+    || bad "$lbl creator flags are not explicitly false"
   if backend_is_recording_stub; then
     title="$(create_call_title_for "$id")"
     [[ "$(create_call_payload_ok "$title")" == "true" ]] \
-      && ok "$lbl agent.create payload is protected before permissions:update" \
-      || bad "$lbl agent.create payload was not born protected"
+      && ok "$lbl agent.create payload is born on the baseline before permissions:update" \
+      || bad "$lbl agent.create payload was not born on the assignment baseline"
   fi
 done
 

@@ -76,6 +76,24 @@ fs.writeFileSync(p,s.replace(a,r))
 NODE
 }
 
+# Seeds a company-wide grant that the provisioner never asks for, standing in
+# for a server-applied default. apply_exact_grants must DELETE it; the mutant
+# disables that DELETE, so the row survives and test_request_queue.sh's
+# company-wide-scope check is what catches it.
+#
+# THE PROBE KEY MUST BE ONE THE PROVISIONER DOES NOT INSERT (TOG-984). It used
+# to be `tasks:assign`, which worked only while the provisioner left that key
+# alone. Now that the assignment baseline unions `tasks:assign` in,
+# principal_permission_grants_unique_idx -- (company_id, principal_type,
+# principal_id, permission_key), which does NOT include scope -- makes the
+# surviving seed row collide with the provisioner's own INSERT. That aborts the
+# whole apply_exact_grants transaction, so the agent ends up with the seeded row
+# and NOTHING else: the mutant still goes red, but on the template key-set
+# assertion instead of the scope assertion this mutant exists to pin, and the
+# gate fails with "red, but not on named assertion".
+# `tools:use` is in no template this suite provisions (only E2_TOOLING_ADMIN
+# carries it, which the suite never requests), so it survives the mutant
+# without colliding and the named assertion fires again.
 seed_server_default_grant() { # stage-dir
   local d="$1"
   mv "$d/test/fixtures/orgdb/paperclipai" "$d/test/fixtures/orgdb/paperclipai.real"
@@ -95,7 +113,7 @@ if [[ "${1:-}" == agent && "${2:-}" == create ]]; then
   psql -Atq -v ON_ERROR_STOP=1 -v company="$company" -v agent="$id" <<'SQL' >/dev/null
 INSERT INTO principal_permission_grants
   (company_id, principal_type, principal_id, permission_key, scope)
-VALUES (:'company'::uuid, 'agent', :'agent', 'tasks:assign', NULL)
+VALUES (:'company'::uuid, 'agent', :'agent', 'tools:use', NULL)
 ON CONFLICT DO NOTHING;
 SQL
 fi
@@ -116,14 +134,24 @@ mutant dormant-payload test_privilege_ceilings.sh org_provisioner.sh \
   'runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}' \
   'runtimeConfig:({heartbeat:{enabled:true, wakeOnDemand:true}}' \
   'DIRECTOR not dormant' || rc=1
-mutant protected-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+# TOG-984: the baseline these two pin is company_default + tasks:assign, not the
+# old born-protected posture. Mutating the mode back to "protected" is exactly
+# the regression that 403'd TOG-54/69/586, so it is the right mutant to require.
+mutant baseline-mode-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+  'authorizationPolicy:{assignmentPolicy:{mode:$mode}}' \
   'authorizationPolicy:{assignmentPolicy:{mode:"protected"}}' \
-  'authorizationPolicy:{assignmentPolicy:{mode:"open"}}' \
-  'DIRECTOR agent.create payload was not born protected' || rc=1
-mutant assign-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+  'DIRECTOR agent.create payload was not born on the assignment baseline' || rc=1
+mutant baseline-assign-create-payload test_privilege_ceilings.sh org_provisioner.sh \
+  'canAssignTasks:$can_assign,' \
   'canAssignTasks:false,' \
-  'canAssignTasks:true,' \
-  'DIRECTOR agent.create payload was not born protected' || rc=1
+  'DIRECTOR agent.create payload was not born on the assignment baseline' || rc=1
+# The ACTOR-side half, and the one a mode-only check cannot see: strip the
+# baseline key from the applied grant set and the agent still looks correctly
+# unprotected while being unable to hand any card back up its own chain.
+mutant baseline-assign-grant test_privilege_ceilings.sh org_provisioner.sh \
+  '+ (if $want_assign then [{permissionKey:"tasks:assign", scope:null}] else [] end)' \
+  '+ []' \
+  'DIRECTOR is missing the company-wide tasks:assign grant' || rc=1
 mutant exact-grant-replacement test_request_queue.sh org_provisioner.sh \
   $'DELETE FROM principal_permission_grants\nWHERE company_id = :\'company_id\'::uuid\n  AND principal_type = \'agent\'\n  AND principal_id = :\'agent_id\';' \
   $'DELETE FROM principal_permission_grants\nWHERE false;' \

@@ -141,10 +141,18 @@ else
   fi
 
   # Invariants that predate this change and must not regress.
+  #
+  # The assignment mode expectation was INVERTED by the TOG-984 owner decision
+  # (2026-09-05): agents are now born `company_default` with canAssignTasks
+  # true, because the old born-protected posture made an agent's first hand-back
+  # up its own chain fail with 403 deny_policy_restricted (TOG-54/69/586).
+  # `canCreateAgents == false` is untouched by that decision and still holds —
+  # the creator ceiling is a separate invariant from the assignment baseline.
   if jq -e '.permissions.canCreateAgents == false
-            and .permissions.authorizationPolicy.assignmentPolicy.mode == "protected"' \
+            and .permissions.canAssignTasks == true
+            and .permissions.authorizationPolicy.assignmentPolicy.mode == "company_default"' \
        <<<"$PAYLOAD" >/dev/null; then
-    ok "existing provisioning invariants (protected assignment) still hold"
+    ok "provisioning invariants hold: creator ceiling off, TOG-984 assignment baseline on"
   else
     bad "provisioning invariants regressed: $(jq -c '.permissions' <<<"$PAYLOAD")"
   fi

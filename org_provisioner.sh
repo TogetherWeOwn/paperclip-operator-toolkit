@@ -52,7 +52,8 @@ set -euo pipefail
 #   8. Paperclip RBAC never implies external tool or data access.
 #   9. Every operation is appended to an immutable grant log.
 #  10. No agent receives raw database credentials.
-#  11. Privileged roles get protected assignment policy.
+#  11. Agents are born on the owner-decided assignment baseline (TOG-984):
+#      company_default + a company-wide tasks:assign, so hand-backs work.
 #  12. Kill switch: see PROVISIONER_DISABLED below.
 #
 # USAGE
@@ -111,6 +112,49 @@ assert_enabled() {
     die "provisioner kill switch is engaged (owner/board control)."
   fi
 }
+
+# ---------------------------------------------------------------------------
+# ASSIGNMENT BASELINE — owner decision, TOG-984, 2026-09-05.
+#
+# Agents used to be born with assignmentPolicy.mode="protected" and
+# canAssignTasks=false (old invariant 11). That posture broke hand-backs: on
+# 2026-09-04, TOG-54, TOG-69 and TOG-586 each finished their work and then got
+# 403 deny_policy_restricted -- "Target agent is protected and requires an
+# explicit assignment grant" -- trying to hand the card back up the chain. Each
+# card sat `blocked` under the wrong assignee until a human reassigned it.
+#
+# The mechanism has two halves, and BOTH have to be right or the hand-back
+# fails again (server/src/services/authorization.ts):
+#
+#   target side -- mode="protected" on the TARGET returns {kind:"restricted"}
+#                  before any grant is consulted.
+#   actor  side -- the ACTOR needs `tasks:assign`. A SELF-scoped
+#                  `tasks:assign_scope` only reaches inside its own subtree,
+#                  and a hand-back is upward or lateral by definition. That is
+#                  a motion a per-template grant could never authorize.
+#
+# So the baseline is company_default + a company-wide `tasks:assign`.
+#
+# WHY THIS IS NOT IN TEMPLATES_JSON. Two reasons, and the first is load-bearing:
+#
+#   1. org_request_queue.sh classify_risk runs a TOTALITY CHECK over template
+#      keys and refuses (exit 3) on any key that is on neither RISK_KEYS nor
+#      NONRISK_KEYS. `tasks:assign` is on NEITHER list. Adding it to templates
+#      would break the provisioning queue's risk classifier for every template
+#      carrying it -- the queue would stop, company-wide, on the next request.
+#   2. A template says what a ROLE is for. This is not a role property; it is
+#      one dated company-wide decision. Encoding it once, here, keeps it
+#      auditable as the single fact it is instead of 15 copies that can drift.
+#
+# TO REVERSE THIS you need a NEW owner decision, not a quiet edit. Set
+# ASSIGNMENT_BASELINE_MODE=protected and BASELINE_CAN_ASSIGN_TASKS=false, and
+# flip the matching expectations in org_access_review.sh. Nobody may re-protect
+# agents piecemeal: a partially-protected fleet reproduces the TOG-54 failure
+# for exactly the agents that were re-protected, which is the hardest version
+# of this bug to see, because the review stays green for everyone else.
+# ---------------------------------------------------------------------------
+ASSIGNMENT_BASELINE_MODE="${ASSIGNMENT_BASELINE_MODE:-company_default}"
+BASELINE_CAN_ASSIGN_TASKS="${BASELINE_CAN_ASSIGN_TASKS:-true}"
 
 # ---------------------------------------------------------------------------
 # Role template catalog — report section 6.
@@ -467,6 +511,8 @@ cmd_create() {
     --arg name "$title" --arg title "$title" --arg parent "$caller_id" \
     --arg adapter "$ADAPTER_TYPE" --arg tpl "$template" --arg cap "$capabilities" \
     --argjson cheap "$cheap_profile_json" \
+    --arg mode "$ASSIGNMENT_BASELINE_MODE" \
+    --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
     --argjson budget "$AGENT_BUDGET_CENTS" '
     {
       name:$name, role:"general", title:$title, capabilities:$cap,
@@ -474,8 +520,8 @@ cmd_create() {
       runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}
                      + (if ($cheap|length) > 0 then {modelProfiles:$cheap} else {} end)),
       budgetMonthlyCents:$budget,
-      permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:false,
-                   authorizationPolicy:{assignmentPolicy:{mode:"protected"}}},
+      permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:$can_assign,
+                   authorizationPolicy:{assignmentPolicy:{mode:$mode}}},
       metadata:{permissionProfile:$tpl, provisionedBy:"org_provisioner"},
       reportsTo:$parent
     }')"
@@ -483,17 +529,31 @@ cmd_create() {
   new_id="$(jq -r '.id' <<<"$out")"
   [[ -n "$new_id" && "$new_id" != "null" ]] || die "agent creation failed"
 
-  # Invariant 11: protected assignment + legacy flags off. Must run BEFORE the
-  # grant replacement, because this route itself rewrites the tasks:assign grant.
+  # Invariant 11 (as amended by TOG-984): the assignment baseline, plus legacy
+  # creator flags still off. Must run BEFORE the grant replacement, because this
+  # route itself rewrites the tasks:assign grant -- and apply_exact_grants below
+  # is a REPLACE, so whatever this route writes is authoritative only until then.
+  # That is why the baseline key is also injected into grants_json: setting the
+  # flag here and stopping would leave the agent on the right MODE with the
+  # wrong GRANTS, which fails the actor-side half of the check and reproduces
+  # the TOG-54 403 on the agent's first hand-back.
   pc agent permissions:update "$new_id" --payload-json \
-    '{"canCreateAgents":false,"canCreateSkills":false,"canAssignTasks":false,
-      "authorizationPolicy":{"assignmentPolicy":{"mode":"protected"}}}' --json >/dev/null
+    "$(jq -cn --arg mode "$ASSIGNMENT_BASELINE_MODE" --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
+       '{canCreateAgents:false, canCreateSkills:false, canAssignTasks:$can_assign,
+         authorizationPolicy:{assignmentPolicy:{mode:$mode}}}')" --json >/dev/null
 
   # Invariant 5: resolve SELF to the NEW agent's id.
+  # The template set, plus the company-wide assignment baseline (TOG-984). The
+  # baseline is unioned in HERE rather than added to TEMPLATES_JSON on purpose
+  # -- see the ASSIGNMENT BASELINE block above; putting `tasks:assign` in a
+  # template breaks classify_risk's totality check and stops the request queue.
   local grants_json
-  grants_json="$(jq -c --arg id "$new_id" --arg t "$template" '
-    .[$t] | map({permissionKey:.permissionKey,
-                 scope: (if .self then {subtreeRootAgentId:$id} else null end)})' \
+  grants_json="$(jq -c --arg id "$new_id" --arg t "$template" \
+    --argjson want_assign "$BASELINE_CAN_ASSIGN_TASKS" '
+    (.[$t] | map({permissionKey:.permissionKey,
+                  scope: (if .self then {subtreeRootAgentId:$id} else null end)}))
+    + (if $want_assign then [{permissionKey:"tasks:assign", scope:null}] else [] end)
+    | unique_by([.permissionKey, (.scope|tostring)])' \
     <<<"$TEMPLATES_JSON")"
 
   # The CALLER is the requesting agent: invariant 1 makes it this agent's parent
@@ -502,9 +562,11 @@ cmd_create() {
 
   log_event "$(jq -cn --arg cid "$caller_id" --arg ct "$caller_template" --arg nid "$new_id" \
     --arg t "$template" --arg title "$title" --argjson g "$grants_json" \
+    --arg mode "$ASSIGNMENT_BASELINE_MODE" --argjson ca "$BASELINE_CAN_ASSIGN_TASKS" \
     '{event:"create.applied",callerAgentId:$cid,callerTemplate:$ct,
       newAgentId:$nid,template:$t,title:$title,reportsTo:$cid,
-      previousGrants:["tasks:assign (server default, replaced)"],newGrants:$g}')"
+      previousGrants:["tasks:assign (server default, replaced)"],newGrants:$g,
+      assignmentBaseline:{mode:$mode,canAssignTasks:$ca,decision:"TOG-984 owner decision 2026-09-05"}}')"
 
   echo "PROVISIONED $template -> $new_id ($title), reports to $caller_ref"
   echo "--- effective access ---"

@@ -195,9 +195,14 @@ if [[ -n "${DIR_ID:-}" ]]; then
   parent="$(q "SELECT COALESCE(p.metadata->>'orgRoleId',p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'text'::uuid;" "$DIR_ID")"
   [[ "$parent" == "T0" ]] && ok "director reports to the REQUESTER (T0), not the reviewer (A0)" \
                           || bad "director parent is '$parent', expected T0"
+  # The template set PLUS the TOG-984 assignment baseline. `tasks:assign` is
+  # not part of C1_DIRECTOR_BUILDER and deliberately is not in TEMPLATES_JSON
+  # (it would break org_request_queue.sh classify_risk's totality check); the
+  # provisioner unions it in at the call site. See the ASSIGNMENT BASELINE
+  # block in org_provisioner.sh.
   keys="$(q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text';" "$DIR_ID")"
-  [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
-    && ok "director holds exactly the C1_DIRECTOR_BUILDER template" \
+  [[ "$keys" == "agents:configure,skills:suggest-changes,tasks:assign,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
+    && ok "director holds exactly the C1_DIRECTOR_BUILDER template plus the assignment baseline" \
     || bad "director grants are '$keys'"
   scoped="$(q "SELECT COALESCE(string_agg(permission_key,',' ORDER BY permission_key),'(none)') FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope=jsonb_build_object('subtreeRootAgentId', :'text');" "$DIR_ID")"
   [[ "$scoped" == "agents:configure,tasks:assign_scope,tasks:manage_active_checkouts" ]] \
@@ -207,8 +212,39 @@ if [[ -n "${DIR_ID:-}" ]]; then
   [[ "$scope_errors" == "0" ]] \
     && ok "director has no NULL or foreign scope on a SELF permission" \
     || bad "director has $scope_errors SELF permission(s) with NULL or foreign scope"
-  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('tasks:assign','agents:configure','tasks:assign_scope','tasks:manage_active_checkouts');" "$DIR_ID")"
+  # `tasks:assign` is EXCLUDED from this check because TOG-984 makes it
+  # company-wide on purpose, and it is the one key here that must be. The
+  # scope is not a provisioner choice: routes/agents.ts:2852 calls
+  # setPrincipalPermission with no scope argument, which defaults to NULL
+  # (services/access.ts:661), so ANY agent with canAssignTasks=true holds it
+  # company-wide. Demanding 0 here would have been unsatisfiable for an agent
+  # on the owner's baseline.
+  #
+  # It must not be narrowed to a subtree either, which is the tempting "fix":
+  # authorization.ts:432-443 resolves a subtree-scoped grant by requiring the
+  # TARGET to sit inside the actor's subtree and returns false otherwise. A
+  # hand-back is upward or lateral, so its target is outside by construction —
+  # a subtree scope would reproduce the exact TOG-54/69/586 403 the owner
+  # abolished, while this suite stayed green.
+  #
+  # The other three keys stay in the check: they are SELF permissions and a
+  # NULL scope on them is still the privilege-escalation bug this guards.
+  #
+  # `tools:use` is here as the REPLACEMENT-COMPLETENESS probe. It is in no
+  # template this suite provisions, so it can only be present if something
+  # outside the provisioner put it there and apply_exact_grants failed to
+  # replace it away — which is precisely what the exact-grant-replacement
+  # mutant in verification/tog-480-mutation-gate.sh seeds. Dropping
+  # `tasks:assign` from this list above costs the check nothing only because
+  # this probe key still covers the DELETE; keep the two in sync.
+  cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts','tools:use');" "$DIR_ID")"
   [[ "$cw" == "0" ]] && ok "server/default SELF grants were replaced away from company scope" || bad "company-wide organizational grant survived (count='$cw')"
+  # Positive half: excluding tasks:assign above must not let the check pass by
+  # the grant being ABSENT. An agent born without it cannot hand work back.
+  bl="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND permission_key='tasks:assign' AND scope IS NULL;" "$DIR_ID")"
+  [[ "$bl" == "1" ]] \
+    && ok "queue-provisioned agent is born on the TOG-984 assignment baseline (company-wide tasks:assign)" \
+    || bad "expected exactly 1 company-wide tasks:assign grant, found '$bl'"
   dorm="$(q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'text'::uuid;" "$DIR_ID")"
   [[ "$dorm" == "yes" ]] && ok "queue-provisioned agent is born dormant" || bad "queue-provisioned agent is not dormant"
 else bad "no director id captured"; fi

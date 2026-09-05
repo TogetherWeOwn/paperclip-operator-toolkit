@@ -10,8 +10,11 @@
 #   1. GRANT DRIFT       — live grants vs. the agent's declared role template
 #   2. BROAD GRANTS      — company-wide privileged keys outside the allowed set
 #   3. SCOPE INTEGRITY   — SELF-scoped grants must name the agent's OWN id
-#   4. PROTECTION        — assignment policy must be 'protected'
-#   5. LEGACY FLAGS      — canCreateAgents/canAssignTasks must not widen authority
+#   4. ASSIGNMENT BASELINE — assignment policy must match the owner-decided
+#                          baseline (company_default since TOG-984, 2026-09-05),
+#                          and every agent must hold the company-wide
+#                          `tasks:assign` grant that makes it effective
+#   5. LEGACY FLAGS      — canCreateAgents must not widen authority
 #   6. DORMANCY          — heartbeat enabled/wakeOnDemand vs. expectation
 #   7. ORPHAN GRANTS     — grants or memberships for agents that no longer exist
 #   8. SUBTREE SANITY    — reporting chain is acyclic and rooted
@@ -113,10 +116,64 @@ TEMPLATE_EXPECT+=$'\n'"P2_OWNER_COS|agents:suggest-changes,audit:view_agent_acti
 TEMPLATE_EXPECT+=$'\n'"P3_AUDIT_RISK|agents:suggest-changes,audit:view_agent_actions,skills:suggest-changes,tools:view_audit"
 TEMPLATE_EXPECT+=$'\n'"P4_PROVISIONING_STEWARD|agents:suggest-changes,audit:view_agent_actions,tools:view_audit"
 
+# ---------------------------------------------------------------------------
+# COMPANY-WIDE ASSIGNMENT BASELINE — owner decision 2026-09-05 00:50Z (TOG-984)
+# ---------------------------------------------------------------------------
+# The owner's instruction was "make sure all agents have the tools resources and
+# permissions to effectively and efficiently do their jobs." The operator applied
+# it at 00:51Z to all 24 non-terminated agents: assignmentPolicy.mode
+# `protected` -> `company_default`, and canAssignTasks true (which the
+# PATCH /api/agents/{id}/permissions route rewrites into a company-wide
+# `tasks:assign` grant — see routes/agents.ts, effectiveCanAssignTasks).
+#
+# WHAT FORCED IT. Three finished hand-backs died on `403 deny_policy_restricted`
+# on 2026-09-04 (TOG-54, TOG-69, TOG-586). The refusal comes from
+# authorization.ts: a target whose assignmentMode is `protected` returns
+# {kind:"restricted"}, and an actor holding only the SELF-scoped
+# `tasks:assign_scope` cannot reach a target OUTSIDE its own subtree. A hand-BACK
+# is upward or lateral by definition, so it is exactly the motion the template
+# grants could never authorize. Each card sat `blocked` under the wrong assignee
+# until a human moved it.
+#
+# WHY THIS IS A BASELINE AND NOT 15 TEMPLATE EDITS. `tasks:assign` is deliberately
+# NOT added to the role templates in org_provisioner.sh. Two reasons, both
+# load-bearing:
+#   1. org_request_queue.sh classify_risk reads the template catalog live and
+#      REFUSES (exit 3) on any key that is on neither RISK_KEYS nor NONRISK_KEYS.
+#      `tasks:assign` is on neither. Putting it in the templates would break the
+#      provisioning queue's risk classifier for every template carrying it.
+#   2. A template says what a ROLE is for. This is one company-wide decision with
+#      one owner and one date. Encoding it once, here, means re-protecting the
+#      fleet is a one-line revert against a named decision rather than an
+#      archaeology exercise across fifteen template bodies.
+#
+# The expectation below is therefore "the role template UNION this baseline".
+# Drift is still drift: an agent holding a key that is in neither set still fails
+# check 1, and an agent MISSING the baseline still fails check 5.
+#
+# TO REVERSE THIS you need a NEW owner decision, not a quiet edit. Set
+# ASSIGNMENT_BASELINE_KEY="" and flip EXPECT_ASSIGNMENT_MODE back to `protected`,
+# and re-run the provisioner's born-state assertions. Nobody may re-protect
+# agents piecemeal — a partially-protected fleet reproduces the TOG-54 failure
+# for exactly the agents that were re-protected, which is the hardest version of
+# this bug to see.
+ASSIGNMENT_BASELINE_KEY="${ASSIGNMENT_BASELINE_KEY-tasks:assign}"
+EXPECT_ASSIGNMENT_MODE="${EXPECT_ASSIGNMENT_MODE:-company_default}"
+
+# Fold the baseline into a template's expected key list, keeping the sorted,
+# comma-joined shape the drift comparison comes in. A template that already
+# names the key (P1/P2 below) must not gain a duplicate.
+with_baseline() {
+  local keys="$1"
+  [[ -n "$ASSIGNMENT_BASELINE_KEY" ]] || { printf '%s' "$keys"; return; }
+  { [[ -n "$keys" ]] && tr ',' '\n' <<<"$keys"; printf '%s\n' "$ASSIGNMENT_BASELINE_KEY"; } \
+    | sort -u | sed '/^$/d' | paste -sd, -
+}
+
 # A template that legitimately grants NOTHING (E0_SPECIALIST) yields an empty
 # expectation, which is still a valid expectation — so test whether the template
 # is KNOWN separately from what it expects.
-expected_for()      { grep -m1 "^$1|" <<<"$TEMPLATE_EXPECT" | cut -d'|' -f2-; }
+expected_for()      { with_baseline "$(grep -m1 "^$1|" <<<"$TEMPLATE_EXPECT" | cut -d'|' -f2-)"; }
 template_is_known() { grep -q "^$1|" <<<"$TEMPLATE_EXPECT"; }
 
 echo "Access review — company $COMPANY_ID — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -173,14 +230,42 @@ if [[ -z "$bad_scope" ]]; then good "every scoped grant is bound to its holder's
 else while read -r l; do [[ -n "$l" ]] && note "foreign scope: $l"; done <<<"$bad_scope"; fi
 
 # --------------------------------------------------------------------------
-hdr "4-5. Protected assignment and legacy permission flags"
-unprot="$(sql "
+hdr "4-5. Assignment policy baseline and legacy permission flags"
+# Owner decision 2026-09-05 (TOG-984): the baseline is company_default, not
+# protected. This check is INVERTED from what it was, deliberately — see the
+# ASSIGNMENT_BASELINE_KEY block above for why, and for what reversing it costs.
+# An agent that is `protected` again is now the finding, because that is the
+# state that produced three 403 hand-back failures on 2026-09-04.
+offbase="$(sql "
 SELECT COALESCE(metadata->>'orgRoleId', title)
+       || ' (mode=' || COALESCE(permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode','unset') || ')'
 FROM agents WHERE company_id = :'cid'::uuid AND status <> 'terminated'
   AND metadata->>'permissionProfile' IS NOT NULL
-  AND COALESCE(permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode','') <> 'protected';")"
-[[ -z "$unprot" ]] && good "all role-templated agents have protected assignment" \
-  || while read -r l; do [[ -n "$l" ]] && note "not protected: $l"; done <<<"$unprot"
+  AND COALESCE(permissions->'authorizationPolicy'->'assignmentPolicy'->>'mode','')
+      <> '$EXPECT_ASSIGNMENT_MODE';")"
+[[ -z "$offbase" ]] && good "all role-templated agents are on the '$EXPECT_ASSIGNMENT_MODE' assignment baseline" \
+  || while read -r l; do [[ -n "$l" ]] && note "off assignment baseline (expected '$EXPECT_ASSIGNMENT_MODE'): $l"; done <<<"$offbase"
+
+# The other half of the same decision, and the half the mode alone does NOT
+# deliver. `company_default` only removes the target-side block; the ACTOR still
+# needs a grant that reaches outside its own subtree, and the SELF-scoped
+# `tasks:assign_scope` does not. Without this check, someone could strip the
+# company-wide grant, leave the mode alone, and reproduce the TOG-54 403 while
+# check 4 above stayed green.
+if [[ -n "$ASSIGNMENT_BASELINE_KEY" ]]; then
+  nokey="$(sql "
+  SELECT COALESCE(a.metadata->>'orgRoleId', a.title)
+  FROM agents a
+  WHERE a.company_id = :'cid'::uuid AND a.status <> 'terminated'
+    AND NOT EXISTS (
+      SELECT 1 FROM principal_permission_grants g
+      WHERE g.company_id = a.company_id AND g.principal_type = 'agent'
+        AND g.principal_id = a.id::text
+        AND g.permission_key = '$ASSIGNMENT_BASELINE_KEY'
+        AND g.scope IS NULL);")"
+  [[ -z "$nokey" ]] && good "every non-terminated agent holds the company-wide '$ASSIGNMENT_BASELINE_KEY' grant" \
+    || while read -r l; do [[ -n "$l" ]] && note "missing company-wide $ASSIGNMENT_BASELINE_KEY grant: $l"; done <<<"$nokey"
+fi
 
 legacy="$(sql "
 SELECT COALESCE(metadata->>'orgRoleId', title) || ' (role=' || role || ', canCreateAgents=' || COALESCE(permissions->>'canCreateAgents','null') || ')'
