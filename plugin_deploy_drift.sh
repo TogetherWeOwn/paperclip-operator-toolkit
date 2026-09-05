@@ -309,16 +309,45 @@ for (const r of routes) {
   }
 }
 out.sort();
+
+// THE MEASUREMENT RECEIPT (TOG-375). An empty surface is ambiguous and the
+// ambiguity is load-bearing: "this manifest declares no apiRoutes" and "the
+// walker broke and read nothing" are the same zero bytes. The caller has to
+// tell them apart, because refusing the first is a false alarm that takes the
+// WHOLE fleet sweep down (measured: `check` exited 2 on `dispatch` and never
+// reached gh-token-broker, which was really drifting), and accepting the
+// second is the silent green this file exists to prevent.
+//
+// So the walker states, out of band, that it got as far as reading apiRoutes.
+// Emitted unconditionally and FIRST, before the sorted leaves, so its presence
+// is proof of arrival rather than proof of content. The caller strips it: it
+// never reaches the comparison, so route findings are byte-identical to before.
+process.stdout.write("#MEASURED\t" + routes.length + "\n");
 process.stdout.write(out.length ? out.join("\n") + "\n" : "");
 '
 
+# Sets ROUTE_SURFACE_MEASURED to the declared route count the walker actually
+# read, or to "" if the walker never got that far. Read it INSTEAD of testing
+# the surface for emptiness — those two are only the same when a manifest with
+# zero routes is impossible, which is exactly the assumption TOG-375 falsified.
+ROUTE_SURFACE_MEASURED=""
 route_surface() {
   local mode="$1" file="$2" abs out status
+  ROUTE_SURFACE_MEASURED=""
   abs="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
   out="$(ROUTE_FIELDS="${ROUTE_FIELDS[*]}" timeout "$NODE_TIMEOUT" \
          node --input-type=module -e "$ROUTES_JS" "$mode" "$abs" 2>&1)"; status=$?
   [ $status -eq 0 ] || { printf '%s\n' "$out" >&2; return 1; }
-  printf '%s' "$out"
+
+  # The receipt is the walker's own statement that it reached apiRoutes. Its
+  # ABSENCE on a zero-status run means the surface came from something that is
+  # not this walker, so it is refused rather than read as "no routes".
+  local first; first="$(head -n1 <<< "$out")"
+  case "$first" in
+    '#MEASURED'*) ROUTE_SURFACE_MEASURED="${first#*$'\t'}" ;;
+    *) printf '%s: route walker emitted no measurement receipt for %s\n' "$ME" "$abs" >&2; return 1 ;;
+  esac
+  printf '%s' "$(tail -n +2 <<< "$out")"
 }
 
 cmd_routes() {
@@ -362,7 +391,7 @@ cmd_check() {
   printf '  deployed   %s plugin row(s) from the host registry\n' "$nplugins"
   printf '  reference  %s:%s\n\n' "$ref" "$pdir"
 
-  local drift=0 compared=0 unpaired=0
+  local drift=0 compared=0 unpaired=0 routeless=0
   local key ppath pstatus pversion
 
   while IFS=$'\t' read -r key ppath pstatus pversion; do
@@ -386,18 +415,40 @@ cmd_check() {
     reffile="$(cut -f3 <<< "$refline")"
 
     local dep_s="$WORK/$key.dep.routes" ref_s="$WORK/$key.ref.routes"
+    local dep_n ref_n
     route_surface json   "$WORK/dep.$key.json" > "$dep_s" \
       || die "could not read the deployed route surface for $key"
+    dep_n="$ROUTE_SURFACE_MEASURED"
     route_surface module "$reffile" > "$ref_s" \
       || die "could not evaluate the repo manifest for $key at $ref:$refpath"
+    ref_n="$ROUTE_SURFACE_MEASURED"
 
-    # Both sides empty is not agreement, it is a measurement failure — the same
-    # zero-vs-zero case plugin_manifest_gate.sh refuses on. A plugin that
-    # genuinely declares no apiRoutes exists (four of them here), but such a
-    # plugin has no repo counterpart, so reaching this line with two empty
-    # surfaces means the walker broke.
-    if [ ! -s "$dep_s" ] && [ ! -s "$ref_s" ]; then
-      die "both route surfaces for '$key' are empty — the extractor measured none of the fields this detector compares"
+    # ZERO ROUTES DECLARED IS NOT A BROKEN WALKER (TOG-375). This guard used to
+    # read emptiness off the surface files and `die`, on the stated assumption
+    # that a route-less plugin never has a repo counterpart. `dispatch` — merged
+    # in PR #161, jobs-only and route-less on BOTH sides — falsified it, and
+    # because `die` exits the whole run rather than the plugin, the fleet sweep
+    # aborted on the first alphabetical row and NEVER REACHED gh-token-broker,
+    # which was genuinely drifting. A detector that refuses is not failing safe
+    # if the refusal is what stops it from looking.
+    #
+    # The receipt makes the two cases distinguishable. The broken-walker half is
+    # enforced ONCE, in route_surface, which refuses a surface carrying no
+    # receipt — so by this line a measurement always exists and re-checking for
+    # an empty one here would be a second mechanism for one invariant. That is
+    # not free: two guards over one invariant means deleting either leaves the
+    # suite green, so neither can be mutation-tested and the pair reads as
+    # covered while being untestable. One guard, at the point of measurement.
+    #
+    # What is left here is the other half: a measured zero on both sides is a
+    # legitimate no-op, reported as uncompared — counted, named, never a silent
+    # green.
+    if [ "$dep_n" -eq 0 ] && [ "$ref_n" -eq 0 ]; then
+      c_yel "  NO ROUTES $key"
+      printf '    package  %s\n    both %s:%s and the deployed row declare zero apiRoutes — nothing to compare\n\n' \
+        "${ppath:-(registry install)}" "$ref" "$refpath"
+      routeless=$((routeless+1))
+      continue
     fi
 
     compared=$((compared+1))
@@ -443,13 +494,16 @@ cmd_check() {
   done < "$WORK/deployed.index"
 
   # If --only named a key that does not exist, nothing was compared and the run
-  # would otherwise print a green summary about zero plugins.
+  # would otherwise print a green summary about zero plugins. A route-less
+  # plugin is counted here too: it was paired and measured, but comparing it
+  # decided nothing, so a sweep that found ONLY those still measured no routes
+  # and must not exit green.
   if [ "$compared" -eq 0 ]; then
-    die "compared 0 plugins ($unpaired had no counterpart under $ref:$pdir). Nothing was measured."
+    die "compared 0 plugins ($unpaired had no counterpart under $ref:$pdir, $routeless declared no routes). Nothing was measured."
   fi
 
-  printf '  %s plugin(s) compared, %s with no repo counterpart (not compared).\n' \
-    "$compared" "$unpaired"
+  printf '  %s plugin(s) compared, %s with no repo counterpart, %s declaring no routes (not compared).\n' \
+    "$compared" "$unpaired" "$routeless"
   if [ "$drift" -gt 0 ]; then
     c_red "DRIFT: $drift plugin(s) are running a manifest that is not what $ref declares."
     c_red "The merged capability does not exist in the running system. Redeploying is an operator action."

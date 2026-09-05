@@ -400,32 +400,97 @@ OUT="$("$TOOL" frobnicate 2>&1)"; GOT=$?
 [ "$GOT" -eq 2 ] && ok "an unknown subcommand refuses (exit 2)" \
   || bad "an unknown subcommand refuses (exit 2)" "exit $GOT, want 2 — an unknown subcommand must not run a check"
 
-# ZERO ROUTES ON BOTH SIDES IS A MEASUREMENT FAILURE, NOT AGREEMENT. If the
-# route walker is ever broken by a refactor, both surfaces degenerate to nothing,
-# the awk join finds no differences, and the tool prints OK about a comparison
-# that read none of the fields it exists to compare. No case above can catch that:
-# every one of them compares a plugin that HAS routes, so a broken walker turns
-# them red for their own reasons and the silent-green path is never exercised.
+# ZERO ROUTES DECLARED AND A BROKEN WALKER ARE DIFFERENT THINGS (TOG-375), and
+# the detector must answer them differently. Both look like an empty surface, so
+# for a year the tool treated the first as the second and `die`d.
 #
-# This constructs the case directly — a repo manifest whose `id` is the
-# route-less agent-pixels.camera row, so a plugin with an empty surface on both
-# sides genuinely gets paired and compared.
+# That was wrong in production, not just in principle. `dispatch` is a real,
+# merged, jobs-only plugin — route-less on BOTH sides — and because `die` exits
+# the RUN rather than the plugin, the whole fleet sweep aborted on the first
+# alphabetical row and never reached gh-token-broker, which was genuinely
+# drifting. Measured 2026-09-03: `check` exited 2 having compared ONE plugin;
+# with the fix, 3 compared and the drift reported.
+#
+# Two cases, because one signal now distinguishes them: the walker's receipt.
+# The repo carries BOTH a route-less plugin and the real gh-token-broker, which
+# is what makes (a) meaningful: the route-less row must be stepped over, not
+# stopped at. A repo holding only the route-less plugin would exit 2 for the
+# honest reason that nothing was measured, and would prove nothing about the bug.
 EMPTYREPO="$WORK/emptyrepo"
 mkdir -p "$EMPTYREPO/plugins/pix/dist"
 cat > "$EMPTYREPO/plugins/pix/dist/manifest.js" <<'EMPTYJS'
 export const manifest = { id: "agent-pixels.camera", apiVersion: "1", apiRoutes: [] };
 export default manifest;
 EMPTYJS
+mkdir -p "$EMPTYREPO/plugins/$KEY/dist"
+cp "$REPO/$PKGDIR/dist/manifest.js" "$EMPTYREPO/plugins/$KEY/dist/manifest.js"
+cp "$REPO/$PKGDIR/package.json"     "$EMPTYREPO/plugins/$KEY/package.json"
 git -C "$EMPTYREPO" init -q
 git -C "$EMPTYREPO" config user.email t@example.invalid
 git -C "$EMPTYREPO" config user.name Test
 git -C "$EMPTYREPO" config commit.gpgsign false
-git -C "$EMPTYREPO" add -A && git -C "$EMPTYREPO" commit -qm "route-less plugin"
+git -C "$EMPTYREPO" add -A && git -C "$EMPTYREPO" commit -qm "route-less plugin beside a real one"
 EMPTYREF="$(git -C "$EMPTYREPO" rev-parse HEAD)"
+
+# (a) A genuinely route-less plugin is SKIPPED, named, and the sweep carries on
+#     past it to the plugins that do declare routes. `agent-pixels.camera` sorts
+#     FIRST in the deployed index, so gh-token-broker being compared at all is
+#     itself the proof that the sweep did not stop at the route-less row.
+#     Asserting only "not exit 2" would pass on a tool that silently dropped
+#     every remaining plugin.
 OUT="$(PLUGINS_SOURCE_CMD="cat '$ROWS'" "$TOOL" check --repo "$EMPTYREPO" --ref "$EMPTYREF" \
       --plugins-dir plugins 2>&1)"; GOT=$?
-[ "$GOT" -eq 2 ] && ok "a plugin with zero routes on BOTH sides refuses rather than reporting OK" \
-  || bad "a plugin with zero routes on BOTH sides refuses rather than reporting OK" "exit $GOT, want 2 — zero-vs-zero compared none of the fields this detector exists to compare"
+if [ "$GOT" -eq 2 ]; then
+  bad "a route-less plugin on both sides is skipped, and the sweep continues past it" \
+      "exit 2 — the route-less row aborted the whole sweep, which is the TOG-375 defect"
+elif ! grep -aq 'NO ROUTES' <<< "$OUT"; then
+  bad "a route-less plugin on both sides is skipped, and the sweep continues past it" \
+      "exit $GOT but no 'NO ROUTES' line — a skipped plugin that is not NAMED is one nobody knows is unmonitored"
+elif ! grep -aqE '1 declaring no routes' <<< "$OUT"; then
+  bad "a route-less plugin on both sides is skipped, and the sweep continues past it" \
+      "exit $GOT but the route-less count is missing from the summary denominator"
+elif ! grep -aqE "^  [0-9]+ plugin\(s\) compared" <<< "$OUT" \
+  || [ "$(grep -aoE '^  [0-9]+ plugin\(s\) compared' <<< "$OUT" | grep -aoE '[0-9]+')" -lt 1 ]; then
+  bad "a route-less plugin on both sides is skipped, and the sweep continues past it" \
+      "exit $GOT but 0 plugins were compared — the sweep stopped at the route-less row"
+elif ! grep -aq "$KEY" <<< "$OUT"; then
+  # THE ASSERTION THAT CARRIES THE BUG. agent-pixels.camera sorts first; if the
+  # route-less row still aborted the run, gh-token-broker is simply absent from
+  # the report and every count above can still look plausible.
+  bad "a route-less plugin on both sides is skipped, and the sweep continues past it" \
+      "exit $GOT but $KEY never appears — the sweep never reached the plugin after the route-less one"
+else
+  ok "a route-less plugin on both sides is skipped, and the sweep continues past it"
+fi
+
+# (b) A surface that does not carry the walker's receipt is REFUSED, never read
+#     as "zero routes". Without this the route-less skip in (a) is a loaded gun:
+#     anything that makes a surface unreadable silently becomes "nothing to
+#     compare", and the detector reports a clean no-op over a plugin it failed
+#     to measure.
+#
+#     Exercised with a repo manifest that writes to stdout at import — a real
+#     hazard, since these manifests are JS modules the walker `import`s, and one
+#     stray console.log displaces the receipt and shifts every route leaf by a
+#     line. Note this case is NOT reachable by breaking the walker for every
+#     plugin at once: that degrades to zero comparisons and the compared-zero
+#     backstop catches it for its own reasons. The receipt guard earns its place
+#     on exactly this partial failure, where other plugins measure fine.
+NOISYREPO="$WORK/noisyrepo"
+mkdir -p "$NOISYREPO/plugins/$KEY/dist"
+{ echo 'console.log("plugin build banner");'; cat "$REPO/$PKGDIR/dist/manifest.js"; } \
+  > "$NOISYREPO/plugins/$KEY/dist/manifest.js"
+cp "$REPO/$PKGDIR/package.json" "$NOISYREPO/plugins/$KEY/package.json"
+git -C "$NOISYREPO" init -q
+git -C "$NOISYREPO" config user.email t@example.invalid
+git -C "$NOISYREPO" config user.name Test
+git -C "$NOISYREPO" config commit.gpgsign false
+git -C "$NOISYREPO" add -A && git -C "$NOISYREPO" commit -qm "manifest that prints at import"
+NOISYREF="$(git -C "$NOISYREPO" rev-parse HEAD)"
+OUT="$(PLUGINS_SOURCE_CMD="cat '$ROWS'" "$TOOL" check --repo "$NOISYREPO" --ref "$NOISYREF" \
+      --plugins-dir plugins 2>&1)"; GOT=$?
+[ "$GOT" -eq 2 ] && ok "a plugin whose walker returns no measurement refuses rather than reporting OK" \
+  || bad "a plugin whose walker returns no measurement refuses rather than reporting OK" "exit $GOT, want 2 — an unreadable surface must never be read as 'declares no routes'"
 
 # ---------------------------------------------------------------------------
 hdr "enumeration: plugins with no repo counterpart are counted, not compared"

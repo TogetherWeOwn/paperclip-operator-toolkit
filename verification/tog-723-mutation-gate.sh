@@ -167,7 +167,7 @@ mutate "an unparseable manifest_json skipped instead of refused" \
 # 6. The compared-nothing guard. With --only naming an absent plugin, zero comparisons
 #    happen and the run would print a green summary about an empty set.
 mutate "the compared-zero guard removed" \
-  '    die "compared 0 plugins ($unpaired had no counterpart under $ref:$pdir). Nothing was measured."' \
+  '    die "compared 0 plugins ($unpaired had no counterpart under $ref:$pdir, $routeless declared no routes). Nothing was measured."' \
   '    : ' \
   "--only with an unknown key refuses (exit 2)"
 
@@ -192,13 +192,32 @@ mutate "the jsonb key-order canonicaliser removed" \
   'out.push(key + "\t" + f + "\t" + JSON.stringify(r[f] === undefined ? null : r[f]));' \
   "nested key reordering is not drift"
 
-# 9. The both-sides-empty guard. If the route walker is ever broken by a refactor, BOTH
-#    surfaces degenerate to nothing, every leaf compares equal, and the detector prints
-#    OK about a comparison that measured none of the fields it exists to compare.
-mutate "the zero-vs-zero guard removed" \
-  '      die "both route surfaces for '"'"'$key'"'"' are empty — the extractor measured none of the fields this detector compares"' \
-  '      : ' \
-  "a plugin with zero routes on BOTH sides refuses rather than reporting OK"
+# 9. The broken-walker guard (TOG-375). If the route walker is ever broken by a
+#    refactor, BOTH surfaces degenerate to nothing, every leaf compares equal, and the
+#    detector prints OK about a comparison that measured none of the fields it exists to
+#    compare.
+#
+#    This is enforced in ONE place — route_surface refuses a surface that carries no
+#    measurement receipt — and that is deliberate. An earlier cut of this fix also
+#    re-checked for an absent measurement at the comparison site; the gate caught it
+#    immediately, because two mechanisms enforcing one invariant means removing either
+#    leaves the suite green and NEITHER can be mutation-tested. The redundancy was
+#    deleted rather than covered.
+mutate "the broken-walker guard removed" \
+  '    *) printf '"'"'%s: route walker emitted no measurement receipt for %s\n'"'"' "$ME" "$abs" >&2; return 1 ;;' \
+  '    *) ROUTE_SURFACE_MEASURED=0 ;;' \
+  "a plugin whose walker returns no measurement refuses rather than reporting OK"
+
+# 11. The route-less continue (TOG-375). The inverse false-positive limb, and the one
+#     that was the actual production defect: `dispatch` is jobs-only and route-less on
+#     both sides, the old guard read that as a broken walker, and `die` exits the RUN,
+#     not the plugin — so the fleet sweep aborted on the first alphabetical row and
+#     never reached gh-token-broker, which was genuinely drifting. Turning the skip back
+#     into a refusal must redden, or nothing stops that regression coming back.
+mutate "a route-less plugin refused instead of skipped" \
+  '      routeless=$((routeless+1))' \
+  '      die "route-less"' \
+  "a route-less plugin on both sides is skipped, and the sweep continues past it"
 
 echo
 echo "=== the fixture guards: a stubbed fixture must not read as the real artifact ==="
