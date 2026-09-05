@@ -81,6 +81,7 @@ class BrokerTest(unittest.TestCase):
             "paperclipHostUser": "ubuntu",
             "paperclipHostUid": 1000,
             "paperclipDataPath": str(self.temp),
+            "paperclipImageRef": "localhost/paperclip-local:tog-516v2-51ee6c01b",
             "opsToolingPath": str(self.tooling),
             "toolingSearchRoots": [str(self.temp)],
             "toolingMarkers": ["probe.sh", "tool_drift.sh"],
@@ -811,6 +812,62 @@ class BrokerTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "invalid_signing_key")
                 self.assertIn("at least 2048 bits", str(raised.exception))
 
+    def test_image_ref_is_config_driven_and_pinned_to_the_deployed_sudoers(self):
+        # TOG-757: the host's image reference is host state, not source state, so
+        # image.inspect reads it from root-owned config. That alone would let a
+        # config edit change which image the broker attests, so a non-test-mode
+        # start re-derives the reference from the DEPLOYED sudoers file and
+        # refuses on disagreement. Both halves are asserted here.
+        executed = []
+
+        def capture_run_fixed(command, timeout=20):
+            executed.append(command)
+            return json.dumps({"Id": "sha256:" + "4" * 64, "Digest": None, "RepoTags": [], "Created": None, "Size": None})
+
+        real_run_fixed = broker.run_fixed
+        old_fake_dir = os.environ.pop("HOST_OPS_FAKE_FACTS_DIR", None)
+        broker.run_fixed = capture_run_fixed
+        try:
+            config = dict(self.config, paperclipImageRef="ghcr.io/paperclipai/paperclip@sha256:" + "f" * 64)
+            broker.execute_image(config)
+            self.assertIn(config["paperclipImageRef"], executed[0])
+            self.assertNotIn("paperclip-local", " ".join(executed[0]))
+
+            for bad in ("paperclip-local --format {{json .}}, /bin/sh", "paperclip local", "", "-local"):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(broker.Refusal) as raised:
+                        broker.execute_image(dict(self.config, paperclipImageRef=bad))
+                    self.assertEqual(raised.exception.code, "unsafe_config")
+        finally:
+            broker.run_fixed = real_run_fixed
+            if old_fake_dir is not None:
+                os.environ["HOST_OPS_FAKE_FACTS_DIR"] = old_fake_dir
+
+        granted = "localhost/paperclip-local:tog-516v2-51ee6c01b"
+        rendered = (ROOT / "host-ops" / "host-ops-broker.sudoers").read_text().replace("@@PAPERCLIP_IMAGE_REF@@", granted)
+        self.assertEqual(broker.sudoers_granted_image_ref(rendered), granted)
+        # A config naming any other image must not be startable against this grant.
+        with self.assertRaises(broker.Refusal) as raised:
+            if broker.sudoers_granted_image_ref(rendered) != "ghcr.io/paperclipai/paperclip:v1":
+                raise broker.Refusal("unsafe_config", "drifted")
+        self.assertEqual(raised.exception.code, "unsafe_config")
+        # Zero or duplicate grants must refuse rather than let the broker choose.
+        for text in (rendered.replace("podman image inspect", "podman image list"), rendered + rendered):
+            with self.subTest(text=text[:40]):
+                with self.assertRaises(broker.Refusal):
+                    broker.sudoers_granted_image_ref(text)
+
+    def test_unit_restricts_namespaces_to_names_systemd_actually_parses(self):
+        # TOG-757: systemd discards the ENTIRE RestrictNamespaces= value when any
+        # type name fails to parse, which fails OPEN — every namespace type is
+        # permitted, not the two intended. The shipped unit said "mount"; the
+        # kernel/systemd name is "mnt". Pin the accepted spelling.
+        service_source = (ROOT / "host-ops" / "host-ops-broker.service").read_text()
+        value = re.search(r"^RestrictNamespaces=(.*)$", service_source, re.MULTILINE).group(1).split()
+        self.assertEqual(set(value), {"user", "mnt"})
+        valid_types = {"cgroup", "ipc", "net", "mnt", "pid", "user", "uts"}
+        self.assertTrue(set(value).issubset(valid_types), f"unparsable namespace type in {value}")
+
     def test_acceptance_requires_each_service_and_image_contract(self):
         args = type("Args", (), {"config": str(self.config_path)})()
         self.private_key.chmod(0o600)
@@ -989,7 +1046,18 @@ class BrokerTest(unittest.TestCase):
         tmpfiles_source = (ROOT / "host-ops" / "host-ops-broker.tmpfiles").read_text()
         sudoers_source = (ROOT / "host-ops" / "host-ops-broker.sudoers").read_text()
         example_config_path = ROOT / "host-ops" / "config.example.json"
-        example_config = broker.load_config(example_config_path)
+        # The shipped example carries the same placeholder as the sudoers
+        # template; install.sh renders both from one --paperclip-image-ref. Render
+        # it here the way the installer does so the rest of this contract check
+        # reads a config the broker would actually accept.
+        rendered_example = json.loads(
+            example_config_path.read_text().replace("@@PAPERCLIP_IMAGE_REF@@", self.config["paperclipImageRef"])
+        )
+        self.assertEqual(rendered_example["paperclipImageRef"], self.config["paperclipImageRef"])
+        rendered_example_path = self.temp / "rendered-example-config.json"
+        rendered_example["testMode"] = True
+        rendered_example_path.write_text(json.dumps(rendered_example))
+        example_config = broker.load_config(rendered_example_path)
 
         exec_start = re.search(r"^ExecStart=(\S+) run --config (\S+)$", service_source, re.MULTILINE)
         self.assertIsNotNone(exec_start)
@@ -997,7 +1065,12 @@ class BrokerTest(unittest.TestCase):
         unit_path = "/etc/systemd/system/paperclip-host-ops-broker.service"
         self.assertIn(f'"$SOURCE_DIR/broker.py" {executable}', install_source)
         self.assertIn(f'"$SOURCE_DIR/host-ops-broker.service" {unit_path}', install_source)
-        self.assertIn(f'"$SOURCE_DIR/config.example.json" {config_path}', install_source)
+        # config.json is no longer copied straight from the reviewed example: the
+        # installer renders --paperclip-image-ref into it (preserving an existing
+        # operator config) and installs that. It must still land at the exact path
+        # the unit reads, and must still be seeded from the reviewed example.
+        self.assertIn(f'install -o root -g paperclip-host-reader -m 0640 "$CONFIG_TMP" {config_path}', install_source)
+        self.assertIn('cp "$SOURCE_DIR/config.example.json" "$CONFIG_TMP"', install_source)
         self.assertIn('git --no-replace-objects archive --format=tar "$SOURCE_REF" host-ops', install_source)
         self.assertIn('source_type=$(git --no-replace-objects cat-file -t "$SOURCE_REF"', install_source)
         self.assertIn('[[ "$source_type" == commit ]]', install_source)
@@ -1073,9 +1146,13 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(sudoers_grantee, service_user)
         self.assertEqual(sudoers_run_as, example_config["paperclipHostUser"])
 
+        # The image reference is host state rendered by install.sh, so the shipped
+        # template carries the placeholder rather than any one host's image. The
+        # rendered-vs-config agreement is asserted separately below and in
+        # test_host_ops_install.sh.
         expected_sudoers_commands = {
             "/usr/bin/env XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/systemctl --user show paperclip.service --no-pager --property=ActiveState\\,SubState\\,MainPID\\,ExecMainStartTimestampMonotonic",
-            "/usr/bin/env XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/podman image inspect paperclip-local --format {{json .}}",
+            "/usr/bin/env XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/podman image inspect @@PAPERCLIP_IMAGE_REF@@ --format {{json .}}",
         }
         command_lines = re.search(r"Cmnd_Alias PAPERCLIP_HOST_READS = \\\n(.*?)\n\n", sudoers_source, re.DOTALL).group(1)
         actual_sudoers_commands = {
@@ -1115,7 +1192,10 @@ class BrokerTest(unittest.TestCase):
         actual_executor_commands = {" ".join(command[4:]) for command in executed_commands}
         self.assertEqual(
             actual_executor_commands,
-            {command.replace("\\,", ",") for command in expected_sudoers_commands},
+            {
+                command.replace("\\,", ",").replace("@@PAPERCLIP_IMAGE_REF@@", self.config["paperclipImageRef"])
+                for command in expected_sudoers_commands
+            },
         )
 
         systemd_analyze = shutil.which("systemd-analyze")

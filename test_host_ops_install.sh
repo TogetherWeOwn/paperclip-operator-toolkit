@@ -113,6 +113,110 @@ getent() {
 id() { return 1; }
 expect_refusal "partial identity refuses before creation" "partially configured" classify_service_identity
 
+# TOG-757: --paperclip-image-ref argument contract and rendering.
+# The installer refuses a reference that could terminate or widen the exact-argv
+# sudoers grant, and renders the accepted one identically into the sudoers file
+# and config.json. Argument validation is exercised through the real script so
+# the regex under test is the shipped one.
+# Run the shipped script with the EUID guard stubbed out, so the refusal under
+# test is the image-reference check and not "must run as root". Invoking the
+# real install.sh unmodified would refuse at the EUID line first and pass no
+# matter what the image-reference contract said.
+image_ref_arg_refusal() {
+  local label="$1" candidate="$2" output rc harness
+  harness=$(mktemp)
+  # Stop before any host mutation: the required-command loop is the first step
+  # after argument validation, so failing it bounds the run to arg parsing.
+  sed -e 's/^\[\[ \$EUID -eq 0 \]\].*$/:/' \
+      -e 's|^for command in git install|for command in __tog757_absent__ git install|' \
+      "$ROOT/host-ops/install.sh" > "$harness"
+  set +e
+  output=$(bash "$harness" --source-ref "$(printf 'a%.0s' {1..40})" \
+    --public-key-out /tmp/none.pem --expected-public-key-sha256 "$(printf 'b%.0s' {1..64})" \
+    --paperclip-image-ref "$candidate" 2>&1)
+  rc=$?
+  set -e
+  rm -f "$harness"
+  if [[ $rc -eq 2 && "$output" == *"must be a plain image reference"* ]]; then
+    ok "$label"
+  else
+    fail "$label (rc=$rc output=$output)"
+  fi
+}
+
+# Positive control: the same harness must get PAST argument validation on a good
+# reference, proving the refusals above are caused by the reference and not by
+# the harness itself.
+image_ref_arg_accepted() {
+  local label="$1" candidate="$2" output rc harness
+  harness=$(mktemp)
+  sed -e 's/^\[\[ \$EUID -eq 0 \]\].*$/:/' \
+      -e 's|^for command in git install|for command in __tog757_absent__ git install|' \
+      "$ROOT/host-ops/install.sh" > "$harness"
+  set +e
+  output=$(bash "$harness" --source-ref "$(printf 'a%.0s' {1..40})" \
+    --public-key-out /tmp/none.pem --expected-public-key-sha256 "$(printf 'b%.0s' {1..64})" \
+    --paperclip-image-ref "$candidate" 2>&1)
+  rc=$?
+  set -e
+  rm -f "$harness"
+  if [[ "$output" == *"required command missing: __tog757_absent__"* ]]; then
+    ok "$label"
+  else
+    fail "$label (rc=$rc output=$output)"
+  fi
+}
+
+image_ref_regex_accepts() {
+  local candidate="$1"
+  [[ "$candidate" =~ ^[a-z0-9][a-z0-9._/-]{0,159}(:[A-Za-z0-9._-]{1,127}|@sha256:[0-9a-f]{64})?$ ]]
+}
+
+for good in \
+  "localhost/paperclip-local:tog-516v2-51ee6c01b" \
+  "ghcr.io/paperclipai/paperclip@sha256:$(printf 'f%.0s' {1..64})" \
+  "paperclip-local"; do
+  if image_ref_regex_accepts "$good"; then ok "image ref accepted: $good"; else fail "image ref should be accepted: $good"; fi
+done
+
+for bad in \
+  "paperclip-local --format {{json .}}, /bin/sh" \
+  "paperclip local" \
+  "paperclip-local, ALL=(ALL) NOPASSWD: ALL" \
+  "-leading-dash" \
+  ""; do
+  if image_ref_regex_accepts "$bad"; then fail "image ref should be refused: $bad"; else ok "image ref refused: ${bad:-<empty>}"; fi
+done
+
+image_ref_arg_refusal "installer refuses an injecting image ref" "paperclip-local, ALL=(ALL) NOPASSWD: ALL"
+image_ref_arg_refusal "installer refuses an image ref with whitespace" "paperclip local"
+image_ref_arg_refusal "installer refuses an empty image ref" ""
+image_ref_arg_accepted "installer accepts the running host's image ref" "localhost/paperclip-local:tog-516v2-51ee6c01b"
+
+# The rendered sudoers grant and the rendered config must name the same image.
+render_dir=$(mktemp -d)
+trap 'rm -rf "$render_dir"' EXIT
+render_ref="localhost/paperclip-local:tog-516v2-51ee6c01b"
+sed "s|@@PAPERCLIP_IMAGE_REF@@|$render_ref|" "$ROOT/host-ops/host-ops-broker.sudoers" > "$render_dir/sudoers"
+python3 - "$ROOT/host-ops/config.example.json" "$render_dir/config.json" "$render_ref" <<'PY'
+import json, sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text().replace("@@PAPERCLIP_IMAGE_REF@@", sys.argv[3]))
+Path(sys.argv[2]).write_text(json.dumps(config))
+PY
+granted=$(grep -oP 'podman image inspect \K\S+' "$render_dir/sudoers")
+configured=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["paperclipImageRef"])' "$render_dir/config.json")
+if [[ "$granted" == "$render_ref" && "$configured" == "$render_ref" ]]; then
+  ok "sudoers grant and config render the same image reference"
+else
+  fail "render mismatch (sudoers=$granted config=$configured)"
+fi
+if grep -Fq '@@PAPERCLIP_IMAGE_REF@@' "$render_dir/sudoers" || grep -Fq '@@PAPERCLIP_IMAGE_REF@@' "$render_dir/config.json"; then
+  fail "placeholder survived rendering"
+else
+  ok "no placeholder survives rendering"
+fi
+
 if (( failures != 0 )); then
   printf '%s host-ops installer contract tests failed\n' "$failures" >&2
   exit 1
