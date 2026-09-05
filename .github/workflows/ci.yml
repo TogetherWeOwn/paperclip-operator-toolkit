@@ -1721,6 +1721,22 @@ jobs:
       - name: stale unblock-descriptor sweep suite
         run: ./test_stale_descriptor_sweep.sh
 
+      # TOG-831. The scheduler that takes the nightly database backup can wedge:
+      # it marks a backup in flight and, if that run dies without clearing the
+      # flag, every later tick sees "already running" and returns. No backup is
+      # taken and nothing goes red -- the wedge is silent, and it recurred on
+      # 2026-09-05 at 06:36Z.
+      #
+      # This suite tests db_backup_stall.sh, the DETECTOR, and it runs offline:
+      # green here means the detector's own logic holds, never that the host is
+      # healthy or that the watchdog patch is deployed. The deployment question
+      # is answered by verification/tog-831-stall-guard-sim.mjs, which reads
+      # /app/server/src/index.ts and is deliberately NOT registered here --
+      # ubuntu-latest has no /app, so it could only ever be vacuous or red
+      # (CONTRIBUTING rule 8). Run that one on the host.
+      - name: database backup stall detector suite
+        run: ./test_db_backup_stall.sh
+
       # And those are 40 green assertions about a detector, which is worth
       # nothing until somebody breaks the detector and watches them go red. Each
       # mutation removes ONE limb and requires the NAMED case to redden, after a
