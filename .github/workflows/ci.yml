@@ -1848,6 +1848,43 @@ jobs:
       - name: upstream readiness suite is not vacuous (mutation-gated)
         run: ./verification/tog-721-mutation-gate.sh
 
+      # TOG-1072. Does every `pinned` line in upstream_draft_pins.txt name
+      # bytes that are actually FILABLE? Two gates already guard that file and
+      # both read green on the defect, because they check the other two
+      # properties: the pin audit asks "does the digest still match the ref?"
+      # (it did — the stale branch genuinely still held the stale bytes) and
+      # the filing gate scores whatever ref you hand it (nothing made it score
+      # the ref a PIN names). Pin drift and pin staleness-of-intent are
+      # different properties; only the first was ever checked. The discord
+      # report sat `pinned` at its pre-remediation blob — seven violations,
+      # including a leaked production run uuid and all four tenant names — and
+      # a disclosure grant reading main would have named those bytes.
+      #
+      # TOG-1086 added the OTHER join direction to the same gate: is every
+      # SENDABLE report actually PINNED? Everything above iterates `pinned`
+      # lines, which structurally cannot see a report with no pin line — it is
+      # not a weak input to that loop, it is not an input at all. Measured on
+      # main: report 9 (omniroute-truncated-reasoning-false-502) was sendable,
+      # on main, and unpinned since 81baa828, and deleting a DIFFERENT
+      # sendable report's pin line made the gate report FEWER violations.
+      # Deleting the evidence improved the score. M6/M7 pin that direction.
+      #
+      # Only the mutation suite is registered. It runs the gate ten times
+      # (baseline, seven mutants, three controls) and fails if the gate goes
+      # green on a bad pin file, so it strictly subsumes running the gate once
+      # — and unlike the gate itself it does not depend on the bundle's own
+      # remediation state, which lives off main and is still in front of the
+      # owner. Running the bare gate here would red on six unrelated pins that
+      # are TOG-1048's business, not this check's.
+      #
+      # The suite builds its own scratch git repo and its own audit ref, so it
+      # needs neither `origin/main` nor any remote branch. That is deliberate:
+      # actions/checkout@v4 clones --depth=1 --single-branch, and an earlier
+      # revision that pinned fixtures to real refs would have been a
+      # permanently red step that never once scored a mutant.
+      - name: pinned upstream blobs are filable, and sendable blobs are pinned (mutation-gated)
+        run: ./verification/tog-1072-pin-conformance-mutants.sh
+
       # TOG-1069. The readiness gates above ask "may we file yet?". This one
       # asks a question none of them do: "if we filed, following the procedure
       # written on `main`, what would we send?"
