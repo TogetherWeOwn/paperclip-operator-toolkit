@@ -1848,6 +1848,39 @@ jobs:
       - name: upstream readiness suite is not vacuous (mutation-gated)
         run: ./verification/tog-721-mutation-gate.sh
 
+      # TOG-1069. The readiness gates above ask "may we file yet?". This one
+      # asks a question none of them do: "if we filed, following the procedure
+      # written on `main`, what would we send?"
+      #
+      # `main`'s README told a filer the `DRAFT — not filed` banner "should be
+      # edited only by whoever actually files it" — i.e. edit line 1, send.
+      # Measured against main's own blobs with the bundle gate's pattern, a
+      # line-1-only edit ships NINE lines telling the vendor the report is
+      # unfiled, that it is one of an internal batch, or that we hold no
+      # credential for their repository and filing is reserved to our operator.
+      # The correct structural rule existed only on an unmerged branch, so it
+      # protected nobody: being right somewhere unreachable is being wrong.
+      #
+      # WHY NOTHING ELSE CAUGHT IT. The defect was never in the report bytes —
+      # those strip clean and always did. It was in the INSTRUCTIONS. The
+      # bundle filing gate scores the seven reports and the README is not one
+      # of them; the pin audit asks only whether a digest still matches its
+      # ref. A gate that reads only artifacts is blind to a wrong procedure.
+      # So this gate asserts both: the reports strip clean AND the README
+      # still teaches the rule that makes that true.
+      #
+      # Registered by BOTH paths deliberately. The mutation suite is the
+      # evidence the gate is load-bearing (8 mutants, incl. the real pre-fix
+      # README from origin/main as a negative control); the bare gate is what
+      # reddens on a future README edit, and is cheap. Per TOG-1047 this repo
+      # has a history of gates that exist and are never run — ci.yml registers
+      # by explicit path, so an unregistered suite is the same as no suite.
+      - name: upstream bundle filing-strip gate
+        run: ./verification/upstream-bundle-filing-strip-gate.sh
+
+      - name: filing-strip gate is not vacuous (mutation-gated)
+        run: ./verification/tog-1069-filing-strip-mutation-gate.sh
+
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
       # UPDATE one statement after the insert that leaves it NULL — and it is
