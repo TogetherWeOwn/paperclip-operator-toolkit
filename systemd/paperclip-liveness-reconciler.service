@@ -1,0 +1,37 @@
+[Unit]
+Description=Paperclip task-liveness reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Default the repair cap to the safe end: an unset or empty
+# PAPERCLIP_RECONCILER_MAX_REPAIRS would otherwise expand to nothing and hand
+# --retry-limit's value to --max-repairs. Kept above EnvironmentFile= so the
+# operator's env file takes precedence -- systemd applies these in order, and
+# EnvironmentFile= is documented to override Environment= regardless, so the
+# env file wins under either reading.
+Environment=PAPERCLIP_RECONCILER_MAX_REPAIRS=0
+EnvironmentFile=%h/.config/paperclip/liveness-reconciler.env
+# The installer renders @SOURCE_REF@ from the independently reviewed 40-hex
+# commit and installs these bytes outside the mutable checkout.
+WorkingDirectory=/usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@
+ExecStartPre=/usr/bin/test -x /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/liveness_reconciler.py
+ExecStartPre=/usr/bin/test -r /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/liveness_reconciler_source.js
+ExecStartPre=/usr/bin/test -x /usr/local/bin/node
+ExecStartPre=/usr/bin/test -x /usr/bin/timeout
+ExecStartPre=/usr/bin/sha256sum --check --strict /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/SHA256SUMS
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/liveness_reconciler.py --check-service-credential --preflight-issue-id ${PAPERCLIP_PREFLIGHT_ISSUE_ID} --preflight-agent-id ${PAPERCLIP_PREFLIGHT_AGENT_ID}
+ExecStart=/usr/bin/timeout --signal=TERM --kill-after=15s 4m /usr/bin/python3 /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/liveness_reconciler.py --apply --source-cmd '/usr/local/bin/node /usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@/liveness_reconciler_source.js --project ${PAPERCLIP_PROJECT_ID}' --max-repairs ${PAPERCLIP_RECONCILER_MAX_REPAIRS} --retry-limit 1
+TimeoutStartSec=5m
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# No ReadWritePaths: the reconciler keeps no on-disk state, and a writable path
+# under %h would contradict ProtectHome=read-only and fail the unit at start.
+# If state is ever needed, use StateDirectory= rather than reopening %h.
+UMask=0077
+
+[Install]
+WantedBy=default.target

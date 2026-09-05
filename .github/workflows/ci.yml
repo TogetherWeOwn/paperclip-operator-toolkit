@@ -121,6 +121,9 @@ name: CI
 #                                       for is already back — and whether a null
 #                                       five-hour reading is ever scored as
 #                                       headroom — TOG-487
+#     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
+#                                       diagnostics, bounded owned repair, and owner-HOLD refusal
+#                                       — TOG-586
 #     test_model_lane_probe.sh          model_lane_probe.sh: whether the cheap/
 #                                       small-fast lane is dead OR has come
 #                                       UNPINNED. A bare model id answers 200 and
@@ -955,6 +958,20 @@ jobs:
       # to a broken staging copy.
       - name: interaction routing suite
         run: ./test_interaction_route.sh
+
+      # TOG-586. Four exact recurring control-plane liveness reproductions:
+      # reviewer/assignee divergence and orphan terminalization are asserted as
+      # diagnostics for Paperclip's native typed-review/recovery paths; ready
+      # unassigned blockers and owner-HOLD preservation exercise the reduced
+      # owned repair. Pure fixtures: no API, database, credential or timer.
+      - name: task liveness reconciler suite
+        run: python3 -m unittest -v test_liveness_reconciler.py
+
+      - name: task liveness deployment contract suite
+        run: python3 -m unittest -v test_liveness_reconciler_deployment.py
+
+      - name: task liveness deployment gates are load-bearing
+        run: ./verification/tog-586-service-mutation-gate.sh
 
       # TOG-676. The Discord daily digest has never posted — not once, in any
       # channel, on any day. It read as healthy for two consecutive write-ups
