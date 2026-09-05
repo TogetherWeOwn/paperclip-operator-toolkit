@@ -284,6 +284,16 @@ detect 2026-08-25T21:45:50Z "$(mk_pace 2026-08-25T16:45:37Z)" "$ACTIONS"
 want "a pace feed 5h stale is exit 5, not 'no headroom'" 5 "$RC"
 want_in "the stale-feed refusal says it is not a clean result" "This is NOT" "$(cat "$ERRTXT")"
 
+# The actual frozen outage feed takes the file path (shared-guard) path, not the
+# synthetic command seam, and must fail closed before recovery-action logic.
+DEAD="$HERE/tests/dead-feed-2026-08-26.jsonl"
+ERRTXT="$WORK/dead.err"
+OUT="$(env COLD_START_NOW=2026-09-04T16:00:00Z QUOTA_PACING_FILE="$DEAD" PACE_WINDOW_CMD="" \
+  RECOVERY_SOURCE_CMD="$ACTIONS" "$TOOL" detect 2>"$ERRTXT")"; RC=$?
+want "the real dead feed is UNKNOWN through the shared guard" 5 "$RC"
+want "the real dead feed emits no confident detector verdict" "" "$OUT"
+want_in "the real dead-feed reason names UNKNOWN" "UNKNOWN" "$(cat "$ERRTXT")"
+
 # An action whose updated_at will not parse cannot be aged. Dropping it would
 # make the count silently one short; guessing it is fresh would hide it.
 BADTS="$(printf 'act-1\tissue-1\tagent-coo\tPresident\tnot-a-timestamp\t1\n' | mk_tsv)"

@@ -832,6 +832,25 @@ export const TOOLS = [
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
 
+// WHAT THIS TRANSPORT ADVERTISES vs WHAT IT CAN RUN (TOG-825)
+//
+// capabilityScript is optional, and makeScriptRunner fails closed when a
+// capability tool reaches a server without one. That refusal is correct and it
+// stays. But for the first nine days of this deployment it was the ONLY
+// control: tools/list advertised all six tools unconditionally, so every agent
+// on the box was shown three capability tools that could never run, and
+// TOOLS.md told them to route real asks through one. Every such ask died in a
+// transport error the caller could not act on.
+//
+// A tool that is advertised and always fails is worse than one that is absent,
+// because it consumes the attempt the instructions demand. So discovery is now
+// derived from the SAME config the runner is bound to: a script binding with no
+// configured path is not offered. The fail-closed runner is kept as defence in
+// depth — these two must agree, and the suite pins that they do.
+export function advertisedTools(cfg) {
+  return TOOLS.filter((tool) => tool.script !== "capability" || Boolean(cfg.capabilityScript));
+}
+
 /**
  * Enforce the tool's own inputSchema: every key must be one it declares.
  *
@@ -1320,7 +1339,7 @@ export function createHandler(cfg, deps = {}) {
 
     // Anonymous by necessity — this is the gateway's catalog refresh and health
     // check, which carries credentials but no session. See the file header.
-    if (method === "tools/list") return rpcResult(id, { tools: TOOLS });
+    if (method === "tools/list") return rpcResult(id, { tools: advertisedTools(cfg) });
 
     if (method === "tools/call") {
       const toolName = params?.name;
@@ -1335,7 +1354,7 @@ export function createHandler(cfg, deps = {}) {
         throw new HttpError(
           400, "unknown_tool",
           `unknown tool '${toolName}'. This transport exposes: `
-          + TOOLS.map((t) => t.name).join(", ")
+          + advertisedTools(cfg).map((t) => t.name).join(", ")
           + ". There is no tool that runs the provisioner or effects a grant; the queue and the gate are the only "
           + "entry points, and they DECIDE — they do not GRANT.",
         );
@@ -1577,8 +1596,21 @@ export async function main(argv) {
     queueScript: cfg.queueScript,
     capabilityScript: cfg.capabilityScript,
     requireLiveRun: cfg.requireLiveRun,
-    tools: TOOLS.map((tool) => tool.name),
+    tools: advertisedTools(cfg).map((tool) => tool.name),
+    // Loud on the line the operator actually reads. An install that meant to
+    // front the gate and left capabilityScript unset is a silent three-tool
+    // hole otherwise — that is exactly how TOG-825 went unnoticed for nine days.
+    capabilityToolsAdvertised: Boolean(cfg.capabilityScript),
   }) + "\n");
+  if (!cfg.capabilityScript) {
+    process.stdout.write(JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "capability_tools_withheld",
+      reason: "capabilityScript is unset in " + configPath + ", so the three capability tools are NOT advertised. "
+        + "Agents will not see them rather than seeing tools that always fail. If this deployment is meant to front "
+        + "the capability gate, set capabilityScript to capability_gate.sh and restart.",
+    }) + "\n");
+  }
 
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => server.close(() => process.exit(0)));

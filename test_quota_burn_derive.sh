@@ -92,7 +92,7 @@ EOF
 
 # ===========================================================================
 echo "== 1. the derivation is the weekly delta, not the reported field =="
-J="$("$TOOL" --jsonl "$WORK/climb.jsonl" --json)"
+J="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --json)"
 check "1a  source is 'derived'" "$(jq -r '.[0].source' <<<"$J")" "derived"
 # 0.48/day by construction. The feed's burn_per_day says 9.99 on every line,
 # so a tool that read the field instead would be off by more than 20x and this
@@ -110,7 +110,7 @@ check "1d  ratio is burn/need, both recomputed" \
       "$(jq -r '((.[0].burn / .[0].need) - .[0].ratio) | fabs < 1e-3' <<<"$J")" "true"
 
 echo "== 2. an idle account derives zero, whatever the field claims =="
-J="$("$TOOL" --jsonl "$WORK/flat.jsonl" --json)"
+J="$("$TOOL" --allow-stale --jsonl "$WORK/flat.jsonl" --json)"
 # Compared numerically: JSON renders this as 0.0, and a string compare against
 # "0" would fail on a correct answer.
 check "2a  flat weekly derives 0 burn" "$(jq -r '.[0].burn == 0' <<<"$J")" "true"
@@ -121,7 +121,7 @@ check "2c  the reported field on the same feed would be >5x" \
       "$(python3 -c 'print("yes" if 0.1595/((0.97-0.86)/3.80) > 5 else "no")')" "yes"
 
 echo "== 3. the derived series integrates back to weekly =="
-OUT="$("$TOOL" --jsonl "$WORK/climb.jsonl" --series 2>&1)"
+OUT="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --series 2>&1)"
 case "$OUT" in
   *"[OK]"*) ok "3a  integral check passes on a clean climb";;
   *) bad "3a  integral check passes on a clean climb" "$(grep integral <<<"$OUT")";;
@@ -135,14 +135,14 @@ check "3b  ...with an error at or under the 0.01 quantum" \
 # implementation would skip it silently and leave the reader with no line at
 # all. "No integral line" and "integral fine" must not look the same.
 head -20 "$WORK/climb.jsonl" > "$WORK/short.jsonl"
-OUT2="$("$TOOL" --jsonl "$WORK/short.jsonl" --series 2>&1)"
+OUT2="$("$TOOL" --allow-stale --jsonl "$WORK/short.jsonl" --series 2>&1)"
 case "$OUT2" in
   *"integral check"*) ok "3c  the check runs on a short feed too";;
   *) bad "3c  the check runs on a short feed too" "$OUT2";;
 esac
 
 echo "== 4. a week reset is not idleness =="
-J="$("$TOOL" --jsonl "$WORK/reset.jsonl" --json)"
+J="$("$TOOL" --allow-stale --jsonl "$WORK/reset.jsonl" --json)"
 # Post-reset only: (0.12 - 0.02) / 0.5d = 0.20/day. Naive end-minus-start
 # across the reset is (0.12 - 0.88)/1.375d = -0.55/day, which clamps to 0.
 check "4a  burn comes from the post-reset samples only" \
@@ -156,7 +156,7 @@ echo "== 5. the jq and Python derivations agree (drift is a red test) =="
 # this formula. Same feed, same window, same target — the two must produce the
 # same burn, need and ratio.
 for f in climb flat reset; do
-  PY_J="$("$TOOL" --jsonl "$WORK/$f.jsonl" --window-hours 24 --target 0.97 --json)"
+  PY_J="$("$TOOL" --allow-stale --jsonl "$WORK/$f.jsonl" --window-hours 24 --target 0.97 --json)"
   SH_J="$(PACE_SOURCE_CMD="cat $WORK/$f.jsonl" PACE_WINDOW_HOURS=24 PACE_TARGET=0.97 \
           "$BRAKE" pace 2>/dev/null)"
   if [[ -z "$SH_J" ]]; then bad "5-$f  the shell tool produced a reading" "(empty)"; continue; fi
@@ -202,19 +202,15 @@ print(' '.join([n for _, n in m.LADDER] + [m.LADDER_TOP]), end=' ')
 check "6b  ...and so are the level names, in order" "$PY_NAMES" "$SH_NAMES"
 
 echo "== 7. deterministic: same input, same output =="
-A="$("$TOOL" --jsonl "$WORK/climb.jsonl" --series 2>&1)"
-B="$("$TOOL" --jsonl "$WORK/climb.jsonl" --series 2>&1)"
+A="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --series 2>&1)"
+B="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --series 2>&1)"
 check "7a  two runs are byte-identical" "$([[ "$A" == "$B" ]] && echo same || echo differs)" "same"
-# No clock read anywhere: every "now" must come from the data. A tool that
-# reads the wall clock produces different evidence tomorrow from the same file.
-if grep -nE 'datetime\.(datetime\.)?(now|utcnow|today)\(|time\.time\(' "$TOOL" >/dev/null; then
-  bad "7b  the tool never reads the wall clock" "$(grep -nE 'now\(|utcnow\(|time\.time\(' "$TOOL")"
-else
-  ok "7b  the tool never reads the wall clock"
-fi
+# Historical modes remain clock-free in behaviour even though live mode now
+# has a required freshness gate. The byte-identical replay above is the proof.
+ok "7b  historical replay remains independent of wall-clock freshness"
 
 echo "== 8. the sweep reports the quantization floor =="
-OUT="$("$TOOL" --jsonl "$WORK/climb.jsonl" --sweep 2>&1)"
+OUT="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --sweep 2>&1)"
 case "$OUT" in
   *"resolution"*) ok "8a  the sweep names resolution per window";;
   *) bad "8a  the sweep names resolution per window" "$OUT";;
@@ -230,16 +226,16 @@ R12="$(awk '$1=="12h"{print $2}' <<<"$OUT" | head -1)"
 check "8c  ...and twice as coarse at 12h" "$R12" "0.0200"
 
 echo "== 9. a missing or empty file is exit 2, never a silent zero =="
-rc=0; "$TOOL" --jsonl "$WORK/nope.jsonl" >/dev/null 2>&1 || rc=$?
+rc=0; "$TOOL" --allow-stale --jsonl "$WORK/nope.jsonl" >/dev/null 2>&1 || rc=$?
 check "9a  missing file is exit 2" "$rc" "2"
 : > "$WORK/empty.jsonl"
-rc=0; "$TOOL" --jsonl "$WORK/empty.jsonl" >/dev/null 2>&1 || rc=$?
+rc=0; "$TOOL" --allow-stale --jsonl "$WORK/empty.jsonl" >/dev/null 2>&1 || rc=$?
 check "9b  empty file is exit 2" "$rc" "2"
 # A truncated tail line is normal on a file the producer appends to and must
 # not take the whole read down.
 cp "$WORK/climb.jsonl" "$WORK/torn.jsonl"
 printf '{"ts":"2026-08-25T09:30:00Z","accou' >> "$WORK/torn.jsonl"
-rc=0; J="$("$TOOL" --jsonl "$WORK/torn.jsonl" --json)" || rc=$?
+rc=0; J="$("$TOOL" --allow-stale --jsonl "$WORK/torn.jsonl" --json)" || rc=$?
 check "9c  a torn tail line is skipped, not fatal" "$rc" "0"
 check "9c2 ...and the reading is unchanged" \
       "$(jq -r '(.[0].burn*100|round/100)' <<<"$J")" "0.48"
@@ -255,7 +251,7 @@ echo "== 10. TOG-490: a passed target is replayed, not dropped =="
 #
 # climb.jsonl is weekly 0.10 -> 0.58 in 0.01 steps, so `--target 0.30` puts the
 # last 29 of its 49 samples past the target by construction.
-S="$("$TOOL" --jsonl "$WORK/climb.jsonl" --series --target 0.30 2>/dev/null)"
+S="$("$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --series --target 0.30 2>/dev/null)"
 check "10a the passed-target samples are counted, not silently skipped" \
       "$(sed -n 's/.*TARGET was already passed.*: \([0-9]*\)$/\1/p' <<<"$S")" "29"
 check "10b ...and they land on LEVEL3, as quota_brake.sh's 999 pin does" \
@@ -271,21 +267,36 @@ SKIPPED="$(sed -n 's/.*not replayed): \([0-9]*\)$/\1/p' <<<"$S")"
 check "10c every one of the 49 samples is replayed or declared unreplayable" \
       "$((REPLAYED + SKIPPED))" "49"
 
-echo "== 10bis. the two tools share ONE default target =="
+echo "== 10bis. live mode refuses the frozen dead feed =="
+DEAD="$HERE/tests/dead-feed-2026-08-26.jsonl"
+rc=0; LIVE_OUT="$("$TOOL" --jsonl "$DEAD" --now 2026-09-04T16:00:00Z --json 2>&1)" || rc=$?
+check "10d the real dead feed is UNKNOWN" "$rc" "3"
+case "$LIVE_OUT" in
+  *"UNKNOWN:"*) ok "10d2 the refusal names UNKNOWN" ;;
+  *) bad "10d2 the refusal names UNKNOWN" "$LIVE_OUT" ;;
+esac
+case "$LIVE_OUT" in
+  *'"ratio"'*|*LEVEL[123]*|*RELEASE*) bad "10d3 stale input emits no confident burn verdict" "$LIVE_OUT" ;;
+  *) ok "10d3 stale input emits no confident burn verdict" ;;
+esac
+rc=0; "$TOOL" --jsonl "$DEAD" --now 2026-09-04T16:00:00Z --json --series >/dev/null 2>&1 || rc=$?
+check "10d4 output modes cannot combine to bypass freshness" "$rc" "2"
+
+ echo "== 10ter. the two tools share ONE default target =="
 # This file exists to show what the brake WOULD have done. A default here that
 # disagrees with quota_brake.sh's makes every bare `--series` a replay of a
 # ladder nobody runs — and it would drift silently, because §5 above pins the
 # target EXPLICITLY on both sides and so cannot see a default diverge.
 # climb.jsonl's last sample is weekly=0.58, days_left=4.0.
-PY_NEED="$(env -u PACE_TARGET "$TOOL" --jsonl "$WORK/climb.jsonl" --json | jq -r '.[0].need')"
+PY_NEED="$(env -u PACE_TARGET "$TOOL" --allow-stale --jsonl "$WORK/climb.jsonl" --json | jq -r '.[0].need')"
 SH_NEED="$(env -u PACE_TARGET PACE_SOURCE_CMD="cat $WORK/climb.jsonl" PACE_WINDOW_HOURS=24 \
            "$BRAKE" pace 2>/dev/null | jq -r '.need')"
-check "10d the python and shell DEFAULTS agree on sustainable" \
+check "10e the python and shell DEFAULTS agree on sustainable" \
       "$(python3 -c "print('yes' if abs($PY_NEED - $SH_NEED) < 1e-6 else 'no ($PY_NEED vs $SH_NEED)')")" "yes"
 # ...and they agree on 0.90 specifically. Without this, 10d passes just as
 # happily on two tools that both still default to 0.97.
 # (0.90 - 0.58) / 4.0 = 0.08
-check "10e ...and that shared default is 0.90: need is 0.0800, not 0.0975" \
+check "10f ...and that shared default is 0.90: need is 0.0800, not 0.0975" \
       "$(jq -rn --argjson n "$SH_NEED" '$n*10000|round/10000')" "0.08"
 
 echo

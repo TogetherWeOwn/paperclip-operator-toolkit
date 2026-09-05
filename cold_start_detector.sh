@@ -204,16 +204,43 @@ is_int() { [[ "${1:-}" =~ ^-?[0-9]+$ ]]; }
 # it is an unreadable one, and read_pace_window fails rather than returning
 # nothing for the caller to misread as "no headroom".
 read_pace_window() {
-  local out
+  local out kept
   if [[ -n "$PACE_WINDOW_CMD" ]]; then
     out="$($PACE_WINDOW_CMD 2>/dev/null)" || return 1
   else
     [[ -r "$QUOTA_PACING_FILE" ]] || return 1
     out="$(cat "$QUOTA_PACING_FILE" 2>/dev/null)" || return 1
   fi
-  local kept
-  kept="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | jq -c -e . 2>/dev/null)" || return 1
+  # Skip a torn append and sort by timestamp. The production path then validates
+  # this same immutable snapshot, so an append between guard and analysis cannot
+  # make the detector evaluate a record the guard never saw.
+  kept="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | jq -cs '
+    map(select(type == "object")
+        | . as $row
+        | if (($row.ts | type) == "string" and ($row.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")))
+          then try (($row.ts | fromdateiso8601) as $epoch | {epoch:$epoch,row:$row}) catch empty
+          else empty
+          end)
+    | sort_by(.epoch) | .[].row' 2>/dev/null)" || return 1
   [[ -n "$kept" ]] || return 1
+
+  if [[ -z "$PACE_WINDOW_CMD" ]]; then
+    local guard_file guard rc
+    local -a now_arg=()
+    guard_file="$(mktemp "${TMPDIR:-/tmp}/cold-start-guard.XXXXXX")" || return 1
+    printf '%s\n' "$kept" >"$guard_file" || { rm -f "$guard_file"; return 1; }
+    [[ -n "$COLD_START_NOW" ]] && now_arg=(--now "$COLD_START_NOW")
+    if guard="$(python3 "$HERE/pacing_verdict.py" --file "$guard_file" --max-age-minutes 120 "${now_arg[@]}" 2>&1)"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    rm -f "$guard_file"
+    if (( rc != 0 )); then
+      echo "UNKNOWN: $guard" >&2
+      return 3
+    fi
+  fi
   printf '%s' "$kept"
 }
 
@@ -269,7 +296,12 @@ tsv_read() { local l="$1"; shift; IFS=$'\x1f' read -r "$@" <<<"${l//$'\t'/$'\x1f
 #   STALE_ROWS STALE_COUNT ACTIVE_COUNT
 gather() {
   local window
-  window="$(read_pace_window)" \
+  local pace_rc=0
+  window="$(read_pace_window)" || pace_rc=$?
+  if (( pace_rc == 3 )); then
+    unknown "pacing verdict is UNKNOWN — nothing was examined."
+  fi
+  (( pace_rc == 0 )) \
     || unknown "cannot read the pace window (PACE_WINDOW_CMD or $QUOTA_PACING_FILE) — nothing was examined."
 
   local newest; newest="$(printf '%s\n' "$window" | tail -1)"

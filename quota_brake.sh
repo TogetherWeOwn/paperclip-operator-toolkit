@@ -183,6 +183,8 @@ AGENT_WRITE_CMD="${AGENT_WRITE_CMD:-}"      # argv: <agent_id> <json_body>
 REFUSAL_SOURCE_CMD="${REFUSAL_SOURCE_CMD:-}" # stdout: refusal TSV
 
 QUOTA_PACING_FILE="${QUOTA_PACING_FILE:-/paperclip/operator-handoff/quota-pacing.jsonl}"
+PACE_MAX_AGE_MIN="${PACE_MAX_AGE_MIN:-120}"
+PACE_NOW="${PACE_NOW:-}"                    # deterministic guard clock for tests
 EXEMPT_FILE="${EXEMPT_FILE:-$HERE/quota_brake_exempt.txt}"
 PACE_TARGET="${PACE_TARGET:-0.90}"   # a RESERVE of 0.10; see the header (TOG-490)
 REFUSAL_WINDOW_MIN="${REFUSAL_WINDOW_MIN:-15}"
@@ -303,6 +305,8 @@ Environment:
   PACE_SOURCE_CMD / ROSTER_SOURCE_CMD / AGENT_WRITE_CMD / REFUSAL_SOURCE_CMD
                             test seams; override the four impure edges
   QUOTA_PACING_FILE         pace samples (default /paperclip/operator-handoff/quota-pacing.jsonl)
+  PACE_MAX_AGE_MIN          newest sample older than this is UNKNOWN (default 120)
+  PACE_NOW                  deterministic UTC clock for the staleness guard (tests)
   EXEMPT_FILE               agents never braked (default ./quota_brake_exempt.txt)
   PACE_TARGET               weekly-quota line the brake defends (default 0.90;
                             1-PACE_TARGET is a reserve, not a shortfall)
@@ -403,20 +407,64 @@ assert_policy_preserved() {
 # with no producer logic in between. Derived that way the series integrates
 # back to `weekly` exactly (err 0.000000 over 46.4h, both accounts).
 read_pace_window() {
-  local out
+  local out parsed guard_file guard now_arg=()
   if [[ -n "$PACE_SOURCE_CMD" ]]; then
-    # The seam may emit one object or many lines; both are a window.
+    # The seam is trusted synthetic input for the offline suite.
     out="$($PACE_SOURCE_CMD 2>/dev/null)" || return 1
   else
     [[ -r "$QUOTA_PACING_FILE" ]] || return 1
+    # Read once. The helper validates a snapshot of these exact bytes, and the
+    # derivation below consumes the same snapshot — no guard/read TOCTOU and no
+    # mismatch between the helper's tail and this tool's larger window.
     out="$(grep -v '^[[:space:]]*$' "$QUOTA_PACING_FILE" 2>/dev/null | tail -n "$PACE_MAX_LINES")" || return 1
   fi
   [[ -n "$out" ]] || return 1
+
   # A partially-flushed tail line is normal on a file the producer appends to,
   # so drop unparseable lines rather than failing the whole read — but the
-  # window is only usable if SOMETHING parsed.
-  out="$(jq -c . <<<"$out" 2>/dev/null)" || true
-  [[ -n "$out" ]] || return 1
+  # window is only usable if SOMETHING parsed. Production requires parseable
+  # timestamps; the trusted synthetic seam retains its historical ts-less
+  # fixtures for pure arithmetic tests.
+  if [[ -n "$PACE_SOURCE_CMD" ]]; then
+    parsed="$(jq -cs 'map(select(type == "object")) | sort_by(.ts // "") | .[]' <<<"$out" 2>/dev/null)" || true
+  else
+    parsed="$(jq -cs '
+      map(select(type == "object")
+          | . as $row
+          | if (($row.ts | type) == "string" and ($row.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")))
+            then try (($row.ts | fromdateiso8601) as $epoch | {epoch:$epoch,row:$row}) catch empty
+            else empty
+            end)
+      | sort_by(.epoch) | .[].row' <<<"$out" 2>/dev/null)" || true
+  fi
+  [[ -n "$parsed" ]] || return 1
+
+  if [[ -z "$PACE_SOURCE_CMD" ]]; then
+    guard_file="$(mktemp "${TMPDIR:-/tmp}/quota-brake-guard.XXXXXX")" || return 1
+    printf '%s\n' "$parsed" >"$guard_file" || { rm -f "$guard_file"; return 1; }
+    [[ -n "$PACE_NOW" ]] && now_arg=(--now "$PACE_NOW")
+    local guard_rc
+    if guard="$(python3 "$HERE/pacing_verdict.py" --file "$guard_file" --max-age-minutes "$PACE_MAX_AGE_MIN" "${now_arg[@]}" 2>&1)"; then
+      guard_rc=0
+    else
+      guard_rc=$?
+    fi
+    rm -f "$guard_file"
+    if (( guard_rc != 0 )); then
+      echo "UNKNOWN: $guard" >&2
+      return 3
+    fi
+  fi
+  printf '%s' "$parsed"
+}
+
+read_guarded_pace_window() {
+  local out rc=0
+  out="$(read_pace_window)" || rc=$?
+  if (( rc == 3 )); then
+    unknown "pacing verdict is UNKNOWN. Nothing braked, nothing restored."
+  fi
+  (( rc == 0 )) || return 1
   printf '%s' "$out"
 }
 
@@ -470,7 +518,14 @@ pace_ratio() {
             | select(.ts != null)
             | { ts: (try (.ts | fromdateiso8601) catch null),
                 weekly: ( [ .accounts[]? | select(.name == $acc.name) | .weekly ][0] ) }
-            | select(.ts != null and .weekly != null) ] as $series
+            | select(.ts != null and .weekly != null) ] as $all_series
+        # An account can disappear while other accounts keep the global feed
+        # continuous. Bound continuity per account or its return after an outage
+        # silently derives across the outage.
+        | ( [ range(1; ($all_series|length))
+              | select(($all_series[.].ts - $all_series[. - 1].ts) > ($w * 3600)) ]
+            | last // 0 ) as $gap_floor
+        | $all_series[$gap_floor:] as $series
         # RESET TRUNCATION. Walk back from the newest sample and stop at the
         # first step where `weekly` DROPS by more than $rd — that is the week
         # rolling over, and pairing across it reads a fresh week as an idle
@@ -777,7 +832,7 @@ do_plan() {
   need jq; need awk
 
   local window worst ratio verdict source
-  window="$(read_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE). Nothing braked, nothing restored."
+  window="$(read_guarded_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE). Nothing braked, nothing restored."
   worst="$(pace_ratio "$window")"
   [[ -n "$worst" ]] || unknown "no account in the pace window has a burn that can be derived from \`weekly\` or read from \`burn_per_day\`. Refusing to guess."
   ratio="$(jq -r '.ratio' <<<"$worst")"
@@ -1070,7 +1125,7 @@ cmd_apply() {
 cmd_pace() {
   need jq
   local window worst
-  window="$(read_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE)."
+  window="$(read_guarded_pace_window)" || unknown "cannot read the pace signal (PACE_SOURCE_CMD or $QUOTA_PACING_FILE)."
   worst="$(pace_ratio "$window")"
   [[ -n "$worst" ]] || unknown "no account in the pace window has a derivable or readable burn."
   jq -c --arg v "$(verdict_for "$(jq -r '.ratio' <<<"$worst")")" '. + {verdict: $v}' <<<"$worst"

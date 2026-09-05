@@ -30,7 +30,10 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$SRC" "$STAGE/cold_start_detector.sh"
 cp "$SUITE" "$STAGE/test_cold_start_detector.sh"
-chmod +x "$STAGE"/*.sh
+cp "$ROOT/pacing_verdict.py" "$STAGE/pacing_verdict.py"
+mkdir -p "$STAGE/tests"
+cp "$ROOT/tests/dead-feed-2026-08-26.jsonl" "$STAGE/tests/"
+chmod +x "$STAGE"/*.sh "$STAGE/pacing_verdict.py"
 
 pass=0; fail=0
 red() { printf '\033[31m%s\033[0m\n' "$*"; }

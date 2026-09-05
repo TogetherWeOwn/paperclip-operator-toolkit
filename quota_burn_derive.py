@@ -74,8 +74,9 @@
 # step in the real file at 10:44Z) truncates the window at that point. Samples
 # before a reset are never mixed with samples after it.
 #
-# Deterministic: same input file -> same output. No network, no writes, no
-# credentials, no clock read. Every "now" is a timestamp from the data.
+# Live latest-sample mode is freshness-gated. Historical replay (--at, --series,
+# --sweep) and an explicit --allow-stale stay deterministic and read no clock.
+# No network, writes, or credentials.
 # ===========================================================================
 """Derive quota burn from the `weekly` series in quota-pacing.jsonl.
 
@@ -88,6 +89,8 @@ import argparse
 import datetime
 import json
 import sys
+
+from pacing_verdict import read_verdict_rows
 
 JSONL = "/paperclip/operator-handoff/quota-pacing.jsonl"
 
@@ -156,21 +159,29 @@ def parse_reset(s):
 
 
 def load(path):
-    """Return {account_name: [sample, ...]} ordered by ts, plus the raw rows."""
+    """Return {account_name: [sample, ...]} ordered by ts, plus usable rows."""
     rows = []
-    for line in open(path):
+    with open(path) as fh:
+        lines = fh.readlines()
+    for line in lines:
         line = line.strip()
         if not line:
             continue
         try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
+            row = json.loads(line)
+            if not isinstance(row, dict) or parse_ts(row.get("ts")) is None:
+                continue
+        except (json.JSONDecodeError, TypeError, ValueError):
             continue  # a partially-flushed tail line is normal; skip it
+        rows.append(row)
     series = {}
     for r in rows:
         ts = parse_ts(r["ts"])
-        for a in r.get("accounts", []):
-            if a.get("weekly") is None:
+        accounts = r.get("accounts")
+        if not isinstance(accounts, list):
+            continue
+        for a in accounts:
+            if not isinstance(a, dict) or a.get("weekly") is None or "name" not in a:
                 continue
             series.setdefault(a["name"], []).append(
                 {
@@ -207,6 +218,22 @@ def sustainable_for(sample, target):
     return (target - sample["weekly"]) / (dl if dl > 0 else 0.0001)
 
 
+def contiguous_floor(samples, idx, max_gap_hours):
+    """Oldest index in the newest producer-contiguous segment.
+
+    A fresh tail after an outage must not derive across the outage. The maximum
+    useful gap is the requested window itself; a wider gap cannot contribute a
+    legitimate endpoint to that window and only stretches it silently.
+    """
+    floor = 0
+    for i in range(idx, 0, -1):
+        gap = (samples[i]["ts"] - samples[i - 1]["ts"]).total_seconds() / 3600.0
+        if gap > max_gap_hours:
+            floor = i
+            break
+    return floor
+
+
 def derived_burn(samples, idx, window_hours):
     """Burn/day over the `window_hours` ending at samples[idx].
 
@@ -223,8 +250,8 @@ def derived_burn(samples, idx, window_hours):
 
     # Walk back from idx, stopping at a reset. floor is the oldest sample that
     # is still in the same week as `end`.
-    floor = 0
-    for i in range(idx, 0, -1):
+    floor = contiguous_floor(samples, idx, window_hours)
+    for i in range(idx, floor, -1):
         if samples[i]["weekly"] < samples[i - 1]["weekly"] - RESET_DROP:
             floor = i
             break
@@ -522,19 +549,34 @@ def main():
     ap.add_argument("--target", type=float, default=DEFAULT_TARGET,
                     help=f"fraction of weekly quota to aim at (default {DEFAULT_TARGET})")
     ap.add_argument("--at", help="report as of this ts, e.g. 2026-08-25T08:43:52Z")
-    ap.add_argument("--series", action="store_true",
-                    help="replay every sample and show the level each input selects")
-    ap.add_argument("--sweep", action="store_true",
-                    help="window-size vs resolution vs level-stability table")
-    ap.add_argument("--json", action="store_true",
-                    help="machine-readable latest-sample derivation (cross-check shape)")
+    ap.add_argument("--now", help="override current UTC time for the live freshness gate")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="offline replay only: bypass the live-feed freshness gate")
+    modes = ap.add_mutually_exclusive_group()
+    modes.add_argument("--series", action="store_true",
+                       help="replay every sample and show the level each input selects")
+    modes.add_argument("--sweep", action="store_true",
+                       help="window-size vs resolution vs level-stability table")
+    modes.add_argument("--json", action="store_true",
+                       help="machine-readable latest-sample derivation (cross-check shape)")
     args = ap.parse_args()
 
+    historical = args.allow_stale or args.at or args.series or args.sweep
     try:
         series, rows = load(args.jsonl)
     except FileNotFoundError:
         print(f"no such file: {args.jsonl}", file=sys.stderr)
         return 2
+
+    if not historical:
+        try:
+            now = parse_ts(args.now) if args.now else None
+        except ValueError:
+            ap.error("--now must be UTC in YYYY-MM-DDTHH:MM:SSZ form")
+        freshness = read_verdict_rows(rows, now=now, source=args.jsonl)
+        if not freshness.ok:
+            print(f"UNKNOWN: {freshness.reason}", file=sys.stderr)
+            return 3
     if not series:
         print("no usable samples", file=sys.stderr)
         return 2

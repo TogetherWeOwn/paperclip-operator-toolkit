@@ -965,7 +965,11 @@ test("the tenancy the queue sees comes from the server, not from queueEnv", asyn
 
 test("tools/list advertises exactly the sanctioned tools, and each binds to a known script", async () => {
   const dir = scratch();
-  await withServer(configFor(dir), {}, async (call) => {
+  // capabilityConfigFor, not configFor: this test pins the FULL sanctioned set,
+  // so it must run on a transport configured to front both scripts. Discovery
+  // is now derived from config (TOG-825), so a queue-only config legitimately
+  // advertises three. Which tools a PARTIAL config offers is pinned in §9.
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(rpc("tools/list", {}));
     assert.equal(response.status, 200);
     const names = response.json.result.tools.map((tool) => tool.name).sort();
@@ -1255,7 +1259,11 @@ test("an argument that is not a string is refused rather than coerced", () => {
 
 test("tools/list works WITHOUT identity headers, or the connection can never go healthy", async () => {
   const dir = scratch();
-  await withServer(configFor(dir), {}, async (call) => {
+  // Fully configured, so "the full catalogue" below means all six. What this
+  // test is actually about is ANONYMITY, not the tool count: discovery must
+  // succeed on credential headers alone. Config-derived filtering (TOG-825) is
+  // a separate axis, pinned in §9.
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
     // The gateway's catalog refresh (tool-access.ts remoteTools) sends
     // credential headers only — no session, so no identity. Requiring identity
     // here would make the connection permanently unhealthy.
@@ -2003,3 +2011,90 @@ test("TOG-459: a countersignature without the record is refused, with no routine
       assert.doesNotMatch(refusal, /no domain-owner key yet/i);
     });
   });
+
+// ===========================================================================
+// 9. Discovery matches what the transport can actually run (TOG-825).
+//
+// The defect: capabilityScript is optional and the runner fails closed without
+// it, but tools/list advertised all six tools unconditionally. So a deployment
+// that fronted only the queue still showed every agent three capability tools,
+// and TOOLS.md instructs agents to route real asks through one of them. Each
+// such ask died in "this transport is not configured to front that script".
+// Reproduced from three agent identities on three separate days.
+//
+// The rule these tests pin: a tool is advertised if and only if this transport
+// is configured to run it. The fail-closed runner stays as defence in depth.
+// ===========================================================================
+
+test("TOG-825: with capabilityScript unset, the capability tools are NOT advertised", async () => {
+  const dir = scratch();
+  // configFor sets no capabilityScript — exactly the live deployment's config.
+  await withServer(configFor(dir), {}, async (call) => {
+    const response = await call(rpc("tools/list", {}));
+    assert.equal(response.status, 200);
+    const names = response.json.result.tools.map((t) => t.name);
+
+    // The three queue tools this deployment CAN run are still offered.
+    assert.deepEqual(names, [
+      "submit_provisioning_request",
+      "review_provisioning_request",
+      "read_my_requests",
+    ]);
+    // And nothing that would fail closed is dangled in front of an agent.
+    for (const dead of [
+      "submit_capability_request",
+      "review_capability_request",
+      "countersign_capability_request",
+    ]) {
+      assert.ok(!names.includes(dead), `${dead} cannot run here and must not be advertised`);
+    }
+  });
+});
+
+test("TOG-825: with capabilityScript set, all six tools are advertised", async () => {
+  const dir = scratch();
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
+    const response = await call(rpc("tools/list", {}));
+    const names = response.json.result.tools.map((t) => t.name);
+    assert.equal(names.length, 6, "a fully configured transport offers every tool");
+    assert.ok(names.includes("submit_capability_request"));
+    assert.ok(names.includes("review_capability_request"));
+    assert.ok(names.includes("countersign_capability_request"));
+  });
+});
+
+test("TOG-825: an unadvertised capability tool called anyway is refused, and never reaches a script", async () => {
+  const dir = scratch();
+  await withServer(configFor(dir), {}, async (call) => {
+    const response = await call(
+      rpc("tools/call", {
+        name: "submit_capability_request",
+        arguments: { capability: "github.token", action: "read", facts: "x".repeat(80), reasoning: "y".repeat(80) },
+      }),
+      IDENTITY_HEADERS,
+    );
+    // The tool stays DISPATCHABLE and fails closed, rather than becoming an
+    // unknown_tool 400. That is deliberate: a client working from a stale
+    // catalog gets the specific, actionable reason ("capabilityScript is
+    // unset") instead of a bare "unknown tool", which would read as a typo and
+    // send the caller looking for the wrong problem. Withholding it from
+    // discovery is what stops an agent reaching this path in the first place.
+    assert.equal(response.status, 200);
+    assert.equal(response.json.result.isError, true);
+    assert.match(response.json.result.content[0].text, /capabilityScript is unset/);
+    // Defence in depth: no script ran for a tool this transport cannot front.
+    assert.equal(recordedCapArgv(dir), null, "no capability script may run when none is configured");
+  });
+});
+
+test("TOG-825: the fail-closed runner is retained even so", async () => {
+  // advertisedTools is the fix; the runner's refusal is the backstop. If a
+  // future change reintroduces the tool into the catalog, this must still hold.
+  const dir = scratch();
+  const cfg = configFor(dir);
+  assert.equal(cfg.capabilityScript, null);
+  const run = makeCapabilityRunner(cfg);
+  const result = await run(["--submit"]);
+  assert.equal(result.ok, false);
+  assert.match(result.text, /capabilityScript is unset/);
+});

@@ -50,15 +50,15 @@ bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 # `null` is passed through unquoted so the JSON carries a real null.
 sample() {
   local f=$1 ts=$2 runs=$3 r5=$4 rw=$5 rc=$6 p5=$7 pw=$8 pc=$9
-  printf '{"ts":"%s","runs_in_flight":%s,"accounts":[' "$ts" "$runs" >>"$f"
-  printf '{"name":"1856877+Rick7C2@users.noreply.github.com","five_hour":%s,"weekly":%s,"is_current":%s},' "$r5" "$rw" "$rc" >>"$f"
-  printf '{"name":"pisnrzrs@two.gg","five_hour":%s,"weekly":%s,"is_current":%s}]}\n' "$p5" "$pw" "$pc" >>"$f"
+  printf '{"ts":"%s","pool_verdict":"AHEAD","runs_in_flight":%s,"accounts":[' "$ts" "$runs" >>"$f"
+  printf '{"name":"1856877+Rick7C2@users.noreply.github.com","five_hour":%s,"weekly":%s,"is_current":%s,"weekly_reset_utc":"2026-09-11 00:00 UTC"},' "$r5" "$rw" "$rc" >>"$f"
+  printf '{"name":"pisnrzrs@two.gg","five_hour":%s,"weekly":%s,"is_current":%s,"weekly_reset_utc":"2026-09-11 00:00 UTC"}]}\n' "$p5" "$pw" "$pc" >>"$f"
 }
 
 # run <file> [extra args...] -> sets OUT and CODE
 run() {
   local f=$1; shift
-  OUT="$(python3 "$TOOL" --jsonl "$f" "$@" 2>&1)"; CODE=$?
+  OUT="$(python3 "$TOOL" --jsonl "$f" --allow-stale "$@" 2>&1)"; CODE=$?
 }
 
 assert() { # assert <label> <want_code> <want_substr>
@@ -180,7 +180,35 @@ printf 'not json at all\n{"ts":"bogus"}\n' >"$WORK/junk.jsonl"
 run "$WORK/junk.jsonl"
 assert "all-unparseable exits 2"          2 "FATAL"
 
-echo "== 9. determinism and the JSON contract =="
+echo "== 9. live mode refuses the frozen dead feed =="
+DEAD="$HERE/tests/dead-feed-2026-08-26.jsonl"
+OUT="$(python3 "$TOOL" --jsonl "$DEAD" --now 2026-09-04T16:00:00Z 2>&1)"; CODE=$?
+assert "the real dead feed is UNKNOWN, not a defect" 6 "OVERALL: UNKNOWN"
+if grep -q "NO_ROTATION\|DEFECT" <<<"$OUT"; then
+  bad "the dead feed emits no confident rotation verdict" "$OUT"
+else
+  ok "the dead feed emits no confident rotation verdict"
+fi
+OUT="$(python3 "$TOOL" --jsonl "$DEAD" --now 2026-09-04T16:00:00Z --json 2>&1)"; CODE=$?
+assert "JSON names the UNKNOWN state" 6 '"overall": "UNKNOWN"'
+
+# A malformed newest row must not be dropped in favour of an older verdict.
+F="$WORK/malformed-newest.jsonl"; : >"$F"
+sample "$F" 2026-09-04T15:30:00Z 4 0.98 0.50 true 0.10 0.20 false
+sample "$F" 2026-09-04T15:45:00Z 4 0.98 0.50 true 0.20 0.22 false
+printf '{"ts":"2026-09-04T15:59:00Z","pool_verdict":"AHEAD","accounts":[{}]}\n' >>"$F"
+OUT="$(python3 "$TOOL" --jsonl "$F" --now 2026-09-04T16:00:00Z 2>&1)"; CODE=$?
+assert "a malformed newest row is UNKNOWN, not an older verdict" 6 "OVERALL: UNKNOWN"
+
+# One fresh recovery row cannot reactivate a pre-outage defect in live mode.
+F="$WORK/recovered.jsonl"; : >"$F"
+sample "$F" 2026-08-26T08:00:00Z 6 0.50 0.98 true 0 0.78 false
+sample "$F" 2026-08-26T08:15:00Z 6 0.52 0.99 true 0 0.78 false
+sample "$F" 2026-09-04T15:59:00Z 1 0.10 0.20 true 0.10 0.20 false
+OUT="$(python3 "$TOOL" --jsonl "$F" --now 2026-09-04T16:00:00Z 2>&1)"; CODE=$?
+assert "live rotation ignores pre-outage episodes after recovery" 4 "NOT_OBSERVED"
+
+ echo "== 10. determinism and the JSON contract =="
 run "$WORK/rotate.jsonl" --json
 A="$OUT"
 run "$WORK/rotate.jsonl" --json

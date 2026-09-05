@@ -130,6 +130,7 @@ chmod +x "$WORK/roster_braked.sh"
 
 base_env() {
   export PACE_TARGET="$LADDER_TARGET"
+  export PACE_NOW="2026-08-25T10:45:00Z"
   export PACE_SOURCE_CMD="cat $WORK/${1:-pace_hot.json}"
   export ROSTER_SOURCE_CMD="$WORK/${2:-roster_std.sh}"
   export EXEMPT_FILE="$WORK/exempt.txt"
@@ -322,6 +323,32 @@ check "6e  refusals cannot read quiet while blind" "$rc" "5"
 base_env pace_hot.json roster_std.sh
 rc=0; (PACE_SOURCE_CMD="false" "$BRAKE" apply --yes) >/dev/null 2>&1 || rc=$?
 check "6f  a blind apply writes NOTHING" "$(wc -l < "$CAPTURE_FILE" | tr -d ' ')" "0"
+
+# The frozen real outage feed must fail before roster evaluation or mutation.
+DEAD="$HERE/tests/dead-feed-2026-08-26.jsonl"
+: > "$WORK/captured.tsv"
+rc=0; out="$(QUOTA_PACING_FILE="$DEAD" PACE_SOURCE_CMD="" PACE_NOW=2026-09-04T16:00:00Z \
+  ROSTER_SOURCE_CMD="$WORK/roster_std.sh" EXEMPT_FILE="$WORK/exempt.txt" \
+  AGENT_WRITE_CMD="$WORK/capture.sh" CAPTURE_FILE="$WORK/captured.tsv" "$BRAKE" pace 2>&1)" || rc=$?
+check "6g  the real dead feed makes pace UNKNOWN" "$rc" "5"
+case "$out" in *"UNKNOWN"*) ok "6g2 ...and names UNKNOWN";; *) bad "6g2 ...and names UNKNOWN" "$out";; esac
+case "$out" in *'"verdict"'*) bad "6g3 ...without a confident JSON verdict" "$out";; *) ok "6g3 ...without a confident JSON verdict";; esac
+
+# A malformed timestamped row cannot sort after the validated sample and drive
+# a privileged apply. Production drops it before both guard and derivation.
+cat > "$WORK/malformed-ts.jsonl" <<'EOF'
+{"ts":"2026-09-04T15:59:00Z","pool_verdict":"AHEAD","accounts":[{"name":"valid","weekly":0.40,"five_hour":0.20,"days_left":6,"burn_per_day":0.01,"weekly_reset_utc":"2026-09-11 00:00 UTC"}]}
+{"ts":"zzzz","pool_verdict":"AHEAD","accounts":[{"name":"attacker","weekly":0.99,"five_hour":0.99,"days_left":1,"burn_per_day":9,"weekly_reset_utc":"2026-09-11 00:00 UTC"}]}
+EOF
+out="$(QUOTA_PACING_FILE="$WORK/malformed-ts.jsonl" PACE_SOURCE_CMD="" PACE_NOW=2026-09-04T16:00:00Z "$BRAKE" pace 2>/dev/null)"; rc=$?
+check "6g4 a malformed timestamp cannot drive the brake" "$(jq -r '.name' <<<"$out")" "valid"
+check "6g5 ...and cannot select LEVEL3" "$(jq -r '.verdict' <<<"$out")" "RELEASE"
+
+rc=0; (QUOTA_PACING_FILE="$DEAD" PACE_SOURCE_CMD="" PACE_NOW=2026-09-04T16:00:00Z \
+  ROSTER_SOURCE_CMD="$WORK/roster_std.sh" EXEMPT_FILE="$WORK/exempt.txt" \
+  AGENT_WRITE_CMD="$WORK/capture.sh" CAPTURE_FILE="$WORK/captured.tsv" "$BRAKE" apply --yes) >/dev/null 2>&1 || rc=$?
+check "6g6 stale apply is UNKNOWN" "$rc" "5"
+check "6g7 stale apply writes NOTHING" "$(wc -l < "$WORK/captured.tsv" | tr -d ' ')" "0"
 
 # ===========================================================================
 echo "== 7. dry-run by default =="

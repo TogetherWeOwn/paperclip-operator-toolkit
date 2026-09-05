@@ -1049,6 +1049,9 @@ jobs:
       - name: quota brake suite
         run: ./test_quota_brake.sh
 
+      - name: quota pacing verdict hostile suite
+        run: python3 ./test_pacing_verdict.py
+
       # TOG-440. The offline derivation tool, and — §5 — the cross-check that
       # keeps it in step with the jq copy inside quota_brake.sh. Two
       # implementations of one formula is the price of the production path
@@ -3318,7 +3321,9 @@ jobs:
           rotation_mutation() {
             local label="$1"; shift
             local mut; mut="$(mktemp -d)"
-            cp quota_rotation_watch.py test_quota_rotation_watch.sh "$mut/"
+            cp quota_rotation_watch.py pacing_verdict.py test_quota_rotation_watch.sh "$mut/"
+            mkdir -p "$mut/tests"
+            cp tests/dead-feed-2026-08-26.jsonl "$mut/tests/"
 
             if ! (cd "$mut" && ./test_quota_rotation_watch.sh >/dev/null 2>&1); then
               echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
@@ -3382,7 +3387,9 @@ jobs:
           brake_mutation() {
             local label="$1" expect="$2"; shift 2
             local mut; mut="$(mktemp -d)"
-            cp quota_brake.sh test_quota_brake.sh quota_brake_exempt.txt "$mut/"
+            cp quota_brake.sh pacing_verdict.py test_quota_brake.sh quota_brake_exempt.txt "$mut/"
+            mkdir -p "$mut/tests"
+            cp tests/dead-feed-2026-08-26.jsonl "$mut/tests/"
 
             # Baseline first. Without it "the mutated suite failed" is
             # unattributable, which is how two gates in this repo sat vacuous

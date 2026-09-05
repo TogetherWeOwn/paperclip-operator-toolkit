@@ -54,6 +54,7 @@
 #   3  NO_ROTATION         a spent account kept taking traffic -- a live defect
 #   4  NOT_OBSERVED        no conclusive episode yet; window still open
 #   5  EXPIRED             --window-close has passed with nothing conclusive
+#   6  UNKNOWN             live feed is stale or invalid; no rotation verdict
 #
 # Read-only: opens one jsonl. No network, no credential, no mutation.
 # ===========================================================================
@@ -62,7 +63,10 @@ import datetime
 import json
 import sys
 
+from pacing_verdict import read_verdict_rows
+
 JSONL = "/paperclip/operator-handoff/quota-pacing.jsonl"
+UNKNOWN_EXIT = 6
 
 # teamclaude's own account-rotation threshold (account-manager.js:111).
 SWITCH_THRESHOLD = 0.98
@@ -78,28 +82,58 @@ def parse_ts(s):
 
 
 def load(path):
-    """Return (samples, skipped). Each sample is {ts, runs, accounts:{name:row}}."""
-    samples, skipped = [], 0
+    """Return (samples, skipped, raw_rows) from one immutable file read."""
+    samples, raw_rows, skipped = [], [], 0
     with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-                ts = parse_ts(r["ts"])
-            except (json.JSONDecodeError, KeyError, ValueError):
-                skipped += 1
-                continue
-            samples.append(
-                {
-                    "ts": ts,
-                    "runs": r.get("runs_in_flight"),
-                    "accounts": {a["name"]: a for a in r.get("accounts", [])},
-                }
-            )
+        lines = fh.readlines()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        if not isinstance(r, dict):
+            skipped += 1
+            continue
+        try:
+            ts = parse_ts(r["ts"])
+        except (KeyError, TypeError, ValueError):
+            skipped += 1
+            continue
+        # Keep every timestamped object in raw_rows so freshness validates the
+        # actual newest record before consumer-specific shape filtering.
+        raw_rows.append(r)
+        accounts = r.get("accounts")
+        if not isinstance(accounts, list) or any(
+            not isinstance(a, dict) or "name" not in a for a in accounts
+        ):
+            skipped += 1
+            continue
+        samples.append(
+            {
+                "ts": ts,
+                "runs": r.get("runs_in_flight"),
+                "accounts": {a["name"]: a for a in accounts},
+            }
+        )
     samples.sort(key=lambda s: s["ts"])
-    return samples, skipped
+    return samples, skipped, raw_rows
+
+
+def newest_contiguous_segment(samples, max_gap_minutes=120):
+    """Drop pre-outage history from live monitoring, preserving replay mode."""
+    if not samples:
+        return samples
+    floor = 0
+    for i in range(len(samples) - 1, 0, -1):
+        gap = (samples[i]["ts"] - samples[i - 1]["ts"]).total_seconds() / 60.0
+        if gap > max_gap_minutes:
+            floor = i
+            break
+    return samples[floor:]
 
 
 def episodes_for(samples, name, bucket, threshold):
@@ -185,15 +219,38 @@ def main():
                     help="burn below this is noise (default 0.005)")
     ap.add_argument("--window-close",
                     help="ISO ts, e.g. 2026-08-29T10:00:00Z; past it, unobserved becomes EXPIRED")
-    ap.add_argument("--now", help="override 'now' for --window-close (testing)")
+    ap.add_argument("--now", help="override current UTC time (testing)")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="offline replay only: bypass the live-feed freshness gate")
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = ap.parse_args()
 
     try:
-        samples, skipped = load(args.jsonl)
+        now = parse_ts(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc)
+    except ValueError:
+        ap.error("--now must be UTC in YYYY-MM-DDTHH:MM:SSZ form")
+
+    try:
+        samples, skipped, raw_rows = load(args.jsonl)
     except OSError as e:
         print(f"FATAL: cannot read {args.jsonl}: {e}", file=sys.stderr)
         return 2
+
+    if not args.allow_stale:
+        freshness = read_verdict_rows(raw_rows, now=now, source=args.jsonl)
+        if not freshness.ok:
+            if args.json:
+                print(json.dumps({
+                    "overall": "UNKNOWN", "exit": UNKNOWN_EXIT,
+                    "reason": freshness.reason,
+                }, indent=2, sort_keys=True))
+            else:
+                print("OVERALL: UNKNOWN")
+                print(f"  {freshness.reason}")
+                print("  No rotation verdict was emitted from an unavailable feed.")
+            return UNKNOWN_EXIT
+        samples = newest_contiguous_segment(samples)
+
     if not samples:
         print(f"FATAL: no usable samples in {args.jsonl} "
               f"({skipped} unparseable line(s)) -- this is NOT a pass", file=sys.stderr)
@@ -223,8 +280,6 @@ def main():
     else:
         overall, code = "NOT_OBSERVED", 4
         if args.window_close:
-            now = parse_ts(args.now) if args.now else datetime.datetime.now(
-                datetime.timezone.utc)
             if now > parse_ts(args.window_close):
                 overall, code = "EXPIRED", 5
 
