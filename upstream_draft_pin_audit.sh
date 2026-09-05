@@ -110,6 +110,7 @@ if [ "$UPDATE" = 1 ]; then
   NEW="$WORK/pins.new"
   : > "$NEW"
   changed=0
+  unparseable=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       pinned[[:space:]]*)
@@ -128,9 +129,21 @@ if [ "$UPDATE" = 1 ]; then
           printf '%s\n' "$line" >> "$NEW"
         fi
         ;;
-      *) printf '%s\n' "$line" >> "$NEW" ;;
+      superseded[[:space:]]*|''|'#'*) printf '%s\n' "$line" >> "$NEW" ;;
+      *)
+        # Same blind spot as the audit loop, but worse: --update would copy an
+        # unparseable line through unchanged and print "no change", so a
+        # dropped artifact survives the very command meant to refresh it.
+        printf '%s\n' "$line" >> "$NEW"
+        unparseable=$((unparseable+1))
+        echo "REFUSING to complete: unparseable pin line, NOT repinned: $line" >&2
+        ;;
     esac
   done < "$PINS"
+  if [ "$unparseable" != 0 ]; then
+    echo "aborted: $unparseable unparseable line(s); $PINS left untouched" >&2
+    exit 4
+  fi
   cp "$NEW" "$PINS"
   [ "$changed" = 1 ] && echo "pins updated: $PINS" || echo "no change: $PINS"
   exit 0
@@ -142,10 +155,30 @@ fi
 printf '\033[1mupstream draft pin audit\033[0m  (pins: %s)\n\n' "$PINS"
 
 SEEN=0
+UNKNOWN=0
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     pinned[[:space:]]*) : ;;
-    *) continue ;;
+    superseded[[:space:]]*) continue ;;
+    ''|'#'*) continue ;;
+    *)
+      # A line that is neither a comment, a blank, nor one of the two states
+      # is NOT "nothing to check" -- it is an artifact that fell out of the
+      # audit.  The loop above dispatches on a literal prefix, so a third
+      # state word, or a typo in `pinned`, drops the line silently: the
+      # artifact count goes DOWN and every remaining line still says OK, so
+      # the run stays green while checking one thing fewer.
+      #
+      # Found 2026-09-05 on TOG-1067.  The live temptation is concrete: a
+      # SEND WITH EDITS verdict invites a third state ("needs_edits",
+      # "reviewed") to record bytes that were reviewed but must not ship, and
+      # nothing here would have said so.  Fail loudly and name the line.
+      UNKNOWN=$((UNKNOWN+1))
+      bad "unparseable pin line: $line"
+      note "state word is neither 'pinned' nor 'superseded' -- this artifact was NOT checked"
+      note "the audit understands exactly two states; see the header of the pins file"
+      continue
+      ;;
   esac
   set -- $line
   want="$2"; target="$3"
@@ -168,7 +201,9 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < "$PINS"
 
-printf '\n  %d pinned artifact(s): %d ok, %d drifted\n' "$SEEN" "$PASS" "$FAIL"
+printf '\n  %d pinned artifact(s): %d ok, %d drifted' "$SEEN" "$PASS" "$FAIL"
+[ "$UNKNOWN" = 0 ] || printf ', %d UNPARSEABLE (not checked)' "$UNKNOWN"
+printf '\n'
 
 if [ "$SEEN" = 0 ]; then
   echo "  FATAL: the pins file contains no pinned lines -- nothing was checked." >&2
