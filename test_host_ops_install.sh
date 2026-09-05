@@ -284,6 +284,75 @@ else
   fail "visudo is unavailable, so the rendered sudoers grant was never parse-checked"
 fi
 
+# TOG-1165: --public-key-out must not collide with the installer's own PUBLIC_KEY.
+#
+# `install "$PUBLIC_KEY" "$PUBLIC_KEY_OUT"` is the last step before daemon-reload.
+# GNU install exits 1 on "are the same file", and under `set -Eeuo pipefail` that
+# aborted the script with sudoers, the unit, tmpfiles and config.json already on
+# the host but the unit never reloaded -- a DIRTY failure. TOG-1126 step 2 carried
+# exactly that path and nearly spent a host window on it.
+#
+# The keys path is READ OUT OF THE SHIPPED SCRIPT, never re-typed here. A test
+# that hardcoded /var/lib/paperclip-host-ops/keys/... would keep passing against
+# its own stale literal after the constant moved, which is precisely how the
+# original gap survived: both existing arms pass /tmp/none.pem, so nothing ever
+# joined the flag to the constant.
+INSTALLER_PUBLIC_KEY=$(sed -n 's/^PUBLIC_KEY=\(.*\)$/\1/p' "$ROOT/host-ops/install.sh")
+if [[ -n "$INSTALLER_PUBLIC_KEY" ]]; then
+  ok "installer's PUBLIC_KEY constant is readable ($INSTALLER_PUBLIC_KEY)"
+else
+  fail "could not read PUBLIC_KEY from install.sh, so the collision arms below prove nothing"
+fi
+
+# Bound the run before any host mutation, exactly as the TOG-757 arms do: stub the
+# EUID guard so the refusal under test is the collision and not "must run as
+# root", and break the required-command loop so a run that gets PAST the guard
+# stops at the first step after it. The guard is deliberately placed above that
+# loop -- it uses only bash builtins -- so both arms are reachable here.
+public_key_out_arm() {
+  local label="$1" candidate="$2" expect="$3" harness output rc
+  harness=$(mktemp)
+  sed -e 's/^\[\[ \$EUID -eq 0 \]\].*$/:/' \
+      -e 's|^for command in git install|for command in __tog1165_absent__ git install|' \
+      "$ROOT/host-ops/install.sh" > "$harness"
+  set +e
+  output=$(bash "$harness" --source-ref "$(printf 'a%.0s' {1..40})" \
+    --public-key-out "$candidate" --expected-public-key-sha256 "$(printf 'b%.0s' {1..64})" \
+    --paperclip-image-ref paperclip-local 2>&1)
+  rc=$?
+  set -e
+  rm -f "$harness"
+  if [[ $rc -eq 2 && "$output" == *"$expect"* ]]; then
+    ok "$label"
+  else
+    fail "$label (rc=$rc output=$output)"
+  fi
+}
+
+# Arm A: the exact constant is refused.
+public_key_out_arm "--public-key-out equal to the installer's own public key is refused" \
+  "$INSTALLER_PUBLIC_KEY" "must not name the installer's own public key"
+
+# Arm A': the same file spelled differently is refused too. A string comparison
+# would pass this one, so these arms are what force normalised-path comparison.
+# The `..` alias bounces off the key's OWN parent directory name rather than a
+# literal "keys", so the arm keeps testing the alias -- not a stale path -- when
+# the constant moves.
+INSTALLER_KEY_DIR=$(dirname "$INSTALLER_PUBLIC_KEY")
+public_key_out_arm "--public-key-out aliased via .. is refused" \
+  "$INSTALLER_KEY_DIR/../$(basename "$INSTALLER_KEY_DIR")/$(basename "$INSTALLER_PUBLIC_KEY")" \
+  "must not name the installer's own public key"
+public_key_out_arm "--public-key-out aliased via a trailing /. is refused" \
+  "$(dirname "$INSTALLER_PUBLIC_KEY")/./$(basename "$INSTALLER_PUBLIC_KEY")" \
+  "must not name the installer's own public key"
+
+# Arm B / positive control: a DISTINCT destination must get PAST the collision
+# guard. Without this the refusals above would pass even if the guard refused
+# unconditionally -- the failure mode that would break every real install.
+public_key_out_arm "a distinct --public-key-out passes the collision guard" \
+  /etc/paperclip-host-ops/response-signing.pub.pem \
+  "required command missing: __tog1165_absent__"
+
 if (( failures != 0 )); then
   printf '%s host-ops installer contract tests failed\n' "$failures" >&2
   exit 1
