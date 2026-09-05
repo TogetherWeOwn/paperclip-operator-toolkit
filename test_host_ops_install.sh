@@ -197,14 +197,19 @@ image_ref_arg_accepted "installer accepts the running host's image ref" "localho
 render_dir=$(mktemp -d)
 trap 'rm -rf "$render_dir"' EXIT
 render_ref="localhost/paperclip-local:tog-516v2-51ee6c01b"
-sed "s|@@PAPERCLIP_IMAGE_REF@@|$render_ref|" "$ROOT/host-ops/host-ops-broker.sudoers" > "$render_dir/sudoers"
+# Render through the SHIPPED function, not a local sed. The previous version of
+# this test re-implemented the substitution, so it passed on a grant the
+# installer could never actually produce.
+render_sudoers_image_ref "$ROOT/host-ops/host-ops-broker.sudoers" "$render_dir/sudoers" "$render_ref"
 python3 - "$ROOT/host-ops/config.example.json" "$render_dir/config.json" "$render_ref" <<'PY'
 import json, sys
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text().replace("@@PAPERCLIP_IMAGE_REF@@", sys.argv[3]))
 Path(sys.argv[2]).write_text(json.dumps(config))
 PY
-granted=$(grep -oP 'podman image inspect \K\S+' "$render_dir/sudoers")
+# The grant's bytes carry the sudoers colon escape; unescape before comparing,
+# exactly as broker.py's sudoers_granted_image_ref does.
+granted=$(grep -oP 'podman image inspect \K\S+' "$render_dir/sudoers" | sed 's/\\:/:/g')
 configured=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["paperclipImageRef"])' "$render_dir/config.json")
 if [[ "$granted" == "$render_ref" && "$configured" == "$render_ref" ]]; then
   ok "sudoers grant and config render the same image reference"
@@ -215,6 +220,68 @@ if grep -Fq '@@PAPERCLIP_IMAGE_REF@@' "$render_dir/sudoers" || grep -Fq '@@PAPER
   fail "placeholder survived rendering"
 else
   ok "no placeholder survives rendering"
+fi
+
+# TOG-757/TOG-1126: the rendered grant must PARSE. Requested by the operator
+# after PR #247 aborted on this host at `sudoers:10:114: syntax error` on the
+# `@sha256:` token: sudoers reads a bare colon as the run-as separator. Both
+# accepted forms carry a colon, so before the escape landed the ONLY reference
+# that rendered a parseable grant was a bare repository name -- the hardcoded
+# value this argument was added to replace. Rendering is not enough; only visudo
+# on the RENDERED file catches this, which is why CI stayed green while the
+# installer could not install.
+render_parses() {
+  local label="$1" candidate="$2" out rc target
+  target="$render_dir/parse-check.sudoers"
+  render_sudoers_image_ref "$ROOT/host-ops/host-ops-broker.sudoers" "$target" "$candidate"
+  chmod 0440 "$target"
+  set +e
+  out=$("$VISUDO" -cf "$target" 2>&1)
+  rc=$?
+  set -e
+  chmod 0640 "$target"
+  if [[ $rc -eq 0 ]]; then
+    ok "$label"
+  else
+    fail "$label (rc=$rc $out)"
+  fi
+  # The grant sudo authorizes must still be the operator's exact reference:
+  # a parse fixed by mangling the argument would attest the wrong image.
+  local authorized
+  authorized=$(grep -oP 'podman image inspect \K\S+' "$target" | sed 's/\\:/:/g')
+  if [[ "$authorized" == "$candidate" ]]; then
+    ok "$label grants the exact reference"
+  else
+    fail "$label granted $authorized, not $candidate"
+  fi
+}
+
+VISUDO=$(command -v visudo || true)
+if [[ -z "$VISUDO" && -x /usr/sbin/visudo ]]; then VISUDO=/usr/sbin/visudo; fi
+if [[ -n "$VISUDO" ]]; then
+  render_parses "rendered grant parses for a registry digest" \
+    "ghcr.io/paperclipai/paperclip@sha256:$(printf 'f%.0s' {1..64})"
+  render_parses "rendered grant parses for a tag" "localhost/paperclip-local:tog-516v2-51ee6c01b"
+  render_parses "rendered grant parses for a bare repository name" "paperclip-local"
+
+  # Negative control: the unescaped render is what actually failed on the host.
+  # Without this, a future change that dropped the escape would leave the three
+  # assertions above passing only because visudo was absent.
+  sed "s|@@PAPERCLIP_IMAGE_REF@@|ghcr.io/paperclipai/paperclip@sha256:$(printf 'f%.0s' {1..64})|" \
+    "$ROOT/host-ops/host-ops-broker.sudoers" > "$render_dir/unescaped.sudoers"
+  chmod 0440 "$render_dir/unescaped.sudoers"
+  set +e
+  "$VISUDO" -cf "$render_dir/unescaped.sudoers" >/dev/null 2>&1
+  unescaped_rc=$?
+  set -e
+  chmod 0640 "$render_dir/unescaped.sudoers"
+  if [[ $unescaped_rc -ne 0 ]]; then
+    ok "control: an unescaped digest render is rejected by visudo"
+  else
+    fail "control: an unescaped digest render parsed, so the escape assertions prove nothing"
+  fi
+else
+  fail "visudo is unavailable, so the rendered sudoers grant was never parse-checked"
 fi
 
 if (( failures != 0 )); then

@@ -843,8 +843,28 @@ class BrokerTest(unittest.TestCase):
             if old_fake_dir is not None:
                 os.environ["HOST_OPS_FAKE_FACTS_DIR"] = old_fake_dir
 
+        # TOG-1126: read the grant back the way the INSTALLER writes it. sudoers
+        # reads a bare colon as the run-as separator, so install.sh escapes each
+        # one as "\:" and sudo strips the escape before matching argv. Rendering
+        # the placeholder raw here would assert a file the installer can never
+        # produce -- visudo rejects it -- and would hide a broker that compared
+        # the escaped bytes to the plain config value and refused every tag and
+        # digest reference. Both forms are checked; both carry a colon.
+        for granted in (
+            "localhost/paperclip-local:tog-516v2-51ee6c01b",
+            "ghcr.io/paperclipai/paperclip@sha256:" + "f" * 64,
+            "paperclip-local",
+        ):
+            with self.subTest(granted=granted):
+                installed = (ROOT / "host-ops" / "host-ops-broker.sudoers").read_text().replace(
+                    "@@PAPERCLIP_IMAGE_REF@@", granted.replace(":", "\\:")
+                )
+                self.assertEqual(broker.sudoers_granted_image_ref(installed), granted)
+
         granted = "localhost/paperclip-local:tog-516v2-51ee6c01b"
-        rendered = (ROOT / "host-ops" / "host-ops-broker.sudoers").read_text().replace("@@PAPERCLIP_IMAGE_REF@@", granted)
+        rendered = (ROOT / "host-ops" / "host-ops-broker.sudoers").read_text().replace(
+            "@@PAPERCLIP_IMAGE_REF@@", granted.replace(":", "\\:")
+        )
         self.assertEqual(broker.sudoers_granted_image_ref(rendered), granted)
         # A config naming any other image must not be startable against this grant.
         with self.assertRaises(broker.Refusal) as raised:
