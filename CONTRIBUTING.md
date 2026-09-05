@@ -156,6 +156,8 @@ Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
 ./test_channel_drift.sh             # channel_drift.sh: staged-but-never-committed detection
 ./test_cold_start_detector.sh       # cold_start_detector.sh: cold-with-headroom detection
 ./test_orgdb_fixture.sh             # the privilege-suite org fixture, stub and schema_drift.sh
+./test_tog994_check9_symmetry.sh    # org_access_review.sh check 9 filters BOTH sides of its join
+./test_tog994_orphan_retire.sh      # org_orphan_retire.sh: what it refuses to delete
 ./verification/tog-487-mutation-gate.sh   # ...and proof those refusals are not vacuous
 for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
 

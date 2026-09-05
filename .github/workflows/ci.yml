@@ -1584,6 +1584,35 @@ jobs:
       - name: cold-start detector refusals are not vacuous (mutation-gated)
         run: ./verification/tog-487-mutation-gate.sh
 
+      # TOG-994. Check 9 of org_access_review.sh compares a GRANT
+      # (company_secret_bindings) against a DECLARATION (adapterConfig.env). The
+      # declaration side filtered terminated agents and the binding side did
+      # not, so a binding whose holder was terminated could only ever resolve to
+      # MISSING — a verdict about the WHERE clause, not the agent. That was 27
+      # of 27 findings on the live company, all benign, which is how a check
+      # stops being read at all.
+      #
+      # The suite is static because the assertion is a property of the SQL TEXT
+      # (both sides carry the same predicate) and running the query needs a
+      # PostgreSQL with jsonb_each and LATERAL that no runner has. Its §3 is the
+      # load-bearing part: it reconstructs the pre-fix text and requires the
+      # guard to go RED on it, so a grep that matches nothing cannot pass.
+      - name: check 9 filters both sides of its join (TOG-994)
+        run: ./test_tog994_check9_symmetry.sh
+
+      # TOG-994, the destructive half. org_orphan_retire.sh DELETEs permission
+      # grants and secret bindings, so the assertions that matter are the
+      # refusals: dry-run is the default, the kill switch stops a write, an
+      # unattributed apply is refused (TOG-870), an unreachable database exits 3
+      # rather than reporting nothing to retire, and every destructive statement
+      # carries a POSITIVE `status = 'terminated'` predicate — never a
+      # NOT EXISTS, which would also delete every row whose agent is merely
+      # invisible. §6 is the positive control: it shows the same invocation
+      # reaching the write, so a tool that is broken and refuses everything
+      # cannot pass the refusal tests.
+      - name: orphan retirement refuses what it must (TOG-994)
+        run: ./test_tog994_orphan_retire.sh
+
       # TOG-676. Same shape, and the limb at risk is the delivery check itself.
       # It reads as redundant with the failure count — every digest that has
       # ever broken here broke loudly — so "simplify it away" is the obvious

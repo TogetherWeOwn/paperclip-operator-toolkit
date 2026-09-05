@@ -278,6 +278,26 @@ WITH b AS (
   WHERE b.company_id = :'cid'::uuid
     AND b.target_type = 'agent'
     AND b.config_path LIKE 'env.%'
+    -- TOG-994. BOTH sides must exclude terminated agents, or this is not a
+    -- comparison at all. The 'd' CTE below reads only non-terminated agents,
+    -- so a
+    -- binding whose holder is terminated has nothing it could ever match and
+    -- resolves to MISSING every time — a verdict about this WHERE clause, not
+    -- about the agent. It measured 27 such rows on this company, each one an
+    -- agent that projects nothing because a terminated agent has no run to
+    -- project INTO. Filtering one side and not the other IS the bug.
+    --
+    -- A binding left behind by a terminated agent is still a real defect, but
+    -- a different one, and check 7 above is where a row belonging to a dead
+    -- agent is reported. Mixing the two here stopped check 9 answering its own
+    -- question — does every secret this company grants actually REACH the run
+    -- it was granted for — because a genuine live-agent projection failure
+    -- would have arrived as the 28th line of a list already 27 lines long and
+    -- entirely benign.
+    AND EXISTS (SELECT 1 FROM agents a2
+                 WHERE a2.id::text = b.target_id
+                   AND a2.company_id = :'cid'::uuid
+                   AND a2.status <> 'terminated')
 ),
 d AS (
   SELECT a.id::text        AS agent_id,
