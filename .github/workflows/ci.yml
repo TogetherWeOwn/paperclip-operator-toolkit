@@ -631,6 +631,26 @@ jobs:
           done
           echo "selftest is prefix-independent: $base across 5 prefixes"
 
+      # TOG-1031. The TOG-292 redaction builders are a LIBRARY with no operator step
+      # of their own, so nobody has a routine reason to run them: before this step
+      # existed, the first execution of the suite could have been the run that appended
+      # to /paperclip/operator-handoff/omniroute-snapshots.jsonl — a 0644 file readable
+      # by every agent on that box. An unregistered suite is indistinguishable from no
+      # suite; it "passes" because somebody ran it by hand once, and keeps passing after
+      # it rots. Offline: it needs no network and no credential, and shells out only to
+      # sys.executable on itself.
+      - name: TOG-292 snapshot-section redaction suite
+        run: python3 omniroute/TOG-292-snapshot-sections.py --selftest
+
+      # The step above is 29 green assertions, which is worth nothing until somebody
+      # breaks the redaction and watches them go red. This reverts each of the five
+      # TOG-292 review fixes in a THROWAWAY COPY and requires the OWNING check to fail.
+      # The unmutated copy is asserted green first, in the same staging directory:
+      # "the mutated suite failed" is unattributable without that baseline, because a
+      # staging error produces an identical red.
+      - name: TOG-292 redaction fixes are load-bearing (mutation-gated)
+        run: ./verification/tog-1031-snapshot-redaction-mutation-gate.sh
+
       # The TOG-226 standing gate. Offline: the board and GitHub reads are
       # redirected to fixtures, and the argv assertions use a stub curl that
       # never opens a socket. It covers the two ways this check can be wrong
