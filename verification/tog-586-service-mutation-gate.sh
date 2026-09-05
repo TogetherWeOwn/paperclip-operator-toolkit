@@ -165,6 +165,13 @@ mutate builder-accepts-any-reachable-commit systemd/build-liveness-reconciler-bu
 mutate builder-trusts-head-not-the-merged-line systemd/build-liveness-reconciler-bundle.sh \
   'TRUSTED_LINE="origin/main"' 'TRUSTED_LINE="HEAD"' \
   test_builder_refuses_a_commit_not_merged_into_the_trusted_line
+# TOG-586 (COO): the two mutants above swap the exact strings the text
+# assertion greps for, so they only prove the text is PRESENT. This one leaves
+# every asserted string intact and makes the check non-fatal -- the gate must
+# be caught by a mutant that RUNS the builder, not one that reads it.
+mutate builder-ancestry-check-present-but-toothless systemd/build-liveness-reconciler-bundle.sh \
+  '  || refuse "$SOURCE_REF is not an ancestor of $TRUSTED_LINE; it was never merged by review. Build a commit that is on that line, or pass --trusted-line if the reviewed line is elsewhere."' '  || true' \
+  test_builder_actually_refuses_to_write_a_bundle_for_an_unmerged_commit
 mutate root-checkout systemd/install-liveness-reconciler.sh \
   '/usr/bin/tar --extract --file "$BUNDLE" --directory "$WORK_DIR" --no-same-owner --no-same-permissions' \
   'git archive HEAD | /usr/bin/tar -x --directory "$WORK_DIR"' \

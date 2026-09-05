@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -176,6 +180,88 @@ class DeploymentContract(unittest.TestCase):
         )
         self.assertIn('rev-parse -q --verify "$TRUSTED_LINE^{commit}"', source)
         self.assertIn('TRUSTED_LINE="origin/main"', source)
+
+    def test_builder_actually_refuses_to_write_a_bundle_for_an_unmerged_commit(self):
+        # The sibling test above asserts the check is PRESENT in the source.
+        # That is not the same as the check WORKING: appending `|| true` to the
+        # merge-base line leaves every asserted string intact and still builds
+        # the unmerged commit. So run the builder and assert on what it does --
+        # nonzero exit, and above all NO output file, since a written bundle is
+        # the thing that reaches a host.
+        #
+        # The fixture is built with `git init` rather than by cloning this
+        # repo, so it holds under the mutation gate, which copies the tree
+        # WITHOUT .git. A skip there would let the mutant survive silently.
+        repo = pathlib.Path(__file__).resolve().parent
+        builder_src = repo / "systemd" / "build-liveness-reconciler-bundle.sh"
+        payload = [
+            "liveness_reconciler.py",
+            "liveness_reconciler_source.js",
+            "systemd/install-liveness-reconciler.sh",
+            "systemd/paperclip-liveness-reconciler.service",
+            "systemd/paperclip-liveness-reconciler.timer",
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            work = pathlib.Path(td) / "repo"
+            (work / "systemd").mkdir(parents=True)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+                   "GIT_CONFIG_GLOBAL": str(pathlib.Path(td) / "gitconfig"),
+                   "GIT_CONFIG_SYSTEM": os.devnull}
+
+            def git(*a):
+                r = subprocess.run(["git", *a], cwd=work, env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, f"git {a[0]}: {r.stderr}")
+                return r.stdout.strip()
+
+            # The builder under test is the one on disk, not a committed copy.
+            shutil.copyfile(builder_src, work / "systemd" / "build-liveness-reconciler-bundle.sh")
+            (work / "systemd" / "build-liveness-reconciler-bundle.sh").chmod(0o755)
+            # Stub payload: the builder only needs these paths to exist at the
+            # commit. Synthesizing them keeps the fixture independent of which
+            # files the mutation gate copies into its scratch tree.
+            for rel in payload:
+                (work / rel).parent.mkdir(parents=True, exist_ok=True)
+                (work / rel).write_text(f"stub for {rel}\n")
+
+            git("init", "--quiet", "-b", "trusted")
+            git("add", "-A")
+            git("commit", "--quiet", "--no-verify", "-m", "trusted line")
+            trusted = git("rev-parse", "HEAD")
+
+            # A sibling that is NOT an ancestor of the trusted line -- the
+            # shape of a commit that re-adds the same files off the merged line.
+            git("checkout", "--quiet", "-b", "sibling", trusted)
+            (work / "DIVERGED").write_text("not on the reviewed line\n")
+            git("add", "DIVERGED")
+            git("commit", "--quiet", "--no-verify", "-m", "diverged sibling")
+            unmerged = git("rev-parse", "HEAD")
+            git("checkout", "--quiet", "trusted")
+
+            def run(source_ref, out):
+                return subprocess.run(
+                    [str(work / "systemd" / "build-liveness-reconciler-bundle.sh"),
+                     "--source-ref", source_ref, "--trusted-line", "trusted",
+                     "--output", str(out)],
+                    cwd=work, env=env, capture_output=True, text=True,
+                )
+
+            bad = pathlib.Path(td) / "bad.tar"
+            refused = run(unmerged, bad)
+            self.assertNotEqual(refused.returncode, 0,
+                                "builder accepted a commit not on the trusted line")
+            self.assertFalse(bad.exists(),
+                             "builder wrote a bundle for an unmerged commit")
+
+            # Control: the trusted commit still builds, so the refusal above is
+            # the ancestry check and not a builder that refuses everything.
+            good = pathlib.Path(td) / "good.tar"
+            ok = run(trusted, good)
+            self.assertEqual(ok.returncode, 0,
+                             f"builder refused the trusted commit: {ok.stderr}")
+            self.assertTrue(good.exists(), "builder produced no bundle for a good commit")
 
     def test_build_script_is_executable_as_the_docs_invoke_it(self):
         # The doc and the install card both call ./systemd/build-...sh directly.
