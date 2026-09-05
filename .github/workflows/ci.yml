@@ -1737,6 +1737,30 @@ jobs:
       - name: database backup stall detector suite
         run: ./test_db_backup_stall.sh
 
+      # A correct detector that nothing runs measures nothing. The suite above
+      # drives db_backup_stall.sh against fixture directories, so it can never
+      # testify about this host -- and on 2026-09-05 the scheduler wedged at
+      # 06:36Z and was found by a human at 17:45Z, eleven hours later, with the
+      # evidence sitting on disk the whole time. The 2026-08-30 occurrence ran
+      # 92 hours. Both times the detector-shaped signal existed and no clock
+      # read it.
+      #
+      # db_backup_stall_monitor.sh is that clock: it runs the detector against
+      # production from a native Paperclip issue monitor, comments the verdict,
+      # and re-arms. This suite covers the wrapper offline (stubbed detector,
+      # stubbed curl, fixed clock). Its load-bearing assertions are the three
+      # ways a monitor lies: a stall becoming a healthy claim, an UNMEASURABLE
+      # detector scoring clean, and a re-arm that reports success while leaving
+      # monitorNextCheckAt unset -- after which the monitor stops forever with
+      # nothing red anywhere.
+      #
+      # It earned its place while being written: the wrapper propagated an
+      # undocumented detector exit verbatim, so a caller testing `rc == 1`
+      # would have read exit 7 as "no stall". The suite caught it before the
+      # first cycle ran.
+      - name: database backup stall monitor wrapper suite
+        run: ./test_db_backup_stall_monitor.sh
+
       # And those are 40 green assertions about a detector, which is worth
       # nothing until somebody breaks the detector and watches them go red. Each
       # mutation removes ONE limb and requires the NAMED case to redden, after a
