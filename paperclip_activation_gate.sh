@@ -516,7 +516,7 @@ gate_networks() {
   # are two distinct keys that render to ONE leg, so comparing raw keys would
   # miss that collapse exactly as counting keys missed a repeated name.
   local -a rendered=()
-  local n u seen found
+  local n u c seen found
   resolve_network_names "${declared[@]}"
   for n in "${declared[@]}"; do
     rendered+=("$(carrier_key_to_podman_network "$n")")
@@ -611,14 +611,43 @@ gate_networks() {
   # this name. If one does, the same leg is reachable as that unit and the bare
   # spelling is the ordering-dropping form. If none does, the key names an
   # unmanaged network and is correct as written.
-  local -a unmanaged=() unmanaged_units=()
+  #
+  # TOG-1115 (fail-open) — "no unit renders to this name" is only a finding
+  # when every candidate name was actually READ. An installed-but-unreadable
+  # unit resolves to Quadlet's `systemd-<stem>` default, which by construction
+  # never equals a bare key that overrides it — so a guess makes the hazard
+  # look absent and ACQUITS the boot race. That is the same reasoning as
+  # `network_name_unresolved` above, inverted: a guessed name must not convict
+  # the carrier, and it must not exonerate it either. This is the live host
+  # shape — the repo ships no `.network` units, so the discriminator rests
+  # entirely on `.networkNames` having been captured.
+  #
+  # Resolve the candidates HERE, in the parent shell. `unit_rendering_to` runs
+  # in `$( )`, so its NETNAME_SRC writes die with the subshell and a guard
+  # reading them there would silently see an empty map and never fire.
+  local -a cand=()
+  mapfile -t cand < <(known_network_units | sort -u)
+  resolve_network_names ${cand[@]+"${cand[@]}"}
+  local -a unmanaged=() unmanaged_units=() unresolved=()
   for n in "${declared[@]}"; do
     is_reserved_network "$n" && continue
     case "$n" in *.network) continue ;; esac
     if u="$(unit_rendering_to "$n")"; then
       unmanaged+=("$n"); unmanaged_units+=("$u")
+      continue
     fi
+    # Nothing rendered to it. Believe that only if nothing was guessed.
+    for c in ${cand[@]+"${cand[@]}"}; do
+      if [ "${NETNAME_SRC[$c]:-default}" = default ]; then unresolved+=("$c"); fi
+    done
   done
+  if [ "${#unmanaged[@]}" -eq 0 ] && [ "${#unresolved[@]}" -gt 0 ]; then
+    local -a uu=(); mapfile -t uu < <(printf '%s\n' "${unresolved[@]}" | sort -u)
+    refuse network_name_unresolved \
+      "$CARRIER_REL names podman network(s) directly and no unit appears to render them — but ${#uu[@]} installed unit(s) (${uu[*]}) could not be read, so they were resolved to Quadlet's DEFAULT systemd-<stem> name. NetworkName= overrides that default, so one of them may in fact render this leg, which would make the bare key a boot race this gate cannot see" \
+      "capture the effective NetworkName= for ${uu[0]} into HOST_EVIDENCE .networkNames (./capture_host_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
+    return
+  fi
   if [ "${#unmanaged[@]}" -gt 0 ]; then
     refuse network_leg_unmanaged \
       "$CARRIER_REL names podman network(s) directly (${unmanaged[*]}) rather than the Quadlet unit that renders them (${unmanaged_units[*]}). Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \

@@ -507,6 +507,58 @@ refuses_because "the managed leg is caught even when unit stem != podman name" \
 says "the remedy names the RESOLVED unit, not a string-munged one that does not exist" \
   "declare pc-internal as paperclip.network" dvrun --commit "$GOOD_COMMIT" --auth "$AUTH"
 
+# (d) THE FAIL-OPEN. Every fixture above supplies `.networkNames`, so the
+# render discriminator always had a MEASURED answer and the suite structurally
+# could not see what happens when it has to GUESS. An installed-but-unreadable
+# unit resolves to Quadlet's `systemd-<stem>` default — which can never equal a
+# bare key that overrides it — so "no unit renders to this name" comes back
+# true by construction and the boot race is ACQUITTED.
+#
+# This is the LIVE HOST SHAPE, not a hypothetical: `paperclip.network` sets
+# `NetworkName=paperclip`, and the repo ships no `.network` units at all, so an
+# operator who runs the gate without capturing `.networkNames` gets exactly
+# this. It is the `network_name_unresolved` premise inverted — a guessed name
+# must not convict the carrier, and it must not exonerate it either.
+GR="$TMP/guessrepo"; mkrepo "$GR"
+rm -f "$GR/deploy/paperclip-immutable/"*.network   # nothing readable in either namespace
+sed -i 's/^Network=paperclip.network$/Network=paperclip/; /^Network=omniroute.network$/d' \
+  "$GR/deploy/paperclip-immutable/paperclip.container"
+EVGUESS="$TMP/ev-guess.json"
+jq -n '{networks:["paperclip"], networkUnits:["paperclip.network"]}' > "$EVGUESS"
+grun() { HOST_EVIDENCE="$EVGUESS" ACTIVATION_NOW="$NOW" "$G" check --repo "$GR" "$@"; }
+refuses_because "a bare key is NOT cleared by a GUESSED render answer" \
+  network_name_unresolved grun --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the unresolved refusal names the unreadable unit, not the carrier" \
+  "paperclip.network" grun --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "and it forbids editing the carrier on a guess, as the mismatch path does" \
+  "Do NOT edit the carrier's Network= keys" grun --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# PAIRED CONTROL for (d): the ONLY difference is that the operator captured the
+# name. If this did not flip, (d) could be passing on some unrelated refusal
+# rather than on the guess, and the arm would prove nothing.
+EVGUESSOK="$TMP/ev-guess-ok.json"
+jq -n '{networks:["paperclip"], networkUnits:["paperclip.network"],
+        networkNames:{"paperclip.network":"paperclip"}}' > "$EVGUESSOK"
+refuses_because "capturing .networkNames turns the same fixture into the real boot-race refusal" \
+  network_leg_unmanaged \
+  env HOST_EVIDENCE="$EVGUESSOK" ACTIVATION_NOW="$NOW" "$G" check --repo "$GR" \
+    --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# (e) The over-correction guard. `corp-shared` is unmanaged and NO unit is
+# installed at all, so there is nothing unreadable to be uncertain about and
+# the carrier is correct as written. Without this arm, the natural fix —
+# refusing whenever ANY name was guessed — sails through (d) while re-breaking
+# 6c(a), which is the exact over-refusal TOG-1115 was opened to remove.
+LR="$TMP/legitnounit"; mkrepo "$LR"
+rm -f "$LR/deploy/paperclip-immutable/"*.network
+sed -i 's/^Network=paperclip.network$/Network=corp-shared/; /^Network=omniroute.network$/d' \
+  "$LR/deploy/paperclip-immutable/paperclip.container"
+EVLEGIT="$TMP/ev-legit.json"
+jq -n '{networks:["corp-shared"], networkUnits:[]}' > "$EVLEGIT"
+allows "a pre-existing network with NO unit installed passes without any capture" \
+  env HOST_EVIDENCE="$EVLEGIT" ACTIVATION_NOW="$NOW" "$G" check --repo "$LR" \
+    --commit "$GOOD_COMMIT" --auth "$AUTH"
+
 hdr "7. The runbook must exist and be fail-CLOSED"
 cp "$R/docs/paperclip-immutable-application-tree.md" "$TMP/rb.bak"
 : > "$R/docs/paperclip-immutable-application-tree.md"
@@ -758,6 +810,43 @@ if command -v python3 >/dev/null; then
   fi
 else
   echo "  SKIP  render-discriminator mutation arms (python3 unavailable)"
+fi
+
+# --- 9d. TOG-1115 — the guessed-render GUARD is load-bearing ---------------
+# 6c(d)'s git control dies the moment this lands, so pin the property here.
+# Delete the guard's provenance test — i.e. treat every candidate as if it had
+# been measured — and 6c(d) must go RED. That mutant is the exact code that was
+# on the branch, so this arm keeps measuring the real regression forever.
+mutate_guess_guard() {  # -> $TMP/mut/gate.sh
+  local mut="$TMP/mut"; rm -rf "$mut"; mkdir -p "$mut"
+  cp "$G" "$mut/gate.sh"; chmod +x "$mut/gate.sh"
+  # The guard fires only via this provenance test; forcing it false restores
+  # the fail-open without touching the surrounding control flow.
+  sed -i 's|if \[ "${NETNAME_SRC\[\$c\]:-default}" = default \]; then unresolved+=("\$c"); fi|if false; then unresolved+=("$c"); fi|' \
+    "$mut/gate.sh"
+  bash -n "$mut/gate.sh" 2>/dev/null || { bad "guess-guard mutant does not parse"; return 1; }
+  if cmp -s "$G" "$mut/gate.sh"; then
+    bad "guess-guard mutant is byte-identical to the gate — the arm mutates nothing"
+    return 1
+  fi
+}
+if mutate_guess_guard; then
+  o="$(HOST_EVIDENCE="$EVGUESS" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" \
+         check --repo "$GR" --commit "$GOOD_COMMIT" --auth "$AUTH" 2>&1)"; mrc=$?
+  if [ $mrc -eq 0 ]; then
+    ok "trusting a GUESSED render answer re-opens the boot-race fail-open"
+  else
+    bad "the guess-guard mutant still refused (rc=$mrc); 6c(d) does not pin this guard"
+  fi
+  # Paired control: the same mutant must still refuse when the name WAS
+  # measured. A mutant that broke the whole check would score a free kill above.
+  o="$(HOST_EVIDENCE="$EVGUESSOK" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" \
+         check --repo "$GR" --commit "$GOOD_COMMIT" --auth "$AUTH" 2>&1)"
+  if grep -qF '[network_leg_unmanaged]' <<<"$o"; then
+    ok "  … and that mutant still refuses the MEASURED case, so the kill is the guard"
+  else
+    bad "  … but the mutant broke the measured case too — the kill above is not attributable"
+  fi
 fi
 
 hdr "10. The real repo carrier, as it stands today, is REFUSED"
