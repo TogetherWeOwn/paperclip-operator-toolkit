@@ -226,6 +226,36 @@ gate_digest() {
   fi
   pass image_digest "pinned to @sha256:${digest:0:12}…"
   printf '%s' "$digest" > "$TMP/digest"
+
+  # A well-formed digest is not a safe one. The 2026-09-05 host window read a
+  # candidate (the sole local `paperclip-local`, a TOG-516 v2 rebuild) that is
+  # NOT the digest the service is running (a ghcr image from the 09-05 05:33Z
+  # operator upgrade). Pinning the candidate is therefore an image CHANGE
+  # wearing the clothes of a placeholder fill: format-valid, board-approvable,
+  # and it silently rolls the running server onto a different build. Measured
+  # before this check existed: pinning `80e113a4…` scored
+  # `PASS [image_digest]` and said nothing about the running `f58ff8e2…`.
+  #
+  # The evidence carries both halves precisely so the gate can tell them
+  # apart, so read them. This does NOT decide which digest is right — that is
+  # the board's call — it refuses to let the difference pass unnamed.
+  [ -n "${HOST_EVIDENCE:-}" ] && [ -f "$HOST_EVIDENCE" ] || return 0
+  local running candidate
+  running="$(jq -r '.image.running // empty' "$HOST_EVIDENCE" 2>/dev/null)"
+  candidate="$(jq -r '.image.candidate // empty' "$HOST_EVIDENCE" 2>/dev/null)"
+  [ -n "$running" ] || return 0
+  running="${running#sha256:}"
+  candidate="${candidate#sha256:}"
+  if [ "$digest" = "$running" ]; then
+    pass image_matches_running "pinned digest is the digest the service is already running"
+    return 0
+  fi
+  local origin="a digest on neither the running service nor the local candidate"
+  [ -n "$candidate" ] && [ "$digest" = "$candidate" ] && \
+    origin="the host-local CANDIDATE image, which is not what the service is running"
+  refuse image_changes_running_service \
+    "carrier pins @sha256:${digest:0:12}… ($origin); the running service is on @sha256:${running:0:12}…. Installing this carrier REPLACES the running image, which is a version change, not a placeholder fill" \
+    "either pin the running digest ${running:0:12}… to make this carrier a no-op on the image, or obtain board authorization that names ${digest:0:12}… as an intended image change and says so explicitly"
 }
 
 # --- gate: ReadOnly does not fail open (TOG-654 rejection 1) --------------

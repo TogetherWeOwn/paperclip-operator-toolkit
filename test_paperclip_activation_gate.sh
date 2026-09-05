@@ -146,6 +146,58 @@ refuses_because "a short/malformed digest is refused" image_digest_malformed \
   run --commit "$GOOD_COMMIT" --auth "$AUTH"
 cp "$TMP/carrier.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
+hdr "2b. A well-formed digest that is not the RUNNING one is an image CHANGE"
+# The 2026-09-05 host window read a candidate digest (the sole local
+# `paperclip-local`, a TOG-516 v2 rebuild) that is NOT what the service runs
+# (a ghcr image from that morning's operator upgrade). Before this gate,
+# pinning the candidate scored `PASS [image_digest]` and said nothing — a
+# format check cannot tell a placeholder fill from a version roll.
+#
+# The fixtures above carry no `.image` at all, which is why the whole suite
+# stayed green when this gate was added. So build evidence that HAS one.
+EVIMG="$TMP/ev-image.json"
+RUNNING_DIGEST="f58ff8e28757eaaf1f58b7ae608e56f2a473fd0688aaab2dbade8c392fad0758"
+CANDIDATE_DIGEST="80e113a4fd811d0e0ed4e4df63a97d1d584d282ce254bdb7209f3437f8b26f9f"
+mkevidence "$EVIMG" paperclip omniroute
+jq --arg r "$RUNNING_DIGEST" --arg c "$CANDIDATE_DIGEST" \
+   '.image = {name:"localhost/paperclip-local:t", candidate:$c, running:$r, matchesRunning:false}' \
+   "$EVIMG" > "$EVIMG.t" && mv "$EVIMG.t" "$EVIMG"
+runimg() { HOST_EVIDENCE="$EVIMG" ACTIVATION_NOW="$NOW" "$G" check --repo "$R" "$@"; }
+
+cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/carrier2.bak"
+sed -i "s|^Image=.*|Image=paperclip-local@sha256:$CANDIDATE_DIGEST|" "$R/deploy/paperclip-immutable/paperclip.container"
+refuses_because "pinning the host CANDIDATE digest is refused as an image change" \
+  image_changes_running_service runimg --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the refusal names the running digest the operator would be replacing" \
+  "${RUNNING_DIGEST:0:12}" runimg --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the refusal identifies the pin as the host-local candidate" \
+  "the host-local CANDIDATE image" runimg --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# A third digest matching neither must refuse too — otherwise the gate is only
+# a candidate-detector, and any other typo'd or stale digest sails through.
+sed -i "s|^Image=.*|Image=paperclip-local@sha256:$(printf 'b%.0s' {1..64})|" "$R/deploy/paperclip-immutable/paperclip.container"
+refuses_because "a digest matching neither running nor candidate is refused" \
+  image_changes_running_service runimg --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# Pinning what is ALREADY running is the no-op case and must pass, or the gate
+# would make the carrier permanently unsatisfiable.
+sed -i "s|^Image=.*|Image=paperclip-local@sha256:$RUNNING_DIGEST|" "$R/deploy/paperclip-immutable/paperclip.container"
+AUTHRUN="$TMP/auth-running.json"
+mkauth "$AUTHRUN" "$GOOD_COMMIT" "$RUNNING_DIGEST" \
+  "2026-09-01T02:00:00Z" "2026-09-01T06:00:00Z"
+allows "pinning the digest the service already runs passes" \
+  runimg --commit "$GOOD_COMMIT" --auth "$AUTHRUN"
+says "and it says so positively, not by silence" \
+  "[image_matches_running]" runimg --commit "$GOOD_COMMIT" --auth "$AUTHRUN"
+
+# Evidence without an .image section must not start refusing: the older
+# capture format predates the candidate/running split, and a gate that
+# refuses on missing evidence would block on data the operator cannot supply
+# without another host window.
+allows "evidence with no .image section still passes (degrades, does not refuse)" \
+  run --commit "$GOOD_COMMIT" --auth "$AUTHRUN"
+cp "$TMP/carrier2.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
 hdr "3. TOG-654 rejection 1 — ReadOnly must not fail open"
 cp "$R/deploy/paperclip-immutable/paperclip.container" "$TMP/c2.bak"
 echo 'ReadOnly=/app' >> "$R/deploy/paperclip-immutable/paperclip.container"
@@ -386,6 +438,22 @@ sed -i 's/^Network=paperclip.network$/Network=systemd-paperclip/; s/^Network=omn
   "$R/deploy/paperclip-immutable/paperclip.container"
 mutation_check "deleting gate_networks makes the unmanaged systemd-* test go green" \
   '/^  gate_networks /d' MUT --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
+
+# The running-image cross-check must be load-bearing too. Deleting only the
+# `refuse image_changes_running_service` call has to make the candidate-pinned
+# carrier green — if some other gate catches it, section 2b proves nothing
+# about THIS check. Note the mutant runs against $EVIMG (evidence WITH an
+# .image), and the auth record must name the candidate digest, or
+# activation_digest_mismatch would refuse instead and mask the deletion.
+MUTIMG() { HOST_EVIDENCE="$EVIMG" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" check --repo "$R" "$@"; }
+AUTHCAND="$TMP/auth-candidate.json"
+mkauth "$AUTHCAND" "$GOOD_COMMIT" "$CANDIDATE_DIGEST" \
+  "2026-09-01T02:00:00Z" "2026-09-01T06:00:00Z"
+sed -i "s|^Image=.*|Image=paperclip-local@sha256:$CANDIDATE_DIGEST|" \
+  "$R/deploy/paperclip-immutable/paperclip.container"
+mutation_check "deleting the running-image cross-check makes the candidate pin go green" \
+  '/refuse image_changes_running_service/,+2d' MUTIMG --commit "$GOOD_COMMIT" --auth "$AUTHCAND"
 cp "$TMP/c9.bak" "$R/deploy/paperclip-immutable/paperclip.container"
 
 echo 'ReadOnly=/app' >> "$R/deploy/paperclip-immutable/paperclip.container"
