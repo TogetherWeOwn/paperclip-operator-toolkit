@@ -198,6 +198,40 @@ touch "$WORK/dead.log"
 OUT="$("$TOOL" --log "$WORK/dead.log" --backup-dir "$DL" --no-health 2>&1)"; RC=$?
 (( RC == 0 )) && ok "a current log with fresh backups is still green" || bad "expected exit 0, got $RC ($OUT)"
 
+# --- 5e. the runbook must not advertise an unreachable exit 0 --------------
+# The detector's dead-log rule (5d) is correct and deliberate. The hazard is
+# what the RUNBOOK and the operator card tell a human to expect from it: on
+# this installation the default log path stopped being written at 05:33Z, three
+# minutes before the 05:36:14Z container restart, and the current container
+# logs to stdout. So a bare `./db_backup_stall.sh` cannot return 0 here even
+# after a flawless recovery -- it returns 2 by design.
+#
+# An operator handed "must be 0" as the acceptance criterion is being asked for
+# something unachievable, and will either conclude the restart failed or "fix"
+# it by relaxing the staleness rule -- which is exactly the green-from-a-dead-
+# log that cost 92 hours on 2026-08-30. This asserts the docs stay honest.
+hdr "The runbook never advertises a bare exit 0 as the recovery check (TOG-1129)"
+RB="$HERE/docs/runbooks/database-backup-stall.md"
+if [[ -r "$RB" ]]; then
+  # Any line invoking the detector with no --log, yet claiming it must be 0.
+  if grep -nE '^\s*\./db_backup_stall\.sh\s*(#.*)?$' "$RB" | grep -qE '(must be|must exit)\s*0'; then
+    bad "runbook advertises a bare invocation returning 0 -- unreachable on this host"
+  else
+    ok "no bare invocation is documented as returning 0"
+  fi
+  grep -q 'exit 0 is unreachable without it' "$RB" \
+    && ok "runbook states why --log is mandatory for the recovery check" \
+    || bad "runbook does not explain that the default log path is dead"
+  # The monitor wrapper passes no --log, so post-recovery it reports
+  # inconclusive rather than green. That must be written down, or the flip
+  # from stall to inconclusive reads as recovery.
+  grep -q 'flips from `stall` straight to `inconclusive`' "$RB" \
+    && ok "runbook warns the monitor flips to inconclusive, not to green" \
+    || bad "runbook does not warn about the post-restart inconclusive flip"
+else
+  bad "runbook $RB not readable -- documentation assertions unverified"
+fi
+
 # --- 6. JSON contract ------------------------------------------------------
 hdr "JSON output is well-formed and carries the verdict"
 J="$("$TOOL" --log "$WORK/stall.log" --backup-dir "$WORK/good" --no-health --json 2>/dev/null)"
