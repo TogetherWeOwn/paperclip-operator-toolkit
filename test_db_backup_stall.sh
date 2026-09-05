@@ -29,7 +29,18 @@ hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/test_db_backup_stall.XXXXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/empty"
+
+# Write a plausible backup archive: comfortably over the 1 KiB usability floor
+# and mtime-now, so it satisfies both the truncation and the staleness rules.
+mkgz() { head -c 4096 /dev/zero > "$1"; }
+
+# The log-signal cases below are about the LOG, so they get a backup directory
+# that is unambiguously healthy -- otherwise signal 3 (no usable backup) fires
+# on the empty directory and every log assertion is measuring the wrong thing.
+# An empty backup directory really is a stall in production; that is asserted
+# on its own in section 5c rather than smuggled into these fixtures.
+mkdir -p "$WORK/good"
+mkgz "$WORK/good/paperclip-20260905-051709.sql.gz"
 
 C='INFO: Automatic database backup complete: /d/paperclip-20260903-061709.sql.gz (130.8M)'
 S='WARN: Skipping scheduled database backup because a previous backup is still running'
@@ -39,7 +50,7 @@ N='INFO: some unrelated server line'
 # run <log> <extra args...> -> sets RC and OUT
 run() {
   local log="$1"; shift
-  OUT="$("$TOOL" --log "$log" --backup-dir "$WORK/empty" --no-health "$@" 2>&1)"
+  OUT="$("$TOOL" --log "$log" --backup-dir "$WORK/good" --no-health "$@" 2>&1)"
   RC=$?
 }
 
@@ -104,27 +115,99 @@ OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$WORK/bk" --no-health 2>&
 (( RC == 1 )) && ok "exit 1 on a stale unpaired .sql" || bad "expected exit 1, got $RC"
 grep -q "ORPHAN" <<<"$OUT" && ok "names the orphan signal" || bad "no ORPHAN reason"
 
-# A gzipped pair is a SUCCESSFUL backup, never an orphan.
-: > "$WORK/bk/paperclip-20260830-093742.sql.gz"
+# A pair whose .gz is a REAL archive is a successful backup, never an orphan.
+# NOTE the sibling must be written with real content. The original version of
+# this test created the .gz with `: >` -- a ZERO-byte file -- and asserted exit
+# 0, which encoded the 2026-09-05 false green as the expected behaviour.
+mkgz "$WORK/bk/paperclip-20260830-093742.sql.gz"
 OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$WORK/bk" --no-health 2>&1)"; RC=$?
-(( RC == 0 )) && ok "paired .sql/.sql.gz is not an orphan" || bad "expected exit 0, got $RC"
+(( RC == 0 )) && ok "paired .sql/real .sql.gz is not an orphan" || bad "expected exit 0, got $RC ($OUT)"
 
-# An in-progress backup younger than the threshold is not yet an orphan.
+# An in-progress backup younger than the threshold is not yet an orphan. Keep a
+# fresh good archive present so signal 3 (staleness) does not fire instead --
+# this case is about the orphan rule alone.
 rm -f "$WORK/bk/paperclip-20260830-093742.sql.gz"
 touch "$WORK/bk/paperclip-20260830-093742.sql"
+mkgz "$WORK/bk/paperclip-20260830-100000.sql.gz"
 OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$WORK/bk" --no-health 2>&1)"; RC=$?
-(( RC == 0 )) && ok "a fresh in-progress .sql is not an orphan" || bad "expected exit 0, got $RC"
+(( RC == 0 )) && ok "a fresh in-progress .sql is not an orphan" || bad "expected exit 0, got $RC ($OUT)"
+
+# --- 5b. THE 2026-09-05 REGRESSION -----------------------------------------
+# The exact shape the detector missed on the live host: a big orphaned .sql
+# next to a 20-byte .sql.gz. The pre-fix detector returned exit 0 here, because
+# it tested for the sibling's EXISTENCE rather than its usability.
+hdr "A TRUNCATED .sql.gz sibling is a stall, not a success (TOG-1129)"
+TR="$WORK/truncated"; mkdir -p "$TR"
+mkgz "$TR/paperclip-20260905-051709.sql.gz"   # a fresh last-good backup, so that
+                                              # staleness stays quiet and this
+                                              # case measures truncation alone
+head -c 4096 /dev/zero > "$TR/paperclip-20260905-063644.sql"
+head -c 20   /dev/zero > "$TR/paperclip-20260905-063644.sql.gz"   # empty gzip frame
+# Older than --orphan-min-age-minutes. That screen is deliberately kept for the
+# truncated case: gzip creates its output file when compression STARTS, so a
+# backup legitimately mid-compress also has a short-lived tiny .gz. Age is what
+# separates "compressing right now" from "died while compressing". On the real
+# host this dump was 681 minutes old.
+touch -d "@$(( $(date -u +%s) - 2 * 3600 ))" "$TR/paperclip-20260905-063644.sql" \
+                                             "$TR/paperclip-20260905-063644.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$TR" --no-health 2>&1)"; RC=$?
+(( RC == 1 )) && ok "exit 1 on a 20-byte .sql.gz beside a real .sql" || bad "FALSE GREEN: expected exit 1, got $RC ($OUT)"
+grep -q "TRUNCATED" <<<"$OUT" && ok "names the truncation signal" || bad "no TRUNCATED reason"
+
+# The complement: raising the floor below the sibling's size must clear it.
+# Without this, a detector that simply calls every pair truncated also passes.
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$TR" --no-health --min-backup-bytes 10 2>&1)"; RC=$?
+(( RC == 0 )) && ok "a .gz above the floor is accepted (floor is really consulted)" || bad "expected exit 0, got $RC ($OUT)"
+
+# --- 5c. staleness, the signal that survives losing the log -----------------
+hdr "A backup directory whose newest archive is old is a stall (TOG-1129)"
+ST="$WORK/stale"; mkdir -p "$ST"
+mkgz "$ST/paperclip-20260905-051709.sql.gz"
+touch -d "@$(( $(date -u +%s) - 3 * 3600 ))" "$ST/paperclip-20260905-051709.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$ST" --no-health 2>&1)"; RC=$?
+(( RC == 1 )) && ok "exit 1 when the newest good archive is 3h old" || bad "expected exit 1, got $RC ($OUT)"
+grep -q "STALE" <<<"$OUT" && ok "names the staleness signal" || bad "no STALE reason"
+
+# Negative control for the same rule: a fresh archive must NOT trip it.
+touch "$ST/paperclip-20260905-051709.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$ST" --no-health 2>&1)"; RC=$?
+(( RC == 0 )) && ok "a fresh archive does not trip staleness" || bad "expected exit 0, got $RC ($OUT)"
+
+hdr "A directory with no usable archive at all is a stall"
+NB="$WORK/nogood"; mkdir -p "$NB"
+head -c 20 /dev/zero > "$NB/paperclip-20260905-063644.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$NB" --no-health 2>&1)"; RC=$?
+(( RC == 1 )) && ok "exit 1 when every archive is truncated" || bad "expected exit 1, got $RC ($OUT)"
+grep -q "NO USABLE BACKUP" <<<"$OUT" && ok "names the no-usable-backup signal" || bad "no NO USABLE BACKUP reason"
+
+# --- 5d. a DEAD log cannot testify to health -------------------------------
+# The second half of the live miss: server.log stopped being written at 05:33,
+# so the suppression scan anchored on a 12-hour-old completion and saw no skips
+# after it. An anchor from a dead log must never produce a green.
+hdr "A stale log is inconclusive, never green (TOG-1129)"
+DL="$WORK/deadlog"; mkdir -p "$DL"
+mkgz "$DL/paperclip-20260905-051709.sql.gz"                  # backups are FINE
+cp "$WORK/healthy.log" "$WORK/dead.log"
+touch -d "@$(( $(date -u +%s) - 12 * 3600 ))" "$WORK/dead.log"
+OUT="$("$TOOL" --log "$WORK/dead.log" --backup-dir "$DL" --no-health 2>&1)"; RC=$?
+(( RC == 2 )) && ok "exit 2 when the log is 12h stale but backups are fresh" || bad "expected exit 2, got $RC ($OUT)"
+grep -q "No backup stall detected" <<<"$OUT" && bad "claimed health from a dead log" || ok "never claims health from a dead log"
+# And the same log, freshly written, must still be able to go green -- otherwise
+# this rule is just a second always-on alarm.
+touch "$WORK/dead.log"
+OUT="$("$TOOL" --log "$WORK/dead.log" --backup-dir "$DL" --no-health 2>&1)"; RC=$?
+(( RC == 0 )) && ok "a current log with fresh backups is still green" || bad "expected exit 0, got $RC ($OUT)"
 
 # --- 6. JSON contract ------------------------------------------------------
 hdr "JSON output is well-formed and carries the verdict"
-J="$("$TOOL" --log "$WORK/stall.log" --backup-dir "$WORK/empty" --no-health --json 2>/dev/null)"
+J="$("$TOOL" --log "$WORK/stall.log" --backup-dir "$WORK/good" --no-health --json 2>/dev/null)"
 if command -v python3 >/dev/null 2>&1; then
   if python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["verdict"]=="stall"; assert d["exitCode"]==1; assert d["windowAnchored"] is True; assert d["skipCountInWindow"]==12' <<<"$J" 2>/dev/null; then
     ok "stall JSON parses with the expected fields"
   else
     bad "stall JSON malformed or wrong: $J"
   fi
-  JH="$("$TOOL" --log "$WORK/noanchor.log" --backup-dir "$WORK/empty" --no-health --json 2>/dev/null)"
+  JH="$("$TOOL" --log "$WORK/noanchor.log" --backup-dir "$WORK/good" --no-health --json 2>/dev/null)"
   if python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["verdict"]=="inconclusive"; assert d["windowAnchored"] is False' <<<"$JH" 2>/dev/null; then
     ok "inconclusive JSON reports windowAnchored=false"
   else
@@ -132,7 +215,7 @@ if command -v python3 >/dev/null 2>&1; then
   fi
   # A log line containing quotes and backslashes must not break the JSON.
   { echo '[06:38:11] '"$C"; echo '[09:00:00] INFO: Automatic database backup starting {"path":"C:\\dir\\"x"}'; } > "$WORK/quotes.log"
-  JQ="$("$TOOL" --log "$WORK/quotes.log" --backup-dir "$WORK/empty" --no-health --json 2>/dev/null)"
+  JQ="$("$TOOL" --log "$WORK/quotes.log" --backup-dir "$WORK/good" --no-health --json 2>/dev/null)"
   python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$JQ" 2>/dev/null \
     && ok "quotes and backslashes in log lines stay valid JSON" || bad "escaping broke JSON"
 else
