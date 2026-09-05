@@ -439,6 +439,74 @@ allows "NetworkName= outside [Network] does not name the network" \
 printf '[Unit]\nDescription=Paperclip internal network\n\n[Network]\nNetworkName=paperclip\n' \
   > "$HR/deploy/paperclip-immutable/paperclip.network"
 
+# ---------------------------------------------------------------------------
+# 6c. TOG-1115 — the unmanaged-leg test keys on WHETHER A UNIT RENDERS TO THE
+# NAME, not on the spelling of the key.
+#
+# TOG-1110 replaced a `systemd-` PREFIX test with a missing-`.network`-SUFFIX
+# test. That closed the boot race on this host's overriding leg, but it
+# over-refused in the other direction: a leg the host holds as a pre-existing
+# podman network correctly has no unit, cannot be respelled as `X.network`,
+# and races nothing — there is no unit for Quadlet to order against. Refusing
+# it contradicted the premise the network_units check below still runs on.
+#
+# Both fixtures below declare a BARE key. The suffix test cannot tell them
+# apart — it refuses both. Only the render test does, so this pair is what
+# makes the discriminator load-bearing in each direction.
+# ---------------------------------------------------------------------------
+hdr "6c. A bare key is a hazard only when a unit renders to it (TOG-1115)"
+UR="$TMP/unmanagedrepo"; mkrepo "$UR"
+printf '[Unit]\nDescription=Paperclip internal network\n\n[Network]\nNetworkName=paperclip\n' \
+  > "$UR/deploy/paperclip-immutable/paperclip.network"
+rm -f "$UR/deploy/paperclip-immutable/omniroute.network"
+
+# (a) LEGITIMATE. `corp-shared` is a pre-existing podman network: the host
+# holds it, no unit renders to it, and the bare key is the only spelling
+# available. Refusing this is the over-refusal.
+sed -i 's/^Network=omniroute.network$/Network=corp-shared/' \
+  "$UR/deploy/paperclip-immutable/paperclip.container"
+EVUN="$TMP/ev-unmanaged.json"
+jq -n '{networks:["paperclip","corp-shared"],
+        networkUnits:["paperclip.network"],
+        networkNames:{"paperclip.network":"paperclip"}}' > "$EVUN"
+urun() { HOST_EVIDENCE="$EVUN" ACTIVATION_NOW="$NOW" "$G" check --repo "$UR" "$@"; }
+allows "a pre-existing podman network with NO unit is not an unmanaged-leg defect" \
+  urun --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "and it still clears the unit check, which exempts it by the same premise" \
+  "PASS  [network_units]" urun --commit "$GOOD_COMMIT" --auth "$AUTH"
+
+# (b) HAZARD, same bare shape. Here a unit DOES render to `paperclip`, so the
+# leg is Quadlet-managed and the bare spelling drops the Requires=/After=.
+cp "$UR/deploy/paperclip-immutable/paperclip.container" "$TMP/u.bak"
+sed -i 's/^Network=paperclip.network$/Network=paperclip/' \
+  "$UR/deploy/paperclip-immutable/paperclip.container"
+refuses_because "a bare key that a unit DOES render to is still refused" \
+  network_leg_unmanaged urun --commit "$GOOD_COMMIT" --auth "$AUTH"
+cp "$TMP/u.bak" "$UR/deploy/paperclip-immutable/paperclip.container"
+
+# (c) The remedy text must name the unit that RENDERS the leg, which is only
+# discoverable by resolving it. Where the override makes the unit stem differ
+# from the podman name, a string-munged `${key#systemd-}.network` guess and the
+# resolved answer DIVERGE — and the guess names a unit that does not exist.
+# Asserting this on a leg called `paperclip` would prove nothing: there both
+# spellings collapse to `paperclip.network` and the assertion passes on the
+# unfixed gate too.
+DR="$TMP/divergerepo"; mkrepo "$DR"
+rm -f "$DR/deploy/paperclip-immutable/omniroute.network"
+printf '[Unit]\n\n[Network]\nNetworkName=pc-internal\n' \
+  > "$DR/deploy/paperclip-immutable/paperclip.network"
+sed -i 's/^Network=paperclip.network$/Network=pc-internal/; s/^Network=omniroute.network$/Network=corp-shared/' \
+  "$DR/deploy/paperclip-immutable/paperclip.container"
+EVDV="$TMP/ev-diverge.json"
+jq -n '{networks:["pc-internal","corp-shared"],
+        networkUnits:["paperclip.network"],
+        networkNames:{"paperclip.network":"pc-internal"}}' > "$EVDV"
+dvrun() { HOST_EVIDENCE="$EVDV" ACTIVATION_NOW="$NOW" "$G" check --repo "$DR" "$@"; }
+refuses_because "the managed leg is caught even when unit stem != podman name" \
+  network_leg_unmanaged dvrun --commit "$GOOD_COMMIT" --auth "$AUTH"
+says "the remedy names the RESOLVED unit, not a string-munged one that does not exist" \
+  "declare pc-internal as paperclip.network" dvrun --commit "$GOOD_COMMIT" --auth "$AUTH"
+
 hdr "7. The runbook must exist and be fail-CLOSED"
 cp "$R/docs/paperclip-immutable-application-tree.md" "$TMP/rb.bak"
 : > "$R/docs/paperclip-immutable-application-tree.md"
@@ -631,6 +699,65 @@ if command -v python3 >/dev/null && mutate_parser_to_grep; then
     > "$HR/deploy/paperclip-immutable/paperclip.network"
 else
   echo "  SKIP  parser mutation arms (python3 unavailable)"
+fi
+
+# --- 9c. TOG-1115 — the RENDER discriminator is load-bearing both ways ------
+# Section 6c currently discriminates only against the pre-fix gate in git. That
+# control expires the moment this lands, so pin the property here instead: swap
+# `unit_rendering_to` for each of the two degenerate answers and assert the 6c
+# fixture that depends on it flips. Each arm carries its own paired control, so
+# an arm that silently stops mutating cannot score a free kill.
+mutate_render_test() {  # <always-yes|always-no> -> $TMP/mut/gate.sh
+  local mode="$1" mut="$TMP/mut"; rm -rf "$mut"; mkdir -p "$mut"
+  cp "$G" "$mut/gate.sh"; chmod +x "$mut/gate.sh"
+  python3 - "$mut/gate.sh" "$mode" <<'PY'
+import sys
+p,mode=sys.argv[1],sys.argv[2]; s=open(p).read()
+anchor='unit_rendering_to() {'
+start=s.index(anchor); end=s.index('\n}\n',start)+3
+# always-yes == the pre-fix suffix-only rule: every bare key is "managed".
+body=('unit_rendering_to() {\n  printf \'%s\\n\' "${1#systemd-}.network"\n  return 0\n}\n'
+      if mode=='always-yes' else
+      'unit_rendering_to() {\n  return 1\n}\n')
+open(p,'w').write(s[:start]+body+s[end:])
+PY
+  bash -n "$mut/gate.sh" 2>/dev/null || { bad "render mutant ($mode) does not parse"; return 1; }
+  # Paired control: the mutant must differ from the original, or the arm proves
+  # nothing. A restructured function body silently drifts the anchor above.
+  if cmp -s "$G" "$mut/gate.sh"; then
+    bad "render mutant ($mode) is byte-identical to the gate — the arm mutates nothing"
+    return 1
+  fi
+}
+if command -v python3 >/dev/null; then
+  # (a) always-yes: the legitimate pre-existing network is wrongly refused.
+  # This is precisely the over-refusal TOG-1115 reported.
+  if mutate_render_test always-yes; then
+    o="$(HOST_EVIDENCE="$EVUN" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" \
+           check --repo "$UR" --commit "$GOOD_COMMIT" --auth "$AUTH" 2>&1)"
+    if grep -qF '[network_leg_unmanaged]' <<<"$o"; then
+      ok "treating every bare key as managed re-breaks the legitimate unmanaged leg"
+    else
+      bad "the always-yes render mutant did NOT over-refuse; 6c(a) does not pin the fix"
+    fi
+  fi
+  # (b) always-no: the boot-racing managed leg is waved through. Same fixture
+  # shape as (a) — only the render answer differs — so the pair isolates it.
+  if mutate_render_test always-no; then
+    cp "$UR/deploy/paperclip-immutable/paperclip.container" "$TMP/u9.bak"
+    sed -i 's/^Network=paperclip.network$/Network=paperclip/' \
+      "$UR/deploy/paperclip-immutable/paperclip.container"
+    o="$(HOST_EVIDENCE="$EVUN" ACTIVATION_NOW="$NOW" "$TMP/mut/gate.sh" \
+           check --repo "$UR" --commit "$GOOD_COMMIT" --auth "$AUTH" 2>&1)"
+    if grep -qF '[network_leg_unmanaged]' <<<"$o"; then
+      bad "the always-no render mutant still refused; 6c(b) does not isolate this check"
+    else
+      ok "answering 'no unit renders this' waves the boot-racing leg through"
+    fi
+    cp "$TMP/u9.bak" "$UR/deploy/paperclip-immutable/paperclip.container"
+  fi
+else
+  echo "  SKIP  render-discriminator mutation arms (python3 unavailable)"
 fi
 
 hdr "10. The real repo carrier, as it stands today, is REFUSED"

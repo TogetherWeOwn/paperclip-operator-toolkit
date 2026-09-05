@@ -355,7 +355,7 @@ while IFS= read -r unit; do
   if eff="$(effective_network_name "$found")"; then
     [ -n "$eff" ] || eff="systemd-${unit%.network}"   # parsed, genuinely default
     names_json="$(printf '%s' "$names_json" \
-      | jq -c --arg k "$unit" --arg v "$eff" --arg src "$found" \
+      | jq -c --arg k "$unit" --arg v "$eff" \
           '.[$k] = $v' 2>/dev/null || printf '%s' "$names_json")"
   fi
 done < <(printf '%s' "$units_json" | jq -r '.[]?')

@@ -294,6 +294,41 @@ carrier_key_to_podman_network() {
   esac
 }
 
+# Every `.network` unit this run can see, from either namespace: the units the
+# host reported installed, plus the units shipped in the carrier's own
+# directory. A unit in either place is one Quadlet will order the service
+# against, which is the only property the unmanaged-leg check turns on.
+known_network_units() {
+  local u f
+  jq -r '.networkUnits[]?' "${HOST_EVIDENCE:-/dev/null}" 2>/dev/null
+  for f in "$REPO/$(dirname "$CARRIER_REL")"/*.network; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "${f##*/}"
+  done
+}
+
+# The discriminator for a bare (non-`.network`) key: is there a unit that
+# RENDERS TO this name? Prints that unit, or nothing.
+#
+# A bare key is only a hazard when the leg is Quadlet-managed — then the same
+# leg is reachable as `<stem>.network`, and spelling it bare drops the
+# Requires=/After= while still rendering the right network. Where NO unit
+# renders to the name, the key names a genuine pre-existing podman network,
+# which correctly has no unit and cannot be respelled into one. Refusing that
+# is the over-refusal that keying on the missing `.network` suffix produced,
+# and it contradicts this gate's own surviving premise below.
+unit_rendering_to() {  # <podman network name>
+  local want="$1" u
+  local -a cand=()
+  mapfile -t cand < <(known_network_units | sort -u)
+  [ "${#cand[@]}" -eq 0 ] && return 1
+  resolve_network_names ${cand[@]+"${cand[@]}"}
+  for u in "${cand[@]}"; do
+    if [ "${NETNAME_VALUE[$u]:-}" = "$want" ]; then printf '%s\n' "$u"; return 0; fi
+  done
+  return 1
+}
+
 c_red()  { if [ -t 1 ]; then printf '\033[31m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
 c_grn()  { if [ -t 1 ]; then printf '\033[32m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
 
@@ -539,7 +574,7 @@ gate_networks() {
     if [ "${#guessed[@]}" -gt 0 ]; then
       refuse network_name_unresolved \
         "carrier legs do not match the running service, but ${#guessed[@]} key(s) (${guessed[*]}) were compared using Quadlet's DEFAULT systemd-<stem> name because no unit was readable. NetworkName= overrides that default, so this is not evidence the carrier is wrong" \
-        "capture the effective NetworkName= for ${guessed[0]} into HOST_EVIDENCE .networkNames (./capture_network_name_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
+        "capture the effective NetworkName= for ${guessed[0]} into HOST_EVIDENCE .networkNames (./capture_host_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
       return
     fi
     refuse network_leg_mismatched \
@@ -564,19 +599,30 @@ gate_networks() {
   # `Network=paperclip`: it renders the correct leg, clears parity, and carries
   # no Requires=/After= — while never matching `systemd-*`. The prefix test
   # would wave through the precise form this gate exists to stop, on the very
-  # host it guards. Match the suffix that determines the ordering instead.
-  local -a unmanaged=()
+  # host it guards.
+  #
+  # TOG-1115 — but keying on the bare suffix ALONE over-refuses in the other
+  # direction. A leg the host holds as a pre-existing podman network correctly
+  # has no unit, cannot be respelled as `X.network`, and is not a boot race:
+  # nothing is being ordered against, because nothing generates it. Refusing it
+  # contradicts the premise the unit check below still runs on.
+  #
+  # The property that actually separates the two is whether a unit RENDERS TO
+  # this name. If one does, the same leg is reachable as that unit and the bare
+  # spelling is the ordering-dropping form. If none does, the key names an
+  # unmanaged network and is correct as written.
+  local -a unmanaged=() unmanaged_units=()
   for n in "${declared[@]}"; do
     is_reserved_network "$n" && continue
-    case "$n" in
-      *.network) ;;
-      *) unmanaged+=("$n") ;;
-    esac
+    case "$n" in *.network) continue ;; esac
+    if u="$(unit_rendering_to "$n")"; then
+      unmanaged+=("$n"); unmanaged_units+=("$u")
+    fi
   done
   if [ "${#unmanaged[@]}" -gt 0 ]; then
     refuse network_leg_unmanaged \
-      "$CARRIER_REL names podman network(s) directly (${unmanaged[*]}) rather than the Quadlet unit. Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \
-      "declare ${unmanaged[0]} as ${unmanaged[0]#systemd-}.network so Quadlet orders the unit, rather than naming the network podman ends up with"
+      "$CARRIER_REL names podman network(s) directly (${unmanaged[*]}) rather than the Quadlet unit that renders them (${unmanaged_units[*]}). Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \
+      "declare ${unmanaged[0]} as ${unmanaged_units[0]} — the unit that renders that exact name — so Quadlet orders the service against it, rather than naming the network podman ends up with"
     return
   fi
 
