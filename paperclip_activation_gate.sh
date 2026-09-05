@@ -94,25 +94,62 @@
 # any comparison, and dedup is judged on the rendered name too, since two
 # distinct keys can collapse to one leg.
 #
+# AND THAT TRANSLATION WAS ITSELF A GUESS (TOG-1110)
+# ---------------------------------------------------------------------------
+# `systemd-<stem>` is Quadlet's DEFAULT, not a rule: `NetworkName=` in the
+# `.network` unit overrides it. The host runs BOTH shapes at once —
+# `paperclip.network` sets `NetworkName=paperclip` and podman reports the leg
+# as `paperclip`, while `omniroute.network` sets nothing and reports
+# `systemd-omniroute`. So the fix above reproduced the same trap one level
+# down: it refused the CORRECT carrier as network_leg_mismatched, and its
+# remedy steered the operator to a bare `Network=paperclip` — which renders
+# the right leg, clears parity, and loses the unit ordering. Note that form
+# does not begin with `systemd-`, so the prefix-matching unmanaged check waved
+# it through on this very host; that check now keys off the missing `.network`
+# suffix, which is what actually determines the ordering.
+#
+# The name is now READ (HOST_EVIDENCE .networkNames, else the shipped unit,
+# else the default) and its provenance recorded. A mismatch judged against a
+# GUESSED name refuses as network_name_unresolved — it is equally consistent
+# with an unread override, and convicting the carrier on it is what cost the
+# 2026-09-05 15:02Z host window.
+#
 # ===========================================================================
 # SEAMS — this suite runs offline, with no podman, no host, no credentials
 # ===========================================================================
 #   HOST_EVIDENCE   JSON captured read-only from the host, read instead of
 #                   shelling to podman. The two arrays come from two DIFFERENT
 #                   namespaces and must not be conflated:
-#                     .networks[]      what `podman inspect` reports —
-#                                      Quadlet's generated `systemd-<stem>`
+#                     .networks[]      what `podman inspect` reports — the
+#                                      network's REAL name, which is
+#                                      `systemd-<stem>` only by default
 #                     .networkUnits[]  what `systemctl list-unit-files` reports
 #                                      — `<stem>.network`, which is also the
 #                                      form the carrier declares
-#                   Shape:
-#                     { "networks": ["systemd-paperclip", "systemd-omniroute"],
+#                     .networkNames    the JOIN between them: unit -> the
+#                                      podman name it renders to, read from the
+#                                      unit's `NetworkName=`. OPTIONAL, and a
+#                                      unit whose name could not be read is
+#                                      OMITTED, never defaulted.
+#                   Shape (this host, measured 2026-09-05 — note the two legs
+#                   do NOT share a naming convention):
+#                     { "networks": ["paperclip", "systemd-omniroute"],
 #                       "networkUnits": ["paperclip.network",
-#                                        "omniroute.network"] }
-#                   Capture both with:
+#                                        "omniroute.network"],
+#                       "networkNames": {
+#                         "paperclip.network": "paperclip",
+#                         "omniroute.network": "systemd-omniroute" } }
+#                   Capture all three with ./capture_host_evidence.sh, or by
+#                   hand:
 #                     podman inspect paperclip \
 #                       --format '{{json .NetworkSettings.Networks}}'
 #                     systemctl --user list-unit-files '*-network.service'
+#                     grep NetworkName= ~/.config/containers/systemd/*.network
+#                   Without .networkNames the gate falls back to Quadlet's
+#                   `systemd-<stem>` DEFAULT, and refuses a mismatch as
+#                   network_name_unresolved rather than blaming the carrier —
+#                   because an unread `NetworkName=` override produces exactly
+#                   the same mismatch as a genuinely wrong carrier.
 #   ACTIVATION_NOW  unix seconds, read instead of `date -u +%s`, so the
 #                   maintenance-window gate is deterministic under test.
 # ===========================================================================
@@ -162,7 +199,95 @@ is_reserved_network() {
 # directions were wrong, so the gate translated to podman's namespace before
 # comparing. A `.network` suffix maps to systemd-<stem>; any other value is a
 # pre-existing podman network and is already in podman's namespace.
+#
+# TOG-1110 — `systemd-<stem>` is a DEFAULT, not a rule. Quadlet:
+#   NetworkName= — "the (optional) name of the Podman network. If this is not
+#   specified, the default value is the same name as the unit, but with a
+#   `systemd-` prefix."
+# So the mapping above is only correct for a unit that does NOT set
+# `NetworkName=`. Measured on this host (operator window 2026-09-05 15:42Z):
+# `paperclip.network` carries `NetworkName=paperclip` and podman reports the
+# leg as `paperclip`, while `omniroute.network` sets nothing and podman
+# reports `systemd-omniroute`. Both shapes run side by side, so the
+# unconditional prefix refused the CORRECT carrier as network_leg_mismatched —
+# and that refusal's own remedy text steers the operator to a bare
+# `Network=paperclip`, which loses Requires=/After= and races network creation
+# at cold boot. Resolve the name; never assume it.
+declare -A NETNAME_VALUE=()   # carrier key -> the podman name it renders to
+declare -A NETNAME_SRC=()     # carrier key -> measured | shipped | default
+
+# Parse a `.network` unit the way systemd resolves it, NOT with a grep.
+# `grep NetworkName=` gets four things wrong, and each one flips the verdict:
+#   * it matches inside [Container] or any other section, where the key does
+#     not name the network;
+#   * it matches a commented-out line;
+#   * on repeated assignment it reports the FIRST, where systemd takes the LAST;
+#   * it reports `NetworkName=` (empty) as "set to nothing", where systemd
+#     treats an empty assignment as a RESET to the default — precisely the
+#     difference this gate now turns on.
+# Prints the effective value, or nothing at all when the default applies.
+unit_effective_network_name() {  # <file>
+  local line section="" key val result="" have=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"                       # CRLF-authored units exist
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ''|'#'*|';'*) continue ;;
+      '['*) section="${line#[}"; section="${section%%]*}"; continue ;;
+    esac
+    [ "$section" = Network ] || continue
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [ "$key" = NetworkName ] || continue
+    # A trailing backslash is a systemd line continuation. This parser does not
+    # join them, and a truncated network name is the one value it exists to get
+    # right — so decline to answer rather than answer wrongly.
+    case "$val" in *\\) return 1 ;; esac
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    if [ -z "$val" ]; then result=""; have=0; else result="$val"; have=1; fi
+  done < "$1"
+  [ "$have" -eq 1 ] && printf '%s\n' "$result"
+  return 0
+}
+
+# Resolve every declared key to the podman name it renders to, recording WHERE
+# each answer came from. Precedence: what the host actually reported for the
+# unit (measured) > the unit shipped in this repo (shipped) > Quadlet's default
+# (default). A `default` answer is a guess, and the caller must not convict the
+# carrier on one.
+resolve_network_names() {  # <declared keys...>
+  local k stem shipped v
+  for k in "$@"; do
+    [ -n "${NETNAME_VALUE[$k]+x}" ] && continue
+    case "$k" in
+      *.network) ;;
+      *) NETNAME_VALUE[$k]="$k"; NETNAME_SRC[$k]=measured; continue ;;
+    esac
+    stem="${k%.network}"
+    # 1. The host's own reading of the installed unit.
+    v="$(jq -r --arg k "$k" '.networkNames[$k]? // empty' "$HOST_EVIDENCE" 2>/dev/null)"
+    if [ -n "$v" ]; then
+      NETNAME_VALUE[$k]="$v"; NETNAME_SRC[$k]=measured; continue
+    fi
+    # 2. The unit shipped in this repo, parsed as systemd would.
+    shipped="$REPO/$(dirname "$CARRIER_REL")/$k"
+    if [ -f "$shipped" ] && v="$(unit_effective_network_name "$shipped")"; then
+      if [ -n "$v" ]; then
+        NETNAME_VALUE[$k]="$v"; NETNAME_SRC[$k]=shipped; continue
+      fi
+      # Parsed cleanly and set nothing: the default genuinely applies.
+      NETNAME_VALUE[$k]="systemd-$stem"; NETNAME_SRC[$k]=shipped; continue
+    fi
+    # 3. Nothing to read. Quadlet's default is the best guess available — but
+    #    it is a guess, and it is recorded as one.
+    NETNAME_VALUE[$k]="systemd-$stem"; NETNAME_SRC[$k]=default
+  done
+}
+
 carrier_key_to_podman_network() {
+  if [ -n "${NETNAME_VALUE[$1]+x}" ]; then printf '%s\n' "${NETNAME_VALUE[$1]}"; return; fi
   case "$1" in
     *.network) printf 'systemd-%s\n' "${1%.network}" ;;
     *)         printf '%s\n' "$1" ;;
@@ -357,6 +482,7 @@ gate_networks() {
   # miss that collapse exactly as counting keys missed a repeated name.
   local -a rendered=()
   local n u seen found
+  resolve_network_names "${declared[@]}"
   for n in "${declared[@]}"; do
     rendered+=("$(carrier_key_to_podman_network "$n")")
   done
@@ -396,13 +522,29 @@ gate_networks() {
   if [ "${#missing_legs[@]}" -gt 0 ] && [ "${#uniq[@]}" -lt "$host_n" ]; then
     refuse network_leg_dropped \
       "carrier renders ${#uniq[@]} network leg(s); the running service holds $host_n (${hostnets[*]}). Recreating drops ${#missing_legs[@]} (${missing_legs[*]}) — loopback /api/health stays GREEN while every agent loses its model gateway" \
-      "add the missing Network= key(s) to $CARRIER_REL. A leg podman reports as 'systemd-X' is declared as 'X.network'. That is a carrier change and needs fresh CISO gate-1 review"
+      "add the missing Network= key(s) to $CARRIER_REL, declared as 'X.network' (the unit), never as the podman name itself. That is a carrier change and needs fresh CISO gate-1 review"
     return
   fi
+  # A mismatch is only attributable to the CARRIER when every name it was
+  # judged against was actually read. Where the name came from Quadlet's
+  # default because no unit could be read, a mismatch is equally consistent
+  # with an unread `NetworkName=` override — which is exactly the shape this
+  # host runs. Convicting the carrier there is how the correct carrier got
+  # refused, and how the refusal text came to recommend the boot-racing form.
   if [ "${#missing_legs[@]}" -gt 0 ] || [ "${#extra_legs[@]}" -gt 0 ]; then
+    local -a guessed=()
+    for n in "${declared[@]}"; do
+      [ "${NETNAME_SRC[$n]:-default}" = default ] && guessed+=("$n")
+    done
+    if [ "${#guessed[@]}" -gt 0 ]; then
+      refuse network_name_unresolved \
+        "carrier legs do not match the running service, but ${#guessed[@]} key(s) (${guessed[*]}) were compared using Quadlet's DEFAULT systemd-<stem> name because no unit was readable. NetworkName= overrides that default, so this is not evidence the carrier is wrong" \
+        "capture the effective NetworkName= for ${guessed[0]} into HOST_EVIDENCE .networkNames (./capture_network_name_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
+      return
+    fi
     refuse network_leg_mismatched \
       "carrier legs do not match the running service. Host holds (${hostnets[*]}); carrier renders (${rendered[*]}) from keys (${declared[*]}). Not on the carrier: ${missing_legs[*]:-none}. Not on the host: ${extra_legs[*]:-none}" \
-      "declare exactly the networks the running service holds, in $CARRIER_REL. A leg podman reports as 'systemd-X' is declared as 'X.network', not as 'systemd-X'"
+      "declare exactly the networks the running service holds, in $CARRIER_REL. Declare a leg as 'X.network' — never as the podman name itself. Which podman name that renders to is read from the unit's NetworkName=, defaulting to 'systemd-X' only when the unit sets none"
     return
   fi
   pass network_legs "carrier renders $host_n distinct leg(s), matching the running service by name"
@@ -414,17 +556,27 @@ gate_networks() {
   # network's creation at boot — it works whenever the network happens to
   # already exist, which is every manual test and not necessarily a cold boot.
   # This is the form the old refusal text actively recommended.
+  #
+  # TOG-1110 — the hazard is the MISSING `.network` suffix, not the `systemd-`
+  # prefix, and matching on the prefix only caught the subset of bare names
+  # that happen to start with it. On this host `paperclip.network` sets
+  # `NetworkName=paperclip`, so the boot-racing carrier is spelled
+  # `Network=paperclip`: it renders the correct leg, clears parity, and carries
+  # no Requires=/After= — while never matching `systemd-*`. The prefix test
+  # would wave through the precise form this gate exists to stop, on the very
+  # host it guards. Match the suffix that determines the ordering instead.
   local -a unmanaged=()
   for n in "${declared[@]}"; do
     is_reserved_network "$n" && continue
     case "$n" in
-      systemd-*) unmanaged+=("$n") ;;
+      *.network) ;;
+      *) unmanaged+=("$n") ;;
     esac
   done
   if [ "${#unmanaged[@]}" -gt 0 ]; then
     refuse network_leg_unmanaged \
-      "$CARRIER_REL names podman's generated network(s) directly (${unmanaged[*]}). Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \
-      "declare ${unmanaged[0]} as ${unmanaged[0]#systemd-}.network so Quadlet orders the unit, rather than naming the generated network"
+      "$CARRIER_REL names podman network(s) directly (${unmanaged[*]}) rather than the Quadlet unit. Quadlet emits a dependency on <stem>-network.service ONLY for a key ending in .network, so this renders the right leg with no Requires=/After= and races network creation at boot" \
+      "declare ${unmanaged[0]} as ${unmanaged[0]#systemd-}.network so Quadlet orders the unit, rather than naming the network podman ends up with"
     return
   fi
 

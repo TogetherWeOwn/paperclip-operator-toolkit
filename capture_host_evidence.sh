@@ -291,12 +291,83 @@ running_digest="$(podman inspect "$CONTAINER" --format '{{.ImageDigest}}' 2>/dev
 running_digest="${running_digest#sha256:}"
 [[ "$running_digest" =~ ^[0-9a-f]{64}$ ]] || running_digest=""
 
+# --- .networkNames — which podman network each UNIT actually renders to -----
+# TOG-1110. The two arrays above are captured from different namespaces, and
+# the gate has to join them. `<stem>.network -> systemd-<stem>` is Quadlet's
+# DEFAULT, not a rule: `NetworkName=` in the unit overrides it, and THIS HOST
+# runs both shapes at once (`paperclip.network` sets `NetworkName=paperclip`;
+# `omniroute.network` sets none and renders `systemd-omniroute`). Capturing
+# only the two arrays left the gate to guess the join, and its guess refused
+# the CORRECT carrier while recommending a boot-racing rewrite.
+#
+# Read it from the .network file Quadlet actually consumes, searching the
+# documented paths in precedence order (podman-systemd.unit(5)) — the FIRST
+# hit wins and the rest are shadowed. Parsed, not grepped: a grep matches
+# commented-out lines and other sections, takes the FIRST assignment where
+# systemd takes the LAST, and reads an empty `NetworkName=` as a name rather
+# than as a RESET to the default. Each of those flips the verdict.
+#
+# A unit whose name cannot be read is OMITTED rather than defaulted. An absent
+# key makes the gate say "unresolved"; a guessed one makes it convict the
+# carrier. Omission is the honest answer.
+if [ "$SYSTEMD_SCOPE" = --system ]; then
+  net_dirs=(/etc/containers/systemd /run/containers/systemd
+            /usr/share/containers/systemd)
+else
+  net_dirs=("${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
+            "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/systemd"
+            "$HOME/.local/share/containers/systemd"
+            /etc/containers/systemd/users)
+fi
+
+# Print the effective NetworkName= for a unit file, or nothing if unset.
+effective_network_name() {  # <file>
+  local line section="" key val result="" have=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ''|'#'*|';'*) continue ;;
+      '['*) section="${line#[}"; section="${section%%]*}"; continue ;;
+    esac
+    [ "$section" = Network ] || continue
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [ "$key" = NetworkName ] || continue
+    case "$val" in *\\) return 1 ;; esac   # unjoined line continuation
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    if [ -z "$val" ]; then result=""; have=0; else result="$val"; have=1; fi
+  done < "$1"
+  [ "$have" -eq 1 ] && printf '%s\n' "$result"
+  return 0
+}
+
+names_json='{}'
+while IFS= read -r unit; do
+  [ -n "$unit" ] || continue
+  found=""
+  for d in "${net_dirs[@]}"; do
+    [ -f "$d/$unit" ] && { found="$d/$unit"; break; }
+  done
+  [ -n "$found" ] || continue
+  if eff="$(effective_network_name "$found")"; then
+    [ -n "$eff" ] || eff="systemd-${unit%.network}"   # parsed, genuinely default
+    names_json="$(printf '%s' "$names_json" \
+      | jq -c --arg k "$unit" --arg v "$eff" --arg src "$found" \
+          '.[$k] = $v' 2>/dev/null || printf '%s' "$names_json")"
+  fi
+done < <(printf '%s' "$units_json" | jq -r '.[]?')
+
 tmp="${OUT}.partial.$$"
 trap 'rm -f "$tmp"' EXIT
 jq -n --argjson networks "$networks_json" --argjson networkUnits "$units_json" \
+      --argjson networkNames "$names_json" \
       --arg image "$IMAGE" --arg candidate "$image_digest" --arg running "$running_digest" \
       --arg systemdInstance "${SYSTEMD_SCOPE#--}" \
   '{networks: $networks, networkUnits: $networkUnits,
+    networkNames: $networkNames,
     systemdInstance: $systemdInstance,
     image: {name: $image, candidate: $candidate,
             running: (if $running == "" then null else $running end),
@@ -324,6 +395,14 @@ trap - EXIT
 printf 'wrote %s\n' "$OUT"
 printf '  .networks[]      %s leg(s)   %s\n' "$n_networks" "$(jq -rc '.networks' "$OUT")"
 printf '  .networkUnits[]  %s unit(s)  %s\n' "$n_units" "$(jq -rc '.networkUnits' "$OUT")"
+printf '  .networkNames    %s resolved  %s\n' \
+  "$(jq -r '.networkNames | length' "$OUT")" "$(jq -rc '.networkNames' "$OUT")"
+# Name every unit whose effective name could NOT be read. The gate refuses
+# these as unresolved rather than convicting the carrier, so an operator who
+# sees this line knows the window did not finish the join.
+unread="$(jq -r '[.networkUnits[] | select(. as $u | ($ARGS.named.n | has($u) | not))] | join(" ")' \
+            --argjson n "$(jq -c '.networkNames' "$OUT")" "$OUT" 2>/dev/null)"
+[ -n "${unread:-}" ] && printf '                   UNRESOLVED (no readable unit): %s\n' "$unread"
 printf '  .image           %s @sha256:%s\n' "$IMAGE" "$image_digest"
 if [ -z "$running_digest" ]; then
   printf '                   running digest UNREADABLE — the board approves the candidate blind to drift\n'
