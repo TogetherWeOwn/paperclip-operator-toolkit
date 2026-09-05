@@ -588,6 +588,33 @@ jobs:
       - name: OmniRoute rehearsal translator fixture
         run: node --test test_omniroute_rehearsal_translator.mjs
 
+      # TOG-588. The assertion this gate protects is the SECOND attempt at that
+      # assertion. The first one -- nine hardcoded absence checks on a filename
+      # (`omniroute-rehearsal-preflight.json`) and an env knob
+      # (OMNIROUTE_REHEARSAL_AUTHORIZATION_DIR) that NO shipped code ever read --
+      # was inert: repointing the knob at a path passed to nothing left the suite
+      # at 64 passed / 0 failed. It asserted the absence of something nothing
+      # could create, and it did that for a full review cycle without anyone
+      # noticing, because an inert check and a satisfied check are the same green.
+      #
+      # The replacement is a before/after `find` snapshot over the writable host
+      # namespace, capturing path, type, mode, content hash and symlink target --
+      # so a leak has to be invisible in five dimensions rather than merely
+      # differently named. That is strictly better, but it is not self-proving,
+      # which is what this step is for: five mutants of the SHIPPED script
+      # (create / delete / chmod / content / symlink) must each turn the target
+      # assertion red, and a decoy must stay green so blanket sensitivity cannot
+      # masquerade as attribution. The gate commits each mutant in a scratch
+      # clone, because the script self-verifies its own blob against HEAD and
+      # exits 7 otherwise -- uncommitted mutants would all "fail" at that
+      # self-check and the gate would score 6/6 while proving nothing.
+      #
+      # Registered here rather than left to be run by hand: an unregistered gate
+      # only runs when someone remembers, which is exactly how the assertion it
+      # guards rotted to inert the first time. ~7 min (six full suite runs).
+      - name: TOG-588 host-namespace snapshot is load-bearing (mutation-gated)
+        run: ./verification/tog-588-host-namespace-mutation-gate.sh
+
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
