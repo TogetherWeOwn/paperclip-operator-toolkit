@@ -16,29 +16,78 @@ The cheap/small-fast profile is also the **recovery** profile. A dead value here
 make small calls fail — it blocks status-recovery itself, which is the mechanism that would
 otherwise notice the failure. That is the loop TOG-679 sat inside for a day.
 
-## HTTP 200 is not the question
+## HTTP 200 is not the question — the billing leg is
 
 This is the part that makes the probe worth more than a curl in a loop.
 
-| Model id | HTTP | What it means |
+| Model id | HTTP | Resolves onto | What it means |
+|---|---|---|---|
+| `cliproxy/claude-haiku-4-5-20251001` | **200** | pinned connection | pinned, direct id |
+| `cliproxy/claude-sonnet-5` | **200** | pinned connection | pinned, `strategy=single` |
+| `claude-sonnet-5` (bare) | **200** | pinned connection | pinned — a **one-leg combo**, `strategy=priority` |
+| `hindsight/retain` (bare) | **200** | **`openrouter`** | genuinely off-subscription; measured cost `0.0000130000` |
+| `cliproxy/claude-haiku-4-5` (undated) | 400 | — | `unknown provider for model claude-haiku-4-5` |
+| `cliproxy/claude-haiku-4-5-20251001-low` | 400 | — | effort belongs in the `effort` field, not the id |
+
+Two ids can both answer 200 and bill different accounts. A status-only monitor cannot tell them
+apart, and the misrouted case is the harder of the two to notice — nothing breaks, the bill just
+moves. So the probe measures **where the request went**, and `ALARM-unpinned` is not a lesser
+finding than `ALARM-dead`.
+
+### The `cliproxy/` prefix was the wrong test, and it cost a fleet-wide false alarm
+
+Until 2026-09-05 the pin gate was a string test, `[[ $model == cliproxy/* ]]`, on the premise
+that a bare id "fails open onto a PAYG leg". **That premise is false on this gateway**, and the
+gate built on it fired TOG-985: an ALARM against all 24 agents, on the ids the *owner* had chosen
+that same evening. A monitor that pages on a correct configuration destroys the signal exactly as
+thoroughly as one that stays quiet on a broken one.
+
+What is actually true here, re-measured independently on 2026-09-05:
+
+```
+GET /v1/combos
+  claude-sonnet-5   strategy=priority, ONE leg  -> openai-compatible-chat-1628780c-…
+  claude-opus-5     strategy=priority, ONE leg  -> openai-compatible-chat-1628780c-…
+```
+
+and per request, from the gateway's own response headers:
+
+```
+model=claude-sonnet-5           x-omniroute-decision: strategy=priority; provider=openai-compatible-chat-1628780c-…
+model=cliproxy/claude-sonnet-5  x-omniroute-decision: strategy=single;   provider=openai-compatible-chat-1628780c-…
+```
+
+Same connection — `cliproxy-main`, the owner's subscription. The prefixed form resolves directly;
+the bare form resolves through a one-leg combo. Neither touches OpenRouter. The prefix only ever
+*correlated* with the property that mattered, on the day it was written.
+
+**Prefixing is not a fix and this probe must never recommend one.** `cliproxy/` is a provider
+namespace, not a string decoration: prefixing an id from another namespace yields an id nothing
+serves (`cliproxy/opencode-go/deepseek-v4-pro` → 400 `model_not_found`, measured 2026-09-03).
+Whether the fleet should prefer the prefixed form is a real question — it fails *closed* if the
+combo is ever deleted — but it is a question for the **owner**, who chooses the model ids, not a
+defect for a monitor to page on.
+
+### What replaced it: three gates, all measured
+
+| Gate | What it reads | Catches |
 |---|---|---|
-| `cliproxy/claude-haiku-4-5-20251001` | **200** | pinned — bills the owner's subscription leg |
-| `claude-haiku-4-5-20251001` (bare) | **200** | **fails _open_ onto a PAYG leg** |
-| `cliproxy/claude-haiku-4-5` (undated) | 400 | `unknown provider for model claude-haiku-4-5` |
-| `cliproxy/claude-haiku-4-5-20251001-low` | 400 | effort belongs in the `effort` field, not the id |
+| **A — the leg set** | `GET /v1/combos`; every leg of a named combo | a **dormant** off-connection failover leg. Bills correctly today, wrongly the first time the pinned leg errors. **No single request can reveal this.** |
+| **B — the resolved provider** | `x-omniroute-provider` on the probe response | a live misroute: the gateway itself says where it dispatched |
+| **C — liveness** | the HTTP status | a dead id, including the undated and `-low` traps |
 
-**The bare id and the pinned id are both 200.** A status-only monitor cannot tell them apart, and
-the unpinned case is the harder of the two to notice — nothing breaks, the bill just moves. So
-the probe asserts the `cliproxy/` prefix as a first-class alarm, equal in severity to a dead id,
-and `ALARM-unpinned` is not a lesser finding than `ALARM-dead`.
+Gate A is strictly stronger than the prefix test it replaced, and in both directions: it clears
+`claude-sonnet-5` (bare, one pinned leg) and it catches `hindsight/retain` (bare, `openrouter`) —
+whereas the prefix test got the first one wrong and the second one right for the wrong reason.
 
-The commissioning issue asserted that a bare id "can fail open". That was re-measured rather than
-assumed: bare `claude-haiku-4-5-20251001` returns 200 today, so the hypothesis holds and a
-status-only monitor is provably blind to it.
+Gate B is why a 200 with **no** `x-omniroute-provider` header is `unmeasured`, not `ok`: the lane
+is alive and the billing leg is unverified, which is the whole question. Likewise an unreadable
+combo list is `unmeasured` even when the measured route was correct — a dormant leg cannot be
+ruled out.
 
-One correction to the issue's own trap list: it warns against re-citing `gpt-5.4-mini`'s
-2026-08-29 503 as current. Re-measured 2026-08-30, that id returns **200**. The 503 had
-self-resolved, exactly as TOG-679's did — which is the argument for a probe rather than a
+One correction to the commissioning issue's own trap list: it warns against re-citing
+`gpt-5.4-mini`'s 2026-08-29 503 as current. Re-measured 2026-08-30, that id returns **200**. The
+503 had self-resolved, exactly as TOG-679's did — which is the argument for a probe rather than a
 hand-check.
 
 ## Both surfaces, because they drift independently
@@ -56,9 +105,15 @@ the seam emits **one row per (agent, surface)**, never one row per agent. A `coa
 across the three would report whichever is listed first and hide the rest — which is the defect
 itself, reimplemented as a monitor.
 
-Measured today: **141 rows = 47 agents × 3 surfaces**, all carrying
-`cliproxy/claude-haiku-4-5-20251001`. The fleet is currently consistent; the probe exists for
-when it stops being.
+Measured 2026-08-30: **141 rows = 47 agents × 3 surfaces**, all carrying
+`cliproxy/claude-haiku-4-5-20251001`.
+
+Re-measured 2026-09-05: **72 rows = 24 agents × 3 surfaces**, carrying **two** ids — the two
+`adapterConfig.env` surfaces still on `cliproxy/claude-haiku-4-5-20251001`, and
+`runtimeConfig.modelProfiles.cheap` on `claude-sonnet-5`, set by the owner on 2026-09-04. Both
+resolve onto the pinned connection, so the fleet disagrees across surfaces *by intent* and the
+probe is green. Note that the surfaces no longer agree on a single id, which is a thing to know
+before reading any older claim in this file that they do.
 
 ### Why the database and not the API
 
@@ -85,26 +140,34 @@ export MODEL_SURFACE_SOURCE_CMD="$PWD/pg_source.js model-surfaces"   # optional;
 
 | Exit | Meaning |
 |---|---|
-| `0` | every referenced id is prefix-pinned **and** answers 200 |
+| `0` | every referenced id **resolves onto the pinned connection** and answers 200 |
 | `2` | REFUSED — bad invocation |
-| `3` | **ALARM** — an id is dead (non-200) or unpinned (missing `cliproxy/`) |
+| `3` | **ALARM** — an id is dead (non-200) or unpinned (routes, or can fail over, off the pinned connection) |
 | `5` | **UNKNOWN** — could not measure. Not green. |
 
-Options: `--surface SUBSTR`, `--json`, `--long`. Env: `REQUIRED_MODEL_PREFIX` (default
-`cliproxy/`), `MIN_SURFACES_EXPECTED`, `PROBE_MAX_TIME`, `ALARM_NAME_CAP`.
+Options: `--surface SUBSTR`, `--json`, `--long`. Env: `PINNED_CONNECTION_ID` (default is the
+`cliproxy-main` connection id), `COMBO_SOURCE_CMD`, `MIN_SURFACES_EXPECTED`, `PROBE_MAX_TIME`,
+`PROBE_MAX_TOKENS`, `ALARM_NAME_CAP`.
+
+`PINNED_CONNECTION_ID` is deliberately an exact id and **not** a pattern like
+`openai-compatible*`: any future OpenAI-compatible connection — including a pay-as-you-go one —
+would match such a pattern, and the monitor would clear the very leg it exists to catch.
 
 ### The verdict ladder, and why its order is load-bearing
 
 ```
-unpinned  →  ALARM-unpinned     ranked ABOVE both network gates
+combo has an off-connection leg   →  ALARM-unpinned    ranked ABOVE both network gates
 unmeasured (curl 000 / non-integer)  →  unmeasured
-non-200   →  ALARM-dead
-else      →  ok
+non-200                           →  ALARM-dead
+200 but no provider header        →  unmeasured        alive ≠ pinned
+resolved provider ≠ pinned        →  ALARM-unpinned
+combo list unreadable             →  unmeasured        dormant leg not ruled out
+else                              →  ok
 ```
 
-The prefix gate is hoisted above both network gates because **the prefix is a property of the
-configured string**, fully measurable even when the gateway is unreachable — and a bare id
-answering 200 is exactly the fail-open case.
+Gate A is hoisted above both network gates because **the leg set is a property of the
+configuration**, fully measurable even when the gateway will not serve — and a dormant failover
+leg is exactly the fail-open case that no single request can surface.
 
 `000` is curl's "no response completed": the request never reached the gateway. But `is_int 000`
 is true and `000 != 200` is true, so the naive ordering pages the model owner for what may be a
@@ -140,17 +203,20 @@ The per-run scratch also avoids the TOG-485 stale-shared-file trap.
 
 ## Verification
 
-- **Suite:** 40 assertions, 6 sections, **40 passed / 0 failed**. Every assertion pins the
-  *reason string* as well as the exit code — a refusal from the wrong branch must fail.
+- **Suite:** 56 assertions, 8 sections, **56 passed / 0 failed** (2026-09-05). Every assertion
+  pins the *reason string* as well as the exit code — a refusal from the wrong branch must fail.
 - **Hermetic:** green under `env -u DATABASE_URL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN
   -u ANTHROPIC_API_KEY -u PAPERCLIP_COMPANY_ID`.
-- **End-to-end against the real gateway**, not just fixtures:
+- **End-to-end against the real gateway**, not just fixtures (re-run 2026-09-05):
 
   | Injected | Real result | Verdict | Exit |
   |---|---|---|---|
-  | dead id | HTTP 400 | `ALARM-dead` | 3 |
-  | bare (unpinned) id | HTTP **200** | `ALARM-unpinned` | 3 |
-  | the real fleet | HTTP 200 | `ok` | 0 |
+  | `cliproxy/claude-haiku-4-5-20251001-low` | HTTP 400 `model_not_found` | `ALARM-dead` | 3 |
+  | `hindsight/retain` — bare, real off-leg | HTTP **200**, `provider=openrouter` | `ALARM-unpinned` | 3 |
+  | the real fleet (72 rows, 2 ids) | HTTP 200, both on the pinned connection | `ok` | **0** |
+
+  The last row is the TOG-985 regression: the same fleet that the prefix gate paged on is green
+  under the routing gates, and the two alarm rows show detection was not weakened to get there.
 
 The fixture allocator uses `mktemp` rather than a counter, because every caller invokes the
 helpers as `SRC="$(surfaces ...)"` — a command-substitution **subshell** — so shell state is
