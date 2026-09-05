@@ -1539,6 +1539,24 @@ jobs:
       - name: handoff-channel unversioned-drop suite
         run: ./test_channel_drift.sh
 
+      # TOG-1106. The bootstrap script writes the container path of its
+      # companion operating model into EVERY agent's metadata and AGENTS.md
+      # ("The canonical org/permission design is documented in: <path>"). That
+      # staging step used to be wrapped in `if [[ -f "$REPORT_SRC" ]]`, so a
+      # host without the document bootstrapped a complete company, exited 0 and
+      # printed nothing, while every agent it created cited a file that was
+      # never staged. This suite runs the guard's OWN BYTES — extracted from the
+      # script by marker — so it reddens if the refusal is deleted or weakened,
+      # and it REFUSES (exit 2) rather than passing vacuously if the markers
+      # move. It also asserts the document is committed and not a stub.
+      #
+      # No podman, no containers, no /paperclip mount: the guard runs against
+      # fixture directories in mktemp. It cannot execute the whole bootstrap —
+      # nothing in CI can — and green here does not mean a bootstrap would
+      # succeed, only that it can no longer succeed SILENTLY without the doc.
+      - name: bootstrap operating-model guard suite
+        run: ./test_bootstrap_operating_model.sh
+
       # TOG-151/TOG-372. The channel's OTHER question. channel_drift.sh asks
       # whether a staged file was ever reviewed; this asks whether anything
       # staged there is a credential. The channel is the one path agents write
