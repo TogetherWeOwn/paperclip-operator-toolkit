@@ -314,8 +314,13 @@ EOF
     exit "$EX_UNANSWERABLE"
   fi
 
+  local required_follow_up=""
+  if [[ -z "$assignee" ]]; then
+    required_follow_up="[Their Name](agent://$addressee)"
+  fi
+
   if (( as_json )); then
-    _json_out "agent_routable" "$kind" "board_or_agents" "$addressee" ""
+    _json_out "agent_routable" "$kind" "board_or_agents" "$addressee" "" "$required_follow_up"
   else
     cat <<EOF
 VERDICT: AGENT-ROUTABLE — this does not need the owner.
@@ -333,6 +338,7 @@ Preconditions the server will enforce (all currently satisfied):
   - the addressee did not author this ask                            (:2975)
   - a different run resolves it than created it                      (:2979)
 $( (( ${#warnings[@]} > 0 )) && printf 'Warnings:\n' && printf '  - %s\n' "${warnings[@]}" )
+$( [[ -n "$required_follow_up" ]] && printf 'REQUIRED FOLLOW-UP — the issue is unassigned, so the interaction_pending wake is cancelled by the stale-assignee guard. Post this exact markdown in a comment on the SAME issue:\n  %s\n\n' "$required_follow_up" )
 Three shape traps that cost a round trip each:
   - the supersede flag set BESIDE payload instead of inside it is silently
     discarded — 201, stored TRUE, no error. Nest it, then read it back off
@@ -349,8 +355,30 @@ EOF
 }
 
 _json_out() {
-  printf '{"verdict":"%s","kind":"%s","resolverPolicy":"%s","addresseeAgentId":"%s","notes":"%s"}\n' \
-    "$1" "$2" "$3" "$4" "${5//\"/\'}"
+  local verdict="$1" kind="$2" policy="$3" addressee="$4" notes="$5" follow_up="${6:-}"
+  jq -cn \
+    --arg verdict "$verdict" \
+    --arg kind "$kind" \
+    --arg policy "$policy" \
+    --arg addressee "$addressee" \
+    --arg notes "$notes" \
+    --arg followUp "$follow_up" '
+      {
+        verdict: $verdict,
+        kind: $kind,
+        resolverPolicy: $policy,
+        addresseeAgentId: $addressee,
+        notes: $notes,
+        requiredFollowUp: (
+          if $followUp == "" then null
+          else {
+            action: "post_issue_comment",
+            target: "same_issue",
+            bodyMarkdown: $followUp,
+            reason: "wake_addressee"
+          } end
+        )
+      }'
 }
 
 # --------------------------------------------------------------------------

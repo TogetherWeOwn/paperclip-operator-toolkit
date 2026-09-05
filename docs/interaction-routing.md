@@ -124,8 +124,11 @@ exception: `:2792` returns early when `assigneeAgentId is null`, so on an **unas
 addressee becomes the operative selector.
 
 > **The unassigned carrier issue is the cheapest agent-to-agent question channel we have.** Create an
-> unassigned issue, create the interaction there addressed to the agent you want, done. No grant, no
-> reassignment, no platform change. Creating it also wakes them (below).
+> unassigned issue and create the interaction there addressed to the agent you want. No grant, no
+> reassignment, no platform change. But the envelope alone does **not** wake a non-assignee: after the
+> interaction is created, post a same-issue comment containing the exact markdown
+> `[Their Name](agent://<uuid>)`. That produces `issue_comment_mentioned`, the wake path with a usable
+> comment id. If the issue is already assigned to that same addressee, the extra mention is unnecessary.
 
 Two more facts from the same read, both of which contradict things previously assumed here:
 
@@ -134,11 +137,14 @@ Two more facts from the same read, both of which contradict things previously as
   else is normal. Only `in_progress` issues are closed off, by the run lock at `:2801`. It is the
   **respond** route that omits the flag, which is why resolution is assignee-scoped but creation is
   not.
-- **The addressee wake is not gated on the addressee being able to answer.**
-  `routes/issues.js:8459-8490` fires `heartbeat.wakeup(addresseeAgentId, reason: "interaction_pending")`
-  **unconditionally** on create. So addressing an ask to a non-assignee on an assigned issue wakes an
-  agent the resolve gate will then refuse — a guaranteed-wasted run that presents as routed work.
-  Address a non-assignee only on an unassigned issue.
+- **The create route attempts an addressee wake, but the wake is later cancelled unless the addressee
+  is already the assignee.** `routes/issues.js:8459-8490` emits `interaction_pending`, whose snapshot
+  exposes `sourceCommentId`; the stale-assignee guard derives identity only from `wakeCommentId`,
+  `commentId`, or `payload.commentId`. On an unassigned issue the attempted wake therefore dies before
+  a run starts. A same-issue markdown link `[Their Name](agent://<uuid>)` creates
+  `issue_comment_mentioned` with a usable comment id and is the required second step. Bare `@Name` and
+  bare `agent://...` text do not count. If the issue is already assigned to that addressee, the original
+  wake survives; if it is assigned to someone else, the interaction itself is inert.
 
 ---
 

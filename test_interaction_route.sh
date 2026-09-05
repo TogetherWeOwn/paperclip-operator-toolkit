@@ -322,6 +322,55 @@ else
   bad "shape mutation applied" "sed did not match; the shape mutation check is inert"
 fi
 
+printf '\n== §13 an unassigned addressee needs a real same-issue mention wake ==\n'
+mention="[Their Name](agent://$A_PEER)"
+unassigned_out="$("$TOOL" route --answer-type choice --addressee "$A_PEER" --self "$A_SELF" 2>&1)"
+[[ "$unassigned_out" == *"REQUIRED FOLLOW-UP"* && "$unassigned_out" == *"$mention"* ]] \
+  && ok "unassigned route prints the exact required mention" \
+  || bad "unassigned route prints the exact required mention" "got: $unassigned_out"
+
+unassigned_json="$("$TOOL" route --json --answer-type choice --addressee "$A_PEER" --self "$A_SELF")"
+printf '%s' "$unassigned_json" | jq -e --arg mention "$mention" '
+  .requiredFollowUp.action == "post_issue_comment" and
+  .requiredFollowUp.target == "same_issue" and
+  .requiredFollowUp.bodyMarkdown == $mention and
+  .requiredFollowUp.reason == "wake_addressee"
+' >/dev/null \
+  && ok "unassigned JSON carries a machine-readable required follow-up" \
+  || bad "unassigned JSON carries a machine-readable required follow-up" "got: $unassigned_json"
+
+assigned_json="$("$TOOL" route --json --answer-type choice --addressee "$A_PEER" \
+  --issue-assignee "$A_PEER" --self "$A_SELF")"
+printf '%s' "$assigned_json" | jq -e '.requiredFollowUp == null' >/dev/null \
+  && ok "assigned addressee needs no mention follow-up" \
+  || bad "assigned addressee needs no mention follow-up" "got: $assigned_json"
+
+owner_json="$("$TOOL" route --json --spends-money --answer-type choice --addressee "$A_PEER" \
+  --issue-assignee "$A_PEER" --self "$A_SELF" 2>/dev/null || true)"
+printf '%s' "$owner_json" | jq -e '.requiredFollowUp == null' >/dev/null \
+  && ok "owner-reserved route never emits an agent mention follow-up" \
+  || bad "owner-reserved route never emits an agent mention follow-up" "got: $owner_json"
+
+# Real removal mutation: first prove the copied tool emits the exact mention,
+# then delete the template and prove the same assertion turns red.
+MUT3="$WORK/mutant-mention.sh"
+cp "$TOOL" "$MUT3"; chmod +x "$MUT3"
+baseline_mention="$("$MUT3" route --json --answer-type choice --addressee "$A_PEER" --self "$A_SELF" \
+  | jq -r '.requiredFollowUp.bodyMarkdown')"
+[[ "$baseline_mention" == "$mention" ]] \
+  && ok "mention mutation baseline emits the exact markdown" \
+  || bad "mention mutation baseline emits the exact markdown" "got: $baseline_mention"
+sed -i 's|required_follow_up="\[Their Name\](agent://\$addressee)"|required_follow_up=""|' "$MUT3"
+if cmp -s "$TOOL" "$MUT3"; then
+  bad "mention-removal mutation applied" "sed matched nothing; mutation check is inert"
+else
+  mut_mention="$("$MUT3" route --json --answer-type choice --addressee "$A_PEER" --self "$A_SELF" \
+    | jq -r '.requiredFollowUp.bodyMarkdown // ""')"
+  [[ "$mut_mention" != "$mention" ]] \
+    && ok "removing the mention makes the exact follow-up assertion go red" \
+    || bad "removing the mention makes the exact follow-up assertion go red" "mutant still emitted: $mut_mention"
+fi
+
 printf '\n---------------------------------------------\n'
 printf 'passed: %d   failed: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
