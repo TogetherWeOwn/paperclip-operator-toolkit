@@ -138,6 +138,46 @@ Two traps that cost this company weeks, both enforced in `routes/issues.js`:
 The `PATCH` in step 3 returns `200` even when the card fails to bind. Verify it, do not assume it.
 Full mechanism, the verification query, and a worked example: **[`docs/interaction-routing.md`](docs/interaction-routing.md)**.
 
+### A card whose deliverable is a PR is not `done` until that PR is merged or closed
+
+Closing the card is not the delivery; landing the branch is. Measured 2026-09-05: this repo had
+**47 open PRs, none with a review or a requested reviewer**, and 27 of them belonged to cards that
+were already `done` or `cancelled` at that moment. Work was being marked complete on the board
+while it sat unmerged on a branch, and it stayed there — the oldest was 10 days and 171 commits
+behind `main`.
+
+So: **do not move a card to `done` while its PR is open.** Either land it or close it first, and
+say which in the closing comment:
+
+- **merged** — quote the squash-merge SHA, and confirm you verified at the *merge result*
+  (`main` + PR), not at the PR head. A branch cut days ago can be green against a base that no
+  longer exists.
+- **closed** — give the reason in one line, and say whether the work is superseded (name what
+  replaced it) or abandoned (say what would have to be true to revisit).
+
+A commit on an unpushed or unmerged branch has produced nothing durable. If the card must close
+before the PR can land — a blocked dependency, an operator step, a reviewer who is unavailable —
+leave the card open and `blocked`, naming the unblock owner.
+
+**One deliberate exception: an upstream staging PR.** A PR that exists to stage something filed
+*elsewhere* (`upstream draft` / `upstream report`) is a holding place, not a deliverable waiting to
+land. Its card is `done` when the report is filed, and the PR stays open by design. Name the PR and
+say so in the closing comment. Outside that one case, `done` with an open PR is wrong.
+
+**"I reviewed it and left it open" is not a second exception — it is the failure mode.** A review
+that requests changes is a completed *review*; the *fix* it waits on is still undelivered, and if
+no open card owns that fix, nothing will ever land it. Measured on this repo: the check-6 fix for
+`upstream-bundle-filing-gate.sh` exists only on `tog-1074-discord-report-revision` and
+`tog-1091-step1-rereview` — both 72 commits behind `main`, neither with an open PR — while all four
+owning cards (TOG-1074, TOG-1077, TOG-1091, TOG-1093) read `done`. Four green cards, one real fix,
+zero of it on `main`. When you leave a PR open pending a fix, open or name the card that owns the
+fix in the same comment; that card, not the review, is what keeps the work alive.
+
+**Stale is not the same as wrong.** Age alone does not justify closing a PR: of the 10-day-old
+branches in that backlog, two merged clean and passed their full suites at the merge result. Run
+the tests before you judge. Conversely, a PR whose diff runs *backwards* against `main` — deleting
+lines a later PR added — must be closed however green it looks.
+
 ## Running the suites
 
 Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
