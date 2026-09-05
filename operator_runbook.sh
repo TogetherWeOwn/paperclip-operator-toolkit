@@ -342,8 +342,23 @@ cmd_render() {
   jq -r --arg note "$generated_note" '
     def esc: .;
     def line_block(id; v; n):
-      "### \(n). \(id) — \(v.credential)\n"
-      + "\n**Blast radius \(v.blast)**"
+      "### \(n). \(id) — \(v.credential)\n\n"
+      # A WITHDRAWN line. The authorisation is gone but the section is retained,
+      # because deleting it would read to the next operator as "this was never
+      # asked" — the exact state the closed-list comment below guards against.
+      # The banner goes ABOVE the blast-radius line, not below it: it is a stop
+      # sign, and a stop sign under the risk rating is read second.
+      # This is a SOURCE field for a reason: the banner was hand-edited straight
+      # into the .md on 2026-09-05, which the render-drift gate correctly caught
+      # as staleness. Regenerating without this field would have silently deleted
+      # an owner-ruling stop sign, so the fix is to give the withdrawal a home in
+      # the data rather than to re-blank the document.
+      + (if (v.withdrawn // "") != ""
+         then ("> 🛑 **WITHDRAWN \(v.withdrawn.date) — DO NOT RUN ANY SCRIPT IN THIS SECTION.**\n"
+              + (v.withdrawn.body | split("\n") | map(if . == "" then ">" else "> " + . end) | join("\n"))
+              + "\n\n")
+         else "" end)
+      + "**Blast radius \(v.blast)**"
       + (if v.class == "MIXED" then "  ·  **MIXED — part of this is owner-reserved**" else "" end)
       + (if v.moved == true then "  ·  **ONLY HOME — no other card carries this ask**" else "" end)
       + "\n\n"
@@ -354,6 +369,14 @@ cmd_render() {
       # "its interaction has been withdrawn" over that one states a fact that did
       # not happen, and an operator who goes looking for the withdrawn card finds
       # no trace — which reads as a bookkeeping error and undermines the line.
+      # A WITHDRAWN line. The authorisation is gone but the section is retained,
+      # because deleting it would read to the next operator as "this was never
+      # asked" — the exact state the closed-list comment below guards against.
+      # This is a SOURCE field for a reason: the banner was hand-edited straight
+      # into the .md on 2026-09-05, which the render-drift gate correctly caught
+      # as staleness. Regenerating without this field would have silently deleted
+      # an owner-ruling stop sign, so the fix is to give the withdrawal a home in
+      # the data rather than to re-blank the document.
       + (if v.moved == true
          then (if v.never_carded == true
                then "> **This line is the only home this ask has ever had.** It never filed an\n"
@@ -371,7 +394,10 @@ cmd_render() {
       + (if (v.reserved_part // "") != "" then "**Owner-reserved part.** \(v.reserved_part)\n\n" else "" end)
       + (if (v.note // "") != "" then "**Note.** \(v.note)\n\n" else "" end)
       + (if (v.commands // "") != ""
-         then "**Exact commands.**\n\n```\n\(v.commands)\n```\n"
+         then (if (v.withdrawn // "") != ""
+               then "**Exact commands.** \(v.withdrawn.commands_note)\n\n```\n\(v.commands)\n```\n"
+               else "**Exact commands.**\n\n```\n\(v.commands)\n```\n"
+               end)
          else "**Exact commands.** In the **\(id) issue thread** — the author verified them there. (Deliberately the issue thread, not the interaction: "
             + (if v.never_carded == true
                then "this ask never filed an interaction at all, so the thread is the only place they exist."
