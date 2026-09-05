@@ -350,6 +350,60 @@ rc=0; (QUOTA_PACING_FILE="$DEAD" PACE_SOURCE_CMD="" PACE_NOW=2026-09-04T16:00:00
 check "6g6 stale apply is UNKNOWN" "$rc" "5"
 check "6g7 stale apply writes NOTHING" "$(wc -l < "$WORK/captured.tsv" | tr -d ' ')" "0"
 
+# TOG-1030. 6g-6g7 above all use the dead-feed fixture, and that fixture is
+# refused TWICE OVER: its samples are nine days old AND its weekly_reset_utc
+# values (08-28, 08-29) have already passed, which independently trips the
+# "no derivable burn" refusal further down. Measured: deleting the entire
+# production guard block in read_pace_window -- `if [[ -z "$PACE_SOURCE_CMD" ]]`
+# to `if false` -- left all 158 checks in this file GREEN, because the dead feed
+# exits 5 either way. So none of the above could see the guard they appear to
+# be about.
+#
+# This fixture separates them. Two samples twelve hours apart, both with a
+# reset a month out, so the burn IS derivable and the window IS live: the ONLY
+# thing wrong with it is that the newest sample is 18 hours old. With the guard
+# intact that is exit 5. With the guard bypassed it derives 0.75 weekly over
+# 12h and returns {"ratio":999,"verdict":"LEVEL3"} at exit 0 -- maximum throttle
+# across the roster off a feed with no living producer, which is the TOG-938
+# incident reproduced exactly.
+cat > "$WORK/stale-derivable.jsonl" <<'EOF'
+{"ts":"2026-09-03T10:00:00Z","pool_verdict":"AHEAD","runs_in_flight":0,"accounts":[{"name":"a@example","weekly":0.20,"five_hour":0.10,"days_left":6,"verdict":"AHEAD","burn_per_day":null,"weekly_reset_utc":"2026-09-30 10:00 UTC","is_current":true}]}
+{"ts":"2026-09-03T22:00:00Z","pool_verdict":"AHEAD","runs_in_flight":0,"accounts":[{"name":"a@example","weekly":0.95,"five_hour":0.10,"days_left":6,"verdict":"AHEAD","burn_per_day":null,"weekly_reset_utc":"2026-09-30 10:00 UTC","is_current":true}]}
+EOF
+rc=0; out="$(QUOTA_PACING_FILE="$WORK/stale-derivable.jsonl" PACE_SOURCE_CMD="" \
+  PACE_NOW=2026-09-04T16:00:00Z "$BRAKE" pace 2>&1)" || rc=$?
+check "6h  a stale but DERIVABLE feed is exit 5, not a verdict" "$rc" "5"
+# Attribution. Without this the check is satisfiable by any of the other exit-5
+# gates standing next to the one under test -- the same failure mode §6's
+# header already records.
+case "$out" in *"1080m old"*) ok "6h2 ...refused for the STALENESS reason specifically";; *) bad "6h2 ...refused for the STALENESS reason specifically" "$out";; esac
+case "$out" in *"limit 120m"*) ok "6h3 ...naming the 120m cutoff";; *) bad "6h3 ...naming the 120m cutoff" "$out";; esac
+# The payload assertion, not just the exit code: this is the literal shape the
+# bypassed guard emits.
+case "$out" in *'"verdict"'*) bad "6h4 ...and emits no throttle verdict at all" "$out";; *) ok "6h4 ...and emits no throttle verdict at all";; esac
+case "$out" in *LEVEL3*) bad "6h5 ...and never reaches the maximum rung" "$out";; *) ok "6h5 ...and never reaches the maximum rung";; esac
+
+# The same feed must not be able to move the roster either. `pace` is a read;
+# `apply` is the privileged path, and it has to refuse for the same reason.
+: > "$WORK/captured.tsv"
+rc=0; (QUOTA_PACING_FILE="$WORK/stale-derivable.jsonl" PACE_SOURCE_CMD="" \
+  PACE_NOW=2026-09-04T16:00:00Z ROSTER_SOURCE_CMD="$WORK/roster_std.sh" \
+  EXEMPT_FILE="$WORK/exempt.txt" AGENT_WRITE_CMD="$WORK/capture.sh" \
+  CAPTURE_FILE="$WORK/captured.tsv" "$BRAKE" apply --yes) >/dev/null 2>&1 || rc=$?
+check "6h6 a stale but derivable apply is UNKNOWN" "$rc" "5"
+check "6h7 ...and writes NOTHING" "$(wc -l < "$WORK/captured.tsv" | tr -d ' ')" "0"
+
+# The negative control, and the reason 6h is not simply "this fixture always
+# refuses". Same bytes, same derivable window, clock moved to one minute after
+# the newest sample: now it is FRESH, and it must produce a real verdict. If
+# this ever goes red the fixture stopped being derivable and 6h has quietly
+# become a test of something else -- the "did it actually build its state"
+# assertion that a refusal-shaped kill needs.
+rc=0; out="$(QUOTA_PACING_FILE="$WORK/stale-derivable.jsonl" PACE_SOURCE_CMD="" \
+  PACE_NOW=2026-09-03T22:01:00Z "$BRAKE" pace 2>/dev/null)" || rc=$?
+check "6h8 the SAME feed read fresh is exit 0 (the fixture is derivable)" "$rc" "0"
+check "6h9 ...and does derive a verdict" "$(jq -r '.source' <<<"$out")" "derived"
+
 # ===========================================================================
 echo "== 7. dry-run by default =="
 base_env pace_hot.json roster_std.sh

@@ -124,6 +124,13 @@ name: CI
 #     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
 #                                       diagnostics, bounded owned repair, and owner-HOLD refusal
 #                                       — TOG-586
+#     test_pacing_verdict.py            pacing_verdict.py: whether a sample older
+#                                       than the 120m cutoff can still be read as
+#                                       a live verdict. Every age case carries a
+#                                       FUTURE weekly_reset_utc on purpose — the
+#                                       acceptance fixture trips TWO independent
+#                                       guards at once, so a suite built on it
+#                                       alone proved neither — TOG-937/938/1030
 #     test_model_lane_probe.sh          model_lane_probe.sh: whether the cheap/
 #                                       small-fast lane is dead OR has come
 #                                       UNPINNED. A bare model id answers 200 and
@@ -3530,6 +3537,112 @@ jobs:
           #    accounts were past it on 2026-08-25.
           brake_mutation "passed-target-releases" 'selects LEVEL3' \
             "$(printf 'ratio: (if $need <= 0 then 999 else ($burn / $need) end),\x1fratio: ($burn / $need),')" || rc=1
+          # 9. TOG-1030. THE PRODUCTION STALENESS GUARD REMOVED. Before this
+          #    mutant existed, `pacing_verdict.py` and the dead-feed fixture
+          #    were COPIED into this staging directory as inputs and never
+          #    mutated — a gate that copies a file it never mutates does not
+          #    guard it. Measured on the reviewed commit: turning the whole
+          #    guard block off left all 158 brake checks green, because the
+          #    only stale fixture in the suite was ALSO refused by the
+          #    "no derivable burn" path. §6h is the fixture that separates
+          #    them, and this is the mutation it exists to kill: an 18-hour-dead
+          #    feed returning {"ratio":999,"verdict":"LEVEL3"} at exit 0, which
+          #    is maximum throttle across the roster with no living producer —
+          #    the TOG-938 incident exactly.
+          brake_mutation "stale-guard-bypassed" 'refused for the STALENESS reason specifically' \
+            "$(printf 'if [[ -z "$PACE_SOURCE_CMD" ]]; then\n    guard_file=\x1fif false; then\n    guard_file=')" || rc=1
+          # 10. THE GUARD RUNS AND ITS ANSWER IS DISCARDED. One rung subtler
+          #     than 9 and it fails identically: paying for the verdict and
+          #     then not branching on it is the same outage with a longer
+          #     receipt. Kept separate because a repair to 9 (restore the
+          #     block) does not imply a repair to 10.
+          brake_mutation "stale-guard-result-ignored" 'refused for the STALENESS reason specifically' \
+            "$(printf 'if (( guard_rc != 0 )); then\x1fif false; then')" || rc=1
+          exit $rc
+
+      # TOG-1030. The staleness cutoff itself, which until now NOTHING mutated.
+      # `pacing_verdict.py` was a copied input to the two gates above and the
+      # subject of neither, and its own suite could not see the cutoff either:
+      # changing `if age > max_age_minutes:` to `if age > 1000000000:` left all
+      # five quota suites — 282 declared checks — green. The suite's one stale
+      # case was the acceptance fixture, whose expired weekly_reset_utc values
+      # trip a second, independent guard, so it proved "the dead feed is
+      # refused" and never "a stale sample is refused".
+      #
+      # 120 is a number in a safety cutoff, which by this repo's standing rule
+      # means it belongs in a gate rather than in a comment somebody trusts.
+      # Both directions are mutated: widening the cutoff lets a dead feed read
+      # live, and flipping the boundary comparison moves it by one minute in a
+      # way no other case in the suite can see.
+      - name: Prove the 120m staleness cutoff is load-bearing (mutation-gated)
+        run: |
+          set -uo pipefail
+          rc=0
+          pacing_mutation() {
+            local label="$1" expect="$2"; shift 2
+            local mut; mut="$(mktemp -d)"
+            cp pacing_verdict.py test_pacing_verdict.py "$mut/"
+            mkdir -p "$mut/tests"
+            cp tests/dead-feed-2026-08-26.jsonl "$mut/tests/"
+
+            # Baseline in the SAME staging directory. §1 of the suite asserts
+            # the fixture is present rather than skipping, so a staging error
+            # is caught here as a red baseline instead of quietly deleting
+            # five checks from every run below.
+            if ! (cd "$mut" && python3 -m unittest test_pacing_verdict.py >/dev/null 2>&1); then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              (cd "$mut" && python3 -m unittest test_pacing_verdict.py 2>&1 | tail -25); rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do
+              python3 -c 'import sys; p, ex = sys.argv[1], sys.argv[2]; o, n = ex.split("\x1f", 1); s = open(p).read(); open(p, "w").write(s.replace(o, n))' "$mut/pacing_verdict.py" "$e"
+            done
+            if cmp -s pacing_verdict.py "$mut/pacing_verdict.py"; then
+              echo "::error::$label: the edit changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! python3 -m py_compile "$mut/pacing_verdict.py"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            local out status
+            out="$(cd "$mut" && python3 -m unittest test_pacing_verdict.py 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the pacing suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            # Attribution, for the same reason the two gates above carry it: a
+            # bare "the suite failed" cannot distinguish the check under test
+            # from the one standing next to it.
+            if ! grep -aqE "FAIL: $expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but $expect did not fail — it is failing for an unrelated reason, so this mutation is not actually covered"
+              grep -aE '^(FAIL|ERROR):' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+
+          # 1. THE CUTOFF DISABLED. Nothing is ever too old. This is M1 from the
+          #    TOG-1030 review, verbatim.
+          pacing_mutation "age-cutoff-disabled" 'test_02_121m_is_unknown' \
+            "$(printf 'if age > max_age_minutes:\x1fif age > 1000000000:')" || rc=1
+          # 2. THE CUTOFF WIDENED TO A WEEK. The plausible version of 1: not a
+          #    disabled guard, a "generous" one. The dead feed was nine days
+          #    old, so this still catches the incident and still reads a
+          #    six-hour-dead producer as a live measurement.
+          pacing_mutation "age-cutoff-widened-to-a-week" 'test_02_121m_is_unknown' \
+            "$(printf 'MAX_AGE_MINUTES = 120\x1fMAX_AGE_MINUTES = 10080')" || rc=1
+          # 3. THE BOUNDARY FLIPPED. `>` to `>=`, one character, and every case
+          #    in the suite except the exact-120m pin agrees with both. The
+          #    limit is INCLUSIVE by decision, not by accident.
+          pacing_mutation "boundary-flipped-to-exclusive" 'test_02_exactly_120m_is_live_limit_is_inclusive' \
+            "$(printf 'if age > max_age_minutes:\x1fif age >= max_age_minutes:')" || rc=1
+          # 4. THE SECOND DOOR. `read_verdict_rows` is the entry point the brake
+          #    and rotation watch actually call. A cutoff enforced on the file
+          #    path and not this one is the shape a partial fix takes.
+          pacing_mutation "rows-path-skips-validation" 'test_stale_row_is_unknown' \
+            "$(printf 'return read_verdict_sample(best, max_age_minutes, now, source)\x1freturn read_verdict_sample(best, 1000000000, now, source)')" || rc=1
           exit $rc
 
       # TOG-345. The sibling guard's whole value is the THIRD exit state. Two
