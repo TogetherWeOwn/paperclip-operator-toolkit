@@ -233,7 +233,7 @@ with no opt-out flag**:
 |---|---|
 | Body keys allowlisted to `pattern`, `comboId`, `priority`, `enabled`, `description` | Exactly the shipped route's zod contract. Deny-by-default, as everywhere else here. |
 | No `*` or `?` in `pattern` | OmniRoute glob-matches case-insensitively, so one `*` can capture ids nobody enumerated — including ids that do not exist yet. |
-| `pattern` must not match `/(claude\|sonnet\|opus\|haiku\|fable)/i` | Matched on **family**, not on the substring `claude`: TOG-237 was a bypass a `claude` check cleared, and 13 `aug/` ids contain no `claude` at all. |
+| `pattern` must not match `/(claude\|sonnet\|opus\|haiku\|fable\|mythos\|prism)/i` | Matched on **family**, not on the substring `claude`: TOG-237 was a bypass a `claude` check cleared, and 14 `aug/` ids contain no `claude` at all. `mythos` and `prism` are **not** family words — see the structural-limit note below for why they are enumerated, and why quoting this rule without them (as this table did until TOG-291) understates the guard. |
 | `priority` must be an explicit integer | The route defaults it to `0`. Mappings resolve `priority DESC`, so an omitted priority silently loses to every existing mapping — a routing decision nobody made. |
 
 The guard is wired into `buildRequest()`, **not** into the operate handler, because
@@ -275,6 +275,41 @@ A fixture certifies the fixture. Run
 this guard from `dist/` so a copy cannot drift and then certify itself. Live
 result after the fix: **352/352 blocked, 0
 escaped**, and all 52 TOG-178 patterns still pass unchanged.
+
+⚠️ **And the fixture was worse than incomplete — it was circular (TOG-291).** The
+trimmed fixture stored the `aug/` ids as bare `{id}` records with no `name`. The
+calibration script's "Claude-bearing" net counts a family-name match as
+Claude-bearing, so with no other evidence in the record the guard was scoring its
+own exam: **deleting `prism` from `MAPPING_PROTECTED_FAMILY` still reported "all
+350 Claude-bearing ids are blocked (0 escaped)" and exited 0** — measured on
+`63ac24ef` — while `mappings.create` would then have accepted `aug/prism-a`. The
+committed fixture now carries both `aug/prism-*` ids and the catalogue `name` for
+`aug/prism-a`, `"Prism (Claude + Gemini)"` — evidence the guard cannot manufacture
+— and the offline suite mutates the **guard**, not the catalogue, to prove the
+loop is broken. Do not strip that `name` to tidy the file; it is the single field
+the whole check rests on, and a separate test pins it.
+
+Be precise about how thin that evidence is. Only **three** entries carry a `name`,
+because only three are written down anywhere a reviewer can check: `aug/prism-a`
+and `aug/prism-b` (`TOG-152-combo-spec.md`, `TOG-151-claude-surface.json`) and
+`aug/opus4.8` (`TOG-151-omniroute_combo_cli.sh`). The other `aug/` ids are stored
+with **no** name rather than a plausible one reconstructed from the id — a guessed
+name is the same circularity in disguise, since the id is what the guard already
+reads. A live run sees all 14 real names and is worth strictly more; this fixture
+proves the loop is broken only for the one id that can prove it.
+
+**No name-shaped regex is a sound Claude-containment control on this instance
+(TOG-291).** Against the 351-id corpus in
+`/paperclip/operator-handoff/TOG-151-claude-surface.json`, `claude|anthropic`
+misses **14** ids and `(claude|sonnet|opus|haiku|fable)` misses `aug/prism-a`; it
+is not sound in the other direction either, since `aug/prism-b` matches on `prism`
+and carries no Claude. This guard is a name-shaped rule **because it structurally
+cannot be anything else** — it only ever holds the caller's pattern string. Where a
+check *can* see ids or resolve a model, it must audit against the corpus instead;
+`omniroute_combo_cli.sh`'s `claude_suspicion_reason()` (0 misses on the corpus) and
+TOG-178's phase 8 are the reference implementations. The corpus is itself a
+snapshot and carries its own warning against hard-coding — the durable form is a
+live read.
 
 **Accepted over-block:** `aug/prism-b` is `"Prism (GPT + Kimi)"`, carries no
 Claude, and is refused anyway — the two are indistinguishable by id. TOG-178

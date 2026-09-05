@@ -1,6 +1,8 @@
 {
-"_source": "trimmed from GET /v1/models 2026-08-25; allowlisted leaves + all Claude-family ids + protected prefixes",
+"_source": "trimmed from GET /v1/models 2026-08-25; allowlisted leaves + all Claude-family ids + protected prefixes. TOG-291 added the two aug/prism-* ids, which the 2026-08-25 trim omitted entirely, and the three catalogue 'name' values that are recorded in the operator handoff.",
+"_warning": "Do NOT strip the 'name' from aug/prism-a. It is the ONLY field in this file that knows aug/prism-a serves Claude, and it is what lets the calibration script judge a guard against the catalogue instead of against itself. Without it, deleting 'prism' from MAPPING_PROTECTED_FAMILY still reports '0 escaped'. Verified by mutation, TOG-291.",
 "object": "list",
+"_names_are_transcribed_not_inferred": "Only three entries carry a 'name', because only three names exist in a source anyone can check: aug/prism-a 'Prism (Claude + Gemini)' (TOG-152-combo-spec.md line 154 and TOG-151-omniroute_combo_cli.sh line 1805), aug/prism-b 'Prism (GPT + Kimi)' (TOG-151-claude-surface.json, family_word_false_positive.note), and aug/opus4.8 'Opus 4.8' (TOG-151-omniroute_combo_cli.sh line 133). The other aug/ ids are stored WITHOUT a name because no capture in this repo records one. Do not fill them in from the id -- a guessed name is not evidence, and this file's only job is to be evidence the guard cannot manufacture. To add one, transcribe it from a live GET /v1/models and say so here.",
 "data": [
 {
 "id": "auto/best-coding"
@@ -165,7 +167,16 @@
 "id": "aug/opus4.7-500k"
 },
 {
-"id": "aug/opus4.8"
+"id": "aug/opus4.8",
+"name": "Opus 4.8"
+},
+{
+"id": "aug/prism-a",
+"name": "Prism (Claude + Gemini)"
+},
+{
+"id": "aug/prism-b",
+"name": "Prism (GPT + Kimi)"
 },
 {
 "id": "opencode-go/glm-5.2-high"

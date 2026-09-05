@@ -11,16 +11,43 @@
 //     the family regex /(claude|sonnet|opus|haiku|fable|mythos|prism)/i blocks EVERY Claude-bearing id
 //     in the catalogue, and blocks NONE of the ids TOG-178 legitimately needs to re-point.
 //
-// That claim is about data, not code. It was true on 2026-08-25 (350/350 blocked, 0/130
+// That claim is about data, not code. It was true on 2026-08-25 (352/352 blocked, 0/130
 // over-blocked). It can rot silently the moment OmniRoute's catalogue churns — a new
 // Anthropic-served id under some future prefix that spells none of the protected family names
 // would pass the guard, and the guard would still look green because every unit test in
 // the broker suite asserts against hand-written strings.
 //
 // TOG-237 is the precedent and the reason the regex is a FAMILY match, not a `claude`
-// substring: 13 ids under `aug/` carry no `claude` string at all, and a substring check
+// substring: 14 ids under `aug/` carry no `claude` string at all, and a substring check
 // clears every one of them. That bug shipped because the test oracle had the same blind
 // spot as the code. This script exists so the oracle is the catalogue instead.
+//
+// TOG-291 is the second-order version of that same defect, and it lived HERE. Check 1's
+// wide net counts a family-name match AS Claude-bearing, so while the committed fixture
+// stored the `aug/` ids as bare `{id}` records, the guard was scoring its own exam:
+// delete a token from MAPPING_PROTECTED_FAMILY and the ids it used to match simply stop
+// being counted as Claude-bearing, so "0 escaped" stays green. Measured on 63ac24ef —
+// removing `prism` still reported "all 350 Claude-bearing ids are blocked" and exited 0,
+// while `mappings.create` would then have accepted `aug/prism-a`, which is live Claude
+// capacity. The fix is in the DATA, not here: the fixture now carries `aug/prism-a` and its
+// catalogue `name`, "Prism (Claude + Gemini)" — corroboration the guard cannot manufacture,
+// transcribed from TOG-152-combo-spec.md rather than inferred from the id.
+// `test_tog473_mapping_guard.mjs` pins it by mutating the GUARD rather than the catalogue —
+// the only mutation that can detect a circular oracle.
+//
+// That one `name` is carrying the whole check, and the fixture says so rather than hiding
+// it: the other `aug/` ids are stored WITHOUT a name because no capture in this repo
+// records one, and a name guessed from the id would be the same circularity wearing a
+// disguise. A live run reads all 14 real names and is worth strictly more than this.
+//
+// The rule TOG-291 established, stated here because it outlives this script: NO
+// NAME-SHAPED REGEX IS A SOUND CLAUDE-CONTAINMENT CONTROL ON THIS INSTANCE. Against the
+// 351-id corpus in TOG-151-claude-surface.json, `claude|anthropic` misses 14 ids and
+// `(claude|sonnet|opus|haiku|fable)` misses `aug/prism-a`. Nor is it sound in the other
+// direction: `aug/prism-b` is "Prism (GPT + Kimi)" and carries no Claude at all. An id is
+// not a reliable statement about what serves it. This guard is id-shaped because it only
+// ever sees a caller's pattern string (see the broker README) — that is a structural
+// limit, and this script exists to keep saying so when the catalogue drifts past it.
 //
 // READ-ONLY, BY CONSTRUCTION. One HTTP call at most, a GET of the model catalogue on the
 // INFERENCE plane. It never touches :20128/api/* (the management plane the broker exists
@@ -256,11 +283,18 @@ if (escaped.length > 0) {
 // family-name match AS Claude-bearing, so that set is empty by construction and the check
 // would be permanently, uselessly green.
 //
-// The honest question is "is this id actually Anthropic-served?", and the catalogue cannot
-// answer it: the 13 `aug/` ids carry no metadata whatsoever, just a bare {id}. They spell
-// sonnet/opus/haiku/fable, they ARE Anthropic capacity, and they are exactly the ids
-// TOG-237 proved a `claude` substring check clears. So a family match with no corroborating
-// string is the NORMAL case here, not a defect.
+// The honest question is "is this id actually Anthropic-served?", and the id alone cannot
+// answer it: the `aug/` ids spell sonnet/opus/haiku/fable and nothing else, they ARE
+// Anthropic capacity, and they are exactly the ids TOG-237 proved a `claude` substring
+// check clears. So a family match with no corroborating string is the NORMAL case here,
+// not a defect.
+//
+// The catalogue CAN answer it, via the `name` field — `aug/opus4.8` is only "Opus 4.8",
+// but `aug/prism-a` is "Prism (Claude + Gemini)" and `aug/prism-b` is "Prism (GPT + Kimi)",
+// two ids one character apart on opposite sides of the containment line. That field is the
+// only independent evidence in this file, which is why the committed fixture now carries
+// the three names that are actually recorded somewhere checkable (TOG-291) and why a live
+// run — which sees all 14 — is worth more than a fixture run.
 //
 // What over-blocking actually costs us is decided by check 4: does the guard refuse a
 // mapping TOG-178 genuinely needs? That is a real gate. This one is a review aid — if the

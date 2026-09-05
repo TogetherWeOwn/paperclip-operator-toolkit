@@ -10,6 +10,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   copyFileSync,
+  cpSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -57,7 +58,7 @@ function mappings(plan) {
   return Array.isArray(plan) ? plan : (plan.mappings ?? plan.plan ?? []);
 }
 
-function run(dir) {
+function run(dir, overrides = {}) {
   const result = spawnSync("node", [SCRIPT], {
     cwd: REPO,
     encoding: "utf8",
@@ -67,6 +68,7 @@ function run(dir) {
       TOG473_BROKER_DIR: BROKER,
       TOG178_DIR: dir,
       OMNIROUTE_API_KEY: "",
+      ...overrides,
     },
   });
   return {
@@ -79,9 +81,63 @@ test("the committed corpus passes as an explicitly non-live check", () => {
   const result = run(stage());
   assert.equal(result.code, 0, result.out);
   assert.match(result.out, /NOT A LIVE CHECK/);
-  assert.match(result.out, /all 350 Claude-bearing ids are blocked/);
+  assert.match(result.out, /all 352 Claude-bearing ids are blocked/);
   assert.match(result.out, /all 52 planned TOG-178 mappings pass/);
   assert.match(result.out, /52 of 52 mapping creates classify as TWO-KEY/);
+});
+
+// TOG-291. THE POINT OF THE WHOLE SUITE, so it is asserted rather than assumed.
+//
+// Every other case here changes the CATALOGUE and asks whether the checker notices.
+// This one changes the GUARD and asks the same question, which is the only version
+// that can detect a circular oracle — and the oracle WAS circular until this commit.
+//
+// Measured on 63ac24ef, before the fixture carried `name`: deleting `prism` from
+// MAPPING_PROTECTED_FAMILY left the calibration script reporting
+// "all 350 Claude-bearing ids are blocked (0 escaped)" and exiting 0, while
+// `mappings.create` would then have accepted `aug/prism-a` — "Prism (Claude + Gemini)",
+// live Claude capacity. The script's own wide net counts a family-name match AS
+// Claude-bearing, so with bare {id} records the guard was scoring its own exam: remove
+// a token and the ids it used to match simply stop being counted.
+//
+// The fixture's `aug/prism-a` entry — specifically its catalogue `name`, "Prism (Claude +
+// Gemini)" — is what breaks the loop, and it is the ONLY thing that does. Strip that one
+// field and this test goes green again while the bypass is real, which is exactly the
+// pre-TOG-291 state. Do not delete this test to make a guard change pass; a guard that
+// fails here is a guard with a live bypass.
+test("deleting a token from the guard is caught — the fixture is not scored by the guard", () => {
+  const dir = stage();
+  const brokerDir = join(dir, "broker");
+  cpSync(BROKER, brokerDir, { recursive: true });
+  const verbsPath = join(brokerDir, "dist", "verbs.js");
+  const before = readFileSync(verbsPath, "utf8");
+  const after = before.replace("|mythos|prism)/i", "|mythos)/i");
+  assert.notEqual(after, before, "could not find MAPPING_PROTECTED_FAMILY to mutate");
+  writeFileSync(verbsPath, after);
+
+  const result = run(dir, { TOG473_BROKER_DIR: brokerDir });
+  assert.equal(result.code, 1, result.out);
+  assert.match(result.out, /NOT blocked by the family regex/);
+  assert.match(result.out, /aug\/prism-a/);
+});
+
+// The test above is only as good as the one field it rests on, so pin that field directly.
+// Without this, someone "tidying" the fixture into uniform {id} records would silently
+// restore the circular oracle and every test here would still pass.
+test("the committed fixture still carries the evidence the guard cannot manufacture", () => {
+  const catalogue = readJson(join(FIXTURES, "catalogue.json"));
+  const prismA = models(catalogue).find((m) => m.id === "aug/prism-a");
+  assert.ok(prismA, "aug/prism-a is missing from the fixture");
+  assert.match(
+    prismA.name ?? "",
+    /claude/i,
+    "aug/prism-a lost its catalogue name — the calibration oracle is circular again",
+  );
+  // The mirror case: matched by the family regex, genuinely NOT Claude. It is why the
+  // answer to prism-a is real catalogue data, not another token bolted onto the regex.
+  const prismB = models(catalogue).find((m) => m.id === "aug/prism-b");
+  assert.ok(prismB, "aug/prism-b is missing from the fixture");
+  assert.doesNotMatch(prismB.name ?? "", /claude/i);
 });
 
 test("an Anthropic-served id with no protected family token is a bypass", () => {
