@@ -196,6 +196,29 @@ grep -Eq -- '(^|[[:space:]])--user 61111:61112([[:space:]]|$)' <<<"$run_exec" ||
 grep -Fq -- '-v /run/paperclip-runs/run-a:/run/paperclip-run:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated run-root bind'
 grep -Fq -- '-v /run/paperclip-runs/run-a/workspace:/workspace:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated workspace bind'
 
+# TOG-1141. Everything below this line measures kernel behaviour inside an
+# unprivileged user namespace: a read-only bind mount, then a uid/gid map. If
+# userns is unavailable, `unshare` exits 1 with "write failed
+# /proc/self/uid_map: Operation not permitted" -- which is byte-for-byte
+# indistinguishable, from outside this script, from the carrier/render binding
+# genuinely being broken. It was read that way for the whole of this window.
+#
+# So refuse instead, exit 3: a comparison that did not happen must not read as
+# an answer (TOG-357). Checked here, after the pure-bytes assertions above, so
+# a host without userns still gets the carrier verdict it CAN give.
+if ! unshare -Urnm true 2>/dev/null; then
+  printf 'REFUSE: unprivileged user namespaces are unavailable here (unshare -Urnm failed).\n' >&2
+  printf '        This suite measures a read-only bind mount and a uid/gid map; without\n' >&2
+  printf '        userns it can measure NEITHER, so it reports no verdict on the carrier.\n' >&2
+  printf '        This is NOT a carrier/render binding failure -- do not read it as one.\n' >&2
+  printf '        kernel.apparmor_restrict_unprivileged_userns=%s user.max_user_namespaces=%s\n' \
+    "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo unset)" \
+    "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo unset)" >&2
+  printf '        On GitHub-hosted ubuntu-24.04, AppArmor restricts unprivileged userns;\n' >&2
+  printf '        the CI step re-enables it with sysctl before invoking this suite.\n' >&2
+  exit 3
+fi
+
 fixture=${PAPERCLIP_RUN_SCRATCH_DIR:-${TMPDIR:-/tmp}/paperclip-immutable-fixture-$$}
 fixture="$fixture/immutable-runtime-test"
 rm -rf "$fixture"

@@ -1126,65 +1126,12 @@ jobs:
       - name: blocked-issue audit applier suite
         run: ./test_blocked_audit.sh
 
-      # TOG-434. The rule: an action only a human can perform is a RUNBOOK
-      # LINE; a judgement only the owner may make is a DECISION. Filed the
-      # wrong way round, "please run these three root commands" renders as a
-      # decision awaiting judgement, nobody triages it as work, and it expires
-      # — 47 of 189 interactions have died that way. Of the 35 pending
-      # owner-only asks swept for TOG-434, 21 were requests for hands.
-      #
-      # The load-bearing half is `check`, not the rendering: it is what stops a
-      # new capability-bound ask joining the owner's queue unclassified. It
-      # fails silently if it is wrong, so §4 pins the fail-open case (empty or
-      # malformed input must NEVER read as a clean board — that bug was real
-      # and is fixed) and §6 deletes each branch of `check` from a staging copy
-      # to prove the test naming it goes red, baseline asserted first.
-      #
-      # This gate does NOT reach the board. `render` is a pure function of the
-      # checked-in classification file; `check` needs a live snapshot and is
-      # run by hand.
-      - name: operator runbook suite
-        run: ./test_operator_runbook.sh
+      # The three operator runbook gates that used to sit here have MOVED to
+      # their own `runbook-gates` job (TOG-1141). They were disarmed here: this
+      # job is fail-fast, so a red at step 12 skipped them at step ~90, and a
+      # skip inside an already-red job reads as "not failing" on the PR page.
+      # See the job's header comment. Do not move them back.
 
-      # The committed runbook must be the one the generator produces. A
-      # hand-edit to docs/OPERATOR-RUNBOOK.md would otherwise drift away from
-      # the classification file that CI actually validates.
-      - name: operator runbook is regenerated, not hand-edited
-        run: |
-          ./operator_runbook.sh render > /tmp/runbook.regenerated.md
-          diff -u docs/OPERATOR-RUNBOOK.md /tmp/runbook.regenerated.md
-
-      # TOG-851. `check` is driven by the pending INTERACTION set, so it is
-      # structurally blind to an ask that never filed one: not in the input,
-      # therefore not unclassified, therefore green. TOG-846 shipped a complete
-      # live-verified operator runbook, filed ZERO interactions, was closed
-      # `done`, and sat on disk with no delivery path while every gate passed.
-      #
-      # This half is driven by the FILES instead, so it catches that direction.
-      # It needs no board access and no credentials, which is exactly why it can
-      # run here when `check` cannot.
-      #
-      # On a CI runner /paperclip does not exist, so this step points the gate at
-      # a fixture rather than skipping: a gate that silently no-ops on the runner
-      # is a green tick that measured nothing. The fixture asserts BOTH
-      # directions — a registered artifact passes, a stranded one exits 3 — so
-      # this step fails if the branch is ever gutted, without needing the host.
-      - name: operator runbook — no capability ask stranded on disk
-        run: |
-          set -euo pipefail
-          if [ -d /paperclip/operator-handoff ]; then
-            ./operator_runbook.sh check-handoff
-          fi
-          fix="$(mktemp -d)"
-          : > "$fix/TOG-846-cliproxy-update-runbook.md"
-          ./operator_runbook.sh check-handoff --handoff "$fix"
-          echo "registered artifact passes"
-          : > "$fix/TOG-999-orphan-runbook.md"
-          if ./operator_runbook.sh check-handoff --handoff "$fix"; then
-            echo "FAIL: a stranded runbook passed clean — the TOG-846 hole is open" >&2
-            exit 1
-          fi
-          echo "stranded artifact correctly exits non-zero"
       # TOG-396. The sibling problem to the one above: routing decides WHERE an
       # ask goes, this decides whether the JSON you are about to POST says what
       # you think it says. `POST /issues/{id}/interactions` validates against a
@@ -4232,14 +4179,31 @@ jobs:
       # not on a clock is not a check — same lesson as the merged-but-never-run
       # detector on TOG-695.
       #
-      # It stays red until the generator is re-run ON THE HOST and a fresh
-      # render is checked in. That is the correct verdict: the carrier now
-      # declares a leg no host render has ever confirmed generates.
+      # That "stays red until a fresh host render is checked in" expectation is
+      # SPENT: 934540c5 (TOG-716) re-pinned the gate at the operator's two-leg
+      # host render, and the suite passes on the checked-in bytes today.
+      #
+      # TOG-1141. It was nevertheless red on every run since 6db1f210 registered
+      # it, for an unrelated reason, and nobody saw it: the rehearsal suite was
+      # red at step 12 and took this one down as `skipped` before it could
+      # speak. The failure is the RUNNER, not the carrier — GitHub's
+      # ubuntu-24.04 image sets kernel.apparmor_restrict_unprivileged_userns=1,
+      # and this suite needs an unprivileged user namespace for both halves it
+      # measures (a read-only bind mount, and a uid/gid ownership handoff).
+      # `unshare` fails with "write failed /proc/self/uid_map: Operation not
+      # permitted", exit 1 — indistinguishable, from the outside, from the
+      # carrier binding genuinely being broken. Which is how it was read.
+      #
+      # So: re-enable it here, and make the suite REFUSE (exit 3) rather than
+      # fail if it is ever unavailable again. A comparison that did not happen
+      # must not read as an answer — the TOG-357 convention.
       #
       # Offline: reads checked-in carrier + render bytes and builds its fixture
       # tree in mktemp. No podman, no host, no database, no credential.
       - name: TOG-714 immutable carrier / host-render binding
-        run: ./test_paperclip_immutable_runtime.sh
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          ./test_paperclip_immutable_runtime.sh
 
       # TOG-910. THE ONLY STEP IN THIS JOB THAT IS ALLOWED AN `if:`, AND THE
       # REASON IS THE WHOLE POINT OF THE CARD.
@@ -4266,6 +4230,117 @@ jobs:
       #
       # Pinned by test_ci_dark_steps.sh, which asserts this wiring so a future
       # edit cannot quietly drop the `if:` and re-blind the job.
+      - name: Report steps that never ran
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./ci_dark_steps.sh report || true
+
+  # ---------------------------------------------------------------------------
+  # The operator runbook gates (TOG-1141).
+  #
+  # SEPARATE JOB, AND THE REASON IS THE DEFECT THAT CREATED IT.
+  #
+  # These three gates used to be steps ~90 of ~120 on `offline-suites`. That job
+  # is fail-fast by design, so when `OmniRoute rehearsal package suite` went red
+  # at step 12, all three were SKIPPED — and a skip inside an already-red job
+  # reads as "not failing" on the PR page. 075b13e5 hand-edited the generated
+  # docs/OPERATOR-RUNBOOK.md and merged to main with the anti-hand-edit gate
+  # sitting at conclusion `skipped`, not `success`. The gate was present,
+  # correct, and disarmed by a failure it had nothing to do with.
+  #
+  # TOG-910's dark-step reporter makes that visible after the fact; it does not
+  # ARM anything. Only a separate job does, because a job's steps cannot be
+  # short-circuited by a failure in a different job. The three gates now
+  # produce their own verdict in the checks list, so "the runbook is
+  # hand-edited" can never again be hidden behind "the rehearsal suite is red".
+  #
+  # Cheap to isolate: every gate here needs only bash + jq + python3 and reads
+  # checked-in bytes. No build, no npm, no database, no credential, no network.
+  #
+  # Do NOT fold these back into another job to save a runner minute. The
+  # isolation IS the fix.
+  runbook-gates:
+    name: Operator runbook gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # TOG-434. The rule: an action only a human can perform is a RUNBOOK
+      # LINE; a judgement only the owner may make is a DECISION. Filed the
+      # wrong way round, "please run these three root commands" renders as a
+      # decision awaiting judgement, nobody triages it as work, and it expires
+      # — 47 of 189 interactions have died that way. Of the 35 pending
+      # owner-only asks swept for TOG-434, 21 were requests for hands.
+      #
+      # The load-bearing half is `check`, not the rendering: it is what stops a
+      # new capability-bound ask joining the owner's queue unclassified. It
+      # fails silently if it is wrong, so §4 pins the fail-open case (empty or
+      # malformed input must NEVER read as a clean board — that bug was real
+      # and is fixed) and §6 deletes each branch of `check` from a staging copy
+      # to prove the test naming it goes red, baseline asserted first.
+      #
+      # This gate does NOT reach the board. `render` is a pure function of the
+      # checked-in classification file; `check` needs a live snapshot and is
+      # run by hand.
+      - name: operator runbook suite
+        run: ./test_operator_runbook.sh
+
+      # The committed runbook must be the one the generator produces. A
+      # hand-edit to docs/OPERATOR-RUNBOOK.md would otherwise drift away from
+      # the classification file that CI actually validates.
+      - name: operator runbook is regenerated, not hand-edited
+        run: |
+          ./operator_runbook.sh render > /tmp/runbook.regenerated.md
+          diff -u docs/OPERATOR-RUNBOOK.md /tmp/runbook.regenerated.md
+
+      # TOG-851. `check` is driven by the pending INTERACTION set, so it is
+      # structurally blind to an ask that never filed one: not in the input,
+      # therefore not unclassified, therefore green. TOG-846 shipped a complete
+      # live-verified operator runbook, filed ZERO interactions, was closed
+      # `done`, and sat on disk with no delivery path while every gate passed.
+      #
+      # This half is driven by the FILES instead, so it catches that direction.
+      # It needs no board access and no credentials, which is exactly why it can
+      # run here when `check` cannot.
+      #
+      # On a CI runner /paperclip does not exist, so this step points the gate at
+      # a fixture rather than skipping: a gate that silently no-ops on the runner
+      # is a green tick that measured nothing. The fixture asserts BOTH
+      # directions — a registered artifact passes, a stranded one exits 3 — so
+      # this step fails if the branch is ever gutted, without needing the host.
+      - name: operator runbook — no capability ask stranded on disk
+        run: |
+          set -euo pipefail
+          if [ -d /paperclip/operator-handoff ]; then
+            ./operator_runbook.sh check-handoff
+          fi
+          fix="$(mktemp -d)"
+          : > "$fix/TOG-846-cliproxy-update-runbook.md"
+          ./operator_runbook.sh check-handoff --handoff "$fix"
+          echo "registered artifact passes"
+          : > "$fix/TOG-999-orphan-runbook.md"
+          if ./operator_runbook.sh check-handoff --handoff "$fix"; then
+            echo "FAIL: a stranded runbook passed clean — the TOG-846 hole is open" >&2
+            exit 1
+          fi
+          echo "stranded artifact correctly exits non-zero"
+
+      # TOG-1141. The mutation gate for the withdrawal RENDERING, kept in this
+      # job because it guards the same file the gate above compares.
+      #
+      # The anti-hand-edit gate proves doc == render. It cannot prove the
+      # generator still SAYS the dangerous thing: strip `withdrawn` from the
+      # classification file and regenerate, and doc == render stays perfectly
+      # green over a runbook that has lost an owner ruling. This asserts the
+      # withdrawal survives a render, by mutation — and pins the one hazard the
+      # data shape does NOT structurally prevent (see the script's header).
+      - name: operator runbook — a withdrawn line survives regeneration
+        run: ./verification/tog-1141-runbook-withdrawal-render-gate.sh
+
+      # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
+      # abort skipped, never fail the build for it. This job is small, but it is
+      # the one whose steps going dark caused TOG-1141 in the first place.
       - name: Report steps that never ran
         if: always()
         env:
