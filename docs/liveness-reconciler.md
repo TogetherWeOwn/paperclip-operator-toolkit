@@ -43,8 +43,19 @@ Each JSONL proposal includes the exact reason, proposed mutation, target, before
 
 Do not install the timer before an independent reviewer approves the exact commit.
 
+The reviewed commit is `49374f556395126b24c1d9310c4d8728167ccd55` (the PR #219
+merge commit, and `main` at the time of writing). **Do not build `ee6a85be`**,
+despite TOG-979's title: it is reachable from several branches but is not an
+ancestor of `main` (diverged, ahead 23 / behind 1), and its installer preflight
+requires `/usr/bin/runuser` — absent on this host, which places it in
+`/usr/sbin`, and never invoked by the bundle — so it refuses a host that would
+otherwise install cleanly. The builder now enforces this rather than trusting
+this paragraph: it refuses any `--source-ref` that is not an ancestor of
+`origin/main`. Fetch first, so that ref exists and is current.
+
 ```bash
-reviewed_commit=<independently-reviewed-40-hex-commit>
+git fetch origin main
+reviewed_commit=49374f556395126b24c1d9310c4d8728167ccd55
 bundle="$HOME/paperclip-liveness-reconciler-$reviewed_commit.tar"
 ./systemd/build-liveness-reconciler-bundle.sh \
   --source-ref "$reviewed_commit" --output "$bundle"

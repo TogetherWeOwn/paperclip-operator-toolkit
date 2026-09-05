@@ -154,6 +154,17 @@ Environment=PAPERCLIP_RECONCILER_MAX_REPAIRS=0' \
 mutate immutable-bundle systemd/build-liveness-reconciler-bundle.sh \
   'git --no-replace-objects archive --format=tar "$SOURCE_REF"' 'git archive --format=tar HEAD' \
   test_unprivileged_builder_archives_installer_and_payload_from_reviewed_commit
+# TOG-586: reachable is not reviewed. Dropping the ancestry check lets an
+# operator build ee6a85be -- reachable from four branches, diverged from main,
+# and carrying the pre-fix installer that refuses a good host.
+mutate builder-accepts-any-reachable-commit systemd/build-liveness-reconciler-bundle.sh \
+  'git --no-replace-objects merge-base --is-ancestor "$SOURCE_REF" "$TRUSTED_LINE"' 'true' \
+  test_builder_refuses_a_commit_not_merged_into_the_trusted_line
+# Defaulting the trusted line to HEAD would diff the tree against itself and
+# pass whatever happens to be checked out, including a defective branch.
+mutate builder-trusts-head-not-the-merged-line systemd/build-liveness-reconciler-bundle.sh \
+  'TRUSTED_LINE="origin/main"' 'TRUSTED_LINE="HEAD"' \
+  test_builder_refuses_a_commit_not_merged_into_the_trusted_line
 mutate root-checkout systemd/install-liveness-reconciler.sh \
   '/usr/bin/tar --extract --file "$BUNDLE" --directory "$WORK_DIR" --no-same-owner --no-same-permissions' \
   'git archive HEAD | /usr/bin/tar -x --directory "$WORK_DIR"' \

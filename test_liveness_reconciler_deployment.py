@@ -162,6 +162,21 @@ class DeploymentContract(unittest.TestCase):
             invoked = executable in elsewhere or executable in service or executable in timer
             self.assertTrue(invoked, f"{executable} is required but never invoked")
 
+    def test_builder_refuses_a_commit_not_merged_into_the_trusted_line(self):
+        # Reachable is not reviewed. ee6a85be is reachable from four remote
+        # branches yet is not an ancestor of main, and building it installs the
+        # pre-fix installer. Ancestry of the line review merges into is the
+        # property that separates the two; a hash pinned here would rot at the
+        # next merge, and a comparison against HEAD would diff the tree with
+        # itself and pass anything checked out.
+        source = (ROOT / "systemd" / "build-liveness-reconciler-bundle.sh").read_text()
+        self.assertIn(
+            'git --no-replace-objects merge-base --is-ancestor "$SOURCE_REF" "$TRUSTED_LINE"',
+            source,
+        )
+        self.assertIn('rev-parse -q --verify "$TRUSTED_LINE^{commit}"', source)
+        self.assertIn('TRUSTED_LINE="origin/main"', source)
+
     def test_build_script_is_executable_as_the_docs_invoke_it(self):
         # The doc and the install card both call ./systemd/build-...sh directly.
         # A 0644 mode makes that documented command fail with permission denied.
