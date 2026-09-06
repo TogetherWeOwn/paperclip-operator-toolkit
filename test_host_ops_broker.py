@@ -878,16 +878,18 @@ class BrokerTest(unittest.TestCase):
                 with self.assertRaises(broker.Refusal):
                     broker.sudoers_granted_image_ref(text)
 
-    def test_unit_restricts_namespaces_to_names_systemd_actually_parses(self):
-        # TOG-757: systemd discards the ENTIRE RestrictNamespaces= value when any
-        # type name fails to parse, which fails OPEN — every namespace type is
-        # permitted, not the two intended. The shipped unit said "mount"; the
-        # kernel/systemd name is "mnt". Pin the accepted spelling.
+    def test_unit_deliberately_omits_incompatible_namespace_filter(self):
+        # TOG-1126: rootless Podman enters its pause user namespace with
+        # setns(fd, 0). systemd's RestrictNamespaces seccomp filter rejects that
+        # call unless every namespace type is allowed, which is no restriction.
         service_source = (ROOT / "host-ops" / "host-ops-broker.service").read_text()
-        value = re.search(r"^RestrictNamespaces=(.*)$", service_source, re.MULTILINE).group(1).split()
-        self.assertEqual(set(value), {"user", "mnt"})
-        valid_types = {"cgroup", "ipc", "net", "mnt", "pid", "user", "uts"}
-        self.assertTrue(set(value).issubset(valid_types), f"unparsable namespace type in {value}")
+        active_directives = [
+            line for line in service_source.splitlines()
+            if re.match(r"^\s*RestrictNamespaces\s*=", line)
+        ]
+        self.assertEqual(active_directives, [])
+        self.assertIn("RestrictNamespaces is intentionally omitted", service_source)
+        self.assertIn("setns(fd, 0)", service_source)
 
     def test_acceptance_requires_each_service_and_image_contract(self):
         args = type("Args", (), {"config": str(self.config_path)})()
@@ -1015,6 +1017,14 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("atomic publication unit", runbook)
         for stale in ("previews/*.json", "responses/*.json", "/previews/HRQ-....json"):
             self.assertNotIn(stale, runbook)
+
+    def test_runbook_requires_live_host_evidence_for_rootless_podman_compatibility(self):
+        runbook = (ROOT / "host-ops" / "RUNBOOK.md").read_text()
+        self.assertIn("`RestrictNamespaces=` is deliberately absent", runbook)
+        self.assertIn("A green CI", runbook)
+        self.assertIn("not installation evidence", runbook)
+        self.assertIn("unprivileged acceptance check passed", runbook)
+        self.assertIn("service remained active", runbook)
 
     def test_installer_export_ignores_git_replacement_objects(self):
         repository = self.temp / "replacement-repo"
@@ -1168,8 +1178,28 @@ class BrokerTest(unittest.TestCase):
         # pin the complete writable authority set while preserving both strict
         # filesystem protections. Iterating every directive is important: a
         # first-line-only check would miss an appended broad writable path.
-        self.assertIn("ProtectSystem=strict", service_source)
-        self.assertIn("ProtectHome=read-only", service_source)
+        expected_hardening = {
+            "NoNewPrivileges=no",
+            "PrivateTmp=yes",
+            "PrivateDevices=yes",
+            "ProtectSystem=strict",
+            "ProtectHome=read-only",
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectKernelLogs=yes",
+            "ProtectControlGroups=yes",
+            "LockPersonality=yes",
+            "MemoryDenyWriteExecute=yes",
+            "MemoryMax=256M",
+            "TasksMax=32",
+            "RestrictSUIDSGID=yes",
+            "RestrictRealtime=yes",
+            "SystemCallArchitectures=native",
+            "UMask=0027",
+        }
+        self.assertTrue(expected_hardening.issubset(set(service_source.splitlines())))
+        self.assertNotRegex(service_source, r"(?m)^\s*RestrictNamespaces\s*=")
+        self.assertNotRegex(service_source, r"(?m)^\s*(ReadWriteDirectories|BindPaths)\s*=")
         writable_paths = {
             path
             for line in service_source.splitlines()
