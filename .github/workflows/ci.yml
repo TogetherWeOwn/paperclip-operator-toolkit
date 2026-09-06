@@ -516,6 +516,11 @@ jobs:
       - name: host operations installer contract suite
         run: ./test_host_ops_install.sh
 
+      # Exports a fixed runtime manifest from a fabricated reviewed commit into
+      # a fake /opt tree. No host, credential, network, or root privilege is used.
+      - name: immutable ops-tooling release installer suite
+        run: ./test_ops_tooling_release_install.sh
+
       # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
       # generated throwaway RSA key, and fabricated token-shaped canaries.
       - name: gh-app-token.js regression suite
