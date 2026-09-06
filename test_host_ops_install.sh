@@ -222,6 +222,31 @@ else
   ok "no placeholder survives rendering"
 fi
 
+# TOG-1126: the protected grant must stay at sudo's required root-only mode,
+# while an exact-byte mirror is readable by the service group. The root-prefixed
+# cmp binds the two before the unprivileged acceptance-check and daemon run.
+service_source=$(<"$ROOT/host-ops/host-ops-broker.service")
+install_source=$(<"$ROOT/host-ops/install.sh")
+protected_sudoers=/etc/sudoers.d/paperclip-host-ops-broker
+sudoers_mirror=/etc/paperclip-host-ops/sudoers.rendered
+if grep -Fqx "ExecStartPre=+/usr/bin/cmp --silent $protected_sudoers $sudoers_mirror" <<<"$service_source"; then
+  ok "root-only preflight binds readable sudoers mirror to protected grant"
+else
+  fail "unit does not bind the sudoers mirror to the protected grant"
+fi
+if grep -Fqx "ExecStartPre=/usr/local/libexec/paperclip-host-ops/broker.py acceptance-check --config /etc/paperclip-host-ops/config.json" <<<"$service_source" &&
+   grep -Fqx "ExecStart=/usr/local/libexec/paperclip-host-ops/broker.py run --config /etc/paperclip-host-ops/config.json" <<<"$service_source"; then
+  ok "acceptance-check and daemon remain unprivileged"
+else
+  fail "acceptance-check or daemon gained root execution"
+fi
+if grep -Fq 'install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/paperclip-host-ops-broker' <<<"$install_source" &&
+   grep -Fq 'install -o root -g paperclip-host-reader -m 0640 "$SUDOERS_TMP" /etc/paperclip-host-ops/sudoers.rendered' <<<"$install_source"; then
+  ok "installer preserves protected grant mode and publishes readable mirror"
+else
+  fail "installer grant or mirror ownership contract drifted"
+fi
+
 # TOG-757/TOG-1126: the rendered grant must PARSE. Requested by the operator
 # after PR #247 aborted on this host at `sudoers:10:114: syntax error` on the
 # `@sha256:` token: sudoers reads a bare colon as the run-as separator. Both

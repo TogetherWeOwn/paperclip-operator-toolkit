@@ -816,8 +816,9 @@ class BrokerTest(unittest.TestCase):
         # TOG-757: the host's image reference is host state, not source state, so
         # image.inspect reads it from root-owned config. That alone would let a
         # config edit change which image the broker attests, so a non-test-mode
-        # start re-derives the reference from the DEPLOYED sudoers file and
-        # refuses on disagreement. Both halves are asserted here.
+        # start re-derives the reference from the readable sudoers mirror and
+        # refuses on disagreement. The unit separately binds that mirror to the
+        # protected deployed grant before the unprivileged check runs.
         executed = []
 
         def capture_run_fixed(command, timeout=20):
@@ -1122,6 +1123,28 @@ class BrokerTest(unittest.TestCase):
         exec_start_pre = re.search(r"^ExecStartPre=(\S+) acceptance-check --config (\S+)$", service_source, re.MULTILINE)
         self.assertIsNotNone(exec_start_pre)
         self.assertEqual(exec_start_pre.groups(), (executable, config_path))
+        # TOG-1126: sudo ignores a grant unless it remains root:root 0440, so the
+        # service user cannot read that authority file directly. Bind a readable
+        # mirror to it with one root-only cmp, but keep acceptance-check and the
+        # long-running daemon unprefixed so both exercise the service user's real
+        # exact-command sudo grant rather than root bypassing it.
+        protected_sudoers = "/etc/sudoers.d/paperclip-host-ops-broker"
+        sudoers_mirror = "/etc/paperclip-host-ops/sudoers.rendered"
+        self.assertIn(
+            f"ExecStartPre=+/usr/bin/cmp --silent {protected_sudoers} {sudoers_mirror}",
+            service_source,
+        )
+        self.assertIn(
+            f'install -o root -g root -m 0440 "$SUDOERS_TMP" {protected_sudoers}',
+            install_source,
+        )
+        self.assertIn(
+            f'install -o root -g {service_group} -m 0640 "$SUDOERS_TMP" {sudoers_mirror}',
+            install_source,
+        )
+        self.assertEqual(broker.DEPLOYED_SUDOERS_MIRROR_PATH, sudoers_mirror)
+        self.assertNotIn(f"ExecStartPre=+{executable} acceptance-check", service_source)
+        self.assertNotIn(f"ExecStart=+{executable} run", service_source)
 
         tmpfiles_rows = {}
         for line in tmpfiles_source.splitlines():
@@ -1227,7 +1250,9 @@ class BrokerTest(unittest.TestCase):
             # before it can certify the unit directives this test owns.
             self.assertEqual(service_source.count(executable), 2)
             validation_unit = self.temp / "host-ops-broker.validation.service"
-            validation_unit.write_text(service_source.replace(executable, shutil.which("true") or "/bin/true"))
+            validation_source = service_source.replace(executable, shutil.which("true") or "/bin/true")
+            validation_source = validation_source.replace("/usr/bin/cmp", shutil.which("true") or "/bin/true")
+            validation_unit.write_text(validation_source)
             completed = subprocess.run(
                 [systemd_analyze, "verify", str(validation_unit)],
                 text=True,
