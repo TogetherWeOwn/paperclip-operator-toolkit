@@ -1145,7 +1145,6 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(broker.DEPLOYED_SUDOERS_MIRROR_PATH, sudoers_mirror)
         self.assertNotIn(f"ExecStartPre=+{executable} acceptance-check", service_source)
         self.assertNotIn(f"ExecStart=+{executable} run", service_source)
-
         tmpfiles_rows = {}
         for line in tmpfiles_source.splitlines():
             if line.startswith("d "):
@@ -1164,15 +1163,31 @@ class BrokerTest(unittest.TestCase):
         self.assertIn(example_config["spoolPath"], tmpfiles_rows)
         self.assertIn(str(Path(example_config["spoolPath"]) / "requests"), tmpfiles_rows)
 
-        writable_paths = set(re.search(r"^ReadWritePaths=(.*)$", service_source, re.MULTILINE).group(1).split())
+        # Rootless Podman mutates runtime and storage lock state even for image
+        # inspect. Sudo changes identity but not this unit's mount namespace, so
+        # pin the complete writable authority set while preserving both strict
+        # filesystem protections. Iterating every directive is important: a
+        # first-line-only check would miss an appended broad writable path.
+        self.assertIn("ProtectSystem=strict", service_source)
+        self.assertIn("ProtectHome=read-only", service_source)
+        writable_paths = {
+            path
+            for line in service_source.splitlines()
+            if line.startswith("ReadWritePaths=")
+            for path in line.removeprefix("ReadWritePaths=").split()
+        }
         self.assertEqual(
             writable_paths,
             {
                 example_config["statePath"],
                 str(Path(example_config["auditPath"]).parent),
                 example_config["spoolPath"],
+                "/run/user/1000",
+                "/home/ubuntu/.local/share/containers",
             },
         )
+        for broad_path in ("/", "/home", "/home/ubuntu", "/run/user"):
+            self.assertNotIn(broad_path, writable_paths)
         readonly_paths = set(re.search(r"^ReadOnlyPaths=(.*)$", service_source, re.MULTILINE).group(1).split())
         self.assertIn(str(Path(config_path).parent), readonly_paths)
         self.assertIn(str(Path(executable).parent), readonly_paths)

@@ -240,6 +240,16 @@ if grep -Fqx "ExecStartPre=/usr/local/libexec/paperclip-host-ops/broker.py accep
 else
   fail "acceptance-check or daemon gained root execution"
 fi
+podman_writable_paths=$(grep -F "ReadWritePaths=" <<<"$service_source" | grep -F "/run/user/1000" || true)
+if grep -Fqx "ProtectSystem=strict" <<<"$service_source" &&
+   grep -Fqx "ProtectHome=read-only" <<<"$service_source" &&
+   [[ "$podman_writable_paths" == "ReadWritePaths=/run/user/1000 /home/ubuntu/.local/share/containers" ]] &&
+   [[ $(grep -Fo "/run/user/1000" <<<"$service_source" | wc -l) -eq 1 ]] &&
+   [[ $(grep -Fo "/home/ubuntu/.local/share/containers" <<<"$service_source" | wc -l) -eq 1 ]]; then
+  ok "rootless podman runtime and storage stay writable inside the strict sandbox"
+else
+  fail "unit cannot run rootless podman image inspect inside its strict sandbox"
+fi
 if grep -Fq 'install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/paperclip-host-ops-broker' <<<"$install_source" &&
    grep -Fq 'install -o root -g paperclip-host-reader -m 0640 "$SUDOERS_TMP" /etc/paperclip-host-ops/sudoers.rendered' <<<"$install_source"; then
   ok "installer preserves protected grant mode and publishes readable mirror"
