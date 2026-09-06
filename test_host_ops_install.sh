@@ -241,12 +241,37 @@ else
   fail "acceptance-check or daemon gained root execution"
 fi
 podman_writable_paths=$(grep -F "ReadWritePaths=" <<<"$service_source" | grep -F "/run/user/1000" || true)
-if grep -Fqx "ProtectSystem=strict" <<<"$service_source" &&
-   grep -Fqx "ProtectHome=read-only" <<<"$service_source" &&
+expected_hardening=(
+  "NoNewPrivileges=no"
+  "PrivateTmp=yes"
+  "PrivateDevices=yes"
+  "ProtectSystem=strict"
+  "ProtectHome=read-only"
+  "ProtectKernelTunables=yes"
+  "ProtectKernelModules=yes"
+  "ProtectKernelLogs=yes"
+  "ProtectControlGroups=yes"
+  "LockPersonality=yes"
+  "MemoryDenyWriteExecute=yes"
+  "MemoryMax=256M"
+  "TasksMax=32"
+  "RestrictSUIDSGID=yes"
+  "RestrictRealtime=yes"
+  "SystemCallArchitectures=native"
+  "UMask=0027"
+)
+hardening_complete=true
+for directive in "${expected_hardening[@]}"; do
+  grep -Fqx "$directive" <<<"$service_source" || hardening_complete=false
+done
+if [[ "$hardening_complete" == true ]] &&
+   ! grep -Eq '^[[:space:]]*RestrictNamespaces[[:space:]]*=' <<<"$service_source" &&
+   ! grep -Eq '^[[:space:]]*(ReadWriteDirectories|BindPaths)[[:space:]]*=' <<<"$service_source" &&
+   grep -Fq "RestrictNamespaces is intentionally omitted" <<<"$service_source" &&
    [[ "$podman_writable_paths" == "ReadWritePaths=/run/user/1000 /home/ubuntu/.local/share/containers" ]] &&
    [[ $(grep -Fo "/run/user/1000" <<<"$service_source" | wc -l) -eq 1 ]] &&
    [[ $(grep -Fo "/home/ubuntu/.local/share/containers" <<<"$service_source" | wc -l) -eq 1 ]]; then
-  ok "rootless podman runtime and storage stay writable inside the strict sandbox"
+  ok "rootless podman namespace, runtime and storage needs are compatible with the strict sandbox"
 else
   fail "unit cannot run rootless podman image inspect inside its strict sandbox"
 fi
