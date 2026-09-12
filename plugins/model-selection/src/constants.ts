@@ -31,8 +31,8 @@ export const TIER_LABEL_PREFIX = "tier:";
 export const TIERS = ["T1", "T2", "T3"] as const;
 export type Tier = (typeof TIERS)[number];
 
-/** T1 cheapest ... T3 most capable. Index order is load-bearing. */
-export const TIER_ORDER: readonly Tier[] = TIERS;
+/** T3 mechanical ... T1 most capable. Index order is load-bearing. */
+export const TIER_ORDER: readonly Tier[] = ["T3", "T2", "T1"];
 
 export const PLUGIN_STATE_KEYS = {
   volumeProfiles: "volumeProfiles",

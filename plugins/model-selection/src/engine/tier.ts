@@ -1,4 +1,4 @@
-import { TIERS, TIER_LABEL_PREFIX, type Tier } from "../constants.js";
+import { TIERS, TIER_LABEL_PREFIX, TIER_ORDER, type Tier } from "../constants.js";
 import type { IssueDescriptor, ModelEntry, TierJudgement } from "./types.js";
 
 /**
@@ -36,13 +36,17 @@ export function tierFromLabels(labelNames: readonly string[] | undefined): Tier 
   if (found.length === 0) return null;
   // More than one tier label is a labelling error, not a judgement. Take the
   // most capable rather than picking arbitrarily — the conservative direction.
-  return found.sort((left, right) => TIERS.indexOf(right) - TIERS.indexOf(left))[0]!;
+  return found.sort((left, right) => TIER_ORDER.indexOf(right) - TIER_ORDER.indexOf(left))[0]!;
 }
 
-/** Tier of whichever configured model id this is, if any. */
+/** Most capable enabled tier configured for this runtime model id, if any. */
 export function tierOfModel(modelId: string | null | undefined, models: readonly ModelEntry[]): Tier | null {
   if (!modelId) return null;
-  return models.find((model) => model.id === modelId)?.tier ?? null;
+  const matches = models.filter((model) => model.id === modelId && model.enabled);
+  if (matches.length === 0) return null;
+  return matches.reduce((highest, model) =>
+    TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
+  matches[0]!.tier);
 }
 
 export function resolveTier(
@@ -57,9 +61,9 @@ export function resolveTier(
   // write when explicitly told not to, and produced unstable arithmetic.
   if (descriptor.exclusion?.excluded) {
     return {
-      tier: "T3",
+      tier: "T1",
       source: "capability-exclusion",
-      detail: `capability exclusion forces T3: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`,
+      detail: `capability exclusion forces T1: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`,
     };
   }
 

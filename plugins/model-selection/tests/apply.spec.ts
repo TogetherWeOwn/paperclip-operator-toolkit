@@ -18,7 +18,7 @@ describe("write policy", () => {
     const plan = planApply(decide({ issueId: "i1", labelNames: ["tier:T1"] }), clean, "i1");
     expect(plan.write).toBe(true);
     expect(plan.patch).toEqual({
-      assigneeAdapterOverrides: { adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" } },
+      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
     });
     expect(JSON.stringify(plan.patch)).not.toContain("modelProfile");
   });
@@ -41,14 +41,21 @@ describe("write policy", () => {
     expect(plan.reason).toContain("prompt cache");
   });
 
-  it("does not pin capability-excluded work, even to the correct tier", () => {
+  it("pins capability-excluded work to the selected T1 model", () => {
     const plan = planApply(
-      decide({ issueId: "i1", exclusion: { excluded: true, reasons: ["spends money"] } }),
+      decide({
+        issueId: "i1",
+        agentFloorModelId: "cliproxy/claude-haiku-4-5-20251001",
+        exclusion: { excluded: true, reasons: ["spends money"] },
+      }),
       clean,
       "i1",
     );
-    expect(plan.write).toBe(false);
-    expect(plan.reason).toContain("capability exclusion");
+    expect(plan.write).toBe(true);
+    expect(plan.patch).toEqual({
+      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+    });
+    expect(plan.labelName).toBe("tier:T1");
   });
 
   it("does not touch finished work", () => {

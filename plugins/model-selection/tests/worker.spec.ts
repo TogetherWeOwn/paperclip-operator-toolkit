@@ -10,6 +10,7 @@ import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
+const AGENT = "agent-1";
 const TIER_LABEL_ID = "lbl-t1";
 const OTHER_LABEL_ID = "lbl-other";
 
@@ -39,9 +40,13 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function boot(config: Record<string, unknown>, seedIssue = issue()) {
+async function boot(
+  config: Record<string, unknown>,
+  seedIssue = issue(),
+  agents: Parameters<ReturnType<typeof createTestHarness>["seed"]>[0]["agents"] = [],
+) {
   const harness = createTestHarness({ manifest, config });
-  harness.seed({ issues: [seedIssue] });
+  harness.seed({ issues: [seedIssue], agents });
   // `definePlugin` returns a sealed wrapper; the lifecycle handlers live on
   // `.definition`. No optional chaining here — a missing setup must fail loudly
   // rather than leave every tool unregistered and the assertions vacuous.
@@ -75,7 +80,7 @@ describe("worker", () => {
   it("advises a model without writing anything", async () => {
     const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
     const decision = (result as { data: { modelId: string; advisory: boolean } }).data;
-    expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+    expect(decision.modelId).toBe("claude-opus-5");
     expect(decision.advisory).toBe(true);
     expect(harness.activity).toHaveLength(0);
   });
@@ -96,10 +101,61 @@ describe("worker", () => {
 
     const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
     expect(after?.assigneeAdapterOverrides).toEqual({
-      adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" },
+      adapterConfig: { model: "claude-opus-5" },
     });
     expect(enforcing.activity).toHaveLength(1);
     expect(enforcing.activity[0]?.metadata?.tierSource).toBe("issue-label");
+  });
+
+  it("pins excluded work to T1 even when the assignee floor is T3", async () => {
+    const excluded = issue({
+      assigneeAgentId: AGENT,
+      labels: [{ id: OTHER_LABEL_ID, companyId: COMPANY, name: "area:platform" }],
+      labelIds: [OTHER_LABEL_ID],
+    } as unknown as Partial<Issue>);
+    const enforcing = await boot(
+      baseConfig({ selection: { enabled: true, mode: "enforce" } }),
+      excluded,
+      [
+        {
+          id: AGENT,
+          companyId: COMPANY,
+          name: "Mechanical worker",
+          urlKey: "mechanical-worker",
+          role: "general",
+          title: null,
+          icon: null,
+          status: "active",
+          reportsTo: null,
+          capabilities: null,
+          adapterType: "claude_local",
+          adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" },
+          runtimeConfig: {},
+          budgetMonthlyCents: 0,
+          spentMonthlyCents: 0,
+          pauseReason: null,
+          pausedAt: null,
+          permissions: {},
+          lastHeartbeatAt: null,
+          metadata: null,
+          createdAt: new Date(0),
+          updatedAt: new Date(0),
+        } as never,
+      ],
+    );
+
+    await enforcing.executeTool(
+      TOOL_NAMES.apply,
+      { issueId: ISSUE, exclusion: { excluded: true, reasons: ["credential access"] } },
+      runCtx,
+    );
+
+    const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
+    expect(after?.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { model: "claude-opus-5" },
+    });
+    expect(new Set(after?.labelIds ?? [])).toEqual(new Set([OTHER_LABEL_ID, TIER_LABEL_ID]));
+    expect(enforcing.activity[0]?.metadata?.tierSource).toBe("capability-exclusion");
   });
 
   it("unions the tier label with the labels already on the issue", async () => {

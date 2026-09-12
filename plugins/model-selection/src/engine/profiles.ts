@@ -26,12 +26,22 @@ export function buildVolumeProfiles(
   models: readonly ModelEntry[],
   computedAt: string,
 ): VolumeProfile[] {
-  const tierOf = new Map(models.map((model) => [model.id, model.tier]));
+  const tiersOf = new Map<string, Tier[]>();
+  for (const model of models) {
+    if (!model.enabled) continue;
+    const tiers = tiersOf.get(model.id) ?? [];
+    if (!tiers.includes(model.tier)) tiers.push(model.tier);
+    tiersOf.set(model.id, tiers);
+  }
   const buckets = new Map<Tier, { n: number; input: number; cache: number; output: number }>();
 
   for (const row of rows) {
-    const tier = row.model ? tierOf.get(row.model) : undefined;
-    if (!tier) continue;
+    const tiers = row.model ? tiersOf.get(row.model) : undefined;
+    // A runtime model admitted at more than one tier cannot be attributed to a
+    // tier from `usage_json.model` alone. Drop it rather than silently assigning
+    // its volume to whichever roster row happened to appear last.
+    if (!tiers || tiers.length !== 1) continue;
+    const tier = tiers[0]!;
     const input = row.inputTokens ?? 0;
     const cache = row.cachedInputTokens ?? 0;
     const output = row.outputTokens ?? 0;

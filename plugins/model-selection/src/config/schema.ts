@@ -25,7 +25,7 @@ export const SELECTION_CONFIG_SCHEMA = {
          * enforce — never two live selection variables in one window.
          */
         mode: { type: "string", enum: ["advise", "enforce"], default: "advise" },
-        defaultTier: { type: "string", enum: [...TIERS], default: "T3" },
+        defaultTier: { type: "string", enum: [...TIERS], default: "T1" },
         stickyModelWithinIssue: { type: "boolean", default: true },
         holdOnUntrustedProfile: { type: "boolean", default: true },
       },
@@ -53,6 +53,16 @@ export const SELECTION_CONFIG_SCHEMA = {
             default: [],
           },
           contextWindow: { type: "integer", minimum: 1, default: 200000 },
+          aaIndex: { type: ["number", "null"], default: null },
+          releasedAt: { type: "string", format: "date" },
+          fallbackOnly: { type: "boolean", default: false },
+          note: { type: "string", default: "" },
+          /**
+           * Slice 1 stores the reviewed earn-in payload as roster metadata. The
+           * admission logic remains off until slice 4 implements and validates
+           * its deterministic counter and lane gates.
+           */
+          earnIn: { type: ["object", "null"], default: null },
         },
       },
       default: [],

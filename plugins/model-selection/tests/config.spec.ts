@@ -7,7 +7,7 @@ describe("config resolution", () => {
     // Installing the plugin must not change a live selection variable.
     const config = resolveConfig(undefined);
     expect(config.selection.mode).toBe("advise");
-    expect(config.selection.defaultTier).toBe("T3");
+    expect(config.selection.defaultTier).toBe("T1");
     expect(config.selection.holdOnUntrustedProfile).toBe(true);
     expect(config.models).toEqual([]);
   });
@@ -39,16 +39,67 @@ describe("config resolution", () => {
     expect(warnings.some((w) => w.includes("no tierLabelIds configured"))).toBe(true);
   });
 
-  it("rejects a duplicate model id", () => {
+  it("allows one runtime model at multiple tiers but rejects a duplicate model+tier row", () => {
     const entry = {
-      id: "claude-opus-5",
-      tier: "T3",
-      costPerMTokIn: 15,
-      costPerMTokOut: 75,
-      costPerMTokCacheRead: 1.5,
+      id: "cliproxy/gpt-5.6-sol",
+      tier: "T1",
+      releasedAt: "2026-06-01",
+      costPerMTokIn: 4,
+      costPerMTokOut: 20,
+      costPerMTokCacheRead: 0.4,
     };
+    const multiTier = validateConfig(
+      resolveConfig({ models: [entry, { ...entry, tier: "T2" }] }),
+    );
+    expect(multiTier.errors).toEqual([]);
+
     const { errors } = validateConfig(resolveConfig({ models: [entry, entry] }));
-    expect(errors).toContain("duplicate model id: claude-opus-5");
+    expect(errors).toContain("duplicate model+tier row: cliproxy/gpt-5.6-sol T1");
+  });
+
+  it("keeps all reviewed roster metadata", () => {
+    const config = resolveConfig({
+      models: [
+        {
+          id: "cliproxy/gpt-6-astra",
+          tier: "T1",
+          enabled: true,
+          costPerMTokIn: 10,
+          costPerMTokOut: 50,
+          costPerMTokCacheRead: 1,
+          aaIndex: 53,
+          releasedAt: "2026-09-03",
+          fallbackOnly: true,
+          note: "reviewed",
+          earnIn: { enabled: false },
+        },
+      ],
+    });
+    expect(config.models[0]).toMatchObject({
+      aaIndex: 53,
+      releasedAt: "2026-09-03",
+      fallbackOnly: true,
+      note: "reviewed",
+      earnIn: { enabled: false },
+    });
+  });
+
+  it("rejects an invalid releasedAt date", () => {
+    const { errors } = validateConfig(
+      resolveConfig({
+        models: [
+          {
+            id: "bad-date",
+            tier: "T1",
+            releasedAt: "not-a-date",
+            costPerMTokIn: 1,
+            costPerMTokOut: 1,
+            costPerMTokCacheRead: 1,
+          },
+        ],
+      }),
+    );
+    expect(errors[0]).toContain("invalid releasedAt date");
   });
 
   it("warns when a zero cache-read rate would hide the largest cost line", () => {

@@ -5184,9 +5184,12 @@ jobs:
           }
           echo "install ok: plugin-sdk present"
 
-      # Run the Vitest suite.
+      # Run the Vitest suite and the named TOG-2134 mutation gate.
       - name: Model selection suite
         run: npm test
+
+      - name: Kill named selection mutants
+        run: npm run test:mutants
 
       # Verify the plugin still builds.
       - name: Verify the plugin builds

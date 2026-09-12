@@ -63,15 +63,10 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return { ...base, outcome: "disabled" };
   }
 
-  // A capability exclusion is a tier FLOOR, not a ceiling. `resolveTier` returns
-  // T3 for excluded work, but T3 read as a ceiling admits every cheaper model
-  // and the cost sort then picks the cheapest one — the exact inversion of what
-  // the exclusion is for. ADR-0004's boundary is capability, not difficulty, so
-  // this floor never yields: not to cost, not to sticky, not to a lifted ceiling.
-  const floor: Tier | null = judgement.source === "capability-exclusion" ? judgement.tier : null;
-  if (floor) {
-    trace.push(`tier floor ${floor}: capability exclusion, no model below ${floor} is eligible`);
-  }
+  // Tiers are minimum capability requirements. T1 is the highest requirement;
+  // T3 is mechanical work. An exclusion resolves to T1 before this engine runs,
+  // so the same admission rule protects both labelled and sensitive work.
+  trace.push(`tier floor ${judgement.tier}: no lower-capability model is eligible`);
 
   // Sticky beats cost. A mid-issue model change fires
   // `shouldResetTaskSessionForModelChange` (heartbeat.ts:5127-5133), discarding
@@ -79,21 +74,21 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // (ADR-0002). The saving from a cheaper model on turn N does not repay a
   // cache reset at turn N.
   //
-  // Sticky beats cost, but it does not beat the floor: an issue already pinned
-  // to a cheap model that is later found to be capability-excluded must not stay
-  // there just because a session reset is expensive.
+  // Sticky beats cost, but it does not beat the required tier: an issue already
+  // pinned to a lower-capability model must not stay there after a stronger
+  // recorded judgement supersedes it.
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
     const incumbent = config.models.find(
       (model) => model.id === descriptor.stickyModelId && model.enabled,
     );
-    if (incumbent && floor && tierIndex(incumbent.tier) < tierIndex(floor)) {
+    if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
       trace.push(
-        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${floor} capability floor`,
+        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`,
       );
       rejections.push({
         modelId: incumbent.id,
         stage: "tier-floor",
-        reason: `tier ${incumbent.tier} is below the ${floor} capability floor`,
+        reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`,
       });
     } else if (incumbent) {
       trace.push(
@@ -103,7 +98,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
   }
 
-  const ceiling = judgement.tier;
+  const requiredTier = judgement.tier;
   const required = new Set(descriptor.requiredCapabilities ?? []);
   if (required.size > 0) {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
@@ -114,7 +109,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const qualified: ModelEntry[] = [];
   for (const model of config.models) {
     if (!model.enabled) {
-      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the model table" });
+      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster" });
       continue;
     }
     const missing = [...required].filter((capability) => !model.capabilities.includes(capability));
@@ -126,11 +121,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    if (floor && tierIndex(model.tier) < tierIndex(floor)) {
+    if (tierIndex(model.tier) < tierIndex(requiredTier)) {
       rejections.push({
         modelId: model.id,
         stage: "tier-floor",
-        reason: `tier ${model.tier} is below the ${floor} capability floor`,
+        reason: `tier ${model.tier} is below the ${requiredTier} required tier`,
       });
       continue;
     }
@@ -153,71 +148,65 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return base;
   }
 
-  // Ceiling yields to the floor: if nothing at or below the judged tier
-  // survived the capability gate, lift the ceiling rather than return nothing.
-  // The capability gate is a hard constraint; the tier is a cost preference,
-  // and a cost preference must never silently drop a capability requirement.
-  let appliedCeiling = ceiling;
-  if (!qualified.some((model) => tierIndex(model.tier) <= tierIndex(ceiling))) {
-    const lowestQualified = qualified.reduce((lowest, model) =>
-      tierIndex(model.tier) < tierIndex(lowest.tier) ? model : lowest,
-    );
-    trace.push(
-      `ceiling ${ceiling} lifted to ${lowestQualified.tier}: nothing at or below ${ceiling} clears the capability gate`,
-    );
-    appliedCeiling = lowestQualified.tier;
-  }
-
-  const survivors = qualified.filter((model) => {
-    if (tierIndex(model.tier) <= tierIndex(appliedCeiling)) return true;
-    rejections.push({
-      modelId: model.id,
-      stage: "tier-ceiling",
-      reason: `tier ${model.tier} exceeds ceiling ${appliedCeiling}`,
-    });
-    return false;
-  });
-
-  // Cost the survivors against the volume profile of the tier we are running
-  // at — the measured multi-turn token totals, not a per-request estimate.
-  const profileVerdict = resolveProfile(appliedCeiling, profiles, now);
+  // Cost against the judged tier's measured multi-turn volume. Ordinary picks
+  // use regular rows only; fallback-only rows are consulted only when every
+  // regular row was rejected or could not be costed. Disabled rows never enter
+  // either path.
+  const profileVerdict = resolveProfile(requiredTier, profiles, now);
   trace.push(`volume profile: ${profileVerdict.reason}`);
 
-  const candidates: Candidate[] = [];
-  for (const model of survivors) {
-    const cost = costOf(model, appliedCeiling, profiles, config.models, signals, now);
-    if (!cost) {
-      rejections.push({
-        modelId: model.id,
-        stage: "no-profile",
-        reason: `no volume profile for ${appliedCeiling}; cannot cost this candidate`,
+  function costCandidates(models: readonly ModelEntry[]): Candidate[] {
+    const candidates: Candidate[] = [];
+    for (const model of models) {
+      const cost = costOf(model, requiredTier, profiles, config.models, signals, now);
+      if (!cost) {
+        rejections.push({
+          modelId: model.id,
+          stage: "no-profile",
+          reason: `no volume profile for ${requiredTier}; cannot cost this candidate`,
+        });
+        continue;
+      }
+      candidates.push({
+        ...cost,
+        tier: model.tier,
+        releasedAt: model.releasedAt,
+        fallbackOnly: model.fallbackOnly,
       });
-      continue;
     }
-    candidates.push({ ...cost, tier: model.tier });
+    return candidates;
+  }
+
+  let candidates = costCandidates(qualified.filter((model) => !model.fallbackOnly));
+  if (candidates.length === 0) {
+    const fallbackModels = qualified.filter((model) => model.fallbackOnly);
+    if (fallbackModels.length > 0) {
+      trace.push("no regular candidate survived; considering fallback-only roster rows");
+      candidates = costCandidates(fallbackModels);
+    }
   }
 
   if (candidates.length === 0) {
     trace.push("no candidate could be costed — refusing to choose on a guessed volume term");
-    return { ...base, effectiveTier: appliedCeiling };
+    return { ...base, effectiveTier: requiredTier };
   }
 
   candidates.sort((left, right) => {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
       return left.expectedCostUsd - right.expectedCostUsd;
     }
-    // Tie on cost: prefer the more capable tier, then a stable id order.
-    if (left.tier !== right.tier) return tierIndex(right.tier) - tierIndex(left.tier);
+    const releaseOrder = Date.parse(right.releasedAt) - Date.parse(left.releasedAt);
+    if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
   });
 
   const winner = candidates[0]!;
-  const withCandidates: SelectionDecision = { ...base, candidates, effectiveTier: appliedCeiling };
+  const withCandidates: SelectionDecision = { ...base, candidates, effectiveTier: requiredTier };
 
   // An untrusted profile means we do not actually know the volume term. Say so
   // and hold at the floor rather than act on a number we would not defend.
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
-    const reason = `volume profile for ${appliedCeiling} is not trusted (${profileVerdict.reason})`;
+    const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     trace.push(`held at agent floor: ${reason}`);
     return { ...withCandidates, outcome: "held-at-floor", heldReason: reason };
   }
@@ -226,7 +215,8 @@ export function selectModel(input: SelectInput): SelectionDecision {
     `selected ${winner.modelId} at an expected $${winner.expectedCostUsd.toFixed(4)}/run ` +
       `(direct $${winner.runCostUsd.toFixed(4)} = in $${winner.inputCostUsd.toFixed(4)} + ` +
       `cache-read $${winner.cacheReadCostUsd.toFixed(4)} + out $${winner.outputCostUsd.toFixed(4)}; ` +
-      `escalation risk $${winner.escalationRiskUsd.toFixed(4)}) — cheapest of ${candidates.length}`,
+      `escalation risk $${winner.escalationRiskUsd.toFixed(4)}) — cheapest of ${candidates.length}; ` +
+      `exact ties prefer newest releasedAt then stable model id${winner.fallbackOnly ? "; fallback-only path" : ""}`,
   );
 
   if (!config.enforcementEnabled) {

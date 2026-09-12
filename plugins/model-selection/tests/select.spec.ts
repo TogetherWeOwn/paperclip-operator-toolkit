@@ -1,48 +1,49 @@
 import { describe, expect, it } from "vitest";
 
 import { selectModel } from "../src/engine/select.js";
-import type { VolumeProfile } from "../src/engine/types.js";
+import type { ModelEntry, VolumeProfile } from "../src/engine/types.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 const base = { profiles: PROFILES, signals: NO_ESCALATION, now: NOW };
 
+function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntry {
+  return { ...baseModel, ...overrides };
+}
+
 describe("selection", () => {
-  it("picks the cheapest model that clears the gates at the judged tier", () => {
+  it("picks the cheapest model that clears the judged tier floor", () => {
     const decision = selectModel({
       ...base,
-      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
       config: config(),
     });
     expect(decision.outcome).toBe("selected");
     expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001");
-    expect(decision.effectiveTier).toBe("T1");
+    expect(decision.effectiveTier).toBe("T3");
   });
 
-  it("never selects below the tier a capability exclusion forces", () => {
+  it("never selects below a T1 capability exclusion", () => {
     const decision = selectModel({
       ...base,
       descriptor: {
         issueId: "i1",
-        labelNames: ["tier:T1"],
+        labelNames: ["tier:T3"],
         exclusion: { excluded: true, reasons: ["rotates a credential"] },
       },
       config: config(),
     });
     expect(decision.judgement.source).toBe("capability-exclusion");
+    expect(decision.judgement.tier).toBe("T1");
     expect(decision.modelId).toBe("claude-opus-5");
   });
 
-  it("declines the sticky model when it sits below a capability floor", () => {
-    // Sticky is a cost preference: it protects the warm prompt cache. A
-    // capability exclusion is a safety constraint. When they conflict the
-    // constraint wins, even though yielding would have been cheaper.
+  it("declines the sticky model when it sits below the required tier", () => {
     const decision = selectModel({
       ...base,
       descriptor: {
         issueId: "i1",
         labelNames: ["tier:T1"],
         stickyModelId: "cliproxy/claude-haiku-4-5-20251001",
-        exclusion: { excluded: true, reasons: ["writes fleet config"] },
       },
       config: config(),
     });
@@ -54,14 +55,10 @@ describe("selection", () => {
     ).toBe(true);
   });
 
-  it("emits a tier-floor rejection for every model below an exclusion floor", () => {
+  it("emits a tier-floor rejection for every model below T1", () => {
     const decision = selectModel({
       ...base,
-      descriptor: {
-        issueId: "i1",
-        labelNames: ["tier:T1"],
-        exclusion: { excluded: true, reasons: ["spends money"] },
-      },
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
       config: config(),
     });
     const floored = decision.rejections.filter((r) => r.stage === "tier-floor").map((r) => r.modelId);
@@ -80,24 +77,10 @@ describe("selection", () => {
     expect(decision.rejections.some((r) => r.stage === "capability" && r.modelId.includes("haiku"))).toBe(true);
   });
 
-  it("lifts the ceiling when nothing at or below the judged tier is capable", () => {
-    // A cost preference must never silently drop a hard capability requirement.
+  it("keeps the model already running when it still clears the tier floor", () => {
     const decision = selectModel({
       ...base,
-      descriptor: { issueId: "i1", labelNames: ["tier:T1"], requiredCapabilities: ["vision"] },
-      config: config(),
-    });
-    expect(decision.outcome).toBe("selected");
-    expect(decision.modelId).toBe("claude-opus-5");
-    expect(decision.trace.some((line) => line.includes("lifted"))).toBe(true);
-  });
-
-  it("keeps the model already running the issue rather than resetting its cache", () => {
-    // A mid-issue switch fires shouldResetTaskSessionForModelChange and throws
-    // away the warm prompt cache — the largest cost line we have.
-    const decision = selectModel({
-      ...base,
-      descriptor: { issueId: "i1", labelNames: ["tier:T1"], stickyModelId: "claude-opus-5" },
+      descriptor: { issueId: "i1", labelNames: ["tier:T3"], stickyModelId: "claude-opus-5" },
       config: config(),
     });
     expect(decision.modelId).toBe("claude-opus-5");
@@ -152,15 +135,53 @@ describe("selection", () => {
     expect(decision.outcome).toBe("disabled");
   });
 
-  it("skips a disabled model and falls to the next cheapest", () => {
+  it("preserves disabled rows and never returns them", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T2"] },
       config: config({
-        models: MODELS.map((m) => (m.tier === "T1" ? { ...m, enabled: false } : m)),
+        models: MODELS.map((entry) =>
+          entry.tier === "T2" ? { ...entry, enabled: false } : entry,
+        ),
       }),
     });
-    expect(decision.modelId).toBe("claude-sonnet-5");
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.rejections.some((r) => r.stage === "disabled" && r.modelId === "claude-sonnet-5")).toBe(true);
+  });
+
+  it("uses fallback-only rows only after regular rows are exhausted", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const regular = model(t1, { id: "regular", costPerMTokIn: 5 });
+    const fallback = model(t1, { id: "fallback", costPerMTokIn: 0, fallbackOnly: true });
+    const withRegular = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({ models: [fallback, regular] }),
+    });
+    expect(withRegular.modelId).toBe("regular");
+
+    const fallbackOnly = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({ models: [fallback, { ...regular, enabled: false }] }),
+    });
+    expect(fallbackOnly.modelId).toBe("fallback");
+    expect(fallbackOnly.trace.some((line) => line.includes("fallback-only"))).toBe(true);
+  });
+
+  it("never revives a disabled fallback-only row", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const disabledFallback = model(t1, {
+      id: "disabled-fallback",
+      enabled: false,
+      fallbackOnly: true,
+    });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({ models: [disabledFallback] }),
+    });
+    expect(decision.modelId).toBeNull();
     expect(decision.rejections.some((r) => r.stage === "disabled")).toBe(true);
   });
 
@@ -170,11 +191,8 @@ describe("selection", () => {
       descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
       config: config(),
     });
-    expect(decision.trace.length).toBeGreaterThanOrEqual(3);
+    expect(decision.trace.length).toBeGreaterThanOrEqual(4);
     expect(decision.trace[0]).toContain("tier T1 via issue-label");
-    // Assert the cost basis is recorded SOMEWHERE in the trace, not at a fixed
-    // index. Advisory mode appends its own note last, so pinning this to
-    // `.at(-1)` tests the line order rather than the thing we care about.
     expect(decision.trace.some((line) => line.includes("cache-read"))).toBe(true);
     expect(decision.trace.at(-1)).toContain("advisory mode");
   });
@@ -189,16 +207,27 @@ describe("selection", () => {
     expect([...costs].sort((a, b) => a - b)).toEqual(costs);
   });
 
-  it("prefers the more capable tier when expected costs tie", () => {
-    const twins = [
-      { ...MODELS[0]!, id: "twin-cheap-t1", tier: "T1" as const },
-      { ...MODELS[0]!, id: "twin-cheap-t2", tier: "T2" as const },
-    ];
+  it("prefers the newest release when expected costs tie exactly", () => {
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const older = model(t2, { id: "alpha-older", releasedAt: "2026-01-01" });
+    const newer = model(t2, { id: "zeta-newer", releasedAt: "2026-09-01" });
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T2"] },
-      config: config({ models: twins }),
+      config: config({ models: [older, newer] }),
     });
-    expect(decision.modelId).toBe("twin-cheap-t2");
+    expect(decision.modelId).toBe("zeta-newer");
+  });
+
+  it("uses stable model id order after an exact price and release tie", () => {
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const zeta = model(t2, { id: "zeta", releasedAt: "2026-09-01" });
+    const alpha = model(t2, { id: "alpha", releasedAt: "2026-09-01" });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T2"] },
+      config: config({ models: [zeta, alpha] }),
+    });
+    expect(decision.modelId).toBe("alpha");
   });
 });

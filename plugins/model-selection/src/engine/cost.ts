@@ -128,9 +128,10 @@ export function escalationRisk(
   const verdict = resolveProfile(above, profiles, now);
   if (!verdict.profile) return 0;
 
-  // Cheapest enabled model at the tier above is what an escalation would land on.
+  // Cheapest regular enabled model at the tier above is what an escalation
+  // would land on. Fallback-only rows never define the normal redo cost.
   const redo = models
-    .filter((model) => model.enabled && model.tier === above)
+    .filter((model) => model.enabled && !model.fallbackOnly && model.tier === above)
     .map((model) => runCost(model, verdict.profile!).runCostUsd)
     .sort((left, right) => left - right)[0];
 

@@ -26,6 +26,16 @@ export interface ModelEntry {
    */
   capabilities: readonly string[];
   contextWindow: number;
+  /** Artificial Analysis intelligence-index prior, or null when unmatched. */
+  aaIndex: number | null;
+  /** ISO date used only after an exact expected-cost tie. */
+  releasedAt: string;
+  /** Eligible only after all regular candidates at the judged tier fail. */
+  fallbackOnly: boolean;
+  /** Operator provenance and restrictions; never interpreted by selection. */
+  note: string;
+  /** Slice-4 policy payload. Stored now, inactive until the earn-in engine ships. */
+  earnIn: Record<string, unknown> | null;
 }
 
 /**
@@ -126,16 +136,14 @@ export type Outcome =
 
 export interface Candidate extends CostBreakdown {
   tier: Tier;
+  releasedAt: string;
+  fallbackOnly: boolean;
 }
 
 export interface Rejection {
   modelId: string;
-  /**
-   * `tier-ceiling` is a cost preference and yields to a hard requirement.
-   * `tier-floor` is a safety constraint and never yields — it is how a
-   * capability exclusion keeps excluded work off a cheap model.
-   */
-  stage: "disabled" | "capability" | "context-window" | "tier-ceiling" | "tier-floor" | "no-profile";
+  /** `tier-floor` keeps work off lower-capability roster rows. */
+  stage: "disabled" | "capability" | "context-window" | "tier-floor" | "no-profile";
   reason: string;
 }
 

@@ -13,6 +13,7 @@
     "worker": "./dist/worker.js"
   },
   "files": [
+    "config",
     "dist",
     "README.md"
   ],
@@ -20,7 +21,8 @@
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run test && npm run build",
+    "test:mutants": "node scripts/mutation-gate.mjs",
+    "verify": "npm run typecheck && npm run test && npm run test:mutants && npm run build",
     "profiles:refresh": "node scripts/refresh-volume-profiles.mjs",
     "gate:stage2": "node scripts/check-stage2-gate.mjs"
   },

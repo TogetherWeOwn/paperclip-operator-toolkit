@@ -19,7 +19,7 @@ var JOB_KEYS = {
 };
 var TIER_LABEL_PREFIX = "tier:";
 var TIERS = ["T1", "T2", "T3"];
-var TIER_ORDER = TIERS;
+var TIER_ORDER = ["T3", "T2", "T1"];
 var PLUGIN_STATE_KEYS = {
   volumeProfiles: "volumeProfiles"
 };
@@ -48,11 +48,6 @@ function planApply(decision, context, targetIssueId) {
       "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache"
     );
   }
-  if (decision.judgement.source === "capability-exclusion") {
-    return nothing(
-      `capability exclusion applies (${decision.judgement.detail}); leaving the issue at its agent floor rather than pinning`
-    );
-  }
   const tier2 = decision.effectiveTier;
   return {
     write: true,
@@ -76,6 +71,15 @@ function num(value, fallback) {
 function bool(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
 }
+function string(value, fallback) {
+  return typeof value === "string" ? value : fallback;
+}
+function nullableNum(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function nullableRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
 function tier(value, fallback) {
   return typeof value === "string" && TIERS.includes(value) ? value : fallback;
 }
@@ -96,7 +100,12 @@ function resolveConfig(raw) {
         costPerMTokOut: num(model.costPerMTokOut, 0),
         costPerMTokCacheRead: num(model.costPerMTokCacheRead, 0),
         capabilities: Array.isArray(model.capabilities) ? model.capabilities.filter((c) => typeof c === "string") : [],
-        contextWindow: num(model.contextWindow, 2e5)
+        contextWindow: num(model.contextWindow, 2e5),
+        aaIndex: nullableNum(model.aaIndex),
+        releasedAt: string(model.releasedAt, "1970-01-01"),
+        fallbackOnly: bool(model.fallbackOnly, false),
+        note: string(model.note, ""),
+        earnIn: nullableRecord(model.earnIn)
       }
     ];
   }) : [];
@@ -110,7 +119,7 @@ function resolveConfig(raw) {
     selection: {
       enabled: bool(selection.enabled, true),
       mode: selection.mode === "enforce" ? "enforce" : "advise",
-      defaultTier: tier(selection.defaultTier, "T3"),
+      defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true)
     },
@@ -133,8 +142,12 @@ function validateConfig(config) {
   const warnings = [];
   const seen = /* @__PURE__ */ new Set();
   for (const model of config.models) {
-    if (seen.has(model.id)) errors.push(`duplicate model id: ${model.id}`);
-    seen.add(model.id);
+    const rosterKey = `${model.id}::${model.tier}`;
+    if (seen.has(rosterKey)) errors.push(`duplicate model+tier row: ${model.id} ${model.tier}`);
+    seen.add(rosterKey);
+    if (!Number.isFinite(Date.parse(`${model.releasedAt}T00:00:00.000Z`))) {
+      errors.push(`invalid releasedAt date: ${model.id} ${model.tier} ${model.releasedAt}`);
+    }
     if (model.costPerMTokCacheRead === 0 && model.costPerMTokIn > 0) {
       warnings.push(
         `${model.id} has costPerMTokCacheRead 0 \u2014 cache read is the largest cost line; a zero rate hides it`
@@ -164,11 +177,18 @@ function validateConfig(config) {
 
 // src/engine/profiles.ts
 function buildVolumeProfiles(rows, models, computedAt) {
-  const tierOf = new Map(models.map((model) => [model.id, model.tier]));
+  const tiersOf = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    if (!model.enabled) continue;
+    const tiers = tiersOf.get(model.id) ?? [];
+    if (!tiers.includes(model.tier)) tiers.push(model.tier);
+    tiersOf.set(model.id, tiers);
+  }
   const buckets = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    const tier2 = row.model ? tierOf.get(row.model) : void 0;
-    if (!tier2) continue;
+    const tiers = row.model ? tiersOf.get(row.model) : void 0;
+    if (!tiers || tiers.length !== 1) continue;
+    const tier2 = tiers[0];
     const input = row.inputTokens ?? 0;
     const cache = row.cachedInputTokens ?? 0;
     const output = row.outputTokens ?? 0;
@@ -251,7 +271,7 @@ function escalationRisk(tier2, models, profiles, signals, now) {
   if (effectiveRate <= 0) return 0;
   const verdict = resolveProfile(above, profiles, now);
   if (!verdict.profile) return 0;
-  const redo = models.filter((model) => model.enabled && model.tier === above).map((model) => runCost(model, verdict.profile).runCostUsd).sort((left, right) => left - right)[0];
+  const redo = models.filter((model) => model.enabled && !model.fallbackOnly && model.tier === above).map((model) => runCost(model, verdict.profile).runCostUsd).sort((left, right) => left - right)[0];
   return redo === void 0 ? 0 : redo * effectiveRate;
 }
 function costOf(model, profileTier, profiles, models, signals, now) {
@@ -282,18 +302,23 @@ function tierFromLabels(labelNames) {
     if (isTier(suffix)) found.push(suffix);
   }
   if (found.length === 0) return null;
-  return found.sort((left, right) => TIERS.indexOf(right) - TIERS.indexOf(left))[0];
+  return found.sort((left, right) => TIER_ORDER.indexOf(right) - TIER_ORDER.indexOf(left))[0];
 }
 function tierOfModel(modelId, models) {
   if (!modelId) return null;
-  return models.find((model) => model.id === modelId)?.tier ?? null;
+  const matches = models.filter((model) => model.id === modelId && model.enabled);
+  if (matches.length === 0) return null;
+  return matches.reduce(
+    (highest, model) => TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
+    matches[0].tier
+  );
 }
 function resolveTier(descriptor, models, configDefaultTier) {
   if (descriptor.exclusion?.excluded) {
     return {
-      tier: "T3",
+      tier: "T1",
       source: "capability-exclusion",
-      detail: `capability exclusion forces T3: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`
+      detail: `capability exclusion forces T1: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`
     };
   }
   const pinnedTier = tierOfModel(descriptor.pinnedModelId, models);
@@ -345,22 +370,19 @@ function selectModel(input) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
   }
-  const floor = judgement.source === "capability-exclusion" ? judgement.tier : null;
-  if (floor) {
-    trace.push(`tier floor ${floor}: capability exclusion, no model below ${floor} is eligible`);
-  }
+  trace.push(`tier floor ${judgement.tier}: no lower-capability model is eligible`);
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
     const incumbent = config.models.find(
       (model) => model.id === descriptor.stickyModelId && model.enabled
     );
-    if (incumbent && floor && tierIndex(incumbent.tier) < tierIndex(floor)) {
+    if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
       trace.push(
-        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${floor} capability floor`
+        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`
       );
       rejections.push({
         modelId: incumbent.id,
         stage: "tier-floor",
-        reason: `tier ${incumbent.tier} is below the ${floor} capability floor`
+        reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`
       });
     } else if (incumbent) {
       trace.push(
@@ -369,7 +391,7 @@ function selectModel(input) {
       return { ...base, outcome: "selected", modelId: incumbent.id, effectiveTier: incumbent.tier };
     }
   }
-  const ceiling = judgement.tier;
+  const requiredTier = judgement.tier;
   const required = new Set(descriptor.requiredCapabilities ?? []);
   if (required.size > 0) {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
@@ -377,7 +399,7 @@ function selectModel(input) {
   const qualified = [];
   for (const model of config.models) {
     if (!model.enabled) {
-      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the model table" });
+      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster" });
       continue;
     }
     const missing = [...required].filter((capability) => !model.capabilities.includes(capability));
@@ -389,11 +411,11 @@ function selectModel(input) {
       });
       continue;
     }
-    if (floor && tierIndex(model.tier) < tierIndex(floor)) {
+    if (tierIndex(model.tier) < tierIndex(requiredTier)) {
       rejections.push({
         modelId: model.id,
         stage: "tier-floor",
-        reason: `tier ${model.tier} is below the ${floor} capability floor`
+        reason: `tier ${model.tier} is below the ${requiredTier} required tier`
       });
       continue;
     }
@@ -411,60 +433,58 @@ function selectModel(input) {
     trace.push(`no model cleared the gates (${rejections.length} rejected)`);
     return base;
   }
-  let appliedCeiling = ceiling;
-  if (!qualified.some((model) => tierIndex(model.tier) <= tierIndex(ceiling))) {
-    const lowestQualified = qualified.reduce(
-      (lowest, model) => tierIndex(model.tier) < tierIndex(lowest.tier) ? model : lowest
-    );
-    trace.push(
-      `ceiling ${ceiling} lifted to ${lowestQualified.tier}: nothing at or below ${ceiling} clears the capability gate`
-    );
-    appliedCeiling = lowestQualified.tier;
-  }
-  const survivors = qualified.filter((model) => {
-    if (tierIndex(model.tier) <= tierIndex(appliedCeiling)) return true;
-    rejections.push({
-      modelId: model.id,
-      stage: "tier-ceiling",
-      reason: `tier ${model.tier} exceeds ceiling ${appliedCeiling}`
-    });
-    return false;
-  });
-  const profileVerdict = resolveProfile(appliedCeiling, profiles, now);
+  const profileVerdict = resolveProfile(requiredTier, profiles, now);
   trace.push(`volume profile: ${profileVerdict.reason}`);
-  const candidates = [];
-  for (const model of survivors) {
-    const cost = costOf(model, appliedCeiling, profiles, config.models, signals, now);
-    if (!cost) {
-      rejections.push({
-        modelId: model.id,
-        stage: "no-profile",
-        reason: `no volume profile for ${appliedCeiling}; cannot cost this candidate`
+  function costCandidates(models) {
+    const candidates2 = [];
+    for (const model of models) {
+      const cost = costOf(model, requiredTier, profiles, config.models, signals, now);
+      if (!cost) {
+        rejections.push({
+          modelId: model.id,
+          stage: "no-profile",
+          reason: `no volume profile for ${requiredTier}; cannot cost this candidate`
+        });
+        continue;
+      }
+      candidates2.push({
+        ...cost,
+        tier: model.tier,
+        releasedAt: model.releasedAt,
+        fallbackOnly: model.fallbackOnly
       });
-      continue;
     }
-    candidates.push({ ...cost, tier: model.tier });
+    return candidates2;
+  }
+  let candidates = costCandidates(qualified.filter((model) => !model.fallbackOnly));
+  if (candidates.length === 0) {
+    const fallbackModels = qualified.filter((model) => model.fallbackOnly);
+    if (fallbackModels.length > 0) {
+      trace.push("no regular candidate survived; considering fallback-only roster rows");
+      candidates = costCandidates(fallbackModels);
+    }
   }
   if (candidates.length === 0) {
     trace.push("no candidate could be costed \u2014 refusing to choose on a guessed volume term");
-    return { ...base, effectiveTier: appliedCeiling };
+    return { ...base, effectiveTier: requiredTier };
   }
   candidates.sort((left, right) => {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
       return left.expectedCostUsd - right.expectedCostUsd;
     }
-    if (left.tier !== right.tier) return tierIndex(right.tier) - tierIndex(left.tier);
+    const releaseOrder = Date.parse(right.releasedAt) - Date.parse(left.releasedAt);
+    if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
   });
   const winner = candidates[0];
-  const withCandidates = { ...base, candidates, effectiveTier: appliedCeiling };
+  const withCandidates = { ...base, candidates, effectiveTier: requiredTier };
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
-    const reason = `volume profile for ${appliedCeiling} is not trusted (${profileVerdict.reason})`;
+    const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     trace.push(`held at agent floor: ${reason}`);
     return { ...withCandidates, outcome: "held-at-floor", heldReason: reason };
   }
   trace.push(
-    `selected ${winner.modelId} at an expected $${winner.expectedCostUsd.toFixed(4)}/run (direct $${winner.runCostUsd.toFixed(4)} = in $${winner.inputCostUsd.toFixed(4)} + cache-read $${winner.cacheReadCostUsd.toFixed(4)} + out $${winner.outputCostUsd.toFixed(4)}; escalation risk $${winner.escalationRiskUsd.toFixed(4)}) \u2014 cheapest of ${candidates.length}`
+    `selected ${winner.modelId} at an expected $${winner.expectedCostUsd.toFixed(4)}/run (direct $${winner.runCostUsd.toFixed(4)} = in $${winner.inputCostUsd.toFixed(4)} + cache-read $${winner.cacheReadCostUsd.toFixed(4)} + out $${winner.outputCostUsd.toFixed(4)}; escalation risk $${winner.escalationRiskUsd.toFixed(4)}) \u2014 cheapest of ${candidates.length}; exact ties prefer newest releasedAt then stable model id${winner.fallbackOnly ? "; fallback-only path" : ""}`
   );
   if (!config.enforcementEnabled) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");

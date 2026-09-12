@@ -80,17 +80,6 @@ export function planApply(
       "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache",
     );
   }
-  // The exclusion is re-checked here and not merely trusted from the judgement,
-  // because this is the last point before a write. A capability-excluded issue
-  // gets T3, and T3 is the tier floor for the roster that does that work — so
-  // there is nothing to gain from writing, and a bug upstream of here must not
-  // be able to pin excluded work to a cheap model.
-  if (decision.judgement.source === "capability-exclusion") {
-    return nothing(
-      `capability exclusion applies (${decision.judgement.detail}); leaving the issue at its agent floor rather than pinning`,
-    );
-  }
-
   const tier = decision.effectiveTier;
   return {
     write: true,

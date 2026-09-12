@@ -80,22 +80,16 @@ plugin exists to avoid.
 
 ## Two safety properties worth naming
 
-### A capability exclusion is a floor, not a ceiling
+### T1 is the most capable tier
 
-A judged tier is normally a cost **ceiling**: cheaper models are allowed, and the
-cost sort picks among them. A capability exclusion is the opposite — it is a
-**floor**, and it never yields.
+The tier order is `T3 < T2 < T1`. A recorded tier is a minimum capability
+requirement: a T2 card may use a T2 or T1 roster row, but never T3. A capability
+exclusion resolves to T1 before selection, so sensitive work uses the same
+all-path floor as an explicit `tier:T1` label.
 
-This mattered concretely. `resolveTier` returns T3 for capability-excluded work.
-Read as a ceiling, T3 admits *every* cheaper model and the cost sort then picks
-the cheapest one — the exact inversion of what the exclusion is for. ADR-0004's
-boundary is capability, not difficulty, so the floor now holds in three places
-(`src/engine/select.ts`): the qualification loop, the sticky path, and a
-dedicated `tier-floor` rejection stage. It does not yield to cost, to sticky, or
-to a lifted ceiling.
-
-The test suite caught this. It is covered by three tests in
-`tests/select.spec.ts`.
+The floor holds in the qualification loop and the sticky path. It does not yield
+to price or to a warm session. Disabled rows are removed before normal and
+fallback selection.
 
 ### Never re-pin a live issue
 
@@ -120,7 +114,7 @@ path.
 
 ## Rollout
 
-**This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T3"`,
+**This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T1"`,
 `holdOnUntrustedProfile: true`. Installing it changes no live selection variable.
 
 Per the TOG-768 constraint, enforcement must not be switched on until Stage 2
@@ -135,7 +129,7 @@ labels `tier:T1` / `tier:T2` / `tier:T3` exist (created 07:38:46Z), but **0 of
 `labelIds`. Stage 2 is *created*, not *rolled out*. Consequences, both by design:
 
 - `resolveTier` never reaches step 3 (the label branch) on today's board. Every
-  issue resolves at step 4 (`agent-floor`) or step 5 (`config-default` → `T3`).
+  issue resolves at step 4 (`agent-floor`) or step 5 (`config-default` → `T1`).
 - Of 7 issues carrying `assigneeAdapterOverrides`, 5 use the shape
   `{"modelProfile": "cheap"}` — which has **no** `adapterConfig.model`. That
   yields `pinnedModelId: null` (so step 2 does not fire) while still setting
@@ -165,6 +159,13 @@ Order of operations:
 
 See `src/config/schema.ts`. Every number that decides anything lives in config,
 so the same input gives the same output on every run.
+
+`config/reviewed-roster.json` is the reviewed roster-shaped plugin config. Its
+`models` array is the single checked-in catalogue and carries `aaIndex`,
+`releasedAt`, `fallbackOnly`, `note`, and `earnIn` on every row. `earnIn` remains
+inert in this slice. Exact cost ties prefer the newest `releasedAt`, then stable
+model id. A runtime model may have one row per admitted tier; exact duplicate
+model+tier rows are rejected.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
 it is operator-supplied because the plugin genuinely cannot look one up. There is
@@ -215,8 +216,9 @@ root: `ctx.issues`, `ctx.agents`, `ctx.companies`, `ctx.db`, `ctx.state`, ….
 ## Verification
 
 ```
-npm run verify     # typecheck + tests + build
-npm test           # 59 tests across 6 files
+npm run verify     # typecheck + tests + named mutants + build
+npm test           # unit + reviewed live-config fixture
+npm run test:mutants  # old tier order, disabled fallback revival, releasedAt removal
 npm run build      # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce

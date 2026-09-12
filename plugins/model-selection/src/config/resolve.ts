@@ -35,6 +35,20 @@ function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function string(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function nullableNum(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function nullableRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function tier(value: unknown, fallback: Tier): Tier {
   return typeof value === "string" && (TIERS as readonly string[]).includes(value)
     ? (value as Tier)
@@ -43,8 +57,9 @@ function tier(value: unknown, fallback: Tier): Tier {
 
 /**
  * Defaults are chosen so that an unconfigured install is inert: advise mode,
- * T3 default tier, hold on an untrusted profile. Nothing about installing this
- * plugin changes a live selection variable until someone sets `mode: enforce`.
+ * conservative T1 default tier, hold on an untrusted profile. Nothing about
+ * installing this plugin changes a live selection variable until someone sets
+ * `mode: enforce`.
  */
 export function resolveConfig(raw: Record<string, unknown> | null | undefined): ResolvedConfig {
   const root = record(raw);
@@ -68,6 +83,11 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
               ? model.capabilities.filter((c): c is string => typeof c === "string")
               : [],
             contextWindow: num(model.contextWindow, 200_000),
+            aaIndex: nullableNum(model.aaIndex),
+            releasedAt: string(model.releasedAt, "1970-01-01"),
+            fallbackOnly: bool(model.fallbackOnly, false),
+            note: string(model.note, ""),
+            earnIn: nullableRecord(model.earnIn),
           } satisfies ModelEntry,
         ];
       })
@@ -84,7 +104,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     selection: {
       enabled: bool(selection.enabled, true),
       mode: selection.mode === "enforce" ? "enforce" : "advise",
-      defaultTier: tier(selection.defaultTier, "T3"),
+      defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
     },
@@ -110,8 +130,12 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
 
   const seen = new Set<string>();
   for (const model of config.models) {
-    if (seen.has(model.id)) errors.push(`duplicate model id: ${model.id}`);
-    seen.add(model.id);
+    const rosterKey = `${model.id}::${model.tier}`;
+    if (seen.has(rosterKey)) errors.push(`duplicate model+tier row: ${model.id} ${model.tier}`);
+    seen.add(rosterKey);
+    if (!Number.isFinite(Date.parse(`${model.releasedAt}T00:00:00.000Z`))) {
+      errors.push(`invalid releasedAt date: ${model.id} ${model.tier} ${model.releasedAt}`);
+    }
     if (model.costPerMTokCacheRead === 0 && model.costPerMTokIn > 0) {
       // A zero cache-read rate makes the largest cost line free and would order
       // candidates on the wrong term entirely (ADR-0002).
