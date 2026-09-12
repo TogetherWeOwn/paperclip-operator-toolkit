@@ -5,6 +5,7 @@ import { planApply } from "./actuate/apply.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
   JOB_KEYS,
+  OPERATOR_PIN_LABEL,
   PLUGIN_STATE_KEYS,
   PLUGIN_VERSION,
   ROUTE_KEYS,
@@ -19,6 +20,16 @@ import type {
   SelectionDecision,
   VolumeProfile,
 } from "./engine/types.js";
+import {
+  activeOperatorOverride,
+  hardStopExcluded,
+  mergeLedgerEntry,
+  recordOperatorOverride,
+  repinAllowed,
+  type LaneLedger,
+  type OperatorOverrideLedger,
+} from "./engine/pacing.js";
+import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -85,6 +96,56 @@ export function createPlugin() {
         };
       };
 
+      // --- TOG-2137: lane pace ledger, operator overrides, repin history ----
+
+      const laneLedgerKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneLedger,
+      });
+
+      const readLaneLedger = async (companyId: string): Promise<LaneLedger> => {
+        const stored = await ctx.state.get(laneLedgerKey(companyId));
+        return stored && typeof stored === "object" ? (stored as LaneLedger) : {};
+      };
+
+      const operatorOverridesKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.operatorOverrides,
+      });
+
+      const readOperatorOverrides = async (companyId: string): Promise<OperatorOverrideLedger> => {
+        const stored = await ctx.state.get(operatorOverridesKey(companyId));
+        return stored && typeof stored === "object" ? (stored as OperatorOverrideLedger) : {};
+      };
+
+      const paceRepinHistoryKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.paceRepinHistory,
+      });
+
+      const readPaceRepinHistory = async (companyId: string): Promise<Record<string, string>> => {
+        const stored = asRecord(await ctx.state.get(paceRepinHistoryKey(companyId)));
+        const history: Record<string, string> = {};
+        for (const [issueId, at] of Object.entries(stored)) {
+          if (typeof at === "string") history[issueId] = at;
+        }
+        return history;
+      };
+
+      /**
+       * `ctx.http.fetch` wrapped to the shape `pollLanes` expects. Mirrors
+       * `capacityHttp(ctx)` in the accepted model-router worker: a thin
+       * adapter with no policy of its own — every guard (https-only, no
+       * userinfo/query/hash, no reserved host, timeout, redirect refusal,
+       * size cap, media-type check) lives in `poll.ts`, not here.
+       */
+      const laneHttp: LanePollHttpClient = {
+        fetch: (url, init) => ctx.http.fetch(url, init),
+      };
+
       /**
        * Build the descriptor from what the board actually records. Everything
        * here is read, never inferred — the tier key is a recorded judgement
@@ -101,6 +162,8 @@ export function createPlugin() {
         hasOverride: boolean;
         existingLabelIds: string[];
         hasTierLabel: boolean;
+        hasOperatorPin: boolean;
+        isIdle: boolean;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -112,6 +175,15 @@ export function createPlugin() {
         const labelNames = labels
           .map((label) => label.name)
           .filter((name): name is string => typeof name === "string");
+
+        // Idle means no run is currently attached to this issue in any
+        // running/queued sense — a repin must never touch live work.
+        const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
+        const isIdle =
+          !issue.checkoutRunId &&
+          !issue.executionRunId &&
+          scheduledRetryStatus !== "queued" &&
+          scheduledRetryStatus !== "running";
 
         let agentFloorModelId: string | null = null;
         const assigneeAgentId = issue.assigneeAgentId;
@@ -164,6 +236,8 @@ export function createPlugin() {
           hasOverride: Object.keys(overrides).length > 0,
           existingLabelIds,
           hasTierLabel: labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX)),
+          hasOperatorPin: labelNames.includes(OPERATOR_PIN_LABEL),
+          isIdle,
         };
       };
 
@@ -177,6 +251,10 @@ export function createPlugin() {
         hasOverride: boolean;
         existingLabelIds: string[];
         hasTierLabel: boolean;
+        hasOperatorPin: boolean;
+        isIdle: boolean;
+        isServiceabilityHardStop: boolean;
+        nowIso: string;
         config: ResolvedConfig;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
@@ -185,6 +263,10 @@ export function createPlugin() {
         const described = await describeIssue(companyId, issueId, params);
         if (!described) return null;
         const { profiles, signals } = await readProfiles(companyId);
+        const laneLedger = await readLaneLedger(companyId);
+        const nowIso = new Date().toISOString();
+        const overrides = await readOperatorOverrides(companyId);
+        const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
 
         const decision = selectModel({
           descriptor: described.descriptor,
@@ -194,11 +276,22 @@ export function createPlugin() {
             models: config.models,
             holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
             stickyWithinIssue: config.selection.stickyModelWithinIssue,
+            pacingMode: config.pacing.mode,
+            laneLedger,
+            slotFloorFraction: config.pacing.slotFloorFraction,
+            operatorOverrideModelId: liveOverride?.modelId ?? null,
           },
           profiles,
           signals,
           now: Date.now(),
         });
+
+        // Whether the CURRENTLY PINNED model (not the newly-computed winner) sits
+        // on an unserviceable lane — this, not a routine pace-preference change,
+        // is the only thing allowed to force a repin through `pin:operator`.
+        const pinnedModel = config.models.find((model) => model.id === described.descriptor.pinnedModelId);
+        const isServiceabilityHardStop =
+          config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
 
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
         return {
@@ -208,6 +301,10 @@ export function createPlugin() {
           hasOverride: described.hasOverride,
           existingLabelIds: described.existingLabelIds,
           hasTierLabel: described.hasTierLabel,
+          hasOperatorPin: described.hasOperatorPin,
+          isIdle: described.isIdle,
+          isServiceabilityHardStop,
+          nowIso,
           config,
         };
       };
@@ -238,6 +335,13 @@ export function createPlugin() {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
 
+          // The repin exception is itself a pace CONSEQUENCE, gated the same as
+          // every other pace consequence: only in `enforce`. In `off`/`shadow`
+          // this must behave exactly like pre-2137 — an existing override is
+          // never touched, full stop.
+          const paceRepinEligible = result.hasOverride && result.config.pacing.mode === "enforce";
+          const repinHistory = paceRepinEligible ? await readPaceRepinHistory(runCtx.companyId) : {};
+
           const plan = planApply(
             result.decision,
             {
@@ -248,6 +352,18 @@ export function createPlugin() {
               // from "the label decided it" would re-add a duplicate.
               hasExistingTierLabel: result.hasTierLabel,
               status: result.status,
+              ...(paceRepinEligible
+                ? {
+                    paceRepin: {
+                      hasOperatorPin: result.hasOperatorPin,
+                      isIdle: result.isIdle,
+                      lastRepinAt: repinHistory[result.issueId] ?? null,
+                      now: result.nowIso,
+                      idleRepinHysteresisSeconds: result.config.pacing.idleRepinHysteresisSeconds,
+                      isServiceabilityHardStop: result.isServiceabilityHardStop,
+                    },
+                  }
+                : {}),
             },
             result.issueId,
           );
@@ -296,7 +412,59 @@ export function createPlugin() {
             },
           });
 
+          if (paceRepinEligible) {
+            // This write only ever reaches here when `repinAllowed` said yes —
+            // record it so the next repin attempt on this issue honors the
+            // idle hysteresis instead of firing again immediately.
+            await ctx.state.set(paceRepinHistoryKey(runCtx.companyId), {
+              ...repinHistory,
+              [result.issueId]: result.nowIso,
+            });
+          }
+
           return { content: plan.reason + labelNote, data: { decision: result.decision, plan } };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.setOperatorOverride,
+        {
+          displayName: "Set an operator override for an issue",
+          description:
+            "Record a time-boxed override: `model_selection_advise`/`apply` will route this issue to the named model ahead of pace ordering and slot throttling, until it expires. It never bypasses a capability gate, tier floor/ceiling, the untrusted-profile hold, or a serviceability hard stop.",
+          parametersSchema: {
+            type: "object",
+            required: ["issueId", "modelId"],
+            properties: {
+              issueId: { type: "string" },
+              modelId: { type: "string" },
+              ttlSeconds: { type: "integer", minimum: 1 },
+            },
+          },
+        },
+        async (params, runCtx): Promise<ToolResult> => {
+          const supplied = asRecord(params);
+          const issueId = typeof supplied.issueId === "string" ? supplied.issueId : null;
+          const modelId = typeof supplied.modelId === "string" ? supplied.modelId : null;
+          if (!issueId || !modelId) {
+            return { content: "issueId and modelId are both required.", data: null };
+          }
+          const config = await companyConfig(runCtx.companyId);
+          const ttlSeconds =
+            typeof supplied.ttlSeconds === "number" && supplied.ttlSeconds > 0
+              ? supplied.ttlSeconds
+              : config.pacing.operatorOverrideTtlSeconds;
+
+          const nowIso = new Date().toISOString();
+          const existing = await readOperatorOverrides(runCtx.companyId);
+          const updated = recordOperatorOverride(existing, issueId, modelId, nowIso, ttlSeconds);
+          await ctx.state.set(operatorOverridesKey(runCtx.companyId), updated);
+
+          const entry = updated[issueId]!;
+          return {
+            content: `operator override recorded: ${issueId} -> ${modelId}, expires ${entry.expiresAt}`,
+            data: entry,
+          };
         },
       );
 
@@ -349,6 +517,51 @@ export function createPlugin() {
             });
           } catch (cause) {
             ctx.logger.error("volume profile refresh failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
+      // --- scheduled lane-capacity poll (TOG-2137) ---------------------------
+      // Runs every 5 minutes, well inside pace's own ~15-minute default
+      // freshness budget. One company's failure, or one lane's failure within
+      // a company, must never block any other company or lane.
+      ctx.jobs.register(JOB_KEYS.pollLanes, async () => {
+        const companies = await ctx.companies.list();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.pacing.lanes.length === 0) continue;
+
+            const sources: LaneSourceDefinition[] = config.pacing.lanes.map((lane) => ({
+              laneId: lane.laneId,
+              statusUrl: lane.statusUrl,
+              requestTimeoutMs: lane.requestTimeoutMs,
+              maxResponseBytes: lane.maxResponseBytes,
+              lane: lane.lane,
+              policy: lane.policy,
+            }));
+
+            const results = await pollLanes({
+              sources,
+              http: laneHttp,
+              now: () => new Date().toISOString(),
+            });
+
+            let ledger = await readLaneLedger(company.id);
+            for (const result of results) {
+              ledger = mergeLedgerEntry(ledger, result);
+            }
+            await ctx.state.set(laneLedgerKey(company.id), ledger);
+
+            ctx.logger.info("lane capacity polled", {
+              companyId: company.id,
+              lanes: results.map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(","),
+            });
+          } catch (cause) {
+            ctx.logger.error("lane capacity poll failed for a company", {
               companyId: company.id,
               error: cause instanceof Error ? cause.message : String(cause),
             });

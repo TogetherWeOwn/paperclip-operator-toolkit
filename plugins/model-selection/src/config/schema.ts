@@ -1,4 +1,4 @@
-import { TIERS } from "../constants.js";
+import { PACING_MODES, TIERS } from "../constants.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
@@ -63,6 +63,8 @@ export const SELECTION_CONFIG_SCHEMA = {
            * its deterministic counter and lane gates.
            */
           earnIn: { type: ["object", "null"], default: null },
+          /** TOG-2137: which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
+          laneId: { type: "string", minLength: 1 },
         },
       },
       default: [],
@@ -112,6 +114,91 @@ export const SELECTION_CONFIG_SCHEMA = {
         t2EscalationCeiling: { type: "number", minimum: 0, maximum: 1, default: 0.15 },
         /** A silent quality failure counts this many escalations. */
         silentFailureWeight: { type: "integer", minimum: 1, default: 10 },
+      },
+      default: {},
+    },
+    /**
+     * TOG-2137: lane-pace polling and pace-first within-tier ordering.
+     * `off` polls nothing. `shadow` (default) polls, records the lane ledger,
+     * and includes the pace-ordering trace, but never lets pace change which
+     * model is selected. `enforce` lets pace reorder candidates within a
+     * tier-cost group (never across an already-decided cost/tier order).
+     */
+    pacing: {
+      type: "object",
+      title: "Lane pacing",
+      additionalProperties: false,
+      properties: {
+        mode: { type: "string", enum: [...PACING_MODES], default: "shadow" },
+        lanes: {
+          type: "array",
+          title: "Lane sources",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["laneId", "statusUrl", "windows"],
+            properties: {
+              laneId: { type: "string", minLength: 1 },
+              statusUrl: {
+                type: "string",
+                minLength: 1,
+                pattern: "^https://[^/?#@]+(?:/[^?#]*)?$",
+              },
+              requestTimeoutMs: { type: "integer", minimum: 1, default: 5000 },
+              maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
+              /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
+              free: { type: "boolean", default: false },
+              healthFields: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                default: ["health", "status"],
+              },
+              weightFields: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                default: ["weight"],
+              },
+              governingWindowField: { type: "string", minLength: 1, default: "governing_window" },
+              windowSecondsField: { type: "string", minLength: 1, default: "window_seconds" },
+              staleAfterSecondsField: { type: "string", minLength: 1, default: "staleAfterSeconds" },
+              windows: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["name", "role", "utilizationFields"],
+                  properties: {
+                    name: { type: "string", minLength: 1 },
+                    role: { type: "string", enum: ["serviceability", "allowance"] },
+                    utilizationFields: {
+                      type: "array",
+                      minItems: 1,
+                      items: { type: "string", minLength: 1 },
+                    },
+                    resetFields: {
+                      type: "array",
+                      items: { type: "string", minLength: 1 },
+                      default: [],
+                    },
+                    defaultWindowSeconds: { type: "integer", minimum: 1 },
+                  },
+                },
+              },
+              /** Overrides the pace engine's default margin/urgent-reset/staleness policy for this lane. */
+              margin: { type: "number", minimum: 0, maximum: 1 },
+              urgentResetSeconds: { type: "integer", minimum: 1 },
+              maxSnapshotAgeSeconds: { type: "integer", minimum: 1 },
+            },
+          },
+          default: [],
+        },
+        /** Ahead-of-line throttling never drops a lane's slot share below this, while serviceable. */
+        slotFloorFraction: { type: "number", minimum: 0, maximum: 1, default: 0.25 },
+        /** Default TTL applied to an operator override recorded in the lane ledger. */
+        operatorOverrideTtlSeconds: { type: "integer", minimum: 1, default: 3600 },
+        /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
+        idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
       },
       default: {},
     },

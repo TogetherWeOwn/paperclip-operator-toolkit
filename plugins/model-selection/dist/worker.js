@@ -7,7 +7,9 @@ var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
   /** Advise and, if enforcement is on for this company, write the override. */
-  apply: "model_selection_apply"
+  apply: "model_selection_apply",
+  /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
+  setOperatorOverride: "model_selection_set_operator_override"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -15,14 +17,136 @@ var ROUTE_KEYS = {
 };
 var JOB_KEYS = {
   /** Recompute per-tier volume profiles from this company's own runs. */
-  refreshProfiles: "refreshVolumeProfiles"
+  refreshProfiles: "refreshVolumeProfiles",
+  /** Poll configured lane-capacity sources and refresh the lane ledger. */
+  pollLanes: "pollLaneCapacity"
 };
 var TIER_LABEL_PREFIX = "tier:";
 var TIERS = ["T1", "T2", "T3"];
 var TIER_ORDER = ["T3", "T2", "T1"];
+var OPERATOR_PIN_LABEL = "pin:operator";
 var PLUGIN_STATE_KEYS = {
-  volumeProfiles: "volumeProfiles"
+  volumeProfiles: "volumeProfiles",
+  /** Per-company lane pace verdicts and slot-throttle counters. */
+  laneLedger: "laneLedger",
+  /** Per-issue operator overrides, each with an expiry (TOG-2137). */
+  operatorOverrides: "operatorOverrides",
+  /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (TOG-2137). */
+  paceRepinHistory: "paceRepinHistory"
 };
+var PACING_MODES = ["off", "shadow", "enforce"];
+var DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
+var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
+var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
+
+// src/engine/pacing.ts
+function mergeLedgerEntry(ledger, result) {
+  return { ...ledger, [result.laneId]: { laneId: result.laneId, verdict: result.verdict, fetchedAt: result.fetchedAt, error: result.error } };
+}
+function laneVerdictFor(ledger, laneId) {
+  if (!laneId) return null;
+  return ledger[laneId]?.verdict ?? null;
+}
+var PACE_STATE_RANK = {
+  "behind-urgent": 0,
+  behind: 1,
+  on: 2,
+  unknown: 3,
+  free: 4,
+  ahead: 5,
+  exhausted: 6
+};
+function paceStateOf(ledger, model) {
+  if (!model) return "unknown";
+  return laneVerdictFor(ledger, model.laneId ?? null)?.state ?? "unknown";
+}
+function deviationOf(ledger, model) {
+  if (!model) return 0;
+  return laneVerdictFor(ledger, model.laneId ?? null)?.score?.deviation ?? 0;
+}
+function modelOf(models, candidate) {
+  return models.find((model) => model.id === candidate.modelId);
+}
+function orderCandidatesByPace(candidates, models, ledger) {
+  const byTier = /* @__PURE__ */ new Map();
+  const orderedTierKeys = [];
+  for (const candidate of candidates) {
+    let group = byTier.get(candidate.tier);
+    if (!group) {
+      group = [];
+      byTier.set(candidate.tier, group);
+      orderedTierKeys.push(candidate.tier);
+    }
+    group.push(candidate);
+  }
+  const result = [];
+  for (const tierKey of orderedTierKeys) {
+    const group = byTier.get(tierKey);
+    group.sort((left, right) => {
+      const leftModel = modelOf(models, left);
+      const rightModel = modelOf(models, right);
+      const stateDelta = PACE_STATE_RANK[paceStateOf(ledger, leftModel)] - PACE_STATE_RANK[paceStateOf(ledger, rightModel)];
+      if (stateDelta !== 0) return stateDelta;
+      const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
+      if (deviationDelta !== 0) return deviationDelta;
+      if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
+      const leftRelease = leftModel?.releasedAt ?? "1970-01-01";
+      const rightRelease = rightModel?.releasedAt ?? "1970-01-01";
+      if (leftRelease !== rightRelease) return leftRelease > rightRelease ? -1 : 1;
+      return left.modelId.localeCompare(right.modelId);
+    });
+    result.push(...group);
+  }
+  return result;
+}
+function hardStopExcluded(ledger, model) {
+  const verdict = laneVerdictFor(ledger, model.laneId ?? null);
+  if (!verdict) return false;
+  return verdict.serviceable === false;
+}
+function hashUnitInterval(input) {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+function slotFactorFor(ledger, model, slotFloorFraction) {
+  const verdict = laneVerdictFor(ledger, model.laneId ?? null);
+  if (!verdict || verdict.state !== "ahead") return 1;
+  const floor = Math.max(Number.EPSILON, slotFloorFraction);
+  return floor;
+}
+function slotAllowed(issueId, ledger, model, slotFloorFraction) {
+  const factor = slotFactorFor(ledger, model, slotFloorFraction);
+  if (factor >= 1) return true;
+  return hashUnitInterval(issueId) < factor;
+}
+function activeOperatorOverride(overrides, issueId, nowIso) {
+  const entry = overrides[issueId];
+  if (!entry) return null;
+  return entry.expiresAt > nowIso ? entry : null;
+}
+function recordOperatorOverride(overrides, issueId, modelId, nowIso, ttlSeconds) {
+  const expiresAt = new Date(Date.parse(nowIso) + ttlSeconds * 1e3).toISOString();
+  return { ...overrides, [issueId]: { issueId, modelId, setAt: nowIso, expiresAt } };
+}
+function repinAllowed(context) {
+  if (context.hasOperatorPin && !context.isServiceabilityHardStop) {
+    return { allowed: false, reason: `${OPERATOR_PIN_LABEL} survives a routine pace repin` };
+  }
+  if (!context.isIdle) {
+    return { allowed: false, reason: "issue has a running or queued run; never repin live work" };
+  }
+  if (context.lastRepinAt) {
+    const elapsedSeconds = (Date.parse(context.now) - Date.parse(context.lastRepinAt)) / 1e3;
+    if (elapsedSeconds < context.idleRepinHysteresisSeconds) {
+      return { allowed: false, reason: `only ${Math.round(elapsedSeconds)}s since the last pace repin, below the ${context.idleRepinHysteresisSeconds}s hysteresis` };
+    }
+  }
+  return { allowed: true, reason: context.isServiceabilityHardStop ? "serviceability hard stop overrides the operator pin" : "idle and past the repin hysteresis" };
+}
 
 // src/actuate/apply.ts
 var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["done", "cancelled"]);
@@ -44,9 +168,15 @@ function planApply(decision, context, targetIssueId) {
     return nothing(`issue status is ${context.status}; not re-pinning finished work`);
   }
   if (context.hasExistingOverride) {
-    return nothing(
-      "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache"
-    );
+    if (!context.paceRepin) {
+      return nothing(
+        "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache"
+      );
+    }
+    const gate = repinAllowed(context.paceRepin);
+    if (!gate.allowed) {
+      return nothing(`pace repin declined: ${gate.reason}`);
+    }
   }
   const tier2 = decision.effectiveTier;
   return {
@@ -88,6 +218,7 @@ function resolveConfig(raw) {
   const selection = record(root.selection);
   const profiles = record(root.profiles);
   const quality = record(root.quality);
+  const pacing = record(root.pacing);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -105,7 +236,8 @@ function resolveConfig(raw) {
         releasedAt: string(model.releasedAt, "1970-01-01"),
         fallbackOnly: bool(model.fallbackOnly, false),
         note: string(model.note, ""),
-        earnIn: nullableRecord(model.earnIn)
+        earnIn: nullableRecord(model.earnIn),
+        laneId: typeof model.laneId === "string" && model.laneId.length > 0 ? model.laneId : null
       }
     ];
   }) : [];
@@ -115,6 +247,51 @@ function resolveConfig(raw) {
     const id = rawLabelIds[t];
     if (typeof id === "string" && id.length > 0) tierLabelIds[t] = id;
   }
+  const lanes = Array.isArray(pacing.lanes) ? pacing.lanes.flatMap((entry) => {
+    const rawLane = record(entry);
+    if (typeof rawLane.laneId !== "string" || rawLane.laneId.length === 0) return [];
+    if (typeof rawLane.statusUrl !== "string" || rawLane.statusUrl.length === 0) return [];
+    const windows = Array.isArray(rawLane.windows) ? rawLane.windows.flatMap((w) => {
+      const window = record(w);
+      if (typeof window.name !== "string" || window.name.length === 0) return [];
+      if (window.role !== "serviceability" && window.role !== "allowance") return [];
+      const utilizationFields = Array.isArray(window.utilizationFields) ? window.utilizationFields.filter((f) => typeof f === "string") : [];
+      if (utilizationFields.length === 0) return [];
+      return [
+        {
+          name: window.name,
+          role: window.role,
+          utilizationFields,
+          resetFields: Array.isArray(window.resetFields) ? window.resetFields.filter((f) => typeof f === "string") : [],
+          defaultWindowSeconds: typeof window.defaultWindowSeconds === "number" ? window.defaultWindowSeconds : null
+        }
+      ];
+    }) : [];
+    if (windows.length === 0) return [];
+    return [
+      {
+        laneId: rawLane.laneId,
+        statusUrl: rawLane.statusUrl,
+        requestTimeoutMs: num(rawLane.requestTimeoutMs, 5e3),
+        maxResponseBytes: num(rawLane.maxResponseBytes, 262144),
+        lane: {
+          laneId: rawLane.laneId,
+          free: bool(rawLane.free, false),
+          healthFields: Array.isArray(rawLane.healthFields) ? rawLane.healthFields.filter((f) => typeof f === "string") : ["health", "status"],
+          weightFields: Array.isArray(rawLane.weightFields) ? rawLane.weightFields.filter((f) => typeof f === "string") : ["weight"],
+          governingWindowField: typeof rawLane.governingWindowField === "string" ? rawLane.governingWindowField : "governing_window",
+          windowSecondsField: typeof rawLane.windowSecondsField === "string" ? rawLane.windowSecondsField : "window_seconds",
+          staleAfterSecondsField: typeof rawLane.staleAfterSecondsField === "string" ? rawLane.staleAfterSecondsField : "staleAfterSeconds",
+          windows
+        },
+        policy: {
+          ...typeof rawLane.margin === "number" ? { margin: rawLane.margin } : {},
+          ...typeof rawLane.urgentResetSeconds === "number" ? { urgentResetSeconds: rawLane.urgentResetSeconds } : {},
+          ...typeof rawLane.maxSnapshotAgeSeconds === "number" ? { maxSnapshotAgeSeconds: rawLane.maxSnapshotAgeSeconds } : {}
+        }
+      }
+    ];
+  }) : [];
   return {
     selection: {
       enabled: bool(selection.enabled, true),
@@ -134,6 +311,13 @@ function resolveConfig(raw) {
       t1EscalationCeiling: num(quality.t1EscalationCeiling, 0.05),
       t2EscalationCeiling: num(quality.t2EscalationCeiling, 0.15),
       silentFailureWeight: num(quality.silentFailureWeight, 10)
+    },
+    pacing: {
+      mode: PACING_MODES.includes(pacing.mode) ? pacing.mode : "shadow",
+      lanes,
+      slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
+      operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
+      idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS)
     }
   };
 }
@@ -171,6 +355,17 @@ function validateConfig(config) {
     warnings.push(
       "mode is enforce: this plugin will write assigneeAdapterOverrides. Confirm Stage 2 is stable before running this alongside another live selection change."
     );
+  }
+  const laneIds = /* @__PURE__ */ new Set();
+  for (const lane of config.pacing.lanes) {
+    if (laneIds.has(lane.laneId)) errors.push(`duplicate lane id: ${lane.laneId}`);
+    laneIds.add(lane.laneId);
+  }
+  if (config.pacing.mode !== "off" && config.pacing.lanes.length === 0) {
+    warnings.push(`pacing.mode is ${config.pacing.mode} but no lanes are configured; pace ordering has nothing to key on`);
+  }
+  if (config.pacing.mode === "enforce" && config.pacing.slotFloorFraction <= 0) {
+    errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable \u2014 ahead-of-line throttling must never reach zero");
   }
   return { errors, warnings };
 }
@@ -364,8 +559,15 @@ function selectModel(input) {
     rejections,
     trace,
     advisory: !config.enforcementEnabled,
-    heldReason: null
+    heldReason: null,
+    pacingApplied: false
   };
+  const pacingMode = config.pacingMode ?? "shadow";
+  const paceActive = pacingMode !== "off";
+  const paceEnforced = pacingMode === "enforce";
+  const ledger = config.laneLedger ?? {};
+  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
+  const overrideModelId = config.operatorOverrideModelId ?? null;
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
@@ -427,6 +629,14 @@ function selectModel(input) {
       });
       continue;
     }
+    if (paceActive && hardStopExcluded(ledger, model)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-unserviceable",
+        reason: `lane ${model.laneId ?? "(none)"} is not serviceable`
+      });
+      continue;
+    }
     qualified.push(model);
   }
   if (qualified.length === 0) {
@@ -476,8 +686,41 @@ function selectModel(input) {
     if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
   });
-  const winner = candidates[0];
-  const withCandidates = { ...base, candidates, effectiveTier: requiredTier };
+  let orderedCandidates = candidates;
+  if (paceActive) {
+    const paceOrdered = orderCandidatesByPace(candidates, config.models, ledger);
+    const changed = paceOrdered.some((candidate, index) => candidate.modelId !== candidates[index]?.modelId);
+    trace.push(
+      changed ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}` : `pace ordering (${pacingMode}) agrees with cost ordering`
+    );
+    if (paceEnforced) orderedCandidates = paceOrdered;
+  }
+  let winnerIndex = 0;
+  if (paceEnforced) {
+    const overrideIndex = overrideModelId ? orderedCandidates.findIndex((candidate) => candidate.modelId === overrideModelId) : -1;
+    if (overrideIndex >= 0) {
+      if (overrideIndex !== 0) {
+        trace.push(`operator override: routing to ${overrideModelId} ahead of pace ordering and slot throttling`);
+      }
+      winnerIndex = overrideIndex;
+    } else {
+      const allowedIndex = orderedCandidates.findIndex((candidate) => {
+        const model = config.models.find((entry) => entry.id === candidate.modelId);
+        return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
+      });
+      if (allowedIndex >= 0) {
+        if (allowedIndex !== 0) {
+          trace.push(
+            `slot throttle: ${orderedCandidates[0].modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[allowedIndex].modelId}`
+          );
+        }
+        winnerIndex = allowedIndex;
+      }
+    }
+  }
+  const winner = orderedCandidates[winnerIndex];
+  const pacingApplied = paceEnforced && winner.modelId !== candidates[0].modelId;
+  const withCandidates = { ...base, candidates, effectiveTier: requiredTier, pacingApplied };
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     trace.push(`held at agent floor: ${reason}`);
@@ -490,6 +733,378 @@ function selectModel(input) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");
   }
   return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+}
+
+// src/lane-capacity/value-normalization.ts
+function recordOf(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function firstValue(record2, fields) {
+  for (const field of fields) {
+    if (field in record2) return { value: record2[field], field };
+  }
+  return null;
+}
+function fraction(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+function timestamp(value) {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+function normalizeHealth(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (["healthy", "available", "allowed", "ready", "ok", "active"].includes(normalized)) return "healthy";
+  if (["degraded", "limited", "warning", "cooldown", "cooling_down"].includes(normalized)) return "degraded";
+  if (["exhausted", "quota_exhausted", "rate_limited"].includes(normalized)) return "exhausted";
+  if (["unavailable", "disabled", "offline", "error", "blocked"].includes(normalized)) return "unavailable";
+  if (["unknown", "stale"].includes(normalized)) return "unknown";
+  return null;
+}
+
+// src/lane-capacity/pace.ts
+var SCALE = 1e3;
+var DEFAULT_MARGIN = 0.1;
+var DEFAULT_URGENT_RESET_SECONDS = 24 * 60 * 60;
+var DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 15 * 60;
+function positiveNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+function windowSeconds(record2, field, window) {
+  const raw = record2[field];
+  if (typeof raw === "number") return positiveNumber(raw);
+  const mapped = recordOf(raw);
+  if (mapped) {
+    return positiveNumber(mapped[window.name]) ?? positiveNumber(mapped[window.name.replace(/-/g, "_")]);
+  }
+  return positiveNumber(window.defaultWindowSeconds);
+}
+function normalizedWeight(record2, fields) {
+  const reported = positiveNumber(firstValue(record2, fields)?.value);
+  return reported === null ? { weight: 1, source: "default" } : { weight: reported, source: "reported" };
+}
+function normalizeLaneDocument(input) {
+  const document = recordOf(input.document);
+  if (!document) {
+    return { laneId: input.definition.laneId, free: Boolean(input.definition.free), observedAt: null, staleAfterSeconds: null, accounts: [], error: "invalid-document" };
+  }
+  const records = Array.isArray(document.records) ? document.records : [];
+  const observedAt = timestamp(document.observedAt);
+  const staleAfterSeconds = positiveNumber(document[input.definition.staleAfterSecondsField ?? "staleAfterSeconds"]);
+  const governingWindowField = input.definition.governingWindowField ?? "governing_window";
+  const windowSecondsField = input.definition.windowSecondsField ?? "window_seconds";
+  const accounts = records.flatMap((value, index) => {
+    const record2 = recordOf(value);
+    if (!record2) return [];
+    const weight = normalizedWeight(record2, input.definition.weightFields ?? ["weight"]);
+    const reportedGoverningWindow = typeof record2[governingWindowField] === "string" ? record2[governingWindowField] : null;
+    return [{
+      accountKey: `record-${index + 1}`,
+      health: normalizeHealth(firstValue(record2, input.definition.healthFields)?.value) ?? "unknown",
+      weight: weight.weight,
+      weightSource: weight.source,
+      governingWindow: reportedGoverningWindow,
+      windows: input.definition.windows.map((window) => {
+        const utilization = firstValue(record2, window.utilizationFields);
+        const reset = firstValue(record2, window.resetFields);
+        return {
+          name: window.name,
+          role: window.role,
+          utilization: fraction(utilization?.value),
+          resetsAt: timestamp(reset?.value),
+          windowSeconds: windowSeconds(record2, windowSecondsField, window),
+          sourcePath: utilization?.field ?? null
+        };
+      })
+    }];
+  });
+  return {
+    laneId: input.definition.laneId,
+    free: Boolean(input.definition.free),
+    observedAt,
+    staleAfterSeconds,
+    accounts,
+    error: records.length === 0 ? "no-records" : null
+  };
+}
+function roundHalfEven(value) {
+  const lower = Math.floor(value);
+  const fraction2 = value - lower;
+  if (Math.abs(fraction2 - 0.5) <= 1e-12) return lower % 2 === 0 ? lower : lower + 1;
+  return Math.round(value);
+}
+function toMilli(value) {
+  return roundHalfEven(Math.min(1, Math.max(0, value)) * SCALE);
+}
+function score(utilizationMilli, elapsedMilli) {
+  return {
+    utilization: utilizationMilli / SCALE,
+    elapsed: elapsedMilli / SCALE,
+    deviation: (utilizationMilli - elapsedMilli) / SCALE
+  };
+}
+function weightedMilli(values) {
+  const weight = values.reduce((sum, entry) => sum + entry.weight, 0);
+  return roundHalfEven(values.reduce((sum, entry) => sum + entry.value * entry.weight, 0) / weight);
+}
+function governingWindow(account) {
+  let fallback = null;
+  for (const window of account.windows) {
+    if (window.role !== "allowance" || window.utilization === null || window.resetsAt === null || window.windowSeconds === null) continue;
+    if (window.name === account.governingWindow) return window;
+    if (fallback === null || window.windowSeconds > fallback.windowSeconds || window.windowSeconds === fallback.windowSeconds && window.name < fallback.name) fallback = window;
+  }
+  return fallback;
+}
+function serviceable(account, governing) {
+  if (account.health === "exhausted" || account.health === "unavailable") return false;
+  if (governing?.utilization !== null && governing && governing.utilization >= 1) return false;
+  return account.windows.every(
+    (window) => window.role !== "serviceability" || window.utilization === null || window.utilization < 1
+  );
+}
+function stateFor(deviationMilli, marginMilli) {
+  if (deviationMilli > marginMilli) return "ahead";
+  if (deviationMilli < -marginMilli) return "behind";
+  return "on";
+}
+function evaluateLanePace(input) {
+  const marginMilli = toMilli(input.policy?.margin ?? DEFAULT_MARGIN);
+  const urgentResetSeconds = input.policy?.urgentResetSeconds ?? DEFAULT_URGENT_RESET_SECONDS;
+  const maxSnapshotAgeSeconds = input.policy?.maxSnapshotAgeSeconds ?? DEFAULT_MAX_SNAPSHOT_AGE_SECONDS;
+  const asOf = timestamp(input.asOf ?? input.observation.observedAt);
+  if (input.observation.free) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "free", serviceable: true, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "free-lane" };
+  }
+  if (input.observation.error === "invalid-document" || input.observation.observedAt === null || asOf === null) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "document-unavailable" };
+  }
+  if (input.observation.error === "no-records") {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "no-records" };
+  }
+  const observedAtMs = Date.parse(input.observation.observedAt);
+  const asOfMs = Date.parse(asOf);
+  const freshnessBudget = Math.min(input.observation.staleAfterSeconds ?? maxSnapshotAgeSeconds, maxSnapshotAgeSeconds);
+  if ((asOfMs - observedAtMs) / 1e3 > freshnessBudget) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "snapshot-stale" };
+  }
+  const internal = input.observation.accounts.map((account) => {
+    const governing = governingWindow(account);
+    const accountServiceable = serviceable(account, governing);
+    if (!governing) {
+      const exhausted2 = account.health === "exhausted" || account.health === "unavailable";
+      return {
+        verdict: { accountKey: account.accountKey, health: account.health, weight: account.weight, weightSource: account.weightSource, governingWindow: null, governingResetAt: null, serviceable: accountServiceable, state: exhausted2 ? "exhausted" : "unknown", score: null },
+        utilizationMilli: null,
+        elapsedMilli: null,
+        resetAtMs: null
+      };
+    }
+    const utilizationMilli2 = toMilli(governing.utilization);
+    const remainingSeconds = (Date.parse(governing.resetsAt) - observedAtMs) / 1e3;
+    const elapsedMilli2 = toMilli(1 - Math.min(1, Math.max(0, remainingSeconds / governing.windowSeconds)));
+    const accountScore = score(utilizationMilli2, elapsedMilli2);
+    const exhausted = account.health === "exhausted" || account.health === "unavailable" || governing.utilization >= 1;
+    let state2 = exhausted ? "exhausted" : stateFor(utilizationMilli2 - elapsedMilli2, marginMilli);
+    const resetSeconds = (Date.parse(governing.resetsAt) - asOfMs) / 1e3;
+    if (state2 === "behind" && resetSeconds >= 0 && resetSeconds < urgentResetSeconds) state2 = "behind-urgent";
+    return {
+      verdict: { accountKey: account.accountKey, health: account.health, weight: account.weight, weightSource: account.weightSource, governingWindow: governing.name, governingResetAt: governing.resetsAt, serviceable: accountServiceable, state: state2, score: accountScore },
+      utilizationMilli: utilizationMilli2,
+      elapsedMilli: elapsedMilli2,
+      resetAtMs: Date.parse(governing.resetsAt)
+    };
+  });
+  const serviceableAccountCount = internal.filter((entry) => entry.verdict.serviceable).length;
+  const accounts = internal.map((entry) => entry.verdict);
+  if (serviceableAccountCount === 0) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "exhausted", serviceable: false, score: null, accounts, knownAccountCount: internal.filter((entry) => entry.utilizationMilli !== null).length, knownWeight: internal.filter((entry) => entry.utilizationMilli !== null).reduce((sum, entry) => sum + entry.verdict.weight, 0), serviceableAccountCount, urgentResetAt: null, reason: "all-accounts-unserviceable" };
+  }
+  const known = internal.filter(
+    (entry) => entry.utilizationMilli !== null && entry.elapsedMilli !== null && entry.resetAtMs !== null
+  );
+  if (known.length === 0) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: true, score: null, accounts, knownAccountCount: 0, knownWeight: 0, serviceableAccountCount, urgentResetAt: null, reason: "no-computable-governing-window" };
+  }
+  const utilizationMilli = weightedMilli(known.map((entry) => ({ value: entry.utilizationMilli, weight: entry.verdict.weight })));
+  const elapsedMilli = weightedMilli(known.map((entry) => ({ value: entry.elapsedMilli, weight: entry.verdict.weight })));
+  const laneScore = score(utilizationMilli, elapsedMilli);
+  let state = stateFor(utilizationMilli - elapsedMilli, marginMilli);
+  const urgent = known.filter((entry) => entry.verdict.state === "behind-urgent").sort((left, right) => left.resetAtMs - right.resetAtMs)[0];
+  if (state === "behind" && urgent) state = "behind-urgent";
+  return {
+    laneId: input.observation.laneId,
+    observedAt: input.observation.observedAt,
+    state,
+    serviceable: true,
+    score: laneScore,
+    accounts,
+    knownAccountCount: known.length,
+    knownWeight: known.reduce((sum, entry) => sum + entry.verdict.weight, 0),
+    serviceableAccountCount,
+    urgentResetAt: urgent?.verdict.governingResetAt ?? null,
+    reason: "ok"
+  };
+}
+
+// src/lane-capacity/url-policy.ts
+function parseIpv4(hostname) {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) return null;
+  const bytes = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9]\d{0,2})$/.test(part)) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    bytes.push(value);
+  }
+  return bytes;
+}
+function parseIpv6(hostname) {
+  const input = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!input.includes(":") || input.includes("%") || input.split("::").length > 2) return null;
+  const parseSide = (side) => {
+    if (!side) return [];
+    const parts = side.split(":");
+    const output = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (part.includes(".")) {
+        if (index !== parts.length - 1) return null;
+        const ipv4 = parseIpv4(part);
+        if (!ipv4) return null;
+        output.push(ipv4[0] << 8 | ipv4[1], ipv4[2] << 8 | ipv4[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+        output.push(Number.parseInt(part, 16));
+      }
+    }
+    return output;
+  };
+  const halves = input.split("::");
+  const left = parseSide(halves[0] ?? "");
+  const right = parseSide(halves[1] ?? "");
+  if (!left || !right) return null;
+  if (halves.length === 1) return left.length === 8 ? left : null;
+  if (left.length + right.length >= 8) return null;
+  return [...left, ...Array(8 - left.length - right.length).fill(0), ...right];
+}
+function isReservedIpv4(bytes) {
+  const [a, b, c] = bytes;
+  return a === 0 || a === 10 || a === 100 && b >= 64 && b <= 127 || a === 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 && c === 0 || a === 192 && b === 0 && c === 2 || a === 192 && b === 88 && c === 99 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 && c === 100 || a === 203 && b === 0 && c === 113 || a >= 224;
+}
+function isReservedIpv6(words) {
+  const allZero = words.every((word) => word === 0);
+  const loopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
+  const ipv4Mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 65535;
+  if (ipv4Mapped) {
+    return isReservedIpv4([
+      words[6] >> 8,
+      words[6] & 255,
+      words[7] >> 8,
+      words[7] & 255
+    ]);
+  }
+  return allZero || loopback || (words[0] & 65024) === 64512 || (words[0] & 65472) === 65152 || (words[0] & 65280) === 65280 || words[0] === 100 && words[1] === 65435 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0 || words[0] === 100 && words[1] === 65435 && words[2] === 1 || words[0] === 256 && words.slice(1, 4).every((word) => word === 0) || words[0] === 8193 && words[1] === 0 || words[0] === 8193 && words[1] === 2 || words[0] === 8193 && (words[1] & 65520) === 16 || words[0] === 8193 && (words[1] & 65520) === 32 || words[0] === 8193 && words[1] === 3512 || words[0] === 8194 || words[0] === 16383 && (words[1] & 61440) === 0;
+}
+function isReservedLiteralHost(hostname) {
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const ipv4 = parseIpv4(host);
+  if (ipv4) return isReservedIpv4(ipv4);
+  const ipv6 = parseIpv6(host);
+  return ipv6 ? isReservedIpv6(ipv6) : false;
+}
+
+// src/lane-capacity/poll.ts
+function verdictFor(document, lane, policy, asOf) {
+  try {
+    return evaluateLanePace({
+      observation: normalizeLaneDocument({ document, definition: lane }),
+      asOf,
+      policy
+    });
+  } catch {
+    return null;
+  }
+}
+async function pollOne(source, http, now) {
+  const fetchedAt = now();
+  const fail = (error) => ({ laneId: source.laneId, fetchedAt, verdict: null, error });
+  let parsed;
+  try {
+    parsed = new URL(source.statusUrl);
+  } catch {
+    return fail("lane-url-rejected");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || isReservedLiteralHost(parsed.hostname)) {
+    return fail("lane-url-rejected");
+  }
+  let response;
+  try {
+    let timer;
+    response = await Promise.race([
+      http.fetch(source.statusUrl, {
+        method: "GET",
+        headers: { Accept: "application/json", "Accept-Encoding": "identity" },
+        redirect: "manual"
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("lane-request-timeout")), source.requestTimeoutMs);
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  } catch {
+    return fail("lane-request-failed");
+  }
+  if (response.redirected || response.status >= 300 && response.status < 400) {
+    return fail("lane-redirect-refused");
+  }
+  if (response.status === 401 || response.status === 403) {
+    return fail("lane-authentication-failed");
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return fail("lane-http-failed");
+  }
+  const mediaType = response.headers.get("content-type")?.toLowerCase().split(";", 1)[0]?.trim();
+  if (!mediaType?.endsWith("/json") && !mediaType?.endsWith("+json")) {
+    return fail("lane-unexpected-media-type");
+  }
+  let text;
+  try {
+    text = await response.text();
+  } catch {
+    return fail("lane-request-failed");
+  }
+  if (new TextEncoder().encode(text).byteLength > source.maxResponseBytes) {
+    return fail("lane-response-too-large");
+  }
+  let document;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return fail("lane-invalid-json");
+  }
+  if (document === null || typeof document !== "object") {
+    return fail("lane-invalid-json");
+  }
+  return {
+    laneId: source.laneId,
+    fetchedAt,
+    verdict: verdictFor(document, source.lane, source.policy, fetchedAt),
+    error: null
+  };
+}
+async function pollLanes(input) {
+  return Promise.all(
+    input.sources.map(
+      (source) => pollOne(source, input.http, input.now).catch(
+        () => ({ laneId: source.laneId, fetchedAt: input.now(), verdict: null, error: "lane-poll-failed" })
+      )
+    )
+  );
 }
 
 // src/worker.ts
@@ -525,6 +1140,40 @@ function createPlugin() {
           signals: Array.isArray(stored.signals) ? stored.signals : []
         };
       };
+      const laneLedgerKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneLedger
+      });
+      const readLaneLedger = async (companyId) => {
+        const stored = await ctx.state.get(laneLedgerKey(companyId));
+        return stored && typeof stored === "object" ? stored : {};
+      };
+      const operatorOverridesKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.operatorOverrides
+      });
+      const readOperatorOverrides = async (companyId) => {
+        const stored = await ctx.state.get(operatorOverridesKey(companyId));
+        return stored && typeof stored === "object" ? stored : {};
+      };
+      const paceRepinHistoryKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.paceRepinHistory
+      });
+      const readPaceRepinHistory = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(paceRepinHistoryKey(companyId)));
+        const history = {};
+        for (const [issueId, at] of Object.entries(stored)) {
+          if (typeof at === "string") history[issueId] = at;
+        }
+        return history;
+      };
+      const laneHttp = {
+        fetch: (url, init) => ctx.http.fetch(url, init)
+      };
       const describeIssue = async (companyId, issueId, supplied) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -533,6 +1182,8 @@ function createPlugin() {
         const pinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const labels = issue.labels ?? [];
         const labelNames = labels.map((label) => label.name).filter((name) => typeof name === "string");
+        const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
+        const isIdle = !issue.checkoutRunId && !issue.executionRunId && scheduledRetryStatus !== "queued" && scheduledRetryStatus !== "running";
         let agentFloorModelId = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
@@ -567,7 +1218,9 @@ function createPlugin() {
           status: String(issue.status ?? ""),
           hasOverride: Object.keys(overrides).length > 0,
           existingLabelIds,
-          hasTierLabel: labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX))
+          hasTierLabel: labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX)),
+          hasOperatorPin: labelNames.includes(OPERATOR_PIN_LABEL),
+          isIdle
         };
       };
       const advise = async (companyId, params) => {
@@ -577,6 +1230,10 @@ function createPlugin() {
         const described = await describeIssue(companyId, issueId, params);
         if (!described) return null;
         const { profiles, signals } = await readProfiles(companyId);
+        const laneLedger = await readLaneLedger(companyId);
+        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+        const overrides = await readOperatorOverrides(companyId);
+        const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
         const decision = selectModel({
           descriptor: described.descriptor,
           config: {
@@ -584,12 +1241,18 @@ function createPlugin() {
             defaultTier: config.selection.defaultTier,
             models: config.models,
             holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
-            stickyWithinIssue: config.selection.stickyModelWithinIssue
+            stickyWithinIssue: config.selection.stickyModelWithinIssue,
+            pacingMode: config.pacing.mode,
+            laneLedger,
+            slotFloorFraction: config.pacing.slotFloorFraction,
+            operatorOverrideModelId: liveOverride?.modelId ?? null
           },
           profiles,
           signals,
           now: Date.now()
         });
+        const pinnedModel = config.models.find((model) => model.id === described.descriptor.pinnedModelId);
+        const isServiceabilityHardStop = config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
         return {
           decision,
@@ -598,6 +1261,10 @@ function createPlugin() {
           hasOverride: described.hasOverride,
           existingLabelIds: described.existingLabelIds,
           hasTierLabel: described.hasTierLabel,
+          hasOperatorPin: described.hasOperatorPin,
+          isIdle: described.isIdle,
+          isServiceabilityHardStop,
+          nowIso,
           config
         };
       };
@@ -624,6 +1291,8 @@ function createPlugin() {
         async (params, runCtx) => {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          const paceRepinEligible = result.hasOverride && result.config.pacing.mode === "enforce";
+          const repinHistory = paceRepinEligible ? await readPaceRepinHistory(runCtx.companyId) : {};
           const plan = planApply(
             result.decision,
             {
@@ -633,7 +1302,17 @@ function createPlugin() {
               // decision (an override outranks it), and inferring "has a label"
               // from "the label decided it" would re-add a duplicate.
               hasExistingTierLabel: result.hasTierLabel,
-              status: result.status
+              status: result.status,
+              ...paceRepinEligible ? {
+                paceRepin: {
+                  hasOperatorPin: result.hasOperatorPin,
+                  isIdle: result.isIdle,
+                  lastRepinAt: repinHistory[result.issueId] ?? null,
+                  now: result.nowIso,
+                  idleRepinHysteresisSeconds: result.config.pacing.idleRepinHysteresisSeconds,
+                  isServiceabilityHardStop: result.isServiceabilityHardStop
+                }
+              } : {}
             },
             result.issueId
           );
@@ -668,7 +1347,48 @@ function createPlugin() {
               trace: result.decision.trace
             }
           });
+          if (paceRepinEligible) {
+            await ctx.state.set(paceRepinHistoryKey(runCtx.companyId), {
+              ...repinHistory,
+              [result.issueId]: result.nowIso
+            });
+          }
           return { content: plan.reason + labelNote, data: { decision: result.decision, plan } };
+        }
+      );
+      ctx.tools.register(
+        TOOL_NAMES.setOperatorOverride,
+        {
+          displayName: "Set an operator override for an issue",
+          description: "Record a time-boxed override: `model_selection_advise`/`apply` will route this issue to the named model ahead of pace ordering and slot throttling, until it expires. It never bypasses a capability gate, tier floor/ceiling, the untrusted-profile hold, or a serviceability hard stop.",
+          parametersSchema: {
+            type: "object",
+            required: ["issueId", "modelId"],
+            properties: {
+              issueId: { type: "string" },
+              modelId: { type: "string" },
+              ttlSeconds: { type: "integer", minimum: 1 }
+            }
+          }
+        },
+        async (params, runCtx) => {
+          const supplied = asRecord(params);
+          const issueId = typeof supplied.issueId === "string" ? supplied.issueId : null;
+          const modelId = typeof supplied.modelId === "string" ? supplied.modelId : null;
+          if (!issueId || !modelId) {
+            return { content: "issueId and modelId are both required.", data: null };
+          }
+          const config = await companyConfig(runCtx.companyId);
+          const ttlSeconds = typeof supplied.ttlSeconds === "number" && supplied.ttlSeconds > 0 ? supplied.ttlSeconds : config.pacing.operatorOverrideTtlSeconds;
+          const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+          const existing = await readOperatorOverrides(runCtx.companyId);
+          const updated = recordOperatorOverride(existing, issueId, modelId, nowIso, ttlSeconds);
+          await ctx.state.set(operatorOverridesKey(runCtx.companyId), updated);
+          const entry = updated[issueId];
+          return {
+            content: `operator override recorded: ${issueId} -> ${modelId}, expires ${entry.expiresAt}`,
+            data: entry
+          };
         }
       );
       ctx.jobs.register(JOB_KEYS.refreshProfiles, async () => {
@@ -714,6 +1434,42 @@ function createPlugin() {
             });
           } catch (cause) {
             ctx.logger.error("volume profile refresh failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.pollLanes, async () => {
+        const companies = await ctx.companies.list();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.pacing.lanes.length === 0) continue;
+            const sources = config.pacing.lanes.map((lane) => ({
+              laneId: lane.laneId,
+              statusUrl: lane.statusUrl,
+              requestTimeoutMs: lane.requestTimeoutMs,
+              maxResponseBytes: lane.maxResponseBytes,
+              lane: lane.lane,
+              policy: lane.policy
+            }));
+            const results = await pollLanes({
+              sources,
+              http: laneHttp,
+              now: () => (/* @__PURE__ */ new Date()).toISOString()
+            });
+            let ledger = await readLaneLedger(company.id);
+            for (const result of results) {
+              ledger = mergeLedgerEntry(ledger, result);
+            }
+            await ctx.state.set(laneLedgerKey(company.id), ledger);
+            ctx.logger.info("lane capacity polled", {
+              companyId: company.id,
+              lanes: results.map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(",")
+            });
+          } catch (cause) {
+            ctx.logger.error("lane capacity poll failed for a company", {
               companyId: company.id,
               error: cause instanceof Error ? cause.message : String(cause)
             });

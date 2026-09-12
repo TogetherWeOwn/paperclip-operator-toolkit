@@ -1,5 +1,6 @@
 import { TIER_LABEL_PREFIX, type Tier } from "../constants.js";
 import type { SelectionDecision } from "../engine/types.js";
+import { repinAllowed, type RepinGateContext } from "../engine/pacing.js";
 
 /**
  * Turning a decision into a board write.
@@ -45,6 +46,13 @@ export interface ApplyContext {
   hasExistingTierLabel: boolean;
   /** Issue status. We do not re-pin work that is already finished. */
   status: string;
+  /**
+   * TOG-2137. Present only when this decision was reached under
+   * `pacing.mode: enforce` and is a candidate for a pace-driven repin of an
+   * issue that already carries an override. Absent entirely for a plain
+   * (non-pacing) re-pin attempt, which keeps the pre-2137 refusal below.
+   */
+  paceRepin?: RepinGateContext;
 }
 
 const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
@@ -76,9 +84,15 @@ export function planApply(
     return nothing(`issue status is ${context.status}; not re-pinning finished work`);
   }
   if (context.hasExistingOverride) {
-    return nothing(
-      "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache",
-    );
+    if (!context.paceRepin) {
+      return nothing(
+        "issue already carries assigneeAdapterOverrides; re-pinning would reset the session and discard the prompt cache",
+      );
+    }
+    const gate = repinAllowed(context.paceRepin);
+    if (!gate.allowed) {
+      return nothing(`pace repin declined: ${gate.reason}`);
+    }
   }
   const tier = decision.effectiveTier;
   return {

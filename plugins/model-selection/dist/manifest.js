@@ -6,7 +6,9 @@ var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
   /** Advise and, if enforcement is on for this company, write the override. */
-  apply: "model_selection_apply"
+  apply: "model_selection_apply",
+  /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
+  setOperatorOverride: "model_selection_set_operator_override"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -14,9 +16,14 @@ var ROUTE_KEYS = {
 };
 var JOB_KEYS = {
   /** Recompute per-tier volume profiles from this company's own runs. */
-  refreshProfiles: "refreshVolumeProfiles"
+  refreshProfiles: "refreshVolumeProfiles",
+  /** Poll configured lane-capacity sources and refresh the lane ledger. */
+  pollLanes: "pollLaneCapacity"
 };
 var TIERS = ["T1", "T2", "T3"];
+var PACING_MODES = ["off", "shadow", "enforce"];
+var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
+var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
 
 // src/config/schema.ts
 var MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
@@ -74,7 +81,9 @@ var SELECTION_CONFIG_SCHEMA = {
            * admission logic remains off until slice 4 implements and validates
            * its deterministic counter and lane gates.
            */
-          earnIn: { type: ["object", "null"], default: null }
+          earnIn: { type: ["object", "null"], default: null },
+          /** TOG-2137: which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
+          laneId: { type: "string", minLength: 1 }
         }
       },
       default: []
@@ -124,6 +133,91 @@ var SELECTION_CONFIG_SCHEMA = {
         t2EscalationCeiling: { type: "number", minimum: 0, maximum: 1, default: 0.15 },
         /** A silent quality failure counts this many escalations. */
         silentFailureWeight: { type: "integer", minimum: 1, default: 10 }
+      },
+      default: {}
+    },
+    /**
+     * TOG-2137: lane-pace polling and pace-first within-tier ordering.
+     * `off` polls nothing. `shadow` (default) polls, records the lane ledger,
+     * and includes the pace-ordering trace, but never lets pace change which
+     * model is selected. `enforce` lets pace reorder candidates within a
+     * tier-cost group (never across an already-decided cost/tier order).
+     */
+    pacing: {
+      type: "object",
+      title: "Lane pacing",
+      additionalProperties: false,
+      properties: {
+        mode: { type: "string", enum: [...PACING_MODES], default: "shadow" },
+        lanes: {
+          type: "array",
+          title: "Lane sources",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["laneId", "statusUrl", "windows"],
+            properties: {
+              laneId: { type: "string", minLength: 1 },
+              statusUrl: {
+                type: "string",
+                minLength: 1,
+                pattern: "^https://[^/?#@]+(?:/[^?#]*)?$"
+              },
+              requestTimeoutMs: { type: "integer", minimum: 1, default: 5e3 },
+              maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
+              /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
+              free: { type: "boolean", default: false },
+              healthFields: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                default: ["health", "status"]
+              },
+              weightFields: {
+                type: "array",
+                items: { type: "string", minLength: 1 },
+                default: ["weight"]
+              },
+              governingWindowField: { type: "string", minLength: 1, default: "governing_window" },
+              windowSecondsField: { type: "string", minLength: 1, default: "window_seconds" },
+              staleAfterSecondsField: { type: "string", minLength: 1, default: "staleAfterSeconds" },
+              windows: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["name", "role", "utilizationFields"],
+                  properties: {
+                    name: { type: "string", minLength: 1 },
+                    role: { type: "string", enum: ["serviceability", "allowance"] },
+                    utilizationFields: {
+                      type: "array",
+                      minItems: 1,
+                      items: { type: "string", minLength: 1 }
+                    },
+                    resetFields: {
+                      type: "array",
+                      items: { type: "string", minLength: 1 },
+                      default: []
+                    },
+                    defaultWindowSeconds: { type: "integer", minimum: 1 }
+                  }
+                }
+              },
+              /** Overrides the pace engine's default margin/urgent-reset/staleness policy for this lane. */
+              margin: { type: "number", minimum: 0, maximum: 1 },
+              urgentResetSeconds: { type: "integer", minimum: 1 },
+              maxSnapshotAgeSeconds: { type: "integer", minimum: 1 }
+            }
+          },
+          default: []
+        },
+        /** Ahead-of-line throttling never drops a lane's slot share below this, while serviceable. */
+        slotFloorFraction: { type: "number", minimum: 0, maximum: 1, default: 0.25 },
+        /** Default TTL applied to an operator override recorded in the lane ledger. */
+        operatorOverrideTtlSeconds: { type: "integer", minimum: 1, default: 3600 },
+        /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
+        idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 }
       },
       default: {}
     }
@@ -186,6 +280,8 @@ var manifest = {
     "api.routes.register",
     "jobs.schedule",
     "companies.read",
+    // TOG-2137: poll operator-configured lane-capacity status URLs.
+    "http.outbound",
     // Recompute volume profiles from heartbeat_runs.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -222,6 +318,12 @@ var manifest = {
       displayName: "Refresh volume profiles",
       description: "Recompute per-tier token volume from this company's own runs. Without this the cost term goes stale and the engine holds at the agent floor rather than guess.",
       schedule: "17 */6 * * *"
+    },
+    {
+      jobKey: JOB_KEYS.pollLanes,
+      displayName: "Poll lane capacity",
+      description: "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+      schedule: "*/5 * * * *"
     }
   ],
   tools: [
@@ -236,6 +338,20 @@ var manifest = {
       displayName: "Apply a model selection to an issue",
       description: "Advise, then write the per-issue override and tier label if enforcement is enabled for this company. No-ops on an issue that already has an override.",
       parametersSchema: DESCRIPTOR_SCHEMA
+    },
+    {
+      name: TOOL_NAMES.setOperatorOverride,
+      displayName: "Set an operator override for an issue",
+      description: "Record a time-boxed override: route this issue to the named model ahead of pace ordering and slot throttling, until it expires. Never bypasses a capability gate, tier floor/ceiling, the untrusted-profile hold, or a serviceability hard stop.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "modelId"],
+        properties: {
+          issueId: { type: "string", minLength: 1 },
+          modelId: { type: "string", minLength: 1 },
+          ttlSeconds: { type: "integer", minimum: 1 }
+        }
+      }
     }
   ],
   apiRoutes: [

@@ -36,6 +36,12 @@ export interface ModelEntry {
   note: string;
   /** Slice-4 policy payload. Stored now, inactive until the earn-in engine ships. */
   earnIn: Record<string, unknown> | null;
+  /**
+   * TOG-2137: which lane-capacity lane governs this model's pace. Optional —
+   * a model with no lane simply never enters pace ordering (`paceStateOf`
+   * degrades to "unknown", the same as an unpolled lane).
+   */
+  laneId?: string | null;
 }
 
 /**
@@ -143,7 +149,7 @@ export interface Candidate extends CostBreakdown {
 export interface Rejection {
   modelId: string;
   /** `tier-floor` keeps work off lower-capability roster rows. */
-  stage: "disabled" | "capability" | "context-window" | "tier-floor" | "no-profile";
+  stage: "disabled" | "capability" | "context-window" | "tier-floor" | "no-profile" | "lane-unserviceable";
   reason: string;
 }
 
@@ -162,4 +168,12 @@ export interface SelectionDecision {
   advisory: boolean;
   /** Set when we deliberately declined to move off the agent floor. */
   heldReason: string | null;
+  /**
+   * TOG-2137. True only in `pacing.mode: enforce`, and only when pace
+   * ordering or the slot throttle actually changed the outcome versus a
+   * pace-less selection. False in `off`/`shadow` (and in `enforce` when
+   * pace agreed with cost ordering already) — this is what a caller checks
+   * before treating the decision as pace-influenced.
+   */
+  pacingApplied: boolean;
 }

@@ -1,6 +1,23 @@
-import type { Tier } from "../constants.js";
-import { TIERS } from "../constants.js";
+import {
+  DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS,
+  DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS,
+  DEFAULT_SLOT_FLOOR_FRACTION,
+  PACING_MODES,
+  TIERS,
+  type PacingMode,
+  type Tier,
+} from "../constants.js";
 import type { ModelEntry } from "../engine/types.js";
+import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
+
+export interface LaneSourceConfig {
+  laneId: string;
+  statusUrl: string;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  lane: LanePaceDefinition;
+  policy: PacePolicy;
+}
 
 export interface ResolvedConfig {
   selection: {
@@ -19,6 +36,13 @@ export interface ResolvedConfig {
   tierLabelIds: Partial<Record<Tier, string>>;
   profiles: { windowDays: number; minSamples: number; maxAgeDays: number };
   quality: { t1EscalationCeiling: number; t2EscalationCeiling: number; silentFailureWeight: number };
+  pacing: {
+    mode: PacingMode;
+    lanes: LaneSourceConfig[];
+    slotFloorFraction: number;
+    operatorOverrideTtlSeconds: number;
+    idleRepinHysteresisSeconds: number;
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -66,6 +90,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const selection = record(root.selection);
   const profiles = record(root.profiles);
   const quality = record(root.quality);
+  const pacing = record(root.pacing);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -88,6 +113,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             fallbackOnly: bool(model.fallbackOnly, false),
             note: string(model.note, ""),
             earnIn: nullableRecord(model.earnIn),
+            laneId: typeof model.laneId === "string" && model.laneId.length > 0 ? model.laneId : null,
           } satisfies ModelEntry,
         ];
       })
@@ -99,6 +125,74 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     const id = rawLabelIds[t];
     if (typeof id === "string" && id.length > 0) tierLabelIds[t] = id;
   }
+
+  const lanes: LaneSourceConfig[] = Array.isArray(pacing.lanes)
+    ? pacing.lanes.flatMap((entry) => {
+        const rawLane = record(entry);
+        if (typeof rawLane.laneId !== "string" || rawLane.laneId.length === 0) return [];
+        if (typeof rawLane.statusUrl !== "string" || rawLane.statusUrl.length === 0) return [];
+        const windows: PaceWindowDefinition[] = Array.isArray(rawLane.windows)
+          ? rawLane.windows.flatMap((w) => {
+              const window = record(w);
+              if (typeof window.name !== "string" || window.name.length === 0) return [];
+              if (window.role !== "serviceability" && window.role !== "allowance") return [];
+              const utilizationFields = Array.isArray(window.utilizationFields)
+                ? window.utilizationFields.filter((f): f is string => typeof f === "string")
+                : [];
+              if (utilizationFields.length === 0) return [];
+              return [
+                {
+                  name: window.name,
+                  role: window.role,
+                  utilizationFields,
+                  resetFields: Array.isArray(window.resetFields)
+                    ? window.resetFields.filter((f): f is string => typeof f === "string")
+                    : [],
+                  defaultWindowSeconds:
+                    typeof window.defaultWindowSeconds === "number" ? window.defaultWindowSeconds : null,
+                } satisfies PaceWindowDefinition,
+              ];
+            })
+          : [];
+        if (windows.length === 0) return [];
+        return [
+          {
+            laneId: rawLane.laneId,
+            statusUrl: rawLane.statusUrl,
+            requestTimeoutMs: num(rawLane.requestTimeoutMs, 5000),
+            maxResponseBytes: num(rawLane.maxResponseBytes, 262_144),
+            lane: {
+              laneId: rawLane.laneId,
+              free: bool(rawLane.free, false),
+              healthFields: Array.isArray(rawLane.healthFields)
+                ? rawLane.healthFields.filter((f): f is string => typeof f === "string")
+                : ["health", "status"],
+              weightFields: Array.isArray(rawLane.weightFields)
+                ? rawLane.weightFields.filter((f): f is string => typeof f === "string")
+                : ["weight"],
+              governingWindowField:
+                typeof rawLane.governingWindowField === "string" ? rawLane.governingWindowField : "governing_window",
+              windowSecondsField:
+                typeof rawLane.windowSecondsField === "string" ? rawLane.windowSecondsField : "window_seconds",
+              staleAfterSecondsField:
+                typeof rawLane.staleAfterSecondsField === "string"
+                  ? rawLane.staleAfterSecondsField
+                  : "staleAfterSeconds",
+              windows,
+            },
+            policy: {
+              ...(typeof rawLane.margin === "number" ? { margin: rawLane.margin } : {}),
+              ...(typeof rawLane.urgentResetSeconds === "number"
+                ? { urgentResetSeconds: rawLane.urgentResetSeconds }
+                : {}),
+              ...(typeof rawLane.maxSnapshotAgeSeconds === "number"
+                ? { maxSnapshotAgeSeconds: rawLane.maxSnapshotAgeSeconds }
+                : {}),
+            },
+          } satisfies LaneSourceConfig,
+        ];
+      })
+    : [];
 
   return {
     selection: {
@@ -119,6 +213,15 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       t1EscalationCeiling: num(quality.t1EscalationCeiling, 0.05),
       t2EscalationCeiling: num(quality.t2EscalationCeiling, 0.15),
       silentFailureWeight: num(quality.silentFailureWeight, 10),
+    },
+    pacing: {
+      mode: (PACING_MODES as readonly string[]).includes(pacing.mode as string)
+        ? (pacing.mode as PacingMode)
+        : "shadow",
+      lanes,
+      slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
+      operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
+      idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS),
     },
   };
 }
@@ -165,5 +268,18 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
       "mode is enforce: this plugin will write assigneeAdapterOverrides. Confirm Stage 2 is stable before running this alongside another live selection change.",
     );
   }
+
+  const laneIds = new Set<string>();
+  for (const lane of config.pacing.lanes) {
+    if (laneIds.has(lane.laneId)) errors.push(`duplicate lane id: ${lane.laneId}`);
+    laneIds.add(lane.laneId);
+  }
+  if (config.pacing.mode !== "off" && config.pacing.lanes.length === 0) {
+    warnings.push(`pacing.mode is ${config.pacing.mode} but no lanes are configured; pace ordering has nothing to key on`);
+  }
+  if (config.pacing.mode === "enforce" && config.pacing.slotFloorFraction <= 0) {
+    errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable — ahead-of-line throttling must never reach zero");
+  }
+
   return { errors, warnings };
 }

@@ -1,4 +1,4 @@
-import type { Tier } from "../constants.js";
+import type { PacingMode, Tier } from "../constants.js";
 import { costOf, resolveProfile, tierIndex } from "./cost.js";
 import { resolveTier } from "./tier.js";
 import type {
@@ -10,6 +10,7 @@ import type {
   SelectionDecision,
   VolumeProfile,
 } from "./types.js";
+import { hardStopExcluded, orderCandidatesByPace, slotAllowed, type LaneLedger } from "./pacing.js";
 
 export interface SelectionConfig {
   /**
@@ -28,6 +29,32 @@ export interface SelectionConfig {
   holdOnUntrustedProfile: boolean;
   /** Keep the model already used on this issue (ADR-0008, Round 4). */
   stickyWithinIssue: boolean;
+  /**
+   * TOG-2137. `off`: no pace involvement at all (skips the hard stop too —
+   * an operator can fully disable this feature). `shadow` (default): the
+   * hard stop and pace ordering both run and are recorded in the trace, but
+   * `pacingApplied` on the decision tells the caller not to treat the result
+   * as different from a pace-less selection for any consequential purpose
+   * (the 48h comparison stream reads this rather than acting on it).
+   * `enforce`: pace ordering and slot throttling actually change which
+   * survivor wins.
+   */
+  pacingMode?: PacingMode;
+  laneLedger?: LaneLedger;
+  slotFloorFraction?: number;
+  /**
+   * TOG-2137. A live (non-expired) operator override for this issue: "route
+   * to this model regardless of pace." It bypasses pace-preference ordering
+   * and the ahead-of-line slot throttle for THIS model only — it never
+   * bypasses a capability gate, a tier floor, the untrusted-profile hold, or
+   * the serviceability hard stop, all of which are safety invariants an
+   * operator override cannot waive (the same rule `repinAllowed` applies to
+   * `pin:operator`: staying pinned to a dead lane is a silent failure, not
+   * "leaving it alone"). Expiry itself is checked by the caller
+   * (`activeOperatorOverride`) before this is ever set; this field is either a
+   * live override or absent.
+   */
+  operatorOverrideModelId?: string | null;
 }
 
 export interface SelectInput {
@@ -56,7 +83,19 @@ export function selectModel(input: SelectInput): SelectionDecision {
     trace,
     advisory: !config.enforcementEnabled,
     heldReason: null,
+    pacingApplied: false,
   };
+
+  // `off` means no pace involvement of any kind, including the hard stop —
+  // an operator can fully disable this feature and get exactly the pre-2137
+  // engine back. `shadow` and `enforce` both run the hard stop and pace
+  // ordering; only `enforce` lets either change which model wins.
+  const pacingMode: PacingMode = config.pacingMode ?? "shadow";
+  const paceActive = pacingMode !== "off";
+  const paceEnforced = pacingMode === "enforce";
+  const ledger: LaneLedger = config.laneLedger ?? {};
+  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
+  const overrideModelId = config.operatorOverrideModelId ?? null;
 
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
@@ -140,6 +179,23 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
+    // Serviceability hard stop (TOG-2137): a lane that is exhausted or
+    // unavailable excludes its model outright, same as a missing capability
+    // — never merely deprioritized. `paceActive` gates this off entirely in
+    // `pacing.mode: off`, and `hardStopExcluded` itself is fail-neutral: an
+    // unpolled or malformed lane (`verdict === null`) excludes nothing.
+    // A serviceability hard stop is never waived by an operator override — the
+    // same rule `repinAllowed` applies to `pin:operator`: staying pinned to a
+    // dead lane is a silent failure, not "leaving it alone", so the strongest
+    // override in this design still yields to it.
+    if (paceActive && hardStopExcluded(ledger, model)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-unserviceable",
+        reason: `lane ${model.laneId ?? "(none)"} is not serviceable`,
+      });
+      continue;
+    }
     qualified.push(model);
   }
 
@@ -200,8 +256,65 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return left.modelId.localeCompare(right.modelId);
   });
 
-  const winner = candidates[0]!;
-  const withCandidates: SelectionDecision = { ...base, candidates, effectiveTier: requiredTier };
+  // Pace ordering (TOG-2137): pace state, deviation, cost, release date, id —
+  // computed and traced whenever pacing is not `off`, but only allowed to
+  // change the winner in `enforce`. `orderCandidatesByPace` partitions by
+  // tier (in cost-sort order) before comparing anything, so this can never
+  // move a candidate ahead of one in a group that already sorted earlier.
+  let orderedCandidates = candidates;
+  if (paceActive) {
+    const paceOrdered = orderCandidatesByPace(candidates, config.models, ledger);
+    const changed = paceOrdered.some((candidate, index) => candidate.modelId !== candidates[index]?.modelId);
+    trace.push(
+      changed
+        ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}`
+        : `pace ordering (${pacingMode}) agrees with cost ordering`,
+    );
+    if (paceEnforced) orderedCandidates = paceOrdered;
+  }
+
+  // Ahead-of-line slot throttling (TOG-2137, enforce only): a candidate whose
+  // lane is `ahead` is capped at `slotFloorFraction` of traffic rather than
+  // excluded — the floor never reaches zero while the lane is serviceable
+  // (serviceability itself was already enforced above as a hard stop, not
+  // here). Throttled-out candidates fall through to the next in order rather
+  // than producing no-eligible-model.
+  let winnerIndex = 0;
+  if (paceEnforced) {
+    // An operator override picks its candidate outright, ahead of pace
+    // ordering and the slot throttle both — it already survived the
+    // capability/tier gates and the serviceability hard stop above (neither
+    // of which an override can waive); the only two things left to skip are
+    // pace preference and ahead-of-line throttling, which this does by
+    // selecting the override's index directly rather than the first
+    // throttle-cleared one.
+    const overrideIndex = overrideModelId
+      ? orderedCandidates.findIndex((candidate) => candidate.modelId === overrideModelId)
+      : -1;
+    if (overrideIndex >= 0) {
+      if (overrideIndex !== 0) {
+        trace.push(`operator override: routing to ${overrideModelId} ahead of pace ordering and slot throttling`);
+      }
+      winnerIndex = overrideIndex;
+    } else {
+      const allowedIndex = orderedCandidates.findIndex((candidate) => {
+        const model = config.models.find((entry) => entry.id === candidate.modelId);
+        return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
+      });
+      if (allowedIndex >= 0) {
+        if (allowedIndex !== 0) {
+          trace.push(
+            `slot throttle: ${orderedCandidates[0]!.modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[allowedIndex]!.modelId}`,
+          );
+        }
+        winnerIndex = allowedIndex;
+      }
+    }
+  }
+
+  const winner = orderedCandidates[winnerIndex]!;
+  const pacingApplied = paceEnforced && winner.modelId !== candidates[0]!.modelId;
+  const withCandidates: SelectionDecision = { ...base, candidates, effectiveTier: requiredTier, pacingApplied };
 
   // An untrusted profile means we do not actually know the volume term. Say so
   // and hold at the floor rather than act on a number we would not defend.

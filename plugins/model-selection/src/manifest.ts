@@ -60,6 +60,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "api.routes.register",
     "jobs.schedule",
     "companies.read",
+    // TOG-2137: poll operator-configured lane-capacity status URLs.
+    "http.outbound",
     // Recompute volume profiles from heartbeat_runs.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -98,6 +100,13 @@ const manifest: PaperclipPluginManifestV1 = {
         "Recompute per-tier token volume from this company's own runs. Without this the cost term goes stale and the engine holds at the agent floor rather than guess.",
       schedule: "17 */6 * * *",
     },
+    {
+      jobKey: JOB_KEYS.pollLanes,
+      displayName: "Poll lane capacity",
+      description:
+        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+      schedule: "*/5 * * * *",
+    },
   ],
   tools: [
     {
@@ -113,6 +122,21 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Advise, then write the per-issue override and tier label if enforcement is enabled for this company. No-ops on an issue that already has an override.",
       parametersSchema: DESCRIPTOR_SCHEMA as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.setOperatorOverride,
+      displayName: "Set an operator override for an issue",
+      description:
+        "Record a time-boxed override: route this issue to the named model ahead of pace ordering and slot throttling, until it expires. Never bypasses a capability gate, tier floor/ceiling, the untrusted-profile hold, or a serviceability hard stop.",
+      parametersSchema: {
+        type: "object",
+        required: ["issueId", "modelId"],
+        properties: {
+          issueId: { type: "string", minLength: 1 },
+          modelId: { type: "string", minLength: 1 },
+          ttlSeconds: { type: "integer", minimum: 1 },
+        },
+      } as unknown as Record<string, unknown>,
     },
   ],
   apiRoutes: [
