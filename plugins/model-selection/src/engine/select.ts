@@ -1,8 +1,11 @@
 import type { PacingMode, Tier } from "../constants.js";
+import type { SelectionObjective } from "../config/resolve.js";
 import { costOf, resolveProfile, tierIndex } from "./cost.js";
+import { computeShadowDiff, orderByObjective } from "./objective.js";
 import { resolveTier } from "./tier.js";
 import type {
   Candidate,
+  CardLedgerEntry,
   IssueDescriptor,
   ModelEntry,
   QualitySignal,
@@ -55,6 +58,20 @@ export interface SelectionConfig {
    * live override or absent.
    */
   operatorOverrideModelId?: string | null;
+  /**
+   * Which cost term orders candidates. Defaults to "list-price" — unchanged
+   * behavior. Composition with pacing (TOG-2137): objective reordering runs
+   * strictly AFTER pace ordering / the ahead-of-line slot throttle and never
+   * bypasses either. Pace encodes hard capacity/serviceability reality
+   * (a lane can only take so much traffic right now); objective encodes a
+   * longer-run cost preference over whichever candidates pace already
+   * cleared. Concretely: `orderByObjective` is applied to `orderedCandidates`
+   * (the pace-ordered array, identical to `candidates` when pacing is
+   * `off`/`shadow` or agreed with cost order), and the slot-throttle winner
+   * index is computed against that same objective-ordered array — so a
+   * throttled-ahead lane is deferred regardless of which objective picked it.
+   */
+  objective?: SelectionObjective;
 }
 
 export interface SelectInput {
@@ -63,6 +80,8 @@ export interface SelectInput {
   profiles: readonly VolumeProfile[];
   signals: readonly QualitySignal[];
   now: number;
+  /** TOG-1917 §2.2 card ledger, keyed `${modelId}:${tier}`. Only consulted for the shadow diff / non-default objective. */
+  cardLedger?: Readonly<Record<string, CardLedgerEntry>>;
 }
 
 export function selectModel(input: SelectInput): SelectionDecision {
@@ -84,6 +103,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     advisory: !config.enforcementEnabled,
     heldReason: null,
     pacingApplied: false,
+    shadowDiff: null,
   };
 
   // `off` means no pace involvement of any kind, including the hard stop —
@@ -279,8 +299,20 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // (serviceability itself was already enforced above as a hard stop, not
   // here). Throttled-out candidates fall through to the next in order rather
   // than producing no-eligible-model.
-  let winnerIndex = 0;
-  if (paceEnforced) {
+  //
+  // Ordering composition (TOG-2136 + TOG-2137): pace answers "what can we
+  // serve right now" (hard stop above, and this throttle) and, in `enforce`,
+  // "what should we prefer right now" (the reorder above). `objective`
+  // answers a separate question — "which of the survivors is cheapest per
+  // accepted card" — and is layered strictly ON TOP of whatever pace already
+  // produced: it is default `list-price`, a documented no-op, so shipped
+  // behavior is unchanged; when explicitly switched, it re-ranks
+  // `orderedCandidates` (the pace-enforced order, or the plain cost order
+  // when pacing is `off`/`shadow`), and this SAME throttle walk below is
+  // re-applied over that re-ranked array so a throttled-ahead lane stays
+  // deferred no matter which objective ranked it first. Capacity safety
+  // (hard stop, slot throttle) always outranks either ordering preference.
+  function pickWinnerIndex(ordered: readonly Candidate[]): number {
     // An operator override picks its candidate outright, ahead of pace
     // ordering and the slot throttle both — it already survived the
     // capability/tier gates and the serviceability hard stop above (neither
@@ -288,33 +320,63 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // pace preference and ahead-of-line throttling, which this does by
     // selecting the override's index directly rather than the first
     // throttle-cleared one.
+    const overrideIndex = overrideModelId ? ordered.findIndex((candidate) => candidate.modelId === overrideModelId) : -1;
+    if (overrideIndex >= 0) return overrideIndex;
+    const allowedIndex = ordered.findIndex((candidate) => {
+      const model = config.models.find((entry) => entry.id === candidate.modelId);
+      return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
+    });
+    return allowedIndex >= 0 ? allowedIndex : 0;
+  }
+
+  let paceWinnerIndex = 0;
+  if (paceEnforced) {
+    paceWinnerIndex = pickWinnerIndex(orderedCandidates);
     const overrideIndex = overrideModelId
       ? orderedCandidates.findIndex((candidate) => candidate.modelId === overrideModelId)
       : -1;
-    if (overrideIndex >= 0) {
+    if (overrideIndex >= 0 && overrideIndex === paceWinnerIndex) {
       if (overrideIndex !== 0) {
         trace.push(`operator override: routing to ${overrideModelId} ahead of pace ordering and slot throttling`);
       }
-      winnerIndex = overrideIndex;
-    } else {
-      const allowedIndex = orderedCandidates.findIndex((candidate) => {
-        const model = config.models.find((entry) => entry.id === candidate.modelId);
-        return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
-      });
-      if (allowedIndex >= 0) {
-        if (allowedIndex !== 0) {
-          trace.push(
-            `slot throttle: ${orderedCandidates[0]!.modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[allowedIndex]!.modelId}`,
-          );
-        }
-        winnerIndex = allowedIndex;
-      }
+    } else if (paceWinnerIndex !== 0) {
+      trace.push(
+        `slot throttle: ${orderedCandidates[0]!.modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[paceWinnerIndex]!.modelId}`,
+      );
     }
   }
 
-  const winner = orderedCandidates[winnerIndex]!;
-  const pacingApplied = paceEnforced && winner.modelId !== candidates[0]!.modelId;
-  const withCandidates: SelectionDecision = { ...base, candidates, effectiveTier: requiredTier, pacingApplied };
+  // `pacingApplied` is measured against the pace-only decision (ignoring
+  // `objective` entirely) so an `objective` switch never taints its meaning —
+  // a caller checking `pacingApplied` is asking specifically "did pace change
+  // this", not "did anything change this".
+  const paceOnlyWinner = orderedCandidates[paceWinnerIndex]!;
+  const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0]!.modelId;
+
+  const listPriceWinner = candidates[0]!;
+  const cardLedger = input.cardLedger ?? {};
+  const shadowDiff = computeShadowDiff(descriptor.issueId, requiredTier, candidates, listPriceWinner.modelId, cardLedger);
+
+  // `objective` never affects `candidates`/`winner` unless explicitly switched
+  // away from the default. Shipped config always leaves this at "list-price"
+  // (TOG-2136 hard constraint) — the alternate ordering above only feeds the
+  // shadow-diff record, observed for 7 days before any enforcement proposal.
+  const objective = config.objective ?? "list-price";
+  let winner = paceOnlyWinner;
+  if (objective === "cost-per-accepted-card") {
+    const objectiveOrdered = orderByObjective(orderedCandidates, objective, cardLedger);
+    if (objectiveOrdered.length > 0) {
+      winner = paceEnforced ? objectiveOrdered[pickWinnerIndex(objectiveOrdered)]! : objectiveOrdered[0]!;
+    }
+  }
+
+  const withCandidates: SelectionDecision = {
+    ...base,
+    candidates,
+    effectiveTier: requiredTier,
+    pacingApplied,
+    shadowDiff,
+  };
 
   // An untrusted profile means we do not actually know the volume term. Say so
   // and hold at the floor rather than act on a number we would not defend.

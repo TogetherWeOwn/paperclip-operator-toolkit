@@ -153,6 +153,19 @@ export interface Rejection {
   reason: string;
 }
 
+/**
+ * Slice 3 shadow comparison: what `cost-per-accepted-card` would have picked
+ * vs. the actual (list-price, unless objective is explicitly switched)
+ * winner. Never affects `modelId`.
+ */
+export interface ShadowDiffRecord {
+  issueId: string;
+  tier: Tier;
+  listPriceWinner: string | null;
+  costPerAcceptedCardWinner: string | null;
+  agree: boolean;
+}
+
 export interface SelectionDecision {
   outcome: Outcome;
   modelId: string | null;
@@ -173,7 +186,92 @@ export interface SelectionDecision {
    * ordering or the slot throttle actually changed the outcome versus a
    * pace-less selection. False in `off`/`shadow` (and in `enforce` when
    * pace agreed with cost ordering already) — this is what a caller checks
-   * before treating the decision as pace-influenced.
+   * before treating the decision as pace-influenced. Computed against the
+   * pre-`objective` candidate order (`candidates[0]`), so an `objective`
+   * switch never taints this flag's meaning.
    */
   pacingApplied: boolean;
+  /** Null when there was nothing to compare. Never affects `modelId`. */
+  shadowDiff: ShadowDiffRecord | null;
+}
+
+/**
+ * Accumulator for one (model, tier) window, mirroring `model_scores.py`'s
+ * `stats` dict shape. `wOk`/`wBad` are recency-weighted (`exp(-age/10)`);
+ * `n`/`ok`/`failInfra`/`tmo` are raw counts, `failModel` is weighted.
+ */
+export interface TierScoreStats {
+  n: number;
+  ok: number;
+  failInfra: number;
+  failModel: number;
+  tmo: number;
+  wOk: number;
+  wBad: number;
+  rework: number;
+  okCost: readonly number[];
+  okMins: readonly number[];
+}
+
+/** Output of `summarize()` — the Bayesian-smoothed success verdict for one (model, tier). */
+export interface TierScore {
+  n: number;
+  ok: number;
+  failInfra: number;
+  failModel: number;
+  tmo: number;
+  nEff: number;
+  pObs: number | null;
+  p: number;
+  capable: boolean | null;
+  proven: boolean;
+  costPerSuccessUsd: number | null;
+  medMin: number | null;
+  rework: number;
+}
+
+export interface ModelScore {
+  modelId: string;
+  aaIndex: number | null;
+  priorP: number;
+  tiers: Record<Tier, TierScore>;
+  overall: TierScore;
+}
+
+/**
+ * Card-level acceptance ledger row (TOG-1917 §2.2), keyed by model+tier.
+ * `pending` cards (closed <14d ago, no reopen/rejection observed yet) are
+ * right-censored: never counted as accepted, never counted as rejected.
+ */
+export interface CardLedgerEntry {
+  modelId: string;
+  tier: Tier;
+  cardsClosed: number;
+  /** Fraction of closed, non-pending cards with no reopen/rejection signal. */
+  acceptRate: number;
+  costPerCard: number | null;
+  runsPerCard: number | null;
+  foreignRunShare: number | null;
+  /** costPerCard / acceptRate. Null when costPerCard is unknown. */
+  costPerAcceptedCard: number | null;
+  /** True when acceptRate/costPerCard are unproven-model fallbacks (priorP / blended list price), not measured. */
+  pending: boolean;
+}
+
+/** Per-model bookkeeping for the Slice-4 bounded T1 earn-in policy (default off). */
+export interface EarnInState {
+  /** Deterministic per-model dispatch counter. Never `Math.random()`. */
+  counter: Record<string, number>;
+  /** Dispatch timestamps (ms) in the current rolling 7-day window, per model. */
+  dispatchedThisWeek: Record<string, number[]>;
+  /** Count of currently-active (dispatched, not yet resolved) earn-in cards, per model. */
+  activePerModel: Record<string, number>;
+  /** Count of currently-active earn-in cards, per lane. */
+  activePerLane: Record<string, string[]>;
+  /** Outcomes of the first 8 dispatched-with-outcome cards per model, oldest first. */
+  firstEightOutcomes: Record<string, ReadonlyArray<"ok" | "material-failure">>;
+  /** Set once a model hits 2 material failures in its first 8, or any safety/authority violation. Sticky. */
+  stopped: Record<string, boolean>;
+  /** Idempotency keys already dispatched (`${issueId}:${modelId}:earnin`). */
+  dispatchedKeys: readonly string[];
 }

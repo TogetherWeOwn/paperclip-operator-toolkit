@@ -62,7 +62,11 @@ const manifest: PaperclipPluginManifestV1 = {
     "companies.read",
     // TOG-2137: poll operator-configured lane-capacity status URLs.
     "http.outbound",
-    // Recompute volume profiles from heartbeat_runs.
+    // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
+    // for the card-level acceptance ledger, since `activity_log` is not an
+    // allowlisted table and cannot be queried directly (TOG-1917 §2.2).
+    "events.subscribe",
+    // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
     // `database`, even one that owns no tables: the validator pairs
@@ -90,7 +94,10 @@ const manifest: PaperclipPluginManifestV1 = {
   database: {
     namespaceSlug: "model_selection",
     migrationsDir: "./migrations",
-    coreReadTables: ["heartbeat_runs"],
+    // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
+    // signals are sourced from captured `ctx.events`, not a live join against a
+    // table this plugin isn't allowlisted to read (TOG-1917 §2.2 / TOG-2136).
+    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations"],
   },
   jobs: [
     {
@@ -106,6 +113,13 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
       schedule: "*/5 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.refreshScores,
+      displayName: "Refresh model scores",
+      description:
+        "Recompute per-model, per-tier Bayesian success scores and the card-level acceptance ledger from this company's own runs and captured rework signals.",
+      schedule: "37 */6 * * *",
     },
   ],
   tools: [

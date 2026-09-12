@@ -177,6 +177,76 @@ additive information rather than a gate (ADR-0008).
 
 ---
 
+## Slices 2–4 (TOG-2136): scores, cost shadowing, bounded T1 earn-in
+
+Approved decisions A and B, implemented **without changing production
+selection** — objective stays `list-price` and earn-in stays disabled until
+their own gates pass. Nothing in this section is wired into `planApply`'s
+enforcement path.
+
+### Model scores + card-level acceptance ledger (`src/engine/scores.ts`)
+
+`refreshScores` is a scheduled job (same cadence family as
+`refreshVolumeProfiles`) that ports `model_scores.py`'s Bayesian
+smoothed-success scoring: `priorP(aaIndex)` seeds a per-model prior, run
+outcomes from `heartbeat_runs` are recency-weighted (`exp(-ageDays/10)`) and
+blended toward it, and a model is `proven` once it has ≥8 weighted-relevant
+outcomes at a tier and `capable` once its blended `p` clears that tier's
+threshold (with a hard-evidence override: enough real evidence at a
+materially lower observed rate forces `capable=false` even if the prior alone
+would have cleared the bar).
+
+One structural deviation from the Python original: `model_scores.py`
+attributes tier via a live SQL join against `issue_labels`/`labels`
+(lines 56–63). Both tables are absent from `PLUGIN_DATABASE_CORE_READ_TABLES`,
+so this plugin cannot do that join. Tier is instead read per distinct issue id
+through `ctx.issues.get()`, which the host already enriches with `.labels` —
+the same mechanism `describeIssue()` uses elsewhere in this plugin. Reopen and
+rejection ("rework") signals are folded in as soft evidence (`failModel`/
+`wBad`, weighted 1.0 within 72h of a reopen or 0.5 within 48h of a rejection)
+via captured `ctx.events` state, never a live `activity_log` read — that table
+is also outside the allowlist.
+
+Alongside `modelScores`, the same job builds the TOG-1917 §2.2 card-level
+acceptance ledger (`buildCardLedger`): each closed card is `pending` (excluded
+from both accepted/rejected) until 14 days past close (`CARD_CENSOR_DAYS`)
+unless it was rejected first, in which case it counts immediately. Both are
+written to `ctx.state` under `PLUGIN_STATE_KEYS.modelScores` as
+`{ modelScores, cardLedger }`.
+
+### `selection.objective` and the 7-day shadow diff (`src/engine/objective.ts`)
+
+`selection.objective` is `"list-price" | "cost-per-accepted-card"`, defaulting
+to `list-price`. Regardless of which objective is configured, `list-price`
+selection is what production actually runs; `cost-per-accepted-card` is
+shadow-only — it is scored against the card ledger and diffed against what
+`list-price` would have picked, never used to make a real selection. That
+diff is what should be reviewed for 7 days before anyone proposes flipping the
+default.
+
+### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
+
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions — TOG-1917 §3
+/ TOG-2048 decision B — covered by `tests/earnIn.spec.ts` but **not called
+from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
+these functions, and the shipped config keeps `earnIn.enabled: false`
+regardless. Gates implemented, in order: enabled check → sticky stop state →
+T1-only → work-class allowlist (`research`/`review`) → todo status → excludes
+(running run, operator pin, capability exclusion, credentials,
+permissions/approvals) → model must be unproven-but-capable at T1 → idempotency
+key → rolling 7-day per-model dispatch cap (`ROLLING_WEEK_MS`, recomputed from
+an explicit `nowMs` on every call, never trusting a caller to have pruned
+stale entries) → per-model active cap → per-lane active cap → **per-tier**
+lane posture (`LanePostureByTier` — a T1 card is gated on the T1 lane's own
+posture, never a collapsed global flag or another tier's lane) → Claude-only
+pace gate (`pacePosture === "behind"` required, ignored for non-Claude models)
+→ deterministic modulus-12 counter (`SELECTION_COUNTER_MODULUS`, never
+`Math.random()`). `recordEarnInOutcome` stops a model (sticky) on 2 material
+first-submission failures within its first 8 outcomes, or immediately on any
+safety/authority violation.
+
+---
+
 ## Typed narrower than the host
 
 Three places where the SDK's types are narrower than what the host actually
@@ -218,7 +288,11 @@ root: `ctx.issues`, `ctx.agents`, `ctx.companies`, `ctx.db`, `ctx.state`, ….
 ```
 npm run verify     # typecheck + tests + named mutants + build
 npm test           # unit + reviewed live-config fixture
-npm run test:mutants  # old tier order, disabled fallback revival, releasedAt removal
+npm run test:mutants  # 12 named mutants: tier order, fallback revival, releasedAt
+                       # removal, rework-as-n, 14-day censor, missing-acceptance
+                       # default, cohort randomization, run/card conflation,
+                       # rolling-clock injection, lane-posture bypass, per-tier
+                       # lane collapse, disallowed activity_log read
 npm run build      # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce

@@ -28,6 +28,13 @@ export const SELECTION_CONFIG_SCHEMA = {
         defaultTier: { type: "string", enum: [...TIERS], default: "T1" },
         stickyModelWithinIssue: { type: "boolean", default: true },
         holdOnUntrustedProfile: { type: "boolean", default: true },
+        /**
+         * Which cost term orders candidates. `list-price` (default) is the
+         * existing `expectedCostUsd` sort, byte-for-byte unchanged.
+         * `cost-per-accepted-card` is Slice 3 (TOG-2048 decision A) — computed
+         * and shadow-diffed for 7 days before this ever flips in a live config.
+         */
+        objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
       },
       default: {},
     },
@@ -199,6 +206,30 @@ export const SELECTION_CONFIG_SCHEMA = {
         operatorOverrideTtlSeconds: { type: "integer", minimum: 1, default: 3600 },
         /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
         idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
+      },
+      default: {},
+    },
+    /**
+     * Slice 4 (TOG-2048 decision B): bounded T1 earn-in for unproven candidate
+     * models. Default OFF — this section being absent, or `enabled: false`,
+     * must leave dispatch behavior byte-for-byte identical to today.
+     */
+    earnIn: {
+      type: "object",
+      title: "Bounded T1 earn-in",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        perModelPerWeek: { type: "integer", minimum: 1, maximum: 8, default: 8 },
+        maxActivePerModel: { type: "integer", minimum: 1, default: 1 },
+        maxActivePerLane: { type: "integer", minimum: 1, default: 1 },
+        classes: {
+          type: "array",
+          items: { type: "string", enum: ["research", "review"] },
+          default: ["research", "review"],
+        },
+        stopOnFirstNFailures: { type: "integer", minimum: 1, default: 2 },
+        stopWindow: { type: "integer", minimum: 1, default: 8 },
       },
       default: {},
     },

@@ -1,5 +1,12 @@
 import type { SelectionConfig } from "../src/engine/select.js";
-import type { ModelEntry, QualitySignal, VolumeProfile } from "../src/engine/types.js";
+import type {
+  CardLedgerEntry,
+  EarnInState,
+  ModelEntry,
+  ModelScore,
+  QualitySignal,
+  VolumeProfile,
+} from "../src/engine/types.js";
 
 function model(entry: Partial<ModelEntry> & Pick<ModelEntry, "id" | "tier">): ModelEntry {
   return {
@@ -86,6 +93,111 @@ export const NO_ESCALATION: QualitySignal[] = [
   { tier: "T3", escalationRate: 0, silentFailureCount: 0, sampleCount: 40, computedAt: FRESH },
   { tier: "T2", escalationRate: 0, silentFailureCount: 0, sampleCount: 103, computedAt: FRESH },
 ];
+
+function tierScore(overrides: Partial<ModelScore["overall"]> = {}): ModelScore["overall"] {
+  return {
+    n: 0,
+    ok: 0,
+    failInfra: 0,
+    failModel: 0,
+    tmo: 0,
+    nEff: 0,
+    pObs: null,
+    p: 0.8,
+    capable: null,
+    proven: false,
+    costPerSuccessUsd: null,
+    medMin: null,
+    rework: 0,
+    ...overrides,
+  };
+}
+
+/** Mirrors `claude-opus-5`/T1's frozen host-evidence.json row (proven, capable, cheap-ish). */
+export const MODEL_SCORES: ModelScore[] = [
+  {
+    modelId: "claude-opus-5",
+    aaIndex: 51,
+    priorP: 0.933,
+    tiers: {
+      T1: tierScore({
+        n: 416,
+        ok: 321,
+        failInfra: 89,
+        failModel: 6,
+        tmo: 3,
+        nEff: 198,
+        pObs: 0.966,
+        p: 0.965,
+        capable: true,
+        proven: true,
+        costPerSuccessUsd: 3.49,
+        medMin: 9.9,
+        rework: 7,
+      }),
+      T2: tierScore({ p: 0.907, capable: true, proven: false }),
+      T3: tierScore({ p: 0.992, capable: true, proven: false }),
+    },
+    overall: tierScore({ n: 416, p: 0.965, capable: true, proven: true }),
+  },
+  {
+    modelId: "cliproxy/gpt-5.6-luna",
+    aaIndex: 43,
+    priorP: 0.873,
+    tiers: {
+      T1: tierScore({ n: 22, ok: 11, p: 0.852, capable: true, proven: true }),
+      T2: tierScore({
+        n: 17,
+        ok: 7,
+        p: 0.729,
+        capable: false,
+        proven: true,
+      }),
+      T3: tierScore({ n: 52, ok: 44, p: 0.981, capable: true, proven: true }),
+    },
+    overall: tierScore({ n: 91, p: 0.9, capable: true, proven: true }),
+  },
+];
+
+export const CARD_LEDGER: Record<string, CardLedgerEntry> = {
+  "claude-opus-5:T1": {
+    modelId: "claude-opus-5",
+    tier: "T1",
+    cardsClosed: 40,
+    acceptRate: 0.9,
+    costPerCard: 3.49,
+    runsPerCard: 1.2,
+    foreignRunShare: 0.05,
+    costPerAcceptedCard: 3.49 / 0.9,
+    pending: false,
+  },
+  "cliproxy/gpt-5.6-luna:T1": {
+    modelId: "cliproxy/gpt-5.6-luna",
+    tier: "T1",
+    cardsClosed: 0,
+    acceptRate: 0.873,
+    costPerCard: 0.35,
+    runsPerCard: null,
+    foreignRunShare: null,
+    costPerAcceptedCard: 0.35 / 0.873,
+    pending: true,
+  },
+};
+
+export function earnInState(overrides: Partial<EarnInState> = {}): EarnInState {
+  return {
+    counter: {},
+    dispatchedThisWeek: {},
+    activePerModel: {},
+    activePerLane: {},
+    firstEightOutcomes: {},
+    stopped: {},
+    dispatchedKeys: [],
+    ...overrides,
+  };
+}
+
+export const EARN_IN_STATE: EarnInState = earnInState();
 
 export function config(overrides: Partial<SelectionConfig> = {}): SelectionConfig {
   return {

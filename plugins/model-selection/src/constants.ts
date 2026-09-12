@@ -24,6 +24,8 @@ export const JOB_KEYS = {
   refreshProfiles: "refreshVolumeProfiles",
   /** Poll configured lane-capacity sources and refresh the lane ledger. */
   pollLanes: "pollLaneCapacity",
+  /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
+  refreshScores: "refreshScores",
 } as const;
 
 /**
@@ -55,6 +57,14 @@ export const PLUGIN_STATE_KEYS = {
   operatorOverrides: "operatorOverrides",
   /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (TOG-2137). */
   paceRepinHistory: "paceRepinHistory",
+  /** `ModelScore[]` written by the `refreshScores` job. */
+  modelScores: "modelScores",
+  /** Reopen/rejection signals captured from `ctx.events` between `refreshScores` runs. */
+  reworkSignals: "reworkSignals",
+  /** Rolling 7-day list-price vs cost-per-accepted-card shadow-diff records (Slice 3). */
+  shadowDiffs: "shadowDiffs",
+  /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
+  earnInState: "earnInState",
 } as const;
 
 export const PACING_MODES = ["off", "shadow", "enforce"] as const;
@@ -68,3 +78,23 @@ export const DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 
 /** A repin below the agent floor's normal churn must wait at least this long, and only while the issue is idle. */
 export const DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
+
+/** Required smoothed success probability to be "capable" for a tier (model_scores.py THRESH). */
+export const SCORE_THRESHOLDS: Record<Tier, number> = { T1: 0.85, T2: 0.8, T3: 0.75 };
+/** Bayesian prior weight — pseudo-observations contributed by `priorP`. */
+export const SCORE_PRIOR_K = 6;
+/** Minimum weighted-outcome count before a (model, tier) verdict is "proven". */
+export const SCORE_PROVEN_N = 8;
+/** A card closed less than this many days ago is right-censored: never accepted, never rejected. */
+export const CARD_CENSOR_DAYS = 14;
+/** `refreshScores` reads this many days of `heartbeat_runs` (model_scores.py WINDOW default). */
+export const SCORE_WINDOW_DAYS = 14;
+/** `refreshScores` reads this many days of closed `issues` for the card-level acceptance ledger. */
+export const CARD_LEDGER_WINDOW_DAYS = 60;
+/** A reopen within this many hours of the closing run counts as rework (model_scores.py:107). */
+export const REOPEN_WINDOW_MS = 72 * 60 * 60 * 1000;
+/** A rejection comment within this many hours of the closing run counts as rework (model_scores.py:123). */
+export const REJECTION_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** Rework weights (model_scores.py:130): a reopen is worse evidence than a review rejection. */
+export const REWORK_WEIGHT_REOPEN = 1.0;
+export const REWORK_WEIGHT_REJECTED = 0.5;

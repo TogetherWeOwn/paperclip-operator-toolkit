@@ -230,4 +230,33 @@ describe("worker", () => {
       expect(q.sql).not.toMatch(/\bfrom\s+labels\b/i);
     }
   });
+
+  it("queries only allowlisted tables when refreshing scores, never activity_log or labels", async () => {
+    harness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+    await harness.runJob("refreshScores");
+    expect(harness.dbQueries.length).toBeGreaterThan(0);
+    for (const q of harness.dbQueries) {
+      // Named mutant: read-disallowed-activity_log — this must never appear,
+      // since activity_log is absent from PLUGIN_DATABASE_CORE_READ_TABLES.
+      expect(q.sql).not.toMatch(/\bfrom\s+activity_log\b/i);
+      expect(q.sql).not.toMatch(/\bfrom\s+labels\b/i);
+      expect(q.sql).not.toMatch(/\bjoin\s+labels\b/i);
+      expect(q.sql).not.toMatch(/\bjoin\s+issue_labels\b/i);
+    }
+  });
+
+  it("writes a modelScores + cardLedger state shape after refreshScores runs", async () => {
+    harness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+    await harness.runJob("refreshScores");
+    const stored = (await harness.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.modelScores,
+    })) as { modelScores: unknown[]; cardLedger: Record<string, unknown> } | undefined;
+    expect(stored).toBeDefined();
+    expect(Array.isArray(stored?.modelScores)).toBe(true);
+    // One row per configured model, even with zero runs observed (model_scores.py's roster union).
+    expect(stored?.modelScores).toHaveLength(MODELS.length);
+    expect(typeof stored?.cardLedger).toBe("object");
+  });
 });

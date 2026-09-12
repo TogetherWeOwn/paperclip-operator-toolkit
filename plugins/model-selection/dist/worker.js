@@ -19,7 +19,9 @@ var JOB_KEYS = {
   /** Recompute per-tier volume profiles from this company's own runs. */
   refreshProfiles: "refreshVolumeProfiles",
   /** Poll configured lane-capacity sources and refresh the lane ledger. */
-  pollLanes: "pollLaneCapacity"
+  pollLanes: "pollLaneCapacity",
+  /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
+  refreshScores: "refreshScores"
 };
 var TIER_LABEL_PREFIX = "tier:";
 var TIERS = ["T1", "T2", "T3"];
@@ -32,12 +34,30 @@ var PLUGIN_STATE_KEYS = {
   /** Per-issue operator overrides, each with an expiry (TOG-2137). */
   operatorOverrides: "operatorOverrides",
   /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (TOG-2137). */
-  paceRepinHistory: "paceRepinHistory"
+  paceRepinHistory: "paceRepinHistory",
+  /** `ModelScore[]` written by the `refreshScores` job. */
+  modelScores: "modelScores",
+  /** Reopen/rejection signals captured from `ctx.events` between `refreshScores` runs. */
+  reworkSignals: "reworkSignals",
+  /** Rolling 7-day list-price vs cost-per-accepted-card shadow-diff records (Slice 3). */
+  shadowDiffs: "shadowDiffs",
+  /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
+  earnInState: "earnInState"
 };
 var PACING_MODES = ["off", "shadow", "enforce"];
 var DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
+var SCORE_THRESHOLDS = { T1: 0.85, T2: 0.8, T3: 0.75 };
+var SCORE_PRIOR_K = 6;
+var SCORE_PROVEN_N = 8;
+var CARD_CENSOR_DAYS = 14;
+var SCORE_WINDOW_DAYS = 14;
+var CARD_LEDGER_WINDOW_DAYS = 60;
+var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
+var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
+var REWORK_WEIGHT_REOPEN = 1;
+var REWORK_WEIGHT_REJECTED = 0.5;
 
 // src/engine/pacing.ts
 function mergeLedgerEntry(ledger, result) {
@@ -219,6 +239,7 @@ function resolveConfig(raw) {
   const profiles = record(root.profiles);
   const quality = record(root.quality);
   const pacing = record(root.pacing);
+  const earnIn = record(root.earnIn);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -298,7 +319,8 @@ function resolveConfig(raw) {
       mode: selection.mode === "enforce" ? "enforce" : "advise",
       defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
-      holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true)
+      holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
+      objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price"
     },
     models,
     tierLabelIds,
@@ -318,6 +340,15 @@ function resolveConfig(raw) {
       slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
       operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
       idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS)
+    },
+    earnIn: {
+      enabled: bool(earnIn.enabled, false),
+      perModelPerWeek: num(earnIn.perModelPerWeek, 8),
+      maxActivePerModel: num(earnIn.maxActivePerModel, 1),
+      maxActivePerLane: num(earnIn.maxActivePerLane, 1),
+      classes: Array.isArray(earnIn.classes) ? earnIn.classes.filter((c) => typeof c === "string") : ["research", "review"],
+      stopOnFirstNFailures: num(earnIn.stopOnFirstNFailures, 2),
+      stopWindow: num(earnIn.stopWindow, 8)
     }
   };
 }
@@ -367,51 +398,17 @@ function validateConfig(config) {
   if (config.pacing.mode === "enforce" && config.pacing.slotFloorFraction <= 0) {
     errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable \u2014 ahead-of-line throttling must never reach zero");
   }
+  if (config.selection.objective === "cost-per-accepted-card") {
+    warnings.push(
+      "selection.objective is cost-per-accepted-card: candidate ordering now depends on the card ledger, not just list price. Confirm the 7-day shadow diff agreed before this was switched."
+    );
+  }
+  if (config.earnIn.enabled) {
+    warnings.push(
+      "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this."
+    );
+  }
   return { errors, warnings };
-}
-
-// src/engine/profiles.ts
-function buildVolumeProfiles(rows, models, computedAt) {
-  const tiersOf = /* @__PURE__ */ new Map();
-  for (const model of models) {
-    if (!model.enabled) continue;
-    const tiers = tiersOf.get(model.id) ?? [];
-    if (!tiers.includes(model.tier)) tiers.push(model.tier);
-    tiersOf.set(model.id, tiers);
-  }
-  const buckets = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const tiers = row.model ? tiersOf.get(row.model) : void 0;
-    if (!tiers || tiers.length !== 1) continue;
-    const tier2 = tiers[0];
-    const input = row.inputTokens ?? 0;
-    const cache = row.cachedInputTokens ?? 0;
-    const output = row.outputTokens ?? 0;
-    if (input === 0 && cache === 0 && output === 0) continue;
-    const bucket = buckets.get(tier2) ?? { n: 0, input: 0, cache: 0, output: 0 };
-    bucket.n += 1;
-    bucket.input += input;
-    bucket.cache += cache;
-    bucket.output += output;
-    buckets.set(tier2, bucket);
-  }
-  return [...buckets.entries()].map(([tier2, bucket]) => ({
-    tier: tier2,
-    sampleCount: bucket.n,
-    computedAt,
-    avgInputTokens: bucket.input / bucket.n,
-    avgCacheReadTokens: bucket.cache / bucket.n,
-    avgOutputTokens: bucket.output / bucket.n
-  }));
-}
-function buildQualitySignals(rows, computedAt) {
-  return rows.map((row) => ({
-    tier: row.tier,
-    escalationRate: row.issues > 0 ? row.escalations / row.issues : 0,
-    silentFailureCount: row.silentFailures,
-    sampleCount: row.issues,
-    computedAt
-  }));
 }
 
 // src/engine/cost.ts
@@ -482,6 +479,76 @@ function costOf(model, profileTier, profiles, models, signals, now) {
     profileTier,
     profileTrusted: verdict.trusted
   };
+}
+
+// src/engine/profiles.ts
+function buildVolumeProfiles(rows, models, computedAt) {
+  const tiersOf = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    if (!model.enabled) continue;
+    const tiers = tiersOf.get(model.id) ?? [];
+    if (!tiers.includes(model.tier)) tiers.push(model.tier);
+    tiersOf.set(model.id, tiers);
+  }
+  const buckets = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const tiers = row.model ? tiersOf.get(row.model) : void 0;
+    if (!tiers || tiers.length !== 1) continue;
+    const tier2 = tiers[0];
+    const input = row.inputTokens ?? 0;
+    const cache = row.cachedInputTokens ?? 0;
+    const output = row.outputTokens ?? 0;
+    if (input === 0 && cache === 0 && output === 0) continue;
+    const bucket = buckets.get(tier2) ?? { n: 0, input: 0, cache: 0, output: 0 };
+    bucket.n += 1;
+    bucket.input += input;
+    bucket.cache += cache;
+    bucket.output += output;
+    buckets.set(tier2, bucket);
+  }
+  return [...buckets.entries()].map(([tier2, bucket]) => ({
+    tier: tier2,
+    sampleCount: bucket.n,
+    computedAt,
+    avgInputTokens: bucket.input / bucket.n,
+    avgCacheReadTokens: bucket.cache / bucket.n,
+    avgOutputTokens: bucket.output / bucket.n
+  }));
+}
+function buildQualitySignals(rows, computedAt) {
+  return rows.map((row) => ({
+    tier: row.tier,
+    escalationRate: row.issues > 0 ? row.escalations / row.issues : 0,
+    silentFailureCount: row.silentFailures,
+    sampleCount: row.issues,
+    computedAt
+  }));
+}
+
+// src/engine/objective.ts
+function costPerAcceptedCardFor(modelId, tier2, ledger) {
+  return ledger[`${modelId}:${tier2}`]?.costPerAcceptedCard ?? null;
+}
+function orderByCostPerAcceptedCard(candidates, ledger) {
+  return candidates.map((candidate) => ({ candidate, cost: costPerAcceptedCardFor(candidate.modelId, candidate.tier, ledger) })).filter((row) => row.cost !== null).sort((a, b) => a.cost - b.cost || a.candidate.modelId.localeCompare(b.candidate.modelId)).map((row) => row.candidate);
+}
+function computeShadowDiff(issueId, tier2, candidates, listPriceWinnerId, ledger) {
+  if (listPriceWinnerId === null) return null;
+  const byCard = orderByCostPerAcceptedCard(candidates, ledger);
+  const costPerAcceptedCardWinner = byCard[0]?.modelId ?? null;
+  if (costPerAcceptedCardWinner === null) return null;
+  return {
+    issueId,
+    tier: tier2,
+    listPriceWinner: listPriceWinnerId,
+    costPerAcceptedCardWinner,
+    agree: costPerAcceptedCardWinner === listPriceWinnerId
+  };
+}
+function orderByObjective(candidates, objective, ledger) {
+  if (objective === "list-price") return [...candidates];
+  const reordered = orderByCostPerAcceptedCard(candidates, ledger);
+  return reordered.length > 0 ? reordered : [...candidates];
 }
 
 // src/engine/tier.ts
@@ -560,7 +627,8 @@ function selectModel(input) {
     trace,
     advisory: !config.enforcementEnabled,
     heldReason: null,
-    pacingApplied: false
+    pacingApplied: false,
+    shadowDiff: null
   };
   const pacingMode = config.pacingMode ?? "shadow";
   const paceActive = pacingMode !== "off";
@@ -695,32 +763,49 @@ function selectModel(input) {
     );
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
-  let winnerIndex = 0;
+  function pickWinnerIndex(ordered) {
+    const overrideIndex = overrideModelId ? ordered.findIndex((candidate) => candidate.modelId === overrideModelId) : -1;
+    if (overrideIndex >= 0) return overrideIndex;
+    const allowedIndex = ordered.findIndex((candidate) => {
+      const model = config.models.find((entry) => entry.id === candidate.modelId);
+      return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
+    });
+    return allowedIndex >= 0 ? allowedIndex : 0;
+  }
+  let paceWinnerIndex = 0;
   if (paceEnforced) {
+    paceWinnerIndex = pickWinnerIndex(orderedCandidates);
     const overrideIndex = overrideModelId ? orderedCandidates.findIndex((candidate) => candidate.modelId === overrideModelId) : -1;
-    if (overrideIndex >= 0) {
+    if (overrideIndex >= 0 && overrideIndex === paceWinnerIndex) {
       if (overrideIndex !== 0) {
         trace.push(`operator override: routing to ${overrideModelId} ahead of pace ordering and slot throttling`);
       }
-      winnerIndex = overrideIndex;
-    } else {
-      const allowedIndex = orderedCandidates.findIndex((candidate) => {
-        const model = config.models.find((entry) => entry.id === candidate.modelId);
-        return !model || slotAllowed(descriptor.issueId, ledger, model, slotFloorFraction);
-      });
-      if (allowedIndex >= 0) {
-        if (allowedIndex !== 0) {
-          trace.push(
-            `slot throttle: ${orderedCandidates[0].modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[allowedIndex].modelId}`
-          );
-        }
-        winnerIndex = allowedIndex;
-      }
+    } else if (paceWinnerIndex !== 0) {
+      trace.push(
+        `slot throttle: ${orderedCandidates[0].modelId} deferred (ahead-of-line, floor ${slotFloorFraction}); using ${orderedCandidates[paceWinnerIndex].modelId}`
+      );
     }
   }
-  const winner = orderedCandidates[winnerIndex];
-  const pacingApplied = paceEnforced && winner.modelId !== candidates[0].modelId;
-  const withCandidates = { ...base, candidates, effectiveTier: requiredTier, pacingApplied };
+  const paceOnlyWinner = orderedCandidates[paceWinnerIndex];
+  const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0].modelId;
+  const listPriceWinner = candidates[0];
+  const cardLedger = input.cardLedger ?? {};
+  const shadowDiff = computeShadowDiff(descriptor.issueId, requiredTier, candidates, listPriceWinner.modelId, cardLedger);
+  const objective = config.objective ?? "list-price";
+  let winner = paceOnlyWinner;
+  if (objective === "cost-per-accepted-card") {
+    const objectiveOrdered = orderByObjective(orderedCandidates, objective, cardLedger);
+    if (objectiveOrdered.length > 0) {
+      winner = paceEnforced ? objectiveOrdered[pickWinnerIndex(objectiveOrdered)] : objectiveOrdered[0];
+    }
+  }
+  const withCandidates = {
+    ...base,
+    candidates,
+    effectiveTier: requiredTier,
+    pacingApplied,
+    shadowDiff
+  };
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     trace.push(`held at agent floor: ${reason}`);
@@ -733,6 +818,212 @@ function selectModel(input) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");
   }
   return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+}
+
+// src/engine/scores.ts
+function priorP(aaIndex) {
+  if (aaIndex === null) return 0.8;
+  return Math.max(0.55, Math.min(1, 0.55 + 0.45 * (aaIndex / 60)));
+}
+function emptyTierScoreStats() {
+  return { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, wOk: 0, wBad: 0, rework: 0, okCost: [], okMins: [] };
+}
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    const lo = sorted[mid - 1];
+    const hi = sorted[mid];
+    return (lo + hi) / 2;
+  }
+  return sorted[mid];
+}
+function round(value, digits) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+function summarize(stats, tier2, priorPValue, priorK = SCORE_PRIOR_K, provenN = SCORE_PROVEN_N, thresholds = SCORE_THRESHOLDS) {
+  const nEff = stats.wOk + stats.wBad;
+  const pObs = nEff > 0 ? stats.wOk / nEff : null;
+  const p = (stats.wOk + priorK * priorPValue) / (nEff + priorK);
+  const thr = tier2 === null ? void 0 : thresholds[tier2];
+  const proven = stats.ok + stats.failModel + stats.tmo >= provenN;
+  let capable = null;
+  if (thr !== void 0) {
+    capable = p >= thr;
+    if (proven && pObs !== null && pObs < thr - 0.1) capable = false;
+  }
+  return {
+    n: stats.n,
+    ok: stats.ok,
+    failInfra: stats.failInfra,
+    failModel: round(stats.failModel, 1),
+    tmo: stats.tmo,
+    nEff: round(nEff, 1),
+    pObs: pObs === null ? null : round(pObs, 3),
+    p: round(p, 3),
+    capable,
+    proven,
+    costPerSuccessUsd: stats.okCost.length ? round(median(stats.okCost), 3) : null,
+    medMin: stats.okMins.length ? round(median(stats.okMins), 1) : null,
+    rework: stats.rework
+  };
+}
+function buildModelScore(modelId, aaIndex, statsByTier, tiers) {
+  const pp = priorP(aaIndex);
+  const tierScores = {};
+  for (const tier2 of tiers) {
+    const stats = statsByTier[tier2];
+    tierScores[tier2] = stats ? summarize(stats, tier2, pp) : {
+      n: 0,
+      ok: 0,
+      failInfra: 0,
+      failModel: 0,
+      tmo: 0,
+      nEff: 0,
+      pObs: null,
+      p: round(pp, 3),
+      capable: pp >= SCORE_THRESHOLDS[tier2],
+      proven: false,
+      costPerSuccessUsd: null,
+      medMin: null,
+      rework: 0
+    };
+  }
+  const agg = emptyTierScoreStats();
+  for (const tier2 of tiers) {
+    const stats = statsByTier[tier2];
+    if (!stats) continue;
+    agg.n += stats.n;
+    agg.ok += stats.ok;
+    agg.failInfra += stats.failInfra;
+    agg.failModel += stats.failModel;
+    agg.tmo += stats.tmo;
+    agg.wOk += stats.wOk;
+    agg.wBad += stats.wBad;
+    agg.rework += stats.rework;
+    agg.okCost.push(...stats.okCost);
+    agg.okMins.push(...stats.okMins);
+  }
+  return {
+    modelId,
+    aaIndex,
+    priorP: round(pp, 3),
+    tiers: tierScores,
+    overall: summarize(agg, null, pp)
+  };
+}
+var FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
+var MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
+var INFRA_RE = /503|502|529|Overloaded|429|exhausted|All credentials|circuit breaker|Stream idle timeout|Stream ended|stalled mid-stream|stopped arriving|mid-response|disabled Claude subscription|ECONN|process_lost|all upstream accounts|not supported for format|issue with the selected model|budget_paused|Missing required permissions|recovery backstop|sandbox gone|401|404/i;
+function normModelId(modelId) {
+  return modelId.replace(/^(cliproxy\/|openrouter\/|opencode-go\/)/, "");
+}
+function classifyRunFailure(errorText, errorCode, modelId) {
+  if (FREE_LANE_RE.test(normModelId(modelId))) return { kind: "model", weight: 1 };
+  if (errorCode === "timeout" || MODEL_FAIL_RE.test(errorText ?? "")) return { kind: "model", weight: 1 };
+  if (INFRA_RE.test(errorText ?? "")) return { kind: "infra", weight: 0 };
+  if (/400 status code \(no body\)/.test(errorText ?? "")) return { kind: "model", weight: 0.5 };
+  return { kind: "model", weight: 0.5 };
+}
+function accumulateRunStats(rows) {
+  const out = {};
+  for (const row of rows) {
+    if (row.tier === null) continue;
+    const modelBucket = out[row.modelId] ?? {};
+    const stats = modelBucket[row.tier] ?? emptyTierScoreStats();
+    const w = Math.exp(-row.ageDays / 10);
+    const next = {
+      ...stats,
+      n: stats.n + 1,
+      okCost: [...stats.okCost],
+      okMins: [...stats.okMins]
+    };
+    if (row.status === "succeeded") {
+      next.ok += 1;
+      next.wOk += w;
+      if (row.costUsd !== null) next.okCost.push(row.costUsd);
+      if (row.mins !== null) next.okMins.push(row.mins);
+    } else if (row.status === "timed_out") {
+      next.tmo += 1;
+      next.wBad += w;
+    } else {
+      const { kind, weight } = classifyRunFailure(row.error, row.errorCode, row.modelId);
+      if (kind === "infra") next.failInfra += 1;
+      else {
+        next.failModel += weight;
+        next.wBad += w * weight;
+      }
+    }
+    modelBucket[row.tier] = next;
+    out[row.modelId] = modelBucket;
+  }
+  return out;
+}
+function foldReworkIntoStats(stats, reworkEvents) {
+  const out = {};
+  for (const [modelId, byTier] of Object.entries(stats)) {
+    out[modelId] = { ...byTier };
+  }
+  for (const event of reworkEvents) {
+    const weight = event.kind === "reopen" ? REWORK_WEIGHT_REOPEN : REWORK_WEIGHT_REJECTED;
+    const modelBucket = out[event.modelId] ?? {};
+    const tierStats = modelBucket[event.tier] ?? emptyTierScoreStats();
+    modelBucket[event.tier] = {
+      ...tierStats,
+      failModel: tierStats.failModel + weight,
+      wBad: tierStats.wBad + weight,
+      rework: tierStats.rework + 1
+    };
+    out[event.modelId] = modelBucket;
+  }
+  return out;
+}
+function findClosingRun(issueId, atMs, windowMs, closingRuns, excludeAgentId) {
+  let best = null;
+  for (const run of closingRuns) {
+    if (run.issueId !== issueId || run.tier === null) continue;
+    if (excludeAgentId != null && run.agentId === excludeAgentId) continue;
+    const delta = atMs - run.finishedAtMs;
+    if (delta < 0 || delta > windowMs) continue;
+    if (!best || run.finishedAtMs > best.finishedAtMs) best = run;
+  }
+  return best;
+}
+function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
+  const byKey = /* @__PURE__ */ new Map();
+  for (const card of cards) {
+    const key = `${card.modelId}\0${card.tier}`;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.push(card);
+    else byKey.set(key, [card]);
+  }
+  const out = {};
+  for (const [key, rows] of byKey) {
+    const [modelId, tier2] = key.split("\0");
+    const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1e3;
+    const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
+    const accepted = resolved.filter((r) => !r.rejected);
+    const costs = resolved.map((r) => r.costUsd).filter((c) => c !== null);
+    const runs = resolved.map((r) => r.runCount);
+    const foreignCount = resolved.filter((r) => r.foreignRun).length;
+    const measured = resolved.length > 0;
+    const acceptRate = measured ? accepted.length / resolved.length : priorPByModel[modelId] ?? 0.8;
+    const costPerCard = costs.length ? costs.reduce((a, b) => a + b, 0) / costs.length : blendedListPriceByModel[modelId] ?? null;
+    out[key.replace("\0", ":")] = {
+      modelId,
+      tier: tier2,
+      cardsClosed: rows.length,
+      acceptRate,
+      costPerCard,
+      runsPerCard: runs.length ? runs.reduce((a, b) => a + b, 0) / runs.length : null,
+      foreignRunShare: resolved.length ? foreignCount / resolved.length : null,
+      costPerAcceptedCard: costPerCard !== null && acceptRate > 0 ? costPerCard / acceptRate : null,
+      pending: !measured
+    };
+  }
+  return out;
 }
 
 // src/lane-capacity/value-normalization.ts
@@ -1174,6 +1465,30 @@ function createPlugin() {
       const laneHttp = {
         fetch: (url, init) => ctx.http.fetch(url, init)
       };
+      const reworkSignalsKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.reworkSignals
+      });
+      const readReworkSignals = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(reworkSignalsKey(companyId)));
+        return Array.isArray(stored.signals) ? stored.signals : [];
+      };
+      const scoresKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.modelScores
+      });
+      const readCardLedger = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
+        const ledger = asRecord(stored.cardLedger);
+        return ledger;
+      };
+      const shadowDiffsKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.shadowDiffs
+      });
       const describeIssue = async (companyId, issueId, supplied) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -1234,6 +1549,7 @@ function createPlugin() {
         const nowIso = (/* @__PURE__ */ new Date()).toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
+        const cardLedger = await readCardLedger(companyId);
         const decision = selectModel({
           descriptor: described.descriptor,
           config: {
@@ -1245,15 +1561,27 @@ function createPlugin() {
             pacingMode: config.pacing.mode,
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
-            operatorOverrideModelId: liveOverride?.modelId ?? null
+            operatorOverrideModelId: liveOverride?.modelId ?? null,
+            objective: config.selection.objective
           },
           profiles,
           signals,
-          now: Date.now()
+          now: Date.now(),
+          cardLedger
         });
         const pinnedModel = config.models.find((model) => model.id === described.descriptor.pinnedModelId);
         const isServiceabilityHardStop = config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
+        if (decision.shadowDiff) {
+          const stored = asRecord(await ctx.state.get(shadowDiffsKey(companyId)));
+          const existing = Array.isArray(stored.records) ? stored.records : [];
+          const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1e3;
+          const records = [
+            ...existing.filter((r) => r.atMs >= cutoffMs),
+            { ...decision.shadowDiff, atMs: Date.now() }
+          ];
+          await ctx.state.set(shadowDiffsKey(companyId), { records });
+        }
         return {
           decision,
           issueId,
@@ -1391,6 +1719,41 @@ function createPlugin() {
           };
         }
       );
+      const appendReworkSignal = async (companyId, signal) => {
+        const existing = await readReworkSignals(companyId);
+        const cutoffMs = Date.now() - SCORE_WINDOW_DAYS * 2 * 24 * 60 * 60 * 1e3;
+        const pruned = existing.filter((s) => s.atMs >= cutoffMs);
+        await ctx.state.set(reworkSignalsKey(companyId), { signals: [...pruned, signal] });
+      };
+      ctx.events.on("issue.updated", async (event) => {
+        const payload = asRecord(event.payload);
+        const changes = asRecord(payload.changes);
+        const status = asRecord(changes.status);
+        const from = typeof status.from === "string" ? status.from : null;
+        const to = typeof status.to === "string" ? status.to : null;
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        if (!issueId || from !== "done" || to === "done" || to === "cancelled" || !to) return;
+        await appendReworkSignal(event.companyId, {
+          issueId,
+          atMs: Date.parse(event.occurredAt) || Date.now(),
+          kind: "reopen",
+          excludeAgentId: null
+        });
+      });
+      const REJECTION_RE = /request(ed)? changes|^## *(rejected|fail|blocked by review)|not accepted|changes requested|re-?do this|does not pass review/i;
+      ctx.events.on("issue.comment.created", async (event) => {
+        const payload = asRecord(event.payload);
+        const snippet = typeof payload.bodySnippet === "string" ? payload.bodySnippet : "";
+        if (!REJECTION_RE.test(snippet)) return;
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        if (!issueId) return;
+        await appendReworkSignal(event.companyId, {
+          issueId,
+          atMs: Date.parse(event.occurredAt) || Date.now(),
+          kind: "rejected",
+          excludeAgentId: typeof event.actorId === "string" ? event.actorId : null
+        });
+      });
       ctx.jobs.register(JOB_KEYS.refreshProfiles, async () => {
         const companies = await ctx.companies.list();
         for (const company of companies) {
@@ -1470,6 +1833,180 @@ function createPlugin() {
             });
           } catch (cause) {
             ctx.logger.error("lane capacity poll failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.refreshScores, async () => {
+        const companies = await ctx.companies.list();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.models.length === 0) continue;
+            const scoreRunRows = await ctx.db.query(
+              `select r.usage_json->>'model' as model,
+                      r.status as status,
+                      coalesce(r.context_snapshot->>'issueId','') as issue_id,
+                      coalesce(r.error_code,'') as error_code,
+                      left(coalesce(r.error,''),200) as error,
+                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
+                      extract(epoch from (r.finished_at - r.started_at))/60.0 as mins,
+                      extract(epoch from (now() - r.created_at))/86400.0 as age_days
+                 from heartbeat_runs r
+                where r.company_id = $1
+                  and r.created_at > now() - ($2 || ' days')::interval
+                  and r.usage_json ? 'model'
+                  and r.status in ('succeeded','failed','timed_out')
+                  and r.usage_json->>'model' not in ('unknown','auto/best-coding')
+                  and r.finished_at is not null`,
+              [company.id, String(SCORE_WINDOW_DAYS)]
+            );
+            const closingRunRows = await ctx.db.query(
+              `select coalesce(r.context_snapshot->>'issueId','') as issue_id,
+                      r.usage_json->>'model' as model,
+                      coalesce(r.agent_id::text,'') as agent_id,
+                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
+                      extract(epoch from r.finished_at) * 1000 as finished_at_ms
+                 from heartbeat_runs r
+                where r.company_id = $1
+                  and r.status = 'succeeded'
+                  and r.finished_at > now() - ($2 || ' days')::interval
+                  and r.usage_json ? 'model'`,
+              [company.id, String(CARD_LEDGER_WINDOW_DAYS)]
+            );
+            const issueIds = /* @__PURE__ */ new Set();
+            for (const row of scoreRunRows) {
+              const r = asRecord(row);
+              if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
+            }
+            for (const row of closingRunRows) {
+              const r = asRecord(row);
+              if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
+            }
+            const tierByIssue = /* @__PURE__ */ new Map();
+            for (const issueId of issueIds) {
+              try {
+                const issue = await ctx.issues.get(issueId, company.id);
+                const labelNames = (issue?.labels ?? []).map((label) => label.name).filter((name) => typeof name === "string");
+                const tierLabel = labelNames.find((name) => name.startsWith(TIER_LABEL_PREFIX));
+                const tierValue = tierLabel ? tierLabel.slice(TIER_LABEL_PREFIX.length) : null;
+                tierByIssue.set(
+                  issueId,
+                  tierValue && TIERS.includes(tierValue) ? tierValue : null
+                );
+              } catch {
+                tierByIssue.set(issueId, null);
+              }
+            }
+            const toNumber = (value) => {
+              if (typeof value === "number") return Number.isFinite(value) ? value : null;
+              if (typeof value === "string" && value.length > 0) {
+                const parsed = Number(value);
+                return Number.isFinite(parsed) ? parsed : null;
+              }
+              return null;
+            };
+            const runOutcomeRows = scoreRunRows.map((row) => {
+              const r = asRecord(row);
+              const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
+              return {
+                modelId: typeof r.model === "string" ? r.model : "",
+                tier: issueId ? tierByIssue.get(issueId) ?? null : null,
+                status: r.status,
+                errorCode: typeof r.error_code === "string" && r.error_code ? r.error_code : null,
+                error: typeof r.error === "string" && r.error ? r.error : null,
+                costUsd: toNumber(r.cost_usd),
+                mins: toNumber(r.mins),
+                ageDays: toNumber(r.age_days) ?? 0
+              };
+            });
+            let statsByModel = accumulateRunStats(runOutcomeRows);
+            const closingRuns = closingRunRows.map((row) => {
+              const r = asRecord(row);
+              const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
+              return {
+                issueId,
+                modelId: typeof r.model === "string" ? r.model : "",
+                tier: issueId ? tierByIssue.get(issueId) ?? null : null,
+                finishedAtMs: toNumber(r.finished_at_ms) ?? 0,
+                agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null
+              };
+            });
+            const reworkSignals = await readReworkSignals(company.id);
+            const reworkEvents = [];
+            const rejectedIssueIds = /* @__PURE__ */ new Set();
+            for (const signal of reworkSignals) {
+              const windowMs = signal.kind === "reopen" ? REOPEN_WINDOW_MS : REJECTION_WINDOW_MS;
+              const closing = findClosingRun(signal.issueId, signal.atMs, windowMs, closingRuns, signal.excludeAgentId);
+              if (!closing || closing.tier === null) continue;
+              reworkEvents.push({ modelId: closing.modelId, tier: closing.tier, kind: signal.kind });
+              rejectedIssueIds.add(signal.issueId);
+            }
+            statsByModel = foldReworkIntoStats(statsByModel, reworkEvents);
+            const modelScores = config.models.map(
+              (model) => buildModelScore(model.id, model.aaIndex, statsByModel[model.id] ?? {}, TIERS)
+            );
+            const cardIssueRows = await ctx.db.query(
+              `select id::text as id,
+                      extract(epoch from coalesce(completed_at, cancelled_at)) * 1000 as closed_at_ms,
+                      assignee_adapter_overrides->'adapterConfig'->>'model' as pinned_model
+                 from issues
+                where company_id = $1
+                  and coalesce(completed_at, cancelled_at) is not null
+                  and coalesce(completed_at, cancelled_at) > now() - ($2 || ' days')::interval`,
+              [company.id, String(CARD_LEDGER_WINDOW_DAYS)]
+            );
+            const latestClosingRunByIssue = /* @__PURE__ */ new Map();
+            const runCountByIssue = /* @__PURE__ */ new Map();
+            for (const [index, run] of closingRuns.entries()) {
+              if (!run.issueId) continue;
+              runCountByIssue.set(run.issueId, (runCountByIssue.get(run.issueId) ?? 0) + 1);
+              const existing = latestClosingRunByIssue.get(run.issueId);
+              if (!existing || run.finishedAtMs > existing.finishedAtMs) {
+                const costUsd = toNumber(asRecord(closingRunRows[index]).cost_usd);
+                latestClosingRunByIssue.set(run.issueId, { ...run, costUsd });
+              }
+            }
+            const cardRows = [];
+            for (const row of cardIssueRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              if (!issueId) continue;
+              const closingRun = latestClosingRunByIssue.get(issueId);
+              if (!closingRun || closingRun.tier === null) continue;
+              const pinnedModel = typeof r.pinned_model === "string" && r.pinned_model ? r.pinned_model : null;
+              cardRows.push({
+                modelId: closingRun.modelId,
+                tier: closingRun.tier,
+                closedAtMs: toNumber(r.closed_at_ms) ?? 0,
+                rejected: rejectedIssueIds.has(issueId),
+                costUsd: closingRun.costUsd,
+                runCount: runCountByIssue.get(issueId) ?? 1,
+                foreignRun: pinnedModel !== null && pinnedModel !== closingRun.modelId
+              });
+            }
+            const priorPByModel = {};
+            const blendedListPriceByModel = {};
+            for (const model of config.models) {
+              priorPByModel[model.id] = priorP(model.aaIndex);
+              blendedListPriceByModel[model.id] = null;
+            }
+            const cardLedger = buildCardLedger(
+              cardRows,
+              Date.now(),
+              priorPByModel,
+              blendedListPriceByModel
+            );
+            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger });
+            ctx.logger.info("model scores refreshed", {
+              companyId: company.id,
+              models: modelScores.length,
+              cardsInLedger: cardRows.length
+            });
+          } catch (cause) {
+            ctx.logger.error("score refresh failed for a company", {
               companyId: company.id,
               error: cause instanceof Error ? cause.message : String(cause)
             });

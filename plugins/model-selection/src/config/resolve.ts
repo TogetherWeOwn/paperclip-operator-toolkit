@@ -19,6 +19,8 @@ export interface LaneSourceConfig {
   policy: PacePolicy;
 }
 
+export type SelectionObjective = "list-price" | "cost-per-accepted-card";
+
 export interface ResolvedConfig {
   selection: {
     enabled: boolean;
@@ -26,6 +28,7 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
+    objective: SelectionObjective;
   };
   models: ModelEntry[];
   /**
@@ -42,6 +45,15 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
+  };
+  earnIn: {
+    enabled: boolean;
+    perModelPerWeek: number;
+    maxActivePerModel: number;
+    maxActivePerLane: number;
+    classes: readonly string[];
+    stopOnFirstNFailures: number;
+    stopWindow: number;
   };
 }
 
@@ -91,6 +103,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const profiles = record(root.profiles);
   const quality = record(root.quality);
   const pacing = record(root.pacing);
+  const earnIn = record(root.earnIn);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -201,6 +214,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
+      objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
     },
     models,
     tierLabelIds,
@@ -222,6 +236,17 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
       operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
       idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS),
+    },
+    earnIn: {
+      enabled: bool(earnIn.enabled, false),
+      perModelPerWeek: num(earnIn.perModelPerWeek, 8),
+      maxActivePerModel: num(earnIn.maxActivePerModel, 1),
+      maxActivePerLane: num(earnIn.maxActivePerLane, 1),
+      classes: Array.isArray(earnIn.classes)
+        ? earnIn.classes.filter((c): c is string => typeof c === "string")
+        : ["research", "review"],
+      stopOnFirstNFailures: num(earnIn.stopOnFirstNFailures, 2),
+      stopWindow: num(earnIn.stopWindow, 8),
     },
   };
 }
@@ -281,5 +306,15 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable — ahead-of-line throttling must never reach zero");
   }
 
+  if (config.selection.objective === "cost-per-accepted-card") {
+    warnings.push(
+      "selection.objective is cost-per-accepted-card: candidate ordering now depends on the card ledger, not just list price. Confirm the 7-day shadow diff agreed before this was switched.",
+    );
+  }
+  if (config.earnIn.enabled) {
+    warnings.push(
+      "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this.",
+    );
+  }
   return { errors, warnings };
 }

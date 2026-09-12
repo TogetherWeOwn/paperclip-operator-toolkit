@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { selectModel } from "../src/engine/select.js";
-import type { ModelEntry, VolumeProfile } from "../src/engine/types.js";
+import type { LaneLedger } from "../src/engine/pacing.js";
+import type { CardLedgerEntry, ModelEntry, VolumeProfile } from "../src/engine/types.js";
+import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 const base = { profiles: PROFILES, signals: NO_ESCALATION, now: NOW };
@@ -229,5 +231,107 @@ describe("selection", () => {
       config: config({ models: [zeta, alpha] }),
     });
     expect(decision.modelId).toBe("alpha");
+  });
+});
+
+describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
+  // Two T1 candidates: `cheap-ahead` is the list-price winner AND has the best
+  // (lowest) cost-per-accepted-card, but its lane is running `ahead` of pace.
+  // `pricier-on-pace` costs 2x as much but its lane is `on` pace. This is
+  // engineered so `objective: "cost-per-accepted-card"` would rank
+  // `cheap-ahead` first no matter what order it's handed — the only thing
+  // that can stop it winning is the ahead-of-line slot throttle being
+  // re-applied AFTER objective reordering, exactly as documented in
+  // select.ts's `pickWinnerIndex` comment.
+  function paceVerdict(overrides: Partial<LanePaceVerdict> = {}): LanePaceVerdict {
+    return {
+      laneId: "lane-ahead",
+      observedAt: "2026-09-10T12:00:00.000Z",
+      state: "ahead",
+      serviceable: true,
+      score: { utilization: 0.9, elapsed: 0.5, deviation: 0 },
+      accounts: [],
+      knownAccountCount: 1,
+      knownWeight: 1,
+      serviceableAccountCount: 1,
+      urgentResetAt: null,
+      reason: "ok",
+      ...overrides,
+    };
+  }
+
+  const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+  const cheapAhead = model(t1, { id: "cheap-ahead", laneId: "lane-ahead" });
+  const pricierOnPace = model(t1, {
+    id: "pricier-on-pace",
+    laneId: "lane-on",
+    costPerMTokIn: t1.costPerMTokIn * 2,
+    costPerMTokOut: t1.costPerMTokOut * 2,
+    costPerMTokCacheRead: t1.costPerMTokCacheRead * 2,
+  });
+
+  const laneLedger: LaneLedger = {
+    "lane-ahead": { laneId: "lane-ahead", fetchedAt: "t", error: null, verdict: paceVerdict({ laneId: "lane-ahead", state: "ahead" }) },
+    "lane-on": { laneId: "lane-on", fetchedAt: "t", error: null, verdict: paceVerdict({ laneId: "lane-on", state: "on" }) },
+  };
+
+  const cardLedger: Record<string, CardLedgerEntry> = {
+    "cheap-ahead:T1": {
+      modelId: "cheap-ahead",
+      tier: "T1",
+      cardsClosed: 40,
+      acceptRate: 0.95,
+      costPerCard: 1,
+      runsPerCard: 1,
+      foreignRunShare: 0,
+      costPerAcceptedCard: 1,
+      pending: false,
+    },
+    "pricier-on-pace:T1": {
+      modelId: "pricier-on-pace",
+      tier: "T1",
+      cardsClosed: 40,
+      acceptRate: 0.95,
+      costPerCard: 5,
+      runsPerCard: 1,
+      foreignRunShare: 0,
+      costPerAcceptedCard: 5,
+      pending: false,
+    },
+  };
+
+  function composedDecision() {
+    return selectModel({
+      ...base,
+      descriptor: { issueId: "pace-objective-composition-1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [cheapAhead, pricierOnPace],
+        enforcementEnabled: true,
+        pacingMode: "enforce",
+        laneLedger,
+        slotFloorFraction: 0,
+        objective: "cost-per-accepted-card",
+      }),
+      cardLedger,
+    });
+  }
+
+  it("re-applies the ahead-of-line slot throttle over the objective-reordered array, so a throttled-ahead lane cannot win by objective alone", () => {
+    const decision = composedDecision();
+    expect(decision.candidates.map((c) => c.modelId)).toEqual(["cheap-ahead", "pricier-on-pace"]);
+    expect(decision.modelId).toBe("pricier-on-pace");
+  });
+
+  it("computes pacingApplied against the pace-only winner, independent of the objective's effect", () => {
+    const decision = composedDecision();
+    expect(decision.pacingApplied).toBe(true);
+  });
+
+  it("keeps shadowDiff comparing against the true list-price winner, unaffected by pacing or objective", () => {
+    const decision = composedDecision();
+    expect(decision.shadowDiff).not.toBeNull();
+    expect(decision.shadowDiff?.listPriceWinner).toBe("cheap-ahead");
+    expect(decision.shadowDiff?.costPerAcceptedCardWinner).toBe("cheap-ahead");
+    expect(decision.shadowDiff?.agree).toBe(true);
   });
 });

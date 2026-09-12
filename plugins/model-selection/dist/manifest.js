@@ -18,12 +18,16 @@ var JOB_KEYS = {
   /** Recompute per-tier volume profiles from this company's own runs. */
   refreshProfiles: "refreshVolumeProfiles",
   /** Poll configured lane-capacity sources and refresh the lane ledger. */
-  pollLanes: "pollLaneCapacity"
+  pollLanes: "pollLaneCapacity",
+  /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
+  refreshScores: "refreshScores"
 };
 var TIERS = ["T1", "T2", "T3"];
 var PACING_MODES = ["off", "shadow", "enforce"];
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
+var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
+var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
 
 // src/config/schema.ts
 var MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
@@ -47,7 +51,14 @@ var SELECTION_CONFIG_SCHEMA = {
         mode: { type: "string", enum: ["advise", "enforce"], default: "advise" },
         defaultTier: { type: "string", enum: [...TIERS], default: "T1" },
         stickyModelWithinIssue: { type: "boolean", default: true },
-        holdOnUntrustedProfile: { type: "boolean", default: true }
+        holdOnUntrustedProfile: { type: "boolean", default: true },
+        /**
+         * Which cost term orders candidates. `list-price` (default) is the
+         * existing `expectedCostUsd` sort, byte-for-byte unchanged.
+         * `cost-per-accepted-card` is Slice 3 (TOG-2048 decision A) — computed
+         * and shadow-diffed for 7 days before this ever flips in a live config.
+         */
+        objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" }
       },
       default: {}
     },
@@ -220,6 +231,30 @@ var SELECTION_CONFIG_SCHEMA = {
         idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 }
       },
       default: {}
+    },
+    /**
+     * Slice 4 (TOG-2048 decision B): bounded T1 earn-in for unproven candidate
+     * models. Default OFF — this section being absent, or `enabled: false`,
+     * must leave dispatch behavior byte-for-byte identical to today.
+     */
+    earnIn: {
+      type: "object",
+      title: "Bounded T1 earn-in",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        perModelPerWeek: { type: "integer", minimum: 1, maximum: 8, default: 8 },
+        maxActivePerModel: { type: "integer", minimum: 1, default: 1 },
+        maxActivePerLane: { type: "integer", minimum: 1, default: 1 },
+        classes: {
+          type: "array",
+          items: { type: "string", enum: ["research", "review"] },
+          default: ["research", "review"]
+        },
+        stopOnFirstNFailures: { type: "integer", minimum: 1, default: 2 },
+        stopWindow: { type: "integer", minimum: 1, default: 8 }
+      },
+      default: {}
     }
   }
 };
@@ -282,7 +317,11 @@ var manifest = {
     "companies.read",
     // TOG-2137: poll operator-configured lane-capacity status URLs.
     "http.outbound",
-    // Recompute volume profiles from heartbeat_runs.
+    // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
+    // for the card-level acceptance ledger, since `activity_log` is not an
+    // allowlisted table and cannot be queried directly (TOG-1917 §2.2).
+    "events.subscribe",
+    // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
     // `database`, even one that owns no tables: the validator pairs
@@ -310,7 +349,10 @@ var manifest = {
   database: {
     namespaceSlug: "model_selection",
     migrationsDir: "./migrations",
-    coreReadTables: ["heartbeat_runs"]
+    // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
+    // signals are sourced from captured `ctx.events`, not a live join against a
+    // table this plugin isn't allowlisted to read (TOG-1917 §2.2 / TOG-2136).
+    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations"]
   },
   jobs: [
     {
@@ -324,6 +366,12 @@ var manifest = {
       displayName: "Poll lane capacity",
       description: "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
       schedule: "*/5 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.refreshScores,
+      displayName: "Refresh model scores",
+      description: "Recompute per-model, per-tier Bayesian success scores and the card-level acceptance ledger from this company's own runs and captured rework signals.",
+      schedule: "37 */6 * * *"
     }
   ],
   tools: [
