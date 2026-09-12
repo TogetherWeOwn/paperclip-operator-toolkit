@@ -67,10 +67,32 @@ REAL_AGENT_PREFIXES='6a02a7ed|974632dd'
 #      and had to be killed by the operator.
 # /app/server/dist is the shipped server -- the thing a "does this symbol exist
 # in the product" question is actually about.
+#
+# INSTALLED PLUGINS ARE IN SCOPE, AND THEIR node_modules PRUNE IS LIFTED.
+# A vendor plugin ships as a package under the plugin root, so it is excluded
+# twice over by the two rules above: it is outside both roots, AND it lives
+# under a node_modules/ path. That made check 6 report an INSTALLED vendor file
+# as "absent from this host" -- the exact inversion the check exists to catch.
+# Measured: the discord report cites `escalation-state.js`, which is really at
+# <plugin-root>/paperclip-plugin-discord/dist/escalation-state.js, and the gate
+# failed the report for citing a file it was merely unable to look at. A gate
+# that manufactures an absent-source violation against a source we do hold
+# blocks a cleared report and teaches the next reviewer to wave check 6 through.
+#
+# The prune is lifted ONLY for this root. /app and the repo keep it: there the
+# prune is what stops a dependency's own sources from answering "does this
+# symbol exist in the product". Plugin packages ARE the product under scrutiny.
+PLUGIN_ROOT=/paperclip/.paperclip/plugins
 SEARCH_ROOTS=(/app "$REPO_ROOT")
 HOST_SOURCE_INDEX="$(find "${SEARCH_ROOTS[@]}" \
   \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.mjs' \) \
   -not -path '*/node_modules/*' 2>/dev/null | sort -u)"
+if [ -d "$PLUGIN_ROOT" ]; then
+  HOST_SOURCE_INDEX="$HOST_SOURCE_INDEX
+$(find "$PLUGIN_ROOT" \
+  \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.mjs' \) \
+  2>/dev/null | sort -u)"
+fi
 
 # Is $1 a path suffix of any indexed file, on a segment boundary?
 # Pure-bash for the same reason the loop below is: `grep -q` in a pipeline

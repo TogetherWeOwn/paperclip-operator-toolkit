@@ -164,8 +164,34 @@ rc="$(run_scene "$S")"
 # This is also the check that proves B3 is scoped to the rule SECTION: the
 # removed name still appears in the "## The reports" index below, so a
 # whole-file match would pass this mutant.
+#
+# ANCHORED ON THE ROW, NOT ITS BOUNDARY LINE NUMBER. This mutant used to
+# delete `^| `plugin-auth-surface.md` | 13`, pinning the literal `13`. That
+# number is the report's own boundary line -- the single most editable cell
+# in the table -- and TOG-1092 re-measured it to 14. The sed then matched
+# nothing, the scene ran UNMUTATED, the gate correctly returned 0, and the
+# suite scored SURVIVED: it accused the gate at the exact moment the artifact
+# was corrected. Match the row by filename and require the deletion to have
+# happened, so a future re-measure cannot quietly turn this into a no-op.
 S="$WORK/m4"; mkscene "$S"
-sed -i '/^| `plugin-auth-surface.md` | 13/d' "$S/docs/upstream/README.md"
+M4_ROW_RE='^| `plugin-auth-surface.md` | [0-9]'
+before="$(grep -c "$M4_ROW_RE" "$S/docs/upstream/README.md" || true)"
+sed -i "\\%$M4_ROW_RE%d" "$S/docs/upstream/README.md"
+after="$(grep -c "$M4_ROW_RE" "$S/docs/upstream/README.md" || true)"
+if [ "$before" -eq 0 ] || [ "$after" -ne 0 ]; then
+  # Not a mutant result at all -- the edit did not apply. Fail loudly with the
+  # gate's "broken suite" code rather than blaming the gate under test.
+  printf '  \033[31mBROKEN\033[0m   M4 did not apply: strip-table rows matching %s went %s -> %s.\n' \
+    "$M4_ROW_RE" "$before" "$after" >&2
+  echo "           The strip table's shape moved; re-derive this mutant." >&2
+  exit 2
+fi
+# The removed name must still appear in the "## The reports" index below, or
+# this mutant stops discriminating a section-scoped B3 from a whole-file one.
+if ! grep -q '^| `plugin-auth-surface.md` | authorization' "$S/docs/upstream/README.md"; then
+  printf '  \033[31mBROKEN\033[0m   M4 premise gone: plugin-auth-surface.md is no longer in the index below the table.\n' >&2
+  exit 2
+fi
 rc="$(run_scene "$S")"
 [ "$rc" -eq 1 ] \
   && kill_ok "M4  strip table drops plugin-auth-surface.md (name still in the index below)" \
