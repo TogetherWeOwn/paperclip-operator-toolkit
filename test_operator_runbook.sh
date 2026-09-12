@@ -469,5 +469,116 @@ else
   bad "render broke on a classification without a closed section"
 fi
 
+# ---------------------------------------------------------------------------
+section "9. a withdrawal survives a source-side regeneration (TOG-1152)"
+# THE HOLE THIS CLOSES. The render-drift gate (test_omniroute_rehearsal.sh:714)
+# asserts render == docs/OPERATOR-RUNBOOK.md. That catches a hand-edit to the
+# DOCUMENT — which is what it caught on 36cd6a70. It is structurally blind to a
+# deletion at the SOURCE followed by a regeneration, because afterwards the
+# source and the document agree: they simply agree on a document with no stop
+# sign. Measured at main d380fd11:
+#
+#   jq 'del(.. | .withdrawn?)' operator_runbook_classification.json > tmp && mv tmp ...
+#   ./operator_runbook.sh render > docs/OPERATOR-RUNBOOK.md
+#   -> 0 🛑 banners, test_operator_runbook.sh 79/0, test_omniroute_rehearsal.sh 73/0
+#
+# The owner's NO-FORK stop sign (TOG-847) was gone and nothing in CI noticed.
+# verification/tog-703-runbook-withdrawal-marker.sh asserts this property but
+# cannot run in CI — it measures from a host STAGING_DIR no runner can reach.
+# These assertions are the hermetic, source-level half of the same property.
+#
+# THE WITNESS IS `commands`, NOT `withdrawn`. Keying the rule on the presence of
+# the `withdrawn` object would be circular: deleting the object deletes the
+# obligation with it, which is exactly the mutation that got through. The
+# witness has to be a field the deletion does NOT touch, so it is the
+# `# WITHDRAWN` header inside the retained `commands` block — the procedure text
+# is kept deliberately (so the retired steps stay legible), which is what makes
+# it a durable anchor.
+if [[ -f "$REAL" ]]; then
+  # Any item whose commands block announces itself as WITHDRAWN must carry the
+  # structured object that renders the banner. Generalised by construction: the
+  # next withdrawn line is covered the day its commands say so, by measurement
+  # rather than by name.
+  wq='[.items | to_entries[] | select((.value.commands? // "") | test("(^|\n)# *WITHDRAWN"))]'
+
+  claim_n="$(jq -r "$wq | length" "$REAL")"
+  # NON-VACUITY. A rule that selects nothing passes forever and pins nothing.
+  # If this ever legitimately reaches 0 — every withdrawal retired — delete this
+  # section with the measurement that retired it, do not let it idle green.
+  (( claim_n > 0 )) \
+    && ok "the withdrawal rule selects $claim_n item(s) — it is not vacuous" \
+    || bad "NO item declares WITHDRAWN in its commands — this whole section is vacuous"
+
+  # The assertion the source-deletion mutation fails on.
+  unmarked="$(jq -r "$wq"'[] | select(((.value.withdrawn.body? // "") | length) == 0) | .key' "$REAL")"
+  [[ -z "$unmarked" ]] \
+    && ok "every WITHDRAWN commands block carries a withdrawn object with a body" \
+    || bad "WITHDRAWN in commands but no withdrawn.body: $(tr '\n' ' ' <<<"$unmarked")"
+
+  # The banner is dated because "withdrawn" with no date cannot be aged out, and
+  # commands_note is what replaces the bare "**Exact commands.**" lead-in — an
+  # empty one renders a withdrawn command block that reads exactly like a live one.
+  thin_w="$(jq -r "$wq"'[] | select(((.value.withdrawn.date? // "") | length) == 0 or ((.value.withdrawn.commands_note? // "") | length) == 0) | .key' "$REAL")"
+  [[ -z "$thin_w" ]] \
+    && ok "every withdrawal carries a date and a commands_note" \
+    || bad "withdrawal missing date/commands_note: $(tr '\n' ' ' <<<"$thin_w")"
+
+  # RENDER SIDE. Ordering is the property that makes the banner a stop sign
+  # rather than a footnote: a 🛑 printed BELOW the risk rating is read second,
+  # after the operator has already started sizing up the job.
+  rendered="$TMP/real_render.md"
+  if "$TOOL" render --classification "$REAL" </dev/null >"$rendered" 2>/dev/null; then
+    ord_bad=""; ord_n=0
+    while read -r id; do
+      [[ -n "$id" ]] || continue
+      ord_n=$((ord_n+1))
+      # The section body: from this item's heading to the next heading.
+      body="$(awk -v id="$id" '
+        $0 ~ "^### [0-9]+\\. " id " " {inb=1; next}
+        inb && /^### / {exit}
+        inb {print}' "$rendered")"
+      [[ -n "$body" ]] || { ord_bad="$ord_bad $id(no-section)"; continue; }
+      banner_at="$(grep -n '🛑' <<<"$body" | head -1 | cut -d: -f1)"
+      blast_at="$(grep -n '^\*\*Blast radius' <<<"$body" | head -1 | cut -d: -f1)"
+      [[ -n "$banner_at" && -n "$blast_at" && $banner_at -lt $blast_at ]] \
+        || ord_bad="$ord_bad $id(banner=${banner_at:-none},blast=${blast_at:-none})"
+    done < <(jq -r "$wq"'[] | .key' "$REAL")
+    [[ -z "$ord_bad" ]] \
+      && ok "each withdrawn section renders 🛑 ABOVE its Blast radius line ($ord_n checked)" \
+      || bad "withdrawn banner missing or below the blast line:$ord_bad"
+  else
+    bad "shipped classification failed to render — cannot check banner ordering"
+  fi
+
+  # POSITIVE CONTROL. Without this, the four assertions above are unfalsifiable:
+  # a green tells us nothing about whether they would catch the deletion. This
+  # replays the exact mutation from the TOG-1149 review on a STAGING COPY and
+  # requires the source assertion to go red on it.
+  MUT="$TMP/withdrawn_deleted.json"
+  jq 'del(.. | .withdrawn?)' "$REAL" >"$MUT"
+  if jq -e "$wq"'[] | select((.value.withdrawn? // null) != null)' "$MUT" >/dev/null 2>&1; then
+    # The mutation silently no-opped. Scoring that as a pass would accuse the
+    # gate at the moment the mutant failed to apply.
+    bad "MUTATION DID NOT APPLY — del(.withdrawn) left objects behind; control is meaningless"
+  else
+    mut_unmarked="$(jq -r "$wq"'[] | select(((.value.withdrawn.body? // "") | length) == 0) | .key' "$MUT")"
+    [[ -n "$mut_unmarked" ]] \
+      && ok "CONTROL: deleting withdrawn at the source goes RED here ($(tr '\n' ' ' <<<"$mut_unmarked"))" \
+      || bad "CONTROL FAILED: the source deletion still passes — this section does not close the hole"
+    # And the regenerated document really does lose the stop sign, which is the
+    # consequence the source assertion is standing in for.
+    mut_render="$TMP/mut_render.md"
+    if "$TOOL" render --classification "$MUT" </dev/null >"$mut_render" 2>/dev/null; then
+      (( $(grep -c '🛑' "$mut_render") == 0 )) \
+        && ok "CONTROL: the regenerated document loses every 🛑 banner" \
+        || bad "CONTROL: banners survived the source deletion — re-derive what this gate pins"
+    else
+      bad "CONTROL: mutated classification failed to render"
+    fi
+  fi
+else
+  bad "shipped classification file not found at $REAL — section 9 cannot run"
+fi
+
 printf '\n== totals\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
