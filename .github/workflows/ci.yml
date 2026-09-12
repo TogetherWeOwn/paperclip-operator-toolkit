@@ -39,6 +39,10 @@ name: CI
 #     test_capability_gate.sh           who may decide a CAPABILITY request, and
 #                                       which four asks stop for the owner
 #                                       whatever any agent says — TOG-387
+#     test_tog825_verify_g4.sh          whether the host acceptance gate can read
+#                                       the current structured listening event,
+#                                       and refuses missing/contradictory evidence
+#                                       rather than scoring it green — TOG-825
 #     test_host_ops_broker.py           fixed read-only host verbs, executor
 #                                       previews, replay/expiry, signed evidence,
 #                                       and the disabled write gate — TOG-520
@@ -1230,6 +1234,14 @@ jobs:
       # *_CMD seams, so there is no database and no host file.
       - name: cold-start detector suite
         run: ./test_cold_start_detector.sh
+
+      # TOG-825. This gate reads the running org-request-mcp startup event, not
+      # merely the config. The production event that closed the incident carried
+      # the authoritative tools array, while the original verifier searched only
+      # for its convenience boolean and therefore reported no evidence. Missing
+      # or contradictory journal evidence is UNKNOWN/FAIL, never a green gate.
+      - name: capability-pathway host verifier suite
+        run: ./test_tog825_verify_g4.sh
 
       # TOG-682. model_lane_probe.sh watches the cheap/small-fast lane — the
       # profile status-recovery itself runs on, so a dead value blocks the
