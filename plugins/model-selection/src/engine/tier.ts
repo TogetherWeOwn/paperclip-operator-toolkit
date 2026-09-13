@@ -49,10 +49,25 @@ export function tierOfModel(modelId: string | null | undefined, models: readonly
   matches[0]!.tier);
 }
 
+export interface ResolveTierOptions {
+  /**
+   * TOG-2137, Defect 6. Whether a given model's lane is currently a
+   * serviceability hard stop (same check `hardStopExcluded` applies in
+   * `select.ts`). When the model an issue is pinned to fails this check, the
+   * pin can no longer win outright — a `pinnedModelId` that hard-bypasses
+   * capacity routing is exactly the classifier-SPOF pattern the reference
+   * dispatcher's `tier_dispatcher.py:classify()` has: a pin on a task class
+   * the control loop itself depends on cannot silently ride a dead lane.
+   * Omitted (or always-false) reproduces the pre-2137 unconditional pin.
+   */
+  isLaneUnserviceable?: (model: ModelEntry) => boolean;
+}
+
 export function resolveTier(
   descriptor: IssueDescriptor,
   models: readonly ModelEntry[],
   configDefaultTier: Tier,
+  options?: ResolveTierOptions,
 ): TierJudgement {
   // Step 1 — capability exclusion, checked FIRST and overriding everything
   // below (ADR-0004, ADR-0008 step 1). This is not a difficulty judgement: a
@@ -68,9 +83,26 @@ export function resolveTier(
   }
 
   // Step 2 — an explicit per-issue model pin is the strongest recorded
-  // judgement: somebody set assigneeAdapterOverrides on purpose.
-  const pinnedTier = tierOfModel(descriptor.pinnedModelId, models);
-  if (pinnedTier) {
+  // judgement: somebody set assigneeAdapterOverrides on purpose. But a pin is
+  // a preference, not a suicide pact: if every enabled row for the pinned
+  // model id sits on a serviceability hard stop, honoring it anyway would
+  // silently wedge this issue (or, worse, a router-dependent task class like
+  // `triage`) on a dead lane forever with no path to escalate. Fall through to
+  // the next recorded judgement instead. A pin with at least one serviceable
+  // row still wins outright, same as before — this only overrides the pin
+  // when it is universally unserviceable, never merely "not preferred".
+  const pinnedMatches = models.filter((model) => model.id === descriptor.pinnedModelId && model.enabled);
+  const servicablePinnedMatches = pinnedMatches.filter(
+    (model) => !(options?.isLaneUnserviceable?.(model) ?? false),
+  );
+  if (pinnedMatches.length > 0 && servicablePinnedMatches.length === 0) {
+    // Every row is hard-stopped; the pin cannot win. Do not `return` — let
+    // this fall through to the tier label / agent floor / config default
+    // below, same as if there were no pin at all.
+  } else if (servicablePinnedMatches.length > 0) {
+    const pinnedTier = servicablePinnedMatches.reduce((highest, model) =>
+      TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
+    servicablePinnedMatches[0]!.tier);
     return {
       tier: pinnedTier,
       source: "issue-override",

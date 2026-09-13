@@ -111,6 +111,15 @@ export const SELECTION_CONFIG_SCHEMA = {
       ),
       default: {},
     },
+    /**
+     * TOG-2137, Defect 2. Company label id for the `operator` label, applied to
+     * the escalation issue this plugin creates when a tier is fully
+     * pace-exhausted. Same constraint as `tierLabelIds`: there is no label
+     * surface in the plugin SDK, so the id cannot be resolved from the name —
+     * it is operator-supplied, and optional (the escalation issue is still
+     * created without it, just unlabelled).
+     */
+    operatorLabelId: { type: "string", minLength: 1, title: "Operator label id" },
     profiles: {
       type: "object",
       title: "Volume profiles",
@@ -248,6 +257,25 @@ export const SELECTION_CONFIG_SCHEMA = {
         },
         stopOnFirstNFailures: { type: "integer", minimum: 1, default: 2 },
         stopWindow: { type: "integer", minimum: 1, default: 8 },
+      },
+      default: {},
+    },
+    /**
+     * TOG-2137. Emits one `tog2138-decision-v1` JSONL record per `advise()`
+     * call to the `shadowDecisions` local folder, for the 48h host/plugin
+     * agreement stream `ops/tog-2138/gate_harness.py` correlates against.
+     * Off by default — same inert-install discipline as `selection.mode`:
+     * installing this plugin must not start writing files an operator did
+     * not ask for.
+     */
+    shadowEmit: {
+      type: "object",
+      title: "TOG-2138 shadow decision emitter",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
+        maxRecords: { type: "integer", minimum: 1, default: 5000 },
       },
       default: {},
     },

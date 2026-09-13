@@ -195,4 +195,78 @@ describe("config resolution", () => {
     );
     expect(warnings.some((w) => w.includes("cache read is the largest cost line"))).toBe(true);
   });
+
+  describe("TOG-2137 Defect 6: a roster laneId must resolve to a configured lane", () => {
+    const validLane = {
+      laneId: "lane-t1",
+      statusUrl: "https://example.test/status",
+      windows: [
+        {
+          name: "primary",
+          role: "serviceability",
+          utilizationFields: ["utilization"],
+        },
+      ],
+    };
+
+    it("errors when a model references a laneId absent from pacing.lanes", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          pacing: { mode: "shadow", lanes: [validLane] },
+          models: [
+            {
+              id: "claude-opus-5",
+              tier: "T1",
+              releasedAt: "2026-06-01",
+              costPerMTokIn: 15,
+              costPerMTokOut: 75,
+              costPerMTokCacheRead: 1.5,
+              laneId: "lane-typo",
+            },
+          ],
+        }),
+      );
+      expect(errors.some((e) => e.includes('references laneId "lane-typo"'))).toBe(true);
+    });
+
+    it("does not error when the referenced laneId is configured", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          pacing: { mode: "shadow", lanes: [validLane] },
+          models: [
+            {
+              id: "claude-opus-5",
+              tier: "T1",
+              releasedAt: "2026-06-01",
+              costPerMTokIn: 15,
+              costPerMTokOut: 75,
+              costPerMTokCacheRead: 1.5,
+              laneId: "lane-t1",
+            },
+          ],
+        }),
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it("does not error on an unresolved laneId when pacing.mode is off", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          pacing: { mode: "off", lanes: [] },
+          models: [
+            {
+              id: "claude-opus-5",
+              tier: "T1",
+              releasedAt: "2026-06-01",
+              costPerMTokIn: 15,
+              costPerMTokOut: 75,
+              costPerMTokCacheRead: 1.5,
+              laneId: "lane-typo",
+            },
+          ],
+        }),
+      );
+      expect(errors.some((e) => e.includes("references laneId"))).toBe(false);
+    });
+  });
 });

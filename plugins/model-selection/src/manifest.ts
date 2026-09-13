@@ -1,7 +1,7 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 import { SELECTION_CONFIG_SCHEMA } from "./config/schema.js";
-import { JOB_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TOOL_NAMES } from "./constants.js";
+import { JOB_KEYS, LOCAL_FOLDER_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TOOL_NAMES } from "./constants.js";
 
 const DESCRIPTOR_SCHEMA = {
   type: "object",
@@ -68,6 +68,16 @@ const manifest: PaperclipPluginManifestV1 = {
     // for the card-level acceptance ledger, since `activity_log` is not an
     // allowlisted table and cannot be queried directly (TOG-1917 §2.2).
     "events.subscribe",
+    // TOG-2137, Defect 2: raise a `tier-exhausted` alarm when every tier from
+    // the required floor through T1 is pace-exhausted — there is nowhere left
+    // to escalate to, and this must reach an operator rather than fail
+    // silently the way the reference dispatcher's `pick()` does. The alarm
+    // reuses this instance's existing `Operator: <title>` + `operator`-label
+    // issue-creation convention (confirmed against 20+ live examples, e.g.
+    // TOG-2318/TOG-2324/TOG-2333), not a same-issue interaction card — an
+    // `Operator:` issue is a real, separately-triaged unit of work, and that
+    // is what a capacity dead end actually is.
+    "issues.create",
     // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -77,9 +87,25 @@ const manifest: PaperclipPluginManifestV1 = {
     // capability is declared and never exercised. It is NOT
     // `database.namespace.write` — this plugin never writes a row of its own.
     "database.namespace.migrate",
+    // TOG-2137. Append-only `tog2138-decision-v1` shadow-decision JSONL, the
+    // plugin-shadow half of the 48h host/plugin agreement stream. `ctx.db` is
+    // scoped to `heartbeat_runs` reads only (above) and cannot hold an
+    // append-only audit log a company operator can point external tooling at
+    // directly — a local folder is the SDK's plain-file surface for exactly
+    // that.
+    "local.folders",
   ],
   entrypoints: { worker: "./dist/worker.js" },
   instanceConfigSchema: SELECTION_CONFIG_SCHEMA as unknown as Record<string, unknown>,
+  localFolders: [
+    {
+      folderKey: LOCAL_FOLDER_KEYS.shadowDecisions,
+      displayName: "Shadow decision log",
+      description:
+        "Append-only tog2138-decision-v1 JSONL, one record per advise() call, for the TOG-2138 48h host/plugin-shadow agreement gate.",
+      access: "readWrite",
+    },
+  ],
   /**
    * `ctx.db` is only wired once the plugin has an ACTIVE namespace, and
    * `ensureNamespace` returns null unless `manifest.database` is present
@@ -153,6 +179,19 @@ const manifest: PaperclipPluginManifestV1 = {
           ttlSeconds: { type: "integer", minimum: 1 },
         },
       } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.ancillaryDrift,
+      displayName: "Report ancillary model pin drift",
+      description:
+        "Report which agents' ancillary model pins (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every " +
+        "ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree with the lane-aware T3 " +
+        "recommendation, and who must act on each surface. Read-only; there is no write path from this " +
+        "plugin to any of these surfaces.",
+      parametersSchema: { type: "object", additionalProperties: false, properties: {} } as unknown as Record<
+        string,
+        unknown
+      >,
     },
   ],
   apiRoutes: [

@@ -9,7 +9,17 @@ var TOOL_NAMES = {
   /** Advise and, if enforcement is on for this company, write the override. */
   apply: "model_selection_apply",
   /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
-  setOperatorOverride: "model_selection_set_operator_override"
+  setOperatorOverride: "model_selection_set_operator_override",
+  /**
+   * TOG-2137, Defect 3. Report where an agent's ancillary model pins
+   * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
+   * ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree
+   * with the lane-aware T3 recommendation. Read-only, always advisory: there
+   * is no write path from this plugin to any of these surfaces (`ctx.agents`
+   * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
+   * host's own internal API), so this can never be anything but a report.
+   */
+  ancillaryDrift: "model_selection_ancillary_drift"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -42,9 +52,30 @@ var PLUGIN_STATE_KEYS = {
   /** Rolling 7-day list-price vs cost-per-accepted-card shadow-diff records (Slice 3). */
   shadowDiffs: "shadowDiffs",
   /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
-  earnInState: "earnInState"
+  earnInState: "earnInState",
+  /**
+   * TOG-2137, Defect 2. Per-issue timestamp of the last raised `tier-exhausted`
+   * operator alarm, so a decision that stays exhausted across repeated
+   * `advise`/`apply` calls does not spam a fresh card every time — one open
+   * card per continuous exhaustion streak. Cleared the first time the same
+   * issue's outcome is no longer `tier-exhausted`, so the NEXT exhaustion
+   * raises a fresh card rather than staying silent forever.
+   */
+  tierExhaustedAlarms: "tierExhaustedAlarms"
 };
 var PACING_MODES = ["off", "shadow", "enforce"];
+var LOCAL_FOLDER_KEYS = {
+  /**
+   * TOG-2137. Append-only `tog2138-decision-v1` JSONL records, one per
+   * `advise()` call, for the 48h host/plugin-shadow agreement stream
+   * `ops/tog-2138/gate_harness.py` correlates against. Plugin-owned path —
+   * never `ops/tog-2138/`, which is TOG-2138's own directory.
+   *
+   * Lowercase-and-hyphen only: `pluginManifestV1Schema` rejects a `folderKey`
+   * that doesn't match `^[a-z0-9][a-z0-9._:-]*$` (no camelCase).
+   */
+  shadowDecisions: "shadow-decisions"
+};
 var DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
@@ -87,7 +118,21 @@ function deviationOf(ledger, model) {
 function modelOf(models, candidate) {
   return models.find((model) => model.id === candidate.modelId);
 }
-function orderCandidatesByPace(candidates, models, ledger) {
+var PREFERRED_ELAPSED_THRESHOLD = 0.8;
+function isPreferredNearReset(verdict, elapsedThreshold = PREFERRED_ELAPSED_THRESHOLD) {
+  if (!verdict || verdict.serviceable !== true || !verdict.score) return false;
+  return verdict.score.elapsed >= elapsedThreshold && verdict.score.deviation < 0;
+}
+function preferredOf(ledger, model, elapsedThreshold) {
+  if (!model) return false;
+  return isPreferredNearReset(laneVerdictFor(ledger, model.laneId ?? null), elapsedThreshold);
+}
+function preferredCandidateId(candidates, models, ledger, elapsedThreshold = PREFERRED_ELAPSED_THRESHOLD) {
+  const preferred = candidates.find((candidate) => preferredOf(ledger, modelOf(models, candidate), elapsedThreshold));
+  return preferred?.modelId ?? null;
+}
+function orderCandidatesByPace(candidates, models, ledger, options) {
+  const elapsedThreshold = options?.preferredElapsedThreshold ?? PREFERRED_ELAPSED_THRESHOLD;
   const byTier = /* @__PURE__ */ new Map();
   const orderedTierKeys = [];
   for (const candidate of candidates) {
@@ -105,6 +150,9 @@ function orderCandidatesByPace(candidates, models, ledger) {
     group.sort((left, right) => {
       const leftModel = modelOf(models, left);
       const rightModel = modelOf(models, right);
+      const leftPreferred = preferredOf(ledger, leftModel, elapsedThreshold);
+      const rightPreferred = preferredOf(ledger, rightModel, elapsedThreshold);
+      if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
       const stateDelta = PACE_STATE_RANK[paceStateOf(ledger, leftModel)] - PACE_STATE_RANK[paceStateOf(ledger, rightModel)];
       if (stateDelta !== 0) return stateDelta;
       const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
@@ -282,6 +330,7 @@ function resolveConfig(raw) {
   const quality = record(root.quality);
   const pacing = record(root.pacing);
   const earnIn = record(root.earnIn);
+  const shadowEmit = record(root.shadowEmit);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -310,6 +359,7 @@ function resolveConfig(raw) {
     const id = rawLabelIds[t];
     if (typeof id === "string" && id.length > 0) tierLabelIds[t] = id;
   }
+  const operatorLabelId = typeof root.operatorLabelId === "string" && root.operatorLabelId.length > 0 ? root.operatorLabelId : null;
   const lanes = Array.isArray(pacing.lanes) ? pacing.lanes.flatMap((entry) => {
     const rawLane = record(entry);
     if (typeof rawLane.laneId !== "string" || rawLane.laneId.length === 0) return [];
@@ -367,6 +417,7 @@ function resolveConfig(raw) {
     },
     models,
     tierLabelIds,
+    operatorLabelId,
     profiles: {
       windowDays: num(profiles.windowDays, 7),
       minSamples: num(profiles.minSamples, 5),
@@ -392,6 +443,10 @@ function resolveConfig(raw) {
       classes: Array.isArray(earnIn.classes) ? earnIn.classes.filter((c) => typeof c === "string") : ["research", "review"],
       stopOnFirstNFailures: num(earnIn.stopOnFirstNFailures, 2),
       stopWindow: num(earnIn.stopWindow, 8)
+    },
+    shadowEmit: {
+      enabled: bool(shadowEmit.enabled, false),
+      maxRecords: num(shadowEmit.maxRecords, 5e3)
     }
   };
 }
@@ -452,6 +507,19 @@ function validateConfig(config) {
     warnings.push(
       "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this."
     );
+  }
+  if (config.pacing.mode !== "off") {
+    const referencedLaneIds = /* @__PURE__ */ new Set();
+    for (const model of config.models) {
+      if (model.laneId) referencedLaneIds.add(model.laneId);
+    }
+    for (const laneId of referencedLaneIds) {
+      if (!laneIds.has(laneId)) {
+        errors.push(
+          `model roster references laneId "${laneId}", which is not in pacing.lanes \u2014 pace routing for that model would silently never activate`
+        );
+      }
+    }
   }
   return { errors, warnings };
 }
@@ -526,50 +594,6 @@ function costOf(model, profileTier, profiles, models, signals, now) {
   };
 }
 
-// src/engine/profiles.ts
-function buildVolumeProfiles(rows, models, computedAt) {
-  const tiersOf = /* @__PURE__ */ new Map();
-  for (const model of models) {
-    if (!model.enabled) continue;
-    const tiers = tiersOf.get(model.id) ?? [];
-    if (!tiers.includes(model.tier)) tiers.push(model.tier);
-    tiersOf.set(model.id, tiers);
-  }
-  const buckets = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const tiers = row.model ? tiersOf.get(row.model) : void 0;
-    if (!tiers || tiers.length !== 1) continue;
-    const tier2 = tiers[0];
-    const input = row.inputTokens ?? 0;
-    const cache = row.cachedInputTokens ?? 0;
-    const output = row.outputTokens ?? 0;
-    if (input === 0 && cache === 0 && output === 0) continue;
-    const bucket = buckets.get(tier2) ?? { n: 0, input: 0, cache: 0, output: 0 };
-    bucket.n += 1;
-    bucket.input += input;
-    bucket.cache += cache;
-    bucket.output += output;
-    buckets.set(tier2, bucket);
-  }
-  return [...buckets.entries()].map(([tier2, bucket]) => ({
-    tier: tier2,
-    sampleCount: bucket.n,
-    computedAt,
-    avgInputTokens: bucket.input / bucket.n,
-    avgCacheReadTokens: bucket.cache / bucket.n,
-    avgOutputTokens: bucket.output / bucket.n
-  }));
-}
-function buildQualitySignals(rows, computedAt) {
-  return rows.map((row) => ({
-    tier: row.tier,
-    escalationRate: row.issues > 0 ? row.escalations / row.issues : 0,
-    silentFailureCount: row.silentFailures,
-    sampleCount: row.issues,
-    computedAt
-  }));
-}
-
 // src/engine/objective.ts
 function costPerAcceptedCardFor(modelId, tier2, ledger) {
   return ledger[`${modelId}:${tier2}`]?.costPerAcceptedCard ?? null;
@@ -620,7 +644,7 @@ function tierOfModel(modelId, models) {
     matches[0].tier
   );
 }
-function resolveTier(descriptor, models, configDefaultTier) {
+function resolveTier(descriptor, models, configDefaultTier, options) {
   if (descriptor.exclusion?.excluded) {
     return {
       tier: "T1",
@@ -628,8 +652,16 @@ function resolveTier(descriptor, models, configDefaultTier) {
       detail: `capability exclusion forces T1: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`
     };
   }
-  const pinnedTier = tierOfModel(descriptor.pinnedModelId, models);
-  if (pinnedTier) {
+  const pinnedMatches = models.filter((model) => model.id === descriptor.pinnedModelId && model.enabled);
+  const servicablePinnedMatches = pinnedMatches.filter(
+    (model) => !(options?.isLaneUnserviceable?.(model) ?? false)
+  );
+  if (pinnedMatches.length > 0 && servicablePinnedMatches.length === 0) {
+  } else if (servicablePinnedMatches.length > 0) {
+    const pinnedTier = servicablePinnedMatches.reduce(
+      (highest, model) => TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
+      servicablePinnedMatches[0].tier
+    );
     return {
       tier: pinnedTier,
       source: "issue-override",
@@ -660,7 +692,15 @@ function selectModel(input) {
   const { descriptor, config, profiles, signals, now } = input;
   const trace = [];
   const rejections = [];
-  const judgement = resolveTier(descriptor, config.models, config.defaultTier);
+  const pacingMode = config.pacingMode ?? "shadow";
+  const paceActive = pacingMode !== "off";
+  const paceEnforced = pacingMode === "enforce";
+  const ledger = config.laneLedger ?? {};
+  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
+  const overrideModelId = config.operatorOverrideModelId ?? null;
+  const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
+    isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model)
+  });
   trace.push(`tier ${judgement.tier} via ${judgement.source} \u2014 ${judgement.detail}`);
   const base = {
     outcome: "no-eligible-model",
@@ -673,14 +713,9 @@ function selectModel(input) {
     advisory: !config.enforcementEnabled,
     heldReason: null,
     pacingApplied: false,
-    shadowDiff: null
+    shadowDiff: null,
+    escalatedFromTier: null
   };
-  const pacingMode = config.pacingMode ?? "shadow";
-  const paceActive = pacingMode !== "off";
-  const paceEnforced = pacingMode === "enforce";
-  const ledger = config.laneLedger ?? {};
-  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
-  const overrideModelId = config.operatorOverrideModelId ?? null;
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
@@ -690,6 +725,7 @@ function selectModel(input) {
     const incumbent = config.models.find(
       (model) => model.id === descriptor.stickyModelId && model.enabled
     );
+    const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
     if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
       trace.push(
         `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`
@@ -698,6 +734,15 @@ function selectModel(input) {
         modelId: incumbent.id,
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`
+      });
+    } else if (incumbent && incumbentUnserviceable) {
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} is not serviceable \u2014 re-selecting instead of wedging this issue on a dead lane`
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "lane-unserviceable",
+        reason: `lane ${incumbent.laneId ?? "(none)"} is not serviceable`
       });
     } else if (incumbent) {
       trace.push(
@@ -753,6 +798,17 @@ function selectModel(input) {
     qualified.push(model);
   }
   if (qualified.length === 0) {
+    const atOrAboveRequired = rejections.filter((rejection) => {
+      const rejectedModel = config.models.find((entry) => entry.id === rejection.modelId);
+      return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
+    });
+    const tierExhausted = atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => rejection.stage === "lane-unserviceable");
+    if (tierExhausted) {
+      trace.push(
+        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by the pace serviceability hard stop (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) \u2014 nowhere left to escalate to`
+      );
+      return { ...base, outcome: "tier-exhausted", effectiveTier: requiredTier };
+    }
     trace.push(`no model cleared the gates (${rejections.length} rejected)`);
     return base;
   }
@@ -779,17 +835,34 @@ function selectModel(input) {
     }
     return candidates2;
   }
-  let candidates = costCandidates(qualified.filter((model) => !model.fallbackOnly));
-  if (candidates.length === 0) {
-    const fallbackModels = qualified.filter((model) => model.fallbackOnly);
-    if (fallbackModels.length > 0) {
-      trace.push("no regular candidate survived; considering fallback-only roster rows");
-      candidates = costCandidates(fallbackModels);
+  let candidates = [];
+  let landingTier = requiredTier;
+  for (let rung = requiredTier; rung !== null; rung = tierAbove(rung)) {
+    const atRung = qualified.filter((model) => model.tier === rung);
+    if (atRung.length === 0) continue;
+    let rungCandidates = costCandidates(atRung.filter((model) => !model.fallbackOnly));
+    if (rungCandidates.length === 0) {
+      const fallbackModels = atRung.filter((model) => model.fallbackOnly);
+      if (fallbackModels.length > 0) {
+        trace.push(`no regular candidate survived at ${rung}; considering fallback-only roster rows`);
+        rungCandidates = costCandidates(fallbackModels);
+      }
+    }
+    if (rungCandidates.length > 0) {
+      landingTier = rung;
+      candidates = rungCandidates;
+      break;
     }
   }
   if (candidates.length === 0) {
     trace.push("no candidate could be costed \u2014 refusing to choose on a guessed volume term");
     return { ...base, effectiveTier: requiredTier };
+  }
+  const escalatedFromTier = landingTier !== requiredTier ? requiredTier : null;
+  if (escalatedFromTier) {
+    trace.push(
+      `escalated from ${requiredTier} to ${landingTier}: no candidate at ${requiredTier} survived the gates or could be costed`
+    );
   }
   candidates.sort((left, right) => {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
@@ -806,6 +879,10 @@ function selectModel(input) {
     trace.push(
       changed ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}` : `pace ordering (${pacingMode}) agrees with cost ordering`
     );
+    const preferredId = preferredCandidateId(candidates, config.models, ledger);
+    if (preferredId) {
+      trace.push(`${preferredId}'s lane is trailing pace near its reset window close \u2014 preferred for new dispatch`);
+    }
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
   function pickWinnerIndex(ordered) {
@@ -835,7 +912,7 @@ function selectModel(input) {
   const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0].modelId;
   const listPriceWinner = candidates[0];
   const cardLedger = input.cardLedger ?? {};
-  const shadowDiff = computeShadowDiff(descriptor.issueId, requiredTier, candidates, listPriceWinner.modelId, cardLedger);
+  const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
   const objective = config.objective ?? "list-price";
   let winner = paceOnlyWinner;
   if (objective === "cost-per-accepted-card") {
@@ -847,9 +924,10 @@ function selectModel(input) {
   const withCandidates = {
     ...base,
     candidates,
-    effectiveTier: requiredTier,
+    effectiveTier: landingTier,
     pacingApplied,
-    shadowDiff
+    shadowDiff,
+    escalatedFromTier
   };
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
@@ -863,6 +941,124 @@ function selectModel(input) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");
   }
   return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+}
+
+// src/engine/ancillary.ts
+var ANCILLARY_ENV_KEYS = ["ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"];
+var ANTHROPIC_DEFAULT_PREFIX = "ANTHROPIC_DEFAULT_";
+var CHEAP_PROFILE_SURFACE = "runtimeConfig.modelProfiles.cheap";
+function remediationFor(surface) {
+  if (surface === CHEAP_PROFILE_SURFACE) {
+    return "no ctx.agents write method exists in the plugin SDK, so this plugin can only report the drift; a differently-authenticated operator tool with a direct PATCH /api/agents/{id} can act on it (docs/model-lane-probe.md)";
+  }
+  return "console only \u2014 adapterConfig is 403 to every agent, structurally; this plugin has no write path to it either";
+}
+function recommendAncillaryModel(input) {
+  return selectModel({
+    descriptor: { issueId: "__ancillary_t3__", labelNames: ["tier:T3"] },
+    config: {
+      ...input.config,
+      // Always advisory: a company-wide ancillary recommendation is never
+      // something this tool writes, regardless of `selection.mode`.
+      enforcementEnabled: false,
+      defaultTier: "T3",
+      stickyWithinIssue: false,
+      operatorOverrideModelId: null
+    },
+    profiles: input.profiles,
+    signals: input.signals,
+    now: input.now
+  });
+}
+function envBindingModelId(binding) {
+  if (typeof binding === "string") return { modelId: binding, unresolvable: false };
+  if (binding && typeof binding === "object") {
+    const record2 = binding;
+    if (record2.type === "plain" && typeof record2.value === "string") {
+      return { modelId: record2.value, unresolvable: false };
+    }
+    if (record2.type === "secret_ref" || record2.type === "user_secret_ref") {
+      return { modelId: null, unresolvable: true };
+    }
+  }
+  return { modelId: null, unresolvable: false };
+}
+function readAncillarySurfaces(agent) {
+  const readings = [];
+  const env = agent.adapterConfig && typeof agent.adapterConfig === "object" ? agent.adapterConfig.env : void 0;
+  if (env && typeof env === "object") {
+    const ancillaryKeys = new Set(ANCILLARY_ENV_KEYS);
+    for (const key of Object.keys(env)) {
+      if (!ancillaryKeys.has(key) && !key.startsWith(ANTHROPIC_DEFAULT_PREFIX)) continue;
+      const { modelId, unresolvable } = envBindingModelId(env[key]);
+      readings.push({ surface: key, currentModelId: modelId, unresolvable });
+    }
+  }
+  const runtimeConfig = agent.runtimeConfig && typeof agent.runtimeConfig === "object" ? agent.runtimeConfig : null;
+  const modelProfiles = runtimeConfig && typeof runtimeConfig.modelProfiles === "object" && runtimeConfig.modelProfiles ? runtimeConfig.modelProfiles : null;
+  const cheap = modelProfiles && typeof modelProfiles.cheap === "object" && modelProfiles.cheap ? modelProfiles.cheap : null;
+  if (cheap) {
+    const adapterConfig = cheap.adapterConfig && typeof cheap.adapterConfig === "object" ? cheap.adapterConfig : null;
+    const modelId = adapterConfig && typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+    readings.push({ surface: CHEAP_PROFILE_SURFACE, currentModelId: modelId, unresolvable: false });
+  }
+  return readings;
+}
+function ancillaryDriftForAgent(agent, recommendedModelId) {
+  if (!recommendedModelId) return [];
+  return readAncillarySurfaces(agent).filter(
+    (reading) => !reading.unresolvable && reading.currentModelId !== null && reading.currentModelId !== recommendedModelId
+  ).map((reading) => ({
+    ...reading,
+    agentId: agent.id,
+    agentName: agent.name,
+    recommendedModelId,
+    remediation: remediationFor(reading.surface)
+  }));
+}
+
+// src/engine/profiles.ts
+function buildVolumeProfiles(rows, models, computedAt) {
+  const tiersOf = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    if (!model.enabled) continue;
+    const tiers = tiersOf.get(model.id) ?? [];
+    if (!tiers.includes(model.tier)) tiers.push(model.tier);
+    tiersOf.set(model.id, tiers);
+  }
+  const buckets = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const tiers = row.model ? tiersOf.get(row.model) : void 0;
+    if (!tiers || tiers.length !== 1) continue;
+    const tier2 = tiers[0];
+    const input = row.inputTokens ?? 0;
+    const cache = row.cachedInputTokens ?? 0;
+    const output = row.outputTokens ?? 0;
+    if (input === 0 && cache === 0 && output === 0) continue;
+    const bucket = buckets.get(tier2) ?? { n: 0, input: 0, cache: 0, output: 0 };
+    bucket.n += 1;
+    bucket.input += input;
+    bucket.cache += cache;
+    bucket.output += output;
+    buckets.set(tier2, bucket);
+  }
+  return [...buckets.entries()].map(([tier2, bucket]) => ({
+    tier: tier2,
+    sampleCount: bucket.n,
+    computedAt,
+    avgInputTokens: bucket.input / bucket.n,
+    avgCacheReadTokens: bucket.cache / bucket.n,
+    avgOutputTokens: bucket.output / bucket.n
+  }));
+}
+function buildQualitySignals(rows, computedAt) {
+  return rows.map((row) => ({
+    tier: row.tier,
+    escalationRate: row.issues > 0 ? row.escalations / row.issues : 0,
+    silentFailureCount: row.silentFailures,
+    sampleCount: row.issues,
+    computedAt
+  }));
 }
 
 // src/engine/scores.ts
@@ -1447,6 +1643,124 @@ async function pollLanes(input) {
   );
 }
 
+// src/shadow-emit.ts
+var SHADOW_SCHEMA_VERSION = "tog2138-decision-v1";
+function laneStateLabel(verdict) {
+  if (!verdict) return "unavailable";
+  if (verdict.state === "exhausted") return "exhausted";
+  if (verdict.serviceable === false) return "unavailable";
+  if (verdict.state === "ahead") return "degraded";
+  if (verdict.serviceable === true) return "available";
+  return "unavailable";
+}
+function buildLaneSnapshot(models, ledger, slotFloorFraction, nowIso) {
+  const laneIds = /* @__PURE__ */ new Set();
+  for (const model of models) {
+    if (model.laneId) laneIds.add(model.laneId);
+  }
+  const lanes = {};
+  const laneFetchErrors = [];
+  let sawAnyLane = false;
+  let allFreshAndClean = true;
+  let maxAgeSeconds = 0;
+  for (const laneId of laneIds) {
+    sawAnyLane = true;
+    const entry = ledger[laneId];
+    if (!entry) {
+      allFreshAndClean = false;
+      lanes[laneId] = { weekly: null, fiveHour: null, state: "unavailable", paceDeviation: 0 };
+      continue;
+    }
+    if (entry.error) {
+      laneFetchErrors.push(laneId);
+      allFreshAndClean = false;
+    }
+    const ageSeconds = (Date.parse(nowIso) - Date.parse(entry.fetchedAt)) / 1e3;
+    if (Number.isFinite(ageSeconds)) maxAgeSeconds = Math.max(maxAgeSeconds, ageSeconds);
+    const verdict = entry.verdict;
+    if (!verdict) allFreshAndClean = false;
+    const model = models.find((candidate) => candidate.laneId === laneId);
+    lanes[laneId] = {
+      // The vendored pace engine reports one governing-window utilization, not
+      // separate weekly/five-hour readings — the host dispatcher's own
+      // five-hour/weekly split is specific to its Anthropic-style windows and
+      // has no equivalent field here. Both columns report the same governing
+      // score rather than fabricate a second number.
+      weekly: verdict?.score?.utilization ?? null,
+      fiveHour: verdict?.score?.utilization ?? null,
+      state: laneStateLabel(verdict),
+      paceDeviation: verdict?.score?.deviation ?? 0,
+      ...model ? { slotFactor: slotFactorFor(ledger, model, slotFloorFraction) } : {}
+    };
+  }
+  return {
+    ageSeconds: Math.round(Math.max(0, maxAgeSeconds)),
+    quality: !sawAnyLane ? "unknown" : allFreshAndClean ? "live" : "cached",
+    laneFetchErrors,
+    lanes
+  };
+}
+function buildCandidates(decision, models) {
+  return decision.candidates.map((candidate) => {
+    const model = models.find((entry) => entry.id === candidate.modelId);
+    return {
+      model: candidate.modelId,
+      lane: model?.laneId ?? "unknown",
+      tier: candidate.tier,
+      // Every rejection stage (capability/tier-floor/context-window/disabled/
+      // lane-unserviceable) already removed non-qualifying models before
+      // `select.ts` ever costs a candidate — everything reaching
+      // `decision.candidates` is capable and usable at this snapshot.
+      capable: true,
+      usable: true,
+      // This engine has no unproven/exploration-slot concept (unlike the
+      // reference dispatcher's 10% EXPLORE lane for unproven T2/T3
+      // candidates) — TOG-2137 slices 2-5 do not add one, so every candidate
+      // is reported proven rather than guessing at an unmodeled distinction.
+      proven: true,
+      // Dollars for one run at the judged tier's measured volume — the number
+      // this engine actually orders on (`expectedCostUsd`), not a $/Mtok rate.
+      // The reference dispatcher's "blended $/M" is a per-token price; this
+      // plugin's cost term is volume-aware (ADR-0002/cost.ts) and has no
+      // single per-token figure to report instead.
+      blended: Number(candidate.expectedCostUsd.toFixed(6))
+    };
+  });
+}
+function buildShadowRecord(input) {
+  const { decision, descriptor } = input;
+  const tier2 = decision.effectiveTier ?? decision.judgement.tier;
+  const stickyKept = decision.outcome === "selected" && descriptor.pinnedModelId != null && decision.modelId === descriptor.pinnedModelId && decision.trace.some((line) => line.startsWith("sticky:"));
+  return {
+    schema: SHADOW_SCHEMA_VERSION,
+    writer: "plugin-shadow",
+    issueId: input.issueId,
+    issueIdentifier: input.issueIdentifier,
+    ts: input.nowIso,
+    // Best-effort, not an independently-verified trigger classification — the
+    // harness re-derives its own classes from stateFingerprint/laneSnapshot
+    // rather than trusting a writer's self-tagged fields (see `explanations`).
+    trigger: input.hasOverride ? "repin" : "new-card",
+    tier: tier2,
+    pickedModel: decision.modelId,
+    keptPin: stickyKept ? descriptor.pinnedModelId : null,
+    stateFingerprint: {
+      status: input.status,
+      hadOverride: input.hasOverride,
+      hadRunningRun: !input.isIdle,
+      pinOperator: input.hasOperatorPin
+    },
+    laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.nowIso),
+    candidates: buildCandidates(decision, input.models),
+    // Self-tagged DF-*/PI-* classes are the harness's job to derive
+    // (`classify_pair`), not this writer's — an empty array here is correct,
+    // not a placeholder.
+    explanations: [],
+    operatorOverride: input.operatorOverride ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt } : null,
+    pickWhy: decision.trace.join("; ")
+  };
+}
+
 // src/worker.ts
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -1459,6 +1773,9 @@ function summary(decision) {
     return `Held at the agent floor: ${decision.heldReason}`;
   }
   if (decision.outcome === "disabled") return "Model Selection is not configured for this company.";
+  if (decision.outcome === "tier-exhausted") {
+    return `Tier exhausted: every model from ${decision.judgement.tier} through T1 is pace-exhausted; nowhere left to escalate to.`;
+  }
   return "No eligible model for this issue.";
 }
 function createPlugin() {
@@ -1510,6 +1827,85 @@ function createPlugin() {
           if (typeof at === "string") history[issueId] = at;
         }
         return history;
+      };
+      const tierExhaustedAlarmsKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.tierExhaustedAlarms
+      });
+      const readTierExhaustedAlarms = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
+        const alarms = {};
+        for (const [issueId, at] of Object.entries(stored)) {
+          if (typeof at === "string") alarms[issueId] = at;
+        }
+        return alarms;
+      };
+      const raiseOrClearTierExhaustedAlarm = async (companyId, issueId, issueTitle, issueIdentifier, decision, authorAgentId) => {
+        const alarms = await readTierExhaustedAlarms(companyId);
+        if (decision.outcome !== "tier-exhausted") {
+          if (issueId in alarms) {
+            const { [issueId]: _dropped, ...rest } = alarms;
+            await ctx.state.set(tierExhaustedAlarmsKey(companyId), rest);
+          }
+          return;
+        }
+        if (issueId in alarms) return;
+        const config = await companyConfig(companyId);
+        const reference = issueIdentifier ? `${issueIdentifier} (${issueTitle})` : issueTitle;
+        await ctx.issues.create({
+          companyId,
+          parentId: issueId,
+          title: `Operator: model tier exhausted on ${reference}`,
+          description: `Every model from ${decision.judgement.tier} through T1 is pace-exhausted for ${reference} \u2014 there is nowhere left for Model Selection to escalate to.
+
+Intervene to unblock: add lane capacity, adjust pacing, or set an operator override (\`model_selection_set_operator_override\`). This escalation stays open until the lane recovers and a fresh \`model_selection_advise\`/\`apply\` call on the original issue no longer reports \`tier-exhausted\`.`,
+          priority: "critical",
+          labelIds: config.operatorLabelId ? [config.operatorLabelId] : void 0,
+          actor: { actorAgentId: authorAgentId ?? void 0 }
+        });
+        await ctx.state.set(tierExhaustedAlarmsKey(companyId), { ...alarms, [issueId]: (/* @__PURE__ */ new Date()).toISOString() });
+      };
+      const SHADOW_DECISIONS_FILE = "decisions.jsonl";
+      const isMissingShadowFileError = (err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        return /not found/i.test(message) || /ENOENT/.test(message);
+      };
+      const shadowEmitChains = /* @__PURE__ */ new Map();
+      const emitShadowRecordSerialized = async (companyId, record2) => {
+        let existing = "";
+        try {
+          existing = await ctx.localFolders.readText(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_DECISIONS_FILE);
+        } catch (err) {
+          if (!isMissingShadowFileError(err)) {
+            ctx.logger.warn("model-selection: shadow decision emit aborted \u2014 could not read existing log", {
+              error: String(err)
+            });
+            return;
+          }
+          existing = "";
+        }
+        const lines = existing.split("\n").filter((line) => line.trim().length > 0);
+        lines.push(JSON.stringify(record2));
+        const config = await companyConfig(companyId);
+        const capped = lines.length > config.shadowEmit.maxRecords ? lines.slice(-config.shadowEmit.maxRecords) : lines;
+        try {
+          await ctx.localFolders.writeTextAtomic(
+            companyId,
+            LOCAL_FOLDER_KEYS.shadowDecisions,
+            SHADOW_DECISIONS_FILE,
+            capped.join("\n") + "\n"
+          );
+        } catch (err) {
+          ctx.logger.warn("model-selection: shadow decision emit failed", { error: String(err) });
+        }
+      };
+      const emitShadowRecord = (companyId, record2) => {
+        const previous = shadowEmitChains.get(companyId) ?? Promise.resolve();
+        const next = previous.catch(() => {
+        }).then(() => emitShadowRecordSerialized(companyId, record2));
+        shadowEmitChains.set(companyId, next);
+        return next;
       };
       const laneHttp = {
         fetch: (url, init) => ctx.http.fetch(url, init)
@@ -1584,7 +1980,9 @@ function createPlugin() {
           existingLabelIds,
           hasTierLabel: labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX)),
           hasOperatorPin: labelNames.includes(OPERATOR_PIN_LABEL),
-          isIdle
+          isIdle,
+          title: String(issue.title ?? ""),
+          identifier: typeof issue.identifier === "string" ? issue.identifier : null
         };
       };
       const advise = async (companyId, params) => {
@@ -1631,6 +2029,24 @@ function createPlugin() {
           ];
           await ctx.state.set(shadowDiffsKey(companyId), { records });
         }
+        if (config.shadowEmit.enabled) {
+          const shadowRecord = buildShadowRecord({
+            issueId,
+            issueIdentifier: described.identifier,
+            nowIso,
+            decision,
+            descriptor: described.descriptor,
+            status: described.status,
+            hasOverride: described.hasOverride,
+            hasOperatorPin: described.hasOperatorPin,
+            isIdle: described.isIdle,
+            models: config.models,
+            laneLedger,
+            slotFloorFraction: config.pacing.slotFloorFraction,
+            operatorOverride: liveOverride
+          });
+          await emitShadowRecord(companyId, shadowRecord);
+        }
         return {
           decision,
           issueId,
@@ -1642,7 +2058,9 @@ function createPlugin() {
           isIdle: described.isIdle,
           isServiceabilityHardStop,
           nowIso,
-          config
+          config,
+          title: described.title,
+          identifier: described.identifier
         };
       };
       ctx.tools.register(
@@ -1655,6 +2073,14 @@ function createPlugin() {
         async (params, runCtx) => {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          await raiseOrClearTierExhaustedAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null
+          );
           return { content: summary(result.decision), data: result.decision };
         }
       );
@@ -1668,6 +2094,14 @@ function createPlugin() {
         async (params, runCtx) => {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          await raiseOrClearTierExhaustedAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null
+          );
           const paceRepinEligible = result.hasOverride && result.config.pacing.mode === "enforce";
           const repinHistory = paceRepinEligible ? await readPaceRepinHistory(runCtx.companyId) : {};
           const plan = planApply(
@@ -1803,6 +2237,65 @@ function createPlugin() {
           excludeAgentId: typeof event.actorId === "string" ? event.actorId : null
         });
       });
+      ctx.tools.register(
+        TOOL_NAMES.ancillaryDrift,
+        {
+          displayName: "Report ancillary model pin drift",
+          description: "Report which agents' ancillary model pins disagree with the lane-aware T3 recommendation. Read-only.",
+          parametersSchema: { type: "object" }
+        },
+        async (_params, runCtx) => {
+          const config = await companyConfig(runCtx.companyId);
+          if (config.models.length === 0) {
+            return { content: "Model Selection is not configured for this company.", data: { recommendedModelId: null, drift: [] } };
+          }
+          const { profiles, signals } = await readProfiles(runCtx.companyId);
+          const laneLedger = await readLaneLedger(runCtx.companyId);
+          const decision = recommendAncillaryModel({
+            config: {
+              models: config.models,
+              holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
+              pacingMode: config.pacing.mode,
+              laneLedger,
+              slotFloorFraction: config.pacing.slotFloorFraction
+            },
+            profiles,
+            signals,
+            now: Date.now()
+          });
+          if (decision.outcome !== "selected" && decision.outcome !== "held-at-floor") {
+            return {
+              content: `No ancillary recommendation: ${summary(decision)}`,
+              data: { recommendedModelId: null, decision, drift: [] }
+            };
+          }
+          const recommendedModelId = decision.modelId;
+          const drift = [];
+          let offset = 0;
+          const pageSize = 200;
+          for (; ; ) {
+            const page = await ctx.agents.list({ companyId: runCtx.companyId, limit: pageSize, offset });
+            for (const agent of page) {
+              drift.push(
+                ...ancillaryDriftForAgent(
+                  {
+                    id: agent.id,
+                    name: agent.name,
+                    adapterConfig: asRecord(agent.adapterConfig),
+                    runtimeConfig: asRecord(agent.runtimeConfig)
+                  },
+                  recommendedModelId
+                )
+              );
+            }
+            if (page.length < pageSize) break;
+            offset += pageSize;
+          }
+          await ctx.metrics.write("model_selection.ancillary_drift.count", drift.length);
+          const content = drift.length === 0 ? `No ancillary drift: every reported ancillary surface already matches the recommended ${recommendedModelId}.` : `${drift.length} ancillary surface${drift.length === 1 ? "" : "s"} drifted from the recommended ${recommendedModelId}.`;
+          return { content, data: { recommendedModelId, decision, drift } };
+        }
+      );
       ctx.jobs.register(JOB_KEYS.refreshProfiles, async () => {
         const companies = await ctx.companies.list();
         for (const company of companies) {

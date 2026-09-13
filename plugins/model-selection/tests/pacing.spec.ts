@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   activeOperatorOverride,
   hardStopExcluded,
+  isPreferredNearReset,
   mergeLedgerEntry,
   orderCandidatesByPace,
+  preferredCandidateId,
   recordOperatorOverride,
   repinAllowed,
   slotAllowed,
@@ -170,6 +172,139 @@ describe("orderCandidatesByPace", () => {
     ];
     const ordered = orderCandidatesByPace(candidates, models, ledger);
     expect(ordered[0]!.modelId).toBe("newer-model");
+  });
+});
+
+describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
+  it("prefers a serviceable lane trailing its elapsed-fraction trajectory as its reset window nears close", () => {
+    const trailingNearClose = verdict({
+      state: "behind",
+      serviceable: true,
+      score: { utilization: 0.6, elapsed: 0.85, deviation: -0.25 },
+    });
+    expect(isPreferredNearReset(trailingNearClose)).toBe(true);
+  });
+
+  it("does not prefer a lane still early in its window, even if trailing", () => {
+    const trailingEarly = verdict({
+      state: "behind",
+      serviceable: true,
+      score: { utilization: 0.1, elapsed: 0.3, deviation: -0.2 },
+    });
+    expect(isPreferredNearReset(trailingEarly)).toBe(false);
+  });
+
+  it("does not prefer a lane near reset that is running ahead, not behind", () => {
+    const aheadNearClose = verdict({
+      state: "ahead",
+      serviceable: true,
+      score: { utilization: 0.95, elapsed: 0.85, deviation: 0.1 },
+    });
+    expect(isPreferredNearReset(aheadNearClose)).toBe(false);
+  });
+
+  it("never prefers an unserviceable (exhausted) lane — the hard stop still wins", () => {
+    const exhaustedNearClose = verdict({
+      state: "exhausted",
+      serviceable: false,
+      score: null,
+    });
+    expect(isPreferredNearReset(exhaustedNearClose)).toBe(false);
+  });
+
+  it("is fail-neutral on an unpolled lane (null verdict) or a free/subscription lane (score null)", () => {
+    expect(isPreferredNearReset(null)).toBe(false);
+    const freeLane = verdict({ state: "free", serviceable: true, score: null });
+    expect(isPreferredNearReset(freeLane)).toBe(false);
+  });
+
+  it("respects a caller-supplied elapsed threshold instead of the 0.8 default", () => {
+    const trailingAtHalf = verdict({
+      state: "behind",
+      serviceable: true,
+      score: { utilization: 0.3, elapsed: 0.55, deviation: -0.25 },
+    });
+    expect(isPreferredNearReset(trailingAtHalf)).toBe(false);
+    expect(isPreferredNearReset(trailingAtHalf, 0.5)).toBe(true);
+  });
+
+  it("boosts a preferred-near-reset candidate ahead of a same-tier candidate with a better raw pace state", () => {
+    // The trailing lane is merely "behind" (worse PACE_STATE_RANK than
+    // "behind-urgent" is better, but here we pit it against an "on" lane to
+    // isolate the preferred boost) — preferred-near-reset must win the
+    // within-tier sort ahead of ordinary pace-state/deviation/cost ordering.
+    const models = [
+      model({ id: "trailing-model", tier: "T1", laneId: "lane-trailing" }),
+      model({ id: "on-pace-model", tier: "T1", laneId: "lane-on" }),
+    ];
+    const ledger: LaneLedger = {
+      "lane-trailing": {
+        laneId: "lane-trailing",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict({
+          laneId: "lane-trailing",
+          state: "behind",
+          serviceable: true,
+          score: { utilization: 0.5, elapsed: 0.85, deviation: -0.35 },
+        }),
+      },
+      "lane-on": {
+        laneId: "lane-on",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict({ laneId: "lane-on", state: "on" }),
+      },
+    };
+    const candidates = [
+      // Cheaper candidate first, so an ordinary cost sort would already put
+      // on-pace-model ahead — the boost must override that.
+      candidate({ modelId: "on-pace-model", tier: "T1", expectedCostUsd: 0.5 }),
+      candidate({ modelId: "trailing-model", tier: "T1", expectedCostUsd: 2 }),
+    ];
+    const ordered = orderCandidatesByPace(candidates, models, ledger);
+    expect(ordered[0]!.modelId).toBe("trailing-model");
+  });
+
+  it("still never lets the preferred boost cross a tier group", () => {
+    const models = [
+      model({ id: "t1-model", tier: "T1", laneId: "lane-t1" }),
+      model({ id: "t2-trailing-model", tier: "T2", laneId: "lane-t2" }),
+    ];
+    const ledger: LaneLedger = {
+      "lane-t1": { laneId: "lane-t1", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-t1", state: "on" }) },
+      "lane-t2": {
+        laneId: "lane-t2",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict({
+          laneId: "lane-t2",
+          state: "behind",
+          serviceable: true,
+          score: { utilization: 0.5, elapsed: 0.9, deviation: -0.4 },
+        }),
+      },
+    };
+    const candidates = [
+      candidate({ modelId: "t1-model", tier: "T1", expectedCostUsd: 1 }),
+      candidate({ modelId: "t2-trailing-model", tier: "T2", expectedCostUsd: 1 }),
+    ];
+    const ordered = orderCandidatesByPace(candidates, models, ledger);
+    expect(ordered.map((c) => c.modelId)).toEqual(["t1-model", "t2-trailing-model"]);
+  });
+
+  it("preferredCandidateId reports the first preferred candidate's modelId, or null when none qualifies", () => {
+    const models = [model({ id: "m1", tier: "T1", laneId: "lane-a" })];
+    const preferredLedger: LaneLedger = {
+      "lane-a": {
+        laneId: "lane-a",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict({ state: "behind", serviceable: true, score: { utilization: 0.5, elapsed: 0.9, deviation: -0.4 } }),
+      },
+    };
+    expect(preferredCandidateId([candidate({ modelId: "m1" })], models, preferredLedger)).toBe("m1");
+    expect(preferredCandidateId([candidate({ modelId: "m1" })], models, {})).toBeNull();
   });
 });
 

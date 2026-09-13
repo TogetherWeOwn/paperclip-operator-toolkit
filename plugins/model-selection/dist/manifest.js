@@ -8,7 +8,17 @@ var TOOL_NAMES = {
   /** Advise and, if enforcement is on for this company, write the override. */
   apply: "model_selection_apply",
   /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
-  setOperatorOverride: "model_selection_set_operator_override"
+  setOperatorOverride: "model_selection_set_operator_override",
+  /**
+   * TOG-2137, Defect 3. Report where an agent's ancillary model pins
+   * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
+   * ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree
+   * with the lane-aware T3 recommendation. Read-only, always advisory: there
+   * is no write path from this plugin to any of these surfaces (`ctx.agents`
+   * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
+   * host's own internal API), so this can never be anything but a report.
+   */
+  ancillaryDrift: "model_selection_ancillary_drift"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -24,6 +34,18 @@ var JOB_KEYS = {
 };
 var TIERS = ["T1", "T2", "T3"];
 var PACING_MODES = ["off", "shadow", "enforce"];
+var LOCAL_FOLDER_KEYS = {
+  /**
+   * TOG-2137. Append-only `tog2138-decision-v1` JSONL records, one per
+   * `advise()` call, for the 48h host/plugin-shadow agreement stream
+   * `ops/tog-2138/gate_harness.py` correlates against. Plugin-owned path —
+   * never `ops/tog-2138/`, which is TOG-2138's own directory.
+   *
+   * Lowercase-and-hyphen only: `pluginManifestV1Schema` rejects a `folderKey`
+   * that doesn't match `^[a-z0-9][a-z0-9._:-]*$` (no camelCase).
+   */
+  shadowDecisions: "shadow-decisions"
+};
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
 var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
@@ -132,6 +154,15 @@ var SELECTION_CONFIG_SCHEMA = {
       ),
       default: {}
     },
+    /**
+     * TOG-2137, Defect 2. Company label id for the `operator` label, applied to
+     * the escalation issue this plugin creates when a tier is fully
+     * pace-exhausted. Same constraint as `tierLabelIds`: there is no label
+     * surface in the plugin SDK, so the id cannot be resolved from the name —
+     * it is operator-supplied, and optional (the escalation issue is still
+     * created without it, just unlabelled).
+     */
+    operatorLabelId: { type: "string", minLength: 1, title: "Operator label id" },
     profiles: {
       type: "object",
       title: "Volume profiles",
@@ -271,6 +302,25 @@ var SELECTION_CONFIG_SCHEMA = {
         stopWindow: { type: "integer", minimum: 1, default: 8 }
       },
       default: {}
+    },
+    /**
+     * TOG-2137. Emits one `tog2138-decision-v1` JSONL record per `advise()`
+     * call to the `shadowDecisions` local folder, for the 48h host/plugin
+     * agreement stream `ops/tog-2138/gate_harness.py` correlates against.
+     * Off by default — same inert-install discipline as `selection.mode`:
+     * installing this plugin must not start writing files an operator did
+     * not ask for.
+     */
+    shadowEmit: {
+      type: "object",
+      title: "TOG-2138 shadow decision emitter",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
+        maxRecords: { type: "integer", minimum: 1, default: 5e3 }
+      },
+      default: {}
     }
   }
 };
@@ -339,6 +389,16 @@ var manifest = {
     // for the card-level acceptance ledger, since `activity_log` is not an
     // allowlisted table and cannot be queried directly (TOG-1917 §2.2).
     "events.subscribe",
+    // TOG-2137, Defect 2: raise a `tier-exhausted` alarm when every tier from
+    // the required floor through T1 is pace-exhausted — there is nowhere left
+    // to escalate to, and this must reach an operator rather than fail
+    // silently the way the reference dispatcher's `pick()` does. The alarm
+    // reuses this instance's existing `Operator: <title>` + `operator`-label
+    // issue-creation convention (confirmed against 20+ live examples, e.g.
+    // TOG-2318/TOG-2324/TOG-2333), not a same-issue interaction card — an
+    // `Operator:` issue is a real, separately-triaged unit of work, and that
+    // is what a capacity dead end actually is.
+    "issues.create",
     // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -347,10 +407,25 @@ var manifest = {
     // directory is deliberately empty (see migrations/README.md), so this
     // capability is declared and never exercised. It is NOT
     // `database.namespace.write` — this plugin never writes a row of its own.
-    "database.namespace.migrate"
+    "database.namespace.migrate",
+    // TOG-2137. Append-only `tog2138-decision-v1` shadow-decision JSONL, the
+    // plugin-shadow half of the 48h host/plugin agreement stream. `ctx.db` is
+    // scoped to `heartbeat_runs` reads only (above) and cannot hold an
+    // append-only audit log a company operator can point external tooling at
+    // directly — a local folder is the SDK's plain-file surface for exactly
+    // that.
+    "local.folders"
   ],
   entrypoints: { worker: "./dist/worker.js" },
   instanceConfigSchema: SELECTION_CONFIG_SCHEMA,
+  localFolders: [
+    {
+      folderKey: LOCAL_FOLDER_KEYS.shadowDecisions,
+      displayName: "Shadow decision log",
+      description: "Append-only tog2138-decision-v1 JSONL, one record per advise() call, for the TOG-2138 48h host/plugin-shadow agreement gate.",
+      access: "readWrite"
+    }
+  ],
   /**
    * `ctx.db` is only wired once the plugin has an ACTIVE namespace, and
    * `ensureNamespace` returns null unless `manifest.database` is present
@@ -418,6 +493,12 @@ var manifest = {
           ttlSeconds: { type: "integer", minimum: 1 }
         }
       }
+    },
+    {
+      name: TOOL_NAMES.ancillaryDrift,
+      displayName: "Report ancillary model pin drift",
+      description: "Report which agents' ancillary model pins (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree with the lane-aware T3 recommendation, and who must act on each surface. Read-only; there is no write path from this plugin to any of these surfaces.",
+      parametersSchema: { type: "object", additionalProperties: false, properties: {} }
     }
   ],
   apiRoutes: [

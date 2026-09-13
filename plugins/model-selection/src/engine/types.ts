@@ -138,7 +138,17 @@ export type Outcome =
   | "selected"
   | "no-eligible-model"
   | "disabled"
-  | "held-at-floor";
+  | "held-at-floor"
+  /**
+   * TOG-2137, Defect 2. Distinct from `no-eligible-model`: every tier from
+   * the required tier up to and including T1 had a candidate that would
+   * otherwise qualify, but every one of them was excluded specifically by
+   * the pace serviceability hard stop (`lane-unserviceable`) — a capacity
+   * failure, not a config/capability gap. There is nowhere left to escalate
+   * to. This must reach an operator, not fail silently the way the reference
+   * dispatcher's `pick()` does.
+   */
+  | "tier-exhausted";
 
 export interface Candidate extends CostBreakdown {
   tier: Tier;
@@ -193,6 +203,18 @@ export interface SelectionDecision {
   pacingApplied: boolean;
   /** Null when there was nothing to compare. Never affects `modelId`. */
   shadowDiff: ShadowDiffRecord | null;
+  /**
+   * TOG-2137, Defect 2. The tier the ladder walk escalated AWAY FROM — set to
+   * `judgement.tier` when `effectiveTier` ends up on a different (higher)
+   * tier, null on an ordinary same-tier selection. The ladder walk climbs
+   * exactly one tier at a time and never skips a tier, so this plus
+   * `effectiveTier` fully describes the escalation: "judged X, nothing
+   * gate-eligible survived there, landed on `effectiveTier` instead". This is
+   * what the 48h comparison stream and the `tier-exhausted` alarm both key on
+   * to tell an escalation apart from a routine pick — the reference
+   * dispatcher has no equivalent signal at all.
+   */
+  escalatedFromTier: Tier | null;
 }
 
 /**

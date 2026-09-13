@@ -84,13 +84,75 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * Order candidates: pace state, then deviation, then measured cost, then
- * release date, then id. This function partitions by TIER FIRST and only
- * ever compares within one tier group — pace must never reorder a candidate
- * ahead of a candidate in a different, already-preferred tier group. That
- * partition is the whole defense for the "pace crosses tiers" mutant: even a
- * candidate with a perfect pace score never moves ahead of any candidate in
- * a tier group that sorted earlier.
+ * TOG-2137, Defect 5. Fraction of a governing window's duration (0-1) after
+ * which a trailing lane is considered close enough to reset that its unused
+ * allowance is at risk of being wasted. 0.8 = the last 20% of the window.
+ */
+export const PREFERRED_ELAPSED_THRESHOLD = 0.8;
+
+/**
+ * TOG-2137, Defect 5: the pace engine was brake-only. `hardStopExcluded`
+ * excludes an exhausted lane and `slotFactorFor` throttles a lane running
+ * `ahead` — both only ever hold a lane BACK. Nothing on the other side ever
+ * PREFERS a lane, so a lane trailing its elapsed-fraction trajectory can
+ * ride out its whole reset window under-used: the allowance is not banked
+ * or refunded, it is simply gone once the window rolls over. As a window's
+ * close nears (elapsed fraction >= `elapsedThreshold`, default the last 20%)
+ * with utilization still behind that elapsed fraction (deviation < 0), the
+ * lane becomes PREFERRED for new dispatch — the gas-pedal counterpart to
+ * the two existing brakes.
+ *
+ * This only ever reads `verdict.score`, which the vendored pace engine
+ * (`pace.ts`) populates solely for a lane with a computable governing
+ * (allowance-role) window. A `free` (unmetered/subscription) lane, or one
+ * whose config defines no allowance window at all — the shape that maps to
+ * the reference dispatcher's fixed `AVOID`/`AVOID_LANE` thresholds, which
+ * gate on a flat utilization reading with no reset-window concept — returns
+ * `score: null` and cannot be classified as preferred here. Extending the
+ * same two-sided treatment to that case needs the vendored verdict to expose
+ * a raw serviceability-window utilization number, which it does not; that is
+ * an upstream `@togetherweown/lane-capacity` change, not something this
+ * plugin can compute locally without forking pace.ts's own account-level
+ * logic. Tracked as a follow-up rather than silently left unimplemented.
+ */
+export function isPreferredNearReset(
+  verdict: LanePaceVerdict | null,
+  elapsedThreshold: number = PREFERRED_ELAPSED_THRESHOLD,
+): boolean {
+  if (!verdict || verdict.serviceable !== true || !verdict.score) return false;
+  return verdict.score.elapsed >= elapsedThreshold && verdict.score.deviation < 0;
+}
+
+function preferredOf(
+  ledger: LaneLedger,
+  model: ModelEntry | undefined,
+  elapsedThreshold: number,
+): boolean {
+  if (!model) return false;
+  return isPreferredNearReset(laneVerdictFor(ledger, model.laneId ?? null), elapsedThreshold);
+}
+
+/** The modelId `orderCandidatesByPace` would boost ahead for being preferred, if any — for trace purposes only. */
+export function preferredCandidateId(
+  candidates: readonly Candidate[],
+  models: readonly ModelEntry[],
+  ledger: LaneLedger,
+  elapsedThreshold: number = PREFERRED_ELAPSED_THRESHOLD,
+): string | null {
+  const preferred = candidates.find((candidate) => preferredOf(ledger, modelOf(models, candidate), elapsedThreshold));
+  return preferred?.modelId ?? null;
+}
+
+/**
+ * Order candidates: preferred-near-reset first, then pace state, then
+ * deviation, then measured cost, then release date, then id. This function
+ * partitions by TIER FIRST and only ever compares within one tier group —
+ * pace must never reorder a candidate ahead of a candidate in a different,
+ * already-preferred tier group. That partition is the whole defense for the
+ * "pace crosses tiers" mutant: even a candidate with a perfect pace score
+ * never moves ahead of any candidate in a tier group that sorted earlier.
+ * A preferred-near-reset boost (Defect 5) is subject to the exact same
+ * partition — it can win the within-group tie-break, never cross tiers.
  *
  * Tier-group order is taken from each group's FIRST APPEARANCE in the
  * incoming `candidates` array, not from a fixed tier index. `select.ts` has
@@ -106,7 +168,9 @@ export function orderCandidatesByPace(
   candidates: readonly Candidate[],
   models: readonly ModelEntry[],
   ledger: LaneLedger,
+  options?: { preferredElapsedThreshold?: number },
 ): Candidate[] {
+  const elapsedThreshold = options?.preferredElapsedThreshold ?? PREFERRED_ELAPSED_THRESHOLD;
   const byTier = new Map<Candidate["tier"], Candidate[]>();
   const orderedTierKeys: Candidate["tier"][] = [];
   for (const candidate of candidates) {
@@ -125,6 +189,11 @@ export function orderCandidatesByPace(
     group.sort((left, right) => {
       const leftModel = modelOf(models, left);
       const rightModel = modelOf(models, right);
+
+      const leftPreferred = preferredOf(ledger, leftModel, elapsedThreshold);
+      const rightPreferred = preferredOf(ledger, rightModel, elapsedThreshold);
+      if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+
       const stateDelta = PACE_STATE_RANK[paceStateOf(ledger, leftModel)] - PACE_STATE_RANK[paceStateOf(ledger, rightModel)];
       if (stateDelta !== 0) return stateDelta;
 

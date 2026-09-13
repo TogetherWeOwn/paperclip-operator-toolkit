@@ -141,6 +141,20 @@ const mutants = [
     from: "    const w = Math.exp(-row.ageDays / 10.0);",
     to: "    const w = Math.exp(-row.ageDays / 5.0);",
   },
+  {
+    // TOG-2373 QA finding (PR #278 review): disabling the worker.ts
+    // integration block that CALLS buildShadowRecord/emitShadowRecord left
+    // 200/200 tests green, because every prior shadow-emit test drove
+    // buildShadowRecord() directly (tests/shadow-emit.spec.ts) rather than
+    // through advise()/apply(). This mutant disables the wiring itself — not
+    // the `shadowEmit.enabled` config default, which is a separate, already
+    // -covered branch — so only a worker-level test that reads
+    // ctx.localFolders after calling advise()/apply() can kill it.
+    name: "disable-shadow-emit-wiring-in-worker",
+    file: "src/worker.ts",
+    from: "        if (config.shadowEmit.enabled) {",
+    to: "        if (false) {",
+  },
 ];
 
 function runTests() {

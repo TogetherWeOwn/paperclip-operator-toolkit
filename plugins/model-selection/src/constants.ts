@@ -10,6 +10,16 @@ export const TOOL_NAMES = {
   apply: "model_selection_apply",
   /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
   setOperatorOverride: "model_selection_set_operator_override",
+  /**
+   * TOG-2137, Defect 3. Report where an agent's ancillary model pins
+   * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
+   * ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree
+   * with the lane-aware T3 recommendation. Read-only, always advisory: there
+   * is no write path from this plugin to any of these surfaces (`ctx.agents`
+   * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
+   * host's own internal API), so this can never be anything but a report.
+   */
+  ancillaryDrift: "model_selection_ancillary_drift",
 } as const;
 
 // Route keys are validated against a lowercase-only regex by
@@ -65,10 +75,32 @@ export const PLUGIN_STATE_KEYS = {
   shadowDiffs: "shadowDiffs",
   /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
   earnInState: "earnInState",
+  /**
+   * TOG-2137, Defect 2. Per-issue timestamp of the last raised `tier-exhausted`
+   * operator alarm, so a decision that stays exhausted across repeated
+   * `advise`/`apply` calls does not spam a fresh card every time — one open
+   * card per continuous exhaustion streak. Cleared the first time the same
+   * issue's outcome is no longer `tier-exhausted`, so the NEXT exhaustion
+   * raises a fresh card rather than staying silent forever.
+   */
+  tierExhaustedAlarms: "tierExhaustedAlarms",
 } as const;
 
 export const PACING_MODES = ["off", "shadow", "enforce"] as const;
 export type PacingMode = (typeof PACING_MODES)[number];
+
+export const LOCAL_FOLDER_KEYS = {
+  /**
+   * TOG-2137. Append-only `tog2138-decision-v1` JSONL records, one per
+   * `advise()` call, for the 48h host/plugin-shadow agreement stream
+   * `ops/tog-2138/gate_harness.py` correlates against. Plugin-owned path —
+   * never `ops/tog-2138/`, which is TOG-2138's own directory.
+   *
+   * Lowercase-and-hyphen only: `pluginManifestV1Schema` rejects a `folderKey`
+   * that doesn't match `^[a-z0-9][a-z0-9._:-]*$` (no camelCase).
+   */
+  shadowDecisions: "shadow-decisions",
+} as const;
 
 /** Ahead-of-line throttling never drives a lane's slot share below this. */
 export const DEFAULT_SLOT_FLOOR_FRACTION = 0.25;

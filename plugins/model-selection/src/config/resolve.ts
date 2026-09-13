@@ -49,6 +49,8 @@ export interface ResolvedConfig {
    * up by name.
    */
   tierLabelIds: Partial<Record<Tier, string>>;
+  /** TOG-2137, Defect 2. Label id for `operator`, applied to escalation issues. Optional. */
+  operatorLabelId: string | null;
   profiles: { windowDays: number; minSamples: number; maxAgeDays: number };
   quality: { t1EscalationCeiling: number; t2EscalationCeiling: number; silentFailureWeight: number };
   pacing: {
@@ -67,6 +69,7 @@ export interface ResolvedConfig {
     stopOnFirstNFailures: number;
     stopWindow: number;
   };
+  shadowEmit: { enabled: boolean; maxRecords: number };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -125,6 +128,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const quality = record(root.quality);
   const pacing = record(root.pacing);
   const earnIn = record(root.earnIn);
+  const shadowEmit = record(root.shadowEmit);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -159,6 +163,9 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     const id = rawLabelIds[t];
     if (typeof id === "string" && id.length > 0) tierLabelIds[t] = id;
   }
+  const operatorLabelId = typeof root.operatorLabelId === "string" && root.operatorLabelId.length > 0
+    ? root.operatorLabelId
+    : null;
 
   const lanes: LaneSourceConfig[] = Array.isArray(pacing.lanes)
     ? pacing.lanes.flatMap((entry) => {
@@ -240,6 +247,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     },
     models,
     tierLabelIds,
+    operatorLabelId,
     profiles: {
       windowDays: num(profiles.windowDays, 7),
       minSamples: num(profiles.minSamples, 5),
@@ -269,6 +277,10 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         : ["research", "review"],
       stopOnFirstNFailures: num(earnIn.stopOnFirstNFailures, 2),
       stopWindow: num(earnIn.stopWindow, 8),
+    },
+    shadowEmit: {
+      enabled: bool(shadowEmit.enabled, false),
+      maxRecords: num(shadowEmit.maxRecords, 5000),
     },
   };
 }
@@ -340,5 +352,30 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
       "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this.",
     );
   }
+
+  // TOG-2137, Defect 6. A model row's `laneId` that does not resolve to a
+  // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
+  // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
+  // has: `laneVerdictFor` degrades a typo'd or renamed lane id to
+  // "unpolled" forever (fail-neutral by design, so it never excludes the
+  // model), which means this roster row's serviceability hard stop and pace
+  // ordering both silently never activate — no error at dispatch, just a
+  // model that quietly never gets pace-governed. Fail loudly here instead,
+  // once, at config load, rather than leaving it to be noticed later as an
+  // absence of behavior nobody can point at.
+  if (config.pacing.mode !== "off") {
+    const referencedLaneIds = new Set<string>();
+    for (const model of config.models) {
+      if (model.laneId) referencedLaneIds.add(model.laneId);
+    }
+    for (const laneId of referencedLaneIds) {
+      if (!laneIds.has(laneId)) {
+        errors.push(
+          `model roster references laneId "${laneId}", which is not in pacing.lanes — pace routing for that model would silently never activate`,
+        );
+      }
+    }
+  }
+
   return { errors, warnings };
 }

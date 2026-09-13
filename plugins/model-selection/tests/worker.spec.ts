@@ -4,8 +4,11 @@ import type { Issue } from "@paperclipai/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { PLUGIN_STATE_KEYS, TOOL_NAMES } from "../src/constants.js";
+import { LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TOOL_NAMES } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
+import type { LaneLedger } from "../src/engine/pacing.js";
+import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
+import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
 
 const COMPANY = "co-1";
@@ -363,6 +366,279 @@ describe("worker", () => {
       expect(seenHeaders).not.toHaveProperty("X-Api-Key");
       const ledger = await ledgerFor(noSecretHarness);
       expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
+    });
+  });
+
+  describe("TOG-2137 Defect 2: tier-exhausted operator alarm", () => {
+    function unserviceableVerdict(laneId: string): LanePaceVerdict {
+      return {
+        laneId,
+        observedAt: "2026-09-10T11:00:00.000Z",
+        state: "exhausted",
+        serviceable: false,
+        score: null,
+        accounts: [],
+        knownAccountCount: 1,
+        knownWeight: 1,
+        serviceableAccountCount: 0,
+        urgentResetAt: null,
+        reason: "all-accounts-unserviceable",
+      };
+    }
+
+    function ledgerWith(...laneIds: string[]): LaneLedger {
+      const ledger: LaneLedger = {};
+      for (const laneId of laneIds) {
+        ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: "2026-09-10T11:00:00.000Z", error: null };
+      }
+      return ledger;
+    }
+
+    // The T1 model is the only one required for a `tier:T1` issue, so pinning
+    // its lane exhausted with nothing above it to escalate to is enough to
+    // force `tier-exhausted` regardless of the T2/T3 rows' own laneId.
+    const t1LaneId = "lane-t1";
+    const laned = MODELS.map((entry) => (entry.tier === "T1" ? { ...entry, laneId: t1LaneId } : entry));
+
+    async function bootExhausted() {
+      const h = await boot(baseConfig({ pacing: { mode: "enforce" }, models: laned }));
+      await h.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        ledgerWith(t1LaneId),
+      );
+      return h;
+    }
+
+    async function listEscalations(h: Awaited<ReturnType<typeof bootExhausted>>) {
+      const all = await h.ctx.issues.list({ companyId: COMPANY, limit: 1000 });
+      return all.filter((i) => i.parentId === ISSUE && i.title.startsWith("Operator:"));
+    }
+
+    it("raises exactly one Operator: escalation issue when tier-exhausted", async () => {
+      const exhausted = await bootExhausted();
+      const result = await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      expect((result as { data: { outcome: string } }).data.outcome).toBe("tier-exhausted");
+
+      const escalations = await listEscalations(exhausted);
+      expect(escalations).toHaveLength(1);
+      expect(escalations[0]?.title).toContain("Operator:");
+      expect(escalations[0]?.assigneeAgentId ?? null).toBeNull();
+    });
+
+    it("does not raise a duplicate escalation issue on a second advise call while still exhausted", async () => {
+      const exhausted = await bootExhausted();
+      await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await exhausted.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+
+      const escalations = await listEscalations(exhausted);
+      expect(escalations).toHaveLength(1);
+    });
+
+    it("clears the alarm once no longer exhausted, so a later exhaustion raises a fresh escalation", async () => {
+      const exhausted = await bootExhausted();
+      await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      // Lane recovers: clear the ledger.
+      await exhausted.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        {},
+      );
+      await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const alarms = await exhausted.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.tierExhaustedAlarms,
+      });
+      expect(alarms).toEqual({});
+
+      // Exhausted again: a fresh escalation must be raised, not suppressed.
+      await exhausted.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        ledgerWith(t1LaneId),
+      );
+      await exhausted.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const escalations = await listEscalations(exhausted);
+      expect(escalations).toHaveLength(2);
+    });
+
+    it("never raises an escalation for an ordinary selected decision", async () => {
+      const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      expect((result as { data: { outcome: string } }).data.outcome).toBe("selected");
+      const escalations = await listEscalations(harness);
+      expect(escalations).toHaveLength(0);
+    });
+  });
+
+  describe("TOG-2137/2138: shadow decision emitter wiring in worker.ts", () => {
+    // Not exported from worker.ts (it's a local `const`); the QA-flagged gap
+    // is exactly that no test drove this path, so the filename is pinned here
+    // deliberately rather than imported.
+    const SHADOW_FILE = "decisions.jsonl";
+
+    async function readShadowLines(h: Awaited<ReturnType<typeof boot>>): Promise<string[]> {
+      const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_FILE);
+      return text.split("\n").filter((line) => line.trim().length > 0);
+    }
+
+    it("writes a decisions.jsonl record on advise() when shadowEmit.enabled is true", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const lines = await readShadowLines(h);
+      expect(lines).toHaveLength(1);
+      const record = JSON.parse(lines[0]!);
+      expect(record.schema).toBe(SHADOW_SCHEMA_VERSION);
+      expect(record.issueId).toBe(ISSUE);
+    });
+
+    it("writes nothing to the shadow folder when shadowEmit.enabled is false (the default)", async () => {
+      // baseConfig() carries no `shadowEmit` key, so resolveConfig defaults it
+      // to { enabled: false }. This is the exact config the QA finding named:
+      // disabling the worker.ts integration block must leave no JSONL write.
+      await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      await expect(readShadowLines(harness)).rejects.toThrow(/not found/i);
+    });
+
+    it("caps the shadow log at config.shadowEmit.maxRecords, keeping the newest records", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 2 } }));
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const lines = await readShadowLines(h);
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(JSON.parse(line).issueId).toBe(ISSUE);
+      }
+    });
+
+    it("swallows a shadow-emit write failure — advise() still returns its decision, and the failure is logged", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
+      h.ctx.localFolders.writeTextAtomic = async () => {
+        throw new Error("simulated local-folder I/O failure");
+      };
+
+      const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      const decision = (result as { data: { modelId: string } }).data;
+      expect(decision.modelId).toBe("claude-opus-5");
+      expect(h.logs.some((l) => l.level === "warn" && l.message.includes("shadow decision emit failed"))).toBe(true);
+
+      h.ctx.localFolders.writeTextAtomic = originalWrite;
+    });
+
+    it("TOG-2373: a transient read failure after existing records aborts the emit instead of truncating history", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      expect(await readShadowLines(h)).toHaveLength(2);
+
+      const originalRead = h.ctx.localFolders.readText.bind(h.ctx.localFolders);
+      h.ctx.localFolders.readText = async () => {
+        throw new Error("simulated transient local-folder read failure");
+      };
+
+      const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+
+      h.ctx.localFolders.readText = originalRead;
+
+      // A transient read error must never be treated as "file is empty" — the
+      // two prior records must survive untouched, not be overwritten by a
+      // single-record file built from a false-empty read.
+      expect(await readShadowLines(h)).toHaveLength(2);
+      expect(
+        h.logs.some(
+          (l) => l.level === "warn" && l.message.includes("shadow decision emit aborted — could not read existing log"),
+        ),
+      ).toBe(true);
+    });
+
+    it("TOG-2373: two overlapping emits both land instead of collapsing to one record", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+
+      await Promise.all([
+        h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx),
+        h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx),
+      ]);
+
+      // Two concurrent read-modify-write cycles against the same file must
+      // serialize, not race — racing them means both read the same "before"
+      // content and the later write silently drops the earlier record.
+      expect(await readShadowLines(h)).toHaveLength(2);
+    });
+  });
+
+  describe("TOG-2137 Defect 3: ancillary model pin drift", () => {
+    function agentWith(overrides: Record<string, unknown>) {
+      return {
+        id: "agent-drift",
+        companyId: COMPANY,
+        name: "Mechanical worker",
+        urlKey: "mechanical-worker",
+        role: "general",
+        title: null,
+        icon: null,
+        status: "active",
+        reportsTo: null,
+        capabilities: null,
+        adapterType: "claude_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        budgetMonthlyCents: 0,
+        spentMonthlyCents: 0,
+        pauseReason: null,
+        pausedAt: null,
+        permissions: {},
+        lastHeartbeatAt: null,
+        metadata: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+        ...overrides,
+      } as never;
+    }
+
+    it("reports drift on an agent whose ancillary pin disagrees with the T3 recommendation", async () => {
+      const h = await boot(baseConfig(), issue(), [
+        agentWith({
+          adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "some-stale-model" } },
+        }),
+      ]);
+      const result = await h.executeTool(TOOL_NAMES.ancillaryDrift, {}, runCtx);
+      const data = (result as { data: { recommendedModelId: string; drift: Array<Record<string, unknown>> } }).data;
+      expect(data.recommendedModelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+      expect(data.drift).toHaveLength(1);
+      expect(data.drift[0]).toMatchObject({
+        surface: "ANTHROPIC_SMALL_FAST_MODEL",
+        currentModelId: "some-stale-model",
+        agentId: "agent-drift",
+      });
+    });
+
+    it("reports no drift when every ancillary surface already matches the recommendation", async () => {
+      const h = await boot(baseConfig(), issue(), [
+        agentWith({
+          adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "cliproxy/claude-haiku-4-5-20251001" } },
+          runtimeConfig: {
+            modelProfiles: { cheap: { adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" } } },
+          },
+        }),
+      ]);
+      const result = await h.executeTool(TOOL_NAMES.ancillaryDrift, {}, runCtx);
+      const data = (result as { data: { drift: unknown[] } }).data;
+      expect(data.drift).toHaveLength(0);
+    });
+
+    it("writes nothing — read-only regardless of what drift it finds", async () => {
+      const h = await boot(baseConfig(), issue(), [
+        agentWith({ adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "some-stale-model" } } }),
+      ]);
+      await h.executeTool(TOOL_NAMES.ancillaryDrift, {}, runCtx);
+      expect(h.activity).toHaveLength(0);
     });
   });
 });

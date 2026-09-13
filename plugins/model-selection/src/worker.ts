@@ -6,6 +6,7 @@ import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/res
 import {
   CARD_LEDGER_WINDOW_DAYS,
   JOB_KEYS,
+  LOCAL_FOLDER_KEYS,
   OPERATOR_PIN_LABEL,
   PLUGIN_STATE_KEYS,
   REJECTION_WINDOW_MS,
@@ -18,7 +19,7 @@ import {
   PLUGIN_VERSION,
   type Tier,
 } from "./constants.js";
-import { costOf } from "./engine/cost.js";
+import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import {
@@ -51,6 +52,7 @@ import {
   type OperatorOverrideLedger,
 } from "./engine/pacing.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
+import { buildShadowRecord } from "./shadow-emit.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -98,6 +100,9 @@ function summary(decision: SelectionDecision): string {
     return `Held at the agent floor: ${decision.heldReason}`;
   }
   if (decision.outcome === "disabled") return "Model Selection is not configured for this company.";
+  if (decision.outcome === "tier-exhausted") {
+    return `Tier exhausted: every model from ${decision.judgement.tier} through T1 is pace-exhausted; nowhere left to escalate to.`;
+  }
   return "No eligible model for this issue.";
 }
 
@@ -166,6 +171,157 @@ export function createPlugin() {
         return history;
       };
 
+      const tierExhaustedAlarmsKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.tierExhaustedAlarms,
+      });
+
+      const readTierExhaustedAlarms = async (companyId: string): Promise<Record<string, string>> => {
+        const stored = asRecord(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
+        const alarms: Record<string, string> = {};
+        for (const [issueId, at] of Object.entries(stored)) {
+          if (typeof at === "string") alarms[issueId] = at;
+        }
+        return alarms;
+      };
+
+      /**
+       * TOG-2137, Defect 2. `tier-exhausted` is a capacity dead end — every
+       * model from the required tier through the T1 ceiling is
+       * pace-unserviceable, and there is nowhere left for the ladder walk in
+       * `select.ts` to climb to. `ctx.metrics.write` records the outcome for
+       * dashboards, but a metric is not something an operator sees; this is
+       * the "must reach an operator card, never a silent no-op" half.
+       *
+       * This reuses the instance's existing `Operator: <title>` + `operator`
+       * label issue-creation convention (confirmed against 20+ live examples
+       * — TOG-2318, TOG-2324, TOG-2333, etc. — all plain `manual`-origin
+       * issues, usually a child of the blocked issue, usually unassigned).
+       * That is a materially different mechanism from a same-issue
+       * confirmation card: it is a real, separately-triaged unit of work, and
+       * an unrecoverable capacity dead end is exactly that, not a
+       * notification. One escalation issue per continuous exhaustion streak:
+       * `tierExhaustedAlarms` gates re-creation while still exhausted, and is
+       * cleared the moment the issue is no longer exhausted so the NEXT
+       * exhaustion raises a fresh escalation rather than staying silent
+       * forever.
+       */
+      const raiseOrClearTierExhaustedAlarm = async (
+        companyId: string,
+        issueId: string,
+        issueTitle: string,
+        issueIdentifier: string | null,
+        decision: SelectionDecision,
+        authorAgentId: string | null,
+      ): Promise<void> => {
+        const alarms = await readTierExhaustedAlarms(companyId);
+        if (decision.outcome !== "tier-exhausted") {
+          if (issueId in alarms) {
+            const { [issueId]: _dropped, ...rest } = alarms;
+            await ctx.state.set(tierExhaustedAlarmsKey(companyId), rest);
+          }
+          return;
+        }
+        if (issueId in alarms) return;
+
+        const config = await companyConfig(companyId);
+        const reference = issueIdentifier ? `${issueIdentifier} (${issueTitle})` : issueTitle;
+        await ctx.issues.create({
+          companyId,
+          parentId: issueId,
+          title: `Operator: model tier exhausted on ${reference}`,
+          description:
+            `Every model from ${decision.judgement.tier} through T1 is pace-exhausted for ` +
+            `${reference} — there is nowhere left for Model Selection to escalate to.\n\n` +
+            "Intervene to unblock: add lane capacity, adjust pacing, or set an operator override " +
+            "(`model_selection_set_operator_override`). This escalation stays open until the lane recovers " +
+            "and a fresh `model_selection_advise`/`apply` call on the original issue no longer reports " +
+            "`tier-exhausted`.",
+          priority: "critical",
+          labelIds: config.operatorLabelId ? [config.operatorLabelId] : undefined,
+          actor: { actorAgentId: authorAgentId ?? undefined },
+        });
+        await ctx.state.set(tierExhaustedAlarmsKey(companyId), { ...alarms, [issueId]: new Date().toISOString() });
+      };
+
+      // --- TOG-2137/2138: shadow decision emitter -----------------------
+
+      const SHADOW_DECISIONS_FILE = "decisions.jsonl";
+
+      /**
+       * A missing shadow-decisions file is the ordinary first-write case (folder
+       * just configured, or `maxRecords` history not yet created) and the only
+       * read failure that may be treated as "start from empty". Both the real
+       * host (`fs` ENOENT surfaced through the RPC error message, since the
+       * ENOENT string `code` does not survive the JSON-RPC error-code coercion)
+       * and the SDK test harness (`Local folder file not found: ...`) signal it
+       * this way, so it must be detected on the message text, not a numeric
+       * code. Any other error — folder not configured, not readable, transient
+       * I/O — is NOT this case, and treating it as "empty" is exactly the QA
+       * TOG-2373 defect: it silently truncates the on-disk history.
+       */
+      const isMissingShadowFileError = (err: unknown): boolean => {
+        const message = err instanceof Error ? err.message : String(err);
+        return /not found/i.test(message) || /ENOENT/.test(message);
+      };
+
+      // Per-company promise chain so overlapping `advise()`/`apply()` calls
+      // serialize their read-modify-write against the same JSONL file instead
+      // of racing: two emits that both read the same "before" content and then
+      // both write collapse to whichever write lands last, silently dropping
+      // the other's record (TOG-2373).
+      const shadowEmitChains = new Map<string, Promise<void>>();
+
+      /**
+       * Off by default (`shadowEmit.enabled`). Read-modify-write against one
+       * JSONL file, capped at `maxRecords` — `ctx.localFolders` has no native
+       * append, and the host only offers whole-file atomic replace. A write
+       * failure is logged and swallowed: shadow emission is a side channel for
+       * the TOG-2138 comparison stream, and must never fail the
+       * `advise()`/`apply` call it rides on. A read failure is swallowed only
+       * when it means "no file yet" — any other read failure aborts the emit
+       * instead of overwriting real history with a one-record file.
+       */
+      const emitShadowRecordSerialized = async (
+        companyId: string,
+        record: ReturnType<typeof buildShadowRecord>,
+      ): Promise<void> => {
+        let existing = "";
+        try {
+          existing = await ctx.localFolders.readText(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_DECISIONS_FILE);
+        } catch (err) {
+          if (!isMissingShadowFileError(err)) {
+            ctx.logger.warn("model-selection: shadow decision emit aborted — could not read existing log", {
+              error: String(err),
+            });
+            return;
+          }
+          existing = "";
+        }
+        const lines = existing.split("\n").filter((line) => line.trim().length > 0);
+        lines.push(JSON.stringify(record));
+        const config = await companyConfig(companyId);
+        const capped = lines.length > config.shadowEmit.maxRecords ? lines.slice(-config.shadowEmit.maxRecords) : lines;
+        try {
+          await ctx.localFolders.writeTextAtomic(
+            companyId,
+            LOCAL_FOLDER_KEYS.shadowDecisions,
+            SHADOW_DECISIONS_FILE,
+            capped.join("\n") + "\n",
+          );
+        } catch (err) {
+          ctx.logger.warn("model-selection: shadow decision emit failed", { error: String(err) });
+        }
+      };
+
+      const emitShadowRecord = (companyId: string, record: ReturnType<typeof buildShadowRecord>): Promise<void> => {
+        const previous = shadowEmitChains.get(companyId) ?? Promise.resolve();
+        const next = previous.catch(() => {}).then(() => emitShadowRecordSerialized(companyId, record));
+        shadowEmitChains.set(companyId, next);
+        return next;
+      };
+
       /**
        * `ctx.http.fetch` wrapped to the shape `pollLanes` expects. Mirrors
        * `capacityHttp(ctx)` in the accepted model-router worker: a thin
@@ -224,6 +380,8 @@ export function createPlugin() {
         hasTierLabel: boolean;
         hasOperatorPin: boolean;
         isIdle: boolean;
+        title: string;
+        identifier: string | null;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -298,6 +456,8 @@ export function createPlugin() {
           hasTierLabel: labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX)),
           hasOperatorPin: labelNames.includes(OPERATOR_PIN_LABEL),
           isIdle,
+          title: String(issue.title ?? ""),
+          identifier: typeof issue.identifier === "string" ? issue.identifier : null,
         };
       };
 
@@ -316,6 +476,8 @@ export function createPlugin() {
         isServiceabilityHardStop: boolean;
         nowIso: string;
         config: ResolvedConfig;
+        title: string;
+        identifier: string | null;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
@@ -371,6 +533,25 @@ export function createPlugin() {
           await ctx.state.set(shadowDiffsKey(companyId), { records });
         }
 
+        if (config.shadowEmit.enabled) {
+          const shadowRecord = buildShadowRecord({
+            issueId,
+            issueIdentifier: described.identifier,
+            nowIso,
+            decision,
+            descriptor: described.descriptor,
+            status: described.status,
+            hasOverride: described.hasOverride,
+            hasOperatorPin: described.hasOperatorPin,
+            isIdle: described.isIdle,
+            models: config.models,
+            laneLedger,
+            slotFloorFraction: config.pacing.slotFloorFraction,
+            operatorOverride: liveOverride,
+          });
+          await emitShadowRecord(companyId, shadowRecord);
+        }
+
         return {
           decision,
           issueId,
@@ -383,6 +564,8 @@ export function createPlugin() {
           isServiceabilityHardStop,
           nowIso,
           config,
+          title: described.title,
+          identifier: described.identifier,
         };
       };
 
@@ -396,6 +579,14 @@ export function createPlugin() {
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          await raiseOrClearTierExhaustedAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null,
+          );
           return { content: summary(result.decision), data: result.decision };
         },
       );
@@ -411,6 +602,14 @@ export function createPlugin() {
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          await raiseOrClearTierExhaustedAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null,
+          );
 
           // The repin exception is itself a pace CONSEQUENCE, gated the same as
           // every other pace consequence: only in `enforce`. In `off`/`shadow`
@@ -594,6 +793,73 @@ export function createPlugin() {
           excludeAgentId: typeof event.actorId === "string" ? event.actorId : null,
         });
       });
+
+      ctx.tools.register(
+        TOOL_NAMES.ancillaryDrift,
+        {
+          displayName: "Report ancillary model pin drift",
+          description:
+            "Report which agents' ancillary model pins disagree with the lane-aware T3 recommendation. Read-only.",
+          parametersSchema: { type: "object" },
+        },
+        async (_params, runCtx): Promise<ToolResult> => {
+          const config = await companyConfig(runCtx.companyId);
+          if (config.models.length === 0) {
+            return { content: "Model Selection is not configured for this company.", data: { recommendedModelId: null, drift: [] } };
+          }
+          const { profiles, signals } = await readProfiles(runCtx.companyId);
+          const laneLedger = await readLaneLedger(runCtx.companyId);
+          const decision = recommendAncillaryModel({
+            config: {
+              models: config.models,
+              holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
+              pacingMode: config.pacing.mode,
+              laneLedger,
+              slotFloorFraction: config.pacing.slotFloorFraction,
+            },
+            profiles,
+            signals,
+            now: Date.now(),
+          });
+
+          if (decision.outcome !== "selected" && decision.outcome !== "held-at-floor") {
+            return {
+              content: `No ancillary recommendation: ${summary(decision)}`,
+              data: { recommendedModelId: null, decision, drift: [] },
+            };
+          }
+          const recommendedModelId = decision.modelId;
+
+          const drift: AncillarySurfaceDrift[] = [];
+          let offset = 0;
+          const pageSize = 200;
+          for (;;) {
+            const page = await ctx.agents.list({ companyId: runCtx.companyId, limit: pageSize, offset });
+            for (const agent of page) {
+              drift.push(
+                ...ancillaryDriftForAgent(
+                  {
+                    id: agent.id,
+                    name: agent.name,
+                    adapterConfig: asRecord(agent.adapterConfig),
+                    runtimeConfig: asRecord(agent.runtimeConfig),
+                  },
+                  recommendedModelId,
+                ),
+              );
+            }
+            if (page.length < pageSize) break;
+            offset += pageSize;
+          }
+
+          await ctx.metrics.write("model_selection.ancillary_drift.count", drift.length);
+          const content =
+            drift.length === 0
+              ? `No ancillary drift: every reported ancillary surface already matches the recommended ${recommendedModelId}.`
+              : `${drift.length} ancillary surface${drift.length === 1 ? "" : "s"} drifted from the recommended ${recommendedModelId}.`;
+          return { content, data: { recommendedModelId, decision, drift } };
+        },
+      );
 
       // --- scheduled volume-profile refresh ---------------------------------
       // Without this the cost term goes stale and the engine holds at the agent

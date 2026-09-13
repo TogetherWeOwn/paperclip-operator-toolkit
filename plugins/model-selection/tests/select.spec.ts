@@ -12,6 +12,30 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
   return { ...baseModel, ...overrides };
 }
 
+function unserviceableVerdict(laneId: string): LanePaceVerdict {
+  return {
+    laneId,
+    observedAt: "2026-09-10T11:00:00.000Z",
+    state: "exhausted",
+    serviceable: false,
+    score: null,
+    accounts: [],
+    knownAccountCount: 1,
+    knownWeight: 1,
+    serviceableAccountCount: 0,
+    urgentResetAt: null,
+    reason: "all-accounts-unserviceable",
+  };
+}
+
+function ledgerWith(...laneIds: string[]): LaneLedger {
+  const ledger: LaneLedger = {};
+  for (const laneId of laneIds) {
+    ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: NOW.toString(), error: null };
+  }
+  return ledger;
+}
+
 describe("selection", () => {
   it("picks the cheapest model that clears the judged tier floor", () => {
     const decision = selectModel({
@@ -231,6 +255,160 @@ describe("selection", () => {
       config: config({ models: [zeta, alpha] }),
     });
     expect(decision.modelId).toBe("alpha");
+  });
+
+  describe("TOG-2137 Defect 2: tier-exhaustion escalation", () => {
+    const t3 = MODELS.find((entry) => entry.tier === "T3")!;
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const laned = [
+      model(t3, { laneId: "lane-t3" }),
+      model(t2, { laneId: "lane-t2" }),
+      model(t1, { laneId: "lane-t1" }),
+    ];
+
+    it("escalates exactly one tier up when the required tier is pace-exhausted", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t3") }),
+      });
+      expect(decision.outcome).toBe("selected");
+      expect(decision.modelId).toBe(t2.id);
+      expect(decision.effectiveTier).toBe("T2");
+      expect(decision.escalatedFromTier).toBe("T3");
+      expect(decision.trace.some((line) => line.includes("escalated from T3 to T2"))).toBe(true);
+    });
+
+    it("climbs a second rung, never skipping the middle tier, when two tiers in a row are pace-exhausted", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t3", "lane-t2") }),
+      });
+      expect(decision.outcome).toBe("selected");
+      expect(decision.modelId).toBe(t1.id);
+      expect(decision.effectiveTier).toBe("T1");
+      expect(decision.escalatedFromTier).toBe("T3");
+    });
+
+    it("never sets escalatedFromTier on an ordinary same-tier pick", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
+        config: config({ models: laned, laneLedger: {} }),
+      });
+      expect(decision.modelId).toBe(t3.id);
+      expect(decision.escalatedFromTier).toBeNull();
+    });
+
+    it("reports tier-exhausted, not no-eligible-model, when T1 itself has no usable lane and there is nowhere left to escalate", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t1") }),
+      });
+      expect(decision.outcome).toBe("tier-exhausted");
+      expect(decision.modelId).toBeNull();
+      expect(decision.effectiveTier).toBe("T1");
+      expect(decision.trace.some((line) => line.includes("tier exhausted"))).toBe(true);
+    });
+
+    it("reports tier-exhausted when every tier from the required floor through T1 is pace-exhausted", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t3", "lane-t2", "lane-t1") }),
+      });
+      expect(decision.outcome).toBe("tier-exhausted");
+      expect(decision.modelId).toBeNull();
+    });
+
+    it("stays no-eligible-model, not tier-exhausted, when a config/capability gap is mixed in alongside pace exhaustion", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T1"], requiredCapabilities: ["computer-use"] },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t1") }),
+      });
+      expect(decision.outcome).toBe("no-eligible-model");
+    });
+
+    it("does not treat a merely-behind (still serviceable) lane as an escalation trigger", () => {
+      const behindLedger: LaneLedger = {
+        "lane-t3": {
+          laneId: "lane-t3",
+          verdict: { ...unserviceableVerdict("lane-t3"), state: "behind", serviceable: true },
+          fetchedAt: NOW.toString(),
+          error: null,
+        },
+      };
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
+        config: config({ models: laned, laneLedger: behindLedger }),
+      });
+      expect(decision.modelId).toBe(t3.id);
+      expect(decision.escalatedFromTier).toBeNull();
+    });
+  });
+
+  describe("TOG-2137 Defect 6: a pin or sticky model cannot hard-bypass capacity routing", () => {
+    const t3 = MODELS.find((entry) => entry.tier === "T3")!;
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const laned = [
+      model(t3, { laneId: "lane-t3" }),
+      model(t2, { laneId: "lane-t2" }),
+      model(t1, { laneId: "lane-t1" }),
+    ];
+
+    it("re-derives the tier from the label instead of an issue-override pin whose lane is unserviceable", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T2"], pinnedModelId: t1.id },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t1") }),
+      });
+      expect(decision.judgement.source).toBe("issue-label");
+      expect(decision.judgement.tier).toBe("T2");
+      // The pinned T1 model must not silently win either — it is excluded by
+      // the ordinary serviceability hard stop below, same as any other
+      // candidate on a dead lane.
+      expect(decision.modelId).not.toBe(t1.id);
+    });
+
+    it("still honors a serviceable pin outright — this only strips a pin that is universally dead", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T2"], pinnedModelId: t1.id },
+        config: config({ models: laned, laneLedger: {} }),
+      });
+      expect(decision.judgement.source).toBe("issue-override");
+      expect(decision.judgement.tier).toBe("T1");
+      expect(decision.modelId).toBe(t1.id);
+    });
+
+    it("declines a sticky model whose lane has gone unserviceable instead of wedging the issue there", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T1"], stickyModelId: t1.id },
+        config: config({ models: laned, laneLedger: ledgerWith("lane-t1") }),
+      });
+      expect(decision.outcome).toBe("tier-exhausted");
+      expect(
+        decision.rejections.some((r) => r.stage === "lane-unserviceable" && r.modelId === t1.id),
+      ).toBe(true);
+      expect(decision.trace.some((line) => line.includes("sticky") && line.includes("not serviceable"))).toBe(true);
+    });
+
+    it("keeps the sticky model when its lane is still serviceable, unchanged from before Defect 6", () => {
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "i1", labelNames: ["tier:T1"], stickyModelId: t1.id },
+        config: config({ models: laned, laneLedger: {} }),
+      });
+      expect(decision.modelId).toBe(t1.id);
+      expect(decision.trace.some((line) => line.includes("already running this issue"))).toBe(true);
+    });
   });
 });
 

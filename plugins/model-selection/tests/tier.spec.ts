@@ -70,3 +70,48 @@ describe("tier judgement is recorded, never inferred", () => {
     expect(tierOfModel("claude-sonnet-4-6", MODELS)).toBeNull();
   });
 });
+
+describe("TOG-2137 Defect 6: a pin cannot hard-bypass capacity routing", () => {
+  it("falls through to the tier label when the pinned model's lane is unserviceable", () => {
+    const judgement = resolveTier(
+      { issueId: "i1", labelNames: ["tier:T2"], pinnedModelId: "claude-opus-5" },
+      MODELS,
+      "T3",
+      { isLaneUnserviceable: (model) => model.id === "claude-opus-5" },
+    );
+    expect(judgement.source).toBe("issue-label");
+    expect(judgement.tier).toBe("T2");
+  });
+
+  it("falls all the way to the config default when the pin is unserviceable and nothing else is recorded", () => {
+    const judgement = resolveTier(
+      { issueId: "i1", pinnedModelId: "claude-opus-5" },
+      MODELS,
+      "T3",
+      { isLaneUnserviceable: (model) => model.id === "claude-opus-5" },
+    );
+    expect(judgement.source).toBe("config-default");
+    expect(judgement.tier).toBe("T3");
+  });
+
+  it("still honors a serviceable pin outright, unchanged from before Defect 6", () => {
+    const judgement = resolveTier(
+      { issueId: "i1", labelNames: ["tier:T3"], pinnedModelId: "claude-opus-5" },
+      MODELS,
+      "T3",
+      { isLaneUnserviceable: () => false },
+    );
+    expect(judgement.source).toBe("issue-override");
+    expect(judgement.tier).toBe("T1");
+  });
+
+  it("with no isLaneUnserviceable predicate supplied, behaves exactly like the pre-2137 unconditional pin", () => {
+    const judgement = resolveTier(
+      { issueId: "i1", labelNames: ["tier:T3"], pinnedModelId: "claude-opus-5" },
+      MODELS,
+      "T3",
+    );
+    expect(judgement.source).toBe("issue-override");
+    expect(judgement.tier).toBe("T1");
+  });
+});

@@ -1,6 +1,6 @@
 import type { PacingMode, Tier } from "../constants.js";
 import type { SelectionObjective } from "../config/resolve.js";
-import { costOf, resolveProfile, tierIndex } from "./cost.js";
+import { costOf, resolveProfile, tierAbove, tierIndex } from "./cost.js";
 import { computeShadowDiff, orderByObjective } from "./objective.js";
 import { resolveTier } from "./tier.js";
 import type {
@@ -13,7 +13,7 @@ import type {
   SelectionDecision,
   VolumeProfile,
 } from "./types.js";
-import { hardStopExcluded, orderCandidatesByPace, slotAllowed, type LaneLedger } from "./pacing.js";
+import { hardStopExcluded, orderCandidatesByPace, preferredCandidateId, slotAllowed, type LaneLedger } from "./pacing.js";
 
 export interface SelectionConfig {
   /**
@@ -89,7 +89,24 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const trace: string[] = [];
   const rejections: Rejection[] = [];
 
-  const judgement = resolveTier(descriptor, config.models, config.defaultTier);
+  // `off` means no pace involvement of any kind, including the hard stop —
+  // an operator can fully disable this feature and get exactly the pre-2137
+  // engine back. `shadow` and `enforce` both run the hard stop and pace
+  // ordering; only `enforce` lets either change which model wins. Resolved
+  // ahead of `resolveTier` (Defect 6) so an issue-override pin on a
+  // fully-unserviceable model can fall through to the tier label / agent
+  // floor instead of silently wedging this issue — or a router-dependent
+  // task class like `triage` — on a dead lane with no path to escalate.
+  const pacingMode: PacingMode = config.pacingMode ?? "shadow";
+  const paceActive = pacingMode !== "off";
+  const paceEnforced = pacingMode === "enforce";
+  const ledger: LaneLedger = config.laneLedger ?? {};
+  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
+  const overrideModelId = config.operatorOverrideModelId ?? null;
+
+  const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
+    isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model),
+  });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
 
   const base: SelectionDecision = {
@@ -104,18 +121,8 @@ export function selectModel(input: SelectInput): SelectionDecision {
     heldReason: null,
     pacingApplied: false,
     shadowDiff: null,
+    escalatedFromTier: null,
   };
-
-  // `off` means no pace involvement of any kind, including the hard stop —
-  // an operator can fully disable this feature and get exactly the pre-2137
-  // engine back. `shadow` and `enforce` both run the hard stop and pace
-  // ordering; only `enforce` lets either change which model wins.
-  const pacingMode: PacingMode = config.pacingMode ?? "shadow";
-  const paceActive = pacingMode !== "off";
-  const paceEnforced = pacingMode === "enforce";
-  const ledger: LaneLedger = config.laneLedger ?? {};
-  const slotFloorFraction = config.slotFloorFraction ?? 0.25;
-  const overrideModelId = config.operatorOverrideModelId ?? null;
 
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
@@ -135,11 +142,17 @@ export function selectModel(input: SelectInput): SelectionDecision {
   //
   // Sticky beats cost, but it does not beat the required tier: an issue already
   // pinned to a lower-capability model must not stay there after a stronger
-  // recorded judgement supersedes it.
+  // recorded judgement supersedes it. It also does not beat the serviceability
+  // hard stop (TOG-2137, Defect 6): staying sticky to a model whose lane is
+  // exhausted/unavailable would silently wedge the issue there with no path
+  // to escalate, the same failure `hardStopExcluded` exists to prevent for
+  // every other candidate below — sticky is a preference for continuity, not
+  // a capacity override.
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
     const incumbent = config.models.find(
       (model) => model.id === descriptor.stickyModelId && model.enabled,
     );
+    const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
     if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
       trace.push(
         `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`,
@@ -148,6 +161,15 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: incumbent.id,
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`,
+      });
+    } else if (incumbent && incumbentUnserviceable) {
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} is not serviceable — re-selecting instead of wedging this issue on a dead lane`,
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "lane-unserviceable",
+        reason: `lane ${incumbent.laneId ?? "(none)"} is not serviceable`,
       });
     } else if (incumbent) {
       trace.push(
@@ -220,6 +242,28 @@ export function selectModel(input: SelectInput): SelectionDecision {
   }
 
   if (qualified.length === 0) {
+    // TOG-2137, Defect 2. Distinguish a genuine capacity dead end from an
+    // ordinary config/capability gap. If every model from `requiredTier`
+    // through the T1 ceiling that survived the disabled/capability/context
+    // gates was excluded ONLY by the pace serviceability hard stop, there is
+    // nowhere left to escalate to — that is `tier-exhausted`, and it must
+    // reach an operator (see `worker.ts`), never fail silently the way the
+    // reference dispatcher's `pick()` does. A mix with a disabled/capability/
+    // context rejection means the gap is a config problem, not capacity, so
+    // it stays `no-eligible-model`.
+    const atOrAboveRequired = rejections.filter((rejection) => {
+      const rejectedModel = config.models.find((entry) => entry.id === rejection.modelId);
+      return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
+    });
+    const tierExhausted =
+      atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => rejection.stage === "lane-unserviceable");
+    if (tierExhausted) {
+      trace.push(
+        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by the pace ` +
+          `serviceability hard stop (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) — nowhere left to escalate to`,
+      );
+      return { ...base, outcome: "tier-exhausted", effectiveTier: requiredTier };
+    }
     trace.push(`no model cleared the gates (${rejections.length} rejected)`);
     return base;
   }
@@ -253,18 +297,45 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return candidates;
   }
 
-  let candidates = costCandidates(qualified.filter((model) => !model.fallbackOnly));
-  if (candidates.length === 0) {
-    const fallbackModels = qualified.filter((model) => model.fallbackOnly);
-    if (fallbackModels.length > 0) {
-      trace.push("no regular candidate survived; considering fallback-only roster rows");
-      candidates = costCandidates(fallbackModels);
+  // TOG-2137, Defect 2. Walk the tier ladder one rung at a time, starting at
+  // the required tier — never pool every qualifying tier into one flat cost
+  // race. A candidate one tier up must never win merely for being cheaper
+  // than a candidate that was actually available at the required tier; it is
+  // only ever considered once the required tier itself has nothing costable.
+  // `tierAbove` (cost.ts) is the same "one step up, or null at the ceiling"
+  // primitive `escalationRisk` uses, so the walk can never skip a tier or
+  // step down.
+  let candidates: Candidate[] = [];
+  let landingTier: Tier = requiredTier;
+  for (let rung: Tier | null = requiredTier; rung !== null; rung = tierAbove(rung)) {
+    const atRung = qualified.filter((model) => model.tier === rung);
+    if (atRung.length === 0) continue;
+
+    let rungCandidates = costCandidates(atRung.filter((model) => !model.fallbackOnly));
+    if (rungCandidates.length === 0) {
+      const fallbackModels = atRung.filter((model) => model.fallbackOnly);
+      if (fallbackModels.length > 0) {
+        trace.push(`no regular candidate survived at ${rung}; considering fallback-only roster rows`);
+        rungCandidates = costCandidates(fallbackModels);
+      }
+    }
+    if (rungCandidates.length > 0) {
+      landingTier = rung;
+      candidates = rungCandidates;
+      break;
     }
   }
 
   if (candidates.length === 0) {
     trace.push("no candidate could be costed — refusing to choose on a guessed volume term");
     return { ...base, effectiveTier: requiredTier };
+  }
+
+  const escalatedFromTier = landingTier !== requiredTier ? requiredTier : null;
+  if (escalatedFromTier) {
+    trace.push(
+      `escalated from ${requiredTier} to ${landingTier}: no candidate at ${requiredTier} survived the gates or could be costed`,
+    );
   }
 
   candidates.sort((left, right) => {
@@ -290,6 +361,15 @@ export function selectModel(input: SelectInput): SelectionDecision {
         ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}`
         : `pace ordering (${pacingMode}) agrees with cost ordering`,
     );
+    // TOG-2137, Defect 5. Preferred-near-reset is the gas-pedal counterpart
+    // to the hard stop and slot throttle, both of which only ever hold a
+    // lane back — this is traced separately so the 48h comparison stream can
+    // tell a "trailing lane preferred" reorder apart from an ordinary
+    // behind/ahead pace reorder.
+    const preferredId = preferredCandidateId(candidates, config.models, ledger);
+    if (preferredId) {
+      trace.push(`${preferredId}'s lane is trailing pace near its reset window close — preferred for new dispatch`);
+    }
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
 
@@ -355,7 +435,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
 
   const listPriceWinner = candidates[0]!;
   const cardLedger = input.cardLedger ?? {};
-  const shadowDiff = computeShadowDiff(descriptor.issueId, requiredTier, candidates, listPriceWinner.modelId, cardLedger);
+  const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
 
   // `objective` never affects `candidates`/`winner` unless explicitly switched
   // away from the default. Shipped config always leaves this at "list-price"
@@ -373,9 +453,10 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const withCandidates: SelectionDecision = {
     ...base,
     candidates,
-    effectiveTier: requiredTier,
+    effectiveTier: landingTier,
     pacingApplied,
     shadowDiff,
+    escalatedFromTier,
   };
 
   // An untrusted profile means we do not actually know the volume term. Say so
