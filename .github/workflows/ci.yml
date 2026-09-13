@@ -1758,6 +1758,21 @@ jobs:
       - name: database backup stall monitor wrapper suite
         run: ./test_db_backup_stall_monitor.sh
 
+      # TOG-2370: the in-server scheduler's in-flight guard is process memory
+      # that a hung COPY can leak permanently, and by TOG-2370 even a full
+      # container restart no longer reliably clears it. host_db_backup.sh is
+      # an independent host-side pg_dump fallback that does not depend on the
+      # in-server scheduler's health at all. This suite runs offline against
+      # a recording podman stub: no real container, database, or network. Its
+      # load-bearing assertions are that a truncated/trailer-less/table-less
+      # dump is never left visible under its real filename (the exact
+      # TOG-1129/1130 empty-gzip-residue shape), that a concurrent dump
+      # (another COPY, or another cycle of this same script) causes a clean
+      # skip rather than a stacked dump, and that retention only ever prunes
+      # this script's own `-hostcron` files, never a server-authored archive.
+      - name: host-side database backup fallback suite
+        run: ./test_host_db_backup.sh
+
       # And those are 40 green assertions about a detector, which is worth
       # nothing until somebody breaks the detector and watches them go red. Each
       # mutation removes ONE limb and requires the NAMED case to redden, after a

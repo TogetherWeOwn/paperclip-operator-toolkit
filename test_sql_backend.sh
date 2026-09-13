@@ -265,6 +265,19 @@ podman_site_allowed() { # <file> <line>
       # reworded — rewording it would decouple the assertion from the text it
       # pins. Keyed on the line for the same reason as the two entries above.
       [[ "$2" == *AGENT_CONTAINER* ]] && return 0 ;;
+    host_db_backup.sh)
+      # TOG-2370: pg_dump and the pg_stat_activity courtesy check both need a
+      # raw `podman exec` into the database container. lib/pcsql.sh's
+      # pcsql_run only knows how to pipe one psql script with bound
+      # :variables through stdin — it cannot stream a pg_dump pipeline, and
+      # the whole point of this file is to be the same "podman exec pg_dump |
+      # gzip" the owner already ran by hand, kept working even if the
+      # in-server scheduler's in-flight guard never clears. Unlike the
+      # CONVERTED tools above, there is no query-shaped alternative backend
+      # for this file to reach for, so it is allowed here by file rather than
+      # by line — every podman exec in it is this same dump-or-probe call
+      # against $CONTAINER, not a query pcsql_run could have carried instead.
+      return 0 ;;
   esac
   return 1
 }

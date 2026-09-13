@@ -1,0 +1,34 @@
+[Unit]
+Description=Host-side database backup independent of the in-server scheduler (TOG-2370)
+
+[Service]
+Type=oneshot
+# The lock file MUST survive across separate activations of this oneshot
+# service -- that is the entire point of the flock in host_db_backup.sh: a
+# slow dump under load must not overlap the NEXT tick. RuntimeDirectory=
+# gives a directory under $XDG_RUNTIME_DIR that persists across activations
+# (cleared only on logout/reboot), unlike PrivateTmp's per-activation /tmp.
+RuntimeDirectory=paperclip-host-db-backup
+Environment=HOST_DB_BACKUP_LOCK_DIR=%t/paperclip-host-db-backup
+Environment=PAPERCLIP_DB_CTR=paperclip-db
+Environment=PAPERCLIP_DB_BACKUP_RETENTION_DAYS=2
+Environment=PAPERCLIP_DB_BACKUP_DIR=%h/.local/share/paperclip/instances/default/data/backups
+EnvironmentFile=-%h/.config/paperclip/host-db-backup.env
+# The installer renders @SOURCE_REF@ from the independently reviewed 40-hex
+# commit and installs these bytes outside the mutable checkout.
+WorkingDirectory=/usr/local/libexec/paperclip-host-db-backup/@SOURCE_REF@
+ExecStartPre=/usr/bin/test -x /usr/local/libexec/paperclip-host-db-backup/@SOURCE_REF@/host_db_backup.sh
+ExecStartPre=/usr/bin/sha256sum --check --strict /usr/local/libexec/paperclip-host-db-backup/@SOURCE_REF@/SHA256SUMS
+ExecStart=/usr/bin/timeout --signal=TERM --kill-after=15s 20m /usr/local/libexec/paperclip-host-db-backup/@SOURCE_REF@/host_db_backup.sh
+TimeoutStartSec=21m
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The one path this unit needs to write besides its RuntimeDirectory: the
+# actual backup archive directory. Everything else stays read-only per
+# ProtectHome=read-only above.
+ReadWritePaths=%h/.local/share/paperclip/instances/default/data/backups
+UMask=0077
+
+[Install]
+WantedBy=default.target

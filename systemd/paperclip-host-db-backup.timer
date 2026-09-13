@@ -1,0 +1,17 @@
+[Unit]
+Description=Run the host-side database backup fallback hourly, off the top of the hour
+
+[Timer]
+# The in-server scheduler ticks on the hour (per docs/runbooks/database-backup-stall.md
+# and the pre-existing oob-db-backup.timer's own :47 offset). Landing this at
+# :27 keeps it out of that same-minute window by construction, not luck --
+# the courtesy pg_stat_activity check in host_db_backup.sh is the second,
+# belt-and-braces layer, not the only one.
+OnCalendar=*-*-* *:27:00
+RandomizedDelaySec=90s
+AccuracySec=30s
+Persistent=true
+Unit=paperclip-host-db-backup.service
+
+[Install]
+WantedBy=timers.target
