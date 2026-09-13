@@ -488,7 +488,14 @@ jobs:
           # gate also covers the nested scripts directly.
           # host-ops/*.sh is included for the same reason: the installer runs on
           # the VPS in front of an operator, and no runner can reach that host.
+          # scripts/*.sh is included for the same reason as lib/: a bare `*.sh`
+          # glob does not descend, and dispatch_deploy.sh is operator-run
+          # against the live dispatch-src checkout with no other CI coverage
+          # of its own syntax.
           for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh host-ops/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # Keep the nested scripts in a separate loop: the host-ops installer
+          # contract pins the complete host-ops/*.sh syntax-check loop.
+          for f in scripts/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           # scripts/*.js is included explicitly for the same reason as lib/: a
           # bare `*.js` glob does not descend, and until TOG-890 the two tools
           # under scripts/ were never parse-checked at all.
@@ -524,6 +531,32 @@ jobs:
       # a fake /opt tree. No host, credential, network, or root privilege is used.
       - name: immutable ops-tooling release installer suite
         run: ./test_ops_tooling_release_install.sh
+
+      # TOG-2307. Exercises deploy/rollback/status entirely against fabricated
+      # fixture git repos built under mktemp (DISPATCH_DEPLOY_TEST_MODE=1); the
+      # live /paperclip/plugin-packages-root/dispatch-src checkout is never
+      # touched. Covers the smoke-gate-before-live-HEAD contract, clean-tree
+      # and commit-object refusal, gc anchoring, and status's absent/corrupt/
+      # drift triad.
+      - name: dispatch_deploy.sh hermetic suite
+        run: ./test_dispatch_deploy.sh
+
+      - name: dispatch_deploy.sh suite is not vacuous (mutation-gated)
+        run: ./verification/tog-2307-dispatch-deploy-mutation-gate.sh
+
+      # TOG-2307. dispatch_deploy.sh status is only correct if something runs
+      # it on a clock against the real checkout; this is the scheduled half of
+      # that loop. Offline: dispatch_deploy.sh and curl are recording stubs
+      # under a fixed clock, so no real Paperclip issue or dispatch-src
+      # checkout is touched. Covers drift/refusal never reading as healthy, an
+      # undocumented detector exit code never being trusted as a pass, and the
+      # re-arm being verified against the authoritative monitorNextCheckAt
+      # column rather than the request's own echo.
+      - name: dispatch_deploy_monitor.sh hermetic suite
+        run: ./test_dispatch_deploy_monitor.sh
+
+      - name: dispatch_deploy_monitor.sh suite is not vacuous (mutation-gated)
+        run: ./verification/tog-2307-dispatch-deploy-monitor-mutation-gate.sh
 
       # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
       # generated throwaway RSA key, and fabricated token-shaped canaries.
