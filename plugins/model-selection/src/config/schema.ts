@@ -2,6 +2,22 @@ import { PACING_MODES, TIERS } from "../constants.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
+/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA` (TOG-2379). */
+const SECRET_REF_SCHEMA = {
+  type: ["object", "null"],
+  format: "secret-ref",
+  additionalProperties: false,
+  required: ["type", "secretId"],
+  properties: {
+    type: { const: "secret_ref" },
+    secretId: { type: "string", format: "uuid" },
+    version: { oneOf: [{ const: "latest" }, { type: "integer", minimum: 1 }] },
+    projectionClass: { type: "string", enum: ["unclassified", "class_3_static_lease"] },
+    projectionAllowlistKey: { type: ["string", "null"] },
+  },
+  default: null,
+} as const;
+
 /**
  * Company-scoped config. Every number that decides anything lives here, so the
  * same input gives the same output on every run — none of it is re-improvised
@@ -153,6 +169,8 @@ export const SELECTION_CONFIG_SCHEMA = {
               },
               requestTimeoutMs: { type: "integer", minimum: 1, default: 5000 },
               maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
+              /** TOG-2379: resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
+              apiKeySecretRef: SECRET_REF_SCHEMA,
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
               healthFields: {

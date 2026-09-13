@@ -662,14 +662,36 @@ export function createPlugin() {
             const config = await companyConfig(company.id);
             if (config.pacing.lanes.length === 0) continue;
 
-            const sources: LaneSourceDefinition[] = config.pacing.lanes.map((lane) => ({
-              laneId: lane.laneId,
-              statusUrl: lane.statusUrl,
-              requestTimeoutMs: lane.requestTimeoutMs,
-              maxResponseBytes: lane.maxResponseBytes,
-              lane: lane.lane,
-              policy: lane.policy,
-            }));
+            // TOG-2379: resolve each lane's optional secret before it is
+            // polled. Resolution failure fails only that lane — it is
+            // recorded as a lane-scoped poll error, never thrown, so one
+            // bad secret ref cannot abort the company's whole poll.
+            const secretFailures: Array<{ laneId: string; fetchedAt: string; verdict: null; error: string }> = [];
+            const sources: LaneSourceDefinition[] = [];
+            const fetchedAt = new Date().toISOString();
+            for (const lane of config.pacing.lanes) {
+              let apiKey: string | null = null;
+              if (lane.apiKeySecretRef) {
+                try {
+                  apiKey = await ctx.secrets.resolve(lane.apiKeySecretRef as never, {
+                    companyId: company.id,
+                    configPath: `pacing.lanes.${lane.laneId}.apiKeySecretRef`,
+                  });
+                } catch {
+                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });
+                  continue;
+                }
+              }
+              sources.push({
+                laneId: lane.laneId,
+                statusUrl: lane.statusUrl,
+                requestTimeoutMs: lane.requestTimeoutMs,
+                maxResponseBytes: lane.maxResponseBytes,
+                lane: lane.lane,
+                policy: lane.policy,
+                apiKey,
+              });
+            }
 
             const results = await pollLanes({
               sources,
@@ -678,14 +700,14 @@ export function createPlugin() {
             });
 
             let ledger = await readLaneLedger(company.id);
-            for (const result of results) {
+            for (const result of [...results, ...secretFailures]) {
               ledger = mergeLedgerEntry(ledger, result);
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
 
             ctx.logger.info("lane capacity polled", {
               companyId: company.id,
-              lanes: results.map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(","),
+              lanes: [...results, ...secretFailures].map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(","),
             });
           } catch (cause) {
             ctx.logger.error("lane capacity poll failed for a company", {

@@ -87,6 +87,33 @@ describe("pollLanes", () => {
     expect(good.error).toBeNull();
   });
 
+  it("sends the resolved apiKey as an X-Api-Key header when present", async () => {
+    let seenHeaders: Record<string, string> | null = null;
+    const sources: LaneSourceDefinition[] = [source({ apiKey: "secret-value-123" })];
+    const http: LanePollHttpClient = {
+      fetch: async (_url, init) => {
+        seenHeaders = init.headers;
+        return jsonResponse(200, { observedAt: "2026-09-12T00:00:00.000Z", records: [{ health: "ok", utilization: 0.1, resetsAt: "2026-09-12T01:00:00.000Z" }] });
+      },
+    };
+    const results = await pollLanes({ sources, http, now: () => "2026-09-12T00:00:00.000Z" });
+    expect(results[0]!.error).toBeNull();
+    expect(seenHeaders).toMatchObject({ "X-Api-Key": "secret-value-123" });
+  });
+
+  it("omits the X-Api-Key header entirely when no apiKey is resolved", async () => {
+    let seenHeaders: Record<string, string> | null = null;
+    const sources: LaneSourceDefinition[] = [source({ apiKey: null })];
+    const http: LanePollHttpClient = {
+      fetch: async (_url, init) => {
+        seenHeaders = init.headers;
+        return jsonResponse(200, { observedAt: "2026-09-12T00:00:00.000Z", records: [{ health: "ok", utilization: 0.1, resetsAt: "2026-09-12T01:00:00.000Z" }] });
+      },
+    };
+    await pollLanes({ sources, http, now: () => "2026-09-12T00:00:00.000Z" });
+    expect(seenHeaders).not.toHaveProperty("X-Api-Key");
+  });
+
   it("rejects a reserved-literal-host status URL rather than polling it", async () => {
     const sources: LaneSourceDefinition[] = [source({ statusUrl: "https://127.0.0.1/lane-a" })];
     const http: LanePollHttpClient = {

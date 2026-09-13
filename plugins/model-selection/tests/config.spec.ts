@@ -102,6 +102,83 @@ describe("config resolution", () => {
     expect(errors[0]).toContain("invalid releasedAt date");
   });
 
+  it("accepts a well-formed lane apiKeySecretRef and threads it through to resolveConfig", () => {
+    const config = resolveConfig({
+      pacing: {
+        lanes: [
+          {
+            laneId: "lane-a",
+            statusUrl: "https://status.example.com/lane-a",
+            apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+            windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+          },
+        ],
+      },
+    });
+    expect(config.pacing.lanes[0]!.apiKeySecretRef).toEqual({
+      type: "secret_ref",
+      secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4",
+    });
+    expect(validateConfig(config).errors).toEqual([]);
+  });
+
+  it("rejects a lane apiKeySecretRef holding a raw string instead of a reference", () => {
+    const config = resolveConfig({
+      pacing: {
+        lanes: [
+          {
+            laneId: "lane-a",
+            statusUrl: "https://status.example.com/lane-a",
+            apiKeySecretRef: "sk-live-not-a-reference",
+            windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+          },
+        ],
+      },
+    });
+    // A string bypasses the object-shaped `secretRef()` coercion in resolve.ts
+    // and stays present as-is, so validateConfig's shape check is what must
+    // catch it — nothing upstream silently drops it to null first.
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("pacing.lanes.lane-a.apiKeySecretRef") && e.includes("not a string"))).toBe(
+      true,
+    );
+  });
+
+  it("rejects a lane apiKeySecretRef object missing the secret_ref discriminant", () => {
+    const config = resolveConfig({
+      pacing: {
+        lanes: [
+          {
+            laneId: "lane-a",
+            statusUrl: "https://status.example.com/lane-a",
+            apiKeySecretRef: { value: "sk-smuggled-credential" },
+            windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+          },
+        ],
+      },
+    });
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("pacing.lanes.lane-a.apiKeySecretRef") && e.includes("not a secret reference"))).toBe(
+      true,
+    );
+  });
+
+  it("leaves a lane with no apiKeySecretRef configured exactly as before (null, no errors)", () => {
+    const config = resolveConfig({
+      pacing: {
+        lanes: [
+          {
+            laneId: "lane-a",
+            statusUrl: "https://status.example.com/lane-a",
+            windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+          },
+        ],
+      },
+    });
+    expect(config.pacing.lanes[0]!.apiKeySecretRef).toBeNull();
+    expect(validateConfig(config).errors).toEqual([]);
+  });
+
   it("warns when a zero cache-read rate would hide the largest cost line", () => {
     const { warnings } = validateConfig(
       resolveConfig({

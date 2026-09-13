@@ -26,6 +26,14 @@ export interface LaneSourceDefinition {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy?: PacePolicy;
+  /**
+   * Already-resolved secret value (TOG-2379), never a secret reference — the
+   * caller resolves `apiKeySecretRef` via `ctx.secrets.resolve()` before
+   * building this, so this module stays free of any SDK dependency. Sent as
+   * `X-Api-Key`, matching the live Caddy matcher and paperclip-model-router's
+   * `x-api-key` header. Null/absent polls unauthenticated.
+   */
+  apiKey?: string | null;
 }
 
 export interface LanePollResult {
@@ -92,7 +100,11 @@ async function pollOne(
     response = await Promise.race([
       http.fetch(source.statusUrl, {
         method: "GET",
-        headers: { Accept: "application/json", "Accept-Encoding": "identity" },
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "identity",
+          ...(source.apiKey ? { "X-Api-Key": source.apiKey } : {}),
+        },
         redirect: "manual",
       }),
       new Promise<never>((_, reject) => {

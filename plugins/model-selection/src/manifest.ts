@@ -62,6 +62,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "companies.read",
     // TOG-2137: poll operator-configured lane-capacity status URLs.
     "http.outbound",
+    // TOG-2379: resolve a lane's optional apiKeySecretRef before polling it.
+    "secrets.read-ref",
     // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
     // for the card-level acceptance ledger, since `activity_log` is not an
     // allowlisted table and cannot be queried directly (TOG-1917 §2.2).

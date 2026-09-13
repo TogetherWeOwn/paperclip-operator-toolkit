@@ -31,6 +31,20 @@ var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
 
 // src/config/schema.ts
 var MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
+var SECRET_REF_SCHEMA = {
+  type: ["object", "null"],
+  format: "secret-ref",
+  additionalProperties: false,
+  required: ["type", "secretId"],
+  properties: {
+    type: { const: "secret_ref" },
+    secretId: { type: "string", format: "uuid" },
+    version: { oneOf: [{ const: "latest" }, { type: "integer", minimum: 1 }] },
+    projectionClass: { type: "string", enum: ["unclassified", "class_3_static_lease"] },
+    projectionAllowlistKey: { type: ["string", "null"] }
+  },
+  default: null
+};
 var SELECTION_CONFIG_SCHEMA = {
   $schema: "http://json-schema.org/draft-07/schema#",
   type: "object",
@@ -176,6 +190,8 @@ var SELECTION_CONFIG_SCHEMA = {
               },
               requestTimeoutMs: { type: "integer", minimum: 1, default: 5e3 },
               maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
+              /** TOG-2379: resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
+              apiKeySecretRef: SECRET_REF_SCHEMA,
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
               healthFields: {
@@ -317,6 +333,8 @@ var manifest = {
     "companies.read",
     // TOG-2137: poll operator-configured lane-capacity status URLs.
     "http.outbound",
+    // TOG-2379: resolve a lane's optional apiKeySecretRef before polling it.
+    "secrets.read-ref",
     // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
     // for the card-level acceptance ledger, since `activity_log` is not an
     // allowlisted table and cannot be queried directly (TOG-1917 §2.2).

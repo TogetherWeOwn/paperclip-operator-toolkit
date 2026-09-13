@@ -259,4 +259,110 @@ describe("worker", () => {
     expect(stored?.modelScores).toHaveLength(MODELS.length);
     expect(typeof stored?.cardLedger).toBe("object");
   });
+
+  // TOG-2379: a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
+  // job, before the poll, never inside poll.ts itself.
+  describe("pollLaneCapacity secret resolution", () => {
+    const laneConfig = (apiKeySecretRef?: Record<string, unknown>) =>
+      baseConfig({
+        pacing: {
+          mode: "enforce",
+          lanes: [
+            {
+              laneId: "lane-a",
+              statusUrl: "https://status.example.com/lane-a",
+              ...(apiKeySecretRef ? { apiKeySecretRef } : {}),
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+          ],
+        },
+      });
+
+    async function ledgerFor(h: Awaited<ReturnType<typeof boot>>) {
+      return h.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.laneLedger,
+      }) as Promise<Record<string, { error: string | null }> | null>;
+    }
+
+    it("resolves the secret and sends it as X-Api-Key when ctx.secrets.resolve succeeds", async () => {
+      const secretHarness = await boot(
+        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+      );
+      secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+      let seenHeaders: Record<string, string> | undefined;
+      let seenResolveArgs: unknown[] = [];
+      secretHarness.ctx.secrets.resolve = async (ref: unknown, options?: unknown) => {
+        seenResolveArgs = [ref, options];
+        return "resolved-lane-key";
+      };
+      secretHarness.ctx.http.fetch = async (_url: unknown, init?: unknown) => {
+        seenHeaders = (init as { headers?: Record<string, string> } | undefined)?.headers;
+        return new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      };
+
+      await secretHarness.runJob("pollLaneCapacity");
+
+      expect(seenHeaders).toMatchObject({ "X-Api-Key": "resolved-lane-key" });
+      expect(seenResolveArgs[1]).toMatchObject({
+        companyId: COMPANY,
+        configPath: "pacing.lanes.lane-a.apiKeySecretRef",
+      });
+      const ledger = await ledgerFor(secretHarness);
+      expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
+    });
+
+    it("records lane-secret-unavailable and never calls http.fetch when ctx.secrets.resolve throws", async () => {
+      const secretHarness = await boot(
+        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+      );
+      secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+      let fetchCalled = false;
+      secretHarness.ctx.secrets.resolve = async () => {
+        throw new Error("secret not found");
+      };
+      secretHarness.ctx.http.fetch = async () => {
+        fetchCalled = true;
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } }) as never;
+      };
+
+      await secretHarness.runJob("pollLaneCapacity");
+
+      expect(fetchCalled).toBe(false);
+      const ledger = await ledgerFor(secretHarness);
+      expect(ledger?.["lane-a"]?.error).toBe("lane-secret-unavailable");
+    });
+
+    it("polls unauthenticated (no X-Api-Key, no secrets.resolve call) when the lane has no apiKeySecretRef", async () => {
+      const noSecretHarness = await boot(laneConfig());
+      noSecretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+      let resolveCalled = false;
+      let seenHeaders: Record<string, string> | undefined;
+      noSecretHarness.ctx.secrets.resolve = async () => {
+        resolveCalled = true;
+        return "unused";
+      };
+      noSecretHarness.ctx.http.fetch = async (_url: unknown, init?: unknown) => {
+        seenHeaders = (init as { headers?: Record<string, string> } | undefined)?.headers;
+        return new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      };
+
+      await noSecretHarness.runJob("pollLaneCapacity");
+
+      expect(resolveCalled).toBe(false);
+      expect(seenHeaders).not.toHaveProperty("X-Api-Key");
+      const ledger = await ledgerFor(noSecretHarness);
+      expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
+    });
+  });
 });

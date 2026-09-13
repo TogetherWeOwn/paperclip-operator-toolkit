@@ -211,6 +211,45 @@ function tierLabelName(tier2) {
   return `${TIER_LABEL_PREFIX}${tier2}`;
 }
 
+// src/config/secret-ref.ts
+var ALLOWED_KEYS = /* @__PURE__ */ new Set([
+  "type",
+  "secretId",
+  "version",
+  "projectionClass",
+  "projectionAllowlistKey"
+]);
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function validateSecretRefShape(value, path) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "string") {
+    return `${path} must be a Paperclip secret reference object, not a string. A pasted credential is never stored \u2014 use the secret picker, which submits { type: "secret_ref", secretId }.`;
+  }
+  if (!isRecord(value)) {
+    return `${path} must be an object of the form { type: "secret_ref", secretId } or null`;
+  }
+  if (value.type !== "secret_ref") {
+    return `${path} is not a secret reference: it must be { type: "secret_ref", secretId, version? }. An object holding a credential value would be stored in this company's config in clear.`;
+  }
+  if (typeof value.secretId !== "string" || !UUID.test(value.secretId)) {
+    return `${path}.secretId must be the UUID of a Paperclip secret`;
+  }
+  if (value.projectionClass !== void 0 && value.projectionClass !== "unclassified" && value.projectionClass !== "class_3_static_lease") {
+    return `${path}.projectionClass must be "unclassified" or "class_3_static_lease"`;
+  }
+  if (value.version !== void 0 && value.version !== "latest" && !(typeof value.version === "number" && Number.isInteger(value.version) && value.version > 0)) {
+    return `${path}.version must be "latest" or a positive integer`;
+  }
+  const extra = Object.keys(value).filter((key) => !ALLOWED_KEYS.has(key));
+  if (extra.length > 0) {
+    return `${path} carries unexpected field(s): ${extra.sort().join(", ")}. A secret reference holds no value, only a pointer.`;
+  }
+  return null;
+}
+
 // src/config/resolve.ts
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -229,6 +268,9 @@ function nullableNum(value) {
 }
 function nullableRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function secretRef(value) {
+  return value === void 0 ? null : value;
 }
 function tier(value, fallback) {
   return typeof value === "string" && TIERS.includes(value) ? value : fallback;
@@ -295,6 +337,7 @@ function resolveConfig(raw) {
         statusUrl: rawLane.statusUrl,
         requestTimeoutMs: num(rawLane.requestTimeoutMs, 5e3),
         maxResponseBytes: num(rawLane.maxResponseBytes, 262144),
+        apiKeySecretRef: secretRef(rawLane.apiKeySecretRef),
         lane: {
           laneId: rawLane.laneId,
           free: bool(rawLane.free, false),
@@ -391,6 +434,8 @@ function validateConfig(config) {
   for (const lane of config.pacing.lanes) {
     if (laneIds.has(lane.laneId)) errors.push(`duplicate lane id: ${lane.laneId}`);
     laneIds.add(lane.laneId);
+    const secretError = validateSecretRefShape(lane.apiKeySecretRef, `pacing.lanes.${lane.laneId}.apiKeySecretRef`);
+    if (secretError) errors.push(secretError);
   }
   if (config.pacing.mode !== "off" && config.pacing.lanes.length === 0) {
     warnings.push(`pacing.mode is ${config.pacing.mode} but no lanes are configured; pace ordering has nothing to key on`);
@@ -1338,7 +1383,11 @@ async function pollOne(source, http, now) {
     response = await Promise.race([
       http.fetch(source.statusUrl, {
         method: "GET",
-        headers: { Accept: "application/json", "Accept-Encoding": "identity" },
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "identity",
+          ...source.apiKey ? { "X-Api-Key": source.apiKey } : {}
+        },
         redirect: "manual"
       }),
       new Promise((_, reject) => {
@@ -1809,27 +1858,45 @@ function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (config.pacing.lanes.length === 0) continue;
-            const sources = config.pacing.lanes.map((lane) => ({
-              laneId: lane.laneId,
-              statusUrl: lane.statusUrl,
-              requestTimeoutMs: lane.requestTimeoutMs,
-              maxResponseBytes: lane.maxResponseBytes,
-              lane: lane.lane,
-              policy: lane.policy
-            }));
+            const secretFailures = [];
+            const sources = [];
+            const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+            for (const lane of config.pacing.lanes) {
+              let apiKey = null;
+              if (lane.apiKeySecretRef) {
+                try {
+                  apiKey = await ctx.secrets.resolve(lane.apiKeySecretRef, {
+                    companyId: company.id,
+                    configPath: `pacing.lanes.${lane.laneId}.apiKeySecretRef`
+                  });
+                } catch {
+                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });
+                  continue;
+                }
+              }
+              sources.push({
+                laneId: lane.laneId,
+                statusUrl: lane.statusUrl,
+                requestTimeoutMs: lane.requestTimeoutMs,
+                maxResponseBytes: lane.maxResponseBytes,
+                lane: lane.lane,
+                policy: lane.policy,
+                apiKey
+              });
+            }
             const results = await pollLanes({
               sources,
               http: laneHttp,
               now: () => (/* @__PURE__ */ new Date()).toISOString()
             });
             let ledger = await readLaneLedger(company.id);
-            for (const result of results) {
+            for (const result of [...results, ...secretFailures]) {
               ledger = mergeLedgerEntry(ledger, result);
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
             ctx.logger.info("lane capacity polled", {
               companyId: company.id,
-              lanes: results.map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(",")
+              lanes: [...results, ...secretFailures].map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(",")
             });
           } catch (cause) {
             ctx.logger.error("lane capacity poll failed for a company", {

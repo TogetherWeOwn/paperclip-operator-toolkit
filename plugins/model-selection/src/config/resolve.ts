@@ -7,8 +7,18 @@ import {
   type PacingMode,
   type Tier,
 } from "../constants.js";
+import { validateSecretRefShape } from "./secret-ref.js";
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
+
+/** Mirrors paperclip-model-router's `SecretRef` (TOG-2379). */
+export interface SecretRef {
+  type: "secret_ref";
+  secretId: string;
+  version?: "latest" | number;
+  projectionClass?: "unclassified" | "class_3_static_lease";
+  projectionAllowlistKey?: string | null;
+}
 
 export interface LaneSourceConfig {
   laneId: string;
@@ -17,6 +27,8 @@ export interface LaneSourceConfig {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy: PacePolicy;
+  /** TOG-2379: resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
+  apiKeySecretRef: SecretRef | null;
 }
 
 export type SelectionObjective = "list-price" | "cost-per-accepted-card";
@@ -83,6 +95,15 @@ function nullableRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function secretRef(value: unknown): SecretRef | null {
+  // Deliberately NOT narrowed to an object shape (let alone `type ===
+  // "secret_ref"`) here: an ill-shaped value — including a raw string —
+  // must survive resolution so `validateConfig`'s `validateSecretRefShape`
+  // call below can see it and reject it with a specific reason, rather than
+  // have resolution silently swallow it to null first.
+  return value === undefined ? null : (value as SecretRef | null);
 }
 
 function tier(value: unknown, fallback: Tier): Tier {
@@ -174,6 +195,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             statusUrl: rawLane.statusUrl,
             requestTimeoutMs: num(rawLane.requestTimeoutMs, 5000),
             maxResponseBytes: num(rawLane.maxResponseBytes, 262_144),
+            apiKeySecretRef: secretRef(rawLane.apiKeySecretRef),
             lane: {
               laneId: rawLane.laneId,
               free: bool(rawLane.free, false),
@@ -298,6 +320,8 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   for (const lane of config.pacing.lanes) {
     if (laneIds.has(lane.laneId)) errors.push(`duplicate lane id: ${lane.laneId}`);
     laneIds.add(lane.laneId);
+    const secretError = validateSecretRefShape(lane.apiKeySecretRef, `pacing.lanes.${lane.laneId}.apiKeySecretRef`);
+    if (secretError) errors.push(secretError);
   }
   if (config.pacing.mode !== "off" && config.pacing.lanes.length === 0) {
     warnings.push(`pacing.mode is ${config.pacing.mode} but no lanes are configured; pace ordering has nothing to key on`);
