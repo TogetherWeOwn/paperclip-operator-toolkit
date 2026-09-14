@@ -1,7 +1,7 @@
 // src/constants.ts
 var PLUGIN_ID = "togetherweown.model-selection";
 var PLUGIN_API_VERSION = 1;
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.2.0";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -18,7 +18,11 @@ var TOOL_NAMES = {
    * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
    * host's own internal API), so this can never be anything but a report.
    */
-  ancillaryDrift: "model_selection_ancillary_drift"
+  ancillaryDrift: "model_selection_ancillary_drift",
+  /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
+  aaDriftReport: "model_selection_aa_drift_report",
+  /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
+  refreshAaIndexNow: "model_selection_refresh_aa_index_now"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -30,7 +34,9 @@ var JOB_KEYS = {
   /** Poll configured lane-capacity sources and refresh the lane ledger. */
   pollLanes: "pollLaneCapacity",
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
-  refreshScores: "refreshScores"
+  refreshScores: "refreshScores",
+  /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
+  refreshAaIndex: "refreshAaIndex"
 };
 var TIERS = ["T1", "T2", "T3"];
 var PACING_MODES = ["off", "shadow", "enforce"];
@@ -120,6 +126,10 @@ var SELECTION_CONFIG_SCHEMA = {
           },
           contextWindow: { type: "integer", minimum: 1, default: 2e5 },
           aaIndex: { type: ["number", "null"], default: null },
+          /** TOG-2438: explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
+          aaSlug: { type: "string", minLength: 1 },
+          /** TOG-2438: snapshot date the roster's aaIndex above was curated from. Informational only. */
+          aaIndexUpdatedAt: { type: ["string", "null"], format: "date", default: null },
           releasedAt: { type: "string", format: "date" },
           fallbackOnly: { type: "boolean", default: false },
           note: { type: "string", default: "" },
@@ -321,6 +331,20 @@ var SELECTION_CONFIG_SCHEMA = {
         maxRecords: { type: "integer", minimum: 1, default: 5e3 }
       },
       default: {}
+    },
+    /**
+     * TOG-2438: aa.ai Intelligence Index sync. A single kill switch — the
+     * feed URL and thresholds are code constants, not operator-configurable
+     * (this isn't a per-company data source the way pacing lanes are).
+     */
+    aaSync: {
+      type: "object",
+      title: "aa.ai ranking sync",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true }
+      },
+      default: {}
     }
   }
 };
@@ -465,6 +489,12 @@ var manifest = {
       displayName: "Refresh model scores",
       description: "Recompute per-model, per-tier Bayesian success scores and the card-level acceptance ledger from this company's own runs and captured rework signals.",
       schedule: "37 */6 * * *"
+    },
+    {
+      jobKey: JOB_KEYS.refreshAaIndex,
+      displayName: "Refresh aa.ai Intelligence Index",
+      description: "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate \u2014 never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt (TOG-2438). Every-6h cadence matches refreshScores's family (TOG-2438 reopen AC4) \u2014 aa.ai moves faster than a daily check surfaced.",
+      schedule: "53 */6 * * *"
     }
   ],
   tools: [
@@ -499,6 +529,18 @@ var manifest = {
       displayName: "Report ancillary model pin drift",
       description: "Report which agents' ancillary model pins (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree with the lane-aware T3 recommendation, and who must act on each surface. Read-only; there is no write path from this plugin to any of these surfaces.",
       parametersSchema: { type: "object", additionalProperties: false, properties: {} }
+    },
+    {
+      name: TOOL_NAMES.aaDriftReport,
+      displayName: "aa.ai drift report",
+      description: "Per-model aa.ai Intelligence Index: the roster's configured value and snapshot date, alongside the latest fetched live value and whether it now implies a different tier. Read-only; writes nothing.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.refreshAaIndexNow,
+      displayName: "Refresh aa.ai Intelligence Index now",
+      description: "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+      parametersSchema: { type: "object" }
     }
   ],
   apiRoutes: [

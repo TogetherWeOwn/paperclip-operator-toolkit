@@ -18,6 +18,53 @@ export function priorP(aaIndex: number | null): number {
   return Math.max(0.55, Math.min(1.0, 0.55 + 0.45 * (aaIndex / 60.0)));
 }
 
+/**
+ * aa.ai agentic sub-benchmark scores (TOG-2438 scope expansion), each
+ * already on a 0..1 scale. Optional/nullable per-field — mirrors
+ * `AaModelRecord`'s own null gaps, never fabricated.
+ */
+export interface AgenticSubScores {
+  terminalbenchHard?: number | null;
+  tau2?: number | null;
+  ifbench?: number | null;
+  gpqa?: number | null;
+  hle?: number | null;
+}
+
+/** Weight `priorP` gives the composite intelligence index when an agentic prior is also available. */
+const AGENTIC_PRIOR_BLEND = 0.3;
+
+/**
+ * A secondary, agentic-benchmark-derived prior, same 0.55-1.0 shape as
+ * `priorP`'s index mapping. Returns null when no sub-benchmark is available
+ * at all — the caller then falls back to the index-only prior, never a
+ * fabricated midpoint. Averages only the sub-benchmarks aa.ai actually
+ * populated for this slug.
+ */
+export function agenticPriorP(scores: AgenticSubScores | null | undefined): number | null {
+  if (!scores) return null;
+  const values = [scores.terminalbenchHard, scores.tau2, scores.ifbench, scores.gpqa, scores.hle].filter(
+    (v): v is number => typeof v === "number",
+  );
+  if (values.length === 0) return null;
+  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  return Math.max(0.55, Math.min(1.0, 0.55 + 0.45 * avg));
+}
+
+/**
+ * Blends the composite-index prior with the agentic sub-score prior when
+ * the latter is available (TOG-2438 scope expansion — "an additional prior
+ * alongside the composite index"). Falls back to the plain index prior when
+ * no agentic score is available, so a caller that never supplies
+ * `agenticScores` sees byte-identical behavior to before this blend existed.
+ */
+export function blendedPriorP(aaIndex: number | null, agenticScores?: AgenticSubScores | null): number {
+  const indexPrior = priorP(aaIndex);
+  const agentic = agenticPriorP(agenticScores);
+  if (agentic === null) return indexPrior;
+  return (1 - AGENTIC_PRIOR_BLEND) * indexPrior + AGENTIC_PRIOR_BLEND * agentic;
+}
+
 export function emptyTierScoreStats(): TierScoreStats {
   return { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, wOk: 0, wBad: 0, rework: 0, okCost: [], okMins: [] };
 }
@@ -85,8 +132,9 @@ export function buildModelScore(
   aaIndex: number | null,
   statsByTier: Partial<Record<Tier, TierScoreStats>>,
   tiers: readonly Tier[],
+  agenticScores?: AgenticSubScores | null,
 ): ModelScore {
-  const pp = priorP(aaIndex);
+  const pp = blendedPriorP(aaIndex, agenticScores);
   const tierScores = {} as Record<Tier, TierScore>;
   for (const tier of tiers) {
     const stats = statsByTier[tier];
@@ -315,7 +363,7 @@ export function buildCardLedger(
 ): Record<string, CardLedgerEntry> {
   const byKey = new Map<string, CardRow[]>();
   for (const card of cards) {
-    const key = `${card.modelId} ${card.tier}`;
+    const key = `${card.modelId}\0${card.tier}`;
     const bucket = byKey.get(key);
     if (bucket) bucket.push(card);
     else byKey.set(key, [card]);
@@ -323,7 +371,7 @@ export function buildCardLedger(
 
   const out: Record<string, CardLedgerEntry> = {};
   for (const [key, rows] of byKey) {
-    const [modelId, tier] = key.split(" ") as [string, Tier];
+    const [modelId, tier] = key.split("\0") as [string, Tier];
     const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1000;
     const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
     const accepted = resolved.filter((r) => !r.rejected);
@@ -338,7 +386,7 @@ export function buildCardLedger(
       ? costs.reduce((a, b) => a + b, 0) / costs.length
       : blendedListPriceByModel[modelId] ?? null;
 
-    out[key.replace(" ", ":")] = {
+    out[key.replace("\0", ":")] = {
       modelId,
       tier,
       cardsClosed: rows.length,

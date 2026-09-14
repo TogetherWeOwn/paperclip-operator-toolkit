@@ -4,6 +4,10 @@ import type { PluginContext, ToolResult } from "@paperclipai/plugin-sdk";
 import { planApply } from "./actuate/apply.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
+  AA_FETCH_TIMEOUT_MS,
+  AA_LEADERBOARD_URL,
+  AA_MAX_RESPONSE_BYTES,
+  AA_SNAPSHOT_HISTORY_LIMIT,
   CARD_LEDGER_WINDOW_DAYS,
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
@@ -19,17 +23,22 @@ import {
   PLUGIN_VERSION,
   type Tier,
 } from "./constants.js";
+import { diffSnapshot, type AaDiffModelInput } from "./aa-index/diff.js";
+import { fetchAaSnapshot, type AaHttpClient } from "./aa-index/fetch.js";
+import { effortSuffixOf, resolveAaSlug, tierImpliedByIndex } from "./aa-index/match.js";
+import { parseAaLeaderboardHtml, type AaModelRecord } from "./aa-index/parse.js";
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
 import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import {
   accumulateRunStats,
+  blendedPriorP,
   buildCardLedger,
   buildModelScore,
   findClosingRun,
   foldReworkIntoStats,
-  priorP,
+  type AgenticSubScores,
   type CardRow,
   type ClosingRunCandidate,
   type ReworkClosingRun,
@@ -109,6 +118,32 @@ function summary(decision: SelectionDecision): string {
 
 export function createPlugin() {
   let context: PluginContext | null = null;
+
+  /**
+   * TOG-2438 reopen: `ctx.companies.list()` is a wildcard host call that,
+   * unlike every other call this worker makes, is not carried by the
+   * per-company `proactiveCompanyScopes` authorization the host seeds
+   * from this plugin's configured companies (LOOA-629/695). A scheduled
+   * job's `companies.list()` call therefore only succeeds when no other
+   * invocation happens to be active in the worker process at that exact
+   * moment — nondeterministic, and observed failing from the real
+   * scheduler with "the worker referenced a missing, expired, or unknown
+   * invocation scope". Every job here immediately filters the company
+   * list down to "configured for this plugin" anyway (each loop bails
+   * on an empty/disabled config), so tracking exactly that set ourselves
+   * — fed by `onConfigChanged`, which the host already calls
+   * unconditionally for every configured company at worker startup and
+   * on every subsequent config save — is both sufficient and reliable:
+   * it never depends on unrelated concurrent worker activity.
+   */
+  const knownCompanyIds = new Set<string>();
+  const listKnownCompanies = (): Array<{ id: string }> =>
+    [...knownCompanyIds].map((id) => ({ id }));
+
+  const knownCompaniesKey = () => ({
+    scopeKind: "instance" as const,
+    stateKey: PLUGIN_STATE_KEYS.knownCompanies,
+  });
 
   return definePlugin({
     multiCompanyConfig: true,
@@ -362,6 +397,72 @@ export function createPlugin() {
         scopeId: companyId,
         stateKey: PLUGIN_STATE_KEYS.shadowDiffs,
       });
+
+      // --- TOG-2438: aa.ai Intelligence Index snapshot + per-company drift dedup ---
+
+      const aaSnapshotKey = () => ({
+        scopeKind: "instance" as const,
+        stateKey: PLUGIN_STATE_KEYS.aaIndexSnapshot,
+      });
+
+      const aaSnapshotHistoryKey = () => ({
+        scopeKind: "instance" as const,
+        stateKey: PLUGIN_STATE_KEYS.aaSnapshotHistory,
+      });
+
+      interface AaSnapshotState {
+        fetchedAt: string | null;
+        /** Every aa.ai slug (one per model x effort-level) mapped to its full parsed record (TOG-2438 scope expansion). */
+        bySlug: Record<string, AaModelRecord>;
+        lastAttemptAt: string | null;
+        lastError: string | null;
+      }
+
+      const readAaSnapshot = async (): Promise<AaSnapshotState> => {
+        const stored = asRecord(await ctx.state.get(aaSnapshotKey()));
+        return {
+          fetchedAt: typeof stored.fetchedAt === "string" ? stored.fetchedAt : null,
+          bySlug: asRecord(stored.bySlug) as Record<string, AaModelRecord>,
+          lastAttemptAt: typeof stored.lastAttemptAt === "string" ? stored.lastAttemptAt : null,
+          lastError: typeof stored.lastError === "string" ? stored.lastError : null,
+        };
+      };
+
+      interface AaSnapshotHistoryEntry {
+        fetchedAt: string;
+        bySlug: Record<string, AaModelRecord>;
+      }
+
+      /**
+       * TOG-2438 scope expansion ("store the raw snapshot per fetch ... so
+       * history is queryable"): appends one entry per successful fetch to a
+       * bounded rolling list in plugin state. Kept in `plugin_state` rather
+       * than `ctx.entities` — the latter would need a new, unconfirmed
+       * capability declaration in the manifest; `plugin_state` already has
+       * everything this plugin is granted and the SDK documents no size
+       * limit on a stored value.
+       */
+      const appendAaSnapshotHistory = async (entry: AaSnapshotHistoryEntry): Promise<void> => {
+        const stored = asRecord(await ctx.state.get(aaSnapshotHistoryKey()));
+        const existing = Array.isArray(stored.entries) ? (stored.entries as AaSnapshotHistoryEntry[]) : [];
+        const next = [...existing, entry].slice(-AA_SNAPSHOT_HISTORY_LIMIT);
+        await ctx.state.set(aaSnapshotHistoryKey(), { entries: next });
+      };
+
+      const aaDriftSurfacedKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.aaDriftSurfaced,
+      });
+
+      const readAaDriftSurfaced = async (companyId: string): Promise<Set<string>> => {
+        const stored = asRecord(await ctx.state.get(aaDriftSurfacedKey(companyId)));
+        return new Set(Array.isArray(stored.keys) ? (stored.keys as string[]) : []);
+      };
+
+      const aaHttp: AaHttpClient = {
+        fetch: (url, init) => ctx.http.fetch(url, init),
+      };
 
       /**
        * Build the descriptor from what the board actually records. Everything
@@ -874,11 +975,65 @@ export function createPlugin() {
         },
       );
 
+      ctx.tools.register(
+        TOOL_NAMES.aaDriftReport,
+        {
+          displayName: "aa.ai drift report",
+          description:
+            "Per-model aa.ai Intelligence Index: the roster's configured value and snapshot date, alongside the latest fetched live value and whether it now implies a different tier. Read-only — never writes tier/enablement.",
+          parametersSchema: { type: "object" },
+        },
+        async (_params, runCtx): Promise<ToolResult> => {
+          const config = await companyConfig(runCtx.companyId);
+          const snapshot = await readAaSnapshot();
+          const knownSlugs = new Set(Object.keys(snapshot.bySlug));
+
+          const rows = config.models.map((model) => {
+            const slug = resolveAaSlug(model.id, knownSlugs, model.aaSlug ?? null);
+            const liveRecord = slug ? snapshot.bySlug[slug] ?? null : null;
+            const liveIndex = liveRecord?.intelligenceIndex ?? null;
+            const configuredImpliedTier = model.aaIndex === null ? null : tierImpliedByIndex(model.aaIndex);
+            const liveImpliedTier = liveIndex === null ? null : tierImpliedByIndex(liveIndex);
+            return {
+              modelId: model.id,
+              configuredIndex: model.aaIndex,
+              configuredAsOf: model.aaIndexUpdatedAt ?? null,
+              liveIndex,
+              liveAsOf: snapshot.fetchedAt,
+              delta: model.aaIndex !== null && liveIndex !== null ? liveIndex - model.aaIndex : null,
+              crossesBoundary: liveIndex !== null && configuredImpliedTier !== liveImpliedTier,
+              // TOG-2438 scope expansion: full-record fields, surface only —
+              // never fed back into tier/enablement decisions.
+              aaCostPerTask: liveRecord?.intelligenceIndexCostPerTask ?? null,
+              aaPriceIn: liveRecord?.price1mInputTokens ?? null,
+              aaPriceOut: liveRecord?.price1mOutputTokens ?? null,
+              aaTokensPerSec: liveRecord?.medianOutputTokensPerSecond ?? null,
+              aaTtftSeconds: liveRecord?.medianTimeToFirstTokenSeconds ?? null,
+              aaContextWindow: liveRecord?.contextWindowTokens ?? null,
+              aaTerminalbenchHard: liveRecord?.terminalbenchHard ?? null,
+              aaTau2: liveRecord?.tau2 ?? null,
+              aaIfbench: liveRecord?.ifbench ?? null,
+              aaGpqa: liveRecord?.gpqa ?? null,
+              aaHle: liveRecord?.hle ?? null,
+              aaEffort: slug ? effortSuffixOf(slug) : null,
+              aaSnapshotAt: liveRecord ? snapshot.fetchedAt : null,
+            };
+          });
+
+          return {
+            content: `${rows.length} models; snapshot ${snapshot.fetchedAt ?? "never fetched"}${
+              snapshot.lastError ? ` (last attempt error: ${snapshot.lastError})` : ""
+            }`,
+            data: { snapshot: { fetchedAt: snapshot.fetchedAt, lastAttemptAt: snapshot.lastAttemptAt, lastError: snapshot.lastError }, rows },
+          };
+        },
+      );
+
       // --- scheduled volume-profile refresh ---------------------------------
       // Without this the cost term goes stale and the engine holds at the agent
       // floor rather than order candidates on a number it cannot defend.
       ctx.jobs.register(JOB_KEYS.refreshProfiles, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -935,7 +1090,7 @@ export function createPlugin() {
       // freshness budget. One company's failure, or one lane's failure within
       // a company, must never block any other company or lane.
       ctx.jobs.register(JOB_KEYS.pollLanes, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -997,6 +1152,161 @@ export function createPlugin() {
         }
       });
 
+      // --- scheduled aa.ai Intelligence Index refresh (TOG-2438) -------------
+      // Fetched once at instance scope (aa.ai data is not company-specific),
+      // then diffed per company against that company's roster. A fetch/parse
+      // failure preserves the prior snapshot untouched and just records the
+      // attempt — stale-but-labelled beats a hard failure (AC4). This job
+      // never writes `models[].tier`/`.enabled`/overrides: a boundary-crossing
+      // delta is surfaced via `ctx.activity.log()` as a prompt to re-evaluate,
+      // never applied.
+      //
+      // Extracted to a plain function (not just the job callback) so the
+      // `refreshAaIndexNow` tool below can run the identical sweep on demand
+      // (TOG-2438 reopen AC4) without duplicating the fetch/diff/surface
+      // logic or waiting for the next cron tick.
+      const runAaIndexRefresh = async (): Promise<{ fetchedAt: string | null; error: string | null; modelsFetched: number }> => {
+        const nowIso = new Date().toISOString();
+        const previous = await readAaSnapshot();
+
+        const fetched = await fetchAaSnapshot({
+          url: AA_LEADERBOARD_URL,
+          http: aaHttp,
+          timeoutMs: AA_FETCH_TIMEOUT_MS,
+          maxResponseBytes: AA_MAX_RESPONSE_BYTES,
+        });
+
+        let snapshot = previous;
+        if (!fetched.ok || !fetched.html) {
+          snapshot = { ...previous, lastAttemptAt: nowIso, lastError: fetched.error ?? "aa-fetch-failed" };
+          await ctx.state.set(aaSnapshotKey(), snapshot);
+          ctx.logger.error("aa.ai snapshot fetch failed; keeping prior snapshot", {
+            error: fetched.error,
+            previousFetchedAt: previous.fetchedAt,
+          });
+        } else {
+          const parsed = parseAaLeaderboardHtml(fetched.html);
+          if (!parsed) {
+            snapshot = { ...previous, lastAttemptAt: nowIso, lastError: "aa-parse-failed" };
+            await ctx.state.set(aaSnapshotKey(), snapshot);
+            ctx.logger.error("aa.ai snapshot parse failed; keeping prior snapshot", {
+              previousFetchedAt: previous.fetchedAt,
+            });
+          } else {
+            const bySlug: Record<string, AaModelRecord> = {};
+            for (const row of parsed) bySlug[row.slug] = row;
+            snapshot = { fetchedAt: nowIso, bySlug, lastAttemptAt: nowIso, lastError: null };
+            await ctx.state.set(aaSnapshotKey(), snapshot);
+            await appendAaSnapshotHistory({ fetchedAt: nowIso, bySlug });
+            ctx.logger.info("aa.ai snapshot refreshed", { fetchedAt: nowIso, models: parsed.length });
+          }
+        }
+
+        const freshBySlug = new Map(Object.entries(snapshot.bySlug));
+        if (freshBySlug.size === 0) {
+          return { fetchedAt: snapshot.fetchedAt, error: snapshot.lastError, modelsFetched: 0 };
+        }
+        const previousBySlug = new Map(Object.entries(previous.bySlug));
+
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.aaSync.enabled || config.models.length === 0) continue;
+
+            const knownSlugs = new Set(freshBySlug.keys());
+            const diffInputs: AaDiffModelInput[] = config.models.map((model) => ({
+              modelId: model.id,
+              previousIndex: model.aaIndex,
+              slug: resolveAaSlug(model.id, knownSlugs, model.aaSlug ?? null),
+            }));
+
+            const rows = diffSnapshot(diffInputs, freshBySlug, previousBySlug);
+            for (const row of rows) {
+              if (row.fieldDeltas.length > 0) {
+                ctx.logger.info("aa.ai fields changed", {
+                  companyId: company.id,
+                  modelId: row.modelId,
+                  fieldDeltas: row.fieldDeltas,
+                });
+              }
+              if (row.delta !== null && row.delta !== 0) {
+                ctx.logger.info("aa.ai index changed", {
+                  companyId: company.id,
+                  modelId: row.modelId,
+                  previousIndex: row.previousIndex,
+                  freshIndex: row.freshIndex,
+                  delta: row.delta,
+                });
+              }
+            }
+
+            const crossing = rows.filter((row) => row.crossesBoundary);
+            if (crossing.length === 0) continue;
+
+            const surfaced = await readAaDriftSurfaced(company.id);
+            let surfacedChanged = false;
+            for (const row of crossing) {
+              const dedupeKey = `${row.modelId}::${row.freshImpliedTier ?? "none"}`;
+              if (surfaced.has(dedupeKey)) continue;
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `aa.ai drift crosses a tier boundary for ${row.modelId} — re-evaluate, do not auto-apply`,
+                entityType: "model",
+                entityId: row.modelId,
+                metadata: {
+                  modelId: row.modelId,
+                  previousIndex: row.previousIndex,
+                  freshIndex: row.freshIndex,
+                  previousImpliedTier: row.previousImpliedTier,
+                  freshImpliedTier: row.freshImpliedTier,
+                },
+              });
+              surfaced.add(dedupeKey);
+              surfacedChanged = true;
+            }
+            if (surfacedChanged) {
+              await ctx.state.set(aaDriftSurfacedKey(company.id), { keys: [...surfaced] });
+            }
+          } catch (cause) {
+            ctx.logger.error("aa.ai drift surfacing failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+
+        return { fetchedAt: snapshot.fetchedAt, error: snapshot.lastError, modelsFetched: freshBySlug.size };
+      };
+
+      ctx.jobs.register(JOB_KEYS.refreshAaIndex, async () => {
+        await runAaIndexRefresh();
+      });
+
+      // Manual operator escalation for the same sweep (TOG-2438 reopen AC4):
+      // aa.ai revises rankings between scheduled ticks, and an operator who
+      // just saw a revision shouldn't have to wait up to 6 hours to fold it
+      // in. Runs the exact same fetch/diff/surface path as the cron job.
+      ctx.tools.register(
+        TOOL_NAMES.refreshAaIndexNow,
+        {
+          displayName: "Refresh aa.ai Intelligence Index now",
+          description:
+            "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+          parametersSchema: { type: "object" },
+        },
+        async (): Promise<ToolResult> => {
+          const result = await runAaIndexRefresh();
+          if (result.error) {
+            return { content: `aa.ai refresh attempted but failed: ${result.error}`, data: result };
+          }
+          return {
+            content: `aa.ai snapshot refreshed: ${result.modelsFetched} models, fetched at ${result.fetchedAt}`,
+            data: result,
+          };
+        },
+      );
+
       // --- scheduled score + card-ledger refresh (TOG-1917 §2.2 / TOG-2136) -
       // Ported from `model_scores.py`, with one structural change: the Python
       // original attributes tier via a live SQL join against
@@ -1005,7 +1315,7 @@ export function createPlugin() {
       // per distinct issue id via `ctx.issues.get()`, which the host already
       // enriches with `.labels` (same mechanism `describeIssue()` uses above).
       ctx.jobs.register(JOB_KEYS.refreshScores, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -1138,8 +1448,33 @@ export function createPlugin() {
             }
             statsByModel = foldReworkIntoStats(statsByModel, reworkEvents);
 
+            const aaSnapshot = await readAaSnapshot();
+            const aaKnownSlugs = new Set(Object.keys(aaSnapshot.bySlug));
+            const liveAaIndex = (model: (typeof config.models)[number]): number | null => {
+              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
+              if (!slug) return model.aaIndex;
+              const live = aaSnapshot.bySlug[slug]?.intelligenceIndex;
+              return typeof live === "number" ? live : model.aaIndex;
+            };
+            // TOG-2438 scope expansion: agentic sub-scores as an additional
+            // prior alongside the composite index (blendedPriorP), never a
+            // replacement for it — null when the model has no resolved slug
+            // or aa.ai has no sub-benchmark data for it.
+            const liveAgenticScores = (model: (typeof config.models)[number]): AgenticSubScores | null => {
+              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
+              const record = slug ? aaSnapshot.bySlug[slug] : null;
+              if (!record) return null;
+              return {
+                terminalbenchHard: record.terminalbenchHard,
+                tau2: record.tau2,
+                ifbench: record.ifbench,
+                gpqa: record.gpqa,
+                hle: record.hle,
+              };
+            };
+
             const modelScores: ModelScore[] = config.models.map((model) =>
-              buildModelScore(model.id, model.aaIndex, statsByModel[model.id] ?? {}, TIERS),
+              buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, liveAgenticScores(model)),
             );
 
             const cardIssueRows = (await ctx.db.query(
@@ -1197,7 +1532,7 @@ export function createPlugin() {
             const priorPByModel: Record<string, number> = {};
             const blendedListPriceByModel: Record<string, number | null> = {};
             for (const model of config.models) {
-              priorPByModel[model.id] = priorP(model.aaIndex);
+              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), liveAgenticScores(model));
               blendedListPriceByModel[model.id] = null;
             }
 
@@ -1223,12 +1558,50 @@ export function createPlugin() {
         }
       });
 
+      // TOG-2438 reopen: `onConfigChanged` only replays at worker startup for
+      // a full plugin reload (plugin-loader.ts step 5b); a bare crash-restart
+      // (`plugin-worker-manager.ts` autoRestart) respawns the process without
+      // it, which would otherwise reset `knownCompanyIds` to empty and make
+      // every scheduled job silently iterate zero companies. Seed from the
+      // persisted set first so a crash-restarted worker still knows its
+      // companies before the (possibly-skipped) replay arrives.
+      const persistedCompanies = asRecord(await ctx.state.get(knownCompaniesKey()));
+      if (Array.isArray(persistedCompanies.ids)) {
+        for (const id of persistedCompanies.ids) {
+          if (typeof id === "string") knownCompanyIds.add(id);
+        }
+      }
+
       void buildQualitySignals;
       ctx.logger.info("Model Selection worker ready", { version: PLUGIN_VERSION });
     },
 
     async onHealth() {
       return { status: "ok", message: `Model Selection ${PLUGIN_VERSION}` };
+    },
+
+    /**
+     * TOG-2438 reopen: the sole feed for `knownCompanyIds` (see the comment
+     * above its declaration). The host calls this unconditionally for every
+     * configured company at worker startup (`plugin-loader.ts` step 5b) and
+     * again on every operator config save — so this set converges to exactly
+     * "companies with stored config for this plugin" without ever calling
+     * `ctx.companies.list()` ourselves. `context.companyId === null` is an
+     * instance/global save, which this plugin's config schema doesn't use;
+     * skip it rather than tracking a non-company id.
+     *
+     * Persisted immediately (not just held in memory) so a bare crash-restart
+     * — which respawns the worker without replaying `configChanged` — can
+     * still recover the set from state in `setup()` above, instead of silently
+     * running every scheduled job over zero companies.
+     */
+    async onConfigChanged(_newConfig, changeContext) {
+      const companyId = changeContext?.companyId;
+      if (!companyId || knownCompanyIds.has(companyId)) return;
+      knownCompanyIds.add(companyId);
+      if (context) {
+        await context.state.set(knownCompaniesKey(), { ids: [...knownCompanyIds] });
+      }
     },
 
     async onValidateConfig(raw: Record<string, unknown>) {

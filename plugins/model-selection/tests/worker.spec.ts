@@ -53,9 +53,17 @@ async function boot(
   // `definePlugin` returns a sealed wrapper; the lifecycle handlers live on
   // `.definition`. No optional chaining here — a missing setup must fail loudly
   // rather than leave every tool unregistered and the assertions vacuous.
-  const setup = createPlugin().definition.setup;
+  const plugin = createPlugin();
+  const setup = plugin.definition.setup;
   if (!setup) throw new Error("plugin definition has no setup handler");
   await setup(harness.ctx);
+  // TOG-2438 reopen: the worker tracks its known companies from
+  // `onConfigChanged` replays instead of `ctx.companies.list()` — mirror the
+  // host's real startup config-delivery sequence (plugin-loader.ts step 5b)
+  // so the scheduled jobs under test see this company.
+  const onConfigChanged = plugin.definition.onConfigChanged;
+  if (!onConfigChanged) throw new Error("plugin definition has no onConfigChanged handler");
+  await onConfigChanged(config, { companyId: COMPANY });
   // Seed the volume profiles the engine refuses to act without.
   await harness.ctx.state.set(
     { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.volumeProfiles },

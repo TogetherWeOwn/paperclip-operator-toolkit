@@ -77,6 +77,10 @@ export const SELECTION_CONFIG_SCHEMA = {
           },
           contextWindow: { type: "integer", minimum: 1, default: 200000 },
           aaIndex: { type: ["number", "null"], default: null },
+          /** TOG-2438: explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
+          aaSlug: { type: "string", minLength: 1 },
+          /** TOG-2438: snapshot date the roster's aaIndex above was curated from. Informational only. */
+          aaIndexUpdatedAt: { type: ["string", "null"], format: "date", default: null },
           releasedAt: { type: "string", format: "date" },
           fallbackOnly: { type: "boolean", default: false },
           note: { type: "string", default: "" },
@@ -276,6 +280,20 @@ export const SELECTION_CONFIG_SCHEMA = {
         enabled: { type: "boolean", default: false },
         /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
         maxRecords: { type: "integer", minimum: 1, default: 5000 },
+      },
+      default: {},
+    },
+    /**
+     * TOG-2438: aa.ai Intelligence Index sync. A single kill switch — the
+     * feed URL and thresholds are code constants, not operator-configurable
+     * (this isn't a per-company data source the way pacing lanes are).
+     */
+    aaSync: {
+      type: "object",
+      title: "aa.ai ranking sync",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true },
       },
       default: {},
     },

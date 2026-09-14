@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.model-selection";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.2.0";
 
 export const TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
@@ -20,6 +20,10 @@ export const TOOL_NAMES = {
    * host's own internal API), so this can never be anything but a report.
    */
   ancillaryDrift: "model_selection_ancillary_drift",
+  /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
+  aaDriftReport: "model_selection_aa_drift_report",
+  /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
+  refreshAaIndexNow: "model_selection_refresh_aa_index_now",
 } as const;
 
 // Route keys are validated against a lowercase-only regex by
@@ -36,6 +40,8 @@ export const JOB_KEYS = {
   pollLanes: "pollLaneCapacity",
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
   refreshScores: "refreshScores",
+  /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
+  refreshAaIndex: "refreshAaIndex",
 } as const;
 
 /**
@@ -84,7 +90,41 @@ export const PLUGIN_STATE_KEYS = {
    * raises a fresh card rather than staying silent forever.
    */
   tierExhaustedAlarms: "tierExhaustedAlarms",
+  /**
+   * Instance-scoped (aa.ai data is not company-specific): the last-fetched
+   * aa.ai snapshot `{fetchedAt, bySlug, lastAttemptAt, lastError}` (TOG-2438).
+   * `bySlug` maps every aa.ai slug (one per model x effort-level) to its full
+   * `AaModelRecord` (TOG-2438 scope expansion) — not just the intelligence
+   * index.
+   */
+  aaIndexSnapshot: "aaIndexSnapshot",
+  /**
+   * Instance-scoped: a bounded rolling history of past fetches, `{entries:
+   * Array<{fetchedAt, bySlug}>}`, newest last, capped at
+   * `AA_SNAPSHOT_HISTORY_LIMIT` entries (TOG-2438 scope expansion — "store
+   * the raw snapshot per fetch so history is queryable"). Separate key from
+   * `aaIndexSnapshot` so a plain drift read never has to load the whole
+   * history.
+   */
+  aaSnapshotHistory: "aaSnapshotHistory",
+  /**
+   * Instance-scoped: `{ids: string[]}`, the set of companies this worker has
+   * ever seen a stored config for, persisted so a bare crash-restart (which
+   * replays no `configChanged` calls, unlike a full plugin reload) doesn't
+   * reset scheduled jobs to iterating zero companies (TOG-2438 reopen).
+   */
+  knownCompanies: "knownCompanies",
+  /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
+  aaDriftSurfaced: "aaDriftSurfaced",
 } as const;
+
+/** aa.ai's public leaderboard page — the only viable data source (no documented API exists). */
+export const AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";
+/** Full-page HTML fetch, not a small JSON blob — generous but bounded. */
+export const AA_FETCH_TIMEOUT_MS = 10_000;
+export const AA_MAX_RESPONSE_BYTES = 8_000_000;
+/** How many past full-detail fetches `aaSnapshotHistory` retains (TOG-2438 scope expansion). At the 6h cadence this is 7 days. */
+export const AA_SNAPSHOT_HISTORY_LIMIT = 28;
 
 export const PACING_MODES = ["off", "shadow", "enforce"] as const;
 export type PacingMode = (typeof PACING_MODES)[number];

@@ -149,6 +149,13 @@ const manifest: PaperclipPluginManifestV1 = {
         "Recompute per-model, per-tier Bayesian success scores and the card-level acceptance ledger from this company's own runs and captured rework signals.",
       schedule: "37 */6 * * *",
     },
+    {
+      jobKey: JOB_KEYS.refreshAaIndex,
+      displayName: "Refresh aa.ai Intelligence Index",
+      description:
+        "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate — never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt (TOG-2438). Every-6h cadence matches refreshScores's family (TOG-2438 reopen AC4) — aa.ai moves faster than a daily check surfaced.",
+      schedule: "53 */6 * * *",
+    },
   ],
   tools: [
     {
@@ -192,6 +199,20 @@ const manifest: PaperclipPluginManifestV1 = {
         string,
         unknown
       >,
+    },
+    {
+      name: TOOL_NAMES.aaDriftReport,
+      displayName: "aa.ai drift report",
+      description:
+        "Per-model aa.ai Intelligence Index: the roster's configured value and snapshot date, alongside the latest fetched live value and whether it now implies a different tier. Read-only; writes nothing.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.refreshAaIndexNow,
+      displayName: "Refresh aa.ai Intelligence Index now",
+      description:
+        "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
     },
   ],
   apiRoutes: [

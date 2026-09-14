@@ -28,6 +28,38 @@ export interface ModelEntry {
   contextWindow: number;
   /** Artificial Analysis intelligence-index prior, or null when unmatched. */
   aaIndex: number | null;
+  /**
+   * Explicit aa.ai leaderboard slug override, for a model whose normalized
+   * id doesn't match aa.ai's slug automatically (TOG-2438). Null/absent
+   * falls back to normalized-id matching in `resolveAaSlug`.
+   */
+  aaSlug?: string | null;
+  /** ISO date the roster's `aaIndex` was curated from (TOG-2438). Informational only — never read by selection. */
+  aaIndexUpdatedAt?: string | null;
+  /**
+   * TOG-2438 scope expansion: derived, read-only fields populated from the
+   * matched aa.ai snapshot record at the point a roster view/drift-report is
+   * assembled (worker.ts) — never operator-curated, never schema-validated
+   * config, and never read by `select.ts`/`cost.ts`. Null wherever aa.ai's
+   * own data is null for the matched slug; absent entirely when the model
+   * has no resolved aa.ai slug at all. Surfacing only, same rule as
+   * `aaIndex`: none of this may change `tier`/`enabled`.
+   */
+  aaCostPerTask?: number | null;
+  aaPriceIn?: number | null;
+  aaPriceOut?: number | null;
+  aaTokensPerSec?: number | null;
+  aaTtftSeconds?: number | null;
+  aaContextWindow?: number | null;
+  aaTerminalbenchHard?: number | null;
+  aaTau2?: number | null;
+  aaIfbench?: number | null;
+  aaGpqa?: number | null;
+  aaHle?: number | null;
+  /** Effort-level suffix of the matched aa.ai slug (e.g. "low", "xhigh"), or null for the base/default row. */
+  aaEffort?: string | null;
+  /** ISO timestamp of the aa.ai snapshot fetch this row's derived fields came from. */
+  aaSnapshotAt?: string | null;
   /** ISO date used only after an exact expected-cost tie. */
   releasedAt: string;
   /** Eligible only after all regular candidates at the judged tier fail. */

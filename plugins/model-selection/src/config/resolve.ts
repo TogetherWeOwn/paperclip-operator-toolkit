@@ -70,6 +70,7 @@ export interface ResolvedConfig {
     stopWindow: number;
   };
   shadowEmit: { enabled: boolean; maxRecords: number };
+  aaSync: { enabled: boolean };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -129,6 +130,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const pacing = record(root.pacing);
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
+  const aaSync = record(root.aaSync);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -147,6 +149,8 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
               : [],
             contextWindow: num(model.contextWindow, 200_000),
             aaIndex: nullableNum(model.aaIndex),
+            aaSlug: typeof model.aaSlug === "string" && model.aaSlug.length > 0 ? model.aaSlug : null,
+            aaIndexUpdatedAt: typeof model.aaIndexUpdatedAt === "string" ? model.aaIndexUpdatedAt : null,
             releasedAt: string(model.releasedAt, "1970-01-01"),
             fallbackOnly: bool(model.fallbackOnly, false),
             note: string(model.note, ""),
@@ -281,6 +285,9 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     shadowEmit: {
       enabled: bool(shadowEmit.enabled, false),
       maxRecords: num(shadowEmit.maxRecords, 5000),
+    },
+    aaSync: {
+      enabled: bool(aaSync.enabled, true),
     },
   };
 }

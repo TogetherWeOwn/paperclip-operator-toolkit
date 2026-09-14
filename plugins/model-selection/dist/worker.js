@@ -2,7 +2,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.2.0";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -19,7 +19,11 @@ var TOOL_NAMES = {
    * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
    * host's own internal API), so this can never be anything but a report.
    */
-  ancillaryDrift: "model_selection_ancillary_drift"
+  ancillaryDrift: "model_selection_ancillary_drift",
+  /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
+  aaDriftReport: "model_selection_aa_drift_report",
+  /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
+  refreshAaIndexNow: "model_selection_refresh_aa_index_now"
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -31,7 +35,9 @@ var JOB_KEYS = {
   /** Poll configured lane-capacity sources and refresh the lane ledger. */
   pollLanes: "pollLaneCapacity",
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
-  refreshScores: "refreshScores"
+  refreshScores: "refreshScores",
+  /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
+  refreshAaIndex: "refreshAaIndex"
 };
 var TIER_LABEL_PREFIX = "tier:";
 var TIERS = ["T1", "T2", "T3"];
@@ -61,8 +67,38 @@ var PLUGIN_STATE_KEYS = {
    * issue's outcome is no longer `tier-exhausted`, so the NEXT exhaustion
    * raises a fresh card rather than staying silent forever.
    */
-  tierExhaustedAlarms: "tierExhaustedAlarms"
+  tierExhaustedAlarms: "tierExhaustedAlarms",
+  /**
+   * Instance-scoped (aa.ai data is not company-specific): the last-fetched
+   * aa.ai snapshot `{fetchedAt, bySlug, lastAttemptAt, lastError}` (TOG-2438).
+   * `bySlug` maps every aa.ai slug (one per model x effort-level) to its full
+   * `AaModelRecord` (TOG-2438 scope expansion) — not just the intelligence
+   * index.
+   */
+  aaIndexSnapshot: "aaIndexSnapshot",
+  /**
+   * Instance-scoped: a bounded rolling history of past fetches, `{entries:
+   * Array<{fetchedAt, bySlug}>}`, newest last, capped at
+   * `AA_SNAPSHOT_HISTORY_LIMIT` entries (TOG-2438 scope expansion — "store
+   * the raw snapshot per fetch so history is queryable"). Separate key from
+   * `aaIndexSnapshot` so a plain drift read never has to load the whole
+   * history.
+   */
+  aaSnapshotHistory: "aaSnapshotHistory",
+  /**
+   * Instance-scoped: `{ids: string[]}`, the set of companies this worker has
+   * ever seen a stored config for, persisted so a bare crash-restart (which
+   * replays no `configChanged` calls, unlike a full plugin reload) doesn't
+   * reset scheduled jobs to iterating zero companies (TOG-2438 reopen).
+   */
+  knownCompanies: "knownCompanies",
+  /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
+  aaDriftSurfaced: "aaDriftSurfaced"
 };
+var AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";
+var AA_FETCH_TIMEOUT_MS = 1e4;
+var AA_MAX_RESPONSE_BYTES = 8e6;
+var AA_SNAPSHOT_HISTORY_LIMIT = 28;
 var PACING_MODES = ["off", "shadow", "enforce"];
 var LOCAL_FOLDER_KEYS = {
   /**
@@ -331,6 +367,7 @@ function resolveConfig(raw) {
   const pacing = record(root.pacing);
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
+  const aaSync = record(root.aaSync);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -345,6 +382,8 @@ function resolveConfig(raw) {
         capabilities: Array.isArray(model.capabilities) ? model.capabilities.filter((c) => typeof c === "string") : [],
         contextWindow: num(model.contextWindow, 2e5),
         aaIndex: nullableNum(model.aaIndex),
+        aaSlug: typeof model.aaSlug === "string" && model.aaSlug.length > 0 ? model.aaSlug : null,
+        aaIndexUpdatedAt: typeof model.aaIndexUpdatedAt === "string" ? model.aaIndexUpdatedAt : null,
         releasedAt: string(model.releasedAt, "1970-01-01"),
         fallbackOnly: bool(model.fallbackOnly, false),
         note: string(model.note, ""),
@@ -447,6 +486,9 @@ function resolveConfig(raw) {
     shadowEmit: {
       enabled: bool(shadowEmit.enabled, false),
       maxRecords: num(shadowEmit.maxRecords, 5e3)
+    },
+    aaSync: {
+      enabled: bool(aaSync.enabled, true)
     }
   };
 }
@@ -525,6 +567,461 @@ function validateConfig(config) {
     }
   }
   return { errors, warnings };
+}
+
+// src/engine/scores.ts
+function priorP(aaIndex) {
+  if (aaIndex === null) return 0.8;
+  return Math.max(0.55, Math.min(1, 0.55 + 0.45 * (aaIndex / 60)));
+}
+var AGENTIC_PRIOR_BLEND = 0.3;
+function agenticPriorP(scores) {
+  if (!scores) return null;
+  const values = [scores.terminalbenchHard, scores.tau2, scores.ifbench, scores.gpqa, scores.hle].filter(
+    (v) => typeof v === "number"
+  );
+  if (values.length === 0) return null;
+  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  return Math.max(0.55, Math.min(1, 0.55 + 0.45 * avg));
+}
+function blendedPriorP(aaIndex, agenticScores) {
+  const indexPrior = priorP(aaIndex);
+  const agentic = agenticPriorP(agenticScores);
+  if (agentic === null) return indexPrior;
+  return (1 - AGENTIC_PRIOR_BLEND) * indexPrior + AGENTIC_PRIOR_BLEND * agentic;
+}
+function emptyTierScoreStats() {
+  return { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, wOk: 0, wBad: 0, rework: 0, okCost: [], okMins: [] };
+}
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    const lo = sorted[mid - 1];
+    const hi = sorted[mid];
+    return (lo + hi) / 2;
+  }
+  return sorted[mid];
+}
+function round(value, digits) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+function summarize(stats, tier2, priorPValue, priorK = SCORE_PRIOR_K, provenN = SCORE_PROVEN_N, thresholds = SCORE_THRESHOLDS) {
+  const nEff = stats.wOk + stats.wBad;
+  const pObs = nEff > 0 ? stats.wOk / nEff : null;
+  const p = (stats.wOk + priorK * priorPValue) / (nEff + priorK);
+  const thr = tier2 === null ? void 0 : thresholds[tier2];
+  const proven = stats.ok + stats.failModel + stats.tmo >= provenN;
+  let capable = null;
+  if (thr !== void 0) {
+    capable = p >= thr;
+    if (proven && pObs !== null && pObs < thr - 0.1) capable = false;
+  }
+  return {
+    n: stats.n,
+    ok: stats.ok,
+    failInfra: stats.failInfra,
+    failModel: round(stats.failModel, 1),
+    tmo: stats.tmo,
+    nEff: round(nEff, 1),
+    pObs: pObs === null ? null : round(pObs, 3),
+    p: round(p, 3),
+    capable,
+    proven,
+    costPerSuccessUsd: stats.okCost.length ? round(median(stats.okCost), 3) : null,
+    medMin: stats.okMins.length ? round(median(stats.okMins), 1) : null,
+    rework: stats.rework
+  };
+}
+function buildModelScore(modelId, aaIndex, statsByTier, tiers, agenticScores) {
+  const pp = blendedPriorP(aaIndex, agenticScores);
+  const tierScores = {};
+  for (const tier2 of tiers) {
+    const stats = statsByTier[tier2];
+    tierScores[tier2] = stats ? summarize(stats, tier2, pp) : {
+      n: 0,
+      ok: 0,
+      failInfra: 0,
+      failModel: 0,
+      tmo: 0,
+      nEff: 0,
+      pObs: null,
+      p: round(pp, 3),
+      capable: pp >= SCORE_THRESHOLDS[tier2],
+      proven: false,
+      costPerSuccessUsd: null,
+      medMin: null,
+      rework: 0
+    };
+  }
+  const agg = emptyTierScoreStats();
+  for (const tier2 of tiers) {
+    const stats = statsByTier[tier2];
+    if (!stats) continue;
+    agg.n += stats.n;
+    agg.ok += stats.ok;
+    agg.failInfra += stats.failInfra;
+    agg.failModel += stats.failModel;
+    agg.tmo += stats.tmo;
+    agg.wOk += stats.wOk;
+    agg.wBad += stats.wBad;
+    agg.rework += stats.rework;
+    agg.okCost.push(...stats.okCost);
+    agg.okMins.push(...stats.okMins);
+  }
+  return {
+    modelId,
+    aaIndex,
+    priorP: round(pp, 3),
+    tiers: tierScores,
+    overall: summarize(agg, null, pp)
+  };
+}
+var FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
+var MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
+var INFRA_RE = /503|502|529|Overloaded|429|exhausted|All credentials|circuit breaker|Stream idle timeout|Stream ended|stalled mid-stream|stopped arriving|mid-response|disabled Claude subscription|ECONN|process_lost|all upstream accounts|not supported for format|issue with the selected model|budget_paused|Missing required permissions|recovery backstop|sandbox gone|401|404/i;
+function normModelId(modelId) {
+  return modelId.replace(/^(cliproxy\/|openrouter\/|opencode-go\/)/, "");
+}
+function classifyRunFailure(errorText, errorCode, modelId) {
+  if (FREE_LANE_RE.test(normModelId(modelId))) return { kind: "model", weight: 1 };
+  if (errorCode === "timeout" || MODEL_FAIL_RE.test(errorText ?? "")) return { kind: "model", weight: 1 };
+  if (INFRA_RE.test(errorText ?? "")) return { kind: "infra", weight: 0 };
+  if (/400 status code \(no body\)/.test(errorText ?? "")) return { kind: "model", weight: 0.5 };
+  return { kind: "model", weight: 0.5 };
+}
+function accumulateRunStats(rows) {
+  const out = {};
+  for (const row of rows) {
+    if (row.tier === null) continue;
+    const modelBucket = out[row.modelId] ?? {};
+    const stats = modelBucket[row.tier] ?? emptyTierScoreStats();
+    const w = Math.exp(-row.ageDays / 10);
+    const next = {
+      ...stats,
+      n: stats.n + 1,
+      okCost: [...stats.okCost],
+      okMins: [...stats.okMins]
+    };
+    if (row.status === "succeeded") {
+      next.ok += 1;
+      next.wOk += w;
+      if (row.costUsd !== null) next.okCost.push(row.costUsd);
+      if (row.mins !== null) next.okMins.push(row.mins);
+    } else if (row.status === "timed_out") {
+      next.tmo += 1;
+      next.wBad += w;
+    } else {
+      const { kind, weight } = classifyRunFailure(row.error, row.errorCode, row.modelId);
+      if (kind === "infra") next.failInfra += 1;
+      else {
+        next.failModel += weight;
+        next.wBad += w * weight;
+      }
+    }
+    modelBucket[row.tier] = next;
+    out[row.modelId] = modelBucket;
+  }
+  return out;
+}
+function foldReworkIntoStats(stats, reworkEvents) {
+  const out = {};
+  for (const [modelId, byTier] of Object.entries(stats)) {
+    out[modelId] = { ...byTier };
+  }
+  for (const event of reworkEvents) {
+    const weight = event.kind === "reopen" ? REWORK_WEIGHT_REOPEN : REWORK_WEIGHT_REJECTED;
+    const modelBucket = out[event.modelId] ?? {};
+    const tierStats = modelBucket[event.tier] ?? emptyTierScoreStats();
+    modelBucket[event.tier] = {
+      ...tierStats,
+      failModel: tierStats.failModel + weight,
+      wBad: tierStats.wBad + weight,
+      rework: tierStats.rework + 1
+    };
+    out[event.modelId] = modelBucket;
+  }
+  return out;
+}
+function findClosingRun(issueId, atMs, windowMs, closingRuns, excludeAgentId) {
+  let best = null;
+  for (const run of closingRuns) {
+    if (run.issueId !== issueId || run.tier === null) continue;
+    if (excludeAgentId != null && run.agentId === excludeAgentId) continue;
+    const delta = atMs - run.finishedAtMs;
+    if (delta < 0 || delta > windowMs) continue;
+    if (!best || run.finishedAtMs > best.finishedAtMs) best = run;
+  }
+  return best;
+}
+function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
+  const byKey = /* @__PURE__ */ new Map();
+  for (const card of cards) {
+    const key = `${card.modelId}\0${card.tier}`;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.push(card);
+    else byKey.set(key, [card]);
+  }
+  const out = {};
+  for (const [key, rows] of byKey) {
+    const [modelId, tier2] = key.split("\0");
+    const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1e3;
+    const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
+    const accepted = resolved.filter((r) => !r.rejected);
+    const costs = resolved.map((r) => r.costUsd).filter((c) => c !== null);
+    const runs = resolved.map((r) => r.runCount);
+    const foreignCount = resolved.filter((r) => r.foreignRun).length;
+    const measured = resolved.length > 0;
+    const acceptRate = measured ? accepted.length / resolved.length : priorPByModel[modelId] ?? 0.8;
+    const costPerCard = costs.length ? costs.reduce((a, b) => a + b, 0) / costs.length : blendedListPriceByModel[modelId] ?? null;
+    out[key.replace("\0", ":")] = {
+      modelId,
+      tier: tier2,
+      cardsClosed: rows.length,
+      acceptRate,
+      costPerCard,
+      runsPerCard: runs.length ? runs.reduce((a, b) => a + b, 0) / runs.length : null,
+      foreignRunShare: resolved.length ? foreignCount / resolved.length : null,
+      costPerAcceptedCard: costPerCard !== null && acceptRate > 0 ? costPerCard / acceptRate : null,
+      pending: !measured
+    };
+  }
+  return out;
+}
+
+// src/aa-index/match.ts
+var ID_PREFIX_RE = /^(cliproxy\/|openrouter\/|opencode-go\/|zai\/)/;
+function normalizeModelId(modelId) {
+  return modelId.replace(ID_PREFIX_RE, "").toLowerCase().replace(/\./g, "-");
+}
+function resolveAaSlug(modelId, knownSlugs, explicitSlug) {
+  if (explicitSlug) return knownSlugs.has(explicitSlug) ? explicitSlug : null;
+  const normalized = normalizeModelId(modelId);
+  return knownSlugs.has(normalized) ? normalized : null;
+}
+function tierImpliedByIndex(index) {
+  const p = priorP(index);
+  for (const tier2 of [...TIER_ORDER].reverse()) {
+    if (p >= SCORE_THRESHOLDS[tier2]) return tier2;
+  }
+  return null;
+}
+var EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh|non-reasoning)$/;
+function effortSuffixOf(slug) {
+  return EFFORT_SUFFIX_RE.exec(slug)?.[1] ?? null;
+}
+
+// src/aa-index/parse.ts
+var STRING_FIELDS = ["name", "shortName", "modelCreatorName", "paramClass", "priceClass"];
+var BOOLEAN_FIELDS = ["deprecated", "isReasoning", "isOpenWeights", "intelligenceIndexIsEstimated"];
+var AA_NUMERIC_FIELDS = [
+  "intelligenceIndex",
+  "intelligenceIndexCostPerTask",
+  "price1mInputTokens",
+  "price1mOutputTokens",
+  "cacheHitPrice",
+  "cacheWritePrice",
+  "medianOutputTokensPerSecond",
+  "outputTokensPerSecondP5",
+  "outputTokensPerSecondP25",
+  "outputTokensPerSecondP75",
+  "outputTokensPerSecondP95",
+  "medianTimeToFirstTokenSeconds",
+  "medianTimeToFirstAnswerTokenSeconds",
+  "medianEndToEndResponseTimeSeconds",
+  "medianReasoningTimeSeconds",
+  "contextWindowTokens",
+  "gpqa",
+  "hle",
+  "critpt",
+  "lcr",
+  "ifbench",
+  "tau2",
+  "terminalbenchHard",
+  "mmmuPro",
+  "gdpvalNormalized",
+  "terminalbenchV21",
+  "tauBanking",
+  "scicode",
+  "terminalbenchV40",
+  "itbenchSre",
+  "analystAgent",
+  "apexAgents",
+  "omniscience",
+  "omniscienceAccuracy",
+  "omniscienceNonHallucination"
+];
+var ANCHOR = '{\\"models\\":[{\\"slug\\":\\"glm-4-5v\\"';
+var ANCHOR_BRACKET_OFFSET = ANCHOR.indexOf("[");
+function findAnchorIndex(html) {
+  return html.indexOf(ANCHOR);
+}
+function extractBalancedArray(html, arrayStart) {
+  let depth = 0;
+  let inString = false;
+  let i = arrayStart;
+  for (; i < html.length; ) {
+    const ch = html[i];
+    const next = html[i + 1];
+    if (ch === "\\" && next === '"') {
+      inString = !inString;
+      i += 2;
+      continue;
+    }
+    if (ch === "\\" && next === "\\") {
+      i += 2;
+      continue;
+    }
+    if (inString) {
+      i += 1;
+      continue;
+    }
+    if (ch === "[") depth += 1;
+    else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) return html.slice(arrayStart, i + 1);
+    }
+    i += 1;
+  }
+  return null;
+}
+function unescapeOuterLayer(raw) {
+  return raw.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+}
+function stringField(rec, key) {
+  const value = rec[key];
+  return typeof value === "string" ? value : null;
+}
+function booleanField(rec, key) {
+  const value = rec[key];
+  return typeof value === "boolean" ? value : null;
+}
+function numberField(rec, key) {
+  const value = rec[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function buildRecord(rec) {
+  const slug = rec.slug;
+  if (typeof slug !== "string" || slug.length === 0) return null;
+  const record2 = { slug };
+  for (const key of STRING_FIELDS) record2[key] = stringField(rec, key);
+  for (const key of BOOLEAN_FIELDS) record2[key] = booleanField(rec, key);
+  for (const key of AA_NUMERIC_FIELDS) record2[key] = numberField(rec, key);
+  return record2;
+}
+function parseAaLeaderboardHtml(html) {
+  const anchorIndex = findAnchorIndex(html);
+  if (anchorIndex < 0) return null;
+  const arrayStart = anchorIndex + ANCHOR_BRACKET_OFFSET;
+  const balanced = extractBalancedArray(html, arrayStart);
+  if (balanced === null) return null;
+  const unescaped = unescapeOuterLayer(balanced);
+  let parsed;
+  try {
+    parsed = JSON.parse(unescaped);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const rows = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const record2 = buildRecord(entry);
+    if (record2) rows.push(record2);
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+// src/aa-index/diff.ts
+function diffFields(previous, fresh) {
+  const deltas = [];
+  for (const field of AA_NUMERIC_FIELDS) {
+    const prevValue = previous ? previous[field] : null;
+    const freshValue = fresh[field];
+    if (prevValue === null && freshValue === null) continue;
+    if (prevValue === freshValue) continue;
+    deltas.push({
+      field,
+      previous: prevValue,
+      fresh: freshValue,
+      delta: prevValue === null || freshValue === null ? null : freshValue - prevValue
+    });
+  }
+  return deltas;
+}
+function diffSnapshot(models, freshBySlug, previousBySlug = /* @__PURE__ */ new Map()) {
+  const rows = [];
+  for (const model of models) {
+    if (!model.slug) continue;
+    const freshRecord = freshBySlug.get(model.slug);
+    if (freshRecord === void 0 || freshRecord.intelligenceIndex === null) continue;
+    const freshIndex = freshRecord.intelligenceIndex;
+    const previousIndex = model.previousIndex;
+    const delta = previousIndex === null ? null : freshIndex - previousIndex;
+    const previousImpliedTier = previousIndex === null ? null : tierImpliedByIndex(previousIndex);
+    const freshImpliedTier = tierImpliedByIndex(freshIndex);
+    rows.push({
+      modelId: model.modelId,
+      previousIndex,
+      freshIndex,
+      delta,
+      previousImpliedTier,
+      freshImpliedTier,
+      crossesBoundary: previousImpliedTier !== freshImpliedTier,
+      fieldDeltas: diffFields(previousBySlug.get(model.slug), freshRecord)
+    });
+  }
+  return rows;
+}
+
+// src/aa-index/fetch.ts
+async function fetchAaSnapshot(input) {
+  const fail = (error) => ({ ok: false, html: null, error });
+  let parsed;
+  try {
+    parsed = new URL(input.url);
+  } catch {
+    return fail("aa-url-rejected");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    return fail("aa-url-rejected");
+  }
+  let response;
+  try {
+    let timer;
+    response = await Promise.race([
+      input.http.fetch(input.url, {
+        method: "GET",
+        headers: { Accept: "text/html", "Accept-Encoding": "identity" },
+        redirect: "manual"
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("aa-request-timeout")), input.timeoutMs);
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  } catch {
+    return fail("aa-request-failed");
+  }
+  if (response.redirected || response.status >= 300 && response.status < 400) {
+    return fail("aa-redirect-refused");
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return fail("aa-http-failed");
+  }
+  let text;
+  try {
+    text = await response.text();
+  } catch {
+    return fail("aa-request-failed");
+  }
+  if (new TextEncoder().encode(text).byteLength > input.maxResponseBytes) {
+    return fail("aa-response-too-large");
+  }
+  return { ok: true, html: text, error: null };
 }
 
 // src/engine/model-id.ts
@@ -1080,212 +1577,6 @@ function buildQualitySignals(rows, computedAt) {
   }));
 }
 
-// src/engine/scores.ts
-function priorP(aaIndex) {
-  if (aaIndex === null) return 0.8;
-  return Math.max(0.55, Math.min(1, 0.55 + 0.45 * (aaIndex / 60)));
-}
-function emptyTierScoreStats() {
-  return { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, wOk: 0, wBad: 0, rework: 0, okCost: [], okMins: [] };
-}
-function median(values) {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 0) {
-    const lo = sorted[mid - 1];
-    const hi = sorted[mid];
-    return (lo + hi) / 2;
-  }
-  return sorted[mid];
-}
-function round(value, digits) {
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
-}
-function summarize(stats, tier2, priorPValue, priorK = SCORE_PRIOR_K, provenN = SCORE_PROVEN_N, thresholds = SCORE_THRESHOLDS) {
-  const nEff = stats.wOk + stats.wBad;
-  const pObs = nEff > 0 ? stats.wOk / nEff : null;
-  const p = (stats.wOk + priorK * priorPValue) / (nEff + priorK);
-  const thr = tier2 === null ? void 0 : thresholds[tier2];
-  const proven = stats.ok + stats.failModel + stats.tmo >= provenN;
-  let capable = null;
-  if (thr !== void 0) {
-    capable = p >= thr;
-    if (proven && pObs !== null && pObs < thr - 0.1) capable = false;
-  }
-  return {
-    n: stats.n,
-    ok: stats.ok,
-    failInfra: stats.failInfra,
-    failModel: round(stats.failModel, 1),
-    tmo: stats.tmo,
-    nEff: round(nEff, 1),
-    pObs: pObs === null ? null : round(pObs, 3),
-    p: round(p, 3),
-    capable,
-    proven,
-    costPerSuccessUsd: stats.okCost.length ? round(median(stats.okCost), 3) : null,
-    medMin: stats.okMins.length ? round(median(stats.okMins), 1) : null,
-    rework: stats.rework
-  };
-}
-function buildModelScore(modelId, aaIndex, statsByTier, tiers) {
-  const pp = priorP(aaIndex);
-  const tierScores = {};
-  for (const tier2 of tiers) {
-    const stats = statsByTier[tier2];
-    tierScores[tier2] = stats ? summarize(stats, tier2, pp) : {
-      n: 0,
-      ok: 0,
-      failInfra: 0,
-      failModel: 0,
-      tmo: 0,
-      nEff: 0,
-      pObs: null,
-      p: round(pp, 3),
-      capable: pp >= SCORE_THRESHOLDS[tier2],
-      proven: false,
-      costPerSuccessUsd: null,
-      medMin: null,
-      rework: 0
-    };
-  }
-  const agg = emptyTierScoreStats();
-  for (const tier2 of tiers) {
-    const stats = statsByTier[tier2];
-    if (!stats) continue;
-    agg.n += stats.n;
-    agg.ok += stats.ok;
-    agg.failInfra += stats.failInfra;
-    agg.failModel += stats.failModel;
-    agg.tmo += stats.tmo;
-    agg.wOk += stats.wOk;
-    agg.wBad += stats.wBad;
-    agg.rework += stats.rework;
-    agg.okCost.push(...stats.okCost);
-    agg.okMins.push(...stats.okMins);
-  }
-  return {
-    modelId,
-    aaIndex,
-    priorP: round(pp, 3),
-    tiers: tierScores,
-    overall: summarize(agg, null, pp)
-  };
-}
-var FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
-var MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
-var INFRA_RE = /503|502|529|Overloaded|429|exhausted|All credentials|circuit breaker|Stream idle timeout|Stream ended|stalled mid-stream|stopped arriving|mid-response|disabled Claude subscription|ECONN|process_lost|all upstream accounts|not supported for format|issue with the selected model|budget_paused|Missing required permissions|recovery backstop|sandbox gone|401|404/i;
-function normModelId(modelId) {
-  return modelId.replace(/^(cliproxy\/|openrouter\/|opencode-go\/)/, "");
-}
-function classifyRunFailure(errorText, errorCode, modelId) {
-  if (FREE_LANE_RE.test(normModelId(modelId))) return { kind: "model", weight: 1 };
-  if (errorCode === "timeout" || MODEL_FAIL_RE.test(errorText ?? "")) return { kind: "model", weight: 1 };
-  if (INFRA_RE.test(errorText ?? "")) return { kind: "infra", weight: 0 };
-  if (/400 status code \(no body\)/.test(errorText ?? "")) return { kind: "model", weight: 0.5 };
-  return { kind: "model", weight: 0.5 };
-}
-function accumulateRunStats(rows) {
-  const out = {};
-  for (const row of rows) {
-    if (row.tier === null) continue;
-    const modelBucket = out[row.modelId] ?? {};
-    const stats = modelBucket[row.tier] ?? emptyTierScoreStats();
-    const w = Math.exp(-row.ageDays / 10);
-    const next = {
-      ...stats,
-      n: stats.n + 1,
-      okCost: [...stats.okCost],
-      okMins: [...stats.okMins]
-    };
-    if (row.status === "succeeded") {
-      next.ok += 1;
-      next.wOk += w;
-      if (row.costUsd !== null) next.okCost.push(row.costUsd);
-      if (row.mins !== null) next.okMins.push(row.mins);
-    } else if (row.status === "timed_out") {
-      next.tmo += 1;
-      next.wBad += w;
-    } else {
-      const { kind, weight } = classifyRunFailure(row.error, row.errorCode, row.modelId);
-      if (kind === "infra") next.failInfra += 1;
-      else {
-        next.failModel += weight;
-        next.wBad += w * weight;
-      }
-    }
-    modelBucket[row.tier] = next;
-    out[row.modelId] = modelBucket;
-  }
-  return out;
-}
-function foldReworkIntoStats(stats, reworkEvents) {
-  const out = {};
-  for (const [modelId, byTier] of Object.entries(stats)) {
-    out[modelId] = { ...byTier };
-  }
-  for (const event of reworkEvents) {
-    const weight = event.kind === "reopen" ? REWORK_WEIGHT_REOPEN : REWORK_WEIGHT_REJECTED;
-    const modelBucket = out[event.modelId] ?? {};
-    const tierStats = modelBucket[event.tier] ?? emptyTierScoreStats();
-    modelBucket[event.tier] = {
-      ...tierStats,
-      failModel: tierStats.failModel + weight,
-      wBad: tierStats.wBad + weight,
-      rework: tierStats.rework + 1
-    };
-    out[event.modelId] = modelBucket;
-  }
-  return out;
-}
-function findClosingRun(issueId, atMs, windowMs, closingRuns, excludeAgentId) {
-  let best = null;
-  for (const run of closingRuns) {
-    if (run.issueId !== issueId || run.tier === null) continue;
-    if (excludeAgentId != null && run.agentId === excludeAgentId) continue;
-    const delta = atMs - run.finishedAtMs;
-    if (delta < 0 || delta > windowMs) continue;
-    if (!best || run.finishedAtMs > best.finishedAtMs) best = run;
-  }
-  return best;
-}
-function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
-  const byKey = /* @__PURE__ */ new Map();
-  for (const card of cards) {
-    const key = `${card.modelId}\0${card.tier}`;
-    const bucket = byKey.get(key);
-    if (bucket) bucket.push(card);
-    else byKey.set(key, [card]);
-  }
-  const out = {};
-  for (const [key, rows] of byKey) {
-    const [modelId, tier2] = key.split("\0");
-    const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1e3;
-    const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
-    const accepted = resolved.filter((r) => !r.rejected);
-    const costs = resolved.map((r) => r.costUsd).filter((c) => c !== null);
-    const runs = resolved.map((r) => r.runCount);
-    const foreignCount = resolved.filter((r) => r.foreignRun).length;
-    const measured = resolved.length > 0;
-    const acceptRate = measured ? accepted.length / resolved.length : priorPByModel[modelId] ?? 0.8;
-    const costPerCard = costs.length ? costs.reduce((a, b) => a + b, 0) / costs.length : blendedListPriceByModel[modelId] ?? null;
-    out[key.replace("\0", ":")] = {
-      modelId,
-      tier: tier2,
-      cardsClosed: rows.length,
-      acceptRate,
-      costPerCard,
-      runsPerCard: runs.length ? runs.reduce((a, b) => a + b, 0) / runs.length : null,
-      foreignRunShare: resolved.length ? foreignCount / resolved.length : null,
-      costPerAcceptedCard: costPerCard !== null && acceptRate > 0 ? costPerCard / acceptRate : null,
-      pending: !measured
-    };
-  }
-  return out;
-}
-
 // src/lane-capacity/value-normalization.ts
 function recordOf(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -1799,6 +2090,12 @@ function summary(decision) {
 }
 function createPlugin() {
   let context = null;
+  const knownCompanyIds = /* @__PURE__ */ new Set();
+  const listKnownCompanies = () => [...knownCompanyIds].map((id) => ({ id }));
+  const knownCompaniesKey = () => ({
+    scopeKind: "instance",
+    stateKey: PLUGIN_STATE_KEYS.knownCompanies
+  });
   return definePlugin({
     multiCompanyConfig: true,
     async setup(ctx) {
@@ -1953,6 +2250,41 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         scopeId: companyId,
         stateKey: PLUGIN_STATE_KEYS.shadowDiffs
       });
+      const aaSnapshotKey = () => ({
+        scopeKind: "instance",
+        stateKey: PLUGIN_STATE_KEYS.aaIndexSnapshot
+      });
+      const aaSnapshotHistoryKey = () => ({
+        scopeKind: "instance",
+        stateKey: PLUGIN_STATE_KEYS.aaSnapshotHistory
+      });
+      const readAaSnapshot = async () => {
+        const stored = asRecord(await ctx.state.get(aaSnapshotKey()));
+        return {
+          fetchedAt: typeof stored.fetchedAt === "string" ? stored.fetchedAt : null,
+          bySlug: asRecord(stored.bySlug),
+          lastAttemptAt: typeof stored.lastAttemptAt === "string" ? stored.lastAttemptAt : null,
+          lastError: typeof stored.lastError === "string" ? stored.lastError : null
+        };
+      };
+      const appendAaSnapshotHistory = async (entry) => {
+        const stored = asRecord(await ctx.state.get(aaSnapshotHistoryKey()));
+        const existing = Array.isArray(stored.entries) ? stored.entries : [];
+        const next = [...existing, entry].slice(-AA_SNAPSHOT_HISTORY_LIMIT);
+        await ctx.state.set(aaSnapshotHistoryKey(), { entries: next });
+      };
+      const aaDriftSurfacedKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.aaDriftSurfaced
+      });
+      const readAaDriftSurfaced = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(aaDriftSurfacedKey(companyId)));
+        return new Set(Array.isArray(stored.keys) ? stored.keys : []);
+      };
+      const aaHttp = {
+        fetch: (url, init) => ctx.http.fetch(url, init)
+      };
       const describeIssue = async (companyId, issueId, supplied) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -2327,8 +2659,56 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           return { content, data: { recommendedModelId, decision, drift } };
         }
       );
+      ctx.tools.register(
+        TOOL_NAMES.aaDriftReport,
+        {
+          displayName: "aa.ai drift report",
+          description: "Per-model aa.ai Intelligence Index: the roster's configured value and snapshot date, alongside the latest fetched live value and whether it now implies a different tier. Read-only \u2014 never writes tier/enablement.",
+          parametersSchema: { type: "object" }
+        },
+        async (_params, runCtx) => {
+          const config = await companyConfig(runCtx.companyId);
+          const snapshot = await readAaSnapshot();
+          const knownSlugs = new Set(Object.keys(snapshot.bySlug));
+          const rows = config.models.map((model) => {
+            const slug = resolveAaSlug(model.id, knownSlugs, model.aaSlug ?? null);
+            const liveRecord = slug ? snapshot.bySlug[slug] ?? null : null;
+            const liveIndex = liveRecord?.intelligenceIndex ?? null;
+            const configuredImpliedTier = model.aaIndex === null ? null : tierImpliedByIndex(model.aaIndex);
+            const liveImpliedTier = liveIndex === null ? null : tierImpliedByIndex(liveIndex);
+            return {
+              modelId: model.id,
+              configuredIndex: model.aaIndex,
+              configuredAsOf: model.aaIndexUpdatedAt ?? null,
+              liveIndex,
+              liveAsOf: snapshot.fetchedAt,
+              delta: model.aaIndex !== null && liveIndex !== null ? liveIndex - model.aaIndex : null,
+              crossesBoundary: liveIndex !== null && configuredImpliedTier !== liveImpliedTier,
+              // TOG-2438 scope expansion: full-record fields, surface only —
+              // never fed back into tier/enablement decisions.
+              aaCostPerTask: liveRecord?.intelligenceIndexCostPerTask ?? null,
+              aaPriceIn: liveRecord?.price1mInputTokens ?? null,
+              aaPriceOut: liveRecord?.price1mOutputTokens ?? null,
+              aaTokensPerSec: liveRecord?.medianOutputTokensPerSecond ?? null,
+              aaTtftSeconds: liveRecord?.medianTimeToFirstTokenSeconds ?? null,
+              aaContextWindow: liveRecord?.contextWindowTokens ?? null,
+              aaTerminalbenchHard: liveRecord?.terminalbenchHard ?? null,
+              aaTau2: liveRecord?.tau2 ?? null,
+              aaIfbench: liveRecord?.ifbench ?? null,
+              aaGpqa: liveRecord?.gpqa ?? null,
+              aaHle: liveRecord?.hle ?? null,
+              aaEffort: slug ? effortSuffixOf(slug) : null,
+              aaSnapshotAt: liveRecord ? snapshot.fetchedAt : null
+            };
+          });
+          return {
+            content: `${rows.length} models; snapshot ${snapshot.fetchedAt ?? "never fetched"}${snapshot.lastError ? ` (last attempt error: ${snapshot.lastError})` : ""}`,
+            data: { snapshot: { fetchedAt: snapshot.fetchedAt, lastAttemptAt: snapshot.lastAttemptAt, lastError: snapshot.lastError }, rows }
+          };
+        }
+      );
       ctx.jobs.register(JOB_KEYS.refreshProfiles, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -2377,7 +2757,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         }
       });
       ctx.jobs.register(JOB_KEYS.pollLanes, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -2430,8 +2810,133 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
+      const runAaIndexRefresh = async () => {
+        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+        const previous = await readAaSnapshot();
+        const fetched = await fetchAaSnapshot({
+          url: AA_LEADERBOARD_URL,
+          http: aaHttp,
+          timeoutMs: AA_FETCH_TIMEOUT_MS,
+          maxResponseBytes: AA_MAX_RESPONSE_BYTES
+        });
+        let snapshot = previous;
+        if (!fetched.ok || !fetched.html) {
+          snapshot = { ...previous, lastAttemptAt: nowIso, lastError: fetched.error ?? "aa-fetch-failed" };
+          await ctx.state.set(aaSnapshotKey(), snapshot);
+          ctx.logger.error("aa.ai snapshot fetch failed; keeping prior snapshot", {
+            error: fetched.error,
+            previousFetchedAt: previous.fetchedAt
+          });
+        } else {
+          const parsed = parseAaLeaderboardHtml(fetched.html);
+          if (!parsed) {
+            snapshot = { ...previous, lastAttemptAt: nowIso, lastError: "aa-parse-failed" };
+            await ctx.state.set(aaSnapshotKey(), snapshot);
+            ctx.logger.error("aa.ai snapshot parse failed; keeping prior snapshot", {
+              previousFetchedAt: previous.fetchedAt
+            });
+          } else {
+            const bySlug = {};
+            for (const row of parsed) bySlug[row.slug] = row;
+            snapshot = { fetchedAt: nowIso, bySlug, lastAttemptAt: nowIso, lastError: null };
+            await ctx.state.set(aaSnapshotKey(), snapshot);
+            await appendAaSnapshotHistory({ fetchedAt: nowIso, bySlug });
+            ctx.logger.info("aa.ai snapshot refreshed", { fetchedAt: nowIso, models: parsed.length });
+          }
+        }
+        const freshBySlug = new Map(Object.entries(snapshot.bySlug));
+        if (freshBySlug.size === 0) {
+          return { fetchedAt: snapshot.fetchedAt, error: snapshot.lastError, modelsFetched: 0 };
+        }
+        const previousBySlug = new Map(Object.entries(previous.bySlug));
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.aaSync.enabled || config.models.length === 0) continue;
+            const knownSlugs = new Set(freshBySlug.keys());
+            const diffInputs = config.models.map((model) => ({
+              modelId: model.id,
+              previousIndex: model.aaIndex,
+              slug: resolveAaSlug(model.id, knownSlugs, model.aaSlug ?? null)
+            }));
+            const rows = diffSnapshot(diffInputs, freshBySlug, previousBySlug);
+            for (const row of rows) {
+              if (row.fieldDeltas.length > 0) {
+                ctx.logger.info("aa.ai fields changed", {
+                  companyId: company.id,
+                  modelId: row.modelId,
+                  fieldDeltas: row.fieldDeltas
+                });
+              }
+              if (row.delta !== null && row.delta !== 0) {
+                ctx.logger.info("aa.ai index changed", {
+                  companyId: company.id,
+                  modelId: row.modelId,
+                  previousIndex: row.previousIndex,
+                  freshIndex: row.freshIndex,
+                  delta: row.delta
+                });
+              }
+            }
+            const crossing = rows.filter((row) => row.crossesBoundary);
+            if (crossing.length === 0) continue;
+            const surfaced = await readAaDriftSurfaced(company.id);
+            let surfacedChanged = false;
+            for (const row of crossing) {
+              const dedupeKey = `${row.modelId}::${row.freshImpliedTier ?? "none"}`;
+              if (surfaced.has(dedupeKey)) continue;
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `aa.ai drift crosses a tier boundary for ${row.modelId} \u2014 re-evaluate, do not auto-apply`,
+                entityType: "model",
+                entityId: row.modelId,
+                metadata: {
+                  modelId: row.modelId,
+                  previousIndex: row.previousIndex,
+                  freshIndex: row.freshIndex,
+                  previousImpliedTier: row.previousImpliedTier,
+                  freshImpliedTier: row.freshImpliedTier
+                }
+              });
+              surfaced.add(dedupeKey);
+              surfacedChanged = true;
+            }
+            if (surfacedChanged) {
+              await ctx.state.set(aaDriftSurfacedKey(company.id), { keys: [...surfaced] });
+            }
+          } catch (cause) {
+            ctx.logger.error("aa.ai drift surfacing failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+        return { fetchedAt: snapshot.fetchedAt, error: snapshot.lastError, modelsFetched: freshBySlug.size };
+      };
+      ctx.jobs.register(JOB_KEYS.refreshAaIndex, async () => {
+        await runAaIndexRefresh();
+      });
+      ctx.tools.register(
+        TOOL_NAMES.refreshAaIndexNow,
+        {
+          displayName: "Refresh aa.ai Intelligence Index now",
+          description: "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+          parametersSchema: { type: "object" }
+        },
+        async () => {
+          const result = await runAaIndexRefresh();
+          if (result.error) {
+            return { content: `aa.ai refresh attempted but failed: ${result.error}`, data: result };
+          }
+          return {
+            content: `aa.ai snapshot refreshed: ${result.modelsFetched} models, fetched at ${result.fetchedAt}`,
+            data: result
+          };
+        }
+      );
       ctx.jobs.register(JOB_KEYS.refreshScores, async () => {
-        const companies = await ctx.companies.list();
+        const companies = listKnownCompanies();
         for (const company of companies) {
           try {
             const config = await companyConfig(company.id);
@@ -2547,8 +3052,28 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               rejectedIssueIds.add(signal.issueId);
             }
             statsByModel = foldReworkIntoStats(statsByModel, reworkEvents);
+            const aaSnapshot = await readAaSnapshot();
+            const aaKnownSlugs = new Set(Object.keys(aaSnapshot.bySlug));
+            const liveAaIndex = (model) => {
+              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
+              if (!slug) return model.aaIndex;
+              const live = aaSnapshot.bySlug[slug]?.intelligenceIndex;
+              return typeof live === "number" ? live : model.aaIndex;
+            };
+            const liveAgenticScores = (model) => {
+              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
+              const record2 = slug ? aaSnapshot.bySlug[slug] : null;
+              if (!record2) return null;
+              return {
+                terminalbenchHard: record2.terminalbenchHard,
+                tau2: record2.tau2,
+                ifbench: record2.ifbench,
+                gpqa: record2.gpqa,
+                hle: record2.hle
+              };
+            };
             const modelScores = config.models.map(
-              (model) => buildModelScore(model.id, model.aaIndex, statsByModel[model.id] ?? {}, TIERS)
+              (model) => buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, liveAgenticScores(model))
             );
             const cardIssueRows = await ctx.db.query(
               `select id::text as id,
@@ -2595,7 +3120,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const priorPByModel = {};
             const blendedListPriceByModel = {};
             for (const model of config.models) {
-              priorPByModel[model.id] = priorP(model.aaIndex);
+              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), liveAgenticScores(model));
               blendedListPriceByModel[model.id] = null;
             }
             const cardLedger = buildCardLedger(
@@ -2618,10 +3143,39 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
+      const persistedCompanies = asRecord(await ctx.state.get(knownCompaniesKey()));
+      if (Array.isArray(persistedCompanies.ids)) {
+        for (const id of persistedCompanies.ids) {
+          if (typeof id === "string") knownCompanyIds.add(id);
+        }
+      }
       ctx.logger.info("Model Selection worker ready", { version: PLUGIN_VERSION });
     },
     async onHealth() {
       return { status: "ok", message: `Model Selection ${PLUGIN_VERSION}` };
+    },
+    /**
+     * TOG-2438 reopen: the sole feed for `knownCompanyIds` (see the comment
+     * above its declaration). The host calls this unconditionally for every
+     * configured company at worker startup (`plugin-loader.ts` step 5b) and
+     * again on every operator config save — so this set converges to exactly
+     * "companies with stored config for this plugin" without ever calling
+     * `ctx.companies.list()` ourselves. `context.companyId === null` is an
+     * instance/global save, which this plugin's config schema doesn't use;
+     * skip it rather than tracking a non-company id.
+     *
+     * Persisted immediately (not just held in memory) so a bare crash-restart
+     * — which respawns the worker without replaying `configChanged` — can
+     * still recover the set from state in `setup()` above, instead of silently
+     * running every scheduled job over zero companies.
+     */
+    async onConfigChanged(_newConfig, changeContext) {
+      const companyId = changeContext?.companyId;
+      if (!companyId || knownCompanyIds.has(companyId)) return;
+      knownCompanyIds.add(companyId);
+      if (context) {
+        await context.state.set(knownCompaniesKey(), { ids: [...knownCompanyIds] });
+      }
     },
     async onValidateConfig(raw) {
       const { errors, warnings } = validateConfig(resolveConfig(raw));
