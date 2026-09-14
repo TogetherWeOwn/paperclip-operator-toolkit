@@ -1103,13 +1103,17 @@ export function createPlugin() {
             const secretFailures: Array<{ laneId: string; fetchedAt: string; verdict: null; error: string }> = [];
             const sources: LaneSourceDefinition[] = [];
             const fetchedAt = new Date().toISOString();
-            for (const lane of config.pacing.lanes) {
+            for (const [laneIndex, lane] of config.pacing.lanes.entries()) {
               let apiKey: string | null = null;
               if (lane.apiKeySecretRef) {
                 try {
                   apiKey = await ctx.secrets.resolve(lane.apiKeySecretRef as never, {
                     companyId: company.id,
-                    configPath: `pacing.lanes.${lane.laneId}.apiKeySecretRef`,
+                    // Must match the array-index path plugin-secrets-handler.ts's
+                    // extractSecretRefBindingsFromConfig binds on config write
+                    // (TOG-2500) — a laneId-keyed path here reads back nothing
+                    // because syncSecretRefsForTarget replaceAll wipes non-matching rows.
+                    configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`,
                   });
                 } catch {
                   secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });

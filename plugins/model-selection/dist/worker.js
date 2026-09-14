@@ -2765,13 +2765,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const secretFailures = [];
             const sources = [];
             const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
-            for (const lane of config.pacing.lanes) {
+            for (const [laneIndex, lane] of config.pacing.lanes.entries()) {
               let apiKey = null;
               if (lane.apiKeySecretRef) {
                 try {
                   apiKey = await ctx.secrets.resolve(lane.apiKeySecretRef, {
                     companyId: company.id,
-                    configPath: `pacing.lanes.${lane.laneId}.apiKeySecretRef`
+                    // Must match the array-index path plugin-secrets-handler.ts's
+                    // extractSecretRefBindingsFromConfig binds on config write
+                    // (TOG-2500) — a laneId-keyed path here reads back nothing
+                    // because syncSecretRefsForTarget replaceAll wipes non-matching rows.
+                    configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`
                   });
                 } catch {
                   secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });

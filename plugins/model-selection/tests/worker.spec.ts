@@ -524,12 +524,56 @@ describe("worker", () => {
       await secretHarness.runJob("pollLaneCapacity");
 
       expect(seenHeaders).toMatchObject({ "X-Api-Key": "resolved-lane-key" });
+      // TOG-2500: the host's plugin-secrets-handler.ts binds config_secret_bindings
+      // rows by the lane's array INDEX (pacing.lanes.<n>.apiKeySecretRef), not by
+      // laneId — a laneId-keyed resolve path reads back nothing after any config
+      // write, since syncSecretRefsForTarget(replaceAll: true) drops non-matching rows.
       expect(seenResolveArgs[1]).toMatchObject({
         companyId: COMPANY,
-        configPath: "pacing.lanes.lane-a.apiKeySecretRef",
+        configPath: "pacing.lanes.0.apiKeySecretRef",
       });
       const ledger = await ledgerFor(secretHarness);
       expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
+    });
+
+    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N (TOG-2500)", async () => {
+      const multiLaneConfig = baseConfig({
+        pacing: {
+          mode: "enforce",
+          lanes: [
+            {
+              laneId: "lane-a",
+              statusUrl: "https://status.example.com/lane-a",
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+            {
+              laneId: "lane-b",
+              statusUrl: "https://status.example.com/lane-b",
+              apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+          ],
+        },
+      });
+      const multiHarness = await boot(multiLaneConfig);
+      multiHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+      let seenConfigPath: unknown;
+      multiHarness.ctx.secrets.resolve = async (_ref: unknown, options?: unknown) => {
+        seenConfigPath = (options as { configPath?: unknown } | undefined)?.configPath;
+        return "resolved-lane-key";
+      };
+      multiHarness.ctx.http.fetch = async () =>
+        new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+
+      await multiHarness.runJob("pollLaneCapacity");
+
+      // extractSecretRefBindingsFromConfig walks the array and binds by index
+      // (0-based position, not laneId) — lane-b is index 1 here.
+      expect(seenConfigPath).toBe("pacing.lanes.1.apiKeySecretRef");
     });
 
     it("records lane-secret-unavailable and never calls http.fetch when ctx.secrets.resolve throws", async () => {
