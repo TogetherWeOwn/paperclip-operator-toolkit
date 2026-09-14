@@ -155,6 +155,42 @@ const mutants = [
     from: "        if (config.shadowEmit.enabled) {",
     to: "        if (false) {",
   },
+  // --- TOG-2572 named mutants: wasted dispatch-sweep wakes -----------------
+  {
+    // "remove monitor-armed check" — TOG-2426: a card with its own future
+    // monitor wake scheduled must never be woken again by the sweep.
+    name: "remove-monitor-armed-check",
+    file: "src/engine/dispatch-selection.ts",
+    from:
+      '  if (isMonitorArmed(issue, nowMs)) {\n' +
+      '    return { outcome: "refused_monitor_armed", wakeable: true };\n' +
+      "  }\n",
+    to: "",
+  },
+  {
+    // "remove human-ask park check" — TOG-2319/2455/1677: a pending
+    // human_only (or wrong-addressee) interaction means no agent run can
+    // advance the card.
+    name: "remove-human-ask-park-check",
+    file: "src/engine/dispatch-selection.ts",
+    from:
+      '  if (isParkedOnHumanAsk(pendingInteractions, issue.assigneeAgentId)) {\n' +
+      '    return { outcome: "parked_on_human_ask", wakeable: true };\n' +
+      "  }\n",
+    to: "",
+  },
+  {
+    // "remove in_review reviewer check" — an in_review card must only wake
+    // when the assignee is the reviewer actually named on a pending
+    // interaction, mirroring the retired dispatcher.py's treatment.
+    name: "remove-in-review-reviewer-check",
+    file: "src/engine/dispatch-selection.ts",
+    from:
+      '  if (issue.status === "in_review" && !isReviewerNamedAssignee(pendingInteractions, issue.assigneeAgentId)) {\n' +
+      '    return { outcome: "refused_in_review", wakeable: true };\n' +
+      "  }\n",
+    to: "",
+  },
   {
     // TOG-2504: a one-sided stream must not pass merely because the existing
     // plugin-shadow emitter still writes a schema-valid record. Removing the

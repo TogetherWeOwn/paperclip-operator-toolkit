@@ -2511,6 +2511,12 @@ export function createPlugin() {
                   companyId: company.id,
                 });
                 const relation = orchestration.relations[issue.id];
+                // TOG-2572: neither a future monitor check nor a pending
+                // interaction is on the orchestration summary — a monitor
+                // wake and a human-only ask are both invisible to
+                // getOrchestration, which is exactly how TOG-2426 and
+                // TOG-2319/2455/1677 slipped past the sweep.
+                const interactions = await ctx.issues.listInteractions(issue.id, company.id);
                 population.push({
                   issue,
                   blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
@@ -2523,6 +2529,13 @@ export function createPlugin() {
                   })),
                   invocationBlock:
                     orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null,
+                  pendingInteractions: interactions
+                    .filter((i) => i.status === "pending")
+                    .map((i) => ({
+                      status: i.status,
+                      addresseeAgentId: i.addresseeAgentId ?? null,
+                      effectiveResolverPolicy: i.effectiveResolverPolicy ?? null,
+                    })),
                 });
               } catch (cause) {
                 unreadable += 1;

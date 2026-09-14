@@ -19,6 +19,20 @@
  * calling requestWakeup and catching a string. Mirroring the server's denylist
  * rather than inventing an allowlist is the whole reason the first cut of the
  * TOG-706 probe undercounted the wakeable surface by 88%.
+ *
+ * TOG-2572 adds three more rails the SERVER does not enforce — a wake it
+ * would happily accept, but that is still a wasted run because nothing an
+ * agent does on that card can move it forward this firing:
+ *
+ *   5. a future `monitor_next_check_at`     -> refused_monitor_armed
+ *   6. a pending human-only/wrong-addressee -> parked_on_human_ask
+ *      interaction
+ *   7. `in_review` with no pending          -> refused_in_review
+ *      interaction naming the assignee
+ *
+ * These sit ABOVE `parked_on_named_owner` in classification order: 5-7 are
+ * "this specific run would accomplish nothing", which is a harder fact than
+ * "parked, but check anyway once idle".
  */
 
 /** Statuses `requestWakeup` refuses outright (plugin-host-services.js:1876). */
@@ -65,11 +79,19 @@ export const TERMINAL_STATUSES = ["done", "cancelled"] as const;
  */
 export const BUDGET_RAIL_MIRROR_SOURCE = "issues.summaries.getOrchestration#invocationBlocks";
 
-/** The five selection counters (Q5), in report order. */
+/**
+ * The selection counters (Q5), in report order. Originally five; TOG-2572
+ * added refused_monitor_armed / parked_on_human_ask / refused_in_review, so
+ * this is now eight, but the report-order and diffability guarantees are
+ * unchanged.
+ */
 export const SELECTION_COUNTERS = [
   "refused_backlog",
   "refused_unassigned",
   "refused_blocked",
+  "refused_monitor_armed",
+  "parked_on_human_ask",
+  "refused_in_review",
   "parked_on_named_owner",
   "woken",
 ] as const;
@@ -100,6 +122,24 @@ export interface DispatchIssue {
   unblockDescriptor?: unknown;
   createdAt: string | Date;
   updatedAt?: string | Date;
+  /**
+   * TOG-2572: a future monitor check is the card's OWN scheduled wake — the
+   * TOG-2426 case, a deliberate 48h observation window re-armed by the CTO
+   * run the sweep spawned. `null`/`undefined` both mean "no monitor armed".
+   */
+  monitorNextCheckAt?: string | Date | null;
+}
+
+/**
+ * TOG-2572: the fields of `IssueThreadInteraction` the sweep needs to decide
+ * whether a card is waiting on something only a human (or a specific named
+ * reviewer) can resolve. A separate read from `getOrchestration`, which does
+ * not carry interaction data at all.
+ */
+export interface DispatchInteraction {
+  status: string;
+  addresseeAgentId?: string | null;
+  effectiveResolverPolicy?: string | null;
 }
 
 export interface DispatchRun {
@@ -180,12 +220,68 @@ export function isParkedOnNamedOwner(issue: DispatchIssue): boolean {
   return descriptor !== null && descriptor !== undefined;
 }
 
+/**
+ * TOG-2572 fix 1: the card already has its own wake scheduled.
+ *
+ * TOG-2426 is the case this exists for — a deliberate 48h observation window
+ * (`monitor_next_check_at` 2026-09-16 09:40) that the sweep woke anyway,
+ * spawning a run that just re-read state and re-armed the same monitor.
+ */
+export function isMonitorArmed(issue: DispatchIssue, nowMs: number): boolean {
+  const at = toMillis(issue.monitorNextCheckAt ?? null);
+  return at !== null && at > nowMs;
+}
+
+const PENDING_INTERACTION_STATUS = "pending";
+
+/**
+ * TOG-2572 fix 2: a pending interaction that only a human (or a specific
+ * other agent) can resolve. `effectiveResolverPolicy === "human_only"` is
+ * the TOG-2319/2455/1677 case verbatim from the issue text. The addressee
+ * check catches the same "no agent run can advance this" fact by a
+ * different route: an interaction addressed to someone other than the
+ * assignee is not this agent's to answer, regardless of resolver policy. A
+ * `null`/unset addressee is open to anyone and does not trip this rail —
+ * only an EXPLICIT mismatch does.
+ */
+export function isParkedOnHumanAsk(
+  interactions: DispatchInteraction[] | undefined,
+  assigneeAgentId: string | null,
+): boolean {
+  return (interactions ?? []).some((interaction) => {
+    if (interaction.status !== PENDING_INTERACTION_STATUS) return false;
+    if (interaction.effectiveResolverPolicy === "human_only") return true;
+    return interaction.addresseeAgentId != null && interaction.addresseeAgentId !== assigneeAgentId;
+  });
+}
+
+/**
+ * TOG-2572 fix 3: an `in_review` card only gets woken if the assignee is the
+ * reviewer actually named on the pending interaction — mirrors the retired
+ * dispatcher's treatment of review-state cards (no surviving source; ported
+ * from the issue's description of that behavior, since `dispatcher.py` was a
+ * host-only script never present in this repo's history). No pending
+ * interaction naming the assignee means nobody has confirmed the assignee IS
+ * the reviewer, so the conservative choice is to skip rather than guess.
+ */
+export function isReviewerNamedAssignee(
+  interactions: DispatchInteraction[] | undefined,
+  assigneeAgentId: string | null,
+): boolean {
+  return (interactions ?? []).some(
+    (interaction) =>
+      interaction.status === PENDING_INTERACTION_STATUS && interaction.addresseeAgentId === assigneeAgentId,
+  );
+}
+
 export interface ClassifyIssueInput {
   issue: DispatchIssue;
   blockedBy?: DispatchBlocker[];
   invocationBlock?: DispatchInvocationBlock | null;
+  pendingInteractions?: DispatchInteraction[];
   idleMinutes: number;
   idle: IdleResult;
+  nowMs: number;
 }
 
 export type ClassifyOutcome =
@@ -194,6 +290,9 @@ export type ClassifyOutcome =
   | "refused_backlog"
   | "refused_blocked"
   | "refused_budget_block"
+  | "refused_monitor_armed"
+  | "parked_on_human_ask"
+  | "refused_in_review"
   | "parked_on_named_owner"
   | "wakeable_not_idle"
   | "actionable";
@@ -212,7 +311,7 @@ export interface ClassifyResult {
  * the SERVER would have stopped, which is on the assignee rail.
  */
 export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
-  const { issue, blockedBy = [], invocationBlock = null, idleMinutes, idle } = input;
+  const { issue, blockedBy = [], invocationBlock = null, pendingInteractions, idleMinutes, idle, nowMs } = input;
 
   if ((TERMINAL_STATUSES as readonly string[]).includes(issue.status)) {
     return { outcome: "excluded_terminal" };
@@ -230,9 +329,27 @@ export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
   // Past this line the server's rails 1-3 would accept it. That is the
   // `runnable_queue` the fact base measured at 26, and the number the retired
   // script's output is diffable against — so `wakeable` is pinned to rails 1-3
-  // and rail 4 is counted on its own line rather than being folded in. Widening
-  // a legacy counter's meaning would make the parallel-week comparison compare
-  // two different things while looking like it compared one.
+  // and rail 4 (and the TOG-2572 rails below) are counted on their own lines
+  // rather than being folded in. Widening a legacy counter's meaning would
+  // make the parallel-week comparison compare two different things while
+  // looking like it compared one.
+
+  // TOG-2572 fix 1: the card already has its own wake scheduled — waking it
+  // again is pure noise (TOG-2426).
+  if (isMonitorArmed(issue, nowMs)) {
+    return { outcome: "refused_monitor_armed", wakeable: true };
+  }
+  // TOG-2572 fix 2: waiting on a human, or on someone other than the
+  // assignee — no agent run the sweep can request will advance this
+  // (TOG-2319/2455/1677).
+  if (isParkedOnHumanAsk(pendingInteractions, issue.assigneeAgentId)) {
+    return { outcome: "parked_on_human_ask", wakeable: true };
+  }
+  // TOG-2572 fix 3: an in_review card only gets woken if the assignee is the
+  // reviewer actually named on the pending interaction.
+  if (issue.status === "in_review" && !isReviewerNamedAssignee(pendingInteractions, issue.assigneeAgentId)) {
+    return { outcome: "refused_in_review", wakeable: true };
+  }
   if (invocationBlock) {
     return { outcome: "refused_budget_block", wakeable: true, blockReason: invocationBlock.reason };
   }
@@ -309,6 +426,7 @@ export interface DispatchPopulationEntry {
   blockedBy?: DispatchBlocker[];
   runs?: DispatchRun[];
   invocationBlock?: DispatchInvocationBlock | null;
+  pendingInteractions?: DispatchInteraction[];
 }
 
 export interface SelectDispatchOptions {
@@ -369,6 +487,9 @@ export function selectDispatch(
     refused_backlog: 0,
     refused_unassigned: 0,
     refused_blocked: 0,
+    refused_monitor_armed: 0,
+    parked_on_human_ask: 0,
+    refused_in_review: 0,
     parked_on_named_owner: 0,
     // Filled in by the worker after the wake attempts. The policy cannot know
     // it: whether a wake succeeds is the server's call, not ours.
@@ -384,9 +505,9 @@ export function selectDispatch(
   let outOfFocus = 0;
 
   for (const entry of population) {
-    const { issue, blockedBy = [], runs = [], invocationBlock = null } = entry;
+    const { issue, blockedBy = [], runs = [], invocationBlock = null, pendingInteractions } = entry;
     const idle = computeIdleMs(issue, runs, nowMs);
-    const result = classifyIssue({ issue, blockedBy, invocationBlock, idleMinutes, idle });
+    const result = classifyIssue({ issue, blockedBy, invocationBlock, pendingInteractions, idleMinutes, idle, nowMs });
 
     if (result.outcome === "excluded_terminal") {
       excludedTerminal += 1;

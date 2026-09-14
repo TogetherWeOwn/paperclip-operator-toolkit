@@ -2627,6 +2627,9 @@ var SELECTION_COUNTERS = [
   "refused_backlog",
   "refused_unassigned",
   "refused_blocked",
+  "refused_monitor_armed",
+  "parked_on_human_ask",
+  "refused_in_review",
   "parked_on_named_owner",
   "woken"
 ];
@@ -2660,8 +2663,25 @@ function isParkedOnNamedOwner(issue) {
   const descriptor = issue.unblockDescriptor;
   return descriptor !== null && descriptor !== void 0;
 }
+function isMonitorArmed(issue, nowMs) {
+  const at = toMillis(issue.monitorNextCheckAt ?? null);
+  return at !== null && at > nowMs;
+}
+var PENDING_INTERACTION_STATUS = "pending";
+function isParkedOnHumanAsk(interactions, assigneeAgentId) {
+  return (interactions ?? []).some((interaction) => {
+    if (interaction.status !== PENDING_INTERACTION_STATUS) return false;
+    if (interaction.effectiveResolverPolicy === "human_only") return true;
+    return interaction.addresseeAgentId != null && interaction.addresseeAgentId !== assigneeAgentId;
+  });
+}
+function isReviewerNamedAssignee(interactions, assigneeAgentId) {
+  return (interactions ?? []).some(
+    (interaction) => interaction.status === PENDING_INTERACTION_STATUS && interaction.addresseeAgentId === assigneeAgentId
+  );
+}
 function classifyIssue(input) {
-  const { issue, blockedBy = [], invocationBlock = null, idleMinutes, idle } = input;
+  const { issue, blockedBy = [], invocationBlock = null, pendingInteractions, idleMinutes, idle, nowMs } = input;
   if (TERMINAL_STATUSES2.includes(issue.status)) {
     return { outcome: "excluded_terminal" };
   }
@@ -2673,6 +2693,15 @@ function classifyIssue(input) {
   }
   if (blockedBy.some((blocker) => blocker.status !== "done")) {
     return { outcome: "refused_blocked" };
+  }
+  if (isMonitorArmed(issue, nowMs)) {
+    return { outcome: "refused_monitor_armed", wakeable: true };
+  }
+  if (isParkedOnHumanAsk(pendingInteractions, issue.assigneeAgentId)) {
+    return { outcome: "parked_on_human_ask", wakeable: true };
+  }
+  if (issue.status === "in_review" && !isReviewerNamedAssignee(pendingInteractions, issue.assigneeAgentId)) {
+    return { outcome: "refused_in_review", wakeable: true };
   }
   if (invocationBlock) {
     return { outcome: "refused_budget_block", wakeable: true, blockReason: invocationBlock.reason };
@@ -2719,6 +2748,9 @@ function selectDispatch(population, options) {
     refused_backlog: 0,
     refused_unassigned: 0,
     refused_blocked: 0,
+    refused_monitor_armed: 0,
+    parked_on_human_ask: 0,
+    refused_in_review: 0,
     parked_on_named_owner: 0,
     // Filled in by the worker after the wake attempts. The policy cannot know
     // it: whether a wake succeeds is the server's call, not ours.
@@ -2732,9 +2764,9 @@ function selectDispatch(population, options) {
   let excludedTerminal = 0;
   let outOfFocus = 0;
   for (const entry of population) {
-    const { issue, blockedBy = [], runs = [], invocationBlock = null } = entry;
+    const { issue, blockedBy = [], runs = [], invocationBlock = null, pendingInteractions } = entry;
     const idle = computeIdleMs(issue, runs, nowMs);
-    const result = classifyIssue({ issue, blockedBy, invocationBlock, idleMinutes, idle });
+    const result = classifyIssue({ issue, blockedBy, invocationBlock, pendingInteractions, idleMinutes, idle, nowMs });
     if (result.outcome === "excluded_terminal") {
       excludedTerminal += 1;
       continue;
@@ -4617,6 +4649,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   companyId: company.id
                 });
                 const relation = orchestration.relations[issue.id];
+                const interactions = await ctx.issues.listInteractions(issue.id, company.id);
                 population.push({
                   issue,
                   blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
@@ -4627,7 +4660,12 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     startedAt: r.startedAt,
                     createdAt: r.createdAt
                   })),
-                  invocationBlock: orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null
+                  invocationBlock: orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null,
+                  pendingInteractions: interactions.filter((i) => i.status === "pending").map((i) => ({
+                    status: i.status,
+                    addresseeAgentId: i.addresseeAgentId ?? null,
+                    effectiveResolverPolicy: i.effectiveResolverPolicy ?? null
+                  }))
                 });
               } catch (cause) {
                 unreadable += 1;

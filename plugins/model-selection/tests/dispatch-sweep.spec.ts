@@ -499,6 +499,192 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(manifest.capabilities).toContain("issues.wakeup");
   });
 
+  it("manifest declares issue.interactions.read (TOG-2572: needed for listInteractions)", () => {
+    expect(manifest.capabilities).toContain("issue.interactions.read");
+  });
+
+  it("TOG-2572 fix 1: refuses a card with a future monitor_next_check_at as refused_monitor_armed", async () => {
+    const armed = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      monitorNextCheckAt: new Date(NOW + 48 * 60 * 60_000),
+    } as never);
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      armed,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "monitor-armed check removed". Without it this card falls
+    // through to `actionable` and gets woken — TOG-2426 verbatim.
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_monitor_armed).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("TOG-2572 fix 1: a PAST monitor_next_check_at does not refuse the wake", async () => {
+    const lapsed = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      monitorNextCheckAt: new Date(NOW - 60 * 60_000),
+    } as never);
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      lapsed,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_monitor_armed ?? 0).toBe(0);
+    expect(metadata.counters.woken).toBe(1);
+  });
+
+  it("TOG-2572 fix 2: refuses a card with a pending human_only interaction as parked_on_human_ask", async () => {
+    const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      asked,
+    ]);
+    harness.seed({
+      issueInteractions: [
+        {
+          id: "int-1",
+          companyId: COMPANY,
+          issueId: "i1",
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "blocking",
+          resolverPolicy: "human_only",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+        } as never,
+      ],
+    });
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "human_only check removed". Without it this falls through
+    // to actionable — TOG-2319/2455/1677 verbatim: no agent run can advance a
+    // card an owner must personally resolve.
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.parked_on_human_ask).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("TOG-2572 fix 2: refuses a card whose pending interaction is addressed to a different agent", async () => {
+    const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-1" });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      asked,
+    ]);
+    harness.seed({
+      issueInteractions: [
+        {
+          id: "int-1",
+          companyId: COMPANY,
+          issueId: "i1",
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "blocking",
+          resolverPolicy: "board_or_agents",
+          requestedResolverPolicy: "board_or_agents",
+          effectiveResolverPolicy: "board_or_agents",
+          resolverPolicyProvenance: "explicit",
+          addresseeAgentId: "agent-9",
+        } as never,
+      ],
+    });
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.parked_on_human_ask).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("TOG-2572 fix 2: a RESOLVED (non-pending) interaction does not park the card", async () => {
+    const resolved = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      resolved,
+    ]);
+    harness.seed({
+      issueInteractions: [
+        {
+          id: "int-1",
+          companyId: COMPANY,
+          issueId: "i1",
+          kind: "request_confirmation",
+          status: "answered",
+          continuationPolicy: "blocking",
+          resolverPolicy: "human_only",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+        } as never,
+      ],
+    });
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.parked_on_human_ask ?? 0).toBe(0);
+    expect(metadata.counters.woken).toBe(1);
+  });
+
+  it("TOG-2572 fix 3: refuses an in_review card with no interaction naming the assignee as refused_in_review", async () => {
+    const reviewing = issue("i1", { status: "in_review", createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      reviewing,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "in_review reviewer check removed". Without it an
+    // in_review card wakes on idle alone, same as any other status — the
+    // dispatcher.py behavior TOG-2572 asks to restore.
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_in_review).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("TOG-2572 fix 3: wakes an in_review card when a pending interaction names the assignee as the reviewer", async () => {
+    const reviewing = issue("i1", {
+      status: "in_review",
+      createdAt: new Date(NOW - 60 * 60_000),
+      assigneeAgentId: "agent-1",
+    });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      reviewing,
+    ]);
+    harness.seed({
+      issueInteractions: [
+        {
+          id: "int-1",
+          companyId: COMPANY,
+          issueId: "i1",
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "blocking",
+          resolverPolicy: "board_or_agents",
+          requestedResolverPolicy: "board_or_agents",
+          effectiveResolverPolicy: "board_or_agents",
+          resolverPolicyProvenance: "explicit",
+          addresseeAgentId: "agent-1",
+        } as never,
+      ],
+    });
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_in_review ?? 0).toBe(0);
+    expect(metadata.counters.woken).toBe(1);
+  });
+
   it("dispatch.wakeEnabled defaults to false when the company config omits the dispatch block entirely", async () => {
     const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot({ selection: { enabled: true, mode: "enforce" }, models: [], tierLabelIds: {} }, [card]);

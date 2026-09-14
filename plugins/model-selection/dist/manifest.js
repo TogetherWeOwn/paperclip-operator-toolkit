@@ -617,6 +617,12 @@ var manifest = {
     "issue.relations.read",
     "issues.orchestration.read",
     "issues.wakeup",
+    // TOG-2572: the sweep must not wake a card that has its own monitor
+    // wake scheduled (`monitorNextCheckAt`, read straight off the `Issue`
+    // rows `issues.list` already returns) or a pending human-only ask —
+    // neither of those is on `PluginIssueOrchestrationSummary`, so a
+    // separate per-issue interaction read is required.
+    "issue.interactions.read",
     // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
