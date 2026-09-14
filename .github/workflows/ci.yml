@@ -286,7 +286,18 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# push and pull_request used to both fire, unfiltered, on every PR commit:
+# two independent runner VMs ran the full suite set (incl. "Offline suites")
+# for the same SHA ~3s apart. GitHub's required-status-check matching is by
+# check-run NAME, so it nondeterministically picked whichever of the two
+# finished last -- doubling exposure to any transient/suite-level flake and
+# producing "push failed, pull_request passed on the identical SHA" (TOG-2519).
+# Restricting push to main means PR commits get exactly one run (via
+# pull_request); main only ever sees its own push run. Check-run names are
+# unchanged, so branch-protection required-check config needs no edit.
 
 # `actions: read` is the narrowest grant that lets the TOG-910 dark-step
 # reporter list this run's own job steps; it is read-only and repo-scoped.
