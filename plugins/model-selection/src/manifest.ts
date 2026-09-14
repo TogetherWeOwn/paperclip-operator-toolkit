@@ -78,6 +78,15 @@ const manifest: PaperclipPluginManifestV1 = {
     // `Operator:` issue is a real, separately-triaged unit of work, and that
     // is what a capacity dead end actually is.
     "issues.create",
+    // TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+    // the stall-sweep reads blocker relations and the orchestration summary
+    // (which mirrors the server's own budget-invocation-block verdict, see
+    // dispatch-selection.ts's BUDGET_RAIL_MIRROR_SOURCE), and wakes a stalled
+    // issue's existing run. Declared even though `dispatch.wakeEnabled`
+    // defaults to false, matching the standalone plugin's own manifest.
+    "issue.relations.read",
+    "issues.orchestration.read",
+    "issues.wakeup",
     // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -125,7 +134,9 @@ const manifest: PaperclipPluginManifestV1 = {
     // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
     // signals are sourced from captured `ctx.events`, not a live join against a
     // table this plugin isn't allowlisted to read (TOG-1917 §2.2 / TOG-2136).
-    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations"],
+    // "agents" added for TOG-2481's classification job (join issues -> agents
+    // to read the assignee's role/name for the classification prompt).
+    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations", "agents"],
   },
   jobs: [
     {
@@ -155,6 +166,41 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate — never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt (TOG-2438). Every-6h cadence matches refreshScores's family (TOG-2438 reopen AC4) — aa.ai moves faster than a daily check surfaced.",
       schedule: "53 */6 * * *",
+    },
+    {
+      jobKey: JOB_KEYS.classifyIssues,
+      displayName: "Classify unlabeled issues",
+      description:
+        "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) — the AC3 kill switch for TOG-2481.",
+      schedule: "*/10 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.labelOnlyPass,
+      displayName: "Pin from an existing tier label",
+      description:
+        "Ported from tier_dispatcher.py label_only_pass(): pin issues that already carry a tier:* label (e.g. inherited from a cloned card) but no override, without re-classifying.",
+      schedule: "*/10 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.repinPass,
+      displayName: "Re-pin off an unusable or demoted model",
+      description:
+        "Ported from tier_dispatcher.py repin_pass(): idle issues pinned to a model whose lane is now unusable, or that has been measurably demoted for their tier, get re-pinned within the same tier.",
+      schedule: "*/10 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.balancePass,
+      displayName: "Balance pinned and formerly-excluded issues",
+      description:
+        "Ported from tier_dispatcher.py balance_pass(): give unpinned+labelled cards a balanced T1-class pin, and re-pin cards whose pinned model has gone cost-down-eligible, incapable/on-probation/over-cap, or whose lane is far busier than another usable lane.",
+      schedule: "*/10 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.dispatchSweep,
+      displayName: "Stall-sweep dispatch",
+      description:
+        "TOG-2481 absorption of the standalone dispatch plugin (TOG-747/TOG-706): finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
+      schedule: "*/30 * * * *",
     },
   ],
   tools: [
@@ -213,6 +259,36 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
       parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.setLaneOutage,
+      displayName: "Declare or clear a lane outage",
+      description:
+        "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+      parametersSchema: {
+        type: "object",
+        required: ["until"],
+        properties: {
+          lanes: { type: "array", items: { type: "string" } },
+          models: { type: "array", items: { type: "string" } },
+          until: { type: "string", minLength: 1 },
+          reason: { type: "string" },
+        },
+      } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.setZaiPaceOverride,
+      displayName: "Set or clear the Z.ai weekly-pace margin override",
+      description:
+        "TOG-2481 port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+      parametersSchema: {
+        type: "object",
+        required: ["until"],
+        properties: {
+          margin: { type: "number", minimum: 0, maximum: 1 },
+          until: { type: "string" },
+        },
+      } as unknown as Record<string, unknown>,
     },
   ],
   apiRoutes: [

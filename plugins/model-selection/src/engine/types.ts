@@ -148,6 +148,13 @@ export interface IssueDescriptor {
   stickyModelId?: string | null;
   requiredCapabilities?: readonly string[];
   requiredContextTokens?: number;
+  /**
+   * Assignee agent's display name (`agents.name`), e.g. "Founding Engineer".
+   * Ported from `tier_dispatcher.py`'s `agent` parameter — every SQL caller
+   * there sources it from `coalesce(a.name,'')`, so this is a name string,
+   * never a role enum. Used only by `ZAI_LONG_RUN_AGENTS` (TOG-2481).
+   */
+  agentName?: string | null;
 }
 
 export interface CostBreakdown {
@@ -190,8 +197,28 @@ export interface Candidate extends CostBreakdown {
 
 export interface Rejection {
   modelId: string;
-  /** `tier-floor` keeps work off lower-capability roster rows. */
-  stage: "disabled" | "capability" | "context-window" | "tier-floor" | "no-profile" | "lane-unserviceable";
+  /**
+   * `tier-floor` keeps work off lower-capability roster rows. `capability-score`
+   * is TOG-2481's Bayesian-measured counterpart, ported from
+   * `tier_dispatcher.py`'s `capable(model_id, tier)`: a model can clear the
+   * static `tier-floor` and still fail here once its own run history shows it
+   * is not actually succeeding at that tier. `lane-avoid` and `lane-outage`
+   * are TOG-2481 ports of `tier_dispatcher.py`'s `AVOID`/ `AVOID_LANE`
+   * threshold and `lane_outage.json` operator override, respectively — both
+   * distinct from `lane-unserviceable` (the pace engine's own
+   * exhausted/unavailable health check).
+   */
+  stage:
+    | "disabled"
+    | "capability"
+    | "capability-score"
+    | "context-window"
+    | "tier-floor"
+    | "no-profile"
+    | "lane-unserviceable"
+    | "lane-avoid"
+    | "lane-outage"
+    | "lane-no-room";
   reason: string;
 }
 

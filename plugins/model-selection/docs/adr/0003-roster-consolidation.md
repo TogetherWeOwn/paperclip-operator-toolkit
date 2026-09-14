@@ -1,0 +1,70 @@
+# ADR-0003 (plugin): `config/reviewed-roster.json` supersedes `tier_roster.json`
+
+- **Status:** accepted
+- **Date:** 2026-09-14
+- **Card:** TOG-2481 task #9
+
+## Context
+
+Before this plugin existed, model routing read from three independent
+sources: `tier_dispatcher.py`'s own logic, the standalone `dispatch` plugin,
+and a hand-edited roster file, `~/paperclip-enterprise-company/ops/tog-1926/tier_roster.json`
+(33 canonical models, each carrying dated owner-rule notes — the durable
+record of decisions like "GLM only via Z.ai, never OpenCode Go" or lane
+credit caps). `tier_dispatcher.py` and `model_scores.py` both load this file
+directly from that host path via `HOME`.
+
+TOG-2481's acceptance criterion 3 requires that no file under
+`~/paperclip-enterprise-company/` participate in routing once the plugin is
+live. A plugin that ported the dispatch logic but kept reading the host
+roster file would fail that criterion by construction — it would just move
+where the *code* lives while the *data* dependency stayed put.
+
+## Decision
+
+`config/reviewed-roster.json`, checked into this repo, is the single
+catalogue the plugin's selection engine reads (`src/config/resolve.js`,
+`tests/live-config.spec.ts`). It was built by auditing every row of
+`tier_roster.json` (the "TOG-2429 audit" pass, 2026-09-13) and is a strict
+superset: 84 entries against the legacy file's 35, including every canonical
+model id and every dated owner-rule note the legacy file carried, preserved
+as a verbatim substring. The audit surfaced and corrected two rows
+(`glm-5.3` T2, `glm-5.3-flash` T3) that the legacy file marked `enabled: true`
+believing them Z.ai-served; they are in fact OpenCode-Go-served, and the
+owner's own rule requires them disabled. Both corrections are recorded
+in-line as `"TOG-2429 correction 2026-09-13"` notes on the affected rows.
+
+The reviewed catalogue carries no `laneId` — lane binding is a live-merge-time
+concern, handled additively by `scripts/assemble-additive-config.mjs` against
+whatever is deployed in a given company (see README "Config"), never baked
+into the checked-in catalogue.
+
+`tests/roster-consolidation.spec.ts` is the permanent proof of this
+supersession, run against a frozen snapshot of the legacy file
+(`tests/fixtures/tier_roster.snapshot.json`, taken 2026-09-14) rather than a
+live read of the host path — the plugin's test suite must not depend on
+`~/paperclip-enterprise-company/` any more than its runtime does. The test
+asserts: every legacy canonical id is present, every legacy dated note is
+preserved verbatim, no `enabled`-state divergence exists beyond the two
+documented corrections, no `cliproxy/` wrapper id leaks into the checked-in
+catalogue, and no row carries a premature `laneId`.
+
+## Consequences
+
+- The plugin's selection decisions no longer depend on
+  `~/paperclip-enterprise-company/tier_roster.json` at all — satisfies
+  TOG-2481 AC3 for the roster data source specifically.
+- `tier_roster.json` itself, and the host processes that still read it
+  (`tier_dispatcher.py`, `model_scores.py`), remain on disk and running until
+  the operator retires them (TOG-2481 task #11); this ADR documents that the
+  plugin-side elimination is complete and does not itself stop the host
+  script.
+- A future edit to `reviewed-roster.json` that silently drops a canonical
+  model or an owner's dated rule fails `tests/roster-consolidation.spec.ts`,
+  not just a future manual diff.
+- If `tier_roster.json` is edited on the host after 2026-09-14, the frozen
+  snapshot will not reflect that change; this ADR's guarantee is "audited and
+  superseded as of the TOG-2429 pass," not "continuously synced." Any future
+  host-side roster edit should be re-audited into `reviewed-roster.json`
+  directly, since the host file is being retired, not kept as a parallel
+  source of truth.

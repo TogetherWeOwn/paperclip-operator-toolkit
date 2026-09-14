@@ -1,4 +1,4 @@
-import type { LanePaceVerdict, PaceState } from "../lane-capacity/pace.js";
+import type { LanePaceObservation, LanePaceVerdict, PaceState } from "../lane-capacity/pace.js";
 import { OPERATOR_PIN_LABEL } from "../constants.js";
 import type { Candidate, ModelEntry } from "./types.js";
 
@@ -9,6 +9,16 @@ import type { Candidate, ModelEntry } from "./types.js";
 export interface LaneLedgerEntry {
   laneId: string;
   verdict: LanePaceVerdict | null;
+  /**
+   * The normalized per-account, per-window document behind `verdict`. Carried
+   * separately because `verdict.score` only reports the account's GOVERNING
+   * (largest allowance) window — for a lane with more than one allowance
+   * window (e.g. zai: 5h AND weekly) the non-governing window's utilization
+   * is only readable here. Used by `lane5hUtilization`/`laneHealthyAccountCount`
+   * (tier_dispatcher.py `lane_5h`/`lane_accounts` port). Null exactly when
+   * `verdict` is null.
+   */
+  observation: LanePaceObservation | null;
   /** When this entry was last written, regardless of whether the poll succeeded. */
   fetchedAt: string;
   /** Null on a clean poll. A failed poll degrades `verdict` to null, never overwrites a good one with a stale guess (see `mergeLedgerEntry`). */
@@ -41,9 +51,24 @@ export type OperatorOverrideLedger = Record<string, OperatorOverrideEntry>;
  */
 export function mergeLedgerEntry(
   ledger: LaneLedger,
-  result: { laneId: string; fetchedAt: string; verdict: LanePaceVerdict | null; error: string | null },
+  result: {
+    laneId: string;
+    fetchedAt: string;
+    verdict: LanePaceVerdict | null;
+    observation?: LanePaceObservation | null;
+    error: string | null;
+  },
 ): LaneLedger {
-  return { ...ledger, [result.laneId]: { laneId: result.laneId, verdict: result.verdict, fetchedAt: result.fetchedAt, error: result.error } };
+  return {
+    ...ledger,
+    [result.laneId]: {
+      laneId: result.laneId,
+      verdict: result.verdict,
+      observation: result.observation ?? null,
+      fetchedAt: result.fetchedAt,
+      error: result.error,
+    },
+  };
 }
 
 export function laneVerdictFor(ledger: LaneLedger, laneId: string | null | undefined): LanePaceVerdict | null {
@@ -230,12 +255,17 @@ export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry): boolean
 }
 
 /**
- * Deterministic per-issue coin flip in [0, 1), stable for a given issue id.
- * Used for ahead-of-line slot throttling so the same issue always lands on
- * the same side of the cap — no shared counter, so no last-write-wins race
- * between concurrent selections (see `last-write-wins-voids-clobber-scores`).
+ * Deterministic per-issue coin flip in [0, 1), stable for a given input
+ * string. Used for ahead-of-line slot throttling, and for the TOG-2481
+ * T2/T3 explore-fraction roll (`applyPickOrdering` in `select.ts`), so the
+ * same issue always lands on the same side of a cap/roll — no shared
+ * counter, so no last-write-wins race between concurrent selections (see
+ * `last-write-wins-voids-clobber-scores`). Deliberately NOT `Math.random()`:
+ * the Python source's `pick()` used genuine randomness per call, but this
+ * plugin can be re-invoked for the same issue (advise, then apply) and must
+ * give the same answer both times.
  */
-function hashUnitInterval(input: string): number {
+export function hashUnitInterval(input: string): number {
   let hash = 2166136261;
   for (let index = 0; index < input.length; index += 1) {
     hash ^= input.charCodeAt(index);
@@ -323,6 +353,260 @@ export interface RepinGateContext {
  *    lane oscillating near its margin from flapping the model back and
  *    forth on a live issue.
  */
+/**
+ * Per-lane utilization threshold above which a lane is avoided for NEW
+ * admission, even while still serviceable. Ported from `tier_dispatcher.py`'s
+ * module-level `AVOID = 0.8` / `AVOID_LANE = {"codex": 0.99}` / `avoid_for()`.
+ */
+export interface LaneAvoidConfig {
+  defaultThreshold: number;
+  perLane: Record<string, number>;
+}
+
+export function avoidThresholdFor(config: LaneAvoidConfig, laneId: string): number {
+  return config.perLane[laneId] ?? config.defaultThreshold;
+}
+
+/**
+ * 2026-09-07 07:12Z owner rule (going-to-bed note): "fully use the full
+ * weekly amount" of the rick.dugger Codex account before a manual reset — the
+ * codex lane must stay usable until it is genuinely exhausted rather than
+ * parked at the generic AVOID threshold. Parking it early moved ~25 T2 cards
+ * onto bare claude-sonnet-5 (the owner's Claude Max, then at 0.87 weekly) at
+ * 06:5xZ. `AVOID_LANE` is how a lane earns a higher threshold than the 0.8
+ * default; this function is fail-neutral like `hardStopExcluded` — a
+ * verdict with no measured utilization (`score` null) excludes nothing.
+ *
+ * 2026-09-08 22:55Z owner rule: the collector labels a lane "degraded" at
+ * >=0.9 utilization; treating "degraded" itself as unusable caused a Claude
+ * flood incident by excluding the lane before its own avoid threshold was
+ * actually crossed. This function must key ONLY on measured utilization
+ * against `avoidThresholdFor`, never on the lane's reported health/state —
+ * "degraded" stays usable until the threshold, exactly like the Python
+ * source's `usable()` (health gates only exclude on exhausted/unavailable,
+ * which is `hardStopExcluded`'s job, not this one).
+ */
+export function laneAvoidExcluded(ledger: LaneLedger, model: ModelEntry, config: LaneAvoidConfig): boolean {
+  if (!model.laneId) return false;
+  const verdict = laneVerdictFor(ledger, model.laneId);
+  const utilization = verdict?.score?.utilization;
+  if (utilization === null || utilization === undefined) return false;
+  return utilization >= avoidThresholdFor(config, model.laneId);
+}
+
+/**
+ * Operator-declared outage the telemetry cannot see — ported from
+ * `tier_dispatcher.py`'s `lane_outage()` /
+ * `ops/model-router/lane_outage.json` (2026-09-07 06:40Z owner note: e.g.
+ * OpenCode Go rejecting every request with 400 MissingSessionID while the
+ * accounts still look healthy to telemetry). `until` is an ISO-8601 UTC
+ * timestamp compared lexicographically, matching `activeOperatorOverride`'s
+ * own expiry convention elsewhere in this file.
+ */
+export interface LaneOutageOverride {
+  lanes: readonly string[];
+  models: readonly string[];
+  until: string;
+  reason?: string;
+}
+
+/** An outage entry past its `until` is treated exactly as if none existed. */
+export function isLaneOutageActive(override: LaneOutageOverride | null, nowIso: string): boolean {
+  if (!override) return false;
+  return override.until > nowIso;
+}
+
+export function laneOutageExcluded(override: LaneOutageOverride | null, nowIso: string, model: ModelEntry): boolean {
+  if (!isLaneOutageActive(override, nowIso)) return false;
+  if (override!.models.includes(model.id)) return true;
+  if (model.laneId && override!.lanes.includes(model.laneId)) return true;
+  return false;
+}
+
+/**
+ * List-price blend, ported byte-for-byte from `tier_dispatcher.py`'s
+ * `blended(m) = (3*costPerMTokIn + costPerMTokOut)/4`. Deliberately NOT the
+ * volume-aware `cost.ts` engine — this is the same simple, weight-only figure
+ * the Python source uses for `lane_active_pins()`'s flash-model half-weighting
+ * (a model under $1/Mtok blended counts as half a lane slot).
+ */
+export function blendedListPrice(model: ModelEntry): number {
+  return (3 * model.costPerMTokIn + model.costPerMTokOut) / 4;
+}
+
+/**
+ * 2026-09-08 22:15Z owner rule: long-turn engineering agent NAMES that keep
+ * hitting Z.ai's Anthropic-compat 1214 ("messages parameter is illegal") on
+ * conversations over ~78 minutes. Ported verbatim from `tier_dispatcher.py`'s
+ * `ZAI_LONG_RUN_AGENTS` — every SQL caller there sources `agent` from
+ * `coalesce(a.name,'')`, so this is a display-NAME set, never a role enum.
+ */
+export const ZAI_LONG_RUN_AGENTS: ReadonlySet<string> = new Set([
+  "Founding Engineer",
+  "Web Engineer",
+  "Automation Engineer",
+  "DevOps & Reliability Engineer",
+  "CTO & Chief AI Officer",
+  "Director of Engineering",
+]);
+
+/**
+ * Fail-neutral-to-0.5 utilization read, ported from `tier_dispatcher.py`'s
+ * `eff_util(lane) = 0.5 if lane_util(lane) is None else lane_util(lane)`.
+ * Distinct from `laneAvoidExcluded`'s fail-neutral-to-FALSE: this feeds a
+ * threshold comparison (`< avoid_for(lane)`) where "unknown" must read as a
+ * mid-pack value, not as "definitely fine" or "definitely blocked".
+ */
+export function laneEffectiveUtilization(ledger: LaneLedger, laneId: string): number {
+  const verdict = laneVerdictFor(ledger, laneId);
+  const utilization = verdict?.score?.utilization;
+  return utilization === null || utilization === undefined ? 0.5 : utilization;
+}
+
+/**
+ * Z.ai Coding Plan peak hours (premium models cost 1x instead of 0.5x
+ * credits): Mon-Fri 14:00-18:00 Asia/Shanghai = 06:00-10:00 UTC. Ported
+ * verbatim from `tier_dispatcher.py`'s `zai_peak_now()`.
+ */
+export function zaiPeakNow(nowMs: number): boolean {
+  const now = new Date(nowMs);
+  const day = now.getUTCDay();
+  const hour = now.getUTCHours();
+  return day >= 1 && day <= 5 && hour >= 6 && hour < 10;
+}
+
+/**
+ * Read the utilization of a specific NAMED window (not necessarily the
+ * account's governing window) across a lane's healthy accounts, taking the
+ * max. Ported from `tier_dispatcher.py`'s `lane_5h()`, generalized to any
+ * window name since this plugin's lane documents are config-named rather
+ * than hardcoded JSON keys. Fail-neutral to 0 (no observation, or nothing
+ * healthy, reads as "no measured pressure" — never excludes on ignorance).
+ */
+export function laneNamedWindowUtilization(ledger: LaneLedger, laneId: string, windowName: string): number {
+  const observation = ledger[laneId]?.observation;
+  if (!observation) return 0;
+  const utilizations = observation.accounts
+    .filter((account) => account.health === "healthy")
+    .flatMap((account) => {
+      const window = account.windows.find((w) => w.name === windowName);
+      return typeof window?.utilization === "number" ? [window.utilization] : [];
+    });
+  return utilizations.length > 0 ? Math.max(...utilizations) : 0;
+}
+
+/**
+ * Count of healthy accounts on a lane. Ported from `tier_dispatcher.py`'s
+ * `lane_accounts()`, whose `try/except` falls back to 1 when the usage file
+ * cannot be read — the same fail-neutral-to-1 posture applies here when this
+ * lane has never been polled (`observation` null), so a per-account cap does
+ * not silently multiply out to "unlimited" on missing telemetry.
+ */
+export function laneHealthyAccountCount(ledger: LaneLedger, laneId: string): number {
+  const observation = ledger[laneId]?.observation;
+  if (!observation) return 1;
+  return observation.accounts.filter((account) => account.health === "healthy").length;
+}
+
+/**
+ * Operator-declared temporary margin override for `zaiWeeklyPaceOk`, e.g.
+ * during a Codex outage. Ported from `tier_dispatcher.py`'s
+ * `zai_pace_override()` / `ops/model-router/zai_pace_override.json`.
+ */
+export interface ZaiPaceOverride {
+  margin: number;
+  until: string;
+}
+
+/** An override past its `until` is treated exactly as if none existed. */
+export function activeZaiPaceOverride(override: ZaiPaceOverride | null, nowIso: string): number | null {
+  if (!override) return null;
+  return override.until > nowIso ? override.margin : null;
+}
+
+/**
+ * 2026-09-08 13:20Z owner rule: the Z.ai Pro plan is 60k credits/week but 12k
+ * per 5h, so full-bore use empties the WEEK in ~1 day. Admit NEW zai cards
+ * only while weekly utilization <= elapsed fraction of the plan week +
+ * margin; cards already pinned keep running (this function only gates NEW
+ * admission, in `laneHasRoom`). Ported verbatim from
+ * `tier_dispatcher.py`'s `zai_weekly_pace_ok()`, reading the FIRST reported
+ * account only, matching the Python source's `records[0]`.
+ */
+export function zaiWeeklyPaceOk(input: {
+  ledger: LaneLedger;
+  laneId: string;
+  weeklyWindowName: string;
+  defaultMargin: number;
+  overrideMargin: number | null;
+  nowMs: number;
+}): boolean {
+  const margin = input.overrideMargin ?? input.defaultMargin;
+  const observation = input.ledger[input.laneId]?.observation;
+  const account = observation?.accounts[0];
+  if (!account) return true;
+  const window = account.windows.find((w) => w.name === input.weeklyWindowName);
+  if (!window || window.utilization === null || window.resetsAt === null) return true;
+  const remainingMs = Date.parse(window.resetsAt) - input.nowMs;
+  const elapsed = 1 - Math.max(0, Math.min(1, remainingMs / (7 * 24 * 60 * 60 * 1000)));
+  return window.utilization <= elapsed + margin;
+}
+
+/**
+ * 2026-09-06 17:1xZ owner rule: OpenCode Go allowances are small ($12 per
+ * rolling 5h per account ≈ 8 agent runs); pinning every card to the cheapest
+ * lane drained all three accounts in an hour and 429'd 8 runs. Cap the
+ * number of ACTIVE (todo/in_progress) cards a lane may hold at once; the
+ * surplus takes the next-cheapest capable model.
+ *
+ * 2026-09-06 23:5xZ: two active cards per Go account still drained both 5h
+ * windows in ~3h (runs are long). Stop handing the lane NEW cards once any
+ * healthy account's 5h window passes 0.5 (2026-09-07 03:15Z: 0.6 -> 0.5) —
+ * leave the rest for the runs already in flight.
+ *
+ * 2026-09-07 12:32Z: cap back to 2 for opencode-go — Go now carries only
+ * cheap models (owner: maximize Go usage); T1 stays off Go unless codex is
+ * exhausted (see the separate T1-avoids-Go rule in `select.ts`).
+ *
+ * Ported from `tier_dispatcher.py`'s `lane_has_room()`.
+ */
+export function laneHasRoom(input: {
+  laneId: string;
+  activePinsWeight: number;
+  extra?: number;
+  ledger: LaneLedger;
+  capPerAccount: Readonly<Record<string, number>>;
+  fiveHourWindowName: string;
+  zaiLaneId: string;
+  zaiWeeklyWindowName: string;
+  zaiWeeklyDefaultMargin: number;
+  zaiPaceOverrideMargin: number | null;
+  nowMs: number;
+}): boolean {
+  if (input.laneId === input.zaiLaneId) {
+    const weeklyOk = zaiWeeklyPaceOk({
+      ledger: input.ledger,
+      laneId: input.laneId,
+      weeklyWindowName: input.zaiWeeklyWindowName,
+      defaultMargin: input.zaiWeeklyDefaultMargin,
+      overrideMargin: input.zaiPaceOverrideMargin,
+      nowMs: input.nowMs,
+    });
+    if (!weeklyOk) return false;
+  }
+
+  let per = input.capPerAccount[input.laneId];
+  if (input.laneId === input.zaiLaneId && per !== undefined && zaiPeakNow(input.nowMs)) {
+    per = 1;
+  }
+  if (per === undefined) return true;
+
+  if (laneNamedWindowUtilization(input.ledger, input.laneId, input.fiveHourWindowName) >= 0.5) return false;
+
+  const accounts = Math.max(1, laneHealthyAccountCount(input.ledger, input.laneId));
+  return input.activePinsWeight + (input.extra ?? 0) < per * accounts;
+}
+
 export function repinAllowed(context: RepinGateContext): { allowed: boolean; reason: string } {
   if (context.hasOperatorPin && !context.isServiceabilityHardStop) {
     return { allowed: false, reason: `${OPERATOR_PIN_LABEL} survives a routine pace repin` };

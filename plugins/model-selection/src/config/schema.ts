@@ -237,6 +237,118 @@ export const SELECTION_CONFIG_SCHEMA = {
         operatorOverrideTtlSeconds: { type: "integer", minimum: 1, default: 3600 },
         /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
         idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
+         * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
+         * excluded from NEW admission even while still serviceable —
+         * `defaultThreshold` is the blanket rule, `perLane` is how a specific
+         * lane (e.g. codex, per the 2026-09-07 07:12Z owner rule) earns a
+         * higher threshold than the default.
+         */
+        avoid: {
+          type: "object",
+          title: "Lane avoid thresholds",
+          additionalProperties: false,
+          properties: {
+            defaultThreshold: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
+            perLane: {
+              type: "object",
+              additionalProperties: { type: "number", minimum: 0, maximum: 1 },
+              default: { "cliproxy-codex": 0.99 },
+            },
+          },
+          default: {},
+        },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
+         * {"opencode-go": 2, "zai": 3}` (2026-09-06 17:1xZ / 2026-09-07
+         * 12:32Z owner rules). Caps the number of ACTIVE (todo/in_progress)
+         * cards a lane may hold per healthy account; unset entries have no
+         * cap. Defaults to the same two lanes the Python source capped,
+         * canonicalized to this deployment's live lane ids.
+         */
+        laneCapPerAccount: {
+          type: "object",
+          title: "Per-account active-card cap",
+          additionalProperties: { type: "number", minimum: 0 },
+          default: { "cliproxy-opencode-go": 2, "cliproxy-zai": 3 },
+        },
+        /** Named 5h allowance window `lane_5h()` reads; new admission stops at >= 0.5 utilization (2026-09-07 03:15Z: 0.6 -> 0.5). Default matches this deployment's live hyphenated `five-hour` window name. */
+        fiveHourWindowName: { type: "string", minLength: 1, default: "five-hour" },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+         * fallback rule (2026-09-07 03:15Z owner rule): `codexLaneId` names
+         * which configured lane is Codex, so the T1-Go-fallback and Z.ai
+         * long-run-agent-exclusion rules know which lane's avoid threshold/
+         * utilization to check before routing away from Go/Zai.
+         */
+        codexLaneId: { type: "string", minLength: 1, default: "cliproxy-codex" },
+        /** Names which configured lane is OpenCode Go, for the T1-Go-fallback rule above. */
+        opencodeGoLaneId: { type: "string", minLength: 1, default: "cliproxy-opencode-go" },
+        /**
+         * TOG-2481 port of `zai_peak_now()` / `zai_weekly_pace_ok()`
+         * (2026-09-08 13:20Z owner rule). `laneId` names which configured
+         * lane is the Z.ai lane so the peak-hour throttle and weekly-pacing
+         * gate know which lane to apply to.
+         */
+        zai: {
+          type: "object",
+          title: "Z.ai lane pacing",
+          additionalProperties: false,
+          properties: {
+            laneId: { type: "string", minLength: 1, default: "cliproxy-zai" },
+            weeklyWindowName: { type: "string", minLength: 1, default: "weekly" },
+            weeklyDefaultMargin: { type: "number", minimum: 0, maximum: 1, default: 0.15 },
+          },
+          default: {},
+        },
+      },
+      default: {},
+    },
+    /**
+     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC (TOG-2481). Default
+     * OFF: this section being absent, or `enabled: false`, means the plugin
+     * writes no tier labels of its own — a company that only ever records tier
+     * via explicit pins/labels sees no behavior change from this section
+     * existing. This is also the AC3 kill switch: there is deliberately no
+     * `~/paperclip-enterprise-company/.tier-dispatcher-disabled` file check
+     * anywhere in this plugin, only this config flag.
+     */
+    classification: {
+      type: "object",
+      title: "Tier classification (LLM)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /**
+         * Called directly (mirroring paperclip-model-router's own upstream
+         * call), never through model-router's `/invoke` route: the host's
+         * `isPrivateIP()` block on `ctx.http.fetch()` makes a same-host
+         * `/invoke` hop unreachable from a plugin (TOG-2481 architecture note).
+         */
+        baseUrl: {
+          type: "string",
+          minLength: 1,
+          pattern: "^https://[^/?#@]+(?:/[^?#]*)?$",
+        },
+        protocol: {
+          type: "string",
+          enum: ["anthropic-messages", "openai-chat-completions"],
+          default: "anthropic-messages",
+        },
+        modelId: { type: "string", minLength: 1 },
+        apiKeySecretRef: SECRET_REF_SCHEMA,
+        requestTimeoutMs: { type: "integer", minimum: 1, default: 15000 },
+        maxResponseBytes: { type: "integer", minimum: 1, default: 65536 },
+        /** tier_dispatcher.py truncates the description to this many chars before prompting. */
+        descriptionChars: { type: "integer", minimum: 1, default: 1500 },
+        maxOutputTokens: { type: "integer", minimum: 1, default: 120 },
+        /** `T3` demotes to `T2` below this confidence (tier_dispatcher.py main():386). */
+        t3ConfidenceFloor: { type: "number", minimum: 0, maximum: 1, default: 0.7 },
+        /** `T2` demotes to `T1` below this confidence (tier_dispatcher.py main():387). */
+        t2ConfidenceFloor: { type: "number", minimum: 0, maximum: 1, default: 0.6 },
+        /** How many eligible issues one job run classifies. */
+        batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 },
       },
       default: {},
     },
@@ -294,6 +406,54 @@ export const SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true },
+      },
+      default: {},
+    },
+    /**
+     * TOG-2481: absorbs the standalone `dispatch` plugin (TOG-747, design
+     * TOG-706) so the `plugins` table shows one dispatcher, not two. Mirrors
+     * that plugin's `instanceConfigSchema` field-for-field, including its
+     * defaults — `wakeEnabled: false` so absorbing it changes nothing live
+     * until an operator explicitly flips the wake gate.
+     */
+    dispatch: {
+      type: "object",
+      title: "Stall-sweep dispatch (TOG-706/TOG-747)",
+      additionalProperties: false,
+      properties: {
+        wakeEnabled: {
+          type: "boolean",
+          title: "Enable the wake action",
+          description:
+            "OFF until the evidence gate passes. While off, the sweep runs the real selection policy and reports what it WOULD have woken, and calls requestWakeup zero times.",
+          default: false,
+        },
+        idleMinutes: {
+          type: "number",
+          title: "Idle threshold (minutes)",
+          description:
+            "How long since the last heartbeat run scoped to that issue before it counts as stalled. Measured against heartbeat_runs.context_snapshot->>'issueId', not updated_at, which any comment refreshes (ADR 0003).",
+          default: 120,
+          minimum: 5,
+          maximum: 10080,
+        },
+        maxWakesPerFiring: {
+          type: "number",
+          title: "Maximum wakes per firing",
+          description:
+            "Cap on selected issues per sweep. Picks are spread across distinct assignees, because host coalescing is per-agent (ADR 0001) and two picks for one agent collapse into one run.",
+          default: 3,
+          minimum: 1,
+          maximum: 25,
+        },
+        focusProjectIds: {
+          type: "array",
+          title: "Focus project IDs",
+          description:
+            "Optional. When set, only issues in these projects are selectable. Empty means the whole company.",
+          default: [],
+          items: { type: "string" },
+        },
       },
       default: {},
     },

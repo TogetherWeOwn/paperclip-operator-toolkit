@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.model-selection";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.2.0";
+export const PLUGIN_VERSION = "0.3.0";
 
 export const TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
@@ -24,7 +24,54 @@ export const TOOL_NAMES = {
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
   refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
+  setLaneOutage: "model_selection_set_lane_outage",
+  /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
+  setZaiPaceOverride: "model_selection_set_zai_pace_override",
 } as const;
+
+/**
+ * Default lane-id strings for the three named lanes `tier_dispatcher.py`
+ * hardcodes (`lane_of()`), canonicalized to this deployment's actual live
+ * `pacing.lanes[].laneId` vocabulary (`cliproxy-codex`/`cliproxy-opencode-go`/
+ * `cliproxy-zai` — the Python source's bare `codex`/`opencode-go`/`zai` were
+ * never the live lane ids here). Configurable via `SelectionConfig.codexLaneId`
+ * / `opencodeGoLaneId` / `pacing.zai.laneId` — these are only the fallback
+ * when a company config doesn't override them, so a company still free to
+ * name its lanes however it likes without losing these dated rules.
+ */
+export const LANE_ID_CODEX = "cliproxy-codex";
+export const LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
+export const LANE_ID_ZAI = "cliproxy-zai";
+
+/**
+ * 2026-09-06 17:1xZ / 2026-09-07 12:32Z owner rule: per-account active-card
+ * ceiling, ported verbatim from `tier_dispatcher.py`'s
+ * `LANE_CAP_PER_ACCOUNT={"opencode-go":2,"zai":3}`, keyed on the canonical
+ * live lane ids.
+ */
+export const DEFAULT_LANE_CAP_PER_ACCOUNT: Readonly<Record<string, number>> = {
+  [LANE_ID_OPENCODE_GO]: 2,
+  [LANE_ID_ZAI]: 3,
+};
+
+/**
+ * 2026-09-07 07:12Z owner rule, ported from `tier_dispatcher.py`'s
+ * `AVOID_LANE = {"codex": 0.99}`: the live company config sets no
+ * `pacing.avoid.perLane` override at all, so this is the only place codex's
+ * higher-than-default avoid threshold takes effect. Keyed on the canonical
+ * live lane id.
+ */
+export const DEFAULT_AVOID_PER_LANE: Readonly<Record<string, number>> = {
+  [LANE_ID_CODEX]: 0.99,
+};
+
+/** `tier_dispatcher.py`'s `lane_5h()` reads this fixed JSON key; kept as the default window name, canonicalized to the live `five-hour` (hyphenated) window name. */
+export const DEFAULT_FIVE_HOUR_WINDOW_NAME = "five-hour";
+/** `tier_dispatcher.py`'s `zai_weekly_pace_ok()` reads `weekly_utilization`/`weekly_resets_at`. */
+export const DEFAULT_ZAI_WEEKLY_WINDOW_NAME = "weekly";
+/** `tier_dispatcher.py`'s `zai_weekly_pace_ok(margin=0.15)` default. */
+export const DEFAULT_ZAI_WEEKLY_MARGIN = 0.15;
 
 // Route keys are validated against a lowercase-only regex by
 // `pluginManifestV1Schema` — camelCase is rejected at install time.
@@ -42,6 +89,20 @@ export const JOB_KEYS = {
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
   refreshAaIndex: "refreshAaIndex",
+  /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
+  classifyIssues: "classifyIssues",
+  /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
+  labelOnlyPass: "labelOnlyPass",
+  /** Ported from `tier_dispatcher.py`'s `repin_pass()`. */
+  repinPass: "repinPass",
+  /** Ported from `tier_dispatcher.py`'s `balance_pass()`. */
+  balancePass: "balancePass",
+  /**
+   * TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+   * stall-sweep + wakeup, ported wholesale so the `plugins` table shows one
+   * dispatcher, not two.
+   */
+  dispatchSweep: "dispatch-sweep",
 } as const;
 
 /**
@@ -116,6 +177,37 @@ export const PLUGIN_STATE_KEYS = {
   knownCompanies: "knownCompanies",
   /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
   aaDriftSurfaced: "aaDriftSurfaced",
+  /**
+   * Per-issue capability-exclusion flag recorded by `classifyIssues`
+   * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
+   * LABEL always records the confidence-demoted tier regardless of
+   * exclusion; this flag is the only place exclusion survives past the
+   * classify job, for a later apply-sweep (TOG-2481 task #6/#7) to supply as
+   * `descriptor.exclusion` and force the T1 model-pick bucket.
+   */
+  classificationExclusions: "classificationExclusions",
+  /**
+   * TOG-2481 port of `lane_outage.json` — an operator-declared outage the
+   * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
+   * not deploy-time config: the Python source is a hand-edited file read
+   * fresh on every dispatcher run, and an outage is exactly the kind of
+   * thing that needs to be set/cleared without a plugin config redeploy.
+   */
+  laneOutage: "laneOutage",
+  /**
+   * TOG-2481 port of `zai_pace_override.json` — an operator-declared
+   * temporary margin override for `zaiWeeklyPaceOk`, e.g. during a Codex
+   * outage. Runtime-settable, same rationale as `laneOutage`.
+   */
+  zaiPaceOverride: "zaiPaceOverride",
+  /**
+   * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
+   * summary a sweep compares against to gate the activity-log line to state
+   * changes only. Namespaced separately from the rest of this plugin's state
+   * (`namespace: "dispatch"`, matching the original plugin's key exactly) so
+   * absorbing it does not collide with `laneLedger`/etc.
+   */
+  dispatchLastFiring: "dispatchLastFiring",
 } as const;
 
 /** aa.ai's public leaderboard page — the only viable data source (no documented API exists). */
@@ -170,3 +262,50 @@ export const REJECTION_WINDOW_MS = 48 * 60 * 60 * 1000;
 /** Rework weights (model_scores.py:130): a reopen is worse evidence than a review rejection. */
 export const REWORK_WEIGHT_REOPEN = 1.0;
 export const REWORK_WEIGHT_REJECTED = 0.5;
+
+/**
+ * 2026-09-06 14:2xZ owner rule ("always use the cheapest capable model for
+ * each task"), ported from `tier_dispatcher.py` `pick()`. 10% of T2/T3 picks
+ * go to the cheapest not-yet-proven capable candidate so real work can
+ * confirm or demote it. Never T1 — an unproven candidate never earns judgement
+ * work.
+ */
+export const EXPLORE_FRACTION = 0.1;
+/**
+ * 2026-09-06 16:2xZ owner rule: a free/stealth candidate (blended list price
+ * under this, $/Mtok) must be PROVEN before it enters the main pick pool —
+ * ported from `tier_dispatcher.py` `pick()`'s `main` filter
+ * (`caps[m["id"]][1] or blended(m)>=0.10`).
+ */
+export const FREE_MUST_BE_PROVEN_USD = 0.1;
+/**
+ * 2026-09-05 spread rule: within this multiple of the cheapest candidate's
+ * cost, prefer the least-utilized lane over the raw cost order — ported from
+ * `tier_dispatcher.py` `pick()`'s `blended(m)<=cheapest*1.20` band.
+ */
+export const COST_BAND_MULTIPLIER = 1.2;
+
+/** `tier_dispatcher.py` `label_only_pass()`'s fixed `limit 100` row fetch. No separate write cap in the source. */
+export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;
+/** `tier_dispatcher.py` `repin_pass()`'s fixed `limit 400` row fetch. */
+export const REPIN_PASS_FETCH_LIMIT = 400;
+/** `tier_dispatcher.py` `repin_pass(limit=6)`'s default write cap per run. */
+export const REPIN_PASS_WRITE_LIMIT = 6;
+/** `tier_dispatcher.py` `balance_pass()`'s fixed `limit 400` row fetch. */
+export const BALANCE_PASS_FETCH_LIMIT = 400;
+/** `tier_dispatcher.py` `balance_pass(limit=8)`'s default write cap per run. */
+export const BALANCE_PASS_WRITE_LIMIT = 8;
+/** `balance_pass()`'s `cheaper = blended(nm) <= 0.8*blended(pm)` cost-down threshold. */
+export const BALANCE_PASS_COST_DOWN_MULTIPLIER = 0.8;
+/** `balance_pass()`'s `busier = (cur_u-new_u)>=0.25` rebalance threshold. */
+export const BALANCE_PASS_BUSIER_UTILIZATION_DELTA = 0.25;
+/** `balance_pass()`'s `probation` branch: a pinned model priced under this (blended $/Mtok) and still unproven may hold only one active card. */
+export const BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
+
+/**
+ * TOG-2481 port of the `dispatch` plugin's `ISSUE_PAGE_LIMIT` — the sweep's
+ * single-page `ctx.issues.list` fetch cap. A company with more open issues
+ * than this per firing is a saturation condition the sweep notes rather than
+ * paginating through, matching the standalone plugin's own behavior exactly.
+ */
+export const DISPATCH_ISSUE_PAGE_LIMIT = 1000;

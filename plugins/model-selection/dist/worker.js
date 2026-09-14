@@ -2,7 +2,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.3.0";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -23,8 +23,25 @@ var TOOL_NAMES = {
   /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
-  refreshAaIndexNow: "model_selection_refresh_aa_index_now"
+  refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
+  setLaneOutage: "model_selection_set_lane_outage",
+  /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
+  setZaiPaceOverride: "model_selection_set_zai_pace_override"
 };
+var LANE_ID_CODEX = "cliproxy-codex";
+var LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
+var LANE_ID_ZAI = "cliproxy-zai";
+var DEFAULT_LANE_CAP_PER_ACCOUNT = {
+  [LANE_ID_OPENCODE_GO]: 2,
+  [LANE_ID_ZAI]: 3
+};
+var DEFAULT_AVOID_PER_LANE = {
+  [LANE_ID_CODEX]: 0.99
+};
+var DEFAULT_FIVE_HOUR_WINDOW_NAME = "five-hour";
+var DEFAULT_ZAI_WEEKLY_WINDOW_NAME = "weekly";
+var DEFAULT_ZAI_WEEKLY_MARGIN = 0.15;
 var ROUTE_KEYS = {
   advise: "advise",
   applyIssue: "apply-issue"
@@ -37,7 +54,21 @@ var JOB_KEYS = {
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
-  refreshAaIndex: "refreshAaIndex"
+  refreshAaIndex: "refreshAaIndex",
+  /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
+  classifyIssues: "classifyIssues",
+  /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
+  labelOnlyPass: "labelOnlyPass",
+  /** Ported from `tier_dispatcher.py`'s `repin_pass()`. */
+  repinPass: "repinPass",
+  /** Ported from `tier_dispatcher.py`'s `balance_pass()`. */
+  balancePass: "balancePass",
+  /**
+   * TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+   * stall-sweep + wakeup, ported wholesale so the `plugins` table shows one
+   * dispatcher, not two.
+   */
+  dispatchSweep: "dispatch-sweep"
 };
 var TIER_LABEL_PREFIX = "tier:";
 var TIERS = ["T1", "T2", "T3"];
@@ -93,7 +124,38 @@ var PLUGIN_STATE_KEYS = {
    */
   knownCompanies: "knownCompanies",
   /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
-  aaDriftSurfaced: "aaDriftSurfaced"
+  aaDriftSurfaced: "aaDriftSurfaced",
+  /**
+   * Per-issue capability-exclusion flag recorded by `classifyIssues`
+   * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
+   * LABEL always records the confidence-demoted tier regardless of
+   * exclusion; this flag is the only place exclusion survives past the
+   * classify job, for a later apply-sweep (TOG-2481 task #6/#7) to supply as
+   * `descriptor.exclusion` and force the T1 model-pick bucket.
+   */
+  classificationExclusions: "classificationExclusions",
+  /**
+   * TOG-2481 port of `lane_outage.json` — an operator-declared outage the
+   * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
+   * not deploy-time config: the Python source is a hand-edited file read
+   * fresh on every dispatcher run, and an outage is exactly the kind of
+   * thing that needs to be set/cleared without a plugin config redeploy.
+   */
+  laneOutage: "laneOutage",
+  /**
+   * TOG-2481 port of `zai_pace_override.json` — an operator-declared
+   * temporary margin override for `zaiWeeklyPaceOk`, e.g. during a Codex
+   * outage. Runtime-settable, same rationale as `laneOutage`.
+   */
+  zaiPaceOverride: "zaiPaceOverride",
+  /**
+   * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
+   * summary a sweep compares against to gate the activity-log line to state
+   * changes only. Namespaced separately from the rest of this plugin's state
+   * (`namespace: "dispatch"`, matching the original plugin's key exactly) so
+   * absorbing it does not collide with `laneLedger`/etc.
+   */
+  dispatchLastFiring: "dispatchLastFiring"
 };
 var AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";
 var AA_FETCH_TIMEOUT_MS = 1e4;
@@ -125,10 +187,31 @@ var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
 var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
 var REWORK_WEIGHT_REOPEN = 1;
 var REWORK_WEIGHT_REJECTED = 0.5;
+var EXPLORE_FRACTION = 0.1;
+var FREE_MUST_BE_PROVEN_USD = 0.1;
+var COST_BAND_MULTIPLIER = 1.2;
+var LABEL_ONLY_PASS_FETCH_LIMIT = 100;
+var REPIN_PASS_FETCH_LIMIT = 400;
+var REPIN_PASS_WRITE_LIMIT = 6;
+var BALANCE_PASS_FETCH_LIMIT = 400;
+var BALANCE_PASS_WRITE_LIMIT = 8;
+var BALANCE_PASS_COST_DOWN_MULTIPLIER = 0.8;
+var BALANCE_PASS_BUSIER_UTILIZATION_DELTA = 0.25;
+var BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
+var DISPATCH_ISSUE_PAGE_LIMIT = 1e3;
 
 // src/engine/pacing.ts
 function mergeLedgerEntry(ledger, result) {
-  return { ...ledger, [result.laneId]: { laneId: result.laneId, verdict: result.verdict, fetchedAt: result.fetchedAt, error: result.error } };
+  return {
+    ...ledger,
+    [result.laneId]: {
+      laneId: result.laneId,
+      verdict: result.verdict,
+      observation: result.observation ?? null,
+      fetchedAt: result.fetchedAt,
+      error: result.error
+    }
+  };
 }
 function laneVerdictFor(ledger, laneId) {
   if (!laneId) return null;
@@ -235,6 +318,98 @@ function activeOperatorOverride(overrides, issueId, nowIso) {
 function recordOperatorOverride(overrides, issueId, modelId, nowIso, ttlSeconds) {
   const expiresAt = new Date(Date.parse(nowIso) + ttlSeconds * 1e3).toISOString();
   return { ...overrides, [issueId]: { issueId, modelId, setAt: nowIso, expiresAt } };
+}
+function avoidThresholdFor(config, laneId) {
+  return config.perLane[laneId] ?? config.defaultThreshold;
+}
+function laneAvoidExcluded(ledger, model, config) {
+  if (!model.laneId) return false;
+  const verdict = laneVerdictFor(ledger, model.laneId);
+  const utilization = verdict?.score?.utilization;
+  if (utilization === null || utilization === void 0) return false;
+  return utilization >= avoidThresholdFor(config, model.laneId);
+}
+function isLaneOutageActive(override, nowIso) {
+  if (!override) return false;
+  return override.until > nowIso;
+}
+function laneOutageExcluded(override, nowIso, model) {
+  if (!isLaneOutageActive(override, nowIso)) return false;
+  if (override.models.includes(model.id)) return true;
+  if (model.laneId && override.lanes.includes(model.laneId)) return true;
+  return false;
+}
+function blendedListPrice(model) {
+  return (3 * model.costPerMTokIn + model.costPerMTokOut) / 4;
+}
+var ZAI_LONG_RUN_AGENTS = /* @__PURE__ */ new Set([
+  "Founding Engineer",
+  "Web Engineer",
+  "Automation Engineer",
+  "DevOps & Reliability Engineer",
+  "CTO & Chief AI Officer",
+  "Director of Engineering"
+]);
+function laneEffectiveUtilization(ledger, laneId) {
+  const verdict = laneVerdictFor(ledger, laneId);
+  const utilization = verdict?.score?.utilization;
+  return utilization === null || utilization === void 0 ? 0.5 : utilization;
+}
+function zaiPeakNow(nowMs) {
+  const now = new Date(nowMs);
+  const day = now.getUTCDay();
+  const hour = now.getUTCHours();
+  return day >= 1 && day <= 5 && hour >= 6 && hour < 10;
+}
+function laneNamedWindowUtilization(ledger, laneId, windowName) {
+  const observation = ledger[laneId]?.observation;
+  if (!observation) return 0;
+  const utilizations = observation.accounts.filter((account) => account.health === "healthy").flatMap((account) => {
+    const window = account.windows.find((w) => w.name === windowName);
+    return typeof window?.utilization === "number" ? [window.utilization] : [];
+  });
+  return utilizations.length > 0 ? Math.max(...utilizations) : 0;
+}
+function laneHealthyAccountCount(ledger, laneId) {
+  const observation = ledger[laneId]?.observation;
+  if (!observation) return 1;
+  return observation.accounts.filter((account) => account.health === "healthy").length;
+}
+function activeZaiPaceOverride(override, nowIso) {
+  if (!override) return null;
+  return override.until > nowIso ? override.margin : null;
+}
+function zaiWeeklyPaceOk(input) {
+  const margin = input.overrideMargin ?? input.defaultMargin;
+  const observation = input.ledger[input.laneId]?.observation;
+  const account = observation?.accounts[0];
+  if (!account) return true;
+  const window = account.windows.find((w) => w.name === input.weeklyWindowName);
+  if (!window || window.utilization === null || window.resetsAt === null) return true;
+  const remainingMs = Date.parse(window.resetsAt) - input.nowMs;
+  const elapsed = 1 - Math.max(0, Math.min(1, remainingMs / (7 * 24 * 60 * 60 * 1e3)));
+  return window.utilization <= elapsed + margin;
+}
+function laneHasRoom(input) {
+  if (input.laneId === input.zaiLaneId) {
+    const weeklyOk = zaiWeeklyPaceOk({
+      ledger: input.ledger,
+      laneId: input.laneId,
+      weeklyWindowName: input.zaiWeeklyWindowName,
+      defaultMargin: input.zaiWeeklyDefaultMargin,
+      overrideMargin: input.zaiPaceOverrideMargin,
+      nowMs: input.nowMs
+    });
+    if (!weeklyOk) return false;
+  }
+  let per = input.capPerAccount[input.laneId];
+  if (input.laneId === input.zaiLaneId && per !== void 0 && zaiPeakNow(input.nowMs)) {
+    per = 1;
+  }
+  if (per === void 0) return true;
+  if (laneNamedWindowUtilization(input.ledger, input.laneId, input.fiveHourWindowName) >= 0.5) return false;
+  const accounts = Math.max(1, laneHealthyAccountCount(input.ledger, input.laneId));
+  return input.activePinsWeight + (input.extra ?? 0) < per * accounts;
 }
 function repinAllowed(context) {
   if (context.hasOperatorPin && !context.isServiceabilityHardStop) {
@@ -365,9 +540,11 @@ function resolveConfig(raw) {
   const profiles = record(root.profiles);
   const quality = record(root.quality);
   const pacing = record(root.pacing);
+  const classification = record(root.classification);
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
+  const dispatch = record(root.dispatch);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -472,7 +649,55 @@ function resolveConfig(raw) {
       lanes,
       slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
       operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
-      idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS)
+      idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS),
+      avoid: (() => {
+        const avoid = record(pacing.avoid);
+        const rawPerLane = record(avoid.perLane);
+        const keys = Object.keys(rawPerLane);
+        if (keys.length === 0) {
+          return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane: { ...DEFAULT_AVOID_PER_LANE } };
+        }
+        const perLane = {};
+        for (const [laneId, threshold] of Object.entries(rawPerLane)) {
+          if (typeof threshold === "number" && Number.isFinite(threshold)) perLane[laneId] = threshold;
+        }
+        return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane };
+      })(),
+      laneCapPerAccount: (() => {
+        const raw2 = record(pacing.laneCapPerAccount);
+        const keys = Object.keys(raw2);
+        if (keys.length === 0) return { ...DEFAULT_LANE_CAP_PER_ACCOUNT };
+        const perAccount = {};
+        for (const [laneId, cap] of Object.entries(raw2)) {
+          if (typeof cap === "number" && Number.isFinite(cap)) perAccount[laneId] = cap;
+        }
+        return perAccount;
+      })(),
+      fiveHourWindowName: string(pacing.fiveHourWindowName, DEFAULT_FIVE_HOUR_WINDOW_NAME),
+      codexLaneId: string(pacing.codexLaneId, LANE_ID_CODEX),
+      opencodeGoLaneId: string(pacing.opencodeGoLaneId, LANE_ID_OPENCODE_GO),
+      zai: (() => {
+        const zai = record(pacing.zai);
+        return {
+          laneId: string(zai.laneId, LANE_ID_ZAI),
+          weeklyWindowName: string(zai.weeklyWindowName, DEFAULT_ZAI_WEEKLY_WINDOW_NAME),
+          weeklyDefaultMargin: num(zai.weeklyDefaultMargin, DEFAULT_ZAI_WEEKLY_MARGIN)
+        };
+      })()
+    },
+    classification: {
+      enabled: bool(classification.enabled, false),
+      baseUrl: typeof classification.baseUrl === "string" && classification.baseUrl.length > 0 ? classification.baseUrl : null,
+      protocol: classification.protocol === "openai-chat-completions" ? "openai-chat-completions" : "anthropic-messages",
+      modelId: typeof classification.modelId === "string" && classification.modelId.length > 0 ? classification.modelId : null,
+      apiKeySecretRef: secretRef(classification.apiKeySecretRef),
+      requestTimeoutMs: num(classification.requestTimeoutMs, 15e3),
+      maxResponseBytes: num(classification.maxResponseBytes, 65536),
+      descriptionChars: num(classification.descriptionChars, 1500),
+      maxOutputTokens: num(classification.maxOutputTokens, 120),
+      t3ConfidenceFloor: num(classification.t3ConfidenceFloor, 0.7),
+      t2ConfidenceFloor: num(classification.t2ConfidenceFloor, 0.6),
+      batchSize: num(classification.batchSize, 20)
     },
     earnIn: {
       enabled: bool(earnIn.enabled, false),
@@ -489,6 +714,12 @@ function resolveConfig(raw) {
     },
     aaSync: {
       enabled: bool(aaSync.enabled, true)
+    },
+    dispatch: {
+      wakeEnabled: bool(dispatch.wakeEnabled, false),
+      idleMinutes: num(dispatch.idleMinutes, 120),
+      maxWakesPerFiring: num(dispatch.maxWakesPerFiring, 3),
+      focusProjectIds: Array.isArray(dispatch.focusProjectIds) ? dispatch.focusProjectIds.filter((p) => typeof p === "string") : []
     }
   };
 }
@@ -542,6 +773,19 @@ function validateConfig(config) {
   }
   if (config.pacing.mode === "enforce" && config.pacing.slotFloorFraction <= 0) {
     errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable \u2014 ahead-of-line throttling must never reach zero");
+  }
+  if (config.classification.enabled) {
+    if (!config.classification.baseUrl) {
+      errors.push("classification.enabled is true but no classification.baseUrl is configured");
+    }
+    if (!config.classification.modelId) {
+      errors.push("classification.enabled is true but no classification.modelId is configured");
+    }
+    const secretError = validateSecretRefShape(
+      config.classification.apiKeySecretRef,
+      "classification.apiKeySecretRef"
+    );
+    if (secretError) errors.push(secretError);
   }
   if (config.selection.objective === "cost-per-accepted-card") {
     warnings.push(
@@ -1199,6 +1443,52 @@ function resolveTier(descriptor, models, configDefaultTier, options) {
   };
 }
 
+// src/engine/pick-order.ts
+function provenFor(modelScores, modelId, tier2) {
+  return modelScores[modelId]?.tiers[tier2]?.proven ?? false;
+}
+function applyPickOrdering(candidates, models, ledger, modelScores, requiredTier, issueId, allowExplore = true) {
+  if (candidates.length === 0) {
+    return { ordered: [], explored: false, exploreModelId: null };
+  }
+  const modelOf2 = (candidate) => models.find((model) => model.id === candidate.modelId);
+  const utilizationOf = (candidate) => {
+    const model = modelOf2(candidate);
+    return model?.laneId ? laneEffectiveUtilization(ledger, model.laneId) : 0.5;
+  };
+  const listPriceOf = (candidate) => {
+    const model = modelOf2(candidate);
+    return model ? blendedListPrice(model) : candidate.expectedCostUsd;
+  };
+  const provenOf = (candidate) => provenFor(modelScores, candidate.modelId, requiredTier);
+  const unproven = candidates.filter((candidate) => !provenOf(candidate));
+  if (allowExplore && requiredTier !== "T1" && unproven.length > 0 && hashUnitInterval(`explore:${requiredTier}:${issueId}`) < EXPLORE_FRACTION) {
+    const explored = [...unproven].sort((a, b) => a.expectedCostUsd - b.expectedCostUsd)[0];
+    return {
+      ordered: [explored, ...candidates.filter((candidate) => candidate.modelId !== explored.modelId)],
+      explored: true,
+      exploreModelId: explored.modelId
+    };
+  }
+  const main = candidates.filter((candidate) => provenOf(candidate) || listPriceOf(candidate) >= FREE_MUST_BE_PROVEN_USD);
+  const pool = main.length > 0 ? main : candidates;
+  const cheapest = Math.min(...pool.map((candidate) => candidate.expectedCostUsd));
+  const band = pool.filter((candidate) => candidate.expectedCostUsd <= cheapest * COST_BAND_MULTIPLIER);
+  const rest = candidates.filter((candidate) => !band.some((banded) => banded.modelId === candidate.modelId));
+  const bandOrdered = [...band].sort((a, b) => {
+    const utilizationDelta = utilizationOf(a) - utilizationOf(b);
+    if (utilizationDelta !== 0) return utilizationDelta;
+    if (a.expectedCostUsd !== b.expectedCostUsd) return a.expectedCostUsd - b.expectedCostUsd;
+    const provenDelta = (provenOf(a) ? 0 : 1) - (provenOf(b) ? 0 : 1);
+    if (provenDelta !== 0) return provenDelta;
+    const tieA = hashUnitInterval(`${issueId}:${a.modelId}`);
+    const tieB = hashUnitInterval(`${issueId}:${b.modelId}`);
+    if (tieA !== tieB) return tieA - tieB;
+    return a.modelId.localeCompare(b.modelId);
+  });
+  return { ordered: [...bandOrdered, ...rest], explored: false, exploreModelId: null };
+}
+
 // src/engine/select.ts
 function selectModel(input) {
   const { descriptor, config, profiles, signals, now } = input;
@@ -1228,6 +1518,7 @@ function selectModel(input) {
     shadowDiff: null,
     escalatedFromTier: null
   };
+  const nowIso = new Date(now).toISOString();
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
@@ -1292,6 +1583,15 @@ function selectModel(input) {
       });
       continue;
     }
+    const score2 = config.modelScores?.[model.id]?.tiers[requiredTier];
+    if (score2 && score2.capable === false) {
+      rejections.push({
+        modelId: model.id,
+        stage: "capability-score",
+        reason: `measured ${requiredTier} success rate (p=${score2.p}) is below the capability threshold`
+      });
+      continue;
+    }
     if (typeof descriptor.requiredContextTokens === "number" && model.contextWindow < descriptor.requiredContextTokens) {
       rejections.push({
         modelId: model.id,
@@ -1305,6 +1605,63 @@ function selectModel(input) {
         modelId: model.id,
         stage: "lane-unserviceable",
         reason: `lane ${model.laneId ?? "(none)"} is not serviceable`
+      });
+      continue;
+    }
+    if (paceActive && config.laneAvoidConfig && laneAvoidExcluded(ledger, model, config.laneAvoidConfig)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`
+      });
+      continue;
+    }
+    if (paceActive && laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, model)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-outage",
+        reason: `lane ${model.laneId ?? "(none)"} is under an operator-declared outage`
+      });
+      continue;
+    }
+    if (paceActive && config.laneRoom && model.laneId) {
+      const room = config.laneRoom;
+      const admitted = laneHasRoom({
+        laneId: model.laneId,
+        activePinsWeight: room.activePinsWeightByLane[model.laneId] ?? 0,
+        ledger,
+        capPerAccount: room.capPerAccount,
+        fiveHourWindowName: room.fiveHourWindowName,
+        zaiLaneId: room.zaiLaneId,
+        zaiWeeklyWindowName: room.zaiWeeklyWindowName,
+        zaiWeeklyDefaultMargin: room.zaiWeeklyDefaultMargin,
+        zaiPaceOverrideMargin: room.zaiPaceOverrideMargin,
+        nowMs: room.now
+      });
+      if (!admitted) {
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-no-room",
+          reason: `lane ${model.laneId} has no room for a new active card right now`
+        });
+        continue;
+      }
+    }
+    if (paceActive && requiredTier === "T1" && model.laneId === (config.opencodeGoLaneId ?? LANE_ID_OPENCODE_GO) && config.laneAvoidConfig && laneEffectiveUtilization(ledger, config.codexLaneId ?? LANE_ID_CODEX) < avoidThresholdFor(config.laneAvoidConfig, config.codexLaneId ?? LANE_ID_CODEX)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: "T1 stays off opencode-go while the codex lane still has room (Go fallback only)"
+      });
+      continue;
+    }
+    const zaiLaneId = config.zaiLaneId ?? LANE_ID_ZAI;
+    const codexLaneId = config.codexLaneId ?? LANE_ID_CODEX;
+    if (paceActive && model.laneId === zaiLaneId && descriptor.agentName && ZAI_LONG_RUN_AGENTS.has(descriptor.agentName) && config.laneAvoidConfig && laneEffectiveUtilization(ledger, codexLaneId) < avoidThresholdFor(config.laneAvoidConfig, codexLaneId) && config.models.some((entry) => entry.laneId === codexLaneId && entry.enabled)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: `long-turn agent "${descriptor.agentName}" stays off zai while the codex lane still has room (Z.ai 1214 risk)`
       });
       continue;
     }
@@ -1385,6 +1742,21 @@ function selectModel(input) {
     if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
   });
+  if (config.modelScores) {
+    const pickResult = applyPickOrdering(
+      candidates,
+      config.models,
+      ledger,
+      config.modelScores,
+      requiredTier,
+      descriptor.issueId,
+      config.allowExplore ?? true
+    );
+    candidates = pickResult.ordered;
+    trace.push(
+      pickResult.explored ? `explore: routing to unproven ${pickResult.exploreModelId} to gather ${requiredTier} evidence` : "pick ordering: free-must-be-proven + 20% cost-band least-utilized-lane tiebreak applied"
+    );
+  }
   let orderedCandidates = candidates;
   if (paceActive) {
     const paceOrdered = orderCandidatesByPace(candidates, config.models, ledger);
@@ -1862,18 +2234,15 @@ function isReservedLiteralHost(hostname) {
 // src/lane-capacity/poll.ts
 function verdictFor(document, lane, policy, asOf) {
   try {
-    return evaluateLanePace({
-      observation: normalizeLaneDocument({ document, definition: lane }),
-      asOf,
-      policy
-    });
+    const observation = normalizeLaneDocument({ document, definition: lane });
+    return { verdict: evaluateLanePace({ observation, asOf, policy }), observation };
   } catch {
     return null;
   }
 }
 async function pollOne(source, http, now) {
   const fetchedAt = now();
-  const fail = (error) => ({ laneId: source.laneId, fetchedAt, verdict: null, error });
+  const fail = (error) => ({ laneId: source.laneId, fetchedAt, verdict: null, observation: null, error });
   let parsed;
   try {
     parsed = new URL(source.statusUrl);
@@ -1936,10 +2305,12 @@ async function pollOne(source, http, now) {
   if (document === null || typeof document !== "object") {
     return fail("lane-invalid-json");
   }
+  const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);
   return {
     laneId: source.laneId,
     fetchedAt,
-    verdict: verdictFor(document, source.lane, source.policy, fetchedAt),
+    verdict: evaluated?.verdict ?? null,
+    observation: evaluated?.observation ?? null,
     error: null
   };
 }
@@ -1947,7 +2318,7 @@ async function pollLanes(input) {
   return Promise.all(
     input.sources.map(
       (source) => pollOne(source, input.http, input.now).catch(
-        () => ({ laneId: source.laneId, fetchedAt: input.now(), verdict: null, error: "lane-poll-failed" })
+        () => ({ laneId: source.laneId, fetchedAt: input.now(), verdict: null, observation: null, error: "lane-poll-failed" })
       )
     )
   );
@@ -2071,6 +2442,435 @@ function buildShadowRecord(input) {
   };
 }
 
+// src/engine/classify-call.ts
+function upstreamUrl(baseUrl, protocol) {
+  const parsed = new URL(baseUrl);
+  const suffix = protocol === "openai-chat-completions" ? "/v1/chat/completions" : "/v1/messages";
+  let path = parsed.pathname.replace(/\/+$/, "");
+  if (path.endsWith(suffix)) path = path.slice(0, -suffix.length);
+  parsed.pathname = `${path}${suffix}`.replace(/\/{2,}/g, "/");
+  return parsed.toString();
+}
+function buildBody(input) {
+  if (input.protocol === "openai-chat-completions") {
+    return JSON.stringify({
+      model: input.modelId,
+      max_tokens: input.maxOutputTokens,
+      messages: [
+        { role: "system", content: input.system },
+        { role: "user", content: input.userPrompt }
+      ]
+    });
+  }
+  return JSON.stringify({
+    model: input.modelId,
+    max_tokens: input.maxOutputTokens,
+    system: input.system,
+    messages: [{ role: "user", content: input.userPrompt }]
+  });
+}
+function buildHeaders(input) {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "Accept-Encoding": "identity"
+  };
+  if (!input.apiKey) return headers;
+  if (input.protocol === "openai-chat-completions") {
+    headers.Authorization = `Bearer ${input.apiKey}`;
+  } else {
+    headers["x-api-key"] = input.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  }
+  return headers;
+}
+function extractText(protocol, parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const body = parsed;
+  if (protocol === "openai-chat-completions") {
+    const choices = Array.isArray(body.choices) ? body.choices : [];
+    const first = choices[0];
+    const message = first && typeof first.message === "object" ? first.message : null;
+    return typeof message?.content === "string" ? message.content : null;
+  }
+  const content = Array.isArray(body.content) ? body.content : [];
+  const text = content.filter((block) => !!block && typeof block === "object").map((block) => typeof block.text === "string" ? block.text : "").join("");
+  return text.length > 0 ? text : null;
+}
+async function callClassifier(input, http) {
+  const fail = (error) => ({ text: null, error });
+  let target;
+  let parsedUrl;
+  try {
+    target = upstreamUrl(input.baseUrl, input.protocol);
+    parsedUrl = new URL(target);
+  } catch {
+    return fail("classification-url-rejected");
+  }
+  if (parsedUrl.protocol !== "https:" || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash || isReservedLiteralHost(parsedUrl.hostname)) {
+    return fail("classification-url-rejected");
+  }
+  let response;
+  try {
+    let timer;
+    response = await Promise.race([
+      http.fetch(target, {
+        method: "POST",
+        headers: buildHeaders(input),
+        body: buildBody(input),
+        redirect: "manual"
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("classification-request-timeout")), input.requestTimeoutMs);
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  } catch {
+    return fail("classification-request-failed");
+  }
+  if (response.redirected || response.status >= 300 && response.status < 400) {
+    return fail("classification-redirect-refused");
+  }
+  if (response.status === 401 || response.status === 403) {
+    return fail("classification-authentication-failed");
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return fail("classification-http-failed");
+  }
+  const mediaType = response.headers.get("content-type")?.toLowerCase().split(";", 1)[0]?.trim();
+  if (!mediaType?.endsWith("/json") && !mediaType?.endsWith("+json")) {
+    return fail("classification-unexpected-media-type");
+  }
+  let text;
+  try {
+    text = await response.text();
+  } catch {
+    return fail("classification-request-failed");
+  }
+  if (new TextEncoder().encode(text).byteLength > input.maxResponseBytes) {
+    return fail("classification-response-too-large");
+  }
+  let document;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return fail("classification-invalid-json");
+  }
+  const extracted = extractText(input.protocol, document);
+  if (extracted === null) return fail("classification-empty-response");
+  return { text: extracted, error: null };
+}
+
+// src/engine/classify.ts
+var RUBRIC = `You classify a software-company work item into a model tier. Answer ONLY a JSON object:
+{"tier":"T1"|"T2"|"T3","confidence":0.0-1.0,"exclusion":true|false,"reason":"<=20 words"}
+T1 = judgement-heavy or irreversible: architecture/design decisions, security or adversarial review, incident response, anything that opens or approves an upstream PR, owner-facing decisions, credential/permission/access changes, production deploys, policy.
+T2 = ordinary engineering: implement a change with tests, fix a bug, code review of a normal PR, CI fixes, runbooks, debugging, data pipeline work.
+T3 = mechanical or low-stakes: docs, reports, summaries, status updates, label/triage hygiene, registering an existing test in CI, renames, boilerplate, re-running a verification, formatting.
+exclusion=true when the task touches secrets, credentials, permissions, access reviews, provisioning, or owner approvals (these must stay on the assignee's default model regardless of tier).
+Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).`;
+function buildClassificationPrompt(title, description, agentRole, descriptionChars) {
+  const truncated = (description ?? "").slice(0, descriptionChars);
+  return `Assignee role: ${agentRole}
+Title: ${title}
+Description:
+${truncated}`;
+}
+var TIER_VALUES = ["T1", "T2", "T3"];
+function parseClassificationResponse(text) {
+  const match = /\{[\s\S]*\}/.exec(text);
+  if (!match) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed;
+  if (typeof obj.tier !== "string" || !TIER_VALUES.includes(obj.tier)) return null;
+  const confidence = typeof obj.confidence === "number" && Number.isFinite(obj.confidence) ? obj.confidence : 0;
+  return {
+    tier: obj.tier,
+    confidence,
+    exclusion: obj.exclusion === true,
+    reason: typeof obj.reason === "string" ? obj.reason : ""
+  };
+}
+function applyConfidenceDemotion(tier2, confidence, t3ConfidenceFloor, t2ConfidenceFloor) {
+  let next = tier2;
+  if (next === "T3" && confidence < t3ConfidenceFloor) next = "T2";
+  if (next === "T2" && confidence < t2ConfidenceFloor) next = "T1";
+  return next;
+}
+function resolveClassifiedTiers(judgement, config) {
+  const labelTier = applyConfidenceDemotion(
+    judgement.tier,
+    judgement.confidence,
+    config.t3ConfidenceFloor,
+    config.t2ConfidenceFloor
+  );
+  return { labelTier, pickTier: judgement.exclusion ? "T1" : labelTier };
+}
+
+// src/engine/dispatch-selection.ts
+var WAKEUP_REFUSED_STATUSES = ["backlog", "done", "cancelled"];
+var TERMINAL_STATUSES2 = ["done", "cancelled"];
+var SELECTION_COUNTERS = [
+  "refused_backlog",
+  "refused_unassigned",
+  "refused_blocked",
+  "parked_on_named_owner",
+  "woken"
+];
+var LEGACY_COUNTERS = ["candidates_ready", "runnable_queue", "deadlocked_agents"];
+var ACTIVE_RUN_STATUSES = ["queued", "running"];
+var toMillis = (value) => {
+  if (value == null) return null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
+};
+function computeIdleMs(issue, runs, nowMs) {
+  const scoped = (runs ?? []).filter((run) => run.issueId === issue.id);
+  if (scoped.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
+    return { idleMs: 0, anchor: "active_run", hasRun: true };
+  }
+  let latest = null;
+  for (const run of scoped) {
+    for (const stamp of [run.finishedAt, run.startedAt, run.createdAt]) {
+      const ms = toMillis(stamp);
+      if (ms !== null && (latest === null || ms > latest)) latest = ms;
+    }
+  }
+  if (latest !== null) {
+    return { idleMs: Math.max(0, nowMs - latest), anchor: "last_run", hasRun: true };
+  }
+  const created = toMillis(issue.createdAt);
+  if (created === null) return { idleMs: 0, anchor: "unknown", hasRun: false };
+  return { idleMs: Math.max(0, nowMs - created), anchor: "issue_created_never_run", hasRun: false };
+}
+function isParkedOnNamedOwner(issue) {
+  const descriptor = issue.unblockDescriptor;
+  return descriptor !== null && descriptor !== void 0;
+}
+function classifyIssue(input) {
+  const { issue, blockedBy = [], invocationBlock = null, idleMinutes, idle } = input;
+  if (TERMINAL_STATUSES2.includes(issue.status)) {
+    return { outcome: "excluded_terminal" };
+  }
+  if (!issue.assigneeAgentId) {
+    return { outcome: "refused_unassigned" };
+  }
+  if (WAKEUP_REFUSED_STATUSES.includes(issue.status)) {
+    return { outcome: "refused_backlog" };
+  }
+  if (blockedBy.some((blocker) => blocker.status !== "done")) {
+    return { outcome: "refused_blocked" };
+  }
+  if (invocationBlock) {
+    return { outcome: "refused_budget_block", wakeable: true, blockReason: invocationBlock.reason };
+  }
+  if (isParkedOnNamedOwner(issue)) {
+    return { outcome: "parked_on_named_owner", wakeable: true };
+  }
+  if (idle.idleMs < idleMinutes * 6e4) {
+    return { outcome: "wakeable_not_idle", wakeable: true };
+  }
+  return { outcome: "actionable", wakeable: true };
+}
+var PRIORITY_RANK = { urgent: 0, high: 1, medium: 2, low: 3 };
+function spreadAcrossAssignees(actionable, maxPicks) {
+  const ordered = [...actionable].sort((a, b) => {
+    if (b.idleMs !== a.idleMs) return b.idleMs - a.idleMs;
+    const pa = PRIORITY_RANK[a.issue.priority] ?? 9;
+    const pb = PRIORITY_RANK[b.issue.priority] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return String(a.issue.id).localeCompare(String(b.issue.id));
+  });
+  const picks = [];
+  const coalesced = [];
+  const claimed = /* @__PURE__ */ new Set();
+  for (const candidate of ordered) {
+    const agentId = candidate.issue.assigneeAgentId;
+    if (claimed.has(agentId)) {
+      coalesced.push(candidate);
+      continue;
+    }
+    if (picks.length >= maxPicks) break;
+    claimed.add(agentId);
+    picks.push(candidate);
+  }
+  const overflow = ordered.filter(
+    (candidate) => !picks.includes(candidate) && !coalesced.includes(candidate)
+  );
+  return { picks, coalescedWithEarlierPick: coalesced, overflow };
+}
+function selectDispatch(population, options) {
+  const { idleMinutes, maxWakesPerFiring, focusProjectIds = [], now } = options;
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  const counters = {
+    refused_backlog: 0,
+    refused_unassigned: 0,
+    refused_blocked: 0,
+    parked_on_named_owner: 0,
+    // Filled in by the worker after the wake attempts. The policy cannot know
+    // it: whether a wake succeeds is the server's call, not ours.
+    woken: 0
+  };
+  const focus = new Set(focusProjectIds);
+  const actionable = [];
+  const parked = [];
+  const budgetBlocked = [];
+  let wakeable = 0;
+  let excludedTerminal = 0;
+  let outOfFocus = 0;
+  for (const entry of population) {
+    const { issue, blockedBy = [], runs = [], invocationBlock = null } = entry;
+    const idle = computeIdleMs(issue, runs, nowMs);
+    const result = classifyIssue({ issue, blockedBy, invocationBlock, idleMinutes, idle });
+    if (result.outcome === "excluded_terminal") {
+      excludedTerminal += 1;
+      continue;
+    }
+    if (result.wakeable) wakeable += 1;
+    if (result.outcome in counters) counters[result.outcome] += 1;
+    if (result.outcome === "refused_budget_block") {
+      budgetBlocked.push({ issue, idleMs: idle.idleMs, reason: result.blockReason ?? null });
+      continue;
+    }
+    if (result.outcome === "parked_on_named_owner") {
+      parked.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
+      continue;
+    }
+    if (result.outcome !== "actionable") continue;
+    if (focus.size > 0 && !focus.has(issue.projectId ?? "")) {
+      outOfFocus += 1;
+      continue;
+    }
+    actionable.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
+  }
+  const { picks, coalescedWithEarlierPick, overflow } = spreadAcrossAssignees(actionable, maxWakesPerFiring);
+  return {
+    counters,
+    legacy: {
+      // The set we would select from: rails passed, not parked, idle over
+      // threshold, in focus.
+      candidates_ready: actionable.length,
+      // The wakeable surface: rails 1-3 passed, before our two own rails. This
+      // is the 26 in docs/dispatch-plugin-facts.md §3.
+      runnable_queue: wakeable,
+      // No native equivalent (Q5). null, never 0 — see LEGACY_COUNTERS.
+      deadlocked_agents: null
+    },
+    picks,
+    parked,
+    // Not one of the five counters — a sixth outcome the design did not know
+    // was measurable. Reported alongside them, never folded into one of them.
+    budgetBlocked,
+    actionable,
+    coalescedWithEarlierPick,
+    overflow,
+    excludedTerminal,
+    outOfFocus
+  };
+}
+function identifyRoutingOwners(agents) {
+  const owners = [];
+  for (const agent of agents ?? []) {
+    if (agent.status === "terminated") continue;
+    if (agent.role === "ceo") {
+      owners.push({ agentId: agent.id, name: agent.name, source: "ceo_role" });
+      continue;
+    }
+    if (agent.permissions?.canCreateAgents === true) {
+      owners.push({ agentId: agent.id, name: agent.name, source: "agent_creator" });
+    }
+  }
+  return {
+    owners,
+    complete: false,
+    unreadableSources: ["explicit_grant", "simple_default"]
+  };
+}
+function summariseRoutingGap(population) {
+  const unassigned = population.map((entry) => entry.issue).filter((issue) => !TERMINAL_STATUSES2.includes(issue.status) && !issue.assigneeAgentId);
+  const byProject = {};
+  for (const issue of unassigned) {
+    const key = issue.projectId ?? "(no project)";
+    byProject[key] = (byProject[key] ?? 0) + 1;
+  }
+  return { count: unassigned.length, byProject, issueIds: unassigned.map((issue) => issue.id) };
+}
+
+// src/dispatch-reporting.ts
+var METRIC_PREFIX = "dispatch";
+function summariseFiring(companyId, selection, wakeOutcomes) {
+  const woken = wakeOutcomes.filter((outcome) => outcome.queued).length;
+  const wakeFailures = wakeOutcomes.filter((outcome) => !outcome.queued).length;
+  return {
+    companyId,
+    counters: { ...selection.counters, woken },
+    legacy: { ...selection.legacy },
+    pickedIssueIds: selection.picks.map((p) => p.issue.id).sort(),
+    parkedIssueIds: selection.parked.map((p) => p.issue.id).sort(),
+    budgetBlockedIssueIds: selection.budgetBlocked.map((b) => b.issue.id).sort(),
+    routingGapCount: selection.routingGap?.count ?? 0,
+    routingOwnerIds: (selection.routingGap?.owners?.owners ?? []).map((o) => o.agentId).sort(),
+    routingOwnersComplete: selection.routingGap?.owners?.complete ?? false,
+    wakeFailures
+  };
+}
+function canonicalise(summary2) {
+  const sortedCounters = Object.fromEntries(Object.entries(summary2.counters).sort(([a], [b]) => a.localeCompare(b)));
+  const sortedLegacy = Object.fromEntries(Object.entries(summary2.legacy).sort(([a], [b]) => a.localeCompare(b)));
+  return {
+    companyId: summary2.companyId,
+    counters: sortedCounters,
+    legacy: sortedLegacy,
+    pickedIssueIds: [...summary2.pickedIssueIds].sort(),
+    parkedIssueIds: [...summary2.parkedIssueIds].sort(),
+    budgetBlockedIssueIds: [...summary2.budgetBlockedIssueIds].sort(),
+    routingGapCount: summary2.routingGapCount,
+    routingOwnerIds: [...summary2.routingOwnerIds].sort(),
+    routingOwnersComplete: summary2.routingOwnersComplete,
+    wakeFailures: summary2.wakeFailures
+  };
+}
+function hasStateChanged(previous, current) {
+  if (!previous) return true;
+  return JSON.stringify(canonicalise(previous)) !== JSON.stringify(canonicalise(current));
+}
+async function emitMetrics(ctx, input) {
+  const { companyId, summary: summary2, wakeEnabled } = input;
+  const tags = { companyId, wakeEnabled: String(wakeEnabled) };
+  for (const counter of SELECTION_COUNTERS) {
+    await ctx.metrics.write(`${METRIC_PREFIX}.${counter}`, summary2.counters[counter] ?? 0, tags);
+  }
+  for (const counter of LEGACY_COUNTERS) {
+    const value = summary2.legacy[counter];
+    if (typeof value === "number") {
+      await ctx.metrics.write(`${METRIC_PREFIX}.${counter}`, value, tags);
+    }
+  }
+  await ctx.metrics.write(`${METRIC_PREFIX}.routing_gap`, summary2.routingGapCount, tags);
+  await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary2.wakeFailures, tags);
+}
+async function logStateChange(ctx, input) {
+  const { companyId, summary: summary2, wakeEnabled, notes = [] } = input;
+  const mode = wakeEnabled ? "live" : "report-only";
+  const action = wakeEnabled ? "woken" : "would have woken";
+  const routing = summary2.routingGapCount > 0 ? ` Unassigned (routing gap): ${summary2.routingGapCount}${summary2.routingOwnersComplete ? "" : " (routing owners: partial list)"}.` : " Unassigned (routing gap): 0.";
+  const message = `Dispatch sweep (${mode}): ${action} of ${summary2.legacy.candidates_ready} candidates from a wakeable surface of ${summary2.legacy.runnable_queue}. Parked on a named owner: ${summary2.counters.parked_on_named_owner ?? 0}.` + routing;
+  await ctx.activity.log({
+    companyId,
+    message,
+    entityType: "plugin",
+    entityId: "dispatch",
+    metadata: { ...summary2, wakeEnabled, notes }
+  });
+}
+
 // src/worker.ts
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -2130,6 +2930,37 @@ function createPlugin() {
       const readOperatorOverrides = async (companyId) => {
         const stored = await ctx.state.get(operatorOverridesKey(companyId));
         return stored && typeof stored === "object" ? stored : {};
+      };
+      const laneOutageKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneOutage
+      });
+      const readLaneOutage = async (companyId) => {
+        const stored = await ctx.state.get(laneOutageKey(companyId));
+        if (!stored || typeof stored !== "object") return null;
+        const record2 = stored;
+        if (!Array.isArray(record2.lanes) || !Array.isArray(record2.models) || typeof record2.until !== "string") {
+          return null;
+        }
+        return {
+          lanes: record2.lanes.filter((l) => typeof l === "string"),
+          models: record2.models.filter((m) => typeof m === "string"),
+          until: record2.until,
+          ...typeof record2.reason === "string" ? { reason: record2.reason } : {}
+        };
+      };
+      const zaiPaceOverrideKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.zaiPaceOverride
+      });
+      const readZaiPaceOverride = async (companyId) => {
+        const stored = await ctx.state.get(zaiPaceOverrideKey(companyId));
+        if (!stored || typeof stored !== "object") return null;
+        const record2 = stored;
+        if (typeof record2.margin !== "number" || typeof record2.until !== "string") return null;
+        return { margin: record2.margin, until: record2.until };
       };
       const paceRepinHistoryKey = (companyId) => ({
         scopeKind: "company",
@@ -2240,16 +3071,65 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         scopeId: companyId,
         stateKey: PLUGIN_STATE_KEYS.modelScores
       });
+      const classificationHttp = {
+        fetch: (url, init) => ctx.http.fetch(url, init)
+      };
+      const classificationExclusionsKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.classificationExclusions
+      });
+      const readClassificationExclusions = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(classificationExclusionsKey(companyId)));
+        const out = {};
+        for (const [issueId, excluded] of Object.entries(stored)) {
+          if (excluded === true) out[issueId] = true;
+        }
+        return out;
+      };
       const readCardLedger = async (companyId) => {
         const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
         const ledger = asRecord(stored.cardLedger);
         return ledger;
+      };
+      const readModelScores = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
+        const scores = Array.isArray(stored.modelScores) ? stored.modelScores : [];
+        const byModelId = {};
+        for (const score2 of scores) byModelId[score2.modelId] = score2;
+        return byModelId;
       };
       const shadowDiffsKey = (companyId) => ({
         scopeKind: "company",
         scopeId: companyId,
         stateKey: PLUGIN_STATE_KEYS.shadowDiffs
       });
+      const dispatchLastFiringKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.dispatchLastFiring
+      });
+      const activePinsWeightByLane = async (companyId, models) => {
+        const rows = await ctx.db.query(
+          `select assignee_adapter_overrides->'adapterConfig'->>'model' as pinned_model
+             from issues
+            where company_id = $1
+              and status in ('todo','in_progress')
+              and assignee_adapter_overrides->'adapterConfig'->>'model' is not null`,
+          [companyId]
+        );
+        const weightByLane = {};
+        for (const row of rows) {
+          const r = asRecord(row);
+          const rawModelId = typeof r.pinned_model === "string" ? r.pinned_model : null;
+          const modelId = resolveConfiguredModelId(rawModelId, models);
+          const model = models.find((m) => m.id === modelId);
+          if (!model || !model.laneId) continue;
+          const weight = blendedListPrice(model) < 1 ? 0.5 : 1;
+          weightByLane[model.laneId] = (weightByLane[model.laneId] ?? 0) + weight;
+        }
+        return weightByLane;
+      };
       const aaSnapshotKey = () => ({
         scopeKind: "instance",
         stateKey: PLUGIN_STATE_KEYS.aaIndexSnapshot
@@ -2296,12 +3176,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
         const isIdle = !issue.checkoutRunId && !issue.executionRunId && scheduledRetryStatus !== "queued" && scheduledRetryStatus !== "running";
         let agentFloorModelId = null;
+        let agentName = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
             const agent = await ctx.agents.get(assigneeAgentId, companyId);
-            const config = asRecord(asRecord(agent).adapterConfig);
+            const agentRecord = asRecord(agent);
+            const config = asRecord(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
+            if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
           }
         }
@@ -2311,6 +3194,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           labelNames,
           pinnedModelId,
           agentFloorModelId,
+          agentName,
           // Sticky is derived from the pin: if the issue is already pinned, the
           // run is already on that model and a change would reset the session.
           stickyModelId: pinnedModelId,
@@ -2336,18 +3220,29 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           identifier: typeof issue.identifier === "string" ? issue.identifier : null
         };
       };
-      const advise = async (companyId, params) => {
+      const advise = async (companyId, params, allowExplore = true, forceTier, suppressSticky = false) => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
         const config = await companyConfig(companyId);
         const described = await describeIssue(companyId, issueId, params);
         if (!described) return null;
+        if (forceTier) {
+          described.descriptor.labelNames = [`${TIER_LABEL_PREFIX}${forceTier}`];
+        }
+        if (suppressSticky) {
+          described.descriptor.stickyModelId = null;
+        }
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
         const nowIso = (/* @__PURE__ */ new Date()).toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
         const cardLedger = await readCardLedger(companyId);
+        const modelScores = await readModelScores(companyId);
+        const laneOutageOverride = await readLaneOutage(companyId);
+        const zaiPaceOverride = await readZaiPaceOverride(companyId);
+        const now = Date.now();
+        const pinsWeightByLane = config.pacing.mode !== "off" ? await activePinsWeightByLane(companyId, config.models) : {};
         const decision = selectModel({
           descriptor: described.descriptor,
           config: {
@@ -2360,11 +3255,28 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
             operatorOverrideModelId: liveOverride?.modelId ?? null,
-            objective: config.selection.objective
+            laneAvoidConfig: config.pacing.avoid,
+            codexLaneId: config.pacing.codexLaneId,
+            opencodeGoLaneId: config.pacing.opencodeGoLaneId,
+            zaiLaneId: config.pacing.zai.laneId,
+            laneOutageOverride,
+            laneRoom: {
+              capPerAccount: config.pacing.laneCapPerAccount,
+              activePinsWeightByLane: pinsWeightByLane,
+              fiveHourWindowName: config.pacing.fiveHourWindowName,
+              zaiLaneId: config.pacing.zai.laneId,
+              zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+              zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+              zaiPaceOverrideMargin: activeZaiPaceOverride(zaiPaceOverride, new Date(now).toISOString()),
+              now
+            },
+            objective: config.selection.objective,
+            modelScores,
+            allowExplore
           },
           profiles,
           signals,
-          now: Date.now(),
+          now,
           cardLedger
         });
         const pinnedModelId = resolveConfiguredModelId(
@@ -2415,7 +3327,9 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           nowIso,
           config,
           title: described.title,
-          identifier: described.identifier
+          identifier: described.identifier,
+          agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
+          pinnedModelId: described.descriptor.pinnedModelId ?? null
         };
       };
       ctx.tools.register(
@@ -2562,6 +3476,65 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             content: `operator override recorded: ${issueId} -> ${configuredModelId}, expires ${entry.expiresAt}`,
             data: entry
           };
+        }
+      );
+      ctx.tools.register(
+        TOOL_NAMES.setLaneOutage,
+        {
+          displayName: "Declare or clear a lane outage",
+          description: "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+          parametersSchema: {
+            type: "object",
+            required: ["until"],
+            properties: {
+              lanes: { type: "array", items: { type: "string" } },
+              models: { type: "array", items: { type: "string" } },
+              until: { type: "string" },
+              reason: { type: "string" }
+            }
+          }
+        },
+        async (params, runCtx) => {
+          const supplied = asRecord(params);
+          const lanes = Array.isArray(supplied.lanes) ? supplied.lanes.filter((l) => typeof l === "string") : [];
+          const models = Array.isArray(supplied.models) ? supplied.models.filter((m) => typeof m === "string") : [];
+          const until = typeof supplied.until === "string" ? supplied.until : null;
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (lanes.length === 0 && models.length === 0) {
+            await ctx.state.set(laneOutageKey(runCtx.companyId), null);
+            return { content: "lane outage cleared.", data: null };
+          }
+          const reason = typeof supplied.reason === "string" ? supplied.reason : void 0;
+          const override = { lanes, models, until, ...reason ? { reason } : {} };
+          await ctx.state.set(laneOutageKey(runCtx.companyId), override);
+          return { content: `lane outage recorded: ${[...lanes, ...models].join(", ")} until ${until}`, data: override };
+        }
+      );
+      ctx.tools.register(
+        TOOL_NAMES.setZaiPaceOverride,
+        {
+          displayName: "Set or clear the Z.ai weekly-pace margin override",
+          description: "TOG-2481 port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+          parametersSchema: {
+            type: "object",
+            required: ["until"],
+            properties: {
+              margin: { type: "number", minimum: 0, maximum: 1 },
+              until: { type: "string" }
+            }
+          }
+        },
+        async (params, runCtx) => {
+          const supplied = asRecord(params);
+          const until = typeof supplied.until === "string" ? supplied.until : null;
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (typeof supplied.margin !== "number") {
+            await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), null);
+            return { content: "zai pace override cleared.", data: null };
+          }
+          const override = { margin: supplied.margin, until };
+          await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), override);
+          return { content: `zai pace override recorded: margin ${supplied.margin} until ${until}`, data: override };
         }
       );
       const appendReworkSignal = async (companyId, signal) => {
@@ -2778,7 +3751,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`
                   });
                 } catch {
-                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });
+                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, observation: null, error: "lane-secret-unavailable" });
                   continue;
                 }
               }
@@ -3141,6 +4114,574 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
           } catch (cause) {
             ctx.logger.error("score refresh failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.classifyIssues, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+            if (!config.classification.baseUrl || !config.classification.modelId) continue;
+            let apiKey = null;
+            if (config.classification.apiKeySecretRef) {
+              try {
+                apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef, {
+                  companyId: company.id,
+                  configPath: "classification.apiKeySecretRef"
+                });
+              } catch {
+                ctx.logger.error("classification secret unavailable", { companyId: company.id });
+                continue;
+              }
+            }
+            const candidateRows = await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      coalesce(a.name,'') as agent_name,
+                      i.title as title,
+                      coalesce(i.description,'') as description
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and i.assignee_agent_id is not null
+                  and (i.assignee_adapter_overrides is null
+                       or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
+                         i.updated_at desc
+                limit $2`,
+              [company.id, String(config.classification.batchSize)]
+            );
+            const exclusions = await readClassificationExclusions(company.id);
+            let classified = 0;
+            for (const row of candidateRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+              let issue;
+              try {
+                issue = await ctx.issues.get(issueId, company.id);
+              } catch {
+                continue;
+              }
+              if (!issue) continue;
+              const labelNames = (issue.labels ?? []).map((label) => label.name).filter((name) => typeof name === "string");
+              if (labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX))) continue;
+              if (labelNames.includes(OPERATOR_PIN_LABEL)) continue;
+              const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
+              const title = typeof r.title === "string" ? r.title : "";
+              const description = typeof r.description === "string" ? r.description : "";
+              const prompt = buildClassificationPrompt(title, description, agentName, config.classification.descriptionChars);
+              const result = await callClassifier(
+                {
+                  baseUrl: config.classification.baseUrl,
+                  protocol: config.classification.protocol,
+                  modelId: config.classification.modelId,
+                  apiKey,
+                  system: RUBRIC,
+                  userPrompt: prompt,
+                  maxOutputTokens: config.classification.maxOutputTokens,
+                  requestTimeoutMs: config.classification.requestTimeoutMs,
+                  maxResponseBytes: config.classification.maxResponseBytes
+                },
+                classificationHttp
+              );
+              if (!result.text) {
+                ctx.logger.info("classification skipped", { companyId: company.id, issue: identifier, why: result.error });
+                continue;
+              }
+              const judgement = parseClassificationResponse(result.text);
+              if (!judgement) {
+                ctx.logger.info("classification unparseable", { companyId: company.id, issue: identifier });
+                continue;
+              }
+              const { labelTier, pickTier } = resolveClassifiedTiers(judgement, {
+                t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+                t2ConfidenceFloor: config.classification.t2ConfidenceFloor
+              });
+              const labelId = config.tierLabelIds[labelTier];
+              if (labelId) {
+                const existingLabelIds = issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
+                const nextLabelIds = [.../* @__PURE__ */ new Set([...existingLabelIds, labelId])];
+                await ctx.issues.update(
+                  issueId,
+                  { labelIds: nextLabelIds },
+                  company.id
+                );
+              }
+              if (judgement.exclusion) {
+                await ctx.state.set(classificationExclusionsKey(company.id), { ...exclusions, [issueId]: true });
+                exclusions[issueId] = true;
+              }
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { tier: labelTier, pickTier, confidence: judgement.confidence, reason: judgement.reason }
+              });
+              classified += 1;
+            }
+            ctx.logger.info("issue classification pass complete", { companyId: company.id, classified, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("issue classification failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      const isUsableAndCapable = (modelId, tier2, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
+        if (!modelId) return false;
+        const model = config.models.find((m) => m.id === modelId && m.enabled);
+        if (!model) return false;
+        if (config.pacing.mode === "off") return true;
+        if (hardStopExcluded(laneLedger, model)) return false;
+        if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
+        if (laneOutageExcluded(laneOutageOverride, nowIso, model)) return false;
+        const score2 = modelScores[model.id]?.tiers[tier2];
+        if (score2 && score2.capable === false) return false;
+        return true;
+      };
+      const countActivePinsOfModel = async (companyId, modelId) => {
+        const rows = await ctx.db.query(
+          `select count(*)::int as n
+             from issues i
+            where i.company_id = $1
+              and i.status in ('todo','in_progress','in_review','blocked')
+              and i.assignee_adapter_overrides->'adapterConfig'->>'model' = $2`,
+          [companyId, modelId]
+        );
+        const r = asRecord(rows[0]);
+        return typeof r.n === "number" ? r.n : 0;
+      };
+      ctx.jobs.register(JOB_KEYS.labelOnlyPass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+            const candidateRows = await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      coalesce(a.adapter_config->>'model','') as floor_model
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and (i.assignee_adapter_overrides is null
+                       or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by i.updated_at desc
+                limit $2`,
+              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)]
+            );
+            let pinned = 0;
+            for (const row of candidateRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier2 = tierFromLabels(described.descriptor.labelNames);
+              if (!tier2) continue;
+              const result = await advise(company.id, { issueId }, false);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier: tier2 });
+                continue;
+              }
+              const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+              if (result.decision.modelId === floorModelId) {
+                ctx.logger.info("label-only pass skipped: pick equals floor", {
+                  companyId: company.id,
+                  issue: identifier,
+                  tier: tier2
+                });
+                continue;
+              }
+              await ctx.issues.update(
+                issueId,
+                {
+                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
+                },
+                company.id
+              );
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection label-only pinned ${result.decision.modelId} (${tier2}) from the existing tier label`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { modelId: result.decision.modelId, tier: tier2, trace: result.decision.trace }
+              });
+              pinned += 1;
+            }
+            ctx.logger.info("label-only pass complete", { companyId: company.id, pinned, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("label-only pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+            const candidateRows = await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      i.updated_at as updated_at
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and i.assignee_adapter_overrides->'adapterConfig'->>'model' is not null
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by i.updated_at asc
+                limit $2`,
+              [company.id, String(REPIN_PASS_FETCH_LIMIT)]
+            );
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+            let repinned = 0;
+            for (const row of candidateRows) {
+              if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier2 = tierFromLabels(described.descriptor.labelNames);
+              if (!tier2) continue;
+              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              if (isUsableAndCapable(pinnedModelId, tier2, config, laneLedger, laneOutageOverride, modelScores, nowIso)) {
+                continue;
+              }
+              const result = await advise(company.id, { issueId }, false, void 0, true);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+              if (result.decision.modelId === pinnedModelId) continue;
+              if (!isUsableAndCapable(
+                result.decision.modelId,
+                tier2,
+                config,
+                laneLedger,
+                laneOutageOverride,
+                modelScores,
+                nowIso
+              )) {
+                continue;
+              }
+              await ctx.issues.update(
+                issueId,
+                {
+                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
+                },
+                company.id
+              );
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection re-pinned ${pinnedModelId} -> ${result.decision.modelId} (${tier2}): lane unusable or measurably demoted`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier: tier2, trace: result.decision.trace }
+              });
+              repinned += 1;
+            }
+            ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("repin pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.balancePass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+            const candidateRows = await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by case i.status when 'in_progress' then 0 when 'todo' then 1 when 'in_review' then 2 else 3 end,
+                         i.updated_at desc
+                limit $2`,
+              [company.id, String(BALANCE_PASS_FETCH_LIMIT)]
+            );
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+            const now = Date.now();
+            let balanced = 0;
+            for (const row of candidateRows) {
+              if (balanced >= BALANCE_PASS_WRITE_LIMIT) break;
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const status = typeof r.status === "string" ? r.status : "";
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier2 = tierFromLabels(described.descriptor.labelNames);
+              if (!tier2) continue;
+              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : void 0;
+              if (pinnedModelId && pinnedModel) {
+                const currentUtilization = pinnedModel.laneId ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId) : null;
+                const result = await advise(company.id, { issueId }, false, void 0, true);
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (result.decision.modelId === pinnedModelId) continue;
+                const newModel = config.models.find((m) => m.id === result.decision.modelId);
+                if (!newModel) continue;
+                const newUtilization = newModel.laneId ? laneEffectiveUtilization(laneLedger, newModel.laneId) : null;
+                const cheaper = blendedListPrice(newModel) <= BALANCE_PASS_COST_DOWN_MULTIPLIER * blendedListPrice(pinnedModel);
+                const pinnedScore = modelScores[pinnedModelId]?.tiers[tier2];
+                let incapable = pinnedScore ? pinnedScore.capable === false : false;
+                if (!incapable && blendedListPrice(pinnedModel) < BALANCE_PASS_PROBATION_PRICE_USD && !(pinnedScore?.proven ?? false)) {
+                  const activeCount = await countActivePinsOfModel(company.id, pinnedModelId);
+                  if (activeCount > 1) incapable = true;
+                }
+                if (!incapable && (status === "todo" || status === "in_progress") && pinnedModel.laneId && config.pacing.mode !== "off") {
+                  const pinsWeightByLane = await activePinsWeightByLane(company.id, config.models);
+                  const admitted = laneHasRoom({
+                    laneId: pinnedModel.laneId,
+                    activePinsWeight: pinsWeightByLane[pinnedModel.laneId] ?? 0,
+                    extra: -1,
+                    ledger: laneLedger,
+                    capPerAccount: config.pacing.laneCapPerAccount,
+                    fiveHourWindowName: config.pacing.fiveHourWindowName,
+                    zaiLaneId: config.pacing.zai.laneId,
+                    zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+                    zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+                    zaiPaceOverrideMargin: null,
+                    nowMs: now
+                  });
+                  if (!admitted) incapable = true;
+                }
+                const busier = currentUtilization !== null && newUtilization !== null && currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
+                if (!(cheaper || incapable || busier)) continue;
+                await ctx.issues.update(
+                  issueId,
+                  {
+                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
+                  },
+                  company.id
+                );
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection balanced ${pinnedModelId} -> ${result.decision.modelId} (${tier2}): ${cheaper ? "cost-down" : incapable ? "demote" : "rebalance"}`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier: tier2, cheaper, incapable, busier }
+                });
+                balanced += 1;
+              } else {
+                const result = await advise(company.id, { issueId }, false, "T1");
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+                if (result.decision.modelId === floorModelId) continue;
+                await ctx.issues.update(
+                  issueId,
+                  {
+                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
+                  },
+                  company.id
+                );
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1" }
+                });
+                balanced += 1;
+              }
+            }
+            ctx.logger.info("balance pass complete", { companyId: company.id, balanced, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("balance pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      });
+      ctx.jobs.register(JOB_KEYS.dispatchSweep, async (job) => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            const dispatchConfig = config.dispatch;
+            const notes = [];
+            const issues = await ctx.issues.list({
+              companyId: company.id,
+              limit: DISPATCH_ISSUE_PAGE_LIMIT
+            });
+            if (issues.length >= DISPATCH_ISSUE_PAGE_LIMIT) {
+              ctx.logger.warn("dispatch sweep: issue page saturated, some issues were not seen this firing", {
+                companyId: company.id,
+                pageLimit: DISPATCH_ISSUE_PAGE_LIMIT
+              });
+              notes.push(
+                `issue list saturated at limit ${DISPATCH_ISSUE_PAGE_LIMIT} \u2014 counters undercount the board`
+              );
+            }
+            const nonTerminal = issues.filter(
+              (issue) => !TERMINAL_STATUSES2.includes(issue.status)
+            );
+            const routingGapBase = summariseRoutingGap(nonTerminal.map((issue) => ({ issue })));
+            let routingGap = routingGapBase;
+            if (routingGapBase.count > 0) {
+              try {
+                const agents = await ctx.agents.list({ companyId: company.id });
+                routingGap = { ...routingGapBase, owners: identifyRoutingOwners(agents) };
+                if (!routingGap.owners?.complete) {
+                  notes.push(
+                    `routing owners are a partial list: ${(routingGap.owners?.unreadableSources ?? []).join(", ")} are not readable from the plugin capability surface`
+                  );
+                }
+              } catch (cause) {
+                ctx.logger.warn("dispatch sweep: could not read agents for routing-gap owners", {
+                  companyId: company.id,
+                  error: cause instanceof Error ? cause.message : String(cause)
+                });
+              }
+            }
+            const assigned = nonTerminal.filter((issue) => issue.assigneeAgentId);
+            const population = [];
+            let unreadable = 0;
+            for (const issue of nonTerminal) {
+              if (!issue.assigneeAgentId) {
+                population.push({ issue });
+                continue;
+              }
+              try {
+                const orchestration = await ctx.issues.summaries.getOrchestration({
+                  issueId: issue.id,
+                  companyId: company.id
+                });
+                const relation = orchestration.relations[issue.id];
+                population.push({
+                  issue,
+                  blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
+                  runs: orchestration.runs.map((r) => ({
+                    issueId: r.issueId,
+                    status: r.status,
+                    finishedAt: r.finishedAt,
+                    startedAt: r.startedAt,
+                    createdAt: r.createdAt
+                  })),
+                  invocationBlock: orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null
+                });
+              } catch (cause) {
+                unreadable += 1;
+                ctx.logger.warn("dispatch sweep: could not read orchestration for an issue, excluding it", {
+                  companyId: company.id,
+                  issueId: issue.id,
+                  error: cause instanceof Error ? cause.message : String(cause)
+                });
+              }
+            }
+            if (unreadable > 0) {
+              notes.push(`${unreadable} assigned issues could not be read and are excluded from selection`);
+            }
+            const selection = selectDispatch(population, {
+              idleMinutes: dispatchConfig.idleMinutes,
+              maxWakesPerFiring: dispatchConfig.maxWakesPerFiring,
+              focusProjectIds: [...dispatchConfig.focusProjectIds],
+              now: Date.now()
+            });
+            selection.routingGap = routingGap;
+            const wakeOutcomes = [];
+            if (dispatchConfig.wakeEnabled) {
+              for (const pick of selection.picks) {
+                try {
+                  const result = await ctx.issues.requestWakeup(pick.issue.id, company.id, {
+                    reason: "dispatch_stalled_issue",
+                    contextSource: "plugin.dispatch.sweep",
+                    idempotencyKey: `dispatch:${job.runId}:${pick.issue.id}`
+                  });
+                  wakeOutcomes.push({ issueId: pick.issue.id, queued: result.queued });
+                } catch (cause) {
+                  wakeOutcomes.push({
+                    issueId: pick.issue.id,
+                    queued: false,
+                    error: cause instanceof Error ? cause.message : String(cause)
+                  });
+                }
+              }
+            }
+            if (!dispatchConfig.wakeEnabled && selection.picks.length > 0) {
+              notes.push(
+                `report-only: would have woken ${selection.picks.map((p) => p.issue.identifier ?? p.issue.id).join(", ")}`
+              );
+            }
+            const summary2 = summariseFiring(company.id, selection, wakeOutcomes);
+            await emitMetrics(ctx, { companyId: company.id, summary: summary2, wakeEnabled: dispatchConfig.wakeEnabled });
+            const previous = await ctx.state.get(dispatchLastFiringKey(company.id));
+            if (hasStateChanged(previous, summary2)) {
+              await logStateChange(ctx, { companyId: company.id, summary: summary2, wakeEnabled: dispatchConfig.wakeEnabled, notes });
+              await ctx.state.set(dispatchLastFiringKey(company.id), summary2);
+            }
+            ctx.logger.info("dispatch sweep complete", {
+              companyId: company.id,
+              woken: summary2.counters.woken,
+              candidatesReady: summary2.legacy.candidates_ready,
+              runnableQueue: summary2.legacy.runnable_queue,
+              routingGap: summary2.routingGapCount,
+              assignedGathered: assigned.length
+            });
+          } catch (cause) {
+            ctx.logger.error("dispatch sweep failed for a company", {
               companyId: company.id,
               error: cause instanceof Error ? cause.message : String(cause)
             });

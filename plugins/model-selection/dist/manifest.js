@@ -1,7 +1,7 @@
 // src/constants.ts
 var PLUGIN_ID = "togetherweown.model-selection";
 var PLUGIN_API_VERSION = 1;
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.3.0";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -22,7 +22,21 @@ var TOOL_NAMES = {
   /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
-  refreshAaIndexNow: "model_selection_refresh_aa_index_now"
+  refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
+  setLaneOutage: "model_selection_set_lane_outage",
+  /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
+  setZaiPaceOverride: "model_selection_set_zai_pace_override"
+};
+var LANE_ID_CODEX = "cliproxy-codex";
+var LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
+var LANE_ID_ZAI = "cliproxy-zai";
+var DEFAULT_LANE_CAP_PER_ACCOUNT = {
+  [LANE_ID_OPENCODE_GO]: 2,
+  [LANE_ID_ZAI]: 3
+};
+var DEFAULT_AVOID_PER_LANE = {
+  [LANE_ID_CODEX]: 0.99
 };
 var ROUTE_KEYS = {
   advise: "advise",
@@ -36,7 +50,21 @@ var JOB_KEYS = {
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
-  refreshAaIndex: "refreshAaIndex"
+  refreshAaIndex: "refreshAaIndex",
+  /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
+  classifyIssues: "classifyIssues",
+  /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
+  labelOnlyPass: "labelOnlyPass",
+  /** Ported from `tier_dispatcher.py`'s `repin_pass()`. */
+  repinPass: "repinPass",
+  /** Ported from `tier_dispatcher.py`'s `balance_pass()`. */
+  balancePass: "balancePass",
+  /**
+   * TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+   * stall-sweep + wakeup, ported wholesale so the `plugins` table shows one
+   * dispatcher, not two.
+   */
+  dispatchSweep: "dispatch-sweep"
 };
 var TIERS = ["T1", "T2", "T3"];
 var PACING_MODES = ["off", "shadow", "enforce"];
@@ -285,7 +313,119 @@ var SELECTION_CONFIG_SCHEMA = {
         /** Default TTL applied to an operator override recorded in the lane ledger. */
         operatorOverrideTtlSeconds: { type: "integer", minimum: 1, default: 3600 },
         /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
-        idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 }
+        idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
+         * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
+         * excluded from NEW admission even while still serviceable —
+         * `defaultThreshold` is the blanket rule, `perLane` is how a specific
+         * lane (e.g. codex, per the 2026-09-07 07:12Z owner rule) earns a
+         * higher threshold than the default.
+         */
+        avoid: {
+          type: "object",
+          title: "Lane avoid thresholds",
+          additionalProperties: false,
+          properties: {
+            defaultThreshold: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
+            perLane: {
+              type: "object",
+              additionalProperties: { type: "number", minimum: 0, maximum: 1 },
+              default: { "cliproxy-codex": 0.99 }
+            }
+          },
+          default: {}
+        },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
+         * {"opencode-go": 2, "zai": 3}` (2026-09-06 17:1xZ / 2026-09-07
+         * 12:32Z owner rules). Caps the number of ACTIVE (todo/in_progress)
+         * cards a lane may hold per healthy account; unset entries have no
+         * cap. Defaults to the same two lanes the Python source capped,
+         * canonicalized to this deployment's live lane ids.
+         */
+        laneCapPerAccount: {
+          type: "object",
+          title: "Per-account active-card cap",
+          additionalProperties: { type: "number", minimum: 0 },
+          default: { "cliproxy-opencode-go": 2, "cliproxy-zai": 3 }
+        },
+        /** Named 5h allowance window `lane_5h()` reads; new admission stops at >= 0.5 utilization (2026-09-07 03:15Z: 0.6 -> 0.5). Default matches this deployment's live hyphenated `five-hour` window name. */
+        fiveHourWindowName: { type: "string", minLength: 1, default: "five-hour" },
+        /**
+         * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+         * fallback rule (2026-09-07 03:15Z owner rule): `codexLaneId` names
+         * which configured lane is Codex, so the T1-Go-fallback and Z.ai
+         * long-run-agent-exclusion rules know which lane's avoid threshold/
+         * utilization to check before routing away from Go/Zai.
+         */
+        codexLaneId: { type: "string", minLength: 1, default: "cliproxy-codex" },
+        /** Names which configured lane is OpenCode Go, for the T1-Go-fallback rule above. */
+        opencodeGoLaneId: { type: "string", minLength: 1, default: "cliproxy-opencode-go" },
+        /**
+         * TOG-2481 port of `zai_peak_now()` / `zai_weekly_pace_ok()`
+         * (2026-09-08 13:20Z owner rule). `laneId` names which configured
+         * lane is the Z.ai lane so the peak-hour throttle and weekly-pacing
+         * gate know which lane to apply to.
+         */
+        zai: {
+          type: "object",
+          title: "Z.ai lane pacing",
+          additionalProperties: false,
+          properties: {
+            laneId: { type: "string", minLength: 1, default: "cliproxy-zai" },
+            weeklyWindowName: { type: "string", minLength: 1, default: "weekly" },
+            weeklyDefaultMargin: { type: "number", minimum: 0, maximum: 1, default: 0.15 }
+          },
+          default: {}
+        }
+      },
+      default: {}
+    },
+    /**
+     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC (TOG-2481). Default
+     * OFF: this section being absent, or `enabled: false`, means the plugin
+     * writes no tier labels of its own — a company that only ever records tier
+     * via explicit pins/labels sees no behavior change from this section
+     * existing. This is also the AC3 kill switch: there is deliberately no
+     * `~/paperclip-enterprise-company/.tier-dispatcher-disabled` file check
+     * anywhere in this plugin, only this config flag.
+     */
+    classification: {
+      type: "object",
+      title: "Tier classification (LLM)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /**
+         * Called directly (mirroring paperclip-model-router's own upstream
+         * call), never through model-router's `/invoke` route: the host's
+         * `isPrivateIP()` block on `ctx.http.fetch()` makes a same-host
+         * `/invoke` hop unreachable from a plugin (TOG-2481 architecture note).
+         */
+        baseUrl: {
+          type: "string",
+          minLength: 1,
+          pattern: "^https://[^/?#@]+(?:/[^?#]*)?$"
+        },
+        protocol: {
+          type: "string",
+          enum: ["anthropic-messages", "openai-chat-completions"],
+          default: "anthropic-messages"
+        },
+        modelId: { type: "string", minLength: 1 },
+        apiKeySecretRef: SECRET_REF_SCHEMA,
+        requestTimeoutMs: { type: "integer", minimum: 1, default: 15e3 },
+        maxResponseBytes: { type: "integer", minimum: 1, default: 65536 },
+        /** tier_dispatcher.py truncates the description to this many chars before prompting. */
+        descriptionChars: { type: "integer", minimum: 1, default: 1500 },
+        maxOutputTokens: { type: "integer", minimum: 1, default: 120 },
+        /** `T3` demotes to `T2` below this confidence (tier_dispatcher.py main():386). */
+        t3ConfidenceFloor: { type: "number", minimum: 0, maximum: 1, default: 0.7 },
+        /** `T2` demotes to `T1` below this confidence (tier_dispatcher.py main():387). */
+        t2ConfidenceFloor: { type: "number", minimum: 0, maximum: 1, default: 0.6 },
+        /** How many eligible issues one job run classifies. */
+        batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 }
       },
       default: {}
     },
@@ -343,6 +483,50 @@ var SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true }
+      },
+      default: {}
+    },
+    /**
+     * TOG-2481: absorbs the standalone `dispatch` plugin (TOG-747, design
+     * TOG-706) so the `plugins` table shows one dispatcher, not two. Mirrors
+     * that plugin's `instanceConfigSchema` field-for-field, including its
+     * defaults — `wakeEnabled: false` so absorbing it changes nothing live
+     * until an operator explicitly flips the wake gate.
+     */
+    dispatch: {
+      type: "object",
+      title: "Stall-sweep dispatch (TOG-706/TOG-747)",
+      additionalProperties: false,
+      properties: {
+        wakeEnabled: {
+          type: "boolean",
+          title: "Enable the wake action",
+          description: "OFF until the evidence gate passes. While off, the sweep runs the real selection policy and reports what it WOULD have woken, and calls requestWakeup zero times.",
+          default: false
+        },
+        idleMinutes: {
+          type: "number",
+          title: "Idle threshold (minutes)",
+          description: "How long since the last heartbeat run scoped to that issue before it counts as stalled. Measured against heartbeat_runs.context_snapshot->>'issueId', not updated_at, which any comment refreshes (ADR 0003).",
+          default: 120,
+          minimum: 5,
+          maximum: 10080
+        },
+        maxWakesPerFiring: {
+          type: "number",
+          title: "Maximum wakes per firing",
+          description: "Cap on selected issues per sweep. Picks are spread across distinct assignees, because host coalescing is per-agent (ADR 0001) and two picks for one agent collapse into one run.",
+          default: 3,
+          minimum: 1,
+          maximum: 25
+        },
+        focusProjectIds: {
+          type: "array",
+          title: "Focus project IDs",
+          description: "Optional. When set, only issues in these projects are selectable. Empty means the whole company.",
+          default: [],
+          items: { type: "string" }
+        }
       },
       default: {}
     }
@@ -423,6 +607,15 @@ var manifest = {
     // `Operator:` issue is a real, separately-triaged unit of work, and that
     // is what a capacity dead end actually is.
     "issues.create",
+    // TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+    // the stall-sweep reads blocker relations and the orchestration summary
+    // (which mirrors the server's own budget-invocation-block verdict, see
+    // dispatch-selection.ts's BUDGET_RAIL_MIRROR_SOURCE), and wakes a stalled
+    // issue's existing run. Declared even though `dispatch.wakeEnabled`
+    // defaults to false, matching the standalone plugin's own manifest.
+    "issue.relations.read",
+    "issues.orchestration.read",
+    "issues.wakeup",
     // Recompute volume profiles and success scores from heartbeat_runs/issues/issue_comments.
     "database.namespace.read",
     // Required by `pluginManifestV1Schema` for ANY manifest declaring
@@ -469,7 +662,9 @@ var manifest = {
     // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
     // signals are sourced from captured `ctx.events`, not a live join against a
     // table this plugin isn't allowlisted to read (TOG-1917 §2.2 / TOG-2136).
-    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations"]
+    // "agents" added for TOG-2481's classification job (join issues -> agents
+    // to read the assignee's role/name for the classification prompt).
+    coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations", "agents"]
   },
   jobs: [
     {
@@ -495,6 +690,36 @@ var manifest = {
       displayName: "Refresh aa.ai Intelligence Index",
       description: "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate \u2014 never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt (TOG-2438). Every-6h cadence matches refreshScores's family (TOG-2438 reopen AC4) \u2014 aa.ai moves faster than a daily check surfaced.",
       schedule: "53 */6 * * *"
+    },
+    {
+      jobKey: JOB_KEYS.classifyIssues,
+      displayName: "Classify unlabeled issues",
+      description: "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) \u2014 the AC3 kill switch for TOG-2481.",
+      schedule: "*/10 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.labelOnlyPass,
+      displayName: "Pin from an existing tier label",
+      description: "Ported from tier_dispatcher.py label_only_pass(): pin issues that already carry a tier:* label (e.g. inherited from a cloned card) but no override, without re-classifying.",
+      schedule: "*/10 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.repinPass,
+      displayName: "Re-pin off an unusable or demoted model",
+      description: "Ported from tier_dispatcher.py repin_pass(): idle issues pinned to a model whose lane is now unusable, or that has been measurably demoted for their tier, get re-pinned within the same tier.",
+      schedule: "*/10 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.balancePass,
+      displayName: "Balance pinned and formerly-excluded issues",
+      description: "Ported from tier_dispatcher.py balance_pass(): give unpinned+labelled cards a balanced T1-class pin, and re-pin cards whose pinned model has gone cost-down-eligible, incapable/on-probation/over-cap, or whose lane is far busier than another usable lane.",
+      schedule: "*/10 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.dispatchSweep,
+      displayName: "Stall-sweep dispatch",
+      description: "TOG-2481 absorption of the standalone dispatch plugin (TOG-747/TOG-706): finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set \u2014 same cadence and same default as the plugin it replaces.",
+      schedule: "*/30 * * * *"
     }
   ],
   tools: [
@@ -541,6 +766,34 @@ var manifest = {
       displayName: "Refresh aa.ai Intelligence Index now",
       description: "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
       parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.setLaneOutage,
+      displayName: "Declare or clear a lane outage",
+      description: "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+      parametersSchema: {
+        type: "object",
+        required: ["until"],
+        properties: {
+          lanes: { type: "array", items: { type: "string" } },
+          models: { type: "array", items: { type: "string" } },
+          until: { type: "string", minLength: 1 },
+          reason: { type: "string" }
+        }
+      }
+    },
+    {
+      name: TOOL_NAMES.setZaiPaceOverride,
+      displayName: "Set or clear the Z.ai weekly-pace margin override",
+      description: "TOG-2481 port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+      parametersSchema: {
+        type: "object",
+        required: ["until"],
+        properties: {
+          margin: { type: "number", minimum: 0, maximum: 1 },
+          until: { type: "string" }
+        }
+      }
     }
   ],
   apiRoutes: [

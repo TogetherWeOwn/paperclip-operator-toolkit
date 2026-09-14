@@ -2,8 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeOperatorOverride,
+  activeZaiPaceOverride,
+  avoidThresholdFor,
+  blendedListPrice,
   hardStopExcluded,
   isPreferredNearReset,
+  isLaneOutageActive,
+  laneAvoidExcluded,
+  laneEffectiveUtilization,
+  laneHasRoom,
+  laneHealthyAccountCount,
+  laneNamedWindowUtilization,
+  laneOutageExcluded,
   mergeLedgerEntry,
   orderCandidatesByPace,
   preferredCandidateId,
@@ -11,10 +21,16 @@ import {
   repinAllowed,
   slotAllowed,
   slotFactorFor,
+  zaiPeakNow,
+  zaiWeeklyPaceOk,
+  ZAI_LONG_RUN_AGENTS,
+  type LaneAvoidConfig,
   type LaneLedger,
+  type LaneOutageOverride,
+  type ZaiPaceOverride,
 } from "../src/engine/pacing.js";
 import type { Candidate, ModelEntry } from "../src/engine/types.js";
-import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
+import type { LanePaceObservation, LanePaceVerdict, PaceAccountObservation, PaceWindowObservation } from "../src/lane-capacity/pace.js";
 
 function verdict(overrides: Partial<LanePaceVerdict> = {}): LanePaceVerdict {
   return {
@@ -49,6 +65,42 @@ function model(overrides: Partial<ModelEntry> = {}): ModelEntry {
     note: "",
     earnIn: null,
     laneId: "lane-a",
+    ...overrides,
+  };
+}
+
+function window(overrides: Partial<PaceWindowObservation> = {}): PaceWindowObservation {
+  return {
+    name: "five_hour",
+    role: "allowance",
+    utilization: 0.3,
+    resetsAt: "2026-09-08T17:00:00.000Z",
+    windowSeconds: 5 * 60 * 60,
+    sourcePath: null,
+    ...overrides,
+  };
+}
+
+function account(overrides: Partial<PaceAccountObservation> = {}): PaceAccountObservation {
+  return {
+    accountKey: "acct-1",
+    health: "healthy",
+    weight: 1,
+    weightSource: "reported",
+    governingWindow: "five_hour",
+    windows: [window()],
+    ...overrides,
+  };
+}
+
+function observation(overrides: Partial<LanePaceObservation> = {}): LanePaceObservation {
+  return {
+    laneId: "lane-a",
+    free: false,
+    observedAt: "2026-09-08T12:00:00.000Z",
+    staleAfterSeconds: 900,
+    accounts: [account()],
+    error: null,
     ...overrides,
   };
 }
@@ -130,8 +182,8 @@ describe("orderCandidatesByPace", () => {
       model({ id: "t2-model", tier: "T2", laneId: "lane-t2" }),
     ];
     const ledger: LaneLedger = {
-      "lane-t1": { laneId: "lane-t1", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-t1", state: "ahead" }) },
-      "lane-t2": { laneId: "lane-t2", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-t2", state: "behind-urgent" }) },
+      "lane-t1": { laneId: "lane-t1", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "lane-t1", state: "ahead" }) },
+      "lane-t2": { laneId: "lane-t2", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "lane-t2", state: "behind-urgent" }) },
     };
     const candidates = [
       candidate({ modelId: "t1-model", tier: "T1", expectedCostUsd: 1 }),
@@ -147,8 +199,8 @@ describe("orderCandidatesByPace", () => {
       model({ id: "ahead-model", tier: "T1", laneId: "lane-ahead" }),
     ];
     const ledger: LaneLedger = {
-      "lane-behind": { laneId: "lane-behind", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-behind", state: "behind" }) },
-      "lane-ahead": { laneId: "lane-ahead", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-ahead", state: "ahead" }) },
+      "lane-behind": { laneId: "lane-behind", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "lane-behind", state: "behind" }) },
+      "lane-ahead": { laneId: "lane-ahead", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "lane-ahead", state: "ahead" }) },
     };
     const candidates = [
       candidate({ modelId: "ahead-model", tier: "T1", expectedCostUsd: 0.5 }),
@@ -164,7 +216,7 @@ describe("orderCandidatesByPace", () => {
       model({ id: "newer-model", tier: "T1", laneId: "lane-a", releasedAt: "2026-01-01" }),
     ];
     const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ state: "on" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "on" }) },
     };
     const candidates = [
       candidate({ modelId: "older-model", tier: "T1", expectedCostUsd: 1, releasedAt: "2025-01-01" }),
@@ -242,6 +294,7 @@ describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart t
         laneId: "lane-trailing",
         fetchedAt: "t",
         error: null,
+        observation: null,
         verdict: verdict({
           laneId: "lane-trailing",
           state: "behind",
@@ -253,6 +306,7 @@ describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart t
         laneId: "lane-on",
         fetchedAt: "t",
         error: null,
+        observation: null,
         verdict: verdict({ laneId: "lane-on", state: "on" }),
       },
     };
@@ -272,11 +326,18 @@ describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart t
       model({ id: "t2-trailing-model", tier: "T2", laneId: "lane-t2" }),
     ];
     const ledger: LaneLedger = {
-      "lane-t1": { laneId: "lane-t1", fetchedAt: "t", error: null, verdict: verdict({ laneId: "lane-t1", state: "on" }) },
+      "lane-t1": {
+        laneId: "lane-t1",
+        fetchedAt: "t",
+        error: null,
+        observation: null,
+        verdict: verdict({ laneId: "lane-t1", state: "on" }),
+      },
       "lane-t2": {
         laneId: "lane-t2",
         fetchedAt: "t",
         error: null,
+        observation: null,
         verdict: verdict({
           laneId: "lane-t2",
           state: "behind",
@@ -300,6 +361,7 @@ describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart t
         laneId: "lane-a",
         fetchedAt: "t",
         error: null,
+        observation: null,
         verdict: verdict({ state: "behind", serviceable: true, score: { utilization: 0.5, elapsed: 0.9, deviation: -0.4 } }),
       },
     };
@@ -311,7 +373,7 @@ describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart t
 describe("hardStopExcluded", () => {
   it("excludes a model whose lane is unserviceable", () => {
     const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ serviceable: false, state: "exhausted" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ serviceable: false, state: "exhausted" }) },
     };
     expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
   });
@@ -320,7 +382,7 @@ describe("hardStopExcluded", () => {
     const ledger: LaneLedger = {};
     expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(false);
     const unknownLedger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ serviceable: null, state: "unknown" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ serviceable: null, state: "unknown" }) },
     };
     expect(hardStopExcluded(unknownLedger, model({ laneId: "lane-a" }))).toBe(false);
   });
@@ -332,7 +394,7 @@ describe("slotFactorFor / slotAllowed", () => {
     // a strictly-positive epsilon — the invariant is "never zero", not
     // "whatever the config says".
     const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ state: "ahead" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "ahead" }) },
     };
     const factor = slotFactorFor(ledger, model({ laneId: "lane-a" }), 0);
     expect(factor).toBeGreaterThan(0);
@@ -340,14 +402,14 @@ describe("slotFactorFor / slotAllowed", () => {
 
   it("gives full slot share to any state other than ahead", () => {
     const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ state: "behind" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "behind" }) },
     };
     expect(slotFactorFor(ledger, model({ laneId: "lane-a" }), 0.25)).toBe(1);
   });
 
   it("is deterministic per issue id — the same issue always lands on the same side of the cap", () => {
     const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, verdict: verdict({ state: "ahead" }) },
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "ahead" }) },
     };
     const m = model({ laneId: "lane-a" });
     const first = slotAllowed("issue-42", ledger, m, 0.25);
@@ -364,6 +426,84 @@ describe("operator overrides", () => {
     expect(live?.modelId).toBe("claude-opus-5");
     const expired = activeOperatorOverride(overrides, "issue-1", "2026-08-31T12:01:01.000Z");
     expect(expired).toBeNull();
+  });
+});
+
+describe("avoidThresholdFor / laneAvoidExcluded (tier_dispatcher.py AVOID/AVOID_LANE)", () => {
+  const config: LaneAvoidConfig = { defaultThreshold: 0.8, perLane: { codex: 0.99 } };
+
+  it("falls back to the default threshold for a lane with no per-lane override", () => {
+    expect(avoidThresholdFor(config, "zai")).toBe(0.8);
+  });
+
+  it("uses the per-lane threshold when one is configured", () => {
+    expect(avoidThresholdFor(config, "codex")).toBe(0.99);
+  });
+
+  it("2026-09-07 07:12Z owner rule: codex stays usable up to 0.99, not the generic 0.8 — parking it early moved ~25 T2 cards onto bare claude-sonnet-5", () => {
+    const ledger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "codex", score: { utilization: 0.9, elapsed: 0.9, deviation: 0 } }) },
+    };
+    expect(laneAvoidExcluded(ledger, model({ laneId: "codex" }), config)).toBe(false);
+    const exhaustedLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "codex", score: { utilization: 0.99, elapsed: 0.99, deviation: 0 } }) },
+    };
+    expect(laneAvoidExcluded(exhaustedLedger, model({ laneId: "codex" }), config)).toBe(true);
+  });
+
+  it("2026-09-08 22:55Z owner rule: a lane the collector marks 'degraded' (>=0.9 utilization) stays usable until its OWN avoid threshold is crossed — this keys only on measured utilization, never on lane state/health", () => {
+    // Account-level health going "degraded" surfaces here only as elevated
+    // `score.utilization`, never as a distinct lane `state` this function
+    // reads — excluding on the health label itself (rather than the
+    // threshold) caused the Claude flood incident.
+    const ledger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "on", score: { utilization: 0.72, elapsed: 0.7, deviation: 0 } }) },
+    };
+    expect(laneAvoidExcluded(ledger, model({ laneId: "lane-a" }), config)).toBe(false);
+  });
+
+  it("excludes a default-threshold lane at or above 0.8 utilization", () => {
+    const ledger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: { utilization: 0.8, elapsed: 0.8, deviation: 0 } }) },
+    };
+    expect(laneAvoidExcluded(ledger, model({ laneId: "lane-a" }), config)).toBe(true);
+  });
+
+  it("is fail-neutral: a model with no laneId, or a lane with no measured utilization, excludes nothing", () => {
+    expect(laneAvoidExcluded({}, model({ laneId: null }), config)).toBe(false);
+    const noScoreLedger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: null }) },
+    };
+    expect(laneAvoidExcluded(noScoreLedger, model({ laneId: "lane-a" }), config)).toBe(false);
+    expect(laneAvoidExcluded({}, model({ laneId: "lane-a" }), config)).toBe(false);
+  });
+});
+
+describe("isLaneOutageActive / laneOutageExcluded (2026-09-07 06:40Z owner note: OpenCode Go 400 MissingSessionID)", () => {
+  it("excludes a model whose lane is under an active outage", () => {
+    const override: LaneOutageOverride = { lanes: ["opencode-go"], models: [], until: "2026-09-08T00:00:00.000Z" };
+    expect(laneOutageExcluded(override, "2026-09-07T12:00:00.000Z", model({ laneId: "opencode-go" }))).toBe(true);
+  });
+
+  it("excludes a model named directly, even if its lane is not listed", () => {
+    const override: LaneOutageOverride = { lanes: [], models: ["m1"], until: "2026-09-08T00:00:00.000Z" };
+    expect(laneOutageExcluded(override, "2026-09-07T12:00:00.000Z", model({ id: "m1", laneId: "other-lane" }))).toBe(true);
+  });
+
+  it("treats an outage past its `until` exactly as if none existed", () => {
+    const override: LaneOutageOverride = { lanes: ["opencode-go"], models: [], until: "2026-09-08T00:00:00.000Z" };
+    expect(isLaneOutageActive(override, "2026-09-08T00:00:01.000Z")).toBe(false);
+    expect(laneOutageExcluded(override, "2026-09-08T00:00:01.000Z", model({ laneId: "opencode-go" }))).toBe(false);
+  });
+
+  it("is a no-op when there is no override recorded at all", () => {
+    expect(isLaneOutageActive(null, "2026-09-07T12:00:00.000Z")).toBe(false);
+    expect(laneOutageExcluded(null, "2026-09-07T12:00:00.000Z", model({ laneId: "opencode-go" }))).toBe(false);
+  });
+
+  it("does not exclude a lane/model outside the declared outage", () => {
+    const override: LaneOutageOverride = { lanes: ["opencode-go"], models: [], until: "2026-09-08T00:00:00.000Z" };
+    expect(laneOutageExcluded(override, "2026-09-07T12:00:00.000Z", model({ laneId: "zai" }))).toBe(false);
   });
 });
 
@@ -409,5 +549,353 @@ describe("repinAllowed", () => {
       lastRepinAt: "2026-08-31T11:50:00.000Z",
     });
     expect(gate.allowed).toBe(true);
+  });
+});
+
+describe("blendedListPrice (tier_dispatcher.py blended())", () => {
+  it("weights input 3x against a 4-part total, matching (3*in + out)/4", () => {
+    const m = model({ costPerMTokIn: 4, costPerMTokOut: 8 });
+    expect(blendedListPrice(m)).toBeCloseTo((3 * 4 + 8) / 4, 10);
+  });
+
+  it("a sub-$1/Mtok flash model blends under 1 — the exact line lane_active_pins() checks for half-weighting", () => {
+    const flash = model({ costPerMTokIn: 0.5, costPerMTokOut: 1.5 });
+    expect(blendedListPrice(flash)).toBeLessThan(1);
+    const premium = model({ costPerMTokIn: 3, costPerMTokOut: 15 });
+    expect(blendedListPrice(premium)).toBeGreaterThan(1);
+  });
+});
+
+describe("ZAI_LONG_RUN_AGENTS (2026-09-08 22:15Z owner rule)", () => {
+  it("names every long-turn engineering agent role hit by Z.ai's 1214 error, and nothing else", () => {
+    expect(ZAI_LONG_RUN_AGENTS.has("Founding Engineer")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("Web Engineer")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("Automation Engineer")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("DevOps & Reliability Engineer")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("CTO & Chief AI Officer")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("Director of Engineering")).toBe(true);
+    expect(ZAI_LONG_RUN_AGENTS.has("QA Reviewer")).toBe(false);
+  });
+});
+
+describe("laneEffectiveUtilization (tier_dispatcher.py eff_util())", () => {
+  it("reads the lane's measured utilization when one exists", () => {
+    const ledger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: { utilization: 0.6, elapsed: 0.5, deviation: 0.1 } }) },
+    };
+    expect(laneEffectiveUtilization(ledger, "lane-a")).toBe(0.6);
+  });
+
+  it("fails neutral to 0.5 (mid-pack), not 0 or 1, when nothing has been measured — distinct from laneAvoidExcluded's fail-to-false", () => {
+    expect(laneEffectiveUtilization({}, "lane-a")).toBe(0.5);
+    const noScoreLedger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: null }) },
+    };
+    expect(laneEffectiveUtilization(noScoreLedger, "lane-a")).toBe(0.5);
+  });
+});
+
+describe("zaiPeakNow (Z.ai Coding Plan peak hours: Mon-Fri 14:00-18:00 Asia/Shanghai = 06:00-10:00 UTC)", () => {
+  it("is true inside the peak window on a weekday", () => {
+    expect(zaiPeakNow(Date.parse("2026-09-08T07:00:00.000Z"))).toBe(true); // Tuesday
+  });
+
+  it("is false just before and just at the end of the peak window", () => {
+    expect(zaiPeakNow(Date.parse("2026-09-08T05:59:00.000Z"))).toBe(false);
+    expect(zaiPeakNow(Date.parse("2026-09-08T10:00:00.000Z"))).toBe(false);
+  });
+
+  it("is false on a weekend even during peak UTC hours", () => {
+    expect(zaiPeakNow(Date.parse("2026-09-06T07:00:00.000Z"))).toBe(false); // Sunday
+  });
+});
+
+describe("laneNamedWindowUtilization (tier_dispatcher.py lane_5h(), generalized to any named window)", () => {
+  it("takes the max utilization across healthy accounts for the named window", () => {
+    const ledger: LaneLedger = {
+      "lane-a": {
+        laneId: "lane-a",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({ accountKey: "a1", windows: [window({ utilization: 0.3 })] }),
+            account({ accountKey: "a2", windows: [window({ utilization: 0.7 })] }),
+          ],
+        }),
+      },
+    };
+    expect(laneNamedWindowUtilization(ledger, "lane-a", "five_hour")).toBe(0.7);
+  });
+
+  it("ignores an unhealthy account's window entirely", () => {
+    const ledger: LaneLedger = {
+      "lane-a": {
+        laneId: "lane-a",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [account({ health: "exhausted", windows: [window({ utilization: 0.99 })] })],
+        }),
+      },
+    };
+    expect(laneNamedWindowUtilization(ledger, "lane-a", "five_hour")).toBe(0);
+  });
+
+  it("is fail-neutral to 0 (no measured pressure) when there is no observation at all, never excluding on ignorance", () => {
+    expect(laneNamedWindowUtilization({}, "lane-a", "five_hour")).toBe(0);
+  });
+
+  it("2026-09-07 03:15Z owner rule: new admission to opencode-go stops at >= 0.5 on the 5h window (tightened from 0.6)", () => {
+    const atThreshold: LaneLedger = {
+      "opencode-go": {
+        laneId: "opencode-go",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({ accounts: [account({ windows: [window({ name: "five_hour", utilization: 0.5 })] })] }),
+      },
+    };
+    expect(laneNamedWindowUtilization(atThreshold, "opencode-go", "five_hour")).toBeGreaterThanOrEqual(0.5);
+  });
+});
+
+describe("laneHealthyAccountCount (tier_dispatcher.py lane_accounts())", () => {
+  it("counts only healthy accounts", () => {
+    const ledger: LaneLedger = {
+      "lane-a": {
+        laneId: "lane-a",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({ accountKey: "a1", health: "healthy" }),
+            account({ accountKey: "a2", health: "healthy" }),
+            account({ accountKey: "a3", health: "exhausted" }),
+          ],
+        }),
+      },
+    };
+    expect(laneHealthyAccountCount(ledger, "lane-a")).toBe(2);
+  });
+
+  it("falls back to 1 (never 0, never unlimited) when the lane has never been polled — matching the Python source's try/except default", () => {
+    expect(laneHealthyAccountCount({}, "lane-a")).toBe(1);
+  });
+});
+
+describe("activeZaiPaceOverride / zaiWeeklyPaceOk (2026-09-08 13:20Z owner rule: Z.ai Pro is 60k credits/week but 12k per 5h)", () => {
+  it("treats an override past its `until` exactly as if none existed", () => {
+    const override: ZaiPaceOverride = { margin: 0.4, until: "2026-09-08T00:00:00.000Z" };
+    expect(activeZaiPaceOverride(override, "2026-09-08T00:00:01.000Z")).toBeNull();
+    expect(activeZaiPaceOverride(override, "2026-09-07T23:59:59.000Z")).toBe(0.4);
+  });
+
+  it("is a no-op when there is no override recorded at all", () => {
+    expect(activeZaiPaceOverride(null, "2026-09-07T12:00:00.000Z")).toBeNull();
+  });
+
+  it("admits a new zai card when weekly utilization is at or under elapsed-week fraction plus margin", () => {
+    // Week starts 2026-09-07T00:00Z, resets 2026-09-14T00:00Z (7 days) — exactly
+    // 2 days (28.6%) elapsed at the check time below.
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [window({ name: "weekly", role: "allowance", utilization: 0.3, resetsAt: "2026-09-14T00:00:00.000Z" })],
+            }),
+          ],
+        }),
+      },
+    };
+    const nowMs = Date.parse("2026-09-09T00:00:00.000Z");
+    expect(
+      zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs }),
+    ).toBe(true);
+  });
+
+  it("refuses a new zai card once weekly utilization outruns elapsed-week fraction plus margin", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [window({ name: "weekly", role: "allowance", utilization: 0.9, resetsAt: "2026-09-14T00:00:00.000Z" })],
+            }),
+          ],
+        }),
+      },
+    };
+    const nowMs = Date.parse("2026-09-09T00:00:00.000Z"); // ~28.6% elapsed + 0.15 margin << 0.9 used
+    expect(
+      zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs }),
+    ).toBe(false);
+  });
+
+  it("an operator override margin (e.g. during a Codex outage) widens admission over the default margin", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [window({ name: "weekly", role: "allowance", utilization: 0.9, resetsAt: "2026-09-14T00:00:00.000Z" })],
+            }),
+          ],
+        }),
+      },
+    };
+    const nowMs = Date.parse("2026-09-09T00:00:00.000Z");
+    expect(
+      zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: 0.8, nowMs }),
+    ).toBe(true);
+  });
+
+  it("reads only the FIRST reported account, matching the Python source's records[0]", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              accountKey: "a1",
+              windows: [window({ name: "weekly", role: "allowance", utilization: 0.9, resetsAt: "2026-09-14T00:00:00.000Z" })],
+            }),
+            account({
+              accountKey: "a2",
+              windows: [window({ name: "weekly", role: "allowance", utilization: 0.05, resetsAt: "2026-09-14T00:00:00.000Z" })],
+            }),
+          ],
+        }),
+      },
+    };
+    const nowMs = Date.parse("2026-09-09T00:00:00.000Z");
+    // a1 (first) is at 0.9 utilization — must refuse even though a2 is nearly empty.
+    expect(
+      zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs }),
+    ).toBe(false);
+  });
+
+  it("is fail-neutral to true (admits) when there is no weekly window observed at all", () => {
+    expect(
+      zaiWeeklyPaceOk({ ledger: {}, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: Date.now() }),
+    ).toBe(true);
+  });
+});
+
+describe("laneHasRoom (tier_dispatcher.py lane_has_room())", () => {
+  const capPerAccount = { "opencode-go": 2, zai: 3 };
+  const baseArgs = {
+    ledger: {} as LaneLedger,
+    capPerAccount,
+    fiveHourWindowName: "five_hour",
+    zaiLaneId: "zai",
+    zaiWeeklyWindowName: "weekly",
+    zaiWeeklyDefaultMargin: 0.15,
+    zaiPaceOverrideMargin: null as number | null,
+    nowMs: Date.parse("2026-09-08T12:00:00.000Z"), // Tuesday, outside zai peak hours
+  };
+
+  it("2026-09-06 17:1xZ / 2026-09-07 12:32Z owner rule: a lane with no configured cap always has room", () => {
+    expect(laneHasRoom({ ...baseArgs, laneId: "codex", activePinsWeight: 999 })).toBe(true);
+  });
+
+  it("admits a new card while active weight stays under cap * healthy account count", () => {
+    const ledger: LaneLedger = {
+      "opencode-go": {
+        laneId: "opencode-go",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [account({ accountKey: "a1" }), account({ accountKey: "a2" })],
+        }),
+      },
+    };
+    // cap 2 * 2 healthy accounts = 4 slots; 3 active + 1 new = 4, still admitted.
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "opencode-go", activePinsWeight: 3 })).toBe(true);
+    // 4 active + 1 new = 5 > 4, refused.
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "opencode-go", activePinsWeight: 4 })).toBe(false);
+  });
+
+  it("2026-09-06 23:5xZ owner rule: stops NEW admission once any healthy account's 5h window hits 0.5, even with weight under the cap", () => {
+    const ledger: LaneLedger = {
+      "opencode-go": {
+        laneId: "opencode-go",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [account({ windows: [window({ name: "five_hour", utilization: 0.5 })] })],
+        }),
+      },
+    };
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "opencode-go", activePinsWeight: 0 })).toBe(false);
+  });
+
+  it("2026-09-08 13:20Z owner rule: refuses a new zai card when the weekly pace gate fails, regardless of the per-account cap", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [
+                window({ name: "five_hour", utilization: 0.1 }),
+                window({ name: "weekly", role: "allowance", utilization: 0.95, resetsAt: "2026-09-14T00:00:00.000Z" }),
+              ],
+            }),
+          ],
+        }),
+      },
+    };
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "zai", activePinsWeight: 0 })).toBe(false);
+  });
+
+  it("2026-09-08 13:20Z owner rule: during zai peak hours the per-account cap drops to 1 regardless of the configured cap", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [
+                window({ name: "five_hour", utilization: 0.1 }),
+                window({ name: "weekly", role: "allowance", utilization: 0.1, resetsAt: "2026-09-14T00:00:00.000Z" }),
+              ],
+            }),
+          ],
+        }),
+      },
+    };
+    const peakNowMs = Date.parse("2026-09-08T07:00:00.000Z"); // Tuesday 07:00 UTC — inside peak
+    // cap 1 * 1 healthy account = 1 slot; 1 active + 1 new = 2 > 1, refused during peak...
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "zai", activePinsWeight: 1, nowMs: peakNowMs })).toBe(false);
+    // ...but the same weight is fine outside peak, where the configured cap of 3 applies.
+    expect(laneHasRoom({ ...baseArgs, ledger, laneId: "zai", activePinsWeight: 1, nowMs: baseArgs.nowMs })).toBe(true);
   });
 });

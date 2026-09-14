@@ -1,7 +1,15 @@
 import {
+  DEFAULT_AVOID_PER_LANE,
+  DEFAULT_FIVE_HOUR_WINDOW_NAME,
   DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS,
+  DEFAULT_LANE_CAP_PER_ACCOUNT,
   DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS,
   DEFAULT_SLOT_FLOOR_FRACTION,
+  DEFAULT_ZAI_WEEKLY_MARGIN,
+  DEFAULT_ZAI_WEEKLY_WINDOW_NAME,
+  LANE_ID_CODEX,
+  LANE_ID_OPENCODE_GO,
+  LANE_ID_ZAI,
   PACING_MODES,
   TIERS,
   type PacingMode,
@@ -33,6 +41,23 @@ export interface LaneSourceConfig {
 
 export type SelectionObjective = "list-price" | "cost-per-accepted-card";
 
+export type ClassificationProtocol = "anthropic-messages" | "openai-chat-completions";
+
+export interface ClassificationConfig {
+  enabled: boolean;
+  baseUrl: string | null;
+  protocol: ClassificationProtocol;
+  modelId: string | null;
+  apiKeySecretRef: SecretRef | null;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
+  descriptionChars: number;
+  maxOutputTokens: number;
+  t3ConfidenceFloor: number;
+  t2ConfidenceFloor: number;
+  batchSize: number;
+}
+
 export interface ResolvedConfig {
   selection: {
     enabled: boolean;
@@ -59,7 +84,23 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
+    /** TOG-2481 port of `AVOID`/`AVOID_LANE`. */
+    avoid: { defaultThreshold: number; perLane: Record<string, number> };
+    /** TOG-2481 port of `LANE_CAP_PER_ACCOUNT`. */
+    laneCapPerAccount: Record<string, number>;
+    /** TOG-2481 port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
+    fiveHourWindowName: string;
+    /** Which configured lane is Codex, for the T1-Go-fallback / Z.ai long-run-agent-exclusion rules. */
+    codexLaneId: string;
+    /** Which configured lane is OpenCode Go, for the T1-Go-fallback rule. */
+    opencodeGoLaneId: string;
+    zai: {
+      laneId: string;
+      weeklyWindowName: string;
+      weeklyDefaultMargin: number;
+    };
   };
+  classification: ClassificationConfig;
   earnIn: {
     enabled: boolean;
     perModelPerWeek: number;
@@ -71,6 +112,13 @@ export interface ResolvedConfig {
   };
   shadowEmit: { enabled: boolean; maxRecords: number };
   aaSync: { enabled: boolean };
+  /** TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706). */
+  dispatch: {
+    wakeEnabled: boolean;
+    idleMinutes: number;
+    maxWakesPerFiring: number;
+    focusProjectIds: readonly string[];
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -128,9 +176,11 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const profiles = record(root.profiles);
   const quality = record(root.quality);
   const pacing = record(root.pacing);
+  const classification = record(root.classification);
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
+  const dispatch = record(root.dispatch);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -270,6 +320,59 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       slotFloorFraction: num(pacing.slotFloorFraction, DEFAULT_SLOT_FLOOR_FRACTION),
       operatorOverrideTtlSeconds: num(pacing.operatorOverrideTtlSeconds, DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS),
       idleRepinHysteresisSeconds: num(pacing.idleRepinHysteresisSeconds, DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS),
+      avoid: (() => {
+        const avoid = record(pacing.avoid);
+        const rawPerLane = record(avoid.perLane);
+        const keys = Object.keys(rawPerLane);
+        if (keys.length === 0) {
+          return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane: { ...DEFAULT_AVOID_PER_LANE } };
+        }
+        const perLane: Record<string, number> = {};
+        for (const [laneId, threshold] of Object.entries(rawPerLane)) {
+          if (typeof threshold === "number" && Number.isFinite(threshold)) perLane[laneId] = threshold;
+        }
+        return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane };
+      })(),
+      laneCapPerAccount: (() => {
+        const raw = record(pacing.laneCapPerAccount);
+        const keys = Object.keys(raw);
+        if (keys.length === 0) return { ...DEFAULT_LANE_CAP_PER_ACCOUNT };
+        const perAccount: Record<string, number> = {};
+        for (const [laneId, cap] of Object.entries(raw)) {
+          if (typeof cap === "number" && Number.isFinite(cap)) perAccount[laneId] = cap;
+        }
+        return perAccount;
+      })(),
+      fiveHourWindowName: string(pacing.fiveHourWindowName, DEFAULT_FIVE_HOUR_WINDOW_NAME),
+      codexLaneId: string(pacing.codexLaneId, LANE_ID_CODEX),
+      opencodeGoLaneId: string(pacing.opencodeGoLaneId, LANE_ID_OPENCODE_GO),
+      zai: (() => {
+        const zai = record(pacing.zai);
+        return {
+          laneId: string(zai.laneId, LANE_ID_ZAI),
+          weeklyWindowName: string(zai.weeklyWindowName, DEFAULT_ZAI_WEEKLY_WINDOW_NAME),
+          weeklyDefaultMargin: num(zai.weeklyDefaultMargin, DEFAULT_ZAI_WEEKLY_MARGIN),
+        };
+      })(),
+    },
+    classification: {
+      enabled: bool(classification.enabled, false),
+      baseUrl: typeof classification.baseUrl === "string" && classification.baseUrl.length > 0
+        ? classification.baseUrl
+        : null,
+      protocol:
+        classification.protocol === "openai-chat-completions" ? "openai-chat-completions" : "anthropic-messages",
+      modelId: typeof classification.modelId === "string" && classification.modelId.length > 0
+        ? classification.modelId
+        : null,
+      apiKeySecretRef: secretRef(classification.apiKeySecretRef),
+      requestTimeoutMs: num(classification.requestTimeoutMs, 15000),
+      maxResponseBytes: num(classification.maxResponseBytes, 65_536),
+      descriptionChars: num(classification.descriptionChars, 1500),
+      maxOutputTokens: num(classification.maxOutputTokens, 120),
+      t3ConfidenceFloor: num(classification.t3ConfidenceFloor, 0.7),
+      t2ConfidenceFloor: num(classification.t2ConfidenceFloor, 0.6),
+      batchSize: num(classification.batchSize, 20),
     },
     earnIn: {
       enabled: bool(earnIn.enabled, false),
@@ -288,6 +391,14 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     },
     aaSync: {
       enabled: bool(aaSync.enabled, true),
+    },
+    dispatch: {
+      wakeEnabled: bool(dispatch.wakeEnabled, false),
+      idleMinutes: num(dispatch.idleMinutes, 120),
+      maxWakesPerFiring: num(dispatch.maxWakesPerFiring, 3),
+      focusProjectIds: Array.isArray(dispatch.focusProjectIds)
+        ? dispatch.focusProjectIds.filter((p): p is string => typeof p === "string")
+        : [],
     },
   };
 }
@@ -350,6 +461,20 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   }
   if (config.pacing.mode === "enforce" && config.pacing.slotFloorFraction <= 0) {
     errors.push("pacing.slotFloorFraction must stay above 0 while lanes are serviceable — ahead-of-line throttling must never reach zero");
+  }
+
+  if (config.classification.enabled) {
+    if (!config.classification.baseUrl) {
+      errors.push("classification.enabled is true but no classification.baseUrl is configured");
+    }
+    if (!config.classification.modelId) {
+      errors.push("classification.enabled is true but no classification.modelId is configured");
+    }
+    const secretError = validateSecretRefShape(
+      config.classification.apiKeySecretRef,
+      "classification.apiKeySecretRef",
+    );
+    if (secretError) errors.push(secretError);
   }
 
   if (config.selection.objective === "cost-per-accepted-card") {

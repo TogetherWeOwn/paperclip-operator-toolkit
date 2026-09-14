@@ -49,7 +49,7 @@ describe("buildShadowRecord", () => {
       hasOperatorPin: false,
       isIdle: true,
       models: MODELS_WITH_LANES,
-      laneLedger: { "lane-a": { laneId: "lane-a", verdict: verdict(), fetchedAt: NOW_ISO, error: null } },
+      laneLedger: { "lane-a": { laneId: "lane-a", verdict: verdict(), fetchedAt: NOW_ISO, error: null, observation: null } },
       slotFloorFraction: 0.25,
       operatorOverride: null,
     });
@@ -110,6 +110,7 @@ describe("buildShadowRecord", () => {
           verdict: verdict({ state: "exhausted", serviceable: false, score: null }),
           fetchedAt: NOW_ISO,
           error: null,
+          observation: null,
         },
       },
       slotFloorFraction: 0.25,

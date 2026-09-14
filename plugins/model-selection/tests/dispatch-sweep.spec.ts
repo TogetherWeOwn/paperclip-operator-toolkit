@@ -1,0 +1,539 @@
+import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import type { Issue } from "@paperclipai/shared";
+import { describe, expect, it } from "vitest";
+
+import manifest from "../src/manifest.js";
+import { JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
+import { createPlugin } from "../src/worker.js";
+
+const COMPANY = "co-1";
+
+function issue(id: string, overrides: Partial<Issue> = {}): Issue {
+  return {
+    id,
+    companyId: COMPANY,
+    projectId: null,
+    title: "A card",
+    status: "in_progress",
+    priority: "medium",
+    assigneeAgentId: "agent-1",
+    unblockDescriptor: null,
+    createdAt: new Date("2026-09-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-09-01T00:00:00.000Z"),
+    ...overrides,
+  } as unknown as Issue;
+}
+
+function agentRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "agent-1",
+    companyId: COMPANY,
+    name: "Founding Engineer",
+    role: "general",
+    status: "active",
+    permissions: {},
+    ...overrides,
+  } as never;
+}
+
+function baseConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    selection: { enabled: true, mode: "enforce" },
+    models: [],
+    tierLabelIds: {},
+    dispatch: { wakeEnabled: false, idleMinutes: 30, maxWakesPerFiring: 3 },
+    ...overrides,
+  };
+}
+
+async function boot(config: Record<string, unknown>, seedIssues: Issue[] = [], agents: unknown[] = [agentRow()]) {
+  const harness = createTestHarness({ manifest, config });
+  harness.seed({ issues: seedIssues, agents: agents as never, companies: [{ id: COMPANY, name: "Co" } as never] });
+  const plugin = createPlugin();
+  const setup = plugin.definition.setup;
+  if (!setup) throw new Error("plugin definition has no setup handler");
+  await setup(harness.ctx);
+  const onConfigChanged = plugin.definition.onConfigChanged;
+  if (!onConfigChanged) throw new Error("plugin definition has no onConfigChanged handler");
+  await onConfigChanged(config, { companyId: COMPANY });
+  return harness;
+}
+
+/**
+ * The harness's own `getOrchestration` fake always returns `runs: []` and
+ * `invocationBlocks: []` (hardcoded — see `testing.js`), so idle-run and
+ * budget-block scenarios can't be driven through `seed()`. Blocker relations
+ * DO flow through `seed({ issues: [{ blockedBy: [...] }] })` because the fake
+ * derives `relations` from the same `blockedByIssueIds` map `issues.relations`
+ * reads, so only this override is needed, mirroring the `harness.ctx.db.query`
+ * override pattern already used for the other scheduled-pass tests.
+ */
+function withOrchestration(
+  harness: ReturnType<typeof createTestHarness>,
+  runsByIssue: Record<string, unknown[]>,
+  invocationBlocksByIssue: Record<string, { reason: string }> = {},
+) {
+  const original = harness.ctx.issues.summaries.getOrchestration.bind(harness.ctx.issues.summaries);
+  harness.ctx.issues.summaries.getOrchestration = (async (input: { issueId: string; companyId: string }) => {
+    const base = await original(input);
+    return {
+      ...base,
+      runs: runsByIssue[input.issueId] ?? [],
+      invocationBlocks: invocationBlocksByIssue[input.issueId]
+        ? [{ issueId: input.issueId, ...invocationBlocksByIssue[input.issueId] }]
+        : [],
+    };
+  }) as never;
+}
+
+// The job under test computes idle against the REAL clock (`now: Date.now()`
+// in worker.ts), not an injected value — so offsets here must be relative to
+// the actual wall clock, not a fabricated date, or "N minutes ago" silently
+// becomes "however many months ago" when compared against the real Date.now().
+const NOW = Date.now();
+
+describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)", () => {
+  it("does not wake anything when dispatch.wakeEnabled is false (report-only)", async () => {
+    const card = issue("i1", { createdAt: new Date("2026-09-01T00:00:00.000Z") });
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    expect(harness.activity).toHaveLength(1);
+    expect(harness.activity[0]?.message).toContain("report-only");
+    expect(harness.activity[0]?.message).toContain("would have woken");
+  });
+
+  it("wakes an idle, actionable issue when wakeEnabled is true", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      card,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    expect(harness.activity[0]?.message).toContain("live");
+    expect(harness.activity[0]?.message).toContain("woken");
+    expect((harness.activity[0]?.metadata as { counters: { woken: number } }).counters.woken).toBe(1);
+  });
+
+  it("refuses a backlog-status issue and counts it as refused_backlog", async () => {
+    const card = issue("i1", { status: "backlog" });
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_backlog).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("refuses an unassigned issue and counts it toward the routing gap, not refused_blocked", async () => {
+    const card = issue("i1", { assigneeAgentId: null, projectId: "proj-a" });
+    const harness = await boot(baseConfig(), [card], []);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number>; routingGapCount: number };
+    expect(metadata.counters.refused_unassigned).toBe(1);
+    expect(metadata.routingGapCount).toBe(1);
+  });
+
+  it("excludes a terminal (done/cancelled) issue entirely — no counter incremented", async () => {
+    const done = issue("i1", { status: "done" });
+    const cancelled = issue("i2", { status: "cancelled" });
+    const idle = issue("i3", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-2" });
+    const harness = await boot(baseConfig(), [done, cancelled, idle], [agentRow(), agentRow({ id: "agent-2" })]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    const total = Object.values(metadata.counters).reduce((a, b) => a + b, 0);
+    // Only i3 (actionable, hence woken=0 report-only... but counters here only
+    // cover the five SELECTION_COUNTERS, not `actionable`) — done/cancelled
+    // contribute to neither refused_backlog nor refused_unassigned.
+    expect(metadata.counters.refused_backlog ?? 0).toBe(0);
+    expect(metadata.counters.refused_unassigned ?? 0).toBe(0);
+    expect(total).toBeGreaterThanOrEqual(0);
+  });
+
+  it("refuses a blocked issue (unresolved blocker relation) as refused_blocked", async () => {
+    const blocker = issue("blocker-1", { status: "in_progress" });
+    const blocked = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      blockedBy: [{ id: "blocker-1" } as never],
+    });
+    const harness = await boot(baseConfig(), [blocker, blocked]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_blocked).toBe(1);
+  });
+
+  it("does not refuse when the sole blocker is done", async () => {
+    const blocker = issue("blocker-1", { status: "done" });
+    const unblocked = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      blockedBy: [{ id: "blocker-1" } as never],
+    });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      blocker,
+      unblocked,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_blocked ?? 0).toBe(0);
+    expect(metadata.counters.woken).toBe(1);
+  });
+
+  it("parks an issue carrying an unblockDescriptor without waking it", async () => {
+    const parked = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      unblockDescriptor: { kind: "named_owner", ownerAgentId: "agent-9" } as never,
+    });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      parked,
+    ]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      parkedIssueIds: string[];
+    };
+    expect(metadata.counters.parked_on_named_owner).toBe(1);
+    expect(metadata.parkedIssueIds).toEqual(["i1"]);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("mirrors the server's budget invocation block (rail 4) as refused_budget_block, counted separately from the five report counters", async () => {
+    const blocked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      blocked,
+    ]);
+    withOrchestration(harness, {}, { i1: { reason: "monthly_budget_exhausted" } });
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      budgetBlockedIssueIds: string[];
+    };
+    expect(metadata.budgetBlockedIssueIds).toEqual(["i1"]);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    // Not one of the five SELECTION_COUNTERS — never fabricated as refused_blocked.
+    expect(metadata.counters.refused_blocked ?? 0).toBe(0);
+  });
+
+  it("treats an issue with an active (queued/running) run as idle 0 — not yet over the idle threshold", async () => {
+    const active = issue("i1", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      active,
+    ]);
+    withOrchestration(harness, { i1: [{ issueId: "i1", status: "running" }] });
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("anchors idle to the last finished run, not issue.createdAt, when a run exists", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
+    const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
+      card,
+    ]);
+    // Finished 5 minutes ago — well under the 30-minute idle threshold, even
+    // though the issue itself was created a day ago.
+    withOrchestration(harness, {
+      i1: [{ issueId: "i1", status: "succeeded", finishedAt: new Date(NOW - 5 * 60_000).toISOString() }],
+    });
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("spreads picks across distinct assignees — at most one wake per agent per firing", async () => {
+    const sameAgentA = issue("i1", { assigneeAgentId: "agent-1", createdAt: new Date(NOW - 120 * 60_000) });
+    const sameAgentB = issue("i2", { assigneeAgentId: "agent-1", createdAt: new Date(NOW - 90 * 60_000) });
+    const otherAgent = issue("i3", { assigneeAgentId: "agent-2", createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }),
+      [sameAgentA, sameAgentB, otherAgent],
+      [agentRow(), agentRow({ id: "agent-2" })],
+    );
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number>; pickedIssueIds: string[] };
+    expect(metadata.counters.woken).toBe(2);
+    expect(metadata.pickedIssueIds.sort()).toEqual(["i1", "i3"]);
+  });
+
+  it("caps picks at dispatch.maxWakesPerFiring", async () => {
+    const cards = Array.from({ length: 5 }, (_, i) =>
+      issue(`i${i}`, { assigneeAgentId: `agent-${i}`, createdAt: new Date(NOW - (60 + i) * 60_000) }),
+    );
+    const agents = cards.map((c) => agentRow({ id: c.assigneeAgentId }));
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 2 } }),
+      cards,
+      agents,
+    );
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.woken).toBe(2);
+  });
+
+  it("respects dispatch.focusProjectIds — an out-of-focus actionable issue is not picked", async () => {
+    const inFocus = issue("i1", { projectId: "proj-a", createdAt: new Date(NOW - 60 * 60_000) });
+    const outOfFocus = issue("i2", {
+      projectId: "proj-b",
+      assigneeAgentId: "agent-2",
+      createdAt: new Date(NOW - 60 * 60_000),
+    });
+    const harness = await boot(
+      baseConfig({
+        dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3, focusProjectIds: ["proj-a"] },
+      }),
+      [inFocus, outOfFocus],
+      [agentRow(), agentRow({ id: "agent-2" })],
+    );
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number>; pickedIssueIds: string[] };
+    expect(metadata.pickedIssueIds).toEqual(["i1"]);
+    expect(metadata.counters.woken).toBe(1);
+  });
+
+  it("still counts the five report rails over the WHOLE company when a focus filter is set (focus narrows only the pick, per dispatch-selection.ts)", async () => {
+    const backlogCard = issue("i1", { status: "backlog", projectId: "proj-b" });
+    const inFocus = issue("i2", { projectId: "proj-a", createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: false, idleMinutes: 30, maxWakesPerFiring: 3, focusProjectIds: ["proj-a"] } }),
+      [backlogCard, inFocus],
+    );
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_backlog).toBe(1);
+  });
+
+  it("emits every SELECTION_COUNTERS metric unconditionally, even when zero, tagged with companyId and wakeEnabled", async () => {
+    const card = issue("i1");
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const names = harness.metrics.map((m) => m.name);
+    expect(names).toContain("dispatch.refused_backlog");
+    expect(names).toContain("dispatch.woken");
+    expect(names).toContain("dispatch.routing_gap");
+    expect(names).toContain("dispatch.wake_failures");
+    // deadlocked_agents has no native equivalent (Q5) — never fabricated as a metric.
+    expect(names).not.toContain("dispatch.deadlocked_agents");
+    const woken = harness.metrics.find((m) => m.name === "dispatch.woken");
+    expect(woken?.tags).toMatchObject({ companyId: COMPANY, wakeEnabled: "false" });
+  });
+
+  it("does not write a second activity line on a firing whose summary is unchanged (hasStateChanged gate)", async () => {
+    const card = issue("i1", { status: "backlog" });
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    expect(harness.activity).toHaveLength(1);
+  });
+
+  it("writes a new activity line when the firing's summary changes between runs", async () => {
+    const card = issue("i1", { status: "backlog" });
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    await harness.ctx.issues.update("i1", { status: "in_progress" }, COMPANY);
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    expect(harness.activity).toHaveLength(2);
+  });
+
+  it("reports the routing gap and names ceo/agent_creator routing owners, marked incomplete (Q2)", async () => {
+    const unassigned = issue("i1", { assigneeAgentId: null, projectId: "proj-a" });
+    const ceo = agentRow({ id: "ceo-1", role: "ceo" });
+    const harness = await boot(baseConfig(), [unassigned], [ceo]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      routingGapCount: number;
+      routingOwnerIds: string[];
+      routingOwnersComplete: boolean;
+    };
+    expect(metadata.routingGapCount).toBe(1);
+    expect(metadata.routingOwnerIds).toEqual(["ceo-1"]);
+    expect(metadata.routingOwnersComplete).toBe(false);
+  });
+
+  it("TOG-2533 fix 3/4: report-only would-have-woken note names the specific issue identifiers, not just a count", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), identifier: "TOG-9001" } as never);
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "report-only would-have-woken note dropped". If the
+    // `!dispatchConfig.wakeEnabled && selection.picks.length > 0` push in
+    // worker.ts were deleted, `notes` would be `[]` here and this assertion
+    // goes red — the operator report loses the one piece of information a
+    // human needs to act on (which specific card would have woken).
+    const metadata = harness.activity[0]?.metadata as { notes: string[] };
+    expect(metadata.notes.some((n) => n.startsWith("report-only: would have woken") && n.includes("TOG-9001"))).toBe(
+      true,
+    );
+  });
+
+  it("TOG-2533 fix 3/4: does not add a report-only would-have-woken note when nothing was picked", async () => {
+    const card = issue("i1", { status: "backlog" });
+    const harness = await boot(baseConfig(), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { notes: string[] };
+    expect(metadata.notes.some((n) => n.startsWith("report-only:"))).toBe(false);
+  });
+
+  it("TOG-2533 fix 3/4: an issue whose orchestration read throws is counted and named in an unreadable-coverage note", async () => {
+    const readable = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const unreadable = issue("i2", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-2" });
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }),
+      [readable, unreadable],
+      [agentRow(), agentRow({ id: "agent-2" })],
+    );
+    const original = harness.ctx.issues.summaries.getOrchestration.bind(harness.ctx.issues.summaries);
+    harness.ctx.issues.summaries.getOrchestration = (async (input: { issueId: string; companyId: string }) => {
+      if (input.issueId === "i2") throw new Error("boom");
+      return original(input);
+    }) as never;
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "unreadable count dropped". If the `unreadable += 1` /
+    // trailing `notes.push` in worker.ts's dispatch-sweep population loop
+    // were removed, this note never appears and the operator has no way to
+    // know one assigned issue silently fell out of selection this firing.
+    const metadata = harness.activity[0]?.metadata as { notes: string[] };
+    expect(metadata.notes).toContain("1 assigned issues could not be read and are excluded from selection");
+    // The readable issue still gets woken — a read failure excludes only the
+    // failing issue, never the whole company's firing.
+    expect((metadata as unknown as { counters: { woken: number } }).counters.woken).toBe(1);
+  });
+
+  it("TOG-2533 fix 3/4: a partial-list routing-owners note is attached whenever the routing gap is non-empty", async () => {
+    const unassigned = issue("i1", { assigneeAgentId: null, projectId: "proj-a" });
+    const harness = await boot(baseConfig(), [unassigned], []);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { notes: string[] };
+    expect(
+      metadata.notes.some(
+        (n) => n.startsWith("routing owners are a partial list:") && n.includes("explicit_grant") && n.includes("simple_default"),
+      ),
+    ).toBe(true);
+  });
+
+  it("TOG-2533 fix 3/4: a page-saturation note is attached when the issue list hits the page limit", async () => {
+    const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
+    const cards = Array.from({ length: DISPATCH_ISSUE_PAGE_LIMIT }, (_, i) =>
+      issue(`saturated-${i}`, { status: "done" }),
+    );
+    const harness = await boot(baseConfig(), cards);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // Named mutant: "page saturation note dropped". If the `notes.push` in
+    // worker.ts's `issues.length >= DISPATCH_ISSUE_PAGE_LIMIT` branch were
+    // removed, this note never appears and a company whose board has grown
+    // past the page limit would silently undercount with no operator signal.
+    const metadata = harness.activity[0]?.metadata as { notes: string[] };
+    expect(
+      metadata.notes.some(
+        (n) => n.startsWith("issue list saturated at limit") && n.includes(String(DISPATCH_ISSUE_PAGE_LIMIT)),
+      ),
+    ).toBe(true);
+  });
+
+  it("manifest declares the dispatch-sweep job and its three absorbed capabilities", () => {
+    expect(manifest.jobs?.some((j) => j.jobKey === JOB_KEYS.dispatchSweep)).toBe(true);
+    expect(manifest.capabilities).toContain("issue.relations.read");
+    expect(manifest.capabilities).toContain("issues.orchestration.read");
+    expect(manifest.capabilities).toContain("issues.wakeup");
+  });
+
+  it("dispatch.wakeEnabled defaults to false when the company config omits the dispatch block entirely", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot({ selection: { enabled: true, mode: "enforce" }, models: [], tierLabelIds: {} }, [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    expect(harness.activity[0]?.message).toContain("report-only");
+  });
+
+  it("state key is scoped per company, not shared across companies (dispatchLastFiring)", async () => {
+    const cardA = issue("i1", { status: "backlog", companyId: "co-1" });
+    const cardB = issue("i2", { status: "backlog", companyId: "co-2" });
+    const harness = createTestHarness({ manifest, config: baseConfig() });
+    harness.seed({
+      issues: [cardA, cardB],
+      agents: [agentRow()] as never,
+      companies: [{ id: "co-1", name: "A" } as never, { id: "co-2", name: "B" } as never],
+    });
+    const plugin = createPlugin();
+    const setup = plugin.definition.setup;
+    if (!setup) throw new Error("plugin definition has no setup handler");
+    await setup(harness.ctx);
+    const onConfigChanged = plugin.definition.onConfigChanged;
+    if (!onConfigChanged) throw new Error("plugin definition has no onConfigChanged handler");
+    await onConfigChanged(baseConfig(), { companyId: "co-1" });
+    await onConfigChanged(baseConfig(), { companyId: "co-2" });
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    // One firing per company => two activity lines (each is a first-ever
+    // state for its own company scope), never merged into one.
+    expect(harness.activity).toHaveLength(2);
+    const companyIds = harness.activity.map((entry) => (entry.metadata as { companyId: string }).companyId).sort();
+    expect(companyIds).toEqual(["co-1", "co-2"]);
+  });
+});

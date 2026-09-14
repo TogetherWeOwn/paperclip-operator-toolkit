@@ -1,4 +1,4 @@
-import type { LanePaceDefinition, LanePaceVerdict, PacePolicy } from "./pace.js";
+import type { LanePaceDefinition, LanePaceObservation, LanePaceVerdict, PacePolicy } from "./pace.js";
 import { evaluateLanePace, normalizeLaneDocument } from "./pace.js";
 import { isReservedLiteralHost } from "./url-policy.js";
 
@@ -40,6 +40,16 @@ export interface LanePollResult {
   laneId: string;
   fetchedAt: string;
   verdict: LanePaceVerdict | null;
+  /**
+   * The normalized per-account, per-window document underlying `verdict`.
+   * `verdict.score` reports only the account's GOVERNING window (the largest
+   * `allowance` window when none is explicitly reported, per `pace.ts`'s
+   * `governingWindow()`) — for zai that is the weekly window, not the 5h one.
+   * `lane_5h()`/`lane_accounts()` (tier_dispatcher.py) need the 5h window and
+   * per-account health directly, so this is carried alongside the verdict
+   * rather than re-derived from it. Null exactly when `verdict` is null.
+   */
+  observation: LanePaceObservation | null;
   /** Null on a clean poll. Fail-neutral: an error here never throws upstream. */
   error: string | null;
 }
@@ -55,13 +65,10 @@ function verdictFor(
   lane: LanePaceDefinition,
   policy: PacePolicy | undefined,
   asOf: string,
-): LanePaceVerdict | null {
+): { verdict: LanePaceVerdict; observation: LanePaceObservation } | null {
   try {
-    return evaluateLanePace({
-      observation: normalizeLaneDocument({ document, definition: lane }),
-      asOf,
-      policy,
-    });
+    const observation = normalizeLaneDocument({ document, definition: lane });
+    return { verdict: evaluateLanePace({ observation, asOf, policy }), observation };
   } catch {
     return null;
   }
@@ -73,7 +80,7 @@ async function pollOne(
   now: () => string,
 ): Promise<LanePollResult> {
   const fetchedAt = now();
-  const fail = (error: string): LanePollResult => ({ laneId: source.laneId, fetchedAt, verdict: null, error });
+  const fail = (error: string): LanePollResult => ({ laneId: source.laneId, fetchedAt, verdict: null, observation: null, error });
 
   let parsed: URL;
   try {
@@ -151,10 +158,12 @@ async function pollOne(
     return fail("lane-invalid-json");
   }
 
+  const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);
   return {
     laneId: source.laneId,
     fetchedAt,
-    verdict: verdictFor(document, source.lane, source.policy, fetchedAt),
+    verdict: evaluated?.verdict ?? null,
+    observation: evaluated?.observation ?? null,
     error: null,
   };
 }
@@ -176,7 +185,7 @@ export async function pollLanes(input: {
   return Promise.all(
     input.sources.map((source) =>
       pollOne(source, input.http, input.now).catch(
-        (): LanePollResult => ({ laneId: source.laneId, fetchedAt: input.now(), verdict: null, error: "lane-poll-failed" }),
+        (): LanePollResult => ({ laneId: source.laneId, fetchedAt: input.now(), verdict: null, observation: null, error: "lane-poll-failed" }),
       ),
     ),
   );

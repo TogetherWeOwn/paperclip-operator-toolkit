@@ -31,7 +31,7 @@ function unserviceableVerdict(laneId: string): LanePaceVerdict {
 function ledgerWith(...laneIds: string[]): LaneLedger {
   const ledger: LaneLedger = {};
   for (const laneId of laneIds) {
-    ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: NOW.toString(), error: null };
+    ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: NOW.toString(), error: null, observation: null };
   }
   return ledger;
 }
@@ -372,6 +372,7 @@ describe("selection", () => {
           verdict: { ...unserviceableVerdict("lane-t3"), state: "behind", serviceable: true },
           fetchedAt: NOW.toString(),
           error: null,
+          observation: null,
         },
       };
       const decision = selectModel({
@@ -481,8 +482,8 @@ describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
   });
 
   const laneLedger: LaneLedger = {
-    "lane-ahead": { laneId: "lane-ahead", fetchedAt: "t", error: null, verdict: paceVerdict({ laneId: "lane-ahead", state: "ahead" }) },
-    "lane-on": { laneId: "lane-on", fetchedAt: "t", error: null, verdict: paceVerdict({ laneId: "lane-on", state: "on" }) },
+    "lane-ahead": { laneId: "lane-ahead", fetchedAt: "t", error: null, observation: null, verdict: paceVerdict({ laneId: "lane-ahead", state: "ahead" }) },
+    "lane-on": { laneId: "lane-on", fetchedAt: "t", error: null, observation: null, verdict: paceVerdict({ laneId: "lane-on", state: "on" }) },
   };
 
   const cardLedger: Record<string, CardLedgerEntry> = {
@@ -543,5 +544,384 @@ describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
     expect(decision.shadowDiff?.listPriceWinner).toBe("cheap-ahead");
     expect(decision.shadowDiff?.costPerAcceptedCardWinner).toBe("cheap-ahead");
     expect(decision.shadowDiff?.agree).toBe(true);
+  });
+});
+
+describe("lane avoid + lane outage gating (TOG-2481)", () => {
+  const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+  const avoidedModel = model(t1, { id: "avoided-model", laneId: "codex" });
+  const fallbackModel = model(t1, { id: "fallback-model", laneId: "lane-fresh" });
+
+  function laneVerdict(overrides: Partial<LanePaceVerdict> = {}): LanePaceVerdict {
+    return {
+      laneId: "codex",
+      observedAt: "2026-09-10T12:00:00.000Z",
+      state: "on",
+      serviceable: true,
+      score: { utilization: 0.85, elapsed: 0.5, deviation: 0 },
+      accounts: [],
+      knownAccountCount: 1,
+      knownWeight: 1,
+      serviceableAccountCount: 1,
+      urgentResetAt: null,
+      reason: "ok",
+      ...overrides,
+    };
+  }
+
+  it("excludes a model whose lane is at or above its avoid threshold (default 0.8), even while serviceable", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict() },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-avoid-1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [avoidedModel, fallbackModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe("fallback-model");
+    expect(
+      decision.rejections.some((r) => r.stage === "lane-avoid" && r.modelId === "avoided-model"),
+    ).toBe(true);
+  });
+
+  it("2026-09-07 07:12Z owner rule: codex's own AVOID_LANE=0.99 keeps it admitted at 0.85 where the generic 0.8 threshold would have excluded it", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict() },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-avoid-2", labelNames: ["tier:T1"] },
+      config: config({
+        models: [avoidedModel, fallbackModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: { codex: 0.99 } },
+      }),
+    });
+    expect(decision.modelId).toBe("avoided-model");
+    expect(decision.rejections.some((r) => r.stage === "lane-avoid")).toBe(false);
+  });
+
+  it("2026-09-07 06:40Z owner note: an operator-declared lane outage excludes a model even though telemetry reports it healthy", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ score: { utilization: 0.1, elapsed: 0.1, deviation: 0 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-outage-1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [avoidedModel, fallbackModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneOutageOverride: { lanes: ["codex"], models: [], until: "2026-09-11T00:00:00.000Z" },
+      }),
+    });
+    expect(decision.modelId).toBe("fallback-model");
+    expect(
+      decision.rejections.some((r) => r.stage === "lane-outage" && r.modelId === "avoided-model"),
+    ).toBe(true);
+  });
+
+  it("an expired lane outage override excludes nothing", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ score: { utilization: 0.1, elapsed: 0.1, deviation: 0 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      now: Date.parse("2026-09-10T12:00:00.000Z"),
+      descriptor: { issueId: "lane-outage-2", labelNames: ["tier:T1"] },
+      config: config({
+        models: [avoidedModel, fallbackModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneOutageOverride: { lanes: ["codex"], models: [], until: "2026-09-09T00:00:00.000Z" },
+      }),
+    });
+    expect(decision.rejections.some((r) => r.stage === "lane-outage")).toBe(false);
+  });
+
+  it("both gates are skipped entirely when pacing is off, matching the pre-2137/pre-2481 engine", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict() },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-avoid-off", labelNames: ["tier:T1"] },
+      config: config({
+        models: [avoidedModel, fallbackModel],
+        pacingMode: "off",
+        laneLedger,
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+        laneOutageOverride: { lanes: ["codex"], models: [], until: "2026-09-11T00:00:00.000Z" },
+      }),
+    });
+    expect(decision.rejections.some((r) => r.stage === "lane-avoid" || r.stage === "lane-outage")).toBe(false);
+  });
+});
+
+describe("lane-has-room gating (TOG-2481 tier_dispatcher.py lane_has_room())", () => {
+  const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+  const goModel = model(t1, { id: "go-model", laneId: "opencode-go", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
+
+  function laneRoom(overrides: Partial<NonNullable<Parameters<typeof config>[0]>["laneRoom"]> = {}) {
+    return {
+      capPerAccount: { "opencode-go": 2 },
+      activePinsWeightByLane: {},
+      fiveHourWindowName: "five_hour",
+      zaiLaneId: "zai",
+      zaiWeeklyWindowName: "weekly",
+      zaiWeeklyDefaultMargin: 0.15,
+      zaiPaceOverrideMargin: null,
+      now: NOW,
+      ...overrides,
+    };
+  }
+
+  it("2026-09-06 17:1xZ / 2026-09-06 23:5xZ owner rule: excludes a model whose lane is at its per-account active-card cap", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-room-1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [goModel, t1],
+        pacingMode: "enforce",
+        laneRoom: laneRoom({ activePinsWeightByLane: { "opencode-go": 2 } }),
+      }),
+    });
+    expect(decision.modelId).toBe(t1.id);
+    expect(
+      decision.rejections.some((r) => r.stage === "lane-no-room" && r.modelId === goModel.id),
+    ).toBe(true);
+  });
+
+  it("admits a model whose lane is still under its per-account cap", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-room-2", labelNames: ["tier:T1"] },
+      config: config({
+        models: [goModel, t1],
+        pacingMode: "enforce",
+        laneRoom: laneRoom({ activePinsWeightByLane: { "opencode-go": 1 } }),
+      }),
+    });
+    expect(decision.modelId).toBe(goModel.id);
+    expect(decision.rejections.some((r) => r.stage === "lane-no-room")).toBe(false);
+  });
+
+  it("is skipped entirely when laneRoom is not configured (fail-open)", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-room-3", labelNames: ["tier:T1"] },
+      config: config({ models: [goModel, t1], pacingMode: "enforce" }),
+    });
+    expect(decision.rejections.some((r) => r.stage === "lane-no-room")).toBe(false);
+  });
+});
+
+describe("T1 stays off opencode-go unless codex is at/over its avoid threshold (2026-09-07 03:15Z owner rule)", () => {
+  const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+  const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+  const goModel = model(t1, { id: "go-model-t1", laneId: "opencode-go", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
+  const codexModel = model(t1, { id: "codex-model", laneId: "codex", costPerMTokIn: 10, costPerMTokOut: 10 });
+
+  function codexLedger(utilization: number): LaneLedger {
+    return {
+      codex: {
+        laneId: "codex",
+        fetchedAt: "t",
+        error: null,
+        observation: null,
+        verdict: {
+          laneId: "codex",
+          observedAt: "2026-09-07T03:15:00.000Z",
+          state: "on",
+          serviceable: true,
+          score: { utilization, elapsed: 0.5, deviation: 0 },
+          accounts: [],
+          knownAccountCount: 1,
+          knownWeight: 1,
+          serviceableAccountCount: 1,
+          urgentResetAt: null,
+          reason: "ok",
+        },
+      },
+    };
+  }
+
+  it("excludes T1 from opencode-go while codex still has room below the avoid threshold", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "go-fallback-1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [goModel, codexModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.5),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+        codexLaneId: "codex",
+        opencodeGoLaneId: "opencode-go",
+      }),
+    });
+    expect(decision.modelId).toBe(codexModel.id);
+    const rejection = decision.rejections.find((r) => r.modelId === goModel.id && r.stage === "lane-avoid");
+    expect(rejection?.reason).toContain("Go fallback only");
+  });
+
+  it("admits T1 onto opencode-go once codex is at/over its own avoid threshold", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "go-fallback-2", labelNames: ["tier:T1"] },
+      config: config({
+        models: [goModel, codexModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.85),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+        codexLaneId: "codex",
+        opencodeGoLaneId: "opencode-go",
+      }),
+    });
+    expect(decision.modelId).toBe(goModel.id);
+    expect(
+      decision.rejections.some((r) => r.modelId === goModel.id && r.reason.includes("Go fallback only")),
+    ).toBe(false);
+    // codexModel itself is excluded by the pre-existing generic lane-avoid gate at 0.85 >= 0.8.
+    expect(decision.rejections.some((r) => r.modelId === codexModel.id && r.stage === "lane-avoid")).toBe(true);
+  });
+
+  it("does not apply the T1-only rule to T2, which keeps using Go under the cap/5h rule alone", () => {
+    const sonnetGo = model(t2, { id: "sonnet-go", laneId: "opencode-go" });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "go-fallback-3", labelNames: ["tier:T2"] },
+      config: config({
+        models: [sonnetGo],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.5),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe(sonnetGo.id);
+    expect(decision.rejections.some((r) => r.reason.includes("Go fallback only"))).toBe(false);
+  });
+});
+
+describe("long-turn engineering agents stay off zai while codex has room (2026-09-08 22:15Z owner rule)", () => {
+  const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+  const zaiModel = model(t1, { id: "zai-model", laneId: "zai", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
+  const codexModel = model(t1, { id: "codex-model-2", laneId: "codex", costPerMTokIn: 10, costPerMTokOut: 10 });
+
+  function codexLedger(utilization: number): LaneLedger {
+    // Both lanes get an explicit `"on"` verdict so pace ordering (which sorts
+    // by pace-state rank before cost) ties between them and cost decides —
+    // isolating what this test actually checks (the ZAI_LONG_RUN_AGENTS
+    // exclusion rule) from an unrelated "zai never polled -> unknown -> sorts
+    // after codex" pace-ordering artifact.
+    return {
+      codex: {
+        laneId: "codex",
+        fetchedAt: "t",
+        error: null,
+        observation: null,
+        verdict: {
+          laneId: "codex",
+          observedAt: "2026-09-08T22:15:00.000Z",
+          state: "on",
+          serviceable: true,
+          score: { utilization, elapsed: 0.5, deviation: 0 },
+          accounts: [],
+          knownAccountCount: 1,
+          knownWeight: 1,
+          serviceableAccountCount: 1,
+          urgentResetAt: null,
+          reason: "ok",
+        },
+      },
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        observation: null,
+        verdict: {
+          laneId: "zai",
+          observedAt: "2026-09-08T22:15:00.000Z",
+          state: "on",
+          serviceable: true,
+          score: { utilization: 0.3, elapsed: 0.5, deviation: 0 },
+          accounts: [],
+          knownAccountCount: 1,
+          knownWeight: 1,
+          serviceableAccountCount: 1,
+          urgentResetAt: null,
+          reason: "ok",
+        },
+      },
+    };
+  }
+
+  it("routes a named long-turn agent off zai onto codex when codex has room", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "zai-long-run-1", labelNames: ["tier:T1"], agentName: "Founding Engineer" },
+      config: config({
+        models: [zaiModel, codexModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.3),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+        codexLaneId: "codex",
+        zaiLaneId: "zai",
+      }),
+    });
+    expect(decision.modelId).toBe(codexModel.id);
+    const rejection = decision.rejections.find((r) => r.modelId === zaiModel.id && r.stage === "lane-avoid");
+    expect(rejection?.reason).toContain("Founding Engineer");
+    expect(rejection?.reason).toContain("1214");
+  });
+
+  it("leaves zai available for an agent name outside ZAI_LONG_RUN_AGENTS", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "zai-long-run-2", labelNames: ["tier:T1"], agentName: "QA Reviewer" },
+      config: config({
+        models: [zaiModel, codexModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.3),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe(zaiModel.id);
+  });
+
+  it("leaves zai available for a named agent when no codex lane is enabled to take the work", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "zai-long-run-3", labelNames: ["tier:T1"], agentName: "Founding Engineer" },
+      config: config({
+        models: [zaiModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.3),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe(zaiModel.id);
+  });
+
+  it("leaves zai available for a named agent once codex is at/over its own avoid threshold (no room to redirect to)", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "zai-long-run-4", labelNames: ["tier:T1"], agentName: "Founding Engineer" },
+      config: config({
+        models: [zaiModel, codexModel],
+        pacingMode: "enforce",
+        laneLedger: codexLedger(0.85),
+        laneAvoidConfig: { defaultThreshold: 0.8, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe(zaiModel.id);
+    expect(
+      decision.rejections.some((r) => r.modelId === zaiModel.id && r.reason.includes("1214")),
+    ).toBe(false);
   });
 });

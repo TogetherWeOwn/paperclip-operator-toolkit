@@ -1,5 +1,4 @@
-import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
-import type { PluginContext, ToolResult } from "@paperclipai/plugin-sdk";
+import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 
 import { planApply } from "./actuate/apply.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
@@ -8,14 +7,24 @@ import {
   AA_LEADERBOARD_URL,
   AA_MAX_RESPONSE_BYTES,
   AA_SNAPSHOT_HISTORY_LIMIT,
+  BALANCE_PASS_BUSIER_UTILIZATION_DELTA,
+  BALANCE_PASS_COST_DOWN_MULTIPLIER,
+  BALANCE_PASS_FETCH_LIMIT,
+  BALANCE_PASS_PROBATION_PRICE_USD,
+  BALANCE_PASS_WRITE_LIMIT,
   CARD_LEDGER_WINDOW_DAYS,
+  DISPATCH_ISSUE_PAGE_LIMIT,
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
+  LABEL_ONLY_PASS_FETCH_LIMIT,
   OPERATOR_PIN_LABEL,
   PLUGIN_STATE_KEYS,
   REJECTION_WINDOW_MS,
   REOPEN_WINDOW_MS,
+  REPIN_PASS_FETCH_LIMIT,
+  REPIN_PASS_WRITE_LIMIT,
   ROUTE_KEYS,
+  SCORE_THRESHOLDS,
   SCORE_WINDOW_DAYS,
   TIER_LABEL_PREFIX,
   TIERS,
@@ -31,6 +40,7 @@ import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceD
 import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
+import { tierFromLabels } from "./engine/tier.js";
 import {
   accumulateRunStats,
   blendedPriorP,
@@ -47,6 +57,7 @@ import {
 import type {
   CardLedgerEntry,
   IssueDescriptor,
+  ModelEntry,
   ModelScore,
   QualitySignal,
   SelectionDecision,
@@ -54,15 +65,39 @@ import type {
 } from "./engine/types.js";
 import {
   activeOperatorOverride,
+  activeZaiPaceOverride,
+  blendedListPrice,
   hardStopExcluded,
+  laneAvoidExcluded,
+  laneEffectiveUtilization,
+  laneHasRoom,
+  laneOutageExcluded,
   mergeLedgerEntry,
   recordOperatorOverride,
   repinAllowed,
   type LaneLedger,
+  type LaneOutageOverride,
   type OperatorOverrideLedger,
+  type ZaiPaceOverride,
 } from "./engine/pacing.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
 import { buildShadowRecord } from "./shadow-emit.js";
+import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
+import {
+  buildClassificationPrompt,
+  parseClassificationResponse,
+  resolveClassifiedTiers,
+  RUBRIC,
+} from "./engine/classify.js";
+import {
+  selectDispatch,
+  summariseRoutingGap,
+  identifyRoutingOwners,
+  TERMINAL_STATUSES as DISPATCH_TERMINAL_STATUSES,
+  type DispatchIssue,
+  type DispatchPopulationEntry,
+} from "./engine/dispatch-selection.js";
+import { summariseFiring, hasStateChanged, emitMetrics, logStateChange, type WakeOutcome } from "./dispatch-reporting.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -190,6 +225,41 @@ export function createPlugin() {
       const readOperatorOverrides = async (companyId: string): Promise<OperatorOverrideLedger> => {
         const stored = await ctx.state.get(operatorOverridesKey(companyId));
         return stored && typeof stored === "object" ? (stored as OperatorOverrideLedger) : {};
+      };
+
+      const laneOutageKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneOutage,
+      });
+
+      const readLaneOutage = async (companyId: string): Promise<LaneOutageOverride | null> => {
+        const stored = await ctx.state.get(laneOutageKey(companyId));
+        if (!stored || typeof stored !== "object") return null;
+        const record = stored as Record<string, unknown>;
+        if (!Array.isArray(record.lanes) || !Array.isArray(record.models) || typeof record.until !== "string") {
+          return null;
+        }
+        return {
+          lanes: record.lanes.filter((l): l is string => typeof l === "string"),
+          models: record.models.filter((m): m is string => typeof m === "string"),
+          until: record.until,
+          ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+        };
+      };
+
+      const zaiPaceOverrideKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.zaiPaceOverride,
+      });
+
+      const readZaiPaceOverride = async (companyId: string): Promise<ZaiPaceOverride | null> => {
+        const stored = await ctx.state.get(zaiPaceOverrideKey(companyId));
+        if (!stored || typeof stored !== "object") return null;
+        const record = stored as Record<string, unknown>;
+        if (typeof record.margin !== "number" || typeof record.until !== "string") return null;
+        return { margin: record.margin, until: record.until };
       };
 
       const paceRepinHistoryKey = (companyId: string) => ({
@@ -386,10 +456,39 @@ export function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.modelScores,
       });
 
+      // --- TOG-2481: LLM tier classification (tier_dispatcher.py classify()) --
+
+      const classificationHttp: ClassificationHttpClient = {
+        fetch: (url, init) => ctx.http.fetch(url, init),
+      };
+
+      const classificationExclusionsKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.classificationExclusions,
+      });
+
+      const readClassificationExclusions = async (companyId: string): Promise<Record<string, boolean>> => {
+        const stored = asRecord(await ctx.state.get(classificationExclusionsKey(companyId)));
+        const out: Record<string, boolean> = {};
+        for (const [issueId, excluded] of Object.entries(stored)) {
+          if (excluded === true) out[issueId] = true;
+        }
+        return out;
+      };
+
       const readCardLedger = async (companyId: string): Promise<Record<string, CardLedgerEntry>> => {
         const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
         const ledger = asRecord(stored.cardLedger);
         return ledger as Record<string, CardLedgerEntry>;
+      };
+
+      const readModelScores = async (companyId: string): Promise<Record<string, ModelScore>> => {
+        const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
+        const scores = Array.isArray(stored.modelScores) ? (stored.modelScores as ModelScore[]) : [];
+        const byModelId: Record<string, ModelScore> = {};
+        for (const score of scores) byModelId[score.modelId] = score;
+        return byModelId;
       };
 
       const shadowDiffsKey = (companyId: string) => ({
@@ -397,6 +496,47 @@ export function createPlugin() {
         scopeId: companyId,
         stateKey: PLUGIN_STATE_KEYS.shadowDiffs,
       });
+
+      // --- TOG-2481: absorbed dispatch stall-sweep (TOG-747/TOG-706) ---------
+
+      const dispatchLastFiringKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.dispatchLastFiring,
+      });
+
+      /**
+       * TOG-2481 port of `tier_dispatcher.py`'s `lane_active_pins()`: current
+       * todo/in_progress pinned weight per lane, a flash model (blended list
+       * price under $1/Mtok) counting as half a lane slot. Computed live per
+       * `advise()` call — same cadence the Python source used, reading fresh
+       * on every dispatcher invocation rather than caching.
+       */
+      const activePinsWeightByLane = async (
+        companyId: string,
+        models: ResolvedConfig["models"],
+      ): Promise<Record<string, number>> => {
+        const rows = (await ctx.db.query(
+          `select assignee_adapter_overrides->'adapterConfig'->>'model' as pinned_model
+             from issues
+            where company_id = $1
+              and status in ('todo','in_progress')
+              and assignee_adapter_overrides->'adapterConfig'->>'model' is not null`,
+          [companyId],
+        )) as unknown[];
+
+        const weightByLane: Record<string, number> = {};
+        for (const row of rows) {
+          const r = asRecord(row);
+          const rawModelId = typeof r.pinned_model === "string" ? r.pinned_model : null;
+          const modelId = resolveConfiguredModelId(rawModelId, models);
+          const model = models.find((m) => m.id === modelId);
+          if (!model || !model.laneId) continue;
+          const weight = blendedListPrice(model) < 1.0 ? 0.5 : 1.0;
+          weightByLane[model.laneId] = (weightByLane[model.laneId] ?? 0) + weight;
+        }
+        return weightByLane;
+      };
 
       // --- TOG-2438: aa.ai Intelligence Index snapshot + per-company drift dedup ---
 
@@ -506,12 +646,15 @@ export function createPlugin() {
           scheduledRetryStatus !== "running";
 
         let agentFloorModelId: string | null = null;
+        let agentName: string | null = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
             const agent = await ctx.agents.get(assigneeAgentId, companyId);
-            const config = asRecord(asRecord(agent).adapterConfig);
+            const agentRecord = asRecord(agent);
+            const config = asRecord(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
+            if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
             // An agent we cannot read simply has no known floor; resolveTier
             // falls through to the config default rather than guessing.
@@ -524,6 +667,7 @@ export function createPlugin() {
           labelNames,
           pinnedModelId,
           agentFloorModelId,
+          agentName,
           // Sticky is derived from the pin: if the issue is already pinned, the
           // run is already on that model and a change would reset the session.
           stickyModelId: pinnedModelId,
@@ -566,6 +710,39 @@ export function createPlugin() {
       const advise = async (
         companyId: string,
         params: Record<string, unknown>,
+        /**
+         * TOG-2481 port of `tier_dispatcher.py` `pick(..., explore=False)`.
+         * `labelOnlyPass`/`repinPass`/`balancePass`'s pinned-branch calls set
+         * this `false` — they are re-affirming or replacing an existing pin,
+         * not seeding new evidence. Defaults `true`: unchanged tool behavior.
+         */
+        allowExplore = true,
+        /**
+         * TOG-2481 port of `balance_pass()`'s unpinned branch:
+         * `pick("T1", floor)` always dispatches unpinned+labelled cards at
+         * T1, regardless of the row's own tier:* label — the 2026-09-05
+         * 23:05Z "balanced T1-class pin" rule. `resolveTier()` would
+         * otherwise re-derive the row's own label tier at step 3, so this
+         * substitutes a synthetic `tier:T1` label ahead of that read rather
+         * than touching `descriptor.exclusion` (a different, unrelated
+         * forced-T1 path with its own capability-exclusion semantics).
+         */
+        forceTier?: Tier,
+        /**
+         * `repinPass`/`balancePass`'s PINNED branches set this `true`: they
+         * exist specifically to move an issue off a pin that is now
+         * unserviceable, measurably demoted, on-probation, over-cap, or on a
+         * far busier lane than another usable one — the sticky short-circuit
+         * in `selectModel()` only declines on a tier-floor violation, so
+         * without this every such call silently re-selects the same pinned
+         * model and these passes are dead code. `isIdle`/`hasOperatorPin` are
+         * already checked by the caller before `advise()` runs, so this never
+         * resets a live in-flight session; it only lets a deliberate,
+         * idle-card re-pin see past the pin it is trying to replace. Defaults
+         * `false`: the interactive advise/apply tool path must keep
+         * protecting a live session's warm prompt cache.
+         */
+        suppressSticky = false,
       ): Promise<{
         decision: SelectionDecision;
         issueId: string;
@@ -580,18 +757,32 @@ export function createPlugin() {
         config: ResolvedConfig;
         title: string;
         identifier: string | null;
+        agentFloorModelId: string | null;
+        pinnedModelId: string | null;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
         const config = await companyConfig(companyId);
         const described = await describeIssue(companyId, issueId, params);
         if (!described) return null;
+        if (forceTier) {
+          described.descriptor.labelNames = [`${TIER_LABEL_PREFIX}${forceTier}`];
+        }
+        if (suppressSticky) {
+          described.descriptor.stickyModelId = null;
+        }
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
         const nowIso = new Date().toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
         const cardLedger = await readCardLedger(companyId);
+        const modelScores = await readModelScores(companyId);
+        const laneOutageOverride = await readLaneOutage(companyId);
+        const zaiPaceOverride = await readZaiPaceOverride(companyId);
+        const now = Date.now();
+        const pinsWeightByLane =
+          config.pacing.mode !== "off" ? await activePinsWeightByLane(companyId, config.models) : {};
 
         const decision = selectModel({
           descriptor: described.descriptor,
@@ -605,11 +796,28 @@ export function createPlugin() {
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
             operatorOverrideModelId: liveOverride?.modelId ?? null,
+            laneAvoidConfig: config.pacing.avoid,
+            codexLaneId: config.pacing.codexLaneId,
+            opencodeGoLaneId: config.pacing.opencodeGoLaneId,
+            zaiLaneId: config.pacing.zai.laneId,
+            laneOutageOverride,
+            laneRoom: {
+              capPerAccount: config.pacing.laneCapPerAccount,
+              activePinsWeightByLane: pinsWeightByLane,
+              fiveHourWindowName: config.pacing.fiveHourWindowName,
+              zaiLaneId: config.pacing.zai.laneId,
+              zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+              zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+              zaiPaceOverrideMargin: activeZaiPaceOverride(zaiPaceOverride, new Date(now).toISOString()),
+              now,
+            },
             objective: config.selection.objective,
+            modelScores,
+            allowExplore,
           },
           profiles,
           signals,
-          now: Date.now(),
+          now,
           cardLedger,
         });
 
@@ -672,6 +880,8 @@ export function createPlugin() {
           config,
           title: described.title,
           identifier: described.identifier,
+          agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
+          pinnedModelId: described.descriptor.pinnedModelId ?? null,
         };
       };
 
@@ -854,6 +1064,69 @@ export function createPlugin() {
             content: `operator override recorded: ${issueId} -> ${configuredModelId}, expires ${entry.expiresAt}`,
             data: entry,
           };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.setLaneOutage,
+        {
+          displayName: "Declare or clear a lane outage",
+          description:
+            "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+          parametersSchema: {
+            type: "object",
+            required: ["until"],
+            properties: {
+              lanes: { type: "array", items: { type: "string" } },
+              models: { type: "array", items: { type: "string" } },
+              until: { type: "string" },
+              reason: { type: "string" },
+            },
+          },
+        },
+        async (params, runCtx): Promise<ToolResult> => {
+          const supplied = asRecord(params);
+          const lanes = Array.isArray(supplied.lanes) ? supplied.lanes.filter((l): l is string => typeof l === "string") : [];
+          const models = Array.isArray(supplied.models) ? supplied.models.filter((m): m is string => typeof m === "string") : [];
+          const until = typeof supplied.until === "string" ? supplied.until : null;
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (lanes.length === 0 && models.length === 0) {
+            await ctx.state.set(laneOutageKey(runCtx.companyId), null);
+            return { content: "lane outage cleared.", data: null };
+          }
+          const reason = typeof supplied.reason === "string" ? supplied.reason : undefined;
+          const override: LaneOutageOverride = { lanes, models, until, ...(reason ? { reason } : {}) };
+          await ctx.state.set(laneOutageKey(runCtx.companyId), override);
+          return { content: `lane outage recorded: ${[...lanes, ...models].join(", ")} until ${until}`, data: override };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.setZaiPaceOverride,
+        {
+          displayName: "Set or clear the Z.ai weekly-pace margin override",
+          description:
+            "TOG-2481 port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+          parametersSchema: {
+            type: "object",
+            required: ["until"],
+            properties: {
+              margin: { type: "number", minimum: 0, maximum: 1 },
+              until: { type: "string" },
+            },
+          },
+        },
+        async (params, runCtx): Promise<ToolResult> => {
+          const supplied = asRecord(params);
+          const until = typeof supplied.until === "string" ? supplied.until : null;
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (typeof supplied.margin !== "number") {
+            await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), null);
+            return { content: "zai pace override cleared.", data: null };
+          }
+          const override: ZaiPaceOverride = { margin: supplied.margin, until };
+          await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), override);
+          return { content: `zai pace override recorded: margin ${supplied.margin} until ${until}`, data: override };
         },
       );
 
@@ -1100,7 +1373,7 @@ export function createPlugin() {
             // polled. Resolution failure fails only that lane — it is
             // recorded as a lane-scoped poll error, never thrown, so one
             // bad secret ref cannot abort the company's whole poll.
-            const secretFailures: Array<{ laneId: string; fetchedAt: string; verdict: null; error: string }> = [];
+            const secretFailures: Array<{ laneId: string; fetchedAt: string; verdict: null; observation: null; error: string }> = [];
             const sources: LaneSourceDefinition[] = [];
             const fetchedAt = new Date().toISOString();
             for (const [laneIndex, lane] of config.pacing.lanes.entries()) {
@@ -1116,7 +1389,7 @@ export function createPlugin() {
                     configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`,
                   });
                 } catch {
-                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, error: "lane-secret-unavailable" });
+                  secretFailures.push({ laneId: lane.laneId, fetchedAt, verdict: null, observation: null, error: "lane-secret-unavailable" });
                   continue;
                 }
               }
@@ -1562,6 +1835,768 @@ export function createPlugin() {
         }
       });
 
+      // --- scheduled LLM tier classification (TOG-2481, tier_dispatcher.py
+      // main()) -----------------------------------------------------------
+      // For every open, agent-assigned issue with no tier:* label, no
+      // per-issue override, no `pin:operator`, and no running/queued run,
+      // classify it with the RUBRIC and write a tier:* label (never a status
+      // or assignee change — same contract as the ported script's file-level
+      // docstring). The AC3 kill switch is `classification.enabled: false`
+      // (default): a company that never sets it true gets byte-identical
+      // behavior to before this job existed.
+      ctx.jobs.register(JOB_KEYS.classifyIssues, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+            if (!config.classification.baseUrl || !config.classification.modelId) continue;
+
+            let apiKey: string | null = null;
+            if (config.classification.apiKeySecretRef) {
+              try {
+                apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef as never, {
+                  companyId: company.id,
+                  configPath: "classification.apiKeySecretRef",
+                });
+              } catch {
+                ctx.logger.error("classification secret unavailable", { companyId: company.id });
+                continue;
+              }
+            }
+
+            // Mirrors tier_dispatcher.py main()'s row query: open, agent-assigned,
+            // no pin:operator, no existing override, no existing tier:* label, no
+            // running/queued run. `labels`/`issue_labels` are not allowlisted
+            // (PLUGIN_DATABASE_CORE_READ_TABLES), so label/pin state is read via
+            // `ctx.issues.get()` per row below rather than a live SQL join.
+            const candidateRows = (await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      coalesce(a.name,'') as agent_name,
+                      i.title as title,
+                      coalesce(i.description,'') as description
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and i.assignee_agent_id is not null
+                  and (i.assignee_adapter_overrides is null
+                       or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
+                         i.updated_at desc
+                limit $2`,
+              [company.id, String(config.classification.batchSize)],
+            )) as unknown[];
+
+            const exclusions = await readClassificationExclusions(company.id);
+            let classified = 0;
+            for (const row of candidateRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+
+              // Skip an issue that already carries a tier:* label — the row query
+              // above cannot see labels (not allowlisted), so this check happens
+              // per candidate via `ctx.issues.get()`, same source `describeIssue`
+              // uses for label reads elsewhere in this worker.
+              let issue: Awaited<ReturnType<typeof ctx.issues.get>>;
+              try {
+                issue = await ctx.issues.get(issueId, company.id);
+              } catch {
+                continue;
+              }
+              if (!issue) continue;
+              const labelNames = (issue.labels ?? [])
+                .map((label) => label.name)
+                .filter((name): name is string => typeof name === "string");
+              if (labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX))) continue;
+              if (labelNames.includes(OPERATOR_PIN_LABEL)) continue;
+
+              const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
+              const title = typeof r.title === "string" ? r.title : "";
+              const description = typeof r.description === "string" ? r.description : "";
+              const prompt = buildClassificationPrompt(title, description, agentName, config.classification.descriptionChars);
+
+              const result = await callClassifier(
+                {
+                  baseUrl: config.classification.baseUrl,
+                  protocol: config.classification.protocol,
+                  modelId: config.classification.modelId,
+                  apiKey,
+                  system: RUBRIC,
+                  userPrompt: prompt,
+                  maxOutputTokens: config.classification.maxOutputTokens,
+                  requestTimeoutMs: config.classification.requestTimeoutMs,
+                  maxResponseBytes: config.classification.maxResponseBytes,
+                },
+                classificationHttp,
+              );
+              if (!result.text) {
+                ctx.logger.info("classification skipped", { companyId: company.id, issue: identifier, why: result.error });
+                continue;
+              }
+
+              const judgement = parseClassificationResponse(result.text);
+              if (!judgement) {
+                ctx.logger.info("classification unparseable", { companyId: company.id, issue: identifier });
+                continue;
+              }
+
+              const { labelTier, pickTier } = resolveClassifiedTiers(judgement, {
+                t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+                t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
+              });
+              void pickTier; // consumed by the apply-sweep (TOG-2481 task #6/#7), not this job
+
+              const labelId = config.tierLabelIds[labelTier];
+              if (labelId) {
+                const existingLabelIds =
+                  issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
+                const nextLabelIds = [...new Set([...existingLabelIds, labelId])];
+                await ctx.issues.update(
+                  issueId,
+                  { labelIds: nextLabelIds } as Parameters<typeof ctx.issues.update>[1],
+                  company.id,
+                );
+              }
+
+              if (judgement.exclusion) {
+                await ctx.state.set(classificationExclusionsKey(company.id), { ...exclusions, [issueId]: true });
+                exclusions[issueId] = true;
+              }
+
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { tier: labelTier, pickTier, confidence: judgement.confidence, reason: judgement.reason },
+              });
+              classified += 1;
+            }
+
+            ctx.logger.info("issue classification pass complete", { companyId: company.id, classified, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("issue classification failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
+      // --- shared helpers for the three scheduled sweeps below (TOG-2481:
+      // label_only_pass / repin_pass / balance_pass) -----------------------
+
+      /**
+       * A model is "usable and capable" for a tier, ported from
+       * `tier_dispatcher.py`'s `usable(model_id) and capable(model_id, tier)[0]`
+       * combination used at `repin_pass`'s skip-check and `balance_pass`'s
+       * `incapable` check. Reuses the exact same gates `select.ts` applies —
+       * hard-stop serviceability, lane avoid, lane outage, and the
+       * capability-score gate — rather than re-deriving Python's separate
+       * `usage_state()`/`lane_util()` telemetry reads that this plugin does
+       * not keep in that shape. Fail-open on an unconfigured/disabled model,
+       * matching every other TOG-2481 gate.
+       */
+      const isUsableAndCapable = (
+        modelId: string | null,
+        tier: Tier,
+        config: ResolvedConfig,
+        laneLedger: LaneLedger,
+        laneOutageOverride: LaneOutageOverride | null,
+        modelScores: Readonly<Record<string, ModelScore>>,
+        nowIso: string,
+      ): boolean => {
+        if (!modelId) return false;
+        const model = config.models.find((m) => m.id === modelId && m.enabled);
+        if (!model) return false;
+        if (config.pacing.mode === "off") return true;
+        if (hardStopExcluded(laneLedger, model)) return false;
+        if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
+        if (laneOutageExcluded(laneOutageOverride, nowIso, model)) return false;
+        const score = modelScores[model.id]?.tiers[tier];
+        if (score && score.capable === false) return false;
+        return true;
+      };
+
+      /**
+       * Company-wide count of active (todo/in_progress/in_review/blocked)
+       * issues pinned to exactly this model, ported from `balance_pass`'s
+       * inline `probation` subquery. Used only to decide whether a second
+       * unproven-cheap-model card may be demoted (the first is allowed to
+       * stay as the one live exploration card for that model).
+       */
+      const countActivePinsOfModel = async (companyId: string, modelId: string): Promise<number> => {
+        const rows = (await ctx.db.query(
+          `select count(*)::int as n
+             from issues i
+            where i.company_id = $1
+              and i.status in ('todo','in_progress','in_review','blocked')
+              and i.assignee_adapter_overrides->'adapterConfig'->>'model' = $2`,
+          [companyId, modelId],
+        )) as unknown[];
+        const r = asRecord(rows[0]);
+        return typeof r.n === "number" ? r.n : 0;
+      };
+
+      // --- scheduled label-only pass (TOG-2481, tier_dispatcher.py
+      // label_only_pass()) --------------------------------------------------
+      // 2026-09-07 01:0xZ owner rule: a card that already carries a tier:*
+      // label but no pin (label inherited/copied from a parent card, e.g.
+      // TOG-1348 cloned TOG-1334's tier:T1) was skipped by the classify job
+      // (which only looks at issues with NO tier:* label) and never pinned —
+      // the model-selection plugin then chose the model on its own, putting
+      // the Steward's TOG-1348 run on claude-sonnet-5 while the Claude lane
+      // sat at 0.84 (AVOID). Pin these from the existing label without
+      // re-classifying.
+      ctx.jobs.register(JOB_KEYS.labelOnlyPass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+
+            // Same allowlisted-table constraint as classifyIssues: the row
+            // query can only see issues/agents, never labels — so this finds
+            // "has no override" candidates here, and confirms the tier:*
+            // label (and absence of pin:operator) per row via
+            // `ctx.issues.get()` below, exactly like `describeIssue` does.
+            const candidateRows = (await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      coalesce(a.adapter_config->>'model','') as floor_model
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and (i.assignee_adapter_overrides is null
+                       or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by i.updated_at desc
+                limit $2`,
+              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)],
+            )) as unknown[];
+
+            let pinned = 0;
+            for (const row of candidateRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier = tierFromLabels(described.descriptor.labelNames);
+              if (!tier) continue;
+
+              const result = await advise(company.id, { issueId }, false);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
+                continue;
+              }
+              const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+              if (result.decision.modelId === floorModelId) {
+                ctx.logger.info("label-only pass skipped: pick equals floor", {
+                  companyId: company.id,
+                  issue: identifier,
+                  tier,
+                });
+                continue;
+              }
+
+              await ctx.issues.update(
+                issueId,
+                {
+                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
+                } as Parameters<typeof ctx.issues.update>[1],
+                company.id,
+              );
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from the existing tier label`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { modelId: result.decision.modelId, tier, trace: result.decision.trace },
+              });
+              pinned += 1;
+            }
+
+            ctx.logger.info("label-only pass complete", { companyId: company.id, pinned, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("label-only pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
+      // --- scheduled repin pass (TOG-2481, tier_dispatcher.py repin_pass()) --
+      // Idle issues pinned to a model whose lane is now unusable, or that has
+      // been measurably demoted for their tier, get re-pinned within the same
+      // tier. Capped at REPIN_PASS_WRITE_LIMIT writes per run, same as the
+      // Python source's `limit=6` default.
+      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+
+            const candidateRows = (await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status,
+                      i.updated_at as updated_at
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and i.assignee_adapter_overrides->'adapterConfig'->>'model' is not null
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by i.updated_at asc
+                limit $2`,
+              [company.id, String(REPIN_PASS_FETCH_LIMIT)],
+            )) as unknown[];
+
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = new Date().toISOString();
+
+            let repinned = 0;
+            for (const row of candidateRows) {
+              if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier = tierFromLabels(described.descriptor.labelNames);
+              if (!tier) continue;
+
+              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              if (isUsableAndCapable(pinnedModelId, tier, config, laneLedger, laneOutageOverride, modelScores, nowIso)) {
+                continue;
+              }
+
+              const result = await advise(company.id, { issueId }, false, undefined, true);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+              if (result.decision.modelId === pinnedModelId) continue;
+              if (
+                !isUsableAndCapable(
+                  result.decision.modelId,
+                  tier,
+                  config,
+                  laneLedger,
+                  laneOutageOverride,
+                  modelScores,
+                  nowIso,
+                )
+              ) {
+                continue;
+              }
+
+              await ctx.issues.update(
+                issueId,
+                {
+                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
+                } as Parameters<typeof ctx.issues.update>[1],
+                company.id,
+              );
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `Model Selection re-pinned ${pinnedModelId} -> ${result.decision.modelId} (${tier}): lane unusable or measurably demoted`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, trace: result.decision.trace },
+              });
+              repinned += 1;
+              void identifier;
+            }
+
+            ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("repin pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
+      // --- scheduled balance pass (TOG-2481, tier_dispatcher.py
+      // balance_pass()) ------------------------------------------------------
+      // Owner rule 2026-09-05 23:05Z (spread across all accounts): idle cards
+      // that carry a tier label but no override were left on the floor by the
+      // old exclusion rule; give them a balanced T1-class pin instead. Also
+      // re-pin idle cards whose pinned model has gone cost-down-eligible,
+      // measurably incapable/on-probation/over-cap, or whose lane is now far
+      // busier (>=0.25) than another usable lane in their tier. Capped at
+      // BALANCE_PASS_WRITE_LIMIT writes per run, same as the Python source's
+      // `limit=8` default.
+      ctx.jobs.register(JOB_KEYS.balancePass, async () => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.classification.enabled) continue;
+
+            const candidateRows = (await ctx.db.query(
+              `select i.id::text as id,
+                      i.identifier as identifier,
+                      i.status as status
+                 from issues i
+                 join agents a on a.id = i.assignee_agent_id
+                where i.company_id = $1
+                  and i.status in ('todo','in_progress','blocked','in_review')
+                  and a.status <> 'terminated'
+                  and not exists (
+                    select 1 from heartbeat_runs r
+                     where r.status in ('running','queued')
+                       and r.context_snapshot->>'issueId' = i.id::text
+                  )
+                order by case i.status when 'in_progress' then 0 when 'todo' then 1 when 'in_review' then 2 else 3 end,
+                         i.updated_at desc
+                limit $2`,
+              [company.id, String(BALANCE_PASS_FETCH_LIMIT)],
+            )) as unknown[];
+
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = new Date().toISOString();
+            const now = Date.now();
+
+            let balanced = 0;
+            for (const row of candidateRows) {
+              if (balanced >= BALANCE_PASS_WRITE_LIMIT) break;
+              const r = asRecord(row);
+              const issueId = typeof r.id === "string" ? r.id : null;
+              const status = typeof r.status === "string" ? r.status : "";
+              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+              if (!issueId) continue;
+
+              const described = await describeIssue(company.id, issueId, {});
+              if (!described) continue;
+              if (described.hasOperatorPin) continue;
+              const tier = tierFromLabels(described.descriptor.labelNames);
+              if (!tier) continue;
+
+              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : undefined;
+
+              if (pinnedModelId && pinnedModel) {
+                const currentUtilization = pinnedModel.laneId
+                  ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId)
+                  : null;
+                const result = await advise(company.id, { issueId }, false, undefined, true);
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (result.decision.modelId === pinnedModelId) continue;
+                const newModel = config.models.find((m) => m.id === result.decision.modelId);
+                if (!newModel) continue;
+                const newUtilization = newModel.laneId ? laneEffectiveUtilization(laneLedger, newModel.laneId) : null;
+
+                const cheaper = blendedListPrice(newModel) <= BALANCE_PASS_COST_DOWN_MULTIPLIER * blendedListPrice(pinnedModel);
+                const pinnedScore = modelScores[pinnedModelId]?.tiers[tier];
+                let incapable = pinnedScore ? pinnedScore.capable === false : false;
+
+                // `probation` (balance_pass()): a pinned model priced under
+                // BALANCE_PASS_PROBATION_PRICE_USD and still unproven may hold
+                // only ONE active card company-wide — the exploration slot —
+                // before it is demoted. Only worth the extra DB round trip
+                // when the cheaper/incapable checks above have not already
+                // decided this row.
+                if (
+                  !incapable &&
+                  blendedListPrice(pinnedModel) < BALANCE_PASS_PROBATION_PRICE_USD &&
+                  !(pinnedScore?.proven ?? false)
+                ) {
+                  const activeCount = await countActivePinsOfModel(company.id, pinnedModelId);
+                  if (activeCount > 1) incapable = true;
+                }
+
+                // `over_cap`: this card's own lane no longer has room for it
+                // (extra: -1 because this card already counts itself in the
+                // ledger's active-pins weight) — only checked for todo/
+                // in_progress, matching the Python source's `status in
+                // ("todo","in_progress")` guard.
+                if (
+                  !incapable &&
+                  (status === "todo" || status === "in_progress") &&
+                  pinnedModel.laneId &&
+                  config.pacing.mode !== "off"
+                ) {
+                  const pinsWeightByLane = await activePinsWeightByLane(company.id, config.models);
+                  const admitted = laneHasRoom({
+                    laneId: pinnedModel.laneId,
+                    activePinsWeight: pinsWeightByLane[pinnedModel.laneId] ?? 0,
+                    extra: -1,
+                    ledger: laneLedger,
+                    capPerAccount: config.pacing.laneCapPerAccount,
+                    fiveHourWindowName: config.pacing.fiveHourWindowName,
+                    zaiLaneId: config.pacing.zai.laneId,
+                    zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+                    zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+                    zaiPaceOverrideMargin: null,
+                    nowMs: now,
+                  });
+                  if (!admitted) incapable = true;
+                }
+
+                const busier =
+                  currentUtilization !== null &&
+                  newUtilization !== null &&
+                  currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
+
+                if (!(cheaper || incapable || busier)) continue;
+
+                await ctx.issues.update(
+                  issueId,
+                  {
+                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
+                  } as Parameters<typeof ctx.issues.update>[1],
+                  company.id,
+                );
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection balanced ${pinnedModelId} -> ${result.decision.modelId} (${tier}): ${
+                    cheaper ? "cost-down" : incapable ? "demote" : "rebalance"
+                  }`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, cheaper, incapable, busier },
+                });
+                balanced += 1;
+                void identifier;
+              } else {
+                // Unpinned + labelled = former exclusion: give it a balanced
+                // T1-class pin instead of leaving it on the agent floor.
+                // `pick("T1", floor)` in Python — always T1, never this row's
+                // own tier label.
+                const result = await advise(company.id, { issueId }, false, "T1");
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+                if (result.decision.modelId === floorModelId) continue;
+
+                await ctx.issues.update(
+                  issueId,
+                  {
+                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
+                  } as Parameters<typeof ctx.issues.update>[1],
+                  company.id,
+                );
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1" },
+                });
+                balanced += 1;
+                void identifier;
+              }
+            }
+
+            ctx.logger.info("balance pass complete", { companyId: company.id, balanced, candidates: candidateRows.length });
+          } catch (cause) {
+            ctx.logger.error("balance pass failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
+      // --- scheduled dispatch sweep (TOG-2481 absorption of the standalone
+      // `dispatch` plugin, TOG-747/TOG-706) -----------------------------------
+      // Ported wholesale, not reimplemented: `dispatch-selection.ts` carries
+      // the ADR 0001/0003/0004/Q2/Q5 owner decisions as comments, and this job
+      // body is the same `sweepCompany` orchestration the standalone plugin
+      // ran, so the `plugins` table shows one dispatcher instead of two.
+      ctx.jobs.register(JOB_KEYS.dispatchSweep, async (job) => {
+        const companies = listKnownCompanies();
+        for (const company of companies) {
+          try {
+            const config = await companyConfig(company.id);
+            const dispatchConfig = config.dispatch;
+
+            // TOG-2533 fix 3/4: standalone-plugin notes, restored alongside the
+            // metrics/logger lines that already cover the same events — see
+            // dispatch-reporting.ts's logStateChange, which folds this array
+            // into metadata.notes.
+            const notes: string[] = [];
+
+            const issues = (await ctx.issues.list({
+              companyId: company.id,
+              limit: DISPATCH_ISSUE_PAGE_LIMIT,
+            })) as unknown as DispatchIssue[];
+            if (issues.length >= DISPATCH_ISSUE_PAGE_LIMIT) {
+              ctx.logger.warn("dispatch sweep: issue page saturated, some issues were not seen this firing", {
+                companyId: company.id,
+                pageLimit: DISPATCH_ISSUE_PAGE_LIMIT,
+              });
+              notes.push(
+                `issue list saturated at limit ${DISPATCH_ISSUE_PAGE_LIMIT} — counters undercount the board`,
+              );
+            }
+
+            const nonTerminal = issues.filter(
+              (issue) => !(DISPATCH_TERMINAL_STATUSES as readonly string[]).includes(issue.status),
+            );
+
+            const routingGapBase = summariseRoutingGap(nonTerminal.map((issue) => ({ issue })));
+            let routingGap: ReturnType<typeof summariseRoutingGap> = routingGapBase;
+            if (routingGapBase.count > 0) {
+              try {
+                const agents = await ctx.agents.list({ companyId: company.id });
+                routingGap = { ...routingGapBase, owners: identifyRoutingOwners(agents) };
+                if (!routingGap.owners?.complete) {
+                  notes.push(
+                    `routing owners are a partial list: ${(routingGap.owners?.unreadableSources ?? []).join(", ")} ` +
+                      "are not readable from the plugin capability surface",
+                  );
+                }
+              } catch (cause) {
+                ctx.logger.warn("dispatch sweep: could not read agents for routing-gap owners", {
+                  companyId: company.id,
+                  error: cause instanceof Error ? cause.message : String(cause),
+                });
+              }
+            }
+
+            const assigned = nonTerminal.filter((issue) => issue.assigneeAgentId);
+            const population: DispatchPopulationEntry[] = [];
+            let unreadable = 0;
+            for (const issue of nonTerminal) {
+              if (!issue.assigneeAgentId) {
+                population.push({ issue });
+                continue;
+              }
+              try {
+                const orchestration = await ctx.issues.summaries.getOrchestration({
+                  issueId: issue.id,
+                  companyId: company.id,
+                });
+                const relation = orchestration.relations[issue.id];
+                population.push({
+                  issue,
+                  blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
+                  runs: orchestration.runs.map((r) => ({
+                    issueId: r.issueId,
+                    status: r.status,
+                    finishedAt: r.finishedAt,
+                    startedAt: r.startedAt,
+                    createdAt: r.createdAt,
+                  })),
+                  invocationBlock:
+                    orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null,
+                });
+              } catch (cause) {
+                unreadable += 1;
+                ctx.logger.warn("dispatch sweep: could not read orchestration for an issue, excluding it", {
+                  companyId: company.id,
+                  issueId: issue.id,
+                  error: cause instanceof Error ? cause.message : String(cause),
+                });
+              }
+            }
+            if (unreadable > 0) {
+              notes.push(`${unreadable} assigned issues could not be read and are excluded from selection`);
+            }
+
+            const selection = selectDispatch(population, {
+              idleMinutes: dispatchConfig.idleMinutes,
+              maxWakesPerFiring: dispatchConfig.maxWakesPerFiring,
+              focusProjectIds: [...dispatchConfig.focusProjectIds],
+              now: Date.now(),
+            });
+            (selection as { routingGap?: typeof routingGap }).routingGap = routingGap;
+
+            const wakeOutcomes: WakeOutcome[] = [];
+            if (dispatchConfig.wakeEnabled) {
+              // ADR 0004: one issue at a time, own try/catch each — never
+              // `requestWakeups`, whose batched call throws on the first
+              // refusal after already waking priors, discarding the rest of
+              // the result set.
+              for (const pick of selection.picks) {
+                try {
+                  const result = await ctx.issues.requestWakeup(pick.issue.id, company.id, {
+                    reason: "dispatch_stalled_issue",
+                    contextSource: "plugin.dispatch.sweep",
+                    idempotencyKey: `dispatch:${job.runId}:${pick.issue.id}`,
+                  });
+                  wakeOutcomes.push({ issueId: pick.issue.id, queued: result.queued });
+                } catch (cause) {
+                  wakeOutcomes.push({
+                    issueId: pick.issue.id,
+                    queued: false,
+                    error: cause instanceof Error ? cause.message : String(cause),
+                  });
+                }
+              }
+            }
+
+            if (!dispatchConfig.wakeEnabled && selection.picks.length > 0) {
+              notes.push(
+                `report-only: would have woken ${selection.picks
+                  .map((p) => p.issue.identifier ?? p.issue.id)
+                  .join(", ")}`,
+              );
+            }
+
+            const summary = summariseFiring(company.id, selection, wakeOutcomes);
+            await emitMetrics(ctx, { companyId: company.id, summary, wakeEnabled: dispatchConfig.wakeEnabled });
+
+            const previous = (await ctx.state.get(dispatchLastFiringKey(company.id))) as
+              | ReturnType<typeof summariseFiring>
+              | null;
+            if (hasStateChanged(previous, summary)) {
+              await logStateChange(ctx, { companyId: company.id, summary, wakeEnabled: dispatchConfig.wakeEnabled, notes });
+              await ctx.state.set(dispatchLastFiringKey(company.id), summary);
+            }
+
+            ctx.logger.info("dispatch sweep complete", {
+              companyId: company.id,
+              woken: summary.counters.woken,
+              candidatesReady: summary.legacy.candidates_ready,
+              runnableQueue: summary.legacy.runnable_queue,
+              routingGap: summary.routingGapCount,
+              assignedGathered: assigned.length,
+            });
+          } catch (cause) {
+            ctx.logger.error("dispatch sweep failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
       // TOG-2438 reopen: `onConfigChanged` only replays at worker startup for
       // a full plugin reload (plugin-loader.ts step 5b); a bare crash-restart
       // (`plugin-worker-manager.ts` autoRestart) respawns the process without

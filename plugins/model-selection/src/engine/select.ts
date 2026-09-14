@@ -9,12 +9,29 @@ import type {
   CardLedgerEntry,
   IssueDescriptor,
   ModelEntry,
+  ModelScore,
   QualitySignal,
   Rejection,
   SelectionDecision,
   VolumeProfile,
 } from "./types.js";
-import { hardStopExcluded, orderCandidatesByPace, preferredCandidateId, slotAllowed, type LaneLedger } from "./pacing.js";
+import { LANE_ID_CODEX, LANE_ID_OPENCODE_GO, LANE_ID_ZAI } from "../constants.js";
+import { applyPickOrdering } from "./pick-order.js";
+import {
+  avoidThresholdFor,
+  hardStopExcluded,
+  laneAvoidExcluded,
+  laneEffectiveUtilization,
+  laneHasRoom,
+  laneOutageExcluded,
+  orderCandidatesByPace,
+  preferredCandidateId,
+  slotAllowed,
+  ZAI_LONG_RUN_AGENTS,
+  type LaneAvoidConfig,
+  type LaneLedger,
+  type LaneOutageOverride,
+} from "./pacing.js";
 
 export interface SelectionConfig {
   /**
@@ -60,6 +77,49 @@ export interface SelectionConfig {
    */
   operatorOverrideModelId?: string | null;
   /**
+   * TOG-2481 port of `tier_dispatcher.py`'s `AVOID` / `AVOID_LANE`. A lane at
+   * or above its threshold is excluded from NEW admission (fail-neutral when
+   * unset or when a lane has no measured utilization yet). Distinct from the
+   * serviceability hard stop above: a lane can be "avoided" long before it is
+   * unserviceable. Gated the same as the hard stop — only when `paceActive`.
+   */
+  laneAvoidConfig?: LaneAvoidConfig;
+  /**
+   * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+   * fallback rule and its Z.ai-long-run-agent exclusion (2026-09-07 03:15Z /
+   * 2026-09-08 22:15Z owner rules). Names which configured lane is Codex/
+   * OpenCode Go so both rules key on this company's actual lane ids rather
+   * than a bare `"codex"`/`"opencode-go"` string. Absent falls back to the
+   * same constants every other unconfigured TOG-2481 addition uses.
+   */
+  codexLaneId?: string;
+  opencodeGoLaneId?: string;
+  zaiLaneId?: string;
+  /**
+   * TOG-2481 port of `tier_dispatcher.py`'s `lane_outage()` /
+   * `lane_outage.json` — an operator-declared outage the telemetry cannot
+   * see. Gated the same as the hard stop — only when `paceActive`.
+   */
+  laneOutageOverride?: LaneOutageOverride | null;
+  /**
+   * TOG-2481 port of `tier_dispatcher.py`'s `lane_has_room()` and its
+   * `LANE_CAP_PER_ACCOUNT` / Z.ai peak-hour / weekly-pacing rules. Absent
+   * disables the gate entirely (fail-open, matching every other TOG-2481
+   * pacing addition — a company that never configures this sees no change).
+   * Gated the same as the hard stop — only when `paceActive`.
+   */
+  laneRoom?: {
+    capPerAccount: Readonly<Record<string, number>>;
+    /** `lane_active_pins()`: current todo/in_progress pinned weight per lane, flash models half-weighted. */
+    activePinsWeightByLane: Readonly<Record<string, number>>;
+    fiveHourWindowName: string;
+    zaiLaneId: string;
+    zaiWeeklyWindowName: string;
+    zaiWeeklyDefaultMargin: number;
+    zaiPaceOverrideMargin: number | null;
+    now: number;
+  };
+  /**
    * Which cost term orders candidates. Defaults to "list-price" — unchanged
    * behavior. Composition with pacing (TOG-2137): objective reordering runs
    * strictly AFTER pace ordering / the ahead-of-line slot throttle and never
@@ -73,6 +133,23 @@ export interface SelectionConfig {
    * throttled-ahead lane is deferred regardless of which objective picked it.
    */
   objective?: SelectionObjective;
+  /**
+   * TOG-2481 port of `tier_dispatcher.py` `model_scores.py`'s Bayesian
+   * (model, tier) success scores, keyed by model id. Drives both the
+   * `capability-score` gate below and `applyPickOrdering`'s
+   * proven/free-must-be-proven/explore-fraction logic. Absent disables both —
+   * fail-open, matching every other TOG-2481 addition: a company with no
+   * scored history yet sees no change from this engine.
+   */
+  modelScores?: Readonly<Record<string, ModelScore>>;
+  /**
+   * TOG-2481 port of `tier_dispatcher.py` `pick(..., explore=False)`. Defaults
+   * to `true` (unchanged `advise`/`apply` behavior). The new
+   * `labelOnlyPass`/`repinPass`/`balancePass` jobs set this `false` for their
+   * pinned-branch calls, matching every Python call site that re-affirms or
+   * replaces an existing pin rather than seeding new evidence.
+   */
+  allowExplore?: boolean;
 }
 
 export interface SelectInput {
@@ -124,6 +201,8 @@ export function selectModel(input: SelectInput): SelectionDecision {
     shadowDiff: null,
     escalatedFromTier: null,
   };
+
+  const nowIso = new Date(now).toISOString();
 
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
@@ -212,6 +291,22 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
+    // TOG-2481 port of `tier_dispatcher.py` `model_scores.py`'s `capable()`:
+    // a model can clear the static roster `tier-floor` above and still be
+    // measurably failing this tier's actual work. `capable` is a tri-state
+    // (`true`/`false`/`null` for "not enough evidence either way") — only an
+    // explicit `false` excludes; fail-open when `config.modelScores` is unset,
+    // when this model has no recorded score, or when the tier verdict is
+    // `null`, so a company with no scored history yet sees no change.
+    const score = config.modelScores?.[model.id]?.tiers[requiredTier];
+    if (score && score.capable === false) {
+      rejections.push({
+        modelId: model.id,
+        stage: "capability-score",
+        reason: `measured ${requiredTier} success rate (p=${score.p}) is below the capability threshold`,
+      });
+      continue;
+    }
     if (
       typeof descriptor.requiredContextTokens === "number" &&
       model.contextWindow < descriptor.requiredContextTokens
@@ -237,6 +332,98 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-unserviceable",
         reason: `lane ${model.laneId ?? "(none)"} is not serviceable`,
+      });
+      continue;
+    }
+    // TOG-2481: lane avoid threshold and operator-declared outage, ported from
+    // `tier_dispatcher.py`'s `AVOID`/`AVOID_LANE` and `lane_outage.json`. Both
+    // are gated the same as the hard stop above (`paceActive` only) and, like
+    // it, are never waived by an operator override.
+    if (paceActive && config.laneAvoidConfig && laneAvoidExcluded(ledger, model, config.laneAvoidConfig)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`,
+      });
+      continue;
+    }
+    if (paceActive && laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, model)) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-outage",
+        reason: `lane ${model.laneId ?? "(none)"} is under an operator-declared outage`,
+      });
+      continue;
+    }
+    // TOG-2481 port of `tier_dispatcher.py`'s `lane_has_room()`: a per-account
+    // active-card cap (opencode-go, zai), Z.ai peak-hour throttle, Z.ai
+    // weekly-pacing gate, and the 5h-window new-admission stop. This gates
+    // NEW admission only — it never touches an issue already pinned to the
+    // lane (that weight is exactly what `activePinsWeightByLane` counts).
+    if (paceActive && config.laneRoom && model.laneId) {
+      const room = config.laneRoom;
+      const admitted = laneHasRoom({
+        laneId: model.laneId,
+        activePinsWeight: room.activePinsWeightByLane[model.laneId] ?? 0,
+        ledger,
+        capPerAccount: room.capPerAccount,
+        fiveHourWindowName: room.fiveHourWindowName,
+        zaiLaneId: room.zaiLaneId,
+        zaiWeeklyWindowName: room.zaiWeeklyWindowName,
+        zaiWeeklyDefaultMargin: room.zaiWeeklyDefaultMargin,
+        zaiPaceOverrideMargin: room.zaiPaceOverrideMargin,
+        nowMs: room.now,
+      });
+      if (!admitted) {
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-no-room",
+          reason: `lane ${model.laneId} has no room for a new active card right now`,
+        });
+        continue;
+      }
+    }
+    // 2026-09-07 03:15Z owner rule: T1 runs carry ~150k-token contexts for
+    // 30-60 turns; on the OpenCode Go lane one such run drains $7-10 of a
+    // $12/5h account and the whole lane 429s mid-run, failing every run
+    // pinned there. Go is T1's FALLBACK only — used when the codex lane is
+    // at/over its avoid threshold. T2/T3 keep using Go under the cap/5h rule
+    // above. Ported from `tier_dispatcher.py` `pick()`.
+    if (
+      paceActive &&
+      requiredTier === "T1" &&
+      model.laneId === (config.opencodeGoLaneId ?? LANE_ID_OPENCODE_GO) &&
+      config.laneAvoidConfig &&
+      laneEffectiveUtilization(ledger, config.codexLaneId ?? LANE_ID_CODEX) <
+        avoidThresholdFor(config.laneAvoidConfig, config.codexLaneId ?? LANE_ID_CODEX)
+    ) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: "T1 stays off opencode-go while the codex lane still has room (Go fallback only)",
+      });
+      continue;
+    }
+    // 2026-09-08 22:15Z owner rule: Z.ai's Anthropic-compat endpoint rejects
+    // very long agent conversations (error 1214) — 3/3 hits were engineering
+    // turns of 78-232 min. Keep zai for reviewer/QA/mechanical roles; route
+    // long-turn engineering agent NAMES to codex when it has room. Ported
+    // from `tier_dispatcher.py` `pick()`'s `ZAI_LONG_RUN_AGENTS` rule.
+    const zaiLaneId = config.zaiLaneId ?? LANE_ID_ZAI;
+    const codexLaneId = config.codexLaneId ?? LANE_ID_CODEX;
+    if (
+      paceActive &&
+      model.laneId === zaiLaneId &&
+      descriptor.agentName &&
+      ZAI_LONG_RUN_AGENTS.has(descriptor.agentName) &&
+      config.laneAvoidConfig &&
+      laneEffectiveUtilization(ledger, codexLaneId) < avoidThresholdFor(config.laneAvoidConfig, codexLaneId) &&
+      config.models.some((entry) => entry.laneId === codexLaneId && entry.enabled)
+    ) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-avoid",
+        reason: `long-turn agent "${descriptor.agentName}" stays off zai while the codex lane still has room (Z.ai 1214 risk)`,
       });
       continue;
     }
@@ -348,6 +535,30 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
   });
+
+  // TOG-2481 port of `tier_dispatcher.py` `pick()`'s own ordering rules —
+  // free-must-be-proven, the 20% cost-band least-utilized-lane tiebreak, and
+  // the 10% T2/T3 explore fraction — layered directly on top of the cost
+  // sort, before pace ordering runs. Fail-open when `config.modelScores` is
+  // unset: a company with no scored history yet gets the plain cost order,
+  // unchanged from pre-TOG-2481 behavior.
+  if (config.modelScores) {
+    const pickResult = applyPickOrdering(
+      candidates,
+      config.models,
+      ledger,
+      config.modelScores,
+      requiredTier,
+      descriptor.issueId,
+      config.allowExplore ?? true,
+    );
+    candidates = pickResult.ordered;
+    trace.push(
+      pickResult.explored
+        ? `explore: routing to unproven ${pickResult.exploreModelId} to gather ${requiredTier} evidence`
+        : "pick ordering: free-must-be-proven + 20% cost-band least-utilized-lane tiebreak applied",
+    );
+  }
 
   // Pace ordering (TOG-2137): pace state, deviation, cost, release date, id —
   // computed and traced whenever pacing is not `off`, but only allowed to

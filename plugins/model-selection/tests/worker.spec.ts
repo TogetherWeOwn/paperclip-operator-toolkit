@@ -208,6 +208,15 @@ describe("worker", () => {
   });
 
   it("resolves a legacy wrapped pin before checking the pinned lane hard stop", async () => {
+    // Fixture roster carries exactly one T1 row (claude-opus-5). Pinning it
+    // while its lane is a serviceability hard stop is therefore the TOG-2137
+    // Defect 2 dead end, not an ordinary pace reorder: T2/T3 are below the
+    // required tier, so there is nowhere to escalate to, and the correct
+    // outcome is `tier-exhausted` (no write) — same as an unwrapped pin would
+    // get. What THIS test actually guards is TOG-2426 composition: the raw
+    // `cliproxy/`-wrapped pin must still resolve to `claude-opus-5` and reach
+    // its lane's hard-stop check (proven by the trace below), not silently
+    // fail to match and skip the hard stop entirely.
     const models = MODELS.map((model) =>
       model.id === "claude-opus-5" ? { ...model, laneId: "lane-opus" } : model,
     );
@@ -231,6 +240,7 @@ describe("worker", () => {
           laneId: "lane-opus",
           fetchedAt: "2026-09-13T00:00:00.000Z",
           error: null,
+          observation: null,
           verdict: {
             laneId: "lane-opus",
             observedAt: "2026-09-13T00:00:00.000Z",
@@ -249,8 +259,17 @@ describe("worker", () => {
     );
 
     const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    // The legacy id resolved far enough to be evaluated against the lane
+    // hard stop (not silently unmatched) — the decision trace names the
+    // canonical id and the lane, and the tool declines to write because the
+    // sole T1 candidate is unserviceable with nowhere to escalate to.
+    const decisionTrace = (result as { data: { decision: { trace: string[] } } }).data.decision.trace;
+    expect(decisionTrace.some((line) => line.includes("claude-opus-5") && line.includes("lane-opus"))).toBe(true);
+    expect((result as { content: string }).content).toContain("tier-exhausted");
     expect((result as { content: string }).content).not.toContain("already carries");
     expect((result as { data: { decision: { outcome: string } } }).data.decision.outcome).toBe("tier-exhausted");
+    // No write happened: the original (legacy-wrapped) pin is left exactly
+    // as it was, never rewritten.
     const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
     expect(after?.assigneeAdapterOverrides).toEqual({
       adapterConfig: { model: "cliproxy/claude-opus-5" },
@@ -645,7 +664,7 @@ describe("worker", () => {
     function ledgerWith(...laneIds: string[]): LaneLedger {
       const ledger: LaneLedger = {};
       for (const laneId of laneIds) {
-        ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: "2026-09-10T11:00:00.000Z", error: null };
+        ledger[laneId] = { laneId, verdict: unserviceableVerdict(laneId), fetchedAt: "2026-09-10T11:00:00.000Z", error: null, observation: null };
       }
       return ledger;
     }
