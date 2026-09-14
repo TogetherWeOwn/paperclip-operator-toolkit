@@ -24,6 +24,7 @@
     "test:mutants": "node scripts/mutation-gate.mjs",
     "verify": "npm run typecheck && npm run test && npm run test:mutants && npm run build",
     "profiles:refresh": "node scripts/refresh-volume-profiles.mjs",
+    "config:assemble": "node scripts/assemble-additive-config.mjs",
     "gate:stage2": "node scripts/check-stage2-gate.mjs"
   },
   "dependencies": {

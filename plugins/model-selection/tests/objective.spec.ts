@@ -33,13 +33,13 @@ describe("selection.objective default (list-price) leaves selection untouched", 
       config: config(),
     });
     expect(decision.outcome).toBe("selected");
-    expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
   });
 
   it("never changes decision.modelId even when the ledger favors a different candidate", () => {
     const ledger: Record<string, CardLedgerEntry> = {
-      "cliproxy/claude-haiku-4-5-20251001:T3": {
-        modelId: "cliproxy/claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20251001:T3": {
+        modelId: "claude-haiku-4-5-20251001",
         tier: "T3",
         cardsClosed: 10,
         acceptRate: 0.4,
@@ -67,9 +67,9 @@ describe("selection.objective default (list-price) leaves selection untouched", 
       config: config(), // objective left at default (list-price)
       cardLedger: ledger,
     });
-    expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001"); // list-price winner, unchanged
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001"); // list-price winner, unchanged
     expect(decision.shadowDiff).not.toBeNull();
-    expect(decision.shadowDiff?.listPriceWinner).toBe("cliproxy/claude-haiku-4-5-20251001");
+    expect(decision.shadowDiff?.listPriceWinner).toBe("claude-haiku-4-5-20251001");
   });
 });
 
@@ -120,8 +120,8 @@ describe("orderByObjective — Slice 3 pure ordering", () => {
 describe("shadow diff", () => {
   it("computes agree=true when both objectives pick the same model", () => {
     const ledger: Record<string, CardLedgerEntry> = {
-      "cliproxy/claude-haiku-4-5-20251001:T3": {
-        modelId: "cliproxy/claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20251001:T3": {
+        modelId: "claude-haiku-4-5-20251001",
         tier: "T3",
         cardsClosed: 10,
         acceptRate: 0.99,

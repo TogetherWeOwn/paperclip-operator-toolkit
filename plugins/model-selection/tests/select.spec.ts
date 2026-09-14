@@ -44,7 +44,7 @@ describe("selection", () => {
       config: config(),
     });
     expect(decision.outcome).toBe("selected");
-    expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
     expect(decision.effectiveTier).toBe("T3");
   });
 
@@ -69,14 +69,14 @@ describe("selection", () => {
       descriptor: {
         issueId: "i1",
         labelNames: ["tier:T1"],
-        stickyModelId: "cliproxy/claude-haiku-4-5-20251001",
+        stickyModelId: "claude-haiku-4-5-20251001",
       },
       config: config(),
     });
     expect(decision.modelId).toBe("claude-opus-5");
     expect(
       decision.rejections.some(
-        (r) => r.stage === "tier-floor" && r.modelId === "cliproxy/claude-haiku-4-5-20251001",
+        (r) => r.stage === "tier-floor" && r.modelId === "claude-haiku-4-5-20251001",
       ),
     ).toBe(true);
   });
@@ -88,7 +88,7 @@ describe("selection", () => {
       config: config(),
     });
     const floored = decision.rejections.filter((r) => r.stage === "tier-floor").map((r) => r.modelId);
-    expect(floored).toContain("cliproxy/claude-haiku-4-5-20251001");
+    expect(floored).toContain("claude-haiku-4-5-20251001");
     expect(floored).toContain("claude-sonnet-5");
     expect(floored).not.toContain("claude-opus-5");
   });
@@ -111,6 +111,38 @@ describe("selection", () => {
     });
     expect(decision.modelId).toBe("claude-opus-5");
     expect(decision.trace.some((line) => line.includes("sticky"))).toBe(true);
+  });
+
+  it("keeps a legacy OmniRoute-wrapped sticky pin but returns the direct runtime id", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: {
+        issueId: "i1",
+        labelNames: ["tier:T3"],
+        stickyModelId: "cliproxy/claude-opus-5",
+      },
+      config: config(),
+    });
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.trace.some((line) => line.includes("sticky"))).toBe(true);
+  });
+
+  it("normalizes a legacy OmniRoute-wrapped operator override to a non-default direct runtime id", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const cheaper = model(t1, { id: "cheaper-default", costPerMTokIn: 1 });
+    const overridden = model(t1, { id: "overridden-model", costPerMTokIn: 10 });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({
+        models: [cheaper, overridden],
+        enforcementEnabled: true,
+        pacingMode: "enforce",
+        operatorOverrideModelId: "cliproxy/overridden-model",
+      }),
+    });
+    expect(decision.candidates[0]?.modelId).toBe("cheaper-default");
+    expect(decision.modelId).toBe("overridden-model");
   });
 
   it("holds at the agent floor rather than act on an untrusted volume profile", () => {

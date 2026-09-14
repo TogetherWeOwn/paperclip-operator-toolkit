@@ -292,6 +292,9 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
 
   const seen = new Set<string>();
   for (const model of config.models) {
+    if (model.id.startsWith("cliproxy/")) {
+      errors.push(`model id must use the direct CLIProxy namespace without an OmniRoute cliproxy/ wrapper: ${model.id}`);
+    }
     const rosterKey = `${model.id}::${model.tier}`;
     if (seen.has(rosterKey)) errors.push(`duplicate model+tier row: ${model.id} ${model.tier}`);
     seen.add(rosterKey);

@@ -1,6 +1,7 @@
 import type { PacingMode, Tier } from "../constants.js";
 import type { SelectionObjective } from "../config/resolve.js";
 import { costOf, resolveProfile, tierAbove, tierIndex } from "./cost.js";
+import { resolveConfiguredModelId } from "./model-id.js";
 import { computeShadowDiff, orderByObjective } from "./objective.js";
 import { resolveTier } from "./tier.js";
 import type {
@@ -102,7 +103,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const paceEnforced = pacingMode === "enforce";
   const ledger: LaneLedger = config.laneLedger ?? {};
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
-  const overrideModelId = config.operatorOverrideModelId ?? null;
+  const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
 
   const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
     isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model),
@@ -149,8 +150,9 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // every other candidate below — sticky is a preference for continuity, not
   // a capacity override.
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
+    const stickyModelId = resolveConfiguredModelId(descriptor.stickyModelId, config.models);
     const incumbent = config.models.find(
-      (model) => model.id === descriptor.stickyModelId && model.enabled,
+      (model) => model.id === stickyModelId && model.enabled,
     );
     const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
     if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {

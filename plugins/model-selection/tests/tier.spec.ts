@@ -13,7 +13,7 @@ describe("tier judgement is recorded, never inferred", () => {
         issueId: "i1",
         exclusion: { excluded: true, reasons: ["touches fleet config"] },
         labelNames: ["tier:T3"],
-        pinnedModelId: "cliproxy/claude-haiku-4-5-20251001",
+        pinnedModelId: "claude-haiku-4-5-20251001",
         agentFloorModelId: "claude-sonnet-5",
       },
       MODELS,
@@ -27,6 +27,16 @@ describe("tier judgement is recorded, never inferred", () => {
   it("prefers an explicit issue override over a label", () => {
     const judgement = resolveTier(
       { issueId: "i1", labelNames: ["tier:T1"], pinnedModelId: "claude-sonnet-5" },
+      MODELS,
+      "T1",
+    );
+    expect(judgement.tier).toBe("T2");
+    expect(judgement.source).toBe("issue-override");
+  });
+
+  it("recognises a legacy OmniRoute-wrapped issue override against the direct roster", () => {
+    const judgement = resolveTier(
+      { issueId: "i1", labelNames: ["tier:T1"], pinnedModelId: "cliproxy/claude-sonnet-5" },
       MODELS,
       "T1",
     );

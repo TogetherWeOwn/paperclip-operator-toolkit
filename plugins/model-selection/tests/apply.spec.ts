@@ -45,7 +45,7 @@ describe("write policy", () => {
     const plan = planApply(
       decide({
         issueId: "i1",
-        agentFloorModelId: "cliproxy/claude-haiku-4-5-20251001",
+        agentFloorModelId: "claude-haiku-4-5-20251001",
         exclusion: { excluded: true, reasons: ["spends money"] },
       }),
       clean,

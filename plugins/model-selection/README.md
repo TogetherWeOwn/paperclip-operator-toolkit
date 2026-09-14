@@ -51,7 +51,7 @@ Measured on this company's own `heartbeat_runs`, 7d to 2026-08-31
 |---|---|---|---|---|---|
 | `claude-opus-5` | 214 | 510,327 | 6,081,872 (11.9× input) | 55,532 | $7.1576 |
 | `claude-sonnet-5` | 103 | 320,286 | 4,336,432 (13.5× input) | 44,712 | $3.0940 |
-| `cliproxy/claude-haiku-4-5-20251001` | 13 | 81,085 | 819,445 (10.1× input) | 5,112 | $0.1958 |
+| `claude-haiku-4-5-20251001` | 13 | 81,085 | 819,445 (10.1× input) | 5,112 | $0.1958 |
 
 Cache-read volume is an order of magnitude larger than input volume at every
 tier. So:
@@ -162,10 +162,27 @@ so the same input gives the same output on every run.
 
 `config/reviewed-roster.json` is the reviewed roster-shaped plugin config. Its
 `models` array is the single checked-in catalogue and carries `aaIndex`,
-`releasedAt`, `fallbackOnly`, `note`, and `earnIn` on every row. `earnIn` remains
-inert in this slice. Exact cost ties prefer the newest `releasedAt`, then stable
-model id. A runtime model may have one row per admitted tier; exact duplicate
-model+tier rows are rejected.
+`releasedAt`, `fallbackOnly`, `note`, and `earnIn` on every row. Model ids use the
+**direct CLIProxy namespace**: bare ids for its main catalogue (`claude-opus-5`)
+and only the provider prefixes CLIProxy itself requires (`zai/glm-5.3`,
+`openrouter/...`). The old OmniRoute `cliproxy/` wrapper is accepted only while
+reading legacy pins and `heartbeat_runs` rows; it is rejected in new roster
+config and never written by the dispatcher. `earnIn` remains inert in this
+slice. Exact cost ties prefer the newest `releasedAt`, then stable model id. A
+runtime model may have one row per admitted tier; exact duplicate model+tier
+rows are rejected.
+
+The checked-in catalogue is intentionally not a deployable replacement for live
+configuration. Build an additive artifact with `npm run config:assemble --
+--roster config/reviewed-roster.json --live <config-BEFORE.json> --out
+<config-AFTER.json> --counts <COUNTS.json>`. The assembler canonicalises one
+legacy `cliproxy/` wrapper, preserves every live model+tier row and lane binding,
+preserves the complete live `pacing` object (including secret references), and
+adds a provider lane to new rows only when the mapping is unambiguous. It refuses
+to write when fewer than 25 models are lane-bound, a live binding or pacing field
+changes, canonical rows collide, or an enabled model is outside pacing. The last
+guard deliberately blocks enabled Z.ai rows until TOG-2424 supplies a real Z.ai
+lane; assigning them to OpenCode Go would make capacity attribution false.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
 it is operator-supplied because the plugin genuinely cannot look one up. There is

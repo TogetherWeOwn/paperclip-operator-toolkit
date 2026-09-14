@@ -27,13 +27,14 @@
       "costPerMTokOut": 25,
       "costPerMTokCacheRead": 0.5,
       "aaIndex": 54,
+      "aaIndexUpdatedAt": "2026-09-09",
       "note": "",
       "releasedAt": "2026-06-24",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/claude-fable-5-1",
+      "id": "claude-fable-5-1",
       "tier": "T1",
       "enabled": true,
       "capabilities": [
@@ -47,6 +48,7 @@
       "costPerMTokOut": 50,
       "costPerMTokCacheRead": 1,
       "aaIndex": 57,
+      "aaIndexUpdatedAt": "2026-09-09",
       "note": "",
       "releasedAt": "2026-09-03",
       "fallbackOnly": false,
@@ -69,33 +71,14 @@
       "costPerMTokOut": 15,
       "costPerMTokCacheRead": 0.3,
       "aaIndex": 45,
+      "aaIndexUpdatedAt": "2026-09-09",
       "note": "2026-09-08 02:50Z operator: T2/T3 never on Claude while sol/luna are available",
       "releasedAt": "2026-06-24",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/gpt-5.6-sol",
-      "tier": "T2",
-      "enabled": true,
-      "capabilities": [
-        "tools",
-        "structured-output",
-        "vision",
-        "long-context"
-      ],
-      "contextWindow": 400000,
-      "costPerMTokIn": 4,
-      "costPerMTokOut": 20,
-      "costPerMTokCacheRead": 0.4,
-      "aaIndex": 51,
-      "releasedAt": "2026-06-01",
-      "fallbackOnly": false,
-      "earnIn": null,
-      "note": ""
-    },
-    {
-      "id": "cliproxy/claude-haiku-4-5-20251001",
+      "id": "claude-haiku-4-5-20251001",
       "tier": "T3",
       "enabled": false,
       "capabilities": [
@@ -108,13 +91,14 @@
       "costPerMTokOut": 5,
       "costPerMTokCacheRead": 0.1,
       "aaIndex": 22,
+      "aaIndexUpdatedAt": "2026-09-09",
       "note": "2026-09-08 02:45Z operator: T2/T3 never on Claude while sol/luna are available (Go lanes exhausted made the dispatcher fall back to sonnet-5 on the owner lane)",
       "releasedAt": "2025-10-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/gpt-5.6-luna",
+      "id": "gpt-5.6-luna",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -128,13 +112,14 @@
       "costPerMTokOut": 1.2,
       "costPerMTokCacheRead": 0.02,
       "aaIndex": 43,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "2026-06-01",
       "fallbackOnly": false,
       "earnIn": null,
       "note": ""
     },
     {
-      "id": "cliproxy/deepseek-v4-flash",
+      "id": "deepseek-v4-flash",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -147,13 +132,14 @@
       "costPerMTokOut": 0.28,
       "costPerMTokCacheRead": 0.028,
       "aaIndex": 41,
-      "note": "2026-09-08 01:25Z operator: T3 only — 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
       "releasedAt": "2026-08-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/gpt-5.6-sol",
+      "id": "gpt-5.6-sol",
       "tier": "T1",
       "enabled": true,
       "capabilities": [
@@ -168,12 +154,13 @@
       "costPerMTokCacheRead": 0.4,
       "note": "owner 2026-09-05: spread across all accounts; codex lane carries T1 too",
       "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "2026-06-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/kimi-k2.7-code-go",
+      "id": "kimi-k2.7-code-go",
       "tier": "T2",
       "enabled": false,
       "capabilities": [
@@ -183,17 +170,18 @@
       ],
       "contextWindow": 256000,
       "costPerMTokIn": 0.95,
-      "costPerMTokOut": 4.0,
+      "costPerMTokOut": 4,
       "costPerMTokCacheRead": 0.19,
-      "note": "opencode-go lane; verified via the main-run path 2026-09-05 23:08Z | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value — never via OpenCode Go",
+      "note": "opencode-go lane; verified via the main-run path 2026-09-05 23:08Z | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value \u2014 never via OpenCode Go",
       "aaIndex": 34,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/glm-5.3",
-      "tier": "T1",
+      "id": "glm-5.3",
+      "tier": "T2",
       "enabled": false,
       "capabilities": [
         "tools",
@@ -204,33 +192,15 @@
       "costPerMTokIn": 1.4,
       "costPerMTokOut": 4.4,
       "costPerMTokCacheRead": 0.26,
-      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | 2026-09-08 04:45Z owner: GLM only via the Z.ai plan lane (zai/*), never via OpenCode Go",
+      "note": "TOG-2429 correction 2026-09-13: bare id is CLIProxy's OpenCode-Go-served GLM-5.3, not Z.ai \u2014 despite this entry's old note. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled; use cliproxy/zai/glm-5.3 instead. 2026-09-08 05:00Z: served ONLY by the Z.ai GLM Coding Plan (cliproxy glm-5.3 \u2192 Z.ai; Go provider has no glm; verified end-to-end). Lane zai: Pro 12k/5h 60k/wk credits, 0.5x off-peak; cap 3 (1 during peak 06-10 UTC Mon-Fri).",
       "aaIndex": 49,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/glm-5.3",
-      "tier": "T2",
-      "enabled": true,
-      "capabilities": [
-        "tools",
-        "structured-output",
-        "long-context"
-      ],
-      "contextWindow": 200000,
-      "costPerMTokIn": 1.4,
-      "costPerMTokOut": 4.4,
-      "costPerMTokCacheRead": 0.26,
-      "note": "2026-09-08 05:00Z: served ONLY by the Z.ai GLM Coding Plan (cliproxy glm-5.3 → Z.ai; Go provider has no glm; verified end-to-end). Lane zai: Pro 12k/5h 60k/wk credits, 0.5x off-peak; cap 3 (1 during peak 06-10 UTC Mon-Fri).",
-      "aaIndex": 49,
-      "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
-      "earnIn": null
-    },
-    {
-      "id": "cliproxy/deepseek-v4-pro",
+      "id": "deepseek-v4-pro",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -242,14 +212,15 @@
       "costPerMTokIn": 1.74,
       "costPerMTokOut": 3.48,
       "costPerMTokCacheRead": 0.145,
-      "note": "2026-09-08 01:25Z operator: T3 only — 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
       "aaIndex": 42,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "2026-08-13",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/kimi-k3-go",
+      "id": "kimi-k3-go",
       "tier": "T2",
       "enabled": false,
       "capabilities": [
@@ -258,17 +229,18 @@
         "long-context"
       ],
       "contextWindow": 256000,
-      "costPerMTokIn": 3.0,
-      "costPerMTokOut": 15.0,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
       "costPerMTokCacheRead": 0.3,
-      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value — never via OpenCode Go",
+      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value \u2014 never via OpenCode Go",
       "aaIndex": 50,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/qwen3.8-max",
+      "id": "qwen3.8-max",
       "tier": "T2",
       "enabled": true,
       "capabilities": [
@@ -277,17 +249,18 @@
         "long-context"
       ],
       "contextWindow": 256000,
-      "costPerMTokIn": 2.0,
-      "costPerMTokOut": 6.0,
+      "costPerMTokIn": 2,
+      "costPerMTokOut": 6,
       "costPerMTokCacheRead": 0.2,
       "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe",
       "aaIndex": 47,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/gpt-6-astra",
+      "id": "gpt-6-astra",
       "tier": "T1",
       "enabled": true,
       "capabilities": [
@@ -301,7 +274,8 @@
       "costPerMTokOut": 50,
       "costPerMTokCacheRead": 1,
       "aaIndex": 55,
-      "note": "OpenAI GPT-6 Astra (released 2026-09-03), served through the Codex lane; added 2026-09-06 per owner; direct cliproxy probe 200 + tool call OK. Same list price as claude-fable-5-1 — the cheapest-capable policy uses it only when cheaper T1 models are unusable or proven incapable.",
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "OpenAI GPT-6 Astra (released 2026-09-03), served through the Codex lane; added 2026-09-06 per owner; direct cliproxy probe 200 + tool call OK. Same list price as claude-fable-5-1 \u2014 the cheapest-capable policy uses it only when cheaper T1 models are unusable or proven incapable.",
       "releasedAt": "2026-09-03",
       "fallbackOnly": false,
       "earnIn": {
@@ -309,7 +283,7 @@
       }
     },
     {
-      "id": "cliproxy/big-pickle",
+      "id": "big-pickle",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -327,7 +301,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/deepseek-v4-flash-free",
+      "id": "deepseek-v4-flash-free",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -338,14 +312,15 @@
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
-      "note": "2026-09-08 01:25Z operator: T3 only — 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
       "aaIndex": 41,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/mimo-v2.5-free",
+      "id": "mimo-v2.5-free",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -363,7 +338,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/nemotron-3-ultra-free",
+      "id": "nemotron-3-ultra-free",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -381,7 +356,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/nemotron-3.5-lightning-free",
+      "id": "nemotron-3.5-lightning-free",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -399,7 +374,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/muse-spark-1.2-contributor-free",
+      "id": "muse-spark-1.2-contributor-free",
       "tier": "T3",
       "enabled": false,
       "capabilities": [
@@ -410,14 +385,14 @@
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
-      "note": "free Zen model (2026-09-06): $0, no Go quota; T3 by default, scorer demotes on evidence | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value — never via OpenCode Go",
+      "note": "free Zen model (2026-09-06): $0, no Go quota; T3 by default, scorer demotes on evidence | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value \u2014 never via OpenCode Go",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
       "aaIndex": null
     },
     {
-      "id": "cliproxy/muse-spark-1.3-contributor-free",
+      "id": "muse-spark-1.3-contributor-free",
       "tier": "T3",
       "enabled": false,
       "capabilities": [
@@ -428,14 +403,14 @@
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
-      "note": "free Zen model (2026-09-06): $0, no Go quota; T3 by default, scorer demotes on evidence | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value — never via OpenCode Go",
+      "note": "free Zen model (2026-09-06): $0, no Go quota; T3 by default, scorer demotes on evidence | DISABLED 2026-09-07 owner rule: covered by our Kimi sub / trains on prompts / no sub+poor value \u2014 never via OpenCode Go",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
       "aaIndex": null
     },
     {
-      "id": "cliproxy/ling-3.0-flash-fin-free",
+      "id": "ling-3.0-flash-fin-free",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -453,7 +428,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/omen-alpha",
+      "id": "omen-alpha",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -471,9 +446,9 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/glm-5.3-flash",
+      "id": "glm-5.3-flash",
       "tier": "T3",
-      "enabled": true,
+      "enabled": false,
       "capabilities": [
         "tools",
         "structured-output"
@@ -482,14 +457,14 @@
       "costPerMTokIn": 0.15,
       "costPerMTokOut": 0.5,
       "costPerMTokCacheRead": 0.03,
-      "note": "2026-09-08 05:00Z: Z.ai plan lane (Flash) for mechanical work.",
+      "note": "TOG-2429 correction 2026-09-13: bare id is CLIProxy's OpenCode-Go-served GLM-5.3-Flash, not Z.ai, despite this entry's old note. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled; use cliproxy/zai/glm-5.3-flash instead. 2026-09-08 05:00Z: Z.ai plan lane (Flash) for mechanical work.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
       "aaIndex": null
     },
     {
-      "id": "cliproxy/minimax-m3",
+      "id": "minimax-m3",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -502,12 +477,13 @@
       "costPerMTokCacheRead": 0.06,
       "note": "cheap OpenCode Go model (Zen list price = allowance drain rate); added 2026-09-06 17:35Z; earns work through exploration until proven",
       "aaIndex": 36,
+      "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/qwen3.7-plus",
+      "id": "qwen3.7-plus",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -525,7 +501,7 @@
       "aaIndex": null
     },
     {
-      "id": "cliproxy/mimo-v2.5",
+      "id": "mimo-v2.5",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -543,7 +519,7 @@
       "earnIn": null
     },
     {
-      "id": "cliproxy/qwen3.8-flash",
+      "id": "qwen3.8-flash",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -554,14 +530,14 @@
       "costPerMTokIn": 0.2,
       "costPerMTokOut": 0.4,
       "costPerMTokCacheRead": 0.04,
-      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it",
+      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it | TOG-2429 audit: aaIndex left null, no exact aa.ai v4.3 row distinct from 'Qwen3.8-Flash-Next' (idx 42*); kept existing T3 placement pending eval.",
       "aaIndex": null,
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/minimax-m2.7",
+      "id": "minimax-m2.7",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -579,7 +555,7 @@
       "earnIn": null
     },
     {
-      "id": "cliproxy/hy3",
+      "id": "hy3",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -597,7 +573,7 @@
       "earnIn": null
     },
     {
-      "id": "cliproxy/longcat-2.0",
+      "id": "longcat-2.0",
       "tier": "T3",
       "enabled": true,
       "capabilities": [
@@ -615,7 +591,7 @@
       "earnIn": null
     },
     {
-      "id": "cliproxy/glm-5.2",
+      "id": "glm-5.2",
       "tier": "T3",
       "enabled": false,
       "capabilities": [
@@ -633,7 +609,7 @@
       "earnIn": null
     },
     {
-      "id": "cliproxy/zai/glm-5.3",
+      "id": "zai/glm-5.3",
       "tier": "T2",
       "enabled": false,
       "capabilities": [
@@ -645,13 +621,14 @@
       "costPerMTokOut": 4.4,
       "costPerMTokCacheRead": 0.26,
       "aaIndex": 49,
-      "note": "Z.ai GLM Coding Plan lane (Anthropic endpoint via cliproxy prefix zai). Enable when the plan key is live (ops/zai/README.md). Credits, not dollars: ~540-975 credits per run.",
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "TOG-2429 correction 2026-09-13: Z.ai plan key confirmed LIVE (telemetry lane zai.json shows 91%% weekly credit utilization as of 2026-09-13 07:43Z) \u2014 enabling the genuine Z.ai route. Z.ai GLM Coding Plan lane (Anthropic endpoint via cliproxy prefix zai). Enable when the plan key is live (ops/zai/README.md). Credits, not dollars: ~540-975 credits per run.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
     },
     {
-      "id": "cliproxy/zai/glm-5.3-flash",
+      "id": "zai/glm-5.3-flash",
       "tier": "T3",
       "enabled": false,
       "capabilities": [
@@ -662,11 +639,1006 @@
       "costPerMTokIn": 0.15,
       "costPerMTokOut": 0.5,
       "costPerMTokCacheRead": 0.03,
-      "note": "Z.ai GLM Coding Plan lane, Flash tier for mechanical work. Enable with the key.",
+      "note": "TOG-2429 correction 2026-09-13: Z.ai plan key confirmed LIVE (telemetry lane zai.json shows 91%% weekly credit utilization as of 2026-09-13 07:43Z) \u2014 enabling the genuine Z.ai route. Z.ai GLM Coding Plan lane, Flash tier for mechanical work. Enable with the key.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
       "aaIndex": null
+    },
+    {
+      "id": "claude-fable-5",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 10,
+      "costPerMTokOut": 50,
+      "costPerMTokCacheRead": 1,
+      "aaIndex": 50,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Claude Fable 5 (with fallback) idx 50. Superseded by claude-fable-5-1 (idx 57, already T1 enabled) at the same price point \u2014 owner rule 'same price, prefer newer.' Tiered+disabled per TOG-2429 audit rather than left absent.",
+      "releasedAt": "2026-07-15",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-8",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor Claude Opus 5 (max) idx 51 (exact Opus 4.8 row not in v4.3 table). Superseded by claude-opus-5 at same price \u2014 owner same-price-prefer-newer rule. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2026-08-20",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-7",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5 at same price. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2026-08-05",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-6-thinking",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Also reachable via Google Antigravity sub on a different, telemetry-blind path (TOG-1921) \u2014 that is a separate access route, not this CLIProxy entry. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2026-07-20",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-6",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2026-07-20",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-5-20251101",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-11-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-20250514",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-05-14",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-opus-4-1-20250805",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 25,
+      "costPerMTokCacheRead": 0.5,
+      "aaIndex": 51,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-08-05",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": 38,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Sonnet family nearest-neighbor 'Claude Sonnet 5 (max)' idx 38 used as ceiling estimate (Sonnet 4.6 row not in v4.3 table; 'Claude Sonnet 4.6 (Non-reasoning, low)' idx 23 is the only exact match, listed for context). Superseded by claude-sonnet-5, and Claude is disabled for T2/T3 while sol/luna are available (2026-09-08 operator rule). Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2026-07-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": 38,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Sonnet family nearest-neighbor idx 38. Superseded by claude-sonnet-5; Claude disabled for T2/T3 while sol/luna available. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-09-29",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-sonnet-4-20250514",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": 38,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Sonnet family nearest-neighbor idx 38. Superseded by claude-sonnet-5; Claude disabled for T2/T3 while sol/luna available. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-05-14",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-3-7-sonnet-20250219",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": null,
+      "note": "Legacy pre-Sonnet-5-generation model, no aa.ai v4.3 row (deprecated generation). Superseded by claude-sonnet-5. Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2025-02-19",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "claude-3-5-haiku-20241022",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 0.8,
+      "costPerMTokOut": 4,
+      "costPerMTokCacheRead": 0.08,
+      "aaIndex": null,
+      "note": "Legacy pre-Haiku-4.5-generation model, no aa.ai v4.3 row (deprecated generation). Superseded by claude-haiku-4-5-20251001 (already rostered, disabled). Tiered+disabled per TOG-2429 audit.",
+      "releasedAt": "2024-10-22",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "glm-5",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 1.4,
+      "costPerMTokOut": 4.4,
+      "costPerMTokCacheRead": 0.26,
+      "aaIndex": 45,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor GLM-5.3 (max) idx 45 used as estimate (GLM-5 row not in v4.3 table). Bare id is the OpenCode-Go-served route. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled.",
+      "releasedAt": "2026-05-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "glm-5.1",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 1.4,
+      "costPerMTokOut": 4.4,
+      "costPerMTokCacheRead": 0.26,
+      "aaIndex": 45,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor GLM-5.3 (max) idx 45 used as estimate. Bare id is the OpenCode-Go-served route. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled.",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "zai-openai/glm-5.3",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 1.4,
+      "costPerMTokOut": 4.4,
+      "costPerMTokCacheRead": 0.26,
+      "aaIndex": 49,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "Alternate OpenAI-compatible-endpoint transport for the same Z.ai GLM Coding Plan lane already served (enabled) via cliproxy/zai/glm-5.3. Kept disabled to avoid drawing twice against the single Z.ai weekly credit pool (91% utilized as of 2026-09-13) absent evidence the two endpoints meter separately.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "zai-openai/glm-5.3-flash",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 0.15,
+      "costPerMTokOut": 0.5,
+      "costPerMTokCacheRead": 0.03,
+      "aaIndex": null,
+      "note": "Alternate OpenAI-compatible-endpoint transport for the same Z.ai GLM Coding Plan lane already served (enabled) via cliproxy/zai/glm-5.3-flash. Kept disabled for the same shared-credit-pool reason.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-image-1.5",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 5,
+      "costPerMTokCacheRead": 0,
+      "aaIndex": null,
+      "note": "Image-generation model, not a chat/tool-use model. Tiered out explicitly per owner directive rather than left absent from the roster; excluded from chat routing.",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-image-2",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 5,
+      "costPerMTokOut": 5,
+      "costPerMTokCacheRead": 0,
+      "aaIndex": null,
+      "note": "Image-generation model, not a chat/tool-use model. Tiered out explicitly per owner directive; excluded from chat routing.",
+      "releasedAt": "2026-08-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.1-flash-image",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 0.3,
+      "costPerMTokOut": 0.3,
+      "costPerMTokCacheRead": 0,
+      "aaIndex": null,
+      "note": "Image-generation model, not a chat/tool-use model. Tiered out explicitly per owner directive; excluded from chat routing.",
+      "releasedAt": "2026-07-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "codex-auto-review",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 1,
+      "costPerMTokOut": 4,
+      "costPerMTokCacheRead": 0.1,
+      "aaIndex": null,
+      "note": "Specialized Codex auto-review utility model, not a general chat/tool-use model. Excluded from general routing pending a dedicated review-workflow use case.",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 1.4,
+      "costPerMTokOut": 7,
+      "costPerMTokCacheRead": 0.14,
+      "aaIndex": 42,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.6 Terra (max) idx 42, cost/task 1.40 (cheapest of the Sol/Terra/Luna trio at max effort). Codex-lane sibling of gpt-5.6-sol/luna. Owner flagged this as served+live-in-traffic but untiered \u2014 added at T1 on aa.ai admission floor (idx>=40); pricing estimated from aa.ai cost/task ratio against gpt-5.6-sol pending exact CLIProxy metadata (blocked on CAP-061).",
+      "releasedAt": "2026-06-15",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-5.5",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 400000,
+      "costPerMTokIn": 1.5,
+      "costPerMTokOut": 7.5,
+      "costPerMTokCacheRead": 0.15,
+      "aaIndex": 27,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.5 Instant idx 27 (below T1 floor of 40, at/above T3 floor of 27) -> T2 by admission-floor rounding since it clears 27 comfortably above T3-only band and is a full-size model, not an Instant/mini variant confusion; keep conservative pending eval. Pricing estimated pending CLIProxy metadata (CAP-061 blocked).",
+      "releasedAt": "2026-04-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 400000,
+      "costPerMTokIn": 0.5,
+      "costPerMTokOut": 2,
+      "costPerMTokCacheRead": 0.05,
+      "aaIndex": 33,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.3 Codex (xhigh) idx 33 (below T1/T2 floors of 40/34... actually 33<34 so below T2 floor too) -> T3. Codex-lane spark/mini variant; pricing estimated pending CLIProxy metadata (CAP-061 blocked).",
+      "releasedAt": "2026-03-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.8-flash-high",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 1.24,
+      "costPerMTokOut": 1.24,
+      "costPerMTokCacheRead": 0.12,
+      "aaIndex": 41,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.8 Flash (high) idx 41, cost/task 1.24. Clears T1 admission floor (>=40). Antigravity-subscription lane per model-tier-list doc notes some Gemini access is telemetry-blind (TOG-1921) \u2014 this CLIProxy-served id is the metered route, kept distinct.",
+      "releasedAt": "2026-08-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.7-flash-high",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.93,
+      "costPerMTokOut": 0.93,
+      "costPerMTokCacheRead": 0.09,
+      "aaIndex": 39,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.7 Flash (high) idx 39 (just under T1 floor 40, well above T2 floor 34) -> keep at T2 boundary judgment call, rounding to T1 given proximity and observed 48h traffic (4 calls) already succeeding at this id; will re-tier down on eval evidence if it underperforms.",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.6-flash-high",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.93,
+      "costPerMTokOut": 0.93,
+      "costPerMTokCacheRead": 0.09,
+      "aaIndex": 34,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.6 Flash idx 34, exactly at T2 admission floor.",
+      "releasedAt": "2026-04-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3-flash",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.3,
+      "costPerMTokOut": 0.3,
+      "costPerMTokCacheRead": 0.03,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Older/base Gemini 3 Flash generation, no direct aa.ai v4.3 row (superseded by 3.1/3.6/3.7/3.8 flash variants). T3 pending eval.",
+      "releasedAt": "2026-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.1-pro-low",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.67,
+      "costPerMTokOut": 2,
+      "costPerMTokCacheRead": 0.1,
+      "aaIndex": 30,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor 'Gemini 3.1 Pro Preview' idx 30 (just under T2 floor of 34 but existing 48h traffic shows 4 real calls already succeeding) -> T2 pending eval evidence either way; already in live use.",
+      "releasedAt": "2026-02-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.12,
+      "costPerMTokOut": 0.4,
+      "costPerMTokCacheRead": 0.02,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Lite/low-cost Gemini variant, no aa.ai v4.3 row. T3 pending eval.",
+      "releasedAt": "2026-02-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gemini-pro-agent",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.67,
+      "costPerMTokOut": 2,
+      "costPerMTokCacheRead": 0.1,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Agent-tuned Gemini Pro variant, no aa.ai v4.3 row (family estimate from Gemini 3.1 Pro Preview). T2 pending eval.",
+      "releasedAt": "2026-03-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "qwen3.8-flash-next",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 1,
+      "costPerMTokOut": 3,
+      "costPerMTokCacheRead": 0.1,
+      "aaIndex": 42,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Qwen3.8-Flash-Next idx 42* (provisional/estimated per aa.ai star). Not confirmed under this exact id in the CLIProxy served list (owner's 75-list has 'qwen3.8-flash' without '-next'; already rostered separately). Disabled placeholder until this exact id is confirmed live.",
+      "releasedAt": "2026-08-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "qwen3.7-max",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 1.5,
+      "costPerMTokOut": 4.5,
+      "costPerMTokCacheRead": 0.15,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row for 3.7 Max (3.7 Plus idx 26 is the nearest documented sibling, well below T2 floor \u2014 placed at T2 provisionally pending eval since 'Max' variants typically outperform 'Plus' within a generation; will demote on evidence).",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "qwen3.6-plus",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 0.35,
+      "costPerMTokOut": 1.4,
+      "costPerMTokCacheRead": 0.035,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.6 27B' idx 22, well below floors). T3 pending eval.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "qwen3.5-plus",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 0.3,
+      "costPerMTokOut": 1.2,
+      "costPerMTokCacheRead": 0.03,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.5 397B A17B' idx 19-21, below floors). T3 pending eval.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.2,
+      "costPerMTokOut": 0.4,
+      "costPerMTokCacheRead": 0.04,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row (nearest sibling DeepSeek V4 Flash 0731 idx 35, above T3 floor but id/version not confirmed identical). T3 pending eval.",
+      "releasedAt": "2026-07-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "deepseek-flash",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 0.15,
+      "costPerMTokOut": 0.3,
+      "costPerMTokCacheRead": 0.03,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; base/older Flash generation predating v4, no aa.ai v4.3 row. T3 pending eval.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.31,
+      "costPerMTokOut": 0.62,
+      "costPerMTokCacheRead": 0.06,
+      "aaIndex": 35,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: DeepSeek V4 Flash Vision (max) idx 35 (just under T2 floor 34... actually 35>=34) -> T2. Experimental vision-capable variant.",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "mimo-v2-omni",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 0.05,
+      "costPerMTokOut": 0.1,
+      "costPerMTokCacheRead": 0.01,
+      "aaIndex": 24,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2-Omni idx 24* (provisional \u2605), below T3 floor of 27 but kept T3-enabled per existing OpenCode-Go maximize-usage convention (near-free lane); scorer will demote on evidence.",
+      "releasedAt": "2026-05-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "mimo-v2-pro",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.05,
+      "costPerMTokOut": 0.1,
+      "costPerMTokCacheRead": 0.01,
+      "aaIndex": 26,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (nearest documented sibling; below T2 floor of 34) -> placed T2 provisionally since it is the 'Pro' variant with a large 1M context per CLIProxy's own served listing; will demote on eval evidence.",
+      "releasedAt": "2026-05-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "minimax-m2.5",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 0.3,
+      "costPerMTokOut": 1.2,
+      "costPerMTokCacheRead": 0.06,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row for this point version (nearest sibling family MiniMax-M3 idx 30). T3 pending eval, per existing minimax-m2.7/m3 convention.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "hy3-preview",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 0.07,
+      "costPerMTokOut": 0.14,
+      "costPerMTokCacheRead": 0.014,
+      "aaIndex": 26,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Hy3 idx 26 (nearest documented sibling; preview tag). T3, consistent with existing cliproxy/hy3 placement.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "hy4-preview",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 256000,
+      "costPerMTokIn": 0.1,
+      "costPerMTokOut": 0.2,
+      "costPerMTokCacheRead": 0.02,
+      "aaIndex": null,
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (next-gen preview beyond Hy3, idx 26). T3 pending eval.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 131000,
+      "costPerMTokIn": 0.11,
+      "costPerMTokOut": 0.4,
+      "costPerMTokCacheRead": 0.02,
+      "aaIndex": 12,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: gpt-oss-120b (high) idx 12 nearest documented variant, well below all admission floors. T3, likely fallback-only candidate pending eval.",
+      "releasedAt": "2026-01-01",
+      "fallbackOnly": true,
+      "earnIn": null
+    },
+    {
+      "id": "openrouter/glm-4.6",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": null,
+      "note": "PAYG (metered, billed per call) \u2014 OpenRouter PAYG \u2014 NOT to be enabled without express owner permission (owner directive 2026-09-13). 164 calls observed in the pre-roster 48h OmniRoute traffic window; must go to zero now that cliproxy/zai/glm-5.3 covers GLM properly. costPerMTok* values are OpenRouter list-price placeholders, unverified, since the model is never meant to be called.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "openrouter/qwen3-coder",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": 10,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "PAYG (metered, billed per call) \u2014 OpenRouter PAYG \u2014 NOT to be enabled without express owner permission. 92 calls observed pre-roster; cliproxy/qwen3.8-max and other Qwen OpenCode-Go entries now cover this need. costPerMTok* values are OpenRouter list-price placeholders, unverified, since the model is never meant to be called.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "openrouter/gpt-5.4",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": null,
+      "note": "PAYG (metered, billed per call) \u2014 OpenRouter PAYG \u2014 NOT to be enabled without express owner permission. 7 calls observed pre-roster; superseded generation vs. gpt-5.6-sol/luna/terra now rostered. costPerMTok* values are OpenRouter list-price placeholders, unverified, since the model is never meant to be called.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "openrouter/auto",
+      "tier": "T3",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 128000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": null,
+      "note": "PAYG (metered, billed per call) \u2014 OpenRouter's auto-router meta-alias (not a single model) \u2014 PAYG, NOT to be enabled without express owner permission. 1 call observed pre-roster. costPerMTok* values are OpenRouter list-price placeholders, unverified, since the model is never meant to be called.",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "mimo-v2.5-pro",
+      "tier": "T2",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 0.05,
+      "costPerMTokOut": 0.1,
+      "costPerMTokCacheRead": 0.01,
+      "aaIndex": 26,
+      "aaIndexUpdatedAt": "2026-09-09",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (below T2 floor of 34) -> placed T2 provisionally: large 1M context, near-free cost, 'Pro' variant per CLIProxy's own served listing. Distinct from cliproxy/mimo-v2-pro (also added this pass) -- both are genuinely separate served ids.",
+      "releasedAt": "2026-05-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "tier": "T2",
+      "enabled": true,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 400000,
+      "costPerMTokIn": 4,
+      "costPerMTokOut": 20,
+      "costPerMTokCacheRead": 0.4,
+      "aaIndex": 51,
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null,
+      "note": ""
+    },
+    {
+      "id": "glm-5.3",
+      "tier": "T1",
+      "enabled": false,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 200000,
+      "costPerMTokIn": 1.4,
+      "costPerMTokOut": 4.4,
+      "costPerMTokCacheRead": 0.26,
+      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | 2026-09-08 04:45Z owner: GLM only via the Z.ai plan lane (zai/*), never via OpenCode Go",
+      "aaIndex": 49,
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null
     }
   ]
 }

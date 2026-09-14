@@ -17,7 +17,7 @@ describe("recommendAncillaryModel", () => {
       now: NOW,
     });
     expect(decision.outcome).toBe("selected");
-    expect(decision.modelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
     expect(decision.effectiveTier).toBe("T3");
   });
 
@@ -145,12 +145,12 @@ describe("ancillaryDriftForAgent", () => {
   };
 
   it("reports only the surface that disagrees with the recommendation", () => {
-    const drift = ancillaryDriftForAgent(agent, "cliproxy/claude-haiku-4-5-20251001");
+    const drift = ancillaryDriftForAgent(agent, "claude-haiku-4-5-20251001", MODELS);
     expect(drift).toHaveLength(1);
     expect(drift[0]).toMatchObject({
       surface: "ANTHROPIC_SMALL_FAST_MODEL",
       currentModelId: "old-haiku",
-      recommendedModelId: "cliproxy/claude-haiku-4-5-20251001",
+      recommendedModelId: "claude-haiku-4-5-20251001",
       agentId: "a1",
       agentName: "Mechanical worker",
     });
@@ -165,7 +165,8 @@ describe("ancillaryDriftForAgent", () => {
         adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "cliproxy/claude-haiku-4-5-20251001" } },
         runtimeConfig: null,
       },
-      "cliproxy/claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20251001",
+      MODELS,
     );
     expect(drift).toEqual([]);
   });
@@ -178,7 +179,8 @@ describe("ancillaryDriftForAgent", () => {
         adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: { type: "secret_ref", secretId: "sec-1" } } },
         runtimeConfig: null,
       },
-      "cliproxy/claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20251001",
+      MODELS,
     );
     expect(drift).toEqual([]);
   });
@@ -195,7 +197,8 @@ describe("ancillaryDriftForAgent", () => {
         adapterConfig: null,
         runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { model: "stale-model" } } } },
       },
-      "cliproxy/claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20251001",
+      MODELS,
     );
     expect(drift).toHaveLength(1);
     expect(drift[0]?.remediation).toContain("PATCH /api/agents/{id}");

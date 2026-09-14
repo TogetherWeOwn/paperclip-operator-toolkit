@@ -1,4 +1,5 @@
 import type { Tier } from "../constants.js";
+import { resolveConfiguredModelId } from "./model-id.js";
 import type { ModelEntry, QualitySignal, VolumeProfile } from "./types.js";
 
 /**
@@ -36,7 +37,8 @@ export function buildVolumeProfiles(
   const buckets = new Map<Tier, { n: number; input: number; cache: number; output: number }>();
 
   for (const row of rows) {
-    const tiers = row.model ? tiersOf.get(row.model) : undefined;
+    const configuredId = resolveConfiguredModelId(row.model, models);
+    const tiers = configuredId ? tiersOf.get(configuredId) : undefined;
     // A runtime model admitted at more than one tier cannot be attributed to a
     // tier from `usage_json.model` alone. Drop it rather than silently assigning
     // its volume to whichever roster row happened to appear last.

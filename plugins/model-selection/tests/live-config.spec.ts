@@ -55,26 +55,27 @@ describe("reviewed live-config fixture", () => {
   });
 
   it("selects sol for tier:T1 under exact list-price ordering", () => {
-    expect(decide("T1").modelId).toBe("cliproxy/gpt-5.6-sol");
+    expect(decide("T1").modelId).toBe("gpt-5.6-sol");
   });
 
-  it("never selects Claude for tier:T2", () => {
+  it("never selects Claude or the disabled OpenCode-Go GLM route for tier:T2", () => {
     const decision = decide("T2");
-    expect(decision.modelId).toBe("cliproxy/glm-5.3");
+    expect(decision.modelId).toBe("qwen3.8-max");
     expect(decision.modelId).not.toContain("claude");
+    expect(decision.modelId).not.toBe("glm-5.3");
   });
 
   it("routes an excluded sensitive card through T1", () => {
     const decision = decide("T3", true);
     expect(decision.judgement.tier).toBe("T1");
-    expect(decision.modelId).toBe("cliproxy/gpt-5.6-sol");
+    expect(decision.modelId).toBe("gpt-5.6-sol");
   });
 
   it("never returns disabled Sonnet or Haiku rows", () => {
     for (const tier of ["T1", "T2", "T3"] as const) {
       const decision = decide(tier);
       expect(decision.modelId).not.toBe("claude-sonnet-5");
-      expect(decision.modelId).not.toBe("cliproxy/claude-haiku-4-5-20251001");
+      expect(decision.modelId).not.toBe("claude-haiku-4-5-20251001");
     }
   });
 });

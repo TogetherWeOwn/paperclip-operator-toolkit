@@ -28,7 +28,7 @@ function model(entry: Partial<ModelEntry> & Pick<ModelEntry, "id" | "tier">): Mo
 /** Small deterministic roster for unit tests. T1 is most capable. */
 export const MODELS: ModelEntry[] = [
   model({
-    id: "cliproxy/claude-haiku-4-5-20251001",
+    id: "claude-haiku-4-5-20251001",
     tier: "T3",
     costPerMTokIn: 1,
     costPerMTokOut: 5,
@@ -141,7 +141,7 @@ export const MODEL_SCORES: ModelScore[] = [
     overall: tierScore({ n: 416, p: 0.965, capable: true, proven: true }),
   },
   {
-    modelId: "cliproxy/gpt-5.6-luna",
+    modelId: "gpt-5.6-luna",
     aaIndex: 43,
     priorP: 0.873,
     tiers: {
@@ -171,8 +171,8 @@ export const CARD_LEDGER: Record<string, CardLedgerEntry> = {
     costPerAcceptedCard: 3.49 / 0.9,
     pending: false,
   },
-  "cliproxy/gpt-5.6-luna:T1": {
-    modelId: "cliproxy/gpt-5.6-luna",
+  "gpt-5.6-luna:T1": {
+    modelId: "gpt-5.6-luna",
     tier: "T1",
     cardsClosed: 0,
     acceptRate: 0.873,

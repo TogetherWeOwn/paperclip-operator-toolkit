@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   isMaterialFailure,
@@ -26,10 +26,14 @@ const EARN_IN_CONFIG: ResolvedConfig["earnIn"] = {
 const AVAILABLE_ALL: LanePostureByTier = { T1: "available", T2: "available", T3: "available" };
 const STARVED_T1_ONLY: LanePostureByTier = { T1: "saturated", T2: "available", T3: "available" };
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 function card(overrides: Partial<EarnInCandidateCard> = {}): EarnInCandidateCard {
   return {
     issueId: "issue-1",
-    modelId: "cliproxy/gpt-5.6-luna",
+    modelId: "gpt-5.6-luna",
     lane: "lane-a",
     tier: "T1",
     status: "todo",
@@ -47,7 +51,7 @@ function card(overrides: Partial<EarnInCandidateCard> = {}): EarnInCandidateCard
 // earn-in candidate as-is. Build an unproven-but-capable score for these
 // tests, mirroring the "unproven, capable" shape earn-in exists to admit.
 const UNPROVEN_CAPABLE_SCORE: ModelScore = {
-  modelId: "cliproxy/gpt-5.6-luna",
+  modelId: "gpt-5.6-luna",
   aaIndex: 43,
   priorP: 0.873,
   tiers: {
@@ -89,7 +93,7 @@ function baseArgs(): DecideArgs {
   return {
     card: card(),
     modelScore: UNPROVEN_CAPABLE_SCORE,
-    state: earnInState({ counter: { "cliproxy/gpt-5.6-luna": 0 } }),
+    state: earnInState({ counter: { "gpt-5.6-luna": 0 } }),
     config: EARN_IN_CONFIG,
     lanePostureByTier: AVAILABLE_ALL,
     pacePosture: "on-pace",
@@ -116,8 +120,8 @@ describe("planEarnIn — gates", () => {
   it("dispatches an unproven, capable T1 candidate when every gate clears and the counter is due", () => {
     const decision = decide();
     expect(decision.dispatch).toBe(true);
-    expect(decision.cohortTag).toBe("earnin:cliproxy/gpt-5.6-luna");
-    expect(decision.idempotencyKey).toBe("issue-1:cliproxy/gpt-5.6-luna:earnin");
+    expect(decision.cohortTag).toBe("earnin:gpt-5.6-luna");
+    expect(decision.idempotencyKey).toBe("issue-1:gpt-5.6-luna:earnin");
   });
 
   it("refuses when earn-in is disabled for the company", () => {
@@ -191,7 +195,7 @@ describe("planEarnIn — gates", () => {
   });
 
   it("is sticky-stopped once state.stopped is set for the model", () => {
-    const decision = decide({ state: earnInState({ stopped: { "cliproxy/gpt-5.6-luna": true } }) });
+    const decision = decide({ state: earnInState({ stopped: { "gpt-5.6-luna": true } }) });
     expect(decision.dispatch).toBe(false);
     expect(decision.reason).toContain("stopped");
   });
@@ -199,8 +203,8 @@ describe("planEarnIn — gates", () => {
   it("refuses an idempotency key already recorded as dispatched", () => {
     const decision = decide({
       state: earnInState({
-        counter: { "cliproxy/gpt-5.6-luna": 0 },
-        dispatchedKeys: ["issue-1:cliproxy/gpt-5.6-luna:earnin"],
+        counter: { "gpt-5.6-luna": 0 },
+        dispatchedKeys: ["issue-1:gpt-5.6-luna:earnin"],
       }),
     });
     expect(decision.dispatch).toBe(false);
@@ -211,8 +215,8 @@ describe("planEarnIn — gates", () => {
     const recent = Array.from({ length: 8 }, (_, i) => NOW_MS - i * 60_000);
     const decision = decide({
       state: earnInState({
-        counter: { "cliproxy/gpt-5.6-luna": 0 },
-        dispatchedThisWeek: { "cliproxy/gpt-5.6-luna": recent },
+        counter: { "gpt-5.6-luna": 0 },
+        dispatchedThisWeek: { "gpt-5.6-luna": recent },
       }),
     });
     expect(decision.dispatch).toBe(false);
@@ -225,8 +229,8 @@ describe("planEarnIn — gates", () => {
     const fresh = Array.from({ length: 4 }, (_, i) => NOW_MS - i * 60_000);
     const decision = decide({
       state: earnInState({
-        counter: { "cliproxy/gpt-5.6-luna": 0 },
-        dispatchedThisWeek: { "cliproxy/gpt-5.6-luna": [...stale, ...fresh] },
+        counter: { "gpt-5.6-luna": 0 },
+        dispatchedThisWeek: { "gpt-5.6-luna": [...stale, ...fresh] },
       }),
     });
     expect(decision.dispatch).toBe(true);
@@ -237,8 +241,8 @@ describe("planEarnIn — gates", () => {
     // Advance nowMs by more than one rolling week — all 8 fall out of window.
     const decision = decide({
       state: earnInState({
-        counter: { "cliproxy/gpt-5.6-luna": 0 },
-        dispatchedThisWeek: { "cliproxy/gpt-5.6-luna": eightStale },
+        counter: { "gpt-5.6-luna": 0 },
+        dispatchedThisWeek: { "gpt-5.6-luna": eightStale },
       }),
       nowMs: NOW_MS + ROLLING_WEEK_MS + 60_000,
     });
@@ -247,7 +251,7 @@ describe("planEarnIn — gates", () => {
 
   it("caps at one active card per model", () => {
     const decision = decide({
-      state: earnInState({ counter: { "cliproxy/gpt-5.6-luna": 0 }, activePerModel: { "cliproxy/gpt-5.6-luna": 1 } }),
+      state: earnInState({ counter: { "gpt-5.6-luna": 0 }, activePerModel: { "gpt-5.6-luna": 1 } }),
     });
     expect(decision.dispatch).toBe(false);
     expect(decision.reason).toContain("already has an active earn-in card");
@@ -255,7 +259,7 @@ describe("planEarnIn — gates", () => {
 
   it("caps at one active card per lane", () => {
     const decision = decide({
-      state: earnInState({ counter: { "cliproxy/gpt-5.6-luna": 0 }, activePerLane: { "lane-a": ["issue-x"] } }),
+      state: earnInState({ counter: { "gpt-5.6-luna": 0 }, activePerLane: { "lane-a": ["issue-x"] } }),
     });
     expect(decision.dispatch).toBe(false);
     expect(decision.reason).toContain("lane lane-a already has an active earn-in card");
@@ -274,16 +278,19 @@ describe("planEarnIn — gates", () => {
   });
 
   it("skips a candidate whose deterministic counter is not a multiple of the modulus", () => {
-    const decision = decide({ state: earnInState({ counter: { "cliproxy/gpt-5.6-luna": 1 } }) });
+    const decision = decide({ state: earnInState({ counter: { "gpt-5.6-luna": 1 } }) });
     expect(decision.dispatch).toBe(false);
     expect(decision.reason).toContain(`not a multiple of ${SELECTION_COUNTER_MODULUS}`);
   });
 
   it("SELECTION_COUNTER_MODULUS is a fixed, non-random constant", () => {
-    // Named mutant: swap-in-randomness. A random gate would make this flaky
-    // across runs; asserting the literal pins the behavior down.
+    // Named mutant: swap-in-randomness. Pin both the literal and the absence of
+    // a runtime random read at the selection boundary.
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
     expect(SELECTION_COUNTER_MODULUS).toBe(12);
     expect(Number.isInteger(SELECTION_COUNTER_MODULUS)).toBe(true);
+    expect(decide().dispatch).toBe(true);
+    expect(random).not.toHaveBeenCalled();
   });
 });
 

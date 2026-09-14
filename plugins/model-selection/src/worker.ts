@@ -20,6 +20,7 @@ import {
   type Tier,
 } from "./constants.js";
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
+import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import {
@@ -514,7 +515,11 @@ export function createPlugin() {
         // Whether the CURRENTLY PINNED model (not the newly-computed winner) sits
         // on an unserviceable lane — this, not a routine pace-preference change,
         // is the only thing allowed to force a repin through `pin:operator`.
-        const pinnedModel = config.models.find((model) => model.id === described.descriptor.pinnedModelId);
+        const pinnedModelId = resolveConfiguredModelId(
+          described.descriptor.pinnedModelId,
+          config.models,
+        );
+        const pinnedModel = config.models.find((model) => model.id === pinnedModelId);
         const isServiceabilityHardStop =
           config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
 
@@ -726,6 +731,13 @@ export function createPlugin() {
             return { content: "issueId and modelId are both required.", data: null };
           }
           const config = await companyConfig(runCtx.companyId);
+          const configuredModelId = resolveConfiguredModelId(modelId, config.models);
+          if (!configuredModelId) {
+            return {
+              content: `modelId ${modelId} is not a configured roster entry.`,
+              data: null,
+            };
+          }
           const ttlSeconds =
             typeof supplied.ttlSeconds === "number" && supplied.ttlSeconds > 0
               ? supplied.ttlSeconds
@@ -733,12 +745,12 @@ export function createPlugin() {
 
           const nowIso = new Date().toISOString();
           const existing = await readOperatorOverrides(runCtx.companyId);
-          const updated = recordOperatorOverride(existing, issueId, modelId, nowIso, ttlSeconds);
+          const updated = recordOperatorOverride(existing, issueId, configuredModelId, nowIso, ttlSeconds);
           await ctx.state.set(operatorOverridesKey(runCtx.companyId), updated);
 
           const entry = updated[issueId]!;
           return {
-            content: `operator override recorded: ${issueId} -> ${modelId}, expires ${entry.expiresAt}`,
+            content: `operator override recorded: ${issueId} -> ${configuredModelId}, expires ${entry.expiresAt}`,
             data: entry,
           };
         },
@@ -845,6 +857,7 @@ export function createPlugin() {
                     runtimeConfig: asRecord(agent.runtimeConfig),
                   },
                   recommendedModelId,
+                  config.models,
                 ),
               );
             }
@@ -1071,11 +1084,16 @@ export function createPlugin() {
               return null;
             };
 
-            const runOutcomeRows: RunOutcomeRow[] = scoreRunRows.map((row) => {
+            const runOutcomeRows: RunOutcomeRow[] = scoreRunRows.flatMap((row) => {
               const r = asRecord(row);
+              const modelId = resolveConfiguredModelId(
+                typeof r.model === "string" ? r.model : null,
+                config.models,
+              );
+              if (!modelId) return [];
               const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
-              return {
-                modelId: typeof r.model === "string" ? r.model : "",
+              return [{
+                modelId,
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 status: r.status as RunOutcomeRow["status"],
                 errorCode: typeof r.error_code === "string" && r.error_code ? r.error_code : null,
@@ -1083,21 +1101,29 @@ export function createPlugin() {
                 costUsd: toNumber(r.cost_usd),
                 mins: toNumber(r.mins),
                 ageDays: toNumber(r.age_days) ?? 0,
-              };
+              }];
             });
 
             let statsByModel = accumulateRunStats(runOutcomeRows);
 
-            const closingRuns: ClosingRunCandidate[] = closingRunRows.map((row) => {
+            const closingRuns: Array<
+              ClosingRunCandidate & { costUsd: number | null }
+            > = closingRunRows.flatMap((row) => {
               const r = asRecord(row);
+              const modelId = resolveConfiguredModelId(
+                typeof r.model === "string" ? r.model : null,
+                config.models,
+              );
+              if (!modelId) return [];
               const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
-              return {
+              return [{
                 issueId,
-                modelId: typeof r.model === "string" ? r.model : "",
+                modelId,
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 finishedAtMs: toNumber(r.finished_at_ms) ?? 0,
                 agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null,
-              };
+                costUsd: toNumber(r.cost_usd),
+              }];
             });
 
             const reworkSignals = await readReworkSignals(company.id);
@@ -1129,13 +1155,12 @@ export function createPlugin() {
 
             const latestClosingRunByIssue = new Map<string, ClosingRunCandidate & { costUsd: number | null }>();
             const runCountByIssue = new Map<string, number>();
-            for (const [index, run] of closingRuns.entries()) {
+            for (const run of closingRuns) {
               if (!run.issueId) continue;
               runCountByIssue.set(run.issueId, (runCountByIssue.get(run.issueId) ?? 0) + 1);
               const existing = latestClosingRunByIssue.get(run.issueId);
               if (!existing || run.finishedAtMs > existing.finishedAtMs) {
-                const costUsd = toNumber(asRecord(closingRunRows[index]).cost_usd);
-                latestClosingRunByIssue.set(run.issueId, { ...run, costUsd });
+                latestClosingRunByIssue.set(run.issueId, run);
               }
             }
 
@@ -1149,7 +1174,14 @@ export function createPlugin() {
               // work handed off, or attribution lost to the window) carries no
               // ledger evidence — dropped, not guessed, same policy as scores.
               if (!closingRun || closingRun.tier === null) continue;
-              const pinnedModel = typeof r.pinned_model === "string" && r.pinned_model ? r.pinned_model : null;
+              const rawPinnedModel =
+                typeof r.pinned_model === "string" && r.pinned_model
+                  ? r.pinned_model
+                  : null;
+              const pinnedModel = resolveConfiguredModelId(
+                rawPinnedModel,
+                config.models,
+              );
               cardRows.push({
                 modelId: closingRun.modelId,
                 tier: closingRun.tier,
@@ -1157,7 +1189,8 @@ export function createPlugin() {
                 rejected: rejectedIssueIds.has(issueId),
                 costUsd: closingRun.costUsd,
                 runCount: runCountByIssue.get(issueId) ?? 1,
-                foreignRun: pinnedModel !== null && pinnedModel !== closingRun.modelId,
+                foreignRun:
+                  rawPinnedModel !== null && pinnedModel !== closingRun.modelId,
               });
             }
 

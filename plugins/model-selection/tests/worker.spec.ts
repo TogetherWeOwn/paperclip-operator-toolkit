@@ -132,7 +132,7 @@ describe("worker", () => {
           reportsTo: null,
           capabilities: null,
           adapterType: "claude_local",
-          adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" },
+          adapterConfig: { model: "claude-haiku-4-5-20251001" },
           runtimeConfig: {},
           budgetMonthlyCents: 0,
           spentMonthlyCents: 0,
@@ -199,6 +199,57 @@ describe("worker", () => {
     expect(enforcing.activity).toHaveLength(0);
   });
 
+  it("resolves a legacy wrapped pin before checking the pinned lane hard stop", async () => {
+    const models = MODELS.map((model) =>
+      model.id === "claude-opus-5" ? { ...model, laneId: "lane-opus" } : model,
+    );
+    const pinned = issue({
+      assigneeAdapterOverrides: { adapterConfig: { model: "cliproxy/claude-opus-5" } },
+      checkoutRunId: null,
+      executionRunId: null,
+    } as unknown as Partial<Issue>);
+    const enforcing = await boot(
+      baseConfig({
+        selection: { enabled: true, mode: "enforce" },
+        models,
+        pacing: { mode: "enforce", idleRepinHysteresisSeconds: 300 },
+      }),
+      pinned,
+    );
+    await enforcing.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      {
+        "lane-opus": {
+          laneId: "lane-opus",
+          fetchedAt: "2026-09-13T00:00:00.000Z",
+          error: null,
+          verdict: {
+            laneId: "lane-opus",
+            observedAt: "2026-09-13T00:00:00.000Z",
+            state: "exhausted",
+            serviceable: false,
+            score: null,
+            accounts: [],
+            knownAccountCount: 1,
+            knownWeight: 1,
+            serviceableAccountCount: 0,
+            urgentResetAt: null,
+            reason: "exhausted",
+          },
+        },
+      },
+    );
+
+    const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    expect((result as { content: string }).content).not.toContain("already carries");
+    expect((result as { data: { decision: { outcome: string } } }).data.decision.outcome).toBe("tier-exhausted");
+    const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
+    expect(after?.assigneeAdapterOverrides).toEqual({
+      adapterConfig: { model: "cliproxy/claude-opus-5" },
+    });
+    expect(enforcing.activity).toHaveLength(0);
+  });
+
   it("writes the override without a label when no label id is configured", async () => {
     const unlabelled = issue({
       labels: [{ id: OTHER_LABEL_ID, companyId: COMPANY, name: "area:platform" }],
@@ -261,6 +312,159 @@ describe("worker", () => {
     // One row per configured model, even with zero runs observed (model_scores.py's roster union).
     expect(stored?.modelScores).toHaveLength(MODELS.length);
     expect(typeof stored?.cardLedger).toBe("object");
+  });
+
+  it("attributes legacy-wrapped score and card rows to the canonical roster id", async () => {
+    const closed = issue({
+      status: "done",
+      assigneeAdapterOverrides: { adapterConfig: { model: "cliproxy/claude-opus-5" } },
+    } as unknown as Partial<Issue>);
+    const scoring = await boot(baseConfig(), closed);
+    scoring.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+    let queryIndex = 0;
+    scoring.ctx.db.query = async () => {
+      queryIndex += 1;
+      if (queryIndex === 1) {
+        return [{
+          model: "cliproxy/claude-opus-5",
+          status: "succeeded",
+          issue_id: ISSUE,
+          error_code: "",
+          error: "",
+          cost_usd: "3",
+          mins: "5",
+          age_days: "0",
+        }] as never;
+      }
+      if (queryIndex === 2) {
+        return [{
+          issue_id: ISSUE,
+          model: "claude-opus-5",
+          agent_id: AGENT,
+          cost_usd: "3",
+          finished_at_ms: "1",
+        }] as never;
+      }
+      if (queryIndex === 3) {
+        return [{
+          id: ISSUE,
+          closed_at_ms: "1",
+          pinned_model: "cliproxy/claude-opus-5",
+        }] as never;
+      }
+      return [] as never;
+    };
+
+    await scoring.runJob("refreshScores");
+    const stored = (await scoring.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.modelScores,
+    })) as {
+      modelScores: Array<{ modelId: string; tiers: { T1: { n: number } } }>;
+      cardLedger: Record<string, { modelId: string; foreignRunShare: number | null }>;
+    } | undefined;
+
+    const opus = stored?.modelScores.find((score) => score.modelId === "claude-opus-5");
+    expect(opus?.tiers.T1.n).toBe(1);
+    expect(stored?.cardLedger).toHaveProperty("claude-opus-5:T1");
+    expect(stored?.cardLedger).not.toHaveProperty("cliproxy/claude-opus-5:T1");
+    expect(stored?.cardLedger["claude-opus-5:T1"]?.foreignRunShare).toBe(0);
+  });
+
+  it("drops unknown telemetry model ids instead of attributing them by suffix", async () => {
+    const scoring = await boot(baseConfig());
+    scoring.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+    let queryIndex = 0;
+    scoring.ctx.db.query = async () => {
+      queryIndex += 1;
+      if (queryIndex === 1) {
+        return [{
+          model: "cliproxy/not-in-roster",
+          status: "succeeded",
+          issue_id: ISSUE,
+          error_code: "",
+          error: "",
+          cost_usd: "1",
+          mins: "1",
+          age_days: "0",
+        }] as never;
+      }
+      return [] as never;
+    };
+
+    await scoring.runJob("refreshScores");
+    const stored = (await scoring.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.modelScores,
+    })) as { modelScores: Array<{ tiers: { T1: { n: number } } }> } | undefined;
+    expect(stored?.modelScores.every((score) => score.tiers.T1.n === 0)).toBe(true);
+  });
+
+  it("counts a known closing run as foreign when the persisted pin is unknown", async () => {
+    const closed = issue({
+      status: "done",
+      assigneeAdapterOverrides: { adapterConfig: { model: "cliproxy/not-in-roster" } },
+    } as unknown as Partial<Issue>);
+    const scoring = await boot(baseConfig(), closed);
+    scoring.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+    let queryIndex = 0;
+    scoring.ctx.db.query = async () => {
+      queryIndex += 1;
+      if (queryIndex === 1) return [] as never;
+      if (queryIndex === 2) {
+        return [{
+          issue_id: ISSUE,
+          model: "claude-opus-5",
+          agent_id: AGENT,
+          cost_usd: "3",
+          finished_at_ms: "1",
+        }] as never;
+      }
+      if (queryIndex === 3) {
+        return [{
+          id: ISSUE,
+          closed_at_ms: "1",
+          pinned_model: "cliproxy/not-in-roster",
+        }] as never;
+      }
+      return [] as never;
+    };
+
+    await scoring.runJob("refreshScores");
+    const stored = (await scoring.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.modelScores,
+    })) as {
+      cardLedger: Record<string, { foreignRunShare: number | null }>;
+    } | undefined;
+
+    expect(stored?.cardLedger["claude-opus-5:T1"]?.foreignRunShare).toBe(1);
+  });
+
+  it("canonicalizes a legacy-wrapped operator override before storing it", async () => {
+    const result = await harness.executeTool(
+      TOOL_NAMES.setOperatorOverride,
+      { issueId: ISSUE, modelId: "cliproxy/claude-opus-5" },
+      runCtx,
+    );
+    expect((result as { content: string }).content).toContain("-> claude-opus-5");
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+  });
+
+  it("rejects an operator override that does not resolve to a configured roster id", async () => {
+    const result = await harness.executeTool(
+      TOOL_NAMES.setOperatorOverride,
+      { issueId: ISSUE, modelId: "cliproxy/not-in-roster" },
+      runCtx,
+    );
+    expect((result as { content: string }).content).toContain("not a configured roster entry");
+    expect((result as { data: unknown }).data).toBeNull();
   });
 
   // TOG-2379: a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
@@ -610,7 +814,7 @@ describe("worker", () => {
       ]);
       const result = await h.executeTool(TOOL_NAMES.ancillaryDrift, {}, runCtx);
       const data = (result as { data: { recommendedModelId: string; drift: Array<Record<string, unknown>> } }).data;
-      expect(data.recommendedModelId).toBe("cliproxy/claude-haiku-4-5-20251001");
+      expect(data.recommendedModelId).toBe("claude-haiku-4-5-20251001");
       expect(data.drift).toHaveLength(1);
       expect(data.drift[0]).toMatchObject({
         surface: "ANTHROPIC_SMALL_FAST_MODEL",
@@ -624,7 +828,7 @@ describe("worker", () => {
         agentWith({
           adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "cliproxy/claude-haiku-4-5-20251001" } },
           runtimeConfig: {
-            modelProfiles: { cheap: { adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" } } },
+            modelProfiles: { cheap: { adapterConfig: { model: "claude-haiku-4-5-20251001" } } },
           },
         }),
       ]);

@@ -1,4 +1,5 @@
 import { TIERS, TIER_LABEL_PREFIX, TIER_ORDER, type Tier } from "../constants.js";
+import { resolveConfiguredModelId } from "./model-id.js";
 import type { IssueDescriptor, ModelEntry, TierJudgement } from "./types.js";
 
 /**
@@ -41,8 +42,9 @@ export function tierFromLabels(labelNames: readonly string[] | undefined): Tier 
 
 /** Most capable enabled tier configured for this runtime model id, if any. */
 export function tierOfModel(modelId: string | null | undefined, models: readonly ModelEntry[]): Tier | null {
-  if (!modelId) return null;
-  const matches = models.filter((model) => model.id === modelId && model.enabled);
+  const configuredId = resolveConfiguredModelId(modelId, models);
+  if (!configuredId) return null;
+  const matches = models.filter((model) => model.id === configuredId && model.enabled);
   if (matches.length === 0) return null;
   return matches.reduce((highest, model) =>
     TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
@@ -91,7 +93,8 @@ export function resolveTier(
   // the next recorded judgement instead. A pin with at least one serviceable
   // row still wins outright, same as before — this only overrides the pin
   // when it is universally unserviceable, never merely "not preferred".
-  const pinnedMatches = models.filter((model) => model.id === descriptor.pinnedModelId && model.enabled);
+  const pinnedModelId = resolveConfiguredModelId(descriptor.pinnedModelId, models);
+  const pinnedMatches = models.filter((model) => model.id === pinnedModelId && model.enabled);
   const servicablePinnedMatches = pinnedMatches.filter(
     (model) => !(options?.isLaneUnserviceable?.(model) ?? false),
   );
@@ -106,7 +109,7 @@ export function resolveTier(
     return {
       tier: pinnedTier,
       source: "issue-override",
-      detail: `assigneeAdapterOverrides pins ${descriptor.pinnedModelId} (${pinnedTier})`,
+      detail: `assigneeAdapterOverrides pins ${pinnedModelId} (${pinnedTier})`,
     };
   }
 

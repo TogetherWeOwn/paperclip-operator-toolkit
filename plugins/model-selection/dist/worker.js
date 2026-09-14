@@ -455,6 +455,9 @@ function validateConfig(config) {
   const warnings = [];
   const seen = /* @__PURE__ */ new Set();
   for (const model of config.models) {
+    if (model.id.startsWith("cliproxy/")) {
+      errors.push(`model id must use the direct CLIProxy namespace without an OmniRoute cliproxy/ wrapper: ${model.id}`);
+    }
     const rosterKey = `${model.id}::${model.tier}`;
     if (seen.has(rosterKey)) errors.push(`duplicate model+tier row: ${model.id} ${model.tier}`);
     seen.add(rosterKey);
@@ -522,6 +525,16 @@ function validateConfig(config) {
     }
   }
   return { errors, warnings };
+}
+
+// src/engine/model-id.ts
+var OMNIROUTE_PROVIDER_PREFIX = "cliproxy/";
+function resolveConfiguredModelId(modelId, models) {
+  if (!modelId) return null;
+  if (models.some((model) => model.id === modelId)) return modelId;
+  if (!modelId.startsWith(OMNIROUTE_PROVIDER_PREFIX)) return null;
+  const directModelId = modelId.slice(OMNIROUTE_PROVIDER_PREFIX.length);
+  return models.some((model) => model.id === directModelId) ? directModelId : null;
 }
 
 // src/engine/cost.ts
@@ -636,8 +649,9 @@ function tierFromLabels(labelNames) {
   return found.sort((left, right) => TIER_ORDER.indexOf(right) - TIER_ORDER.indexOf(left))[0];
 }
 function tierOfModel(modelId, models) {
-  if (!modelId) return null;
-  const matches = models.filter((model) => model.id === modelId && model.enabled);
+  const configuredId = resolveConfiguredModelId(modelId, models);
+  if (!configuredId) return null;
+  const matches = models.filter((model) => model.id === configuredId && model.enabled);
   if (matches.length === 0) return null;
   return matches.reduce(
     (highest, model) => TIER_ORDER.indexOf(model.tier) > TIER_ORDER.indexOf(highest) ? model.tier : highest,
@@ -652,7 +666,8 @@ function resolveTier(descriptor, models, configDefaultTier, options) {
       detail: `capability exclusion forces T1: ${descriptor.exclusion.reasons.join("; ") || "unspecified"}`
     };
   }
-  const pinnedMatches = models.filter((model) => model.id === descriptor.pinnedModelId && model.enabled);
+  const pinnedModelId = resolveConfiguredModelId(descriptor.pinnedModelId, models);
+  const pinnedMatches = models.filter((model) => model.id === pinnedModelId && model.enabled);
   const servicablePinnedMatches = pinnedMatches.filter(
     (model) => !(options?.isLaneUnserviceable?.(model) ?? false)
   );
@@ -665,7 +680,7 @@ function resolveTier(descriptor, models, configDefaultTier, options) {
     return {
       tier: pinnedTier,
       source: "issue-override",
-      detail: `assigneeAdapterOverrides pins ${descriptor.pinnedModelId} (${pinnedTier})`
+      detail: `assigneeAdapterOverrides pins ${pinnedModelId} (${pinnedTier})`
     };
   }
   const labelTier = tierFromLabels(descriptor.labelNames);
@@ -697,7 +712,7 @@ function selectModel(input) {
   const paceEnforced = pacingMode === "enforce";
   const ledger = config.laneLedger ?? {};
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
-  const overrideModelId = config.operatorOverrideModelId ?? null;
+  const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
   const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
     isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model)
   });
@@ -722,8 +737,9 @@ function selectModel(input) {
   }
   trace.push(`tier floor ${judgement.tier}: no lower-capability model is eligible`);
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
+    const stickyModelId = resolveConfiguredModelId(descriptor.stickyModelId, config.models);
     const incumbent = config.models.find(
-      (model) => model.id === descriptor.stickyModelId && model.enabled
+      (model) => model.id === stickyModelId && model.enabled
     );
     const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
     if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
@@ -1004,11 +1020,13 @@ function readAncillarySurfaces(agent) {
   }
   return readings;
 }
-function ancillaryDriftForAgent(agent, recommendedModelId) {
+function ancillaryDriftForAgent(agent, recommendedModelId, models = []) {
   if (!recommendedModelId) return [];
-  return readAncillarySurfaces(agent).filter(
-    (reading) => !reading.unresolvable && reading.currentModelId !== null && reading.currentModelId !== recommendedModelId
-  ).map((reading) => ({
+  return readAncillarySurfaces(agent).filter((reading) => {
+    if (reading.unresolvable || reading.currentModelId === null) return false;
+    const configuredModelId = resolveConfiguredModelId(reading.currentModelId, models);
+    return (configuredModelId ?? reading.currentModelId) !== recommendedModelId;
+  }).map((reading) => ({
     ...reading,
     agentId: agent.id,
     agentName: agent.name,
@@ -1028,7 +1046,8 @@ function buildVolumeProfiles(rows, models, computedAt) {
   }
   const buckets = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    const tiers = row.model ? tiersOf.get(row.model) : void 0;
+    const configuredId = resolveConfiguredModelId(row.model, models);
+    const tiers = configuredId ? tiersOf.get(configuredId) : void 0;
     if (!tiers || tiers.length !== 1) continue;
     const tier2 = tiers[0];
     const input = row.inputTokens ?? 0;
@@ -2016,7 +2035,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           now: Date.now(),
           cardLedger
         });
-        const pinnedModel = config.models.find((model) => model.id === described.descriptor.pinnedModelId);
+        const pinnedModelId = resolveConfiguredModelId(
+          described.descriptor.pinnedModelId,
+          config.models
+        );
+        const pinnedModel = config.models.find((model) => model.id === pinnedModelId);
         const isServiceabilityHardStop = config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
         if (decision.shadowDiff) {
@@ -2190,14 +2213,21 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             return { content: "issueId and modelId are both required.", data: null };
           }
           const config = await companyConfig(runCtx.companyId);
+          const configuredModelId = resolveConfiguredModelId(modelId, config.models);
+          if (!configuredModelId) {
+            return {
+              content: `modelId ${modelId} is not a configured roster entry.`,
+              data: null
+            };
+          }
           const ttlSeconds = typeof supplied.ttlSeconds === "number" && supplied.ttlSeconds > 0 ? supplied.ttlSeconds : config.pacing.operatorOverrideTtlSeconds;
           const nowIso = (/* @__PURE__ */ new Date()).toISOString();
           const existing = await readOperatorOverrides(runCtx.companyId);
-          const updated = recordOperatorOverride(existing, issueId, modelId, nowIso, ttlSeconds);
+          const updated = recordOperatorOverride(existing, issueId, configuredModelId, nowIso, ttlSeconds);
           await ctx.state.set(operatorOverridesKey(runCtx.companyId), updated);
           const entry = updated[issueId];
           return {
-            content: `operator override recorded: ${issueId} -> ${modelId}, expires ${entry.expiresAt}`,
+            content: `operator override recorded: ${issueId} -> ${configuredModelId}, expires ${entry.expiresAt}`,
             data: entry
           };
         }
@@ -2284,7 +2314,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     adapterConfig: asRecord(agent.adapterConfig),
                     runtimeConfig: asRecord(agent.runtimeConfig)
                   },
-                  recommendedModelId
+                  recommendedModelId,
+                  config.models
                 )
               );
             }
@@ -2468,11 +2499,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               }
               return null;
             };
-            const runOutcomeRows = scoreRunRows.map((row) => {
+            const runOutcomeRows = scoreRunRows.flatMap((row) => {
               const r = asRecord(row);
+              const modelId = resolveConfiguredModelId(
+                typeof r.model === "string" ? r.model : null,
+                config.models
+              );
+              if (!modelId) return [];
               const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
-              return {
-                modelId: typeof r.model === "string" ? r.model : "",
+              return [{
+                modelId,
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 status: r.status,
                 errorCode: typeof r.error_code === "string" && r.error_code ? r.error_code : null,
@@ -2480,19 +2516,25 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 costUsd: toNumber(r.cost_usd),
                 mins: toNumber(r.mins),
                 ageDays: toNumber(r.age_days) ?? 0
-              };
+              }];
             });
             let statsByModel = accumulateRunStats(runOutcomeRows);
-            const closingRuns = closingRunRows.map((row) => {
+            const closingRuns = closingRunRows.flatMap((row) => {
               const r = asRecord(row);
+              const modelId = resolveConfiguredModelId(
+                typeof r.model === "string" ? r.model : null,
+                config.models
+              );
+              if (!modelId) return [];
               const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
-              return {
+              return [{
                 issueId,
-                modelId: typeof r.model === "string" ? r.model : "",
+                modelId,
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 finishedAtMs: toNumber(r.finished_at_ms) ?? 0,
-                agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null
-              };
+                agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null,
+                costUsd: toNumber(r.cost_usd)
+              }];
             });
             const reworkSignals = await readReworkSignals(company.id);
             const reworkEvents = [];
@@ -2520,13 +2562,12 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             );
             const latestClosingRunByIssue = /* @__PURE__ */ new Map();
             const runCountByIssue = /* @__PURE__ */ new Map();
-            for (const [index, run] of closingRuns.entries()) {
+            for (const run of closingRuns) {
               if (!run.issueId) continue;
               runCountByIssue.set(run.issueId, (runCountByIssue.get(run.issueId) ?? 0) + 1);
               const existing = latestClosingRunByIssue.get(run.issueId);
               if (!existing || run.finishedAtMs > existing.finishedAtMs) {
-                const costUsd = toNumber(asRecord(closingRunRows[index]).cost_usd);
-                latestClosingRunByIssue.set(run.issueId, { ...run, costUsd });
+                latestClosingRunByIssue.set(run.issueId, run);
               }
             }
             const cardRows = [];
@@ -2536,7 +2577,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               if (!issueId) continue;
               const closingRun = latestClosingRunByIssue.get(issueId);
               if (!closingRun || closingRun.tier === null) continue;
-              const pinnedModel = typeof r.pinned_model === "string" && r.pinned_model ? r.pinned_model : null;
+              const rawPinnedModel = typeof r.pinned_model === "string" && r.pinned_model ? r.pinned_model : null;
+              const pinnedModel = resolveConfiguredModelId(
+                rawPinnedModel,
+                config.models
+              );
               cardRows.push({
                 modelId: closingRun.modelId,
                 tier: closingRun.tier,
@@ -2544,7 +2589,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 rejected: rejectedIssueIds.has(issueId),
                 costUsd: closingRun.costUsd,
                 runCount: runCountByIssue.get(issueId) ?? 1,
-                foreignRun: pinnedModel !== null && pinnedModel !== closingRun.modelId
+                foreignRun: rawPinnedModel !== null && pinnedModel !== closingRun.modelId
               });
             }
             const priorPByModel = {};

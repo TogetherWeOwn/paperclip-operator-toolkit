@@ -39,9 +39,29 @@ describe("config resolution", () => {
     expect(warnings.some((w) => w.includes("no tierLabelIds configured"))).toBe(true);
   });
 
+  it("rejects the OmniRoute cliproxy wrapper in the direct CLIProxy roster", () => {
+    const { errors } = validateConfig(
+      resolveConfig({
+        models: [
+          {
+            id: "cliproxy/claude-opus-5",
+            tier: "T1",
+            releasedAt: "2026-06-24",
+            costPerMTokIn: 5,
+            costPerMTokOut: 25,
+            costPerMTokCacheRead: 0.5,
+          },
+        ],
+      }),
+    );
+    expect(errors).toContain(
+      "model id must use the direct CLIProxy namespace without an OmniRoute cliproxy/ wrapper: cliproxy/claude-opus-5",
+    );
+  });
+
   it("allows one runtime model at multiple tiers but rejects a duplicate model+tier row", () => {
     const entry = {
-      id: "cliproxy/gpt-5.6-sol",
+      id: "gpt-5.6-sol",
       tier: "T1",
       releasedAt: "2026-06-01",
       costPerMTokIn: 4,
@@ -54,14 +74,14 @@ describe("config resolution", () => {
     expect(multiTier.errors).toEqual([]);
 
     const { errors } = validateConfig(resolveConfig({ models: [entry, entry] }));
-    expect(errors).toContain("duplicate model+tier row: cliproxy/gpt-5.6-sol T1");
+    expect(errors).toContain("duplicate model+tier row: gpt-5.6-sol T1");
   });
 
   it("keeps all reviewed roster metadata", () => {
     const config = resolveConfig({
       models: [
         {
-          id: "cliproxy/gpt-6-astra",
+          id: "gpt-6-astra",
           tier: "T1",
           enabled: true,
           costPerMTokIn: 10,
@@ -99,7 +119,7 @@ describe("config resolution", () => {
         ],
       }),
     );
-    expect(errors[0]).toContain("invalid releasedAt date");
+    expect(errors.some((error) => error.includes("invalid releasedAt date"))).toBe(true);
   });
 
   it("accepts a well-formed lane apiKeySecretRef and threads it through to resolveConfig", () => {

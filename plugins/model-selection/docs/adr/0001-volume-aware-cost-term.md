@@ -27,7 +27,7 @@ Measured against this company's own `heartbeat_runs`, 7 days to 2026-08-31
 |---|---|---|---|---|---|
 | `claude-opus-5` | 214 | 510,327 | 6,081,872 | 55,532 | $7.1576 |
 | `claude-sonnet-5` | 103 | 320,286 | 4,336,432 | 44,712 | $3.0940 |
-| `cliproxy/claude-haiku-4-5-20251001` | 13 | 81,085 | 819,445 | 5,112 | $0.1958 |
+| `claude-haiku-4-5-20251001` | 13 | 81,085 | 819,445 | 5,112 | $0.1958 |
 
 Cache-read volume is 10–13× input volume at every tier, and cache read is 44% of
 the opus bill (ADR-0002).

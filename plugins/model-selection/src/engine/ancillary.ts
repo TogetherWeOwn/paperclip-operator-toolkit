@@ -1,3 +1,4 @@
+import { resolveConfiguredModelId } from "./model-id.js";
 import type { SelectionConfig } from "./select.js";
 import { selectModel } from "./select.js";
 import type { QualitySignal, SelectionDecision, VolumeProfile } from "./types.js";
@@ -161,13 +162,15 @@ export function readAncillarySurfaces(agent: AncillaryAgentLike): AncillarySurfa
 export function ancillaryDriftForAgent(
   agent: AncillaryAgentLike,
   recommendedModelId: string | null,
+  models: SelectionConfig["models"] = [],
 ): AncillarySurfaceDrift[] {
   if (!recommendedModelId) return [];
   return readAncillarySurfaces(agent)
-    .filter(
-      (reading) =>
-        !reading.unresolvable && reading.currentModelId !== null && reading.currentModelId !== recommendedModelId,
-    )
+    .filter((reading) => {
+      if (reading.unresolvable || reading.currentModelId === null) return false;
+      const configuredModelId = resolveConfiguredModelId(reading.currentModelId, models);
+      return (configuredModelId ?? reading.currentModelId) !== recommendedModelId;
+    })
     .map((reading) => ({
       ...reading,
       agentId: agent.id,
