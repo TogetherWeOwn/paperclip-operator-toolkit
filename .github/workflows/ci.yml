@@ -306,10 +306,18 @@ permissions:
   contents: read
   actions: read
 
+# Cancel a superseded run on the same ref rather than letting it burn the full
+# ~70min Offline-suites job to completion. Keyed on PR number when present so
+# concurrent PRs never cancel each other; falls back to the ref for push-to-main.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   privilege-suites:
     name: Privilege ceiling suites
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -339,7 +347,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Postgres client and jq
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client jq
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: postgresql-client jq
+          version: 1.0
       - name: Arm the empty throwaway database
         run: ./test/fixtures/orgdb/reset.sh --init
       - name: Fixture and recording-stub contract
@@ -471,6 +482,7 @@ jobs:
   offline-suites:
     name: Offline suites
     runs-on: ubuntu-latest
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -4339,6 +4351,7 @@ jobs:
   runbook-gates:
     name: Operator runbook gates
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -4437,6 +4450,7 @@ jobs:
   broker-suite:
     name: gh-token-broker suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: plugins/gh-token-broker
@@ -4534,6 +4548,7 @@ jobs:
   omniroute-broker-suite:
     name: omniroute-broker suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -4592,6 +4607,7 @@ jobs:
   dispatch-suite:
     name: dispatch suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: plugins/dispatch
@@ -4737,6 +4753,7 @@ jobs:
   capture-suite:
     name: gh-event-capture suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: gh-event-capture
@@ -4922,6 +4939,7 @@ jobs:
   mcp-suite:
     name: org-request-mcp suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -5228,6 +5246,7 @@ jobs:
   model-selection-suite:
     name: model-selection suite
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: plugins/model-selection
