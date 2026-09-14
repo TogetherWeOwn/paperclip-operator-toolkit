@@ -155,6 +155,15 @@ const mutants = [
     from: "        if (config.shadowEmit.enabled) {",
     to: "        if (false) {",
   },
+  {
+    // TOG-2504: a one-sided stream must not pass merely because the existing
+    // plugin-shadow emitter still writes a schema-valid record. Removing the
+    // host projection must fail the worker-level paired-stream assertion.
+    name: "drop-host-projection-from-decision-pair",
+    file: "src/worker.ts",
+    from: "          await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);",
+    to: "          await emitDecisionPair(companyId, [buildShadowRecord(recordInput)]);",
+  },
 ];
 
 function runTests() {

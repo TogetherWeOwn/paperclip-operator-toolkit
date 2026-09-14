@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { LaneLedger } from "../src/engine/pacing.js";
 import { selectModel } from "../src/engine/select.js";
-import { buildShadowRecord, SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
+import { buildHostRecord, buildShadowRecord, SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
@@ -30,7 +30,7 @@ function verdict(overrides: Partial<LanePaceVerdict> = {}): LanePaceVerdict {
 // lane-snapshot/candidate-lane derivations under test have something to key on.
 const MODELS_WITH_LANES = MODELS.map((m) => ({ ...m, laneId: "lane-a" }));
 
-describe("buildShadowRecord", () => {
+describe("paired decision records", () => {
   it("produces every field the tog2138-decision-v1 schema requires", () => {
     const decision = selectModel({
       ...base,
@@ -85,6 +85,38 @@ describe("buildShadowRecord", () => {
     expect(record.explanations).toEqual([]);
     expect(record.operatorOverride).toBeNull();
     expect(typeof record.pickWhy).toBe("string");
+  });
+
+  it("builds a host projection from the identical decision snapshot", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i-host", labelNames: ["tier:T3"] },
+      config: config({ models: MODELS_WITH_LANES }),
+    });
+    const input = {
+      issueId: "i-host",
+      issueIdentifier: "TOG-HOST",
+      nowIso: NOW_ISO,
+      decision,
+      descriptor: { issueId: "i-host", labelNames: ["tier:T3"] },
+      status: "todo",
+      hasOverride: false,
+      hasOperatorPin: false,
+      isIdle: true,
+      models: MODELS_WITH_LANES,
+      laneLedger: { "lane-a": { laneId: "lane-a", verdict: verdict(), fetchedAt: NOW_ISO, error: null, observation: null } },
+      slotFloorFraction: 0.25,
+      operatorOverride: null,
+    };
+
+    const host = buildHostRecord(input);
+    const shadow = buildShadowRecord(input);
+
+    expect(host).toEqual({ ...shadow, writer: "host" });
+    expect(host.schema).toBe(SHADOW_SCHEMA_VERSION);
+    expect(host.ts).toBe(shadow.ts);
+    expect(host.stateFingerprint).toEqual(shadow.stateFingerprint);
+    expect(host.candidates).toEqual(shadow.candidates);
   });
 
   it("maps an exhausted lane verdict to state exhausted, not available", () => {

@@ -81,7 +81,7 @@ import {
   type ZaiPaceOverride,
 } from "./engine/pacing.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
-import { buildShadowRecord } from "./shadow-emit.js";
+import { buildHostRecord, buildShadowRecord } from "./shadow-emit.js";
 import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
 import {
   buildClassificationPrompt,
@@ -351,7 +351,7 @@ export function createPlugin() {
         await ctx.state.set(tierExhaustedAlarmsKey(companyId), { ...alarms, [issueId]: new Date().toISOString() });
       };
 
-      // --- TOG-2137/2138: shadow decision emitter -----------------------
+      // --- TOG-2137/2138/2504: paired decision emitter -----------------
 
       const SHADOW_DECISIONS_FILE = "decisions.jsonl";
 
@@ -377,11 +377,12 @@ export function createPlugin() {
       // of racing: two emits that both read the same "before" content and then
       // both write collapse to whichever write lands last, silently dropping
       // the other's record (TOG-2373).
-      const shadowEmitChains = new Map<string, Promise<void>>();
+      const decisionEmitChains = new Map<string, Promise<void>>();
 
       /**
-       * Off by default (`shadowEmit.enabled`). Read-modify-write against one
-       * JSONL file, capped at `maxRecords` — `ctx.localFolders` has no native
+       * Off by default (`shadowEmit.enabled`). Each authoritative decision
+       * appends one `host` and one `plugin-shadow` projection to the same JSONL
+       * file, capped at `maxRecords` — `ctx.localFolders` has no native
        * append, and the host only offers whole-file atomic replace. A write
        * failure is logged and swallowed: shadow emission is a side channel for
        * the TOG-2138 comparison stream, and must never fail the
@@ -389,9 +390,9 @@ export function createPlugin() {
        * when it means "no file yet" — any other read failure aborts the emit
        * instead of overwriting real history with a one-record file.
        */
-      const emitShadowRecordSerialized = async (
+      const emitDecisionPairSerialized = async (
         companyId: string,
-        record: ReturnType<typeof buildShadowRecord>,
+        records: readonly ReturnType<typeof buildShadowRecord>[],
       ): Promise<void> => {
         let existing = "";
         try {
@@ -406,9 +407,12 @@ export function createPlugin() {
           existing = "";
         }
         const lines = existing.split("\n").filter((line) => line.trim().length > 0);
-        lines.push(JSON.stringify(record));
+        lines.push(...records.map((record) => JSON.stringify(record)));
         const config = await companyConfig(companyId);
-        const capped = lines.length > config.shadowEmit.maxRecords ? lines.slice(-config.shadowEmit.maxRecords) : lines;
+        // A retained history must never split the newest host/shadow pair. An
+        // odd configured cap is rounded down, with two records as the floor.
+        const pairAlignedCap = Math.max(2, config.shadowEmit.maxRecords - (config.shadowEmit.maxRecords % 2));
+        const capped = lines.length > pairAlignedCap ? lines.slice(-pairAlignedCap) : lines;
         try {
           await ctx.localFolders.writeTextAtomic(
             companyId,
@@ -421,10 +425,13 @@ export function createPlugin() {
         }
       };
 
-      const emitShadowRecord = (companyId: string, record: ReturnType<typeof buildShadowRecord>): Promise<void> => {
-        const previous = shadowEmitChains.get(companyId) ?? Promise.resolve();
-        const next = previous.catch(() => {}).then(() => emitShadowRecordSerialized(companyId, record));
-        shadowEmitChains.set(companyId, next);
+      const emitDecisionPair = (
+        companyId: string,
+        records: readonly ReturnType<typeof buildShadowRecord>[],
+      ): Promise<void> => {
+        const previous = decisionEmitChains.get(companyId) ?? Promise.resolve();
+        const next = previous.catch(() => {}).then(() => emitDecisionPairSerialized(companyId, records));
+        decisionEmitChains.set(companyId, next);
         return next;
       };
 
@@ -848,7 +855,7 @@ export function createPlugin() {
         }
 
         if (config.shadowEmit.enabled) {
-          const shadowRecord = buildShadowRecord({
+          const recordInput = {
             issueId,
             issueIdentifier: described.identifier,
             nowIso,
@@ -862,8 +869,8 @@ export function createPlugin() {
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
             operatorOverride: liveOverride,
-          });
-          await emitShadowRecord(companyId, shadowRecord);
+          };
+          await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);
         }
 
         return {

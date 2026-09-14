@@ -3,20 +3,15 @@ import type { IssueDescriptor, ModelEntry, SelectionDecision } from "./engine/ty
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * TOG-2137 / TOG-2138. `tog2138-decision-v1`, the plugin-shadow half of the
- * 48h host/plugin-shadow agreement stream `ops/tog-2138/gate_harness.py`
- * correlates against (schema confirmed by reading that file end to end,
- * cross-checked against `ops/tog-2138/fixtures/A_shadow.jsonl`). This module
- * only builds the record; `worker.ts` decides when to call it and appends the
- * JSONL line via `ctx.localFolders`.
- *
- * `ops/tog-1926/tier_dispatcher.py` (the reference host writer this scope
- * line names) does not itself emit this schema — see the TOG-2137 comment
- * thread. This emitter can only ever produce the plugin-shadow side; the
- * comparison stream needs a matching host-side writer this card cannot build
- * (it lives outside this plugin's file scope).
+ * TOG-2137 / TOG-2138 / TOG-2504. `tog2138-decision-v1`, the paired
+ * host/plugin-shadow agreement stream `ops/tog-2138/gate_harness.py`
+ * correlates. TOG-2481 retired the separate host dispatcher, so both writer
+ * projections now come from the same authoritative `advise()` decision. This
+ * module only builds records; `worker.ts` appends the pair via
+ * `ctx.localFolders`.
  */
 export const SHADOW_SCHEMA_VERSION = "tog2138-decision-v1";
+export type DecisionWriter = "host" | "plugin-shadow";
 
 export type ShadowLaneState = "available" | "degraded" | "exhausted" | "unavailable";
 
@@ -40,7 +35,7 @@ export interface ShadowCandidate {
 
 export interface ShadowDecisionRecord {
   schema: typeof SHADOW_SCHEMA_VERSION;
-  writer: "plugin-shadow";
+  writer: DecisionWriter;
   issueId: string;
   issueIdentifier: string | null;
   ts: string;
@@ -189,7 +184,7 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
   });
 }
 
-export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecord {
+function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): ShadowDecisionRecord {
   const { decision, descriptor } = input;
   const tier = decision.effectiveTier ?? decision.judgement.tier;
   const stickyKept =
@@ -200,7 +195,7 @@ export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecor
 
   return {
     schema: SHADOW_SCHEMA_VERSION,
-    writer: "plugin-shadow",
+    writer,
     issueId: input.issueId,
     issueIdentifier: input.issueIdentifier,
     ts: input.nowIso,
@@ -228,4 +223,17 @@ export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecor
       : null,
     pickWhy: decision.trace.join("; "),
   };
+}
+
+export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecord {
+  return buildDecisionRecord(input, "plugin-shadow");
+}
+
+/**
+ * TOG-2504. The host projection is emitted from the same native-plugin
+ * decision as the shadow projection. It is evidence about the authoritative
+ * host choice, not a second actuator or an independently recomputed pick.
+ */
+export function buildHostRecord(input: ShadowRecordInput): ShadowDecisionRecord {
+  return buildDecisionRecord(input, "host");
 }

@@ -758,15 +758,21 @@ describe("worker", () => {
       return text.split("\n").filter((line) => line.trim().length > 0);
     }
 
-    it("writes a decisions.jsonl record on advise() when shadowEmit.enabled is true", async () => {
+    it("writes a correlated host/plugin-shadow pair on advise() when shadowEmit.enabled is true", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
 
       const lines = await readShadowLines(h);
-      expect(lines).toHaveLength(1);
-      const record = JSON.parse(lines[0]!);
-      expect(record.schema).toBe(SHADOW_SCHEMA_VERSION);
-      expect(record.issueId).toBe(ISSUE);
+      expect(lines).toHaveLength(2);
+      const records = lines.map((line) => JSON.parse(line));
+      expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+      for (const record of records) {
+        expect(record.schema).toBe(SHADOW_SCHEMA_VERSION);
+        expect(record.issueId).toBe(ISSUE);
+      }
+      expect(records[0].ts).toBe(records[1].ts);
+      expect(records[0].stateFingerprint).toEqual(records[1].stateFingerprint);
+      expect(records[0].candidates).toEqual(records[1].candidates);
     });
 
     it("writes nothing to the shadow folder when shadowEmit.enabled is false (the default)", async () => {
@@ -791,6 +797,17 @@ describe("worker", () => {
       }
     });
 
+    it("keeps complete pairs when maxRecords is odd", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 3 } }));
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const records = (await readShadowLines(h)).map((line) => JSON.parse(line));
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+      expect(records[0].ts).toBe(records[1].ts);
+    });
+
     it("swallows a shadow-emit write failure — advise() still returns its decision, and the failure is logged", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
@@ -810,7 +827,7 @@ describe("worker", () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-      expect(await readShadowLines(h)).toHaveLength(2);
+      expect(await readShadowLines(h)).toHaveLength(4);
 
       const originalRead = h.ctx.localFolders.readText.bind(h.ctx.localFolders);
       h.ctx.localFolders.readText = async () => {
@@ -823,9 +840,9 @@ describe("worker", () => {
       h.ctx.localFolders.readText = originalRead;
 
       // A transient read error must never be treated as "file is empty" — the
-      // two prior records must survive untouched, not be overwritten by a
-      // single-record file built from a false-empty read.
-      expect(await readShadowLines(h)).toHaveLength(2);
+      // two prior pairs must survive untouched, not be overwritten by a
+      // single pair built from a false-empty read.
+      expect(await readShadowLines(h)).toHaveLength(4);
       expect(
         h.logs.some(
           (l) => l.level === "warn" && l.message.includes("shadow decision emit aborted — could not read existing log"),
@@ -843,8 +860,8 @@ describe("worker", () => {
 
       // Two concurrent read-modify-write cycles against the same file must
       // serialize, not race — racing them means both read the same "before"
-      // content and the later write silently drops the earlier record.
-      expect(await readShadowLines(h)).toHaveLength(2);
+      // content and the later write silently drops the earlier pair.
+      expect(await readShadowLines(h)).toHaveLength(4);
     });
   });
 

@@ -155,6 +155,51 @@ Order of operations:
    0, so this step currently fails outright rather than being a judgement call.
 5. Only then set `mode: "enforce"`.
 
+### Paired host/plugin decision evidence
+
+`shadowEmit.enabled` is off by default. When enabled, every authoritative
+`advise()` decision appends two `tog2138-decision-v1` records to
+`shadow-decisions/decisions.jsonl`: one tagged `writer: "host"` and one tagged
+`writer: "plugin-shadow"`. Both projections come from the same decision object,
+timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
+the comparison stream without restoring the host `tier_dispatcher.py` retired
+by TOG-2481 or adding a second actuator.
+
+A bounded interval can be split by writer without copying or changing records:
+
+```bash
+jq -c 'select(.writer == "host")' decisions.jsonl > host.jsonl
+jq -c 'select(.writer == "plugin-shadow")' decisions.jsonl > shadow.jsonl
+python3 "$COMPANY_ROOT/ops/tog-2138/gate_harness.py" agreement \
+  --host host.jsonl --shadow shadow.jsonl --out agreement.json
+```
+
+The agreement command deliberately remains nonzero until the separate
+48-hour/200-decision clean-window gate is satisfied. For a reproducible bounded
+comparison (maximum 24 hours), use the repository-pinned consumer through:
+
+```bash
+npm run decisions:summary -- \
+  --input decisions.jsonl \
+  --start 2026-09-14T00:00:00Z \
+  --end 2026-09-15T00:00:00Z \
+  --out summary-24h.json
+```
+
+That command exits nonzero on empty, missing-writer, malformed, or unpaired
+data. It reports the earliest actual correlated pair as `observationStart` and
+sets `cleanWindowGateEvaluated: false`; never substitute plugin-config apply
+time or report the clean-window gate as passed from this bounded summary.
+
+Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
+configuring its existing `shadow-decisions` local folder. Preserve the complete
+live config with a parsed read-merge-write and readback; do not use a textual
+`replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
+or secret references. TOG-2500 remains a prerequisite for any live config
+write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
+JSONL file as historical evidence. No host service or timer is started or
+stopped by this feature.
+
 ### Config
 
 See `src/config/schema.ts`. Every number that decides anything lives in config,

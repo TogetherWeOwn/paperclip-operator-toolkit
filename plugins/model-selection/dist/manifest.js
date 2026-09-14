@@ -454,9 +454,10 @@ var SELECTION_CONFIG_SCHEMA = {
       default: {}
     },
     /**
-     * TOG-2137. Emits one `tog2138-decision-v1` JSONL record per `advise()`
-     * call to the `shadowDecisions` local folder, for the 48h host/plugin
-     * agreement stream `ops/tog-2138/gate_harness.py` correlates against.
+     * TOG-2137 / TOG-2504. Emits paired `host` and `plugin-shadow`
+     * `tog2138-decision-v1` JSONL records per `advise()` call to the
+     * `shadowDecisions` local folder, for the 48h agreement stream
+     * `ops/tog-2138/gate_harness.py` correlates.
      * Off by default — same inert-install discipline as `selection.mode`:
      * installing this plugin must not start writing files an operator did
      * not ask for.

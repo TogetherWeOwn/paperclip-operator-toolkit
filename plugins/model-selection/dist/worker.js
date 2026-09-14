@@ -2408,13 +2408,13 @@ function buildCandidates(decision, models) {
     };
   });
 }
-function buildShadowRecord(input) {
+function buildDecisionRecord(input, writer) {
   const { decision, descriptor } = input;
   const tier2 = decision.effectiveTier ?? decision.judgement.tier;
   const stickyKept = decision.outcome === "selected" && descriptor.pinnedModelId != null && decision.modelId === descriptor.pinnedModelId && decision.trace.some((line) => line.startsWith("sticky:"));
   return {
     schema: SHADOW_SCHEMA_VERSION,
-    writer: "plugin-shadow",
+    writer,
     issueId: input.issueId,
     issueIdentifier: input.issueIdentifier,
     ts: input.nowIso,
@@ -2440,6 +2440,12 @@ function buildShadowRecord(input) {
     operatorOverride: input.operatorOverride ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt } : null,
     pickWhy: decision.trace.join("; ")
   };
+}
+function buildShadowRecord(input) {
+  return buildDecisionRecord(input, "plugin-shadow");
+}
+function buildHostRecord(input) {
+  return buildDecisionRecord(input, "host");
 }
 
 // src/engine/classify-call.ts
@@ -3018,8 +3024,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const message = err instanceof Error ? err.message : String(err);
         return /not found/i.test(message) || /ENOENT/.test(message);
       };
-      const shadowEmitChains = /* @__PURE__ */ new Map();
-      const emitShadowRecordSerialized = async (companyId, record2) => {
+      const decisionEmitChains = /* @__PURE__ */ new Map();
+      const emitDecisionPairSerialized = async (companyId, records) => {
         let existing = "";
         try {
           existing = await ctx.localFolders.readText(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_DECISIONS_FILE);
@@ -3033,9 +3039,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           existing = "";
         }
         const lines = existing.split("\n").filter((line) => line.trim().length > 0);
-        lines.push(JSON.stringify(record2));
+        lines.push(...records.map((record2) => JSON.stringify(record2)));
         const config = await companyConfig(companyId);
-        const capped = lines.length > config.shadowEmit.maxRecords ? lines.slice(-config.shadowEmit.maxRecords) : lines;
+        const pairAlignedCap = Math.max(2, config.shadowEmit.maxRecords - config.shadowEmit.maxRecords % 2);
+        const capped = lines.length > pairAlignedCap ? lines.slice(-pairAlignedCap) : lines;
         try {
           await ctx.localFolders.writeTextAtomic(
             companyId,
@@ -3047,11 +3054,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           ctx.logger.warn("model-selection: shadow decision emit failed", { error: String(err) });
         }
       };
-      const emitShadowRecord = (companyId, record2) => {
-        const previous = shadowEmitChains.get(companyId) ?? Promise.resolve();
+      const emitDecisionPair = (companyId, records) => {
+        const previous = decisionEmitChains.get(companyId) ?? Promise.resolve();
         const next = previous.catch(() => {
-        }).then(() => emitShadowRecordSerialized(companyId, record2));
-        shadowEmitChains.set(companyId, next);
+        }).then(() => emitDecisionPairSerialized(companyId, records));
+        decisionEmitChains.set(companyId, next);
         return next;
       };
       const laneHttp = {
@@ -3297,7 +3304,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           await ctx.state.set(shadowDiffsKey(companyId), { records });
         }
         if (config.shadowEmit.enabled) {
-          const shadowRecord = buildShadowRecord({
+          const recordInput = {
             issueId,
             issueIdentifier: described.identifier,
             nowIso,
@@ -3311,8 +3318,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
             operatorOverride: liveOverride
-          });
-          await emitShadowRecord(companyId, shadowRecord);
+          };
+          await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);
         }
         return {
           decision,
