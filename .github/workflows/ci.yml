@@ -316,7 +316,7 @@ concurrency:
 jobs:
   privilege-suites:
     name: Privilege ceiling suites
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     services:
       postgres:
@@ -481,14 +481,35 @@ jobs:
 
   offline-suites:
     name: Offline suites
-    runs-on: ubuntu-latest
+    # This is the only migrated job in the first concurrency-1 slice. Keep the
+    # exact job name above: branch protection matches the check-run name. There
+    # is deliberately no ubuntu-latest fallback; an unavailable private runner
+    # must queue visibly rather than consume paid minutes or bypass isolation.
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 100
     steps:
+      - name: Prove the private runner selected this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RUNNER_NAME:-}" == coolify-vps-* ]]
+          [[ "${RUNNER_OS:-}" == Linux ]]
+          [[ "${RUNNER_ARCH:-}" == X64 ]]
+          printf 'private runner: name=%s os=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+
       - uses: actions/checkout@v4
+        with:
+          clean: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # TOG-2677. Keep the migration contract executable: changing the label,
+      # restoring a paid fallback, deleting the runner proof, or dropping the
+      # clean checkout must turn this job red.
+      - name: self-hosted runner migration contract
+        run: ./test_tog2677_selfhosted_runner.sh
 
       # Every tool here is a script; there is no build. A parse error is the
       # most common regression and the cheapest to catch, so catch it first —
@@ -4350,7 +4371,7 @@ jobs:
   # isolation IS the fix.
   runbook-gates:
     name: Operator runbook gates
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4449,7 +4470,7 @@ jobs:
   # test count. See the header.
   broker-suite:
     name: gh-token-broker suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     defaults:
       run:
@@ -4547,7 +4568,7 @@ jobs:
   # check stays operator-run because a fixture certifies only the fixture.
   omniroute-broker-suite:
     name: omniroute-broker suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4606,7 +4627,7 @@ jobs:
   # covers the wiring.
   dispatch-suite:
     name: dispatch suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     defaults:
       run:
@@ -4752,7 +4773,7 @@ jobs:
   # Gated on EXIT STATUS, never on a test count. See the header.
   capture-suite:
     name: gh-event-capture suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     defaults:
       run:
@@ -4938,7 +4959,7 @@ jobs:
   # Gated on EXIT STATUS, never a test count. See the header.
   mcp-suite:
     name: org-request-mcp suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -5245,7 +5266,7 @@ jobs:
   # Offline: no credential, no network, no host. Tests are written for Vitest.
   model-selection-suite:
     name: model-selection suite
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 20
     defaults:
       run:
