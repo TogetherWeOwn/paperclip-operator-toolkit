@@ -65,8 +65,15 @@ body="$(sed -n 's/^data-binary = "@\(.*\)"$/\1/p' "$cfg")"
 printf '%s\t%s\t%s\n' "$method" "$url" "$body" >> "$REQUEST_LOG"
 if [[ "$method" == GET ]]; then
   cp "$ISSUE_SRC" "$out"
+  http_status="${CURL_GET_HTTP_STATUS:-${CURL_HTTP_STATUS:-200}}"
 else
   cp "$body" "$PATCH_LOG"
+  patch_count="$(grep -c '^PATCH' "$REQUEST_LOG")"
+  if [[ "$patch_count" -eq 1 ]]; then
+    http_status="${CURL_PATCH_FIRST_HTTP_STATUS:-${CURL_HTTP_STATUS:-200}}"
+  else
+    http_status="${CURL_PATCH_RETRY_HTTP_STATUS:-${CURL_HTTP_STATUS:-200}}"
+  fi
   # Model the REAL server: `executionPolicy.monitor` is echoed back verbatim,
   # but the authoritative top-level `monitorNextCheckAt` column is rendered at
   # millisecond precision. So a request for `...:00Z` reads back as
@@ -83,7 +90,7 @@ else
       "$ISSUE_SRC" > "$out"
   fi
 fi
-printf "${CURL_HTTP_STATUS:-200}"
+printf '%s' "$http_status"
 STUB
 chmod +x "$WORK/bin/curl"
 
@@ -109,6 +116,9 @@ run_case() {
     REQUEST_LOG="$WORK/requests.log" PATCH_LOG="$WORK/patch.json" \
     DETECTOR_ARGV_LOG="$WORK/detector-argv.log" ISSUE_SRC="$WORK/issue.json" \
     CURL_HTTP_STATUS="${CURL_HTTP_STATUS:-200}" \
+    CURL_GET_HTTP_STATUS="${CURL_GET_HTTP_STATUS:-}" \
+    CURL_PATCH_FIRST_HTTP_STATUS="${CURL_PATCH_FIRST_HTTP_STATUS:-}" \
+    CURL_PATCH_RETRY_HTTP_STATUS="${CURL_PATCH_RETRY_HTTP_STATUS:-}" \
     MONITOR_STORED_NEXT_OVERRIDE="${MONITOR_STORED_NEXT_OVERRIDE:-}" \
     MONITOR_OMIT_STORED_COLUMN="${MONITOR_OMIT_STORED_COLUMN:-}" \
     "$TOOL" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" > "$WORK/out.txt" 2> "$WORK/err.txt"
@@ -156,8 +166,8 @@ comment | grep -q "UNKNOWN" \
   && ok "inconclusive is reported as UNKNOWN, not as health" || bad "inconclusive was not marked UNKNOWN"
 comment | grep -qi "not a passing backup" \
   && ok "states an inconclusive cycle is not a verified backup" || bad "missing the not-a-pass statement"
-[[ "$(next_at)" == "2026-09-05T21:00:00Z" ]] \
-  && ok "an error retries on the shorter one-hour interval" || bad "error interval was $(next_at)"
+[[ "$(next_at)" == "2026-09-06T02:00:00Z" ]] \
+  && ok "an error retries on the six-hour interval, not hourly against a dead source" || bad "error interval was $(next_at)"
 
 hdr "5. An undocumented exit code is treated as unmeasured, not as a pass"
 run_case "$OK_JSON" 7
@@ -217,10 +227,32 @@ run_case "$STALL_JSON" 1
   && ok "millisecond-normalised readback is accepted as the same instant" \
   || bad "ms normalisation was scored a failure ($CASE_RC)"
 
-hdr "10. Paperclip failures are exit 2 and never a health claim"
-CURL_HTTP_STATUS=500 run_case "$OK_JSON" 0
-[[ "$CASE_RC" -eq 2 ]] && ok "an HTTP 500 from Paperclip is exit 2" || bad "HTTP 500 scored $CASE_RC"
-unset CURL_HTTP_STATUS
+hdr "10. Paperclip failures use the six-hour error cadence"
+CURL_PATCH_FIRST_HTTP_STATUS=500 CURL_PATCH_RETRY_HTTP_STATUS=200 run_case "$OK_JSON" 0
+[[ "$CASE_RC" -eq 2 ]] && ok "a recovered Paperclip failure stays exit 2" || bad "recovered PATCH failure scored $CASE_RC"
+[[ "$(grep -c '^PATCH' "$WORK/requests.log")" -eq 2 ]] \
+  && ok "a failed normal-cadence write gets one bounded recovery write" \
+  || bad "expected two PATCH attempts"
+[[ "$(next_at)" == "2026-09-06T02:00:00Z" ]] \
+  && ok "the recovery write re-arms at six hours, not the clean detector's two" \
+  || bad "Paperclip failure retry interval was $(next_at)"
+comment | grep -q "Next check | \*\*2026-09-06T02:00:00Z\*\*" \
+  && ok "the recovered clean-cycle comment reports the stored six-hour time" \
+  || bad "the recovered clean-cycle comment disagrees with the stored cadence"
+
+CURL_PATCH_FIRST_HTTP_STATUS=500 CURL_PATCH_RETRY_HTTP_STATUS=200 run_case "$STALL_JSON" 1
+[[ "$CASE_RC" -eq 2 ]] && ok "a recovered stall write also stays exit 2" || bad "recovered stall PATCH failure scored $CASE_RC"
+[[ "$(next_at)" == "2026-09-06T02:00:00Z" ]] \
+  && ok "the recovered stall write replaces its one-hour cadence with six hours" \
+  || bad "recovered stall retry interval was $(next_at)"
+comment | grep -q "Next check | \*\*2026-09-06T02:00:00Z\*\*" \
+  && ok "the recovered stall comment reports the stored six-hour time" \
+  || bad "the recovered stall comment disagrees with the stored cadence"
+
+CURL_PATCH_FIRST_HTTP_STATUS=500 CURL_PATCH_RETRY_HTTP_STATUS=500 run_case "$OK_JSON" 0
+[[ "$CASE_RC" -eq 2 ]] && ok "a persistent HTTP 500 from Paperclip is exit 2" || bad "HTTP 500 scored $CASE_RC"
+[[ "$(grep -c '^PATCH' "$WORK/requests.log")" -eq 2 ]] \
+  && ok "a persistent failure is attempted at most twice" || bad "persistent failure attempt count was $(grep -c '^PATCH' "$WORK/requests.log")"
 
 hdr "11. The bearer token never reaches argv"
 run_case "$STALL_JSON" 1
@@ -239,6 +271,8 @@ run_case "$STALL_JSON" 1
   && ok "scheduledBy is assignee" || bad "scheduledBy is wrong"
 [[ "$(jq -r '.executionPolicy.monitor.notes' "$WORK/patch.json" | wc -c)" -le 500 ]] \
   && ok "notes stay under the 500-char cap that voids the whole write" || bad "notes exceed the 500-char cap"
+[[ "$(jq -r '.executionPolicy.monitor.notes' "$WORK/patch.json")" == *"error 6h"* ]] \
+  && ok "notes advertise the new 6h error cadence" || bad "notes still advertise the old error cadence"
 
 hdr "13. Detector passthrough and argument hygiene"
 EXTRA_ARGS=(-- --backup-dir /somewhere)

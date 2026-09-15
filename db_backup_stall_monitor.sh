@@ -34,9 +34,18 @@
 # the normal interval is 2 hours: a wedge is caught within one threshold window
 # instead of eleven hours. A detected stall re-checks in 1 hour, because a
 # stall is a live incident whose clearing (an operator restart) should be
-# noticed promptly rather than up to a full cycle later. A detector or API
-# failure also retries in 1 hour. Those numbers live here rather than in issue
-# prose so every run makes the same decision.
+# noticed promptly rather than up to a full cycle later. Those numbers live
+# here rather than in issue prose so every run makes the same decision.
+#
+# A detector or API failure retries in 6 hours, not 1 (TOG-2601). On TOG-1150
+# an hourly error retry re-armed against a permanently dead log source: 13 of
+# the last 21 cycles came back inconclusive (exit 2), burning ~100 minutes/day
+# of agent time on a cycle that measures nothing. A live host outage or a
+# transient API failure is still worth re-checking sooner than the normal
+# interval, so 6h is a compromise between that and not hourly-polling a
+# permanently dead source. If the underlying data source is fixed, the very
+# next cycle measures cleanly and returns to the normal 2h/1h cadence on its
+# own -- this interval only matters while the source stays broken.
 #
 # THIS MONITOR IS EXPECTED TO EXIT 1 UNTIL AN OPERATOR RESTARTS THE SERVER.
 # The wedged flag lives in process memory; no code change and no file on disk
@@ -67,7 +76,7 @@ DETECTOR="${DB_BACKUP_STALL_SH:-$HERE/db_backup_stall.sh}"
 ISSUE_ID="${PAPERCLIP_TASK_ID:-}"
 INTERVAL_HOURS=2
 STALL_RETRY_HOURS=1
-ERROR_RETRY_HOURS=1
+ERROR_RETRY_HOURS=6
 DETECTOR_ARGS=()
 
 usage() {
@@ -194,68 +203,71 @@ NEXT_CHECK="$(date -u -d "@$NEXT_EPOCH" +%Y-%m-%dT%H:%M:%SZ)" \
   || { echo "ERROR: could not compute next monitor time" >&2; exit 2; }
 
 COMMENT="$WORK/comment.md"
-if [[ "$MEASURED" == yes ]]; then
-  NEWEST="$(jq -r '.newestUsableBackup // "none"' "$RESULT")"
-  AGE_MIN="$(jq -r '.newestUsableBackupAgeMinutes // "unknown"' "$RESULT")"
-  HEALTH="$(jq -r '.healthStatus // "unknown"' "$RESULT")"
-  {
-    echo "## Database backup stall monitor"
-    echo
-    if [[ "$DETECTOR_RC" -eq 1 ]]; then
-      echo "**STALL DETECTED — scheduled database backups are not landing.**"
-    else
-      echo "**No stall: the newest usable backup is within threshold.**"
-    fi
-    echo
-    echo "| Field | Value |"
-    echo "|---|---|"
-    echo "| Verdict | \`$(jq -r '.verdict' "$RESULT")\` (exit $DETECTOR_RC) |"
-    echo "| Checked at | $(jq -r '.checkedAt' "$RESULT") |"
-    echo "| Newest usable \`.sql.gz\` | \`$NEWEST\`, **${AGE_MIN} min** old |"
-    echo "| Orphaned / truncated | $(jq -r '.orphanCount // 0' "$RESULT") |"
-    echo "| Skips in log window | $(jq -r '.skipCountInWindow // 0' "$RESULT") |"
-    echo "| Log anchor stale | $(jq -r '.logStale // false' "$RESULT") |"
-    echo "| \`/api/health\` says | \`$HEALTH\` |"
-    echo "| Next check | **$NEXT_CHECK** |"
-    if [[ "$(jq -r '.reasons | length' "$RESULT")" -gt 0 ]]; then
+render_comment() {
+  if [[ "$MEASURED" == yes ]]; then
+    NEWEST="$(jq -r '.newestUsableBackup // "none"' "$RESULT")"
+    AGE_MIN="$(jq -r '.newestUsableBackupAgeMinutes // "unknown"' "$RESULT")"
+    HEALTH="$(jq -r '.healthStatus // "unknown"' "$RESULT")"
+    {
+      echo "## Database backup stall monitor"
       echo
-      echo "**Findings**"
-      echo
-      jq -r '.reasons[] | "- " + .' "$RESULT"
-    fi
-    if [[ "$(jq -r '.notes | length' "$RESULT")" -gt 0 ]]; then
-      echo
-      echo "**Notes**"
-      echo
-      jq -r '.notes[] | "- " + .' "$RESULT"
-    fi
-    if [[ "$DETECTOR_RC" -eq 1 ]]; then
-      echo
-      echo "> **Expected steady state while TOG-1138 is open.** The in-flight flag lives in the server process's memory; no code change and no file on disk clears it. Until an operator restarts the server at a quiet window, this monitor is expected to report a stall every cycle. It is a standing measurement of a known-open incident, not an unattended alarm — do not silence it, and do not read a run of failures as this monitor being broken."
-      echo ">"
-      echo "> Recovery is proved by the **next hourly tick landing a \`>1 MB\` \`.sql.gz\`**, not by the restart completing. Runbook: \`docs/runbooks/database-backup-stall.md\`."
-      if [[ "$HEALTH" == "ok" ]]; then
-        echo ">"
-        echo "> \`/api/health\` reporting \`ok\` here is the documented blind spot, not a contradiction: it stats \`.sql.gz\` mtimes only, and the wedge leaves a fresh-mtime 20-byte frame. Never use it to clear this finding."
+      if [[ "$DETECTOR_RC" -eq 1 ]]; then
+        echo "**STALL DETECTED — scheduled database backups are not landing.**"
+      else
+        echo "**No stall: the newest usable backup is within threshold.**"
       fi
-    fi
-  } > "$COMMENT"
-else
-  {
-    echo "## Database backup stall monitor"
-    echo
-    echo "**UNKNOWN: the detector did not produce a valid measurement.**"
-    echo
-    echo "- Detector exit: $DETECTOR_RAW_RC"
-    echo "- Retry scheduled: **$NEXT_CHECK** (the shorter ${ERROR_RETRY_HOURS}h error interval)"
-    echo
-    echo '```'
-    tail -c 1500 "$DETECTOR_ERR" 2>/dev/null || true
-    echo '```'
-    echo
-    echo "> Nothing was scored healthy. An inconclusive detector is not a passing backup: treat this exactly as an unverified backup schedule until a cycle measures cleanly."
-  } > "$COMMENT"
-fi
+      echo
+      echo "| Field | Value |"
+      echo "|---|---|"
+      echo "| Verdict | \`$(jq -r '.verdict' "$RESULT")\` (exit $DETECTOR_RC) |"
+      echo "| Checked at | $(jq -r '.checkedAt' "$RESULT") |"
+      echo "| Newest usable \`.sql.gz\` | \`$NEWEST\`, **${AGE_MIN} min** old |"
+      echo "| Orphaned / truncated | $(jq -r '.orphanCount // 0' "$RESULT") |"
+      echo "| Skips in log window | $(jq -r '.skipCountInWindow // 0' "$RESULT") |"
+      echo "| Log anchor stale | $(jq -r '.logStale // false' "$RESULT") |"
+      echo "| \`/api/health\` says | \`$HEALTH\` |"
+      echo "| Next check | **$NEXT_CHECK** |"
+      if [[ "$(jq -r '.reasons | length' "$RESULT")" -gt 0 ]]; then
+        echo
+        echo "**Findings**"
+        echo
+        jq -r '.reasons[] | "- " + .' "$RESULT"
+      fi
+      if [[ "$(jq -r '.notes | length' "$RESULT")" -gt 0 ]]; then
+        echo
+        echo "**Notes**"
+        echo
+        jq -r '.notes[] | "- " + .' "$RESULT"
+      fi
+      if [[ "$DETECTOR_RC" -eq 1 ]]; then
+        echo
+        echo "> **Expected steady state while TOG-1138 is open.** The in-flight flag lives in the server process's memory; no code change and no file on disk clears it. Until an operator restarts the server at a quiet window, this monitor is expected to report a stall every cycle. It is a standing measurement of a known-open incident, not an unattended alarm — do not silence it, and do not read a run of failures as this monitor being broken."
+        echo ">"
+        echo "> Recovery is proved by the **next hourly tick landing a \`>1 MB\` \`.sql.gz\`**, not by the restart completing. Runbook: \`docs/runbooks/database-backup-stall.md\`."
+        if [[ "$HEALTH" == "ok" ]]; then
+          echo ">"
+          echo "> \`/api/health\` reporting \`ok\` here is the documented blind spot, not a contradiction: it stats \`.sql.gz\` mtimes only, and the wedge leaves a fresh-mtime 20-byte frame. Never use it to clear this finding."
+        fi
+      fi
+    } > "$COMMENT"
+  else
+    {
+      echo "## Database backup stall monitor"
+      echo
+      echo "**UNKNOWN: the detector did not produce a valid measurement.**"
+      echo
+      echo "- Detector exit: $DETECTOR_RAW_RC"
+      echo "- Retry scheduled: **$NEXT_CHECK** (the ${ERROR_RETRY_HOURS}h error interval)"
+      echo
+      echo '```'
+      tail -c 1500 "$DETECTOR_ERR" 2>/dev/null || true
+      echo '```'
+      echo
+      echo "> Nothing was scored healthy. An inconclusive detector is not a passing backup: treat this exactly as an unverified backup schedule until a cycle measures cleanly."
+    } > "$COMMENT"
+  fi
+}
+render_comment
 
 ISSUE_JSON="$WORK/issue.json"
 GET_STATUS="$(request GET "$BASE/api/issues/$ISSUE_ID" "$ISSUE_JSON")" \
@@ -278,7 +290,7 @@ jq -n \
       executionPolicy: ($policy + {
         monitor: {
           nextCheckAt: $next,
-          notes: "Do NOT run ./db_backup_stall_monitor.sh from the shared workspace: it sits on whatever branch the last run left, the script may be absent, and the exit 127 never re-arms this clock. Run the git-show block in this card description verbatim. Normal 2h, stall 1h, error 1h. A STALL every cycle is EXPECTED until the TOG-1138 operator restart. /api/health says ok during this wedge and must never clear it.",
+          notes: "Do NOT run ./db_backup_stall_monitor.sh from the shared workspace: it sits on whatever branch the last run left, the script may be absent, and the exit 127 never re-arms this clock. Run the git-show block in this card description verbatim. Normal 2h, stall 1h, error 6h. A STALL every cycle is EXPECTED until the TOG-1138 operator restart. /api/health says ok during this wedge and must never clear it.",
           scheduledBy: "assignee",
           kind: "external_service",
           serviceName: "Paperclip database backup scheduler",
@@ -290,14 +302,44 @@ jq -n \
   || { echo "ERROR: could not build monitor update" >&2; exit 2; }
 
 PATCH_RESPONSE="$WORK/patch-response.json"
-PATCH_STATUS="$(request PATCH "$BASE/api/issues/$ISSUE_ID" "$PATCH_RESPONSE" "$PATCH_BODY")" \
-  || { echo "ERROR: could not update monitor issue" >&2; exit 2; }
+PAPERCLIP_FAILED=no
+PATCH_STATUS="$(request PATCH "$BASE/api/issues/$ISSUE_ID" "$PATCH_RESPONSE" "$PATCH_BODY")" || PATCH_STATUS=""
 case "$PATCH_STATUS" in
   2*) ;;
   *)
-    echo "ERROR: monitor update returned HTTP $PATCH_STATUS" >&2
-    jq -c '{error,details}' "$PATCH_RESPONSE" 2>/dev/null >&2 || true
-    exit 2
+    # A Paperclip failure changes the outcome to inconclusive. If the detector
+    # had selected the 1h/2h cadence, make one bounded recovery write using the
+    # 6h error interval. This cannot guarantee a re-arm when Paperclip is down,
+    # but it prevents a transient first-write failure from preserving the wrong
+    # cadence after the API recovers.
+    PAPERCLIP_FAILED=yes
+    FIRST_PATCH_STATUS="${PATCH_STATUS:-transport failure}"
+    if [[ "$NEXT_HOURS" != "$ERROR_RETRY_HOURS" ]]; then
+      NEXT_HOURS="$ERROR_RETRY_HOURS"
+      NEXT_EPOCH=$((NOW_EPOCH + NEXT_HOURS * 3600))
+      NEXT_CHECK="$(date -u -d "@$NEXT_EPOCH" +%Y-%m-%dT%H:%M:%SZ)" \
+        || { echo "ERROR: could not compute Paperclip failure retry time" >&2; exit 2; }
+      render_comment
+      jq --arg next "$NEXT_CHECK" --rawfile comment "$COMMENT" '
+          .comment = $comment
+          | .executionPolicy.monitor.nextCheckAt = $next
+        ' "$PATCH_BODY" > "$PATCH_BODY.retry" \
+        || { echo "ERROR: could not build Paperclip failure retry update" >&2; exit 2; }
+      mv "$PATCH_BODY.retry" "$PATCH_BODY"
+      PATCH_STATUS="$(request PATCH "$BASE/api/issues/$ISSUE_ID" "$PATCH_RESPONSE" "$PATCH_BODY")" || PATCH_STATUS=""
+      case "$PATCH_STATUS" in
+        2*) ;;
+        *)
+          echo "ERROR: monitor update failed first with $FIRST_PATCH_STATUS; 6h recovery update failed with ${PATCH_STATUS:-transport failure}" >&2
+          jq -c '{error,details}' "$PATCH_RESPONSE" 2>/dev/null >&2 || true
+          exit 2
+          ;;
+      esac
+    else
+      echo "ERROR: monitor update returned $FIRST_PATCH_STATUS" >&2
+      jq -c '{error,details}' "$PATCH_RESPONSE" 2>/dev/null >&2 || true
+      exit 2
+    fi
     ;;
 esac
 
@@ -323,6 +365,11 @@ STORED_EPOCH="$(date -u -d "$STORED_NEXT" +%s 2>/dev/null)" \
   || { echo "ERROR: Paperclip stored an unparseable monitorNextCheckAt: $STORED_NEXT" >&2; exit 2; }
 if [[ "$STORED_EPOCH" != "$NEXT_EPOCH" ]]; then
   echo "ERROR: Paperclip returned HTTP $PATCH_STATUS but stored nextCheckAt=$STORED_NEXT, not $NEXT_CHECK" >&2
+  exit 2
+fi
+
+if [[ "$PAPERCLIP_FAILED" == yes ]]; then
+  echo "db backup stall monitor: result=2 next=$NEXT_CHECK issue=$ISSUE_ID paperclip-recovered=yes"
   exit 2
 fi
 
