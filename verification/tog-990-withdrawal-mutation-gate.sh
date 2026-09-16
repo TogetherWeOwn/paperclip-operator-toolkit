@@ -42,7 +42,7 @@ run_mutant() {
 check() {
   local name="$1" expect_rc="$2" expect_grep="$3" got="$4"
   local rc="${got%%|*}" out="${got#*|}"
-  if [ "$rc" = "$expect_rc" ] && printf '%s' "$out" | grep -qE "$expect_grep"; then
+  if [ "$rc" = "$expect_rc" ] && grep -qE "$expect_grep" <<<"$out"; then
     printf '  PASS  %s\n' "$name"
     pass=$((pass + 1))
   else

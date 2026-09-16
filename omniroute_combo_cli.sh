@@ -633,7 +633,7 @@ blend_reason() {   # name -> reason on stdout, exit 0 if it looks blended
     *mixture*)  echo "catalogue name says 'mixture'"; return 0 ;;
   esac
   # "X + Y" — the marker auggie uses: "Prism (Claude + Gemini)", "Prism (GPT + Kimi)".
-  if printf '%s' "$lower" | grep -qE '[[:alnum:]][[:space:]]*\+[[:space:]]*[[:alnum:]]'; then
+  if grep -qE '[[:alnum:]][[:space:]]*\+[[:space:]]*[[:alnum:]]' <<<"$lower"; then
     echo "catalogue name '$1' names two models joined by '+'"; return 0
   fi
   return 1
@@ -970,7 +970,7 @@ tables_missing_from() {
   local have="$1"; shift
   local want miss=""
   for want in "$@"; do
-    printf '%s\n' "$have" | grep -Fxq -- "$want" || miss="${miss}${miss:+ }${want}"
+    grep -Fxq -- "$want" <<<"$have" || miss="${miss}${miss:+ }${want}"
   done
   printf '%s' "$miss"
 }
@@ -2383,7 +2383,7 @@ PYFIX
     else fail=$((fail+1)); c_red "  FAIL  $nm — rc=$rc want=$want_rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; fi; }
   _agrep() { local nm="$1" pat="$2"; shift 2
     local out; out="$( "$@" 2>&1 )" || true
-    if printf '%s' "$out" | grep -qF "$pat"; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "ok"
+    if grep -qF "$pat" <<<"$out"; then pass=$((pass+1)); printf '  PASS  %-46s %s\n' "$nm" "ok"
     else fail=$((fail+1)); c_red "  FAIL  $nm — no '$pat' in: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; fi; }
 
   # Pure path classifier.
@@ -2430,7 +2430,7 @@ PYFIX
   _agrep "post-mutation names the backup"          "/bk/x.sqlite"                                    _postfail
   _agrep "pre-mutation says nothing is unrecorded" "nothing is unrecorded"                           _prefail
   local pre_out; pre_out="$(_prefail)"
-  if printf '%s' "$pre_out" | grep -qF "THE MUTATION WAS APPLIED"; then
+  if grep -qF "THE MUTATION WAS APPLIED" <<<"$pre_out"; then
     fail=$((fail+1)); c_red "  FAIL  pre-mutation failure wrongly claims a mutation was applied"
   else pass=$((pass+1)); printf '  PASS  %-46s %s\n' "pre-mutation does NOT claim a mutation" "ok"; fi
 
@@ -2532,7 +2532,7 @@ PYFIX
   # reason for existing, and a future edit "helpfully" adding auth would defeat it.
   local ce_src; ce_src="$(sed -n '/^cmd_check_endpoints()/,/^}/p' "$0" | grep -v '^[[:space:]]*#')"
   local auth_pat="Authorization""|MGMT_TOKEN|OMNIROUTE_MANAGEMENT_KEY|--config"
-  if ! printf '%s' "$ce_src" | grep -qE "$auth_pat"; then
+  if ! grep -qE "$auth_pat" <<<"$ce_src"; then
     pass=$((pass+1)); printf '  PASS  %-46s %s\n' "check-endpoints sends no credential" "ok"
   else fail=$((fail+1)); c_red "  FAIL  check-endpoints now references a credential — it must probe unauthenticated"; fi
 

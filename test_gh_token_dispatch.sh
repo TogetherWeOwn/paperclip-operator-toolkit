@@ -170,7 +170,17 @@ STUBSSL
 cat > "$TMP/bin-silentsign/openssl" <<'STUBSSL'
 #!/usr/bin/env bash
 for a in "$@"; do
-  if [ "$a" = "-sign" ]; then exit 0; fi
+  # Drain stdin BEFORE exiting, or this stub is a race, not a fixture.
+  # app_jwt signs with `printf '%s' "$signing_input" | openssl ... | b64url`.
+  # Exiting straight away closes the read end while printf may not have
+  # written yet; printf then takes SIGPIPE and, under `pipefail`, the WHOLE
+  # pipeline reports 141. app_jwt's first guard ("could not sign") absorbs
+  # that, `[[ -n "$sig" ]]` is never reached, and the case below passes for a
+  # reason that has nothing to do with the guard it exists to pin. Draining to
+  # EOF keeps this stub what its name claims: exits 0 having written nothing.
+  # Measured: the mutation gate that pins this caught the mutant on 12 of 13
+  # CI runs and lost it on the 13th, purely on runner load (TOG-2869).
+  if [ "$a" = "-sign" ]; then cat >/dev/null; exit 0; fi
 done
 exec "$REAL_OPENSSL" "$@"
 STUBSSL
@@ -397,6 +407,16 @@ must_fail_signing "jwt, openssl -sign fails"           "$TMP/bin-badsign"    jwt
 # The variant a status check alone cannot catch: -sign exits 0 and writes
 # nothing, so pipefail sees success down the whole pipeline and $sig is empty.
 must_fail_signing "jwt, openssl -sign silently empty"  "$TMP/bin-silentsign" jwt
+# ...and it must be the EMPTINESS guard that refused, not the pipeline-status
+# guard above it. Both produce a non-zero exit and a stderr line, so the five
+# assertions above cannot tell them apart — which is how this case silently
+# stopped covering `[[ -n "$sig" ]]` at all when a SIGPIPE from the writer made
+# the pipeline report 141 (TOG-2869). Pinning the message keeps that failure
+# loud and immediate here, instead of surfacing 50 minutes into CI as a
+# surviving mutant in the gate that pins this line.
+[[ "$ERR" == *"produced an empty signature"* ]] \
+  && ok "jwt, openssl -sign silently empty: refused at the emptiness guard, so this case still covers it" \
+  || bad "jwt, openssl -sign silently empty: refused for a different reason, so \`[[ -n \"\$sig\" ]]\` is NOT covered here: [$(head -c 120 <<<"$ERR")]"
 # Everything authenticated goes through app_jwt. If the failure stops at the
 # function boundary, these arms send an empty bearer and GitHub's 401 sends the
 # reader to the App's install settings instead of to the key.

@@ -123,6 +123,7 @@ EOF
   cat > "$TMP/t_ignore_term.sh" <<EOF
 #!/usr/bin/env bash
 cat >/dev/null
+printf 'armed\n' > "$TMP/ignore-term.heartbeat"
 : > "$TMP/ignore-term.started"
 if [[ -n "\${TEST_LEADER_NOTIFY_DESCENDANT_WATCH:-}" ]]; then
   watch_pid="\$\$"
@@ -131,7 +132,7 @@ if [[ -n "\${TEST_LEADER_NOTIFY_DESCENDANT_WATCH:-}" ]]; then
 fi
 trap '' TERM
 while :; do
-  date +%s%N > "$TMP/ignore-term.heartbeat"
+  printf 'tick\n' >> "$TMP/ignore-term.heartbeat"
   sleep 0.1
  done
 EOF

@@ -43,7 +43,7 @@ else
   exit 1
 fi
 # A mutation that removes a test rather than breaking it must not read as a detection.
-if printf '%s' "$base_out" | grep -qE '  SKIP '; then
+if grep -qE '  SKIP ' <<<"$base_out"; then
   red "  FAIL  baseline contains a SKIP — a skipped case cannot detect anything"; fail=$((fail+1))
 else
   grn "  PASS  baseline has zero skipped cases"; pass=$((pass+1))
@@ -74,7 +74,7 @@ PY
   fi
   local case_name ok=1
   for case_name in "$@"; do
-    if printf '%s' "$out" | grep -qF "FAIL  $case_name"; then :; else
+    if grep -qF "FAIL  $case_name" <<<"$out"; then :; else
       red "  FAIL  $name: suite went red, but NOT on the case that claims to cover it:"
       red "        expected a red on: $case_name"
       ok=0

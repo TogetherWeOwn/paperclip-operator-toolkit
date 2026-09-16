@@ -991,7 +991,7 @@ cmd_selftest() {
     mkdir -p "$d"; printf '%s\n' "$content" > "$d/sample.txt"
     local out; out="$(STRICT=0 QUIET=1 DROPSCAN_ALLOWLIST_FILE="" DROPSCAN_SHARED_UID=0 \
       run_engine "$d" scan 2>&1 || true)"
-    if printf '%s' "$out" | grep -q "rule=$want"; then
+    if grep -q "rule=$want" <<<"$out"; then
       pass=$((pass+1)); printf '  PASS  %-52s %s\n' "$nm" "$want"
     else
       fail=$((fail+1)); c_red "  FAIL  $nm  expected rule=$want, got: $(printf '%s' "$out" | tr '\n' ' ' | head -c 160)"
@@ -1315,7 +1315,7 @@ cmd_selftest() {
   if [ "$rc6" = "0" ]; then pass=$((pass+1)); printf '  PASS  %-52s rc=0\n' "allowlisted fingerprint is suppressed"
   else fail=$((fail+1)); c_red "  FAIL  allowlist expected rc=0 got rc=$rc6"; fi
   local out6; out6="$(STRICT=0 QUIET=0 DROPSCAN_ALLOWLIST_FILE="$tmp/allow.txt" DROPSCAN_SHARED_UID=0 run_engine "$d6" scan 2>&1 || true)"
-  if printf '%s' "$out6" | grep -q "reviewed: selftest fixture"; then
+  if grep -q "reviewed: selftest fixture" <<<"$out6"; then
     pass=$((pass+1)); printf '  PASS  %-52s printed\n' "suppression is visible, not silent"
   else fail=$((fail+1)); c_red "  FAIL  suppression was silent"; fi
 
@@ -1366,10 +1366,10 @@ cmd_selftest() {
   local SECRET="${SK}${A26}${D10:0:6}"
   printf 'OPENAI_KEY=%s\n' "$SECRET" > "$d8/sample.txt"
   local out8; out8="$(STRICT=0 QUIET=0 DROPSCAN_ALLOWLIST_FILE="" DROPSCAN_SHARED_UID=0 run_engine "$d8" scan 2>&1 || true)"
-  if printf '%s' "$out8" | grep -qF "$SECRET"; then
+  if grep -qF "$SECRET" <<<"$out8"; then
     fail=$((fail+1)); c_red "  FAIL  scanner echoed the secret into its own output"
   else pass=$((pass+1)); printf '  PASS  %-52s masked\n' "matched value is not echoed"; fi
-  if printf '%s' "$out8" | grep -q "fp=$(printf '%s' "$SECRET" | sha256sum | cut -c1-12)"; then
+  if grep -q "fp=$(printf '%s' "$SECRET" | sha256sum | cut -c1-12)" <<<"$out8"; then
     pass=$((pass+1)); printf '  PASS  %-52s present\n' "fingerprint is reported instead"
   else fail=$((fail+1)); c_red "  FAIL  fingerprint missing from output"; fi
 

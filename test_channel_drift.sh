@@ -54,7 +54,7 @@ want_rc() {
 }
 # want_out <grep-pattern> <label> — asserts on $OUT, printing <label> either way.
 want_out() {
-  if printf '%s' "$OUT" | grep -q "$1"; then ok "$2"; else bad "$2" "output did not match: $1"; fi
+  if grep -q "$1" <<<"$OUT"; then ok "$2"; else bad "$2" "output did not match: $1"; fi
 }
 
 [ -x "$CD" ] || { echo "no executable channel_drift.sh at $CD" >&2; exit 2; }

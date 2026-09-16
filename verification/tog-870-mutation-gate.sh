@@ -79,7 +79,7 @@ else
   exit 1
 fi
 # A suite that scored zero assertions is not a green suite.
-if printf '%s' "$base_out" | grep -qE 'passed 0,'; then
+if grep -qE 'passed 0,' <<<"$base_out"; then
   red "  FAIL  baseline ran ZERO assertions — nothing below could be detected"; exit 1
 else
   grn "  PASS  baseline ran $(printf '%s' "$base_out" | grep -oE 'passed [0-9]+' | head -1) assertions"; pass=$((pass+1))
@@ -120,7 +120,7 @@ PY
   fi
   local case_name ok=1
   for case_name in "$@"; do
-    if printf '%s' "$out" | grep -qF "FAIL $case_name"; then :; else
+    if grep -qF "FAIL $case_name" <<<"$out"; then :; else
       red "  FAIL  $name: suite went red, but NOT on the case that claims to cover it:"
       red "        expected a red on: $case_name"
       ok=0
@@ -261,7 +261,7 @@ else
     printf '%s\n' "$wbase" | grep -E 'FAIL' || true
     exit 1
   fi
-  if printf '%s' "$wbase" | grep -qE 'passed 0,'; then
+  if grep -qE 'passed 0,' <<<"$wbase"; then
     red "  FAIL  write baseline ran ZERO assertions"; exit 1
   else
     grn "  PASS  write baseline ran $(printf '%s' "$wbase" | grep -oE 'passed [0-9]+' | head -1) assertions"; pass=$((pass+1))
@@ -293,7 +293,7 @@ PY
     fi
     local case_name ok=1
     for case_name in "$@"; do
-      if printf '%s' "$out" | grep -qF "FAIL $case_name"; then :; else
+      if grep -qF "FAIL $case_name" <<<"$out"; then :; else
         red "  FAIL  $name: suite went red, but NOT on the case that claims to cover it:"
         red "        expected a red on: $case_name"
         ok=0
@@ -377,7 +377,7 @@ s = s.replace("apply_exact_grants() {", "apply_grants_renamed() {", 1)
 open(f, "w").write(s)
 PY
   eout="$("$WSTAGE/test_grant_write_attribution.sh" 2>&1)" && erc=0 || erc=$?
-  if [ "$erc" = "2" ] && printf '%s' "$eout" | grep -q "could not extract apply_exact_grants"; then
+  if [ "$erc" = "2" ] && grep -q "could not extract apply_exact_grants" <<<"$eout"; then
     grn "  PASS  a renamed function makes the suite FATAL, not silently green"; pass=$((pass+1))
   else
     red "  FAIL  a renamed apply_exact_grants did not produce the extraction FATAL"

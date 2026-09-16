@@ -69,7 +69,7 @@ else
   exit 1
 fi
 # A suite that scored zero assertions is not a green suite.
-if printf '%s' "$base_out" | grep -qE 'passed 0,'; then
+if grep -qE 'passed 0,' <<<"$base_out"; then
   red "  FAIL  baseline ran ZERO assertions — nothing below could be detected"; exit 1
 else
   grn "  PASS  baseline ran $(printf '%s' "$base_out" | grep -oE 'passed [0-9]+' | head -1) assertions"; pass=$((pass+1))
@@ -112,7 +112,7 @@ PY
   fi
   local case_name ok=1
   for case_name in "$@"; do
-    if printf '%s' "$out" | grep -qF "FAIL $case_name"; then :; else
+    if grep -qF "FAIL $case_name" <<<"$out"; then :; else
       red "  FAIL  $name: suite went red, but NOT on the case that claims to cover it:"
       red "        expected a red on: $case_name"
       ok=0

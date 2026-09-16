@@ -80,7 +80,7 @@ expect() { # expect <label> <want-code> <want-substring>
   local label=$1 wantc=$2 wants=$3
   if [ "$CODE" != "$wantc" ]; then
     bad "$label" "exit $CODE, wanted $wantc. Output: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"
-  elif ! printf '%s' "$OUT" | grep -qF "$wants"; then
+  elif ! grep -qF "$wants" <<<"$OUT"; then
     bad "$label" "missing '$wants'. Output: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"
   else
     ok "$label"

@@ -93,7 +93,7 @@ expect() { # expect <label> <want-code> <want-substring>
   local label=$1 wantc=$2 wants=$3
   if [ "$CODE" != "$wantc" ]; then
     bad "$label" "exit $CODE, wanted $wantc. Output: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"
-  elif ! printf '%s' "$OUT" | grep -qF "$wants"; then
+  elif ! grep -qF "$wants" <<<"$OUT"; then
     bad "$label" "missing '$wants'. Output: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"
   else
     ok "$label"
@@ -104,7 +104,7 @@ expect_absent() { # expect_absent <label> <want-code> <forbidden-substring>
   local label=$1 wantc=$2 forbidden=$3
   if [ "$CODE" != "$wantc" ]; then
     bad "$label" "exit $CODE, wanted $wantc"
-  elif printf '%s' "$OUT" | grep -qF "$forbidden"; then
+  elif grep -qF "$forbidden" <<<"$OUT"; then
     bad "$label" "output contains '$forbidden' and must not"
   else
     ok "$label"
@@ -117,7 +117,7 @@ if out="$(node "$TOOL" --selftest 2>&1)"; then
 else
   bad "selftest exits 0" "$(printf '%s' "$out" | grep FAIL | tr '\n' ' ')"
 fi
-if printf '%s' "$out" | grep -qE 'selftest 0/'; then
+if grep -qE 'selftest 0/' <<<"$out"; then
   bad "selftest ran assertions" "it scored 0 cases"
 else
   ok "selftest ran a non-zero number of cases"

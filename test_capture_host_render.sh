@@ -152,8 +152,8 @@ section '2. requiredTokens are written from what GENERATED, not from a wish list
 d="$(new_case)"; make_host "$d"
 run_render "$d" >/dev/null
 toks="$(jq -r '.server.requiredTokens[]' "$d/repo/$RENDER" 2>/dev/null | sort)"
-if printf '%s\n' "$toks" | grep -Fqx -- '--network=systemd-paperclip' \
-   && printf '%s\n' "$toks" | grep -Fqx -- '--network=systemd-omniroute'; then
+if grep -Fqx -- '--network=systemd-paperclip' <<<"$toks" \
+   && grep -Fqx -- '--network=systemd-omniroute' <<<"$toks"; then
   ok 'both generated legs land in requiredTokens'
 else bad 'both generated legs land in requiredTokens' "$toks"; fi
 rm -rf "$d"

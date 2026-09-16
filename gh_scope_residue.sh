@@ -313,7 +313,7 @@ if [[ "$MODE_BRANCHES" -eq 1 ]]; then
     SELECTED="$(printf '%s' "$ONLY_REPOS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep . | sort -u)"
     while read -r r; do
       [[ -n "$r" ]] || continue
-      printf '%s\n' "$ALL_REPOS" | grep -qx -- "$r" \
+      grep -qx -- "$r" <<<"$ALL_REPOS" \
         || { echo "ERROR: --repos names '$r', which no project pins" >&2; exit 2; }
     done <<< "$SELECTED"
   else

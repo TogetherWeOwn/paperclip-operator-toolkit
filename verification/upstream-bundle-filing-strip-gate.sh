@@ -179,7 +179,7 @@ else
   #     defect. Matched on the flattened body so a reflow cannot hide it, and
   #     matched as the CLAIM ("edited only by whoever files it") rather than
   #     the word "banner", which legitimately still appears in the new rule.
-  if printf '%s\n' "$rflat" | grep -qEi 'should be edited only by whoever actually files it'; then
+  if grep -qEi 'should be edited only by whoever actually files it' <<<"$rflat"; then
     fail "README still teaches the line-1-only edit: \"...should be edited only by whoever actually files it\" -- this is the instruction the structural rule supersedes"
   fi
 
@@ -208,7 +208,7 @@ else
       fail "README strip-rule section carries no per-file table -- the rule without its table sends the filer back to counting lines by eye"
     else
       for name in "${SENDABLE[@]}"; do
-        if ! printf '%s\n' "$table_rows" | grep -qF "\`$name.md\`"; then
+        if ! grep -qF "\`$name.md\`" <<<"$table_rows"; then
           fail "README strip table has no row for $name.md"
         fi
       done

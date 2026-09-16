@@ -486,6 +486,12 @@ jobs:
     # exact job name above: branch protection matches the check-run name. There
     # is deliberately no ubuntu-latest fallback; an unavailable private runner
     # must queue visibly rather than consume paid minutes or bypass isolation.
+    # The two long mutation steps have their own 55m/25m deadlines below, so a
+    # runaway step is bounded before the job ceiling is reached. The ceiling
+    # itself stays where TOG-2918 put it (d40fda8e, 100 -> 150): the 102.30 min
+    # measured on PR #306 was a clean-tree SUCCESS, not a worst case, so it is
+    # a floor for the ceiling and not a target. Lower it only against a
+    # post-merge duration measured with the step bounds actually in effect.
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 150
     steps:
@@ -1661,6 +1667,23 @@ jobs:
       - name: dropchannel_scan narrowing is not vacuous (mutation-gated)
         run: ./verification/tog-385-mutation-gate.sh
 
+      # TOG-2869. The step ABOVE is what caught this: it reported
+      #   FAIL  URL userinfo guard removed: suite went red, but NOT on the case
+      # while the case had in fact gone red exactly as required. Under `pipefail`,
+      # `printf '%s' "$out" | grep -qF ...` returns the PRODUCER's status when grep
+      # matches early and walks away without draining stdin — printf takes EPIPE and
+      # poisons the pipeline. So a match reads as a miss and the gate emits a false
+      # verdict. It is a scheduling race: invisible on an idle box, seen under CI load.
+      #
+      # This step proves the mechanism with a forced-lost-race control (a payload past
+      # the pipe capacity makes the producer block mid-write, so the loss is 20/20 and
+      # not a coin flip), proves the herestring form is immune, and scans the tree so
+      # the construct cannot come back. Both directions were live: at a `FAIL` check it
+      # fabricates a red, but at a baseline check like "does the output contain SKIP"
+      # it fabricates a GREEN and the gate above it silently stops measuring.
+      - name: a matched pattern never reads as a miss (SIGPIPE verdict gate)
+        run: ./verification/tog-2869-sigpipe-verdict-gate.sh
+
       # TOG-487. Same shape, same reason. Every refusal in the cold-start
       # detector is a limb a reasonable person would simplify away — coalescing
       # a null five_hour to zero, defaulting a missing runs_in_flight to zero,
@@ -2285,12 +2308,13 @@ jobs:
       # "the mutated suite failed" was true for a reason that had nothing to do
       # with the mutation. Both gates passed while proving nothing.
       #
-      # The fix is not merely `cp -r lib` — it is asserting that the UNMUTATED
-      # copy passes in the same directory first. That single check is what makes
-      # a red result attributable to the mutation, and it is what would have
-      # caught the original hole. mutation_check below does both, and every
-      # mutation step goes through it.
+      # The fix is not merely `cp -r lib` — it is asserting that a staged,
+      # UNMUTATED copy passes, then cloning those exact bytes before mutation.
+      # That check is what makes a red result attributable to the mutation, and
+      # it is what would have caught the original hole. Every distinct suite
+      # passes that baseline once before any of its mutants are scored.
       - name: Mutation gates — the suites must reject reintroduced defects
+        timeout-minutes: 55
         run: |
           set -uo pipefail
 
@@ -2318,9 +2342,41 @@ jobs:
             python3 "$dir/lib/mutation_watchdog.py" "$dir" "$suite" "$limit" >"$output" 2>&1
           }
 
+          # A baseline proves the staged bytes, not a particular mutant. Verify
+          # each distinct suite once, then clone those exact passing bytes for
+          # every mutation. Re-running the same baseline before every mutant was
+          # consuming roughly half this step while adding no discrimination.
+          baseline_root="$(mktemp -d)"
+          trap 'rm -rf "$baseline_root"' EXIT
+          baseline_template() {
+            local suite="$1" key="${suite//[^A-Za-z0-9_.-]/_}"
+            local dir="$baseline_root/$key" output="$baseline_root/$key.out"
+            if [[ ! -e "$dir/.baseline-passed" ]]; then
+              mkdir -p "$dir"; stage "$dir"
+              MUTATION_SUITE_OUTPUT="$output" mutation_suite "$dir" "$suite"
+              local base_rc=$?
+              if [[ $base_rc -ne 0 ]]; then
+                if [[ $base_rc -eq 124 || $base_rc -eq 137 ]]; then
+                  echo "::error::$suite BASELINE TIMEOUT — the unmutated suite exceeded the outer ${MUTATION_SUITE_TIMEOUT:-150}s bound" >&2
+                else
+                  echo "::error::the UNMUTATED copy of $suite already fails (rc=$base_rc) — mutation gates prove nothing" >&2
+                fi
+                grep -E 'FAIL|RESULT' "$output" >&2 || true
+                tail -20 "$output" >&2
+                return 1
+              fi
+              : > "$dir/.baseline-passed"
+            fi
+            BASELINE_TEMPLATE="$dir"
+          }
+
           mutation_check() {
             local label="$1" suite="$2" sibling="$3"; shift 3
-            local mut; mut="$(mktemp -d)"; stage "$mut"
+            baseline_template "$suite" || {
+              echo "::error::$label: no verified baseline for $suite"; return 1; }
+            local baseline="$BASELINE_TEMPLATE"
+            local mut; mut="$(mktemp -d "$baseline_root/mutant.XXXXXX")"
+            cp -a "$baseline/." "$mut/"
             local assertion_sentinel="" required_assertion="" assertion_armed=""
             if [[ "$label" == "transport-can-ignore-timeout-term" ]]; then
               assertion_sentinel="$mut/.assertion-sentinel"
@@ -2328,25 +2384,25 @@ jobs:
               assertion_armed="transport-ignore-term-assertion-armed"
             fi
 
-            TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
-              mutation_suite "$mut" "$suite"
-            local base_rc=$?
-            if [[ $base_rc -ne 0 ]]; then
-              if [[ $base_rc -eq 124 || $base_rc -eq 137 ]]; then
-                echo "::error::$label: BASELINE TIMEOUT in $suite — the unmutated suite exceeded the outer ${MUTATION_SUITE_TIMEOUT:-150}s bound"
-              else
-                echo "::error::$label: the UNMUTATED copy of $suite already fails (rc=$base_rc) — this gate proves nothing"
-              fi
-              MUTATION_SUITE_OUTPUT="$mut/.baseline-output" \
+            # This mutant additionally proves that the baseline reached the
+            # exact TERM-containment assertion before the mutation blocks it.
+            # Keep that one attributable run; all other mutants use the shared
+            # passing template above.
+            if [[ -n "$required_assertion" ]]; then
+              : > "$assertion_sentinel"
+              MUTATION_SUITE_OUTPUT="$mut/.assertion-baseline-output" \
                 TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
                 mutation_suite "$mut" "$suite"
-              tail -20 "$mut/.baseline-output"
-              rm -rf "$mut"; return 1
-            fi
-            if [[ -n "$required_assertion" ]] \
-              && ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
-              echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
-              rm -rf "$mut"; return 1
+              local base_rc=$?
+              if [[ $base_rc -ne 0 ]]; then
+                echo "::error::$label: assertion baseline failed in $suite (rc=$base_rc)"
+                tail -20 "$mut/.assertion-baseline-output"
+                rm -rf "$mut"; return 1
+              fi
+              if ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
+                rm -rf "$mut"; return 1
+              fi
             fi
 
             local e target
@@ -2667,7 +2723,7 @@ jobs:
           # silently missed).
           notify_mutation_check() {
             local label="$1"; shift
-            local mut; mut="$(mktemp -d)"
+            local mut; mut="$(mktemp -d "$baseline_root/notify-mutant.XXXXXX")"
             cp notify_paperclip_issue.sh test_notify_transport.sh "$mut/"
             chmod +x "$mut/notify_paperclip_issue.sh" "$mut/test_notify_transport.sh"
 
@@ -3596,21 +3652,45 @@ jobs:
       # for — :20129 answers a TCP reset from inside a container, and a gate that
       # scores that as a pass green-lights a company-wide outage.
       #
-      # Baseline first, as everywhere else here: the unmutated copy must pass in
-      # the same staging directory, or a red below is unattributable.
+      # Baseline first, as everywhere else here: a staged unmutated copy must
+      # pass, then every mutant starts from those exact bytes. Otherwise a red
+      # below is unattributable.
       - name: Prove the preflight suite still detects a weakened refusal
+        timeout-minutes: 25
         run: |
           set -uo pipefail
           rc=0
+
+          # Verify one staged baseline, then clone those exact passing bytes for
+          # each mutant. The old loop paid for the identical baseline 11 times.
+          # Keep an outer process-tree deadline on both baseline and mutants so
+          # weakening timeout logic cannot consume the whole Offline job.
+          preflight_root="$(mktemp -d)"
+          trap 'rm -rf "$preflight_root"' EXIT
+          baseline="$preflight_root/baseline"
+          mkdir -p "$baseline/lib"
+          cp agent_endpoint_preflight.sh test_agent_endpoint_preflight.sh "$baseline/"
+          cp lib/mutation_watchdog.py "$baseline/lib/"
+
+          preflight_suite() {
+            local dir="$1" limit="${PREFLIGHT_MUTATION_TIMEOUT:-180}"
+            local output="${PREFLIGHT_SUITE_OUTPUT:-/dev/null}"
+            python3 "$dir/lib/mutation_watchdog.py" "$dir" \
+              test_agent_endpoint_preflight.sh "$limit" >"$output" 2>&1
+          }
+
+          PREFLIGHT_SUITE_OUTPUT="$preflight_root/baseline.out" preflight_suite "$baseline"
+          base_rc=$?
+          if [[ $base_rc -ne 0 ]]; then
+            echo "::error::the UNMUTATED preflight copy fails (rc=$base_rc) — this gate proves nothing"
+            tail -25 "$preflight_root/baseline.out"
+            exit 1
+          fi
+
           preflight_mutation() {
             local label="$1"; shift
-            local mut; mut="$(mktemp -d)"
-            cp agent_endpoint_preflight.sh test_agent_endpoint_preflight.sh "$mut/"
-
-            if ! (cd "$mut" && ./test_agent_endpoint_preflight.sh >/dev/null 2>&1); then
-              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
-              (cd "$mut" && ./test_agent_endpoint_preflight.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
-            fi
+            local mut; mut="$(mktemp -d "$preflight_root/mutant.XXXXXX")"
+            cp -a "$baseline/." "$mut/"
 
             local e
             for e in "$@"; do sed -i "$e" "$mut/agent_endpoint_preflight.sh"; done
@@ -3622,11 +3702,18 @@ jobs:
               echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
               rm -rf "$mut"; return 1
             fi
-            if (cd "$mut" && ./test_agent_endpoint_preflight.sh >/dev/null 2>&1); then
+            PREFLIGHT_SUITE_OUTPUT="$mut/.mutant-output" preflight_suite "$mut"
+            local mut_rc=$?
+            if [[ $mut_rc -eq 0 ]]; then
               echo "::error::$label: the preflight suite PASSED against the mutation"
               rm -rf "$mut"; return 1
             fi
-            rm -rf "$mut"; echo "  ok  $label"
+            if [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
+              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
+            else
+              echo "  ok  $label"
+            fi
+            rm -rf "$mut"
           }
 
           # A refused connection scored as a pass — the outage green-light.
