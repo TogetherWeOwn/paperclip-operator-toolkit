@@ -18,6 +18,16 @@ describe("RUBRIC (tier_dispatcher.py lines 316-322, ported verbatim)", () => {
     );
     expect(RUBRIC).toContain("Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).");
   });
+
+  it("places fact-producing reports above mechanical supplied-evidence transformations", () => {
+    expect(RUBRIC).toContain("research or reports that must discover or reconcile facts");
+    expect(RUBRIC).toContain("A report or summary is T3 only when it creates no new factual premise");
+    expect(RUBRIC).not.toContain("T3 = mechanical or low-stakes: docs, reports, summaries");
+  });
+
+  it("raises consequential factual analysis to T1", () => {
+    expect(RUBRIC).toContain("factual analysis that feeds consequential decisions");
+  });
 });
 
 describe("buildClassificationPrompt (classify() line 325)", () => {

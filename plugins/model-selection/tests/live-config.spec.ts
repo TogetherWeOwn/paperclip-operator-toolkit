@@ -58,11 +58,20 @@ describe("reviewed live-config fixture", () => {
     expect(decide("T1").modelId).toBe("gpt-5.6-sol");
   });
 
-  it("never selects Claude or the disabled OpenCode-Go GLM route for tier:T2", () => {
+  it("keeps the canonical Z.ai GLM routes enabled without an obsolete T1 duplicate", () => {
+    expect(
+      resolved.models.find((model) => model.id === "glm-5.3" && model.tier === "T2"),
+    ).toMatchObject({ enabled: true });
+    expect(
+      resolved.models.find((model) => model.id === "glm-5.3-flash" && model.tier === "T3"),
+    ).toMatchObject({ enabled: true });
+    expect(resolved.models.filter((model) => model.id === "glm-5.3" && model.tier === "T1")).toEqual([]);
+  });
+
+  it("never selects Claude for tier:T2", () => {
     const decision = decide("T2");
-    expect(decision.modelId).toBe("qwen3.8-max");
+    expect(decision.modelId).toBe("glm-5.3");
     expect(decision.modelId).not.toContain("claude");
-    expect(decision.modelId).not.toBe("glm-5.3");
   });
 
   it("routes an excluded sensitive card through T1", () => {

@@ -7,9 +7,9 @@ import type { Tier } from "../constants.js";
  */
 export const RUBRIC = `You classify a software-company work item into a model tier. Answer ONLY a JSON object:
 {"tier":"T1"|"T2"|"T3","confidence":0.0-1.0,"exclusion":true|false,"reason":"<=20 words"}
-T1 = judgement-heavy or irreversible: architecture/design decisions, security or adversarial review, incident response, anything that opens or approves an upstream PR, owner-facing decisions, credential/permission/access changes, production deploys, policy.
-T2 = ordinary engineering: implement a change with tests, fix a bug, code review of a normal PR, CI fixes, runbooks, debugging, data pipeline work.
-T3 = mechanical or low-stakes: docs, reports, summaries, status updates, label/triage hygiene, registering an existing test in CI, renames, boilerplate, re-running a verification, formatting.
+T1 = judgement-heavy, consequential, trust-sensitive, or irreversible: architecture/design decisions; security or adversarial review; incident response; upstream/public actions; owner-facing decisions; factual analysis that feeds consequential decisions; credentials, permissions, access, production deploys, approvals, policy.
+T2 = ordinary engineering and fact-producing knowledge work: implementation with tests, normal code review, CI, runbooks, debugging, data pipelines, bounded multi-app automation with deterministic checks, research or reports that must discover or reconcile facts.
+T3 = mechanically checkable, low-stakes transformation of supplied evidence: formatting, renames, boilerplate, verbatim extraction, status restatement, label/triage hygiene, registering an existing test, deterministic reruns. A report or summary is T3 only when it creates no new factual premise.
 exclusion=true when the task touches secrets, credentials, permissions, access reviews, provisioning, or owner approvals (these must stay on the assignee's default model regardless of tier).
 Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).`;
 

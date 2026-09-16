@@ -182,7 +182,7 @@
     {
       "id": "glm-5.3",
       "tier": "T2",
-      "enabled": false,
+      "enabled": true,
       "capabilities": [
         "tools",
         "structured-output",
@@ -192,7 +192,7 @@
       "costPerMTokIn": 1.4,
       "costPerMTokOut": 4.4,
       "costPerMTokCacheRead": 0.26,
-      "note": "TOG-2429 correction 2026-09-13: bare id is CLIProxy's OpenCode-Go-served GLM-5.3, not Z.ai \u2014 despite this entry's old note. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled; use cliproxy/zai/glm-5.3 instead. 2026-09-08 05:00Z: served ONLY by the Z.ai GLM Coding Plan (cliproxy glm-5.3 \u2192 Z.ai; Go provider has no glm; verified end-to-end). Lane zai: Pro 12k/5h 60k/wk credits, 0.5x off-peak; cap 3 (1 during peak 06-10 UTC Mon-Fri).",
+      "note": "2026-09-14 correction: canonical bare glm-5.3 is the live Z.ai subscription-pool route; OpenCode Go no longer serves GLM. Keep enabled on cliproxy-zai. Owner rule: GLM only via Z.ai, never OpenCode Go. aa.ai Intelligence Index v4.3 snapshot 2026-09-09: index 49; local measured outcomes may move tier eligibility. 2026-09-08 05:00Z: served ONLY by the Z.ai GLM Coding Plan (cliproxy glm-5.3 \u2192 Z.ai; Go provider has no glm; verified end-to-end). Lane zai: Pro 12k/5h 60k/wk credits, 0.5x off-peak; cap 3 (1 during peak 06-10 UTC Mon-Fri). opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | 2026-09-08 04:45Z owner: GLM only via the Z.ai plan lane (zai/*), never via OpenCode Go",
       "aaIndex": 49,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
@@ -448,7 +448,7 @@
     {
       "id": "glm-5.3-flash",
       "tier": "T3",
-      "enabled": false,
+      "enabled": true,
       "capabilities": [
         "tools",
         "structured-output"
@@ -457,7 +457,7 @@
       "costPerMTokIn": 0.15,
       "costPerMTokOut": 0.5,
       "costPerMTokCacheRead": 0.03,
-      "note": "TOG-2429 correction 2026-09-13: bare id is CLIProxy's OpenCode-Go-served GLM-5.3-Flash, not Z.ai, despite this entry's old note. Owner rule: GLM only via Z.ai, never OpenCode Go. Disabled; use cliproxy/zai/glm-5.3-flash instead. 2026-09-08 05:00Z: Z.ai plan lane (Flash) for mechanical work.",
+      "note": "2026-09-14 correction: canonical bare glm-5.3-flash is the live Z.ai subscription-pool route; OpenCode Go no longer serves GLM. Keep enabled on cliproxy-zai at its T3 static floor until measured local evidence supports a change. Owner rule: GLM only via Z.ai, never OpenCode Go. 2026-09-08 05:00Z: Z.ai plan lane (Flash) for mechanical work.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
@@ -1620,25 +1620,6 @@
       "fallbackOnly": false,
       "earnIn": null,
       "note": ""
-    },
-    {
-      "id": "glm-5.3",
-      "tier": "T1",
-      "enabled": false,
-      "capabilities": [
-        "tools",
-        "structured-output",
-        "long-context"
-      ],
-      "contextWindow": 200000,
-      "costPerMTokIn": 1.4,
-      "costPerMTokOut": 4.4,
-      "costPerMTokCacheRead": 0.26,
-      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | 2026-09-08 04:45Z owner: GLM only via the Z.ai plan lane (zai/*), never via OpenCode Go",
-      "aaIndex": 49,
-      "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
-      "earnIn": null
     }
   ]
 }

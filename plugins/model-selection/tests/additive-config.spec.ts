@@ -74,6 +74,35 @@ describe("additive model-selection config assembly", () => {
     });
   });
 
+  it("preserves a live enabled model when the reviewed roster is stale-disabled", () => {
+    const result = assembleAdditiveConfig(
+      {
+        models: [{ ...model("glm-5.3", "T2", false), laneId: "cliproxy-opencode-go" }],
+      },
+      {
+        models: [{ ...model("cliproxy/glm-5.3", "T2"), laneId: "cliproxy-zai" }],
+        pacing: {
+          ...pacing,
+          lanes: [
+            ...pacing.lanes,
+            {
+              laneId: "cliproxy-zai",
+              statusUrl: "https://status.example/zai",
+              apiKeySecretRef: { type: "secret_ref", secretId: "secret-zai" },
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["used"] }],
+            },
+          ],
+        },
+      },
+      { minimumLaneBoundModels: 1 },
+    );
+
+    expect(result.config.models).toEqual([
+      { ...model("glm-5.3", "T2"), laneId: "cliproxy-zai" },
+    ]);
+    expect(result.counts.guard).toContain("any live enabled model is disabled");
+  });
+
   it("retains live-only rows instead of replacing the live config", () => {
     const result = assembleAdditiveConfig(
       { models: [model("claude-opus-5", "T1")] },
