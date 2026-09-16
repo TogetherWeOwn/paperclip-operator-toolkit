@@ -2,7 +2,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.3.1";
+var PLUGIN_VERSION = "0.3.2";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -148,6 +148,8 @@ var PLUGIN_STATE_KEYS = {
    * outage. Runtime-settable, same rationale as `laneOutage`.
    */
   zaiPaceOverride: "zaiPaceOverride",
+  /** Keyset cursor for the bounded balance-pass page, persisted per company. */
+  balancePassCursor: "balancePassCursor",
   /**
    * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
    * summary a sweep compares against to gate the activity-log line to state
@@ -193,7 +195,8 @@ var COST_BAND_MULTIPLIER = 1.2;
 var LABEL_ONLY_PASS_FETCH_LIMIT = 100;
 var REPIN_PASS_FETCH_LIMIT = 400;
 var REPIN_PASS_WRITE_LIMIT = 6;
-var BALANCE_PASS_FETCH_LIMIT = 400;
+var BALANCE_PASS_FETCH_LIMIT = 50;
+var BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1e3;
 var BALANCE_PASS_WRITE_LIMIT = 8;
 var BALANCE_PASS_COST_DOWN_MULTIPLIER = 0.8;
 var BALANCE_PASS_BUSIER_UTILIZATION_DELTA = 0.25;
@@ -2518,6 +2521,56 @@ function buildHostRecord(input) {
   return buildDecisionRecord(input, "host");
 }
 
+// src/sql.ts
+var REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
+       status as status,
+       coalesce(context_snapshot->>'issueId','') as issue_id,
+       coalesce(error_code,'') as error_code,
+       left(coalesce(error,''),200) as error,
+       coalesce(usage_json->>'costUsd','') as cost_usd,
+       extract(epoch from (finished_at - started_at))/60.0 as mins,
+       extract(epoch from (now() - created_at))/86400.0 as age_days
+  from heartbeat_runs
+ where company_id = $1
+   and created_at > now() - ($2 || ' days')::interval
+   and usage_json ? 'model'
+   and status in ('succeeded','failed','timed_out')
+   and usage_json->>'model' not in ('unknown','auto/best-coding')
+   and finished_at is not null`;
+var LAST_RUN_CONTEXT_USAGE_SQL = `select input_tokens, cached_input_tokens
+  from ((select (usage_json->>'inputTokens')::numeric as input_tokens,
+                (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens,
+                created_at as created_at
+           from heartbeat_runs
+          where company_id = $1
+            and context_snapshot->>'issueId' = $2
+            and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
+          order by created_at desc
+          limit 1)
+        union all
+        (select (usage_json->>'inputTokens')::numeric as input_tokens,
+                (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens,
+                created_at as created_at
+           from heartbeat_runs
+          where company_id = $1
+            and context_snapshot->>'taskId' = $2
+            and context_snapshot->>'issueId' is null
+            and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
+          order by created_at desc
+          limit 1)) matches
+ order by created_at desc
+ limit 1`;
+var REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot->>'issueId','') as issue_id,
+       usage_json->>'model' as model,
+       coalesce(agent_id::text,'') as agent_id,
+       coalesce(usage_json->>'costUsd','') as cost_usd,
+       extract(epoch from finished_at) * 1000 as finished_at_ms
+  from heartbeat_runs
+ where company_id = $1
+   and status = 'succeeded'
+   and finished_at > now() - ($2 || ' days')::interval
+   and usage_json ? 'model'`;
+
 // src/engine/classify-call.ts
 function upstreamUrl(baseUrl, protocol) {
   const parsed = new URL(baseUrl);
@@ -3274,7 +3327,26 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       const aaHttp = {
         fetch: (url, init) => ctx.http.fetch(url, init)
       };
-      const describeIssue = async (companyId, issueId, supplied) => {
+      const readLastRunContextUsage = async (companyId, issueId) => {
+        const contextRows = await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId]);
+        const contextRow = asRecord(contextRows[0]);
+        const rawInput = Number(contextRow.input_tokens);
+        const rawCached = Number(contextRow.cached_input_tokens);
+        return {
+          lastRunInputTokens: Number.isFinite(rawInput) && rawInput >= 0 ? Math.floor(rawInput) : null,
+          lastRunCachedInputTokens: Number.isFinite(rawCached) && rawCached >= 0 ? Math.floor(rawCached) : null
+        };
+      };
+      const loadContextUsage = (companyId, issueId, cache) => {
+        if (!cache) return readLastRunContextUsage(companyId, issueId);
+        const key = `${companyId}:${issueId}`;
+        const memo = cache.get(key);
+        if (memo) return memo;
+        const pending = readLastRunContextUsage(companyId, issueId);
+        cache.set(key, pending);
+        return pending;
+      };
+      const describeIssue = async (companyId, issueId, supplied, contextUsageCache) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
         const overrides = asRecord(issue.assigneeAdapterOverrides);
@@ -3300,23 +3372,6 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           } catch {
           }
         }
-        const contextRows = await ctx.db.query(
-          `select (usage_json->>'inputTokens')::numeric as input_tokens,
-                  (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens
-             from heartbeat_runs
-            where company_id = $1
-              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
-              and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
-            order by created_at desc
-            limit 1`,
-          [companyId, issueId]
-        );
-        const contextRow = asRecord(contextRows[0]);
-        const rawLastRunInputTokens = Number(contextRow.input_tokens);
-        const rawLastRunCachedInputTokens = Number(contextRow.cached_input_tokens);
-        const lastRunInputTokens = Number.isFinite(rawLastRunInputTokens) && rawLastRunInputTokens >= 0 ? Math.floor(rawLastRunInputTokens) : null;
-        const lastRunCachedInputTokens = Number.isFinite(rawLastRunCachedInputTokens) && rawLastRunCachedInputTokens >= 0 ? Math.floor(rawLastRunCachedInputTokens) : null;
-        const lastRunContextTokens = (lastRunInputTokens ?? 0) + (lastRunCachedInputTokens ?? 0);
         const exclusionRaw = asRecord(supplied.exclusion);
         const descriptor = {
           issueId,
@@ -3328,7 +3383,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           // run is already on that model and a change would reset the session.
           stickyModelId: pinnedModelId,
           requiredCapabilities: Array.isArray(supplied.requiredCapabilities) ? supplied.requiredCapabilities : void 0,
-          requiredContextTokens: typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : lastRunContextTokens > 0 ? lastRunContextTokens : void 0,
+          // Only the CALLER-supplied value is eager. The measured fallback
+          // needs the `heartbeat_runs` read, so callers that want it await
+          // `contextUsage()` and set this themselves (`advise`, `repinPass`) —
+          // the passes that only decide repinnability never pay for it.
+          requiredContextTokens: typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : void 0,
           ...typeof exclusionRaw.excluded === "boolean" ? {
             exclusion: {
               excluded: exclusionRaw.excluded,
@@ -3349,15 +3408,14 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
           agentEnv,
           existingOverrideEnv,
-          lastRunInputTokens,
-          lastRunCachedInputTokens
+          contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache)
         };
       };
-      const advise = async (companyId, params, allowExplore = true, forceTier, suppressSticky = false) => {
+      const advise = async (companyId, params, allowExplore = true, forceTier, suppressSticky = false, contextUsageCache) => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
         const config = await companyConfig(companyId);
-        const described = await describeIssue(companyId, issueId, params);
+        const described = await describeIssue(companyId, issueId, params, contextUsageCache);
         if (!described) return null;
         if (forceTier) {
           described.descriptor.labelNames = [`${TIER_LABEL_PREFIX}${forceTier}`];
@@ -3377,10 +3435,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         ).tier;
         const profile = profiles.find((entry) => entry.tier === profileTier) ?? null;
+        const usage = await described.contextUsage();
         const contextEstimate = estimateIssueContext({
           explicitTokens: typeof params.requiredContextTokens === "number" ? params.requiredContextTokens : void 0,
-          lastRunInputTokens: described.lastRunInputTokens,
-          lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+          lastRunInputTokens: usage.lastRunInputTokens,
+          lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
           fleetCeilingTokens: config.selection.fleetContextCeilingTokens
         });
         described.descriptor.requiredContextTokens = contextEstimate.tokens ?? void 0;
@@ -4084,34 +4143,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const config = await companyConfig(company.id);
             if (config.models.length === 0) continue;
             const scoreRunRows = await ctx.db.query(
-              `select r.usage_json->>'model' as model,
-                      r.status as status,
-                      coalesce(r.context_snapshot->>'issueId','') as issue_id,
-                      coalesce(r.error_code,'') as error_code,
-                      left(coalesce(r.error,''),200) as error,
-                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
-                      extract(epoch from (r.finished_at - r.started_at))/60.0 as mins,
-                      extract(epoch from (now() - r.created_at))/86400.0 as age_days
-                 from heartbeat_runs r
-                where r.company_id = $1
-                  and r.created_at > now() - ($2 || ' days')::interval
-                  and r.usage_json ? 'model'
-                  and r.status in ('succeeded','failed','timed_out')
-                  and r.usage_json->>'model' not in ('unknown','auto/best-coding')
-                  and r.finished_at is not null`,
+              REFRESH_SCORE_RUNS_SQL,
               [company.id, String(SCORE_WINDOW_DAYS)]
             );
             const closingRunRows = await ctx.db.query(
-              `select coalesce(r.context_snapshot->>'issueId','') as issue_id,
-                      r.usage_json->>'model' as model,
-                      coalesce(r.agent_id::text,'') as agent_id,
-                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
-                      extract(epoch from r.finished_at) * 1000 as finished_at_ms
-                 from heartbeat_runs r
-                where r.company_id = $1
-                  and r.status = 'succeeded'
-                  and r.finished_at > now() - ($2 || ' days')::interval
-                  and r.usage_json ? 'model'`,
+              REFRESH_SCORE_CLOSING_RUNS_SQL,
               [company.id, String(CARD_LEDGER_WINDOW_DAYS)]
             );
             const issueIds = /* @__PURE__ */ new Set();
@@ -4409,6 +4445,45 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
+      const balanceOpenStatuses = /* @__PURE__ */ new Set(["todo", "in_progress", "blocked", "in_review"]);
+      const activeBalanceRunIssueIds = async (companyId) => {
+        const rows = await ctx.db.query(
+          `select distinct coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') as issue_id
+             from heartbeat_runs
+            where company_id = $1
+              and status in ('running','queued')
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') is not null`,
+          [companyId]
+        );
+        return new Set(
+          rows.map((row) => asRecord(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
+        );
+      };
+      const balanceWriteStillSafe = async (companyId, issueId, expectedPinnedModelId, models) => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue || !balanceOpenStatuses.has(String(issue.status ?? ""))) return false;
+        const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
+        if (issue.checkoutRunId || issue.executionRunId || scheduledRetryStatus === "queued" || scheduledRetryStatus === "running") {
+          return false;
+        }
+        if ((issue.labels ?? []).some((label) => label.name === OPERATOR_PIN_LABEL)) return false;
+        const overrides = asRecord(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord(overrides.adapterConfig);
+        const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+        const currentPinnedModelId = resolveConfiguredModelId(rawPinnedModelId, models);
+        if (rawPinnedModelId && !currentPinnedModelId) return false;
+        if (currentPinnedModelId !== expectedPinnedModelId) return false;
+        const activeRows = await ctx.db.query(
+          `select coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') as issue_id
+             from heartbeat_runs
+            where company_id = $1
+              and status in ('running','queued')
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
+            limit 1`,
+          [companyId, issueId]
+        );
+        return !activeRows.some((row) => asRecord(row).issue_id === issueId);
+      };
       const isUsableAndCapable = (modelId, tier2, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
         if (!modelId) return false;
         const model = config.models.find((m) => m.id === modelId && m.enabled);
@@ -4461,18 +4536,19 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 limit $2`,
               [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)]
             );
+            const contextUsageCache = /* @__PURE__ */ new Map();
             let pinned = 0;
             for (const row of candidateRows) {
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
-              const described = await describeIssue(company.id, issueId, {});
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
               const tier2 = tierFromLabels(described.descriptor.labelNames);
               if (!tier2) continue;
-              const result = await advise(company.id, { issueId }, false);
+              const result = await advise(company.id, { issueId }, false, void 0, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                 ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier: tier2 });
                 continue;
@@ -4547,6 +4623,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const laneOutageOverride = await readLaneOutage(company.id);
             const modelScores = await readModelScores(company.id);
             const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+            const contextUsageCache = /* @__PURE__ */ new Map();
             let repinned = 0;
             for (const row of candidateRows) {
               if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
@@ -4554,15 +4631,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
-              const described = await describeIssue(company.id, issueId, {});
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
               const tier2 = tierFromLabels(described.descriptor.labelNames);
               if (!tier2) continue;
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              const usage = await described.contextUsage();
               const contextEstimate = estimateIssueContext({
-                lastRunInputTokens: described.lastRunInputTokens,
-                lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+                lastRunInputTokens: usage.lastRunInputTokens,
+                lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
                 fleetCeilingTokens: config.selection.fleetContextCeilingTokens
               });
               described.descriptor.requiredContextTokens = contextEstimate.tokens ?? void 0;
@@ -4578,7 +4656,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               )) {
                 continue;
               }
-              const result = await advise(company.id, { issueId }, false, void 0, true);
+              const result = await advise(company.id, { issueId }, false, void 0, true, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
               if (result.decision.modelId === pinnedModelId) continue;
               if (!isUsableAndCapable(
@@ -4626,53 +4704,81 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       });
       ctx.jobs.register(JOB_KEYS.balancePass, async () => {
         const companies = listKnownCompanies();
+        const jobStartedAt = Date.now();
+        const deadlineAt = jobStartedAt + BALANCE_PASS_JOB_BUDGET_MS;
         for (const company of companies) {
+          if (Date.now() >= deadlineAt) {
+            ctx.logger.warn("balance pass stopped before the host RPC wall", {
+              companyId: company.id,
+              durationMs: Date.now() - jobStartedAt,
+              budgetMs: BALANCE_PASS_JOB_BUDGET_MS
+            });
+            break;
+          }
+          const startedAt = Date.now();
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+            const cursorKey = {
+              scopeKind: "company",
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.balancePassCursor
+            };
+            const storedCursor = asRecord(await ctx.state.get(cursorKey));
+            const afterId = typeof storedCursor.afterId === "string" ? storedCursor.afterId : "";
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
-                      i.identifier as identifier,
-                      i.status as status
+                      i.identifier as identifier
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
+                  and i.id::text > $2
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
-                  and not exists (
-                    select 1 from heartbeat_runs r
-                     where r.status in ('running','queued')
-                       and r.context_snapshot->>'issueId' = i.id::text
-                  )
-                order by case i.status when 'in_progress' then 0 when 'todo' then 1 when 'in_review' then 2 else 3 end,
-                         i.updated_at desc
-                limit $2`,
-              [company.id, String(BALANCE_PASS_FETCH_LIMIT)]
+                order by i.id::text asc
+                limit $3`,
+              [company.id, afterId, String(BALANCE_PASS_FETCH_LIMIT)]
             );
+            const activeRunIssueIds = await activeBalanceRunIssueIds(company.id);
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const modelScores = await readModelScores(company.id);
             const nowIso = (/* @__PURE__ */ new Date()).toISOString();
             const now = Date.now();
+            const contextUsageCache = /* @__PURE__ */ new Map();
             let balanced = 0;
+            let scanned = 0;
+            let lastScannedId = afterId;
+            let budgetExhausted = false;
             for (const row of candidateRows) {
               if (balanced >= BALANCE_PASS_WRITE_LIMIT) break;
+              if (Date.now() >= deadlineAt) {
+                budgetExhausted = true;
+                break;
+              }
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
-              const status = typeof r.status === "string" ? r.status : "";
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
-              const described = await describeIssue(company.id, issueId, {});
+              scanned += 1;
+              lastScannedId = issueId;
+              if (activeRunIssueIds.has(issueId)) continue;
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
+              if (!balanceOpenStatuses.has(described.status)) continue;
+              if (!described.isIdle) continue;
               if (described.hasOperatorPin) continue;
+              const status = described.status;
               const tier2 = tierFromLabels(described.descriptor.labelNames);
               if (!tier2) continue;
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
               const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : void 0;
               if (pinnedModelId && pinnedModel) {
                 const currentUtilization = pinnedModel.laneId ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId) : null;
-                const result = await advise(company.id, { issueId }, false, void 0, true);
+                const result = await advise(company.id, { issueId }, false, void 0, true, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
+                if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) continue;
                 if (result.decision.modelId === pinnedModelId) continue;
                 const newModel = config.models.find((m) => m.id === result.decision.modelId);
                 if (!newModel) continue;
@@ -4705,14 +4811,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 if (!(cheaper || incapable || busier)) continue;
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+                if (!await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models)) continue;
                 await ctx.issues.update(
                   issueId,
                   modelOverrideForContext({
                     model: selectedModel,
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
-                    agentEnv: described.agentEnv,
-                    existingOverrideEnv: described.existingOverrideEnv
+                    agentEnv: result.agentEnv,
+                    existingOverrideEnv: result.existingOverrideEnv
                   }),
                   company.id
                 );
@@ -4725,20 +4832,23 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 });
                 balanced += 1;
               } else {
-                const result = await advise(company.id, { issueId }, false, "T1");
+                const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
+                if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 if (result.decision.modelId === floorModelId) continue;
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+                if (!await balanceWriteStillSafe(company.id, issueId, null, config.models)) continue;
                 await ctx.issues.update(
                   issueId,
                   modelOverrideForContext({
                     model: selectedModel,
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
-                    agentEnv: described.agentEnv,
-                    existingOverrideEnv: described.existingOverrideEnv
+                    agentEnv: result.agentEnv,
+                    existingOverrideEnv: result.existingOverrideEnv
                   }),
                   company.id
                 );
@@ -4752,11 +4862,28 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 balanced += 1;
               }
             }
-            ctx.logger.info("balance pass complete", { companyId: company.id, balanced, candidates: candidateRows.length });
+            const cycleComplete = scanned === candidateRows.length && candidateRows.length < BALANCE_PASS_FETCH_LIMIT;
+            const nextAfterId = cycleComplete ? null : lastScannedId || null;
+            await ctx.state.set(cursorKey, { afterId: nextAfterId });
+            ctx.logger.info("balance pass complete", {
+              companyId: company.id,
+              balanced,
+              candidates: candidateRows.length,
+              scanned,
+              afterId: afterId || null,
+              nextAfterId,
+              cycleComplete,
+              budgetExhausted,
+              durationMs: Date.now() - startedAt,
+              jobDurationMs: Date.now() - jobStartedAt
+            });
+            if (budgetExhausted) break;
           } catch (cause) {
             ctx.logger.error("balance pass failed for a company", {
               companyId: company.id,
-              error: cause instanceof Error ? cause.message : String(cause)
+              error: cause instanceof Error ? cause.message : String(cause),
+              durationMs: Date.now() - startedAt,
+              jobDurationMs: Date.now() - jobStartedAt
             });
           }
         }

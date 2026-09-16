@@ -1,7 +1,7 @@
 // src/constants.ts
 var PLUGIN_ID = "togetherweown.model-selection";
 var PLUGIN_API_VERSION = 1;
-var PLUGIN_VERSION = "0.3.1";
+var PLUGIN_VERSION = "0.3.2";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -84,6 +84,7 @@ var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
 var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
 var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
+var BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1e3;
 
 // src/config/schema.ts
 var MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];

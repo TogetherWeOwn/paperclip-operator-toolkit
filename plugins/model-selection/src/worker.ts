@@ -10,6 +10,7 @@ import {
   BALANCE_PASS_BUSIER_UTILIZATION_DELTA,
   BALANCE_PASS_COST_DOWN_MULTIPLIER,
   BALANCE_PASS_FETCH_LIMIT,
+  BALANCE_PASS_JOB_BUDGET_MS,
   BALANCE_PASS_PROBATION_PRICE_USD,
   BALANCE_PASS_WRITE_LIMIT,
   CARD_LEDGER_WINDOW_DAYS,
@@ -83,6 +84,7 @@ import {
 } from "./engine/pacing.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
 import { buildHostRecord, buildShadowRecord } from "./shadow-emit.js";
+import { LAST_RUN_CONTEXT_USAGE_SQL, REFRESH_SCORE_CLOSING_RUNS_SQL, REFRESH_SCORE_RUNS_SQL } from "./sql.js";
 import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
 import {
   buildClassificationPrompt,
@@ -153,6 +155,21 @@ function summary(decision: SelectionDecision): string {
   }
   return "No eligible model for this issue.";
 }
+
+/**
+ * TOG-2862. The measured half of an issue's context estimate: the input and
+ * cached-input token counts of the most recent heartbeat run scoped to it.
+ */
+type ContextUsage = { lastRunInputTokens: number | null; lastRunCachedInputTokens: number | null };
+
+/**
+ * A single scheduled pass's per-issue memo of {@link ContextUsage}, keyed
+ * `companyId:issueId`. Created per pass and passed explicitly, so it cannot
+ * outlive its pass or leak one company's rows into another's. In-flight
+ * promises are stored rather than resolved values, so concurrent asks for one
+ * issue collapse to a single `heartbeat_runs` read.
+ */
+type ContextUsageCache = Map<string, Promise<ContextUsage>>;
 
 export function createPlugin() {
   let context: PluginContext | null = null;
@@ -615,15 +632,68 @@ export function createPlugin() {
       };
 
       /**
+       * TOG-2862. The one genuinely expensive read behind a descriptor: the
+       * last heartbeat run's context usage for an issue.
+       *
+       * It is kept OUT of `describeIssue`'s eager path and behind a per-pass
+       * memo for two measured reasons:
+       *
+       *  - every scheduled pass rejects most candidates on cheap, already-read
+       *    fields (operator pin, tier label, status, idleness). Paying a
+       *    `heartbeat_runs` read before those rejections cost one scan per
+       *    *scanned* candidate rather than per *repinnable* one; and
+       *  - the survivors then call `advise()`, which describes the same issue
+       *    a second time — doubling the read on exactly the rows that reach it.
+       *
+       * The cache is created per pass and threaded in explicitly, so it can
+       * never outlive the pass that owns it or serve one company's row to
+       * another. Promises are memoized, not values, so two concurrent asks for
+       * the same issue share a single in-flight query.
+       */
+      const readLastRunContextUsage = async (
+        companyId: string,
+        issueId: string,
+      ): Promise<{ lastRunInputTokens: number | null; lastRunCachedInputTokens: number | null }> => {
+        const contextRows = (await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId])) as unknown[];
+        const contextRow = asRecord(contextRows[0]);
+        const rawInput = Number(contextRow.input_tokens);
+        const rawCached = Number(contextRow.cached_input_tokens);
+        return {
+          lastRunInputTokens: Number.isFinite(rawInput) && rawInput >= 0 ? Math.floor(rawInput) : null,
+          lastRunCachedInputTokens: Number.isFinite(rawCached) && rawCached >= 0 ? Math.floor(rawCached) : null,
+        };
+      };
+
+      const loadContextUsage = (
+        companyId: string,
+        issueId: string,
+        cache?: ContextUsageCache,
+      ): Promise<ContextUsage> => {
+        if (!cache) return readLastRunContextUsage(companyId, issueId);
+        const key = `${companyId}:${issueId}`;
+        const memo = cache.get(key);
+        if (memo) return memo;
+        const pending = readLastRunContextUsage(companyId, issueId);
+        cache.set(key, pending);
+        return pending;
+      };
+
+      /**
        * Build the descriptor from what the board actually records. Everything
        * here is read, never inferred — the tier key is a recorded judgement
        * (ADR-0007 / ratified Q8-a), so the only classifier in this plugin is
        * the absence of one.
+       *
+       * The returned `contextUsage()` is lazy: callers that only need to
+       * decide whether a card is repinnable never trigger the
+       * `heartbeat_runs` read at all. Callers that do need the estimate get it
+       * memoized for the life of the pass's `contextUsageCache`.
        */
       const describeIssue = async (
         companyId: string,
         issueId: string,
         supplied: Record<string, unknown>,
+        contextUsageCache?: ContextUsageCache,
       ): Promise<{
         descriptor: IssueDescriptor;
         status: string;
@@ -636,8 +706,8 @@ export function createPlugin() {
         identifier: string | null;
         agentEnv: Record<string, unknown>;
         existingOverrideEnv: Record<string, unknown>;
-        lastRunInputTokens: number | null;
-        lastRunCachedInputTokens: number | null;
+        /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
+        contextUsage: () => Promise<ContextUsage>;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -678,30 +748,6 @@ export function createPlugin() {
           }
         }
 
-        const contextRows = (await ctx.db.query(
-          `select (usage_json->>'inputTokens')::numeric as input_tokens,
-                  (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens
-             from heartbeat_runs
-            where company_id = $1
-              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
-              and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
-            order by created_at desc
-            limit 1`,
-          [companyId, issueId],
-        )) as unknown[];
-        const contextRow = asRecord(contextRows[0]);
-        const rawLastRunInputTokens = Number(contextRow.input_tokens);
-        const rawLastRunCachedInputTokens = Number(contextRow.cached_input_tokens);
-        const lastRunInputTokens =
-          Number.isFinite(rawLastRunInputTokens) && rawLastRunInputTokens >= 0
-            ? Math.floor(rawLastRunInputTokens)
-            : null;
-        const lastRunCachedInputTokens =
-          Number.isFinite(rawLastRunCachedInputTokens) && rawLastRunCachedInputTokens >= 0
-            ? Math.floor(rawLastRunCachedInputTokens)
-            : null;
-        const lastRunContextTokens = (lastRunInputTokens ?? 0) + (lastRunCachedInputTokens ?? 0);
-
         const exclusionRaw = asRecord(supplied.exclusion);
         const descriptor: IssueDescriptor = {
           issueId,
@@ -715,12 +761,12 @@ export function createPlugin() {
           requiredCapabilities: Array.isArray(supplied.requiredCapabilities)
             ? (supplied.requiredCapabilities as string[])
             : undefined,
+          // Only the CALLER-supplied value is eager. The measured fallback
+          // needs the `heartbeat_runs` read, so callers that want it await
+          // `contextUsage()` and set this themselves (`advise`, `repinPass`) —
+          // the passes that only decide repinnability never pay for it.
           requiredContextTokens:
-            typeof supplied.requiredContextTokens === "number"
-              ? supplied.requiredContextTokens
-              : lastRunContextTokens > 0
-                ? lastRunContextTokens
-                : undefined,
+            typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : undefined,
           ...(typeof exclusionRaw.excluded === "boolean"
             ? {
                 exclusion: {
@@ -751,8 +797,7 @@ export function createPlugin() {
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
           agentEnv,
           existingOverrideEnv,
-          lastRunInputTokens,
-          lastRunCachedInputTokens,
+          contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache),
         };
       };
 
@@ -792,6 +837,14 @@ export function createPlugin() {
          * protecting a live session's warm prompt cache.
          */
         suppressSticky = false,
+        /**
+         * TOG-2862. The owning pass's per-issue context memo. A scheduled pass
+         * has almost always described this issue already; passing its cache
+         * means `advise` reuses that `heartbeat_runs` read instead of
+         * repeating it. Omitted on the interactive tool path, which describes
+         * exactly one issue once.
+         */
+        contextUsageCache?: ContextUsageCache,
       ): Promise<{
         decision: SelectionDecision;
         issueId: string;
@@ -814,7 +867,7 @@ export function createPlugin() {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
         const config = await companyConfig(companyId);
-        const described = await describeIssue(companyId, issueId, params);
+        const described = await describeIssue(companyId, issueId, params, contextUsageCache);
         if (!described) return null;
         if (forceTier) {
           described.descriptor.labelNames = [`${TIER_LABEL_PREFIX}${forceTier}`];
@@ -834,11 +887,16 @@ export function createPlugin() {
           },
         ).tier;
         const profile = profiles.find((entry) => entry.tier === profileTier) ?? null;
+        // The measured half of the estimate. This is the only place `advise`
+        // needs the `heartbeat_runs` read, and it sits AFTER `resolveTier`,
+        // which reads labels and lane state only — so nothing above this line
+        // depends on it.
+        const usage = await described.contextUsage();
         const contextEstimate = estimateIssueContext({
           explicitTokens:
             typeof params.requiredContextTokens === "number" ? params.requiredContextTokens : undefined,
-          lastRunInputTokens: described.lastRunInputTokens,
-          lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+          lastRunInputTokens: usage.lastRunInputTokens,
+          lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
           fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
         });
         described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
@@ -1683,35 +1741,12 @@ export function createPlugin() {
             if (config.models.length === 0) continue;
 
             const scoreRunRows = (await ctx.db.query(
-              `select r.usage_json->>'model' as model,
-                      r.status as status,
-                      coalesce(r.context_snapshot->>'issueId','') as issue_id,
-                      coalesce(r.error_code,'') as error_code,
-                      left(coalesce(r.error,''),200) as error,
-                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
-                      extract(epoch from (r.finished_at - r.started_at))/60.0 as mins,
-                      extract(epoch from (now() - r.created_at))/86400.0 as age_days
-                 from heartbeat_runs r
-                where r.company_id = $1
-                  and r.created_at > now() - ($2 || ' days')::interval
-                  and r.usage_json ? 'model'
-                  and r.status in ('succeeded','failed','timed_out')
-                  and r.usage_json->>'model' not in ('unknown','auto/best-coding')
-                  and r.finished_at is not null`,
+              REFRESH_SCORE_RUNS_SQL,
               [company.id, String(SCORE_WINDOW_DAYS)],
             )) as unknown[];
 
             const closingRunRows = (await ctx.db.query(
-              `select coalesce(r.context_snapshot->>'issueId','') as issue_id,
-                      r.usage_json->>'model' as model,
-                      coalesce(r.agent_id::text,'') as agent_id,
-                      coalesce(r.usage_json->>'costUsd','') as cost_usd,
-                      extract(epoch from r.finished_at) * 1000 as finished_at_ms
-                 from heartbeat_runs r
-                where r.company_id = $1
-                  and r.status = 'succeeded'
-                  and r.finished_at > now() - ($2 || ' days')::interval
-                  and r.usage_json ? 'model'`,
+              REFRESH_SCORE_CLOSING_RUNS_SQL,
               [company.id, String(CARD_LEDGER_WINDOW_DAYS)],
             )) as unknown[];
 
@@ -2081,6 +2116,63 @@ export function createPlugin() {
       // --- shared helpers for the three scheduled sweeps below (TOG-2481:
       // label_only_pass / repin_pass / balance_pass) -----------------------
 
+      const balanceOpenStatuses = new Set(["todo", "in_progress", "blocked", "in_review"]);
+
+      const activeBalanceRunIssueIds = async (companyId: string): Promise<Set<string>> => {
+        const rows = (await ctx.db.query(
+          `select distinct coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') as issue_id
+             from heartbeat_runs
+            where company_id = $1
+              and status in ('running','queued')
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') is not null`,
+          [companyId],
+        )) as unknown[];
+        return new Set(
+          rows
+            .map((row) => asRecord(row).issue_id)
+            .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0),
+        );
+      };
+
+      /** Final fail-closed read immediately before a balance write. */
+      const balanceWriteStillSafe = async (
+        companyId: string,
+        issueId: string,
+        expectedPinnedModelId: string | null,
+        models: ResolvedConfig["models"],
+      ): Promise<boolean> => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue || !balanceOpenStatuses.has(String(issue.status ?? ""))) return false;
+        const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
+        if (
+          issue.checkoutRunId ||
+          issue.executionRunId ||
+          scheduledRetryStatus === "queued" ||
+          scheduledRetryStatus === "running"
+        ) {
+          return false;
+        }
+        if ((issue.labels ?? []).some((label) => label.name === OPERATOR_PIN_LABEL)) return false;
+
+        const overrides = asRecord(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord(overrides.adapterConfig);
+        const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+        const currentPinnedModelId = resolveConfiguredModelId(rawPinnedModelId, models);
+        if (rawPinnedModelId && !currentPinnedModelId) return false;
+        if (currentPinnedModelId !== expectedPinnedModelId) return false;
+
+        const activeRows = (await ctx.db.query(
+          `select coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') as issue_id
+             from heartbeat_runs
+            where company_id = $1
+              and status in ('running','queued')
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
+            limit 1`,
+          [companyId, issueId],
+        )) as unknown[];
+        return !activeRows.some((row) => asRecord(row).issue_id === issueId);
+      };
+
       /**
        * A model is "usable and capable" for a tier, ported from
        * `tier_dispatcher.py`'s `usable(model_id) and capable(model_id, tier)[0]`
@@ -2179,6 +2271,11 @@ export function createPlugin() {
               [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)],
             )) as unknown[];
 
+            // TOG-2862. One memo per company per pass: `advise` re-describes
+            // the rows that survive the cheap rejections, and without this it
+            // would repeat their `heartbeat_runs` read.
+            const contextUsageCache: ContextUsageCache = new Map();
+
             let pinned = 0;
             for (const row of candidateRows) {
               const r = asRecord(row);
@@ -2186,13 +2283,13 @@ export function createPlugin() {
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
 
-              const described = await describeIssue(company.id, issueId, {});
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
               const tier = tierFromLabels(described.descriptor.labelNames);
               if (!tier) continue;
 
-              const result = await advise(company.id, { issueId }, false);
+              const result = await advise(company.id, { issueId }, false, undefined, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                 ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
                 continue;
@@ -2278,6 +2375,11 @@ export function createPlugin() {
             const modelScores = await readModelScores(company.id);
             const nowIso = new Date().toISOString();
 
+            // TOG-2862. One memo per company per pass: `advise` re-describes
+            // the rows that survive the cheap rejections, and without this it
+            // would repeat their `heartbeat_runs` read.
+            const contextUsageCache: ContextUsageCache = new Map();
+
             let repinned = 0;
             for (const row of candidateRows) {
               if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
@@ -2286,16 +2388,19 @@ export function createPlugin() {
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
 
-              const described = await describeIssue(company.id, issueId, {});
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
               const tier = tierFromLabels(described.descriptor.labelNames);
               if (!tier) continue;
 
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+              // First point in the pass that actually needs the measurement —
+              // every candidate rejected above cost zero `heartbeat_runs` reads.
+              const usage = await described.contextUsage();
               const contextEstimate = estimateIssueContext({
-                lastRunInputTokens: described.lastRunInputTokens,
-                lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+                lastRunInputTokens: usage.lastRunInputTokens,
+                lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
                 fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
               });
               described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
@@ -2314,7 +2419,7 @@ export function createPlugin() {
                 continue;
               }
 
-              const result = await advise(company.id, { issueId }, false, undefined, true);
+              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
               if (result.decision.modelId === pinnedModelId) continue;
               if (
@@ -2378,30 +2483,43 @@ export function createPlugin() {
       // `limit=8` default.
       ctx.jobs.register(JOB_KEYS.balancePass, async () => {
         const companies = listKnownCompanies();
+        const jobStartedAt = Date.now();
+        const deadlineAt = jobStartedAt + BALANCE_PASS_JOB_BUDGET_MS;
         for (const company of companies) {
+          if (Date.now() >= deadlineAt) {
+            ctx.logger.warn("balance pass stopped before the host RPC wall", {
+              companyId: company.id,
+              durationMs: Date.now() - jobStartedAt,
+              budgetMs: BALANCE_PASS_JOB_BUDGET_MS,
+            });
+            break;
+          }
+          const startedAt = Date.now();
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
 
+            const cursorKey = {
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
+            };
+            const storedCursor = asRecord(await ctx.state.get(cursorKey));
+            const afterId = typeof storedCursor.afterId === "string" ? storedCursor.afterId : "";
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
-                      i.identifier as identifier,
-                      i.status as status
+                      i.identifier as identifier
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
+                  and i.id::text > $2
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
-                  and not exists (
-                    select 1 from heartbeat_runs r
-                     where r.status in ('running','queued')
-                       and r.context_snapshot->>'issueId' = i.id::text
-                  )
-                order by case i.status when 'in_progress' then 0 when 'todo' then 1 when 'in_review' then 2 else 3 end,
-                         i.updated_at desc
-                limit $2`,
-              [company.id, String(BALANCE_PASS_FETCH_LIMIT)],
+                order by i.id::text asc
+                limit $3`,
+              [company.id, afterId, String(BALANCE_PASS_FETCH_LIMIT)],
             )) as unknown[];
+            const activeRunIssueIds = await activeBalanceRunIssueIds(company.id);
 
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
@@ -2409,18 +2527,35 @@ export function createPlugin() {
             const nowIso = new Date().toISOString();
             const now = Date.now();
 
+            // TOG-2862. One memo per company per pass: `advise` re-describes
+            // the rows that survive the cheap rejections, and without this it
+            // would repeat their `heartbeat_runs` read.
+            const contextUsageCache: ContextUsageCache = new Map();
+
             let balanced = 0;
+            let scanned = 0;
+            let lastScannedId = afterId;
+            let budgetExhausted = false;
             for (const row of candidateRows) {
               if (balanced >= BALANCE_PASS_WRITE_LIMIT) break;
+              if (Date.now() >= deadlineAt) {
+                budgetExhausted = true;
+                break;
+              }
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
-              const status = typeof r.status === "string" ? r.status : "";
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
+              scanned += 1;
+              lastScannedId = issueId;
+              if (activeRunIssueIds.has(issueId)) continue;
 
-              const described = await describeIssue(company.id, issueId, {});
+              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
+              if (!balanceOpenStatuses.has(described.status)) continue;
+              if (!described.isIdle) continue;
               if (described.hasOperatorPin) continue;
+              const status = described.status;
               const tier = tierFromLabels(described.descriptor.labelNames);
               if (!tier) continue;
 
@@ -2431,8 +2566,10 @@ export function createPlugin() {
                 const currentUtilization = pinnedModel.laneId
                   ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId)
                   : null;
-                const result = await advise(company.id, { issueId }, false, undefined, true);
+                const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
+                if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) continue;
                 if (result.decision.modelId === pinnedModelId) continue;
                 const newModel = config.models.find((m) => m.id === result.decision.modelId);
                 if (!newModel) continue;
@@ -2494,14 +2631,15 @@ export function createPlugin() {
 
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+                if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) continue;
                 await ctx.issues.update(
                   issueId,
                   modelOverrideForContext({
                     model: selectedModel,
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
-                    agentEnv: described.agentEnv,
-                    existingOverrideEnv: described.existingOverrideEnv,
+                    agentEnv: result.agentEnv,
+                    existingOverrideEnv: result.existingOverrideEnv,
                   }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,
                 );
@@ -2521,21 +2659,24 @@ export function createPlugin() {
                 // T1-class pin instead of leaving it on the agent floor.
                 // `pick("T1", floor)` in Python — always T1, never this row's
                 // own tier label.
-                const result = await advise(company.id, { issueId }, false, "T1");
+                const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
+                if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 if (result.decision.modelId === floorModelId) continue;
 
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+                if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) continue;
                 await ctx.issues.update(
                   issueId,
                   modelOverrideForContext({
                     model: selectedModel,
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
-                    agentEnv: described.agentEnv,
-                    existingOverrideEnv: described.existingOverrideEnv,
+                    agentEnv: result.agentEnv,
+                    existingOverrideEnv: result.existingOverrideEnv,
                   }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,
                 );
@@ -2551,11 +2692,29 @@ export function createPlugin() {
               }
             }
 
-            ctx.logger.info("balance pass complete", { companyId: company.id, balanced, candidates: candidateRows.length });
+            const cycleComplete =
+              scanned === candidateRows.length && candidateRows.length < BALANCE_PASS_FETCH_LIMIT;
+            const nextAfterId = cycleComplete ? null : lastScannedId || null;
+            await ctx.state.set(cursorKey, { afterId: nextAfterId });
+            ctx.logger.info("balance pass complete", {
+              companyId: company.id,
+              balanced,
+              candidates: candidateRows.length,
+              scanned,
+              afterId: afterId || null,
+              nextAfterId,
+              cycleComplete,
+              budgetExhausted,
+              durationMs: Date.now() - startedAt,
+              jobDurationMs: Date.now() - jobStartedAt,
+            });
+            if (budgetExhausted) break;
           } catch (cause) {
             ctx.logger.error("balance pass failed for a company", {
               companyId: company.id,
               error: cause instanceof Error ? cause.message : String(cause),
+              durationMs: Date.now() - startedAt,
+              jobDurationMs: Date.now() - jobStartedAt,
             });
           }
         }

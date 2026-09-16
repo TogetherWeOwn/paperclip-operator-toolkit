@@ -200,6 +200,31 @@ const mutants = [
     from: "          await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);",
     to: "          await emitDecisionPair(companyId, [buildShadowRecord(recordInput)]);",
   },
+  {
+    // TOG-2862/2893: the two index-matching UNION branches only reproduce the
+    // `coalesce(issueId, taskId)` predicate they replaced while the task
+    // branch is guarded. Without it a run stamped with BOTH keys is attributed
+    // to two cards, and a card inherits another card's context estimate.
+    name: "drop-issueid-precedence-guard",
+    file: "src/sql.ts",
+    from: "\n            and context_snapshot->>'issueId' is null",
+    to: "",
+  },
+  {
+    // TOG-2862: `repinPass` reads the context estimate in `describeIssue` and
+    // again inside the `advise()` call it then makes. Dropping the shared
+    // per-pass cache restores two unindexed heartbeat_runs reads per
+    // re-pinnable candidate — the shape that hit the host's 300 s RPC wall.
+    //
+    // `balancePass` makes a character-identical call two levels deeper, so the
+    // anchor is newline-prefixed: it pins the indentation exactly, and the
+    // occurrence check above turns a reindent into BROKEN GATE rather than a
+    // mutant that silently moves to the wrong pass.
+    name: "drop-repin-context-cache",
+    file: "src/worker.ts",
+    from: "\n              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
+    to: "\n              const result = await advise(company.id, { issueId }, false, undefined, true);",
+  },
 ];
 
 function runTests() {

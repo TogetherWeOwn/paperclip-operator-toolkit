@@ -1,9 +1,9 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Issue } from "@paperclipai/shared";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { PLUGIN_STATE_KEYS } from "../src/constants.js";
+import { BALANCE_PASS_FETCH_LIMIT, BALANCE_PASS_JOB_BUDGET_MS, PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
 
@@ -103,6 +103,61 @@ function idleRow(id: string, status = "in_progress", extra: Record<string, unkno
 function withOpusAlt(overrides: Record<string, unknown> = {}) {
   const opus = MODELS.find((m) => m.id === "claude-opus-5")!;
   return [...MODELS, { ...opus, id: "claude-opus-5-alt", ...overrides }];
+}
+
+/**
+ * Scores `claude-opus-5` as measurably incapable at T1 (5 ok / 15 model-fails
+ * over 20 runs, `capable: false`, `proven: true`) so a card pinned to it is
+ * re-pinnable without a lane hard stop. Pair with {@link withOpusAlt} so there
+ * is somewhere else to land.
+ */
+async function demoteOpus(harness: Awaited<ReturnType<typeof boot>>) {
+  const demoted = { n: 20, ok: 5, failInfra: 0, failModel: 15, tmo: 0, nEff: 20, pObs: 0.25, p: 0.25, capable: false, proven: true, costPerSuccessUsd: null, medMin: null, rework: 10 };
+  const unproven = { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, nEff: 0, pObs: null, p: 0.8, capable: null, proven: false, costPerSuccessUsd: null, medMin: null, rework: 0 };
+  await harness.ctx.state.set(
+    { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
+    {
+      modelScores: [
+        {
+          modelId: "claude-opus-5",
+          aaIndex: 51,
+          priorP: 0.9,
+          tiers: { T1: demoted, T2: unproven, T3: unproven },
+          overall: demoted,
+        },
+      ],
+      cardLedger: {},
+    },
+  );
+}
+
+/**
+ * TOG-2862: no pass may pay a `heartbeat_runs` read per scanned candidate.
+ *
+ * The incident was `balancePass` hitting the host's 300 s RPC wall on EVERY
+ * run; the cause was one unindexed context lookup per candidate, doubled on
+ * the pinned path because `advise()` re-described the same issue. `repinPass`
+ * walks the same candidates through the same `describeIssue`/`advise` pair, so
+ * it carries the identical doubling and is gated here too.
+ *
+ * These bound the COUNT, not the wall-clock — a duration assertion would be
+ * flaky and would not name the defect.
+ */
+function countContextQueries(
+  harness: Awaited<ReturnType<typeof boot>>,
+  rows: Array<Record<string, unknown>>,
+) {
+  const contextQueries: string[] = [];
+  harness.ctx.db.query = (async (query: string) => {
+    // The context lookup is the only query selecting this alias.
+    if (query.includes("input_tokens") && query.includes("context_snapshot")) {
+      contextQueries.push(query);
+      return [];
+    }
+    if (query.includes("from issues i")) return rows;
+    return [];
+  }) as typeof harness.ctx.db.query;
+  return contextQueries;
 }
 
 describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
@@ -265,31 +320,40 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       });
       const harness = await boot(baseConfig({ models: withOpusAlt() }), [card]);
       harness.ctx.db.query = async () => [idleRow("i1")] as never;
-      await harness.ctx.state.set(
-        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
-        {
-          modelScores: [
-            {
-              modelId: "claude-opus-5",
-              aaIndex: 51,
-              priorP: 0.9,
-              tiers: {
-                T1: { n: 20, ok: 5, failInfra: 0, failModel: 15, tmo: 0, nEff: 20, pObs: 0.25, p: 0.25, capable: false, proven: true, costPerSuccessUsd: null, medMin: null, rework: 10 },
-                T2: { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, nEff: 0, pObs: null, p: 0.8, capable: null, proven: false, costPerSuccessUsd: null, medMin: null, rework: 0 },
-                T3: { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, nEff: 0, pObs: null, p: 0.8, capable: null, proven: false, costPerSuccessUsd: null, medMin: null, rework: 0 },
-              },
-              overall: { n: 20, ok: 5, failInfra: 0, failModel: 15, tmo: 0, nEff: 20, pObs: 0.25, p: 0.25, capable: false, proven: true, costPerSuccessUsd: null, medMin: null, rework: 10 },
-            },
-          ],
-          cardLedger: {},
-        },
-      );
+      await demoteOpus(harness);
 
       await harness.runJob("repinPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
       expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
       expect(harness.activity).toHaveLength(1);
+    });
+
+    // TOG-2862. `repinPass` reaches the context lookup on two separate lines:
+    // `describeIssue` reads the estimate to judge capability, and the
+    // `advise()` call it then makes re-describes the same issue. Without the
+    // shared per-pass cache that is two unindexed reads per re-pinnable
+    // candidate, which is the same shape that walked `balancePass` into the
+    // 300 s wall. The balance gates do not cover this path.
+    it("reads the heartbeat context at most once per re-pinnable candidate", async () => {
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: withOpusAlt() }), [card]);
+      const contextQueries = countContextQueries(harness, [idleRow("i1")]);
+      await demoteOpus(harness);
+
+      await harness.runJob("repinPass");
+
+      // Non-vacuity: the pass really did re-pin, so it really did run both the
+      // describe and the advise read. A card that bailed early would report
+      // zero queries and pass a bare `toBeLessThan(2)`.
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(1);
+      expect(contextQueries).toHaveLength(1);
     });
 
     it("stops writing once REPIN_PASS_WRITE_LIMIT (6) repins have happened this run", async () => {
@@ -479,6 +543,231 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
         }
       }
       expect(changed).toBe(8);
+    });
+
+    it("skips a candidate with a queued heartbeat run even before issue lock fields attach", async () => {
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("from issues i")) return [idleRow("i1")];
+        if (query.includes("select distinct coalesce")) return [{ issue_id: "i1" }];
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("refuses a write when a heartbeat run queues during selection", async () => {
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("from issues i")) return [idleRow("i1")];
+        if (query.includes("select distinct coalesce")) return [];
+        if (query.includes("status in ('running','queued')") && query.includes("limit 1")) {
+          return [{ issue_id: "i1" }];
+        }
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("drops a stale candidate row after the issue becomes terminal", async () => {
+      const card = issue("i1", {
+        status: "done",
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+      });
+      const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("from issues i")) return [idleRow("i1", "in_progress")];
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("refuses a write when the issue becomes terminal during selection", async () => {
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("from issues i")) return [idleRow("i1")];
+        return [];
+      }) as typeof harness.ctx.db.query;
+      const originalGet = harness.ctx.issues.get.bind(harness.ctx.issues);
+      let reads = 0;
+      harness.ctx.issues.get = (async (...args: Parameters<typeof originalGet>) => {
+        const current = await originalGet(...args);
+        reads += 1;
+        return reads >= 3 && current ? ({ ...current, status: "done" } as typeof current) : current;
+      }) as typeof harness.ctx.issues.get;
+
+      try {
+        await harness.runJob("balancePass");
+      } finally {
+        harness.ctx.issues.get = originalGet;
+      }
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("stops starting rows when the global job budget is exhausted", async () => {
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(baseConfig(), [card]);
+      const infoLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
+      harness.ctx.logger.info = ((message: string, metadata: Record<string, unknown>) => {
+        infoLogs.push({ message, metadata });
+      }) as typeof harness.ctx.logger.info;
+      let nowMs = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("from issues i")) {
+          nowMs = BALANCE_PASS_JOB_BUDGET_MS + 1;
+          return [idleRow("i1")];
+        }
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      try {
+        await harness.runJob("balancePass");
+      } finally {
+        nowSpy.mockRestore();
+      }
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(infoLogs).toHaveLength(1);
+      expect(infoLogs[0]?.metadata.budgetExhausted).toBe(true);
+      expect(infoLogs[0]?.metadata.jobDurationMs).toBe(BALANCE_PASS_JOB_BUDGET_MS + 1);
+    });
+
+    it("pages candidates with a persisted keyset cursor and logs durationMs", async () => {
+      const cards = Array.from({ length: BALANCE_PASS_FETCH_LIMIT + 5 }, (_, i) =>
+        issue(`i${String(i).padStart(3, "0")}`, { labels: [], labelIds: [] }),
+      );
+      const harness = await boot(baseConfig(), cards);
+      const candidateCursors: string[] = [];
+      const infoLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
+      harness.ctx.logger.info = ((message: string, metadata: Record<string, unknown>) => {
+        infoLogs.push({ message, metadata });
+      }) as typeof harness.ctx.logger.info;
+      harness.ctx.db.query = (async (query: string, params: readonly unknown[] = []) => {
+        if (!query.includes("from issues i")) return [];
+        const afterId = String(params[1] ?? "");
+        const limit = Number(params[2]);
+        candidateCursors.push(afterId);
+        return cards
+          .filter((card) => card.id > afterId)
+          .slice(0, limit)
+          .map((card) => idleRow(card.id));
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("balancePass");
+      expect(await harness.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
+      })).toEqual({ afterId: cards[BALANCE_PASS_FETCH_LIMIT - 1]?.id });
+
+      await harness.runJob("balancePass");
+      expect(await harness.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
+      })).toEqual({ afterId: null });
+      expect(candidateCursors).toEqual(["", cards[BALANCE_PASS_FETCH_LIMIT - 1]?.id]);
+      expect(infoLogs).toHaveLength(2);
+      expect(infoLogs.every((entry) => typeof entry.metadata.durationMs === "number")).toBe(true);
+    });
+
+    it("rechecks idleness after the candidate query before writing", async () => {
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        checkoutRunId: "run-1",
+      });
+      const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    // --- TOG-2862: the pass must not pay a heartbeat_runs read per scanned
+    // candidate. See `countContextQueries` above.
+    it("reads no heartbeat context for candidates it cannot re-pin", async () => {
+      // Twelve untiered cards: every one is rejected on already-read fields,
+      // so the expensive lookup must never run.
+      const cards = Array.from({ length: 12 }, (_, i) =>
+        issue(`i${String(i).padStart(3, "0")}`, { labels: [], labelIds: [], assigneeAdapterOverrides: null }),
+      );
+      const harness = await boot(baseConfig(), cards);
+      const contextQueries = countContextQueries(harness, cards.map((card) => idleRow(card.id)));
+
+      await harness.runJob("balancePass");
+
+      expect(contextQueries).toHaveLength(0);
+    });
+
+    it("reads the heartbeat context at most once per re-pinnable candidate", async () => {
+      // Same shape as the cost-down test, which does reach `advise()` — before
+      // TOG-2862 this one card cost TWO context reads (describe, then advise
+      // re-describing it).
+      const cheapModels = withOpusAlt().map((m) =>
+        m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: cheapModels }), [card]);
+      const contextQueries = countContextQueries(harness, [idleRow("i1")]);
+
+      await harness.runJob("balancePass");
+
+      // Non-vacuity: the pass really did re-pin, so it really did reach the
+      // path that needs the estimate.
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(contextQueries).toHaveLength(1);
+    });
+
+    it("never filters the context lookup on an unindexed coalesce expression", async () => {
+      const cheapModels = withOpusAlt().map((m) =>
+        m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: cheapModels }), [card]);
+      const contextQueries = countContextQueries(harness, [idleRow("i1")]);
+
+      await harness.runJob("balancePass");
+
+      expect(contextQueries.length).toBeGreaterThan(0);
+      for (const query of contextQueries) {
+        expect(query).not.toMatch(/coalesce\s*\(\s*context_snapshot/i);
+      }
     });
 
     it("does nothing when classification.enabled is false (AC3 kill switch)", async () => {

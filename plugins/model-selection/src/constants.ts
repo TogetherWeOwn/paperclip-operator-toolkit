@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.model-selection";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.3.1";
+export const PLUGIN_VERSION = "0.3.2";
 
 export const TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
@@ -200,6 +200,8 @@ export const PLUGIN_STATE_KEYS = {
    * outage. Runtime-settable, same rationale as `laneOutage`.
    */
   zaiPaceOverride: "zaiPaceOverride",
+  /** Keyset cursor for the bounded balance-pass page, persisted per company. */
+  balancePassCursor: "balancePassCursor",
   /**
    * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
    * summary a sweep compares against to gate the activity-log line to state
@@ -291,8 +293,10 @@ export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;
 export const REPIN_PASS_FETCH_LIMIT = 400;
 /** `tier_dispatcher.py` `repin_pass(limit=6)`'s default write cap per run. */
 export const REPIN_PASS_WRITE_LIMIT = 6;
-/** `tier_dispatcher.py` `balance_pass()`'s fixed `limit 400` row fetch. */
-export const BALANCE_PASS_FETCH_LIMIT = 400;
+/** Bounded keyset page size: 400 rows caused the host's 300 s job RPC wall to fire before completion. */
+export const BALANCE_PASS_FETCH_LIMIT = 50;
+/** Stop starting new balance work with a full minute left before the host's 300 s RPC wall. */
+export const BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1000;
 /** `tier_dispatcher.py` `balance_pass(limit=8)`'s default write cap per run. */
 export const BALANCE_PASS_WRITE_LIMIT = 8;
 /** `balance_pass()`'s `cheaper = blended(nm) <= 0.8*blended(pm)` cost-down threshold. */
