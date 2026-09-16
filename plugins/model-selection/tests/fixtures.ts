@@ -15,7 +15,7 @@ function model(entry: Partial<ModelEntry> & Pick<ModelEntry, "id" | "tier">): Mo
     costPerMTokOut: 0,
     costPerMTokCacheRead: 0,
     capabilities: ["tools"],
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
     aaIndex: null,
     releasedAt: "1970-01-01",
     fallbackOnly: false,

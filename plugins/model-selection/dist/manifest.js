@@ -1,7 +1,7 @@
 // src/constants.ts
 var PLUGIN_ID = "togetherweown.model-selection";
 var PLUGIN_API_VERSION = 1;
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -128,7 +128,11 @@ var SELECTION_CONFIG_SCHEMA = {
          * `cost-per-accepted-card` is Slice 3 (TOG-2048 decision A) — computed
          * and shadow-diffed for 7 days before this ever flips in a live config.
          */
-        objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" }
+        objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
+        /** Fleet-wide harness compaction ceiling. Models at/above it need no per-issue env override. */
+        fleetContextCeilingTokens: { type: "integer", minimum: 1, default: 1e6 },
+        /** Fraction of a narrower model's context window where Claude Code should compact. */
+        compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 }
       },
       default: {}
     },

@@ -23,8 +23,8 @@ export interface ApplyPlan {
   /** Whether anything should be written at all. */
   write: boolean;
   issueId: string;
-  /** The `assigneeAdapterOverrides` patch, or null when nothing is written. */
-  patch: { assigneeAdapterOverrides: { adapterConfig: { model: string } } } | null;
+  /** The selected model id. The caller builds the full env-preserving override. */
+  modelId: string | null;
   /**
    * Tier label to attach alongside, per ADR-0008.
    *
@@ -69,7 +69,7 @@ export function planApply(
   const nothing = (reason: string): ApplyPlan => ({
     write: false,
     issueId: targetIssueId,
-    patch: null,
+    modelId: null,
     labelName: null,
     reason,
   });
@@ -98,7 +98,7 @@ export function planApply(
   return {
     write: true,
     issueId: targetIssueId,
-    patch: { assigneeAdapterOverrides: { adapterConfig: { model: decision.modelId } } },
+    modelId: decision.modelId,
     labelName: context.hasExistingTierLabel || !tier ? null : tierLabelName(tier),
     reason: `pinning ${decision.modelId} at ${tier} — ${decision.trace.at(-1) ?? "selected"}`,
   };

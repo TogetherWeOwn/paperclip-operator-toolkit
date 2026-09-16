@@ -9,7 +9,16 @@ describe("config resolution", () => {
     expect(config.selection.mode).toBe("advise");
     expect(config.selection.defaultTier).toBe("T1");
     expect(config.selection.holdOnUntrustedProfile).toBe(true);
+    expect(config.selection.fleetContextCeilingTokens).toBe(1_000_000);
+    expect(config.selection.compactionRatio).toBe(0.75);
     expect(config.models).toEqual([]);
+  });
+
+  it("rejects an invalid context compaction ratio", () => {
+    const { errors } = validateConfig(
+      resolveConfig({ selection: { compactionRatio: 1 } }),
+    );
+    expect(errors).toContain("selection.compactionRatio must be greater than 0 and less than 1");
   });
 
   it("keeps only well-formed tier label ids", () => {

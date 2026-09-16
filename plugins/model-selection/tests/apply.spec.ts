@@ -17,10 +17,8 @@ describe("write policy", () => {
     // default first (heartbeat.ts:3523-3525) — the known ACP effort outage path.
     const plan = planApply(decide({ issueId: "i1", labelNames: ["tier:T1"] }), clean, "i1");
     expect(plan.write).toBe(true);
-    expect(plan.patch).toEqual({
-      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
-    });
-    expect(JSON.stringify(plan.patch)).not.toContain("modelProfile");
+    expect(plan.modelId).toBe("claude-opus-5");
+    expect(JSON.stringify(plan)).not.toContain("modelProfile");
   });
 
   it("writes nothing in advisory mode", () => {
@@ -52,9 +50,7 @@ describe("write policy", () => {
       "i1",
     );
     expect(plan.write).toBe(true);
-    expect(plan.patch).toEqual({
-      assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
-    });
+    expect(plan.modelId).toBe("claude-opus-5");
     expect(plan.labelName).toBe("tier:T1");
   });
 

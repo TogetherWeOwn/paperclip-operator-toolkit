@@ -66,6 +66,8 @@ export interface ResolvedConfig {
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
     objective: SelectionObjective;
+    fleetContextCeilingTokens: number;
+    compactionRatio: number;
   };
   models: ModelEntry[];
   /**
@@ -298,6 +300,8 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
       objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
+      fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
+      compactionRatio: num(selection.compactionRatio, 0.75),
     },
     models,
     tierLabelIds,
@@ -426,6 +430,20 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
         `${model.id} has costPerMTokCacheRead 0 — cache read is the largest cost line; a zero rate hides it`,
       );
     }
+  }
+
+  if (
+    !Number.isFinite(config.selection.compactionRatio) ||
+    config.selection.compactionRatio <= 0 ||
+    config.selection.compactionRatio >= 1
+  ) {
+    errors.push("selection.compactionRatio must be greater than 0 and less than 1");
+  }
+  if (
+    !Number.isFinite(config.selection.fleetContextCeilingTokens) ||
+    config.selection.fleetContextCeilingTokens < 1
+  ) {
+    errors.push("selection.fleetContextCeilingTokens must be a positive number");
   }
 
   if (config.selection.enabled && config.models.length === 0) {

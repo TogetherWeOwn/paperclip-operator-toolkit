@@ -51,6 +51,10 @@ export const SELECTION_CONFIG_SCHEMA = {
          * and shadow-diffed for 7 days before this ever flips in a live config.
          */
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
+        /** Fleet-wide harness compaction ceiling. Models at/above it need no per-issue env override. */
+        fleetContextCeilingTokens: { type: "integer", minimum: 1, default: 1000000 },
+        /** Fraction of a narrower model's context window where Claude Code should compact. */
+        compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 },
       },
       default: {},
     },

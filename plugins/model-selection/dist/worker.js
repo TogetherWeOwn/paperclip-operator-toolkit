@@ -2,7 +2,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -433,7 +433,7 @@ function planApply(decision, context, targetIssueId) {
   const nothing = (reason) => ({
     write: false,
     issueId: targetIssueId,
-    patch: null,
+    modelId: null,
     labelName: null,
     reason
   });
@@ -461,7 +461,7 @@ function planApply(decision, context, targetIssueId) {
   return {
     write: true,
     issueId: targetIssueId,
-    patch: { assigneeAdapterOverrides: { adapterConfig: { model: decision.modelId } } },
+    modelId: decision.modelId,
     labelName: context.hasExistingTierLabel || !tier2 ? null : tierLabelName(tier2),
     reason: `pinning ${decision.modelId} at ${tier2} \u2014 ${decision.trace.at(-1) ?? "selected"}`
   };
@@ -629,7 +629,9 @@ function resolveConfig(raw) {
       defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
-      objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price"
+      objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
+      fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1e6),
+      compactionRatio: num(selection.compactionRatio, 0.75)
     },
     models,
     tierLabelIds,
@@ -742,6 +744,12 @@ function validateConfig(config) {
         `${model.id} has costPerMTokCacheRead 0 \u2014 cache read is the largest cost line; a zero rate hides it`
       );
     }
+  }
+  if (!Number.isFinite(config.selection.compactionRatio) || config.selection.compactionRatio <= 0 || config.selection.compactionRatio >= 1) {
+    errors.push("selection.compactionRatio must be greater than 0 and less than 1");
+  }
+  if (!Number.isFinite(config.selection.fleetContextCeilingTokens) || config.selection.fleetContextCeilingTokens < 1) {
+    errors.push("selection.fleetContextCeilingTokens must be a positive number");
   }
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
@@ -1539,6 +1547,15 @@ function selectModel(input) {
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`
       });
+    } else if (incumbent && typeof descriptor.requiredContextTokens === "number" && incumbent.contextWindow < descriptor.requiredContextTokens) {
+      trace.push(
+        `sticky ${incumbent.id} declined: context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "context-window",
+        reason: `context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`
+      });
     } else if (incumbent && incumbentUnserviceable) {
       trace.push(
         `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} is not serviceable \u2014 re-selecting instead of wedging this issue on a dead lane`
@@ -1902,6 +1919,59 @@ function ancillaryDriftForAgent(agent, recommendedModelId, models = []) {
     recommendedModelId,
     remediation: remediationFor(reading.surface)
   }));
+}
+
+// src/engine/context.ts
+var CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+function positiveInteger(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+function estimateIssueContext(input) {
+  const explicit = positiveInteger(input.explicitTokens);
+  if (explicit !== null) return { tokens: explicit, source: "explicit" };
+  const fleetCeiling = positiveInteger(input.fleetCeilingTokens);
+  const capObserved = (value) => {
+    const tokens = positiveInteger(value);
+    if (tokens === null) return null;
+    return fleetCeiling === null ? tokens : Math.min(tokens, fleetCeiling);
+  };
+  const inputContextTotal = (uncached, cached) => {
+    const parts = [uncached, cached].filter(
+      (value) => typeof value === "number" && Number.isFinite(value) && value >= 0
+    );
+    if (parts.length === 0) return null;
+    return positiveInteger(parts.reduce((total, value) => total + Math.floor(value), 0));
+  };
+  const lastRun = capObserved(
+    inputContextTotal(input.lastRunInputTokens, input.lastRunCachedInputTokens)
+  );
+  if (lastRun !== null) return { tokens: lastRun, source: "last-run-context" };
+  return { tokens: null, source: "none" };
+}
+function modelOverrideForContext(input) {
+  const agentEnv = input.agentEnv ?? {};
+  const overrideEnv = input.existingOverrideEnv ?? {};
+  const env = { ...agentEnv, ...overrideEnv };
+  const fleetCeiling = positiveInteger(input.fleetCeilingTokens);
+  const modelWindow = positiveInteger(input.model.contextWindow);
+  const ratio = Number.isFinite(input.compactionRatio) && input.compactionRatio > 0 && input.compactionRatio < 1 ? input.compactionRatio : 0.75;
+  if (fleetCeiling !== null && modelWindow !== null && modelWindow < fleetCeiling) {
+    env[CONTEXT_LIMIT_ENV_KEY] = {
+      type: "plain",
+      value: String(Math.max(1, Math.floor(modelWindow * ratio)))
+    };
+  } else {
+    delete env[CONTEXT_LIMIT_ENV_KEY];
+  }
+  const mustWriteEnv = Object.keys(env).length > 0 || CONTEXT_LIMIT_ENV_KEY in agentEnv || CONTEXT_LIMIT_ENV_KEY in overrideEnv;
+  return {
+    assigneeAdapterOverrides: {
+      adapterConfig: {
+        model: input.model.id,
+        ...mustWriteEnv ? { env } : {}
+      }
+    }
+  };
 }
 
 // src/engine/profiles.ts
@@ -3209,6 +3279,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         if (!issue) return null;
         const overrides = asRecord(issue.assigneeAdapterOverrides);
         const adapterConfig = asRecord(overrides.adapterConfig);
+        const existingOverrideEnv = asRecord(adapterConfig.env);
         const pinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const labels = issue.labels ?? [];
         const labelNames = labels.map((label) => label.name).filter((name) => typeof name === "string");
@@ -3216,6 +3287,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const isIdle = !issue.checkoutRunId && !issue.executionRunId && scheduledRetryStatus !== "queued" && scheduledRetryStatus !== "running";
         let agentFloorModelId = null;
         let agentName = null;
+        let agentEnv = {};
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -3223,10 +3295,28 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const agentRecord = asRecord(agent);
             const config = asRecord(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
+            agentEnv = asRecord(config.env);
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
           }
         }
+        const contextRows = await ctx.db.query(
+          `select (usage_json->>'inputTokens')::numeric as input_tokens,
+                  (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens
+             from heartbeat_runs
+            where company_id = $1
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
+              and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
+            order by created_at desc
+            limit 1`,
+          [companyId, issueId]
+        );
+        const contextRow = asRecord(contextRows[0]);
+        const rawLastRunInputTokens = Number(contextRow.input_tokens);
+        const rawLastRunCachedInputTokens = Number(contextRow.cached_input_tokens);
+        const lastRunInputTokens = Number.isFinite(rawLastRunInputTokens) && rawLastRunInputTokens >= 0 ? Math.floor(rawLastRunInputTokens) : null;
+        const lastRunCachedInputTokens = Number.isFinite(rawLastRunCachedInputTokens) && rawLastRunCachedInputTokens >= 0 ? Math.floor(rawLastRunCachedInputTokens) : null;
+        const lastRunContextTokens = (lastRunInputTokens ?? 0) + (lastRunCachedInputTokens ?? 0);
         const exclusionRaw = asRecord(supplied.exclusion);
         const descriptor = {
           issueId,
@@ -3238,7 +3328,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           // run is already on that model and a change would reset the session.
           stickyModelId: pinnedModelId,
           requiredCapabilities: Array.isArray(supplied.requiredCapabilities) ? supplied.requiredCapabilities : void 0,
-          requiredContextTokens: typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : void 0,
+          requiredContextTokens: typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : lastRunContextTokens > 0 ? lastRunContextTokens : void 0,
           ...typeof exclusionRaw.excluded === "boolean" ? {
             exclusion: {
               excluded: exclusionRaw.excluded,
@@ -3256,7 +3346,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           hasOperatorPin: labelNames.includes(OPERATOR_PIN_LABEL),
           isIdle,
           title: String(issue.title ?? ""),
-          identifier: typeof issue.identifier === "string" ? issue.identifier : null
+          identifier: typeof issue.identifier === "string" ? issue.identifier : null,
+          agentEnv,
+          existingOverrideEnv,
+          lastRunInputTokens,
+          lastRunCachedInputTokens
         };
       };
       const advise = async (companyId, params, allowExplore = true, forceTier, suppressSticky = false) => {
@@ -3273,6 +3367,23 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         }
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
+        const pacingActive = config.pacing.mode !== "off";
+        const profileTier = resolveTier(
+          described.descriptor,
+          config.models,
+          config.selection.defaultTier,
+          {
+            isLaneUnserviceable: (model) => pacingActive && hardStopExcluded(laneLedger, model)
+          }
+        ).tier;
+        const profile = profiles.find((entry) => entry.tier === profileTier) ?? null;
+        const contextEstimate = estimateIssueContext({
+          explicitTokens: typeof params.requiredContextTokens === "number" ? params.requiredContextTokens : void 0,
+          lastRunInputTokens: described.lastRunInputTokens,
+          lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+          fleetCeilingTokens: config.selection.fleetContextCeilingTokens
+        });
+        described.descriptor.requiredContextTokens = contextEstimate.tokens ?? void 0;
         const nowIso = (/* @__PURE__ */ new Date()).toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
@@ -3368,7 +3479,9 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           title: described.title,
           identifier: described.identifier,
           agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
-          pinnedModelId: described.descriptor.pinnedModelId ?? null
+          pinnedModelId: described.descriptor.pinnedModelId ?? null,
+          agentEnv: described.agentEnv,
+          existingOverrideEnv: described.existingOverrideEnv
         };
       };
       ctx.tools.register(
@@ -3435,10 +3548,23 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             },
             result.issueId
           );
-          if (!plan.write || !plan.patch) {
+          if (!plan.write || !plan.modelId) {
             return { content: `No write: ${plan.reason}`, data: { decision: result.decision, plan } };
           }
-          const patch = { ...plan.patch };
+          const selectedModel = result.config.models.find((model) => model.id === plan.modelId);
+          if (!selectedModel) {
+            return {
+              content: `No write: selected model ${plan.modelId} is absent from the resolved roster`,
+              data: { decision: result.decision, plan }
+            };
+          }
+          const patch = modelOverrideForContext({
+            model: selectedModel,
+            fleetCeilingTokens: result.config.selection.fleetContextCeilingTokens,
+            compactionRatio: result.config.selection.compactionRatio,
+            agentEnv: result.agentEnv,
+            existingOverrideEnv: result.existingOverrideEnv
+          });
           let labelNote = "";
           if (plan.labelName && result.decision.effectiveTier) {
             const labelId = result.config.tierLabelIds[result.decision.effectiveTier];
@@ -4283,10 +4409,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
-      const isUsableAndCapable = (modelId, tier2, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
+      const isUsableAndCapable = (modelId, tier2, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
         if (!modelId) return false;
         const model = config.models.find((m) => m.id === modelId && m.enabled);
         if (!model) return false;
+        if (typeof requiredContextTokens === "number" && model.contextWindow < requiredContextTokens) return false;
         if (config.pacing.mode === "off") return true;
         if (hardStopExcluded(laneLedger, model)) return false;
         if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
@@ -4359,11 +4486,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 });
                 continue;
               }
+              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+              if (!selectedModel) continue;
               await ctx.issues.update(
                 issueId,
-                {
-                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
-                },
+                modelOverrideForContext({
+                  model: selectedModel,
+                  fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                  compactionRatio: config.selection.compactionRatio,
+                  agentEnv: described.agentEnv,
+                  existingOverrideEnv: described.existingOverrideEnv
+                }),
                 company.id
               );
               await ctx.activity.log({
@@ -4427,15 +4560,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const tier2 = tierFromLabels(described.descriptor.labelNames);
               if (!tier2) continue;
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
-              if (isUsableAndCapable(pinnedModelId, tier2, config, laneLedger, laneOutageOverride, modelScores, nowIso)) {
-                continue;
-              }
-              const result = await advise(company.id, { issueId }, false, void 0, true);
-              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
-              if (result.decision.modelId === pinnedModelId) continue;
-              if (!isUsableAndCapable(
-                result.decision.modelId,
+              const contextEstimate = estimateIssueContext({
+                lastRunInputTokens: described.lastRunInputTokens,
+                lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+                fleetCeilingTokens: config.selection.fleetContextCeilingTokens
+              });
+              described.descriptor.requiredContextTokens = contextEstimate.tokens ?? void 0;
+              if (isUsableAndCapable(
+                pinnedModelId,
                 tier2,
+                described.descriptor.requiredContextTokens,
                 config,
                 laneLedger,
                 laneOutageOverride,
@@ -4444,11 +4578,32 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               )) {
                 continue;
               }
+              const result = await advise(company.id, { issueId }, false, void 0, true);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+              if (result.decision.modelId === pinnedModelId) continue;
+              if (!isUsableAndCapable(
+                result.decision.modelId,
+                tier2,
+                described.descriptor.requiredContextTokens,
+                config,
+                laneLedger,
+                laneOutageOverride,
+                modelScores,
+                nowIso
+              )) {
+                continue;
+              }
+              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+              if (!selectedModel) continue;
               await ctx.issues.update(
                 issueId,
-                {
-                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
-                },
+                modelOverrideForContext({
+                  model: selectedModel,
+                  fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                  compactionRatio: config.selection.compactionRatio,
+                  agentEnv: described.agentEnv,
+                  existingOverrideEnv: described.existingOverrideEnv
+                }),
                 company.id
               );
               await ctx.activity.log({
@@ -4548,11 +4703,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 }
                 const busier = currentUtilization !== null && newUtilization !== null && currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
                 if (!(cheaper || incapable || busier)) continue;
+                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+                if (!selectedModel) continue;
                 await ctx.issues.update(
                   issueId,
-                  {
-                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
-                  },
+                  modelOverrideForContext({
+                    model: selectedModel,
+                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                    compactionRatio: config.selection.compactionRatio,
+                    agentEnv: described.agentEnv,
+                    existingOverrideEnv: described.existingOverrideEnv
+                  }),
                   company.id
                 );
                 await ctx.activity.log({
@@ -4568,11 +4729,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 if (result.decision.modelId === floorModelId) continue;
+                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+                if (!selectedModel) continue;
                 await ctx.issues.update(
                   issueId,
-                  {
-                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } }
-                  },
+                  modelOverrideForContext({
+                    model: selectedModel,
+                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                    compactionRatio: config.selection.compactionRatio,
+                    agentEnv: described.agentEnv,
+                    existingOverrideEnv: described.existingOverrideEnv
+                  }),
                   company.id
                 );
                 await ctx.activity.log({

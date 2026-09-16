@@ -243,6 +243,19 @@ export function selectModel(input: SelectInput): SelectionDecision {
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`,
       });
+    } else if (
+      incumbent &&
+      typeof descriptor.requiredContextTokens === "number" &&
+      incumbent.contextWindow < descriptor.requiredContextTokens
+    ) {
+      trace.push(
+        `sticky ${incumbent.id} declined: context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`,
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "context-window",
+        reason: `context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`,
+      });
     } else if (incumbent && incumbentUnserviceable) {
       trace.push(
         `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} is not serviceable — re-selecting instead of wedging this issue on a dead lane`,

@@ -110,6 +110,28 @@ Related: we pin `adapterConfig.model` directly and never use
 first in the merge (`heartbeat.ts:3523-3525`) — the known ACP `effort` outage
 path.
 
+### Context fit and compaction ceiling
+
+Every model pin is paired with a context-safe runtime envelope:
+
+- the plugin estimates required context from an explicit caller requirement or
+  the latest issue-scoped run's uncached plus cached input totals;
+- tier volume profiles are deliberately not used for this gate: they contain
+  cumulative multi-turn billing totals, not one request's peak context, so using
+  them would wrongly exclude narrow models before an issue has run;
+- candidates whose roster `contextWindow` is below a real issue estimate are
+  rejected at the hard `context-window` gate, including a sticky incumbent;
+- a model narrower than `selection.fleetContextCeilingTokens` gets
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS=floor(contextWindow * compactionRatio)` in the
+  issue override (defaults: 1,000,000 and 0.75);
+- a model at or above the fleet ceiling gets no issue-level compaction binding.
+
+The host shallow-spreads issue `adapterConfig` over the agent config, so an issue
+`env` object replaces the agent's `env` object rather than deep-merging it. The
+write helper copies the agent env and any existing issue env before it changes
+only `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Unrelated bindings therefore survive both
+initial pins and idle repins.
+
 ---
 
 ## Rollout

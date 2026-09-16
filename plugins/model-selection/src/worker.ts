@@ -37,10 +37,11 @@ import { fetchAaSnapshot, type AaHttpClient } from "./aa-index/fetch.js";
 import { effortSuffixOf, resolveAaSlug, tierImpliedByIndex } from "./aa-index/match.js";
 import { parseAaLeaderboardHtml, type AaModelRecord } from "./aa-index/parse.js";
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
+import { estimateIssueContext, modelOverrideForContext } from "./engine/context.js";
 import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
-import { tierFromLabels } from "./engine/tier.js";
+import { resolveTier, tierFromLabels } from "./engine/tier.js";
 import {
   accumulateRunStats,
   blendedPriorP,
@@ -131,7 +132,9 @@ interface ReworkSignal {
  * see README "Typed narrower than the host".
  */
 interface IssueUpdatePatch {
-  assigneeAdapterOverrides: { adapterConfig: { model: string } };
+  assigneeAdapterOverrides: {
+    adapterConfig: { model: string; env?: Record<string, unknown> };
+  };
   labelIds?: string[];
 }
 
@@ -631,12 +634,17 @@ export function createPlugin() {
         isIdle: boolean;
         title: string;
         identifier: string | null;
+        agentEnv: Record<string, unknown>;
+        existingOverrideEnv: Record<string, unknown>;
+        lastRunInputTokens: number | null;
+        lastRunCachedInputTokens: number | null;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
 
         const overrides = asRecord(issue.assigneeAdapterOverrides);
         const adapterConfig = asRecord(overrides.adapterConfig);
+        const existingOverrideEnv = asRecord(adapterConfig.env);
         const pinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const labels = issue.labels ?? [];
         const labelNames = labels
@@ -654,6 +662,7 @@ export function createPlugin() {
 
         let agentFloorModelId: string | null = null;
         let agentName: string | null = null;
+        let agentEnv: Record<string, unknown> = {};
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -661,12 +670,37 @@ export function createPlugin() {
             const agentRecord = asRecord(agent);
             const config = asRecord(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
+            agentEnv = asRecord(config.env);
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
             // An agent we cannot read simply has no known floor; resolveTier
             // falls through to the config default rather than guessing.
           }
         }
+
+        const contextRows = (await ctx.db.query(
+          `select (usage_json->>'inputTokens')::numeric as input_tokens,
+                  (usage_json->>'cachedInputTokens')::numeric as cached_input_tokens
+             from heartbeat_runs
+            where company_id = $1
+              and coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2
+              and (usage_json ? 'inputTokens' or usage_json ? 'cachedInputTokens')
+            order by created_at desc
+            limit 1`,
+          [companyId, issueId],
+        )) as unknown[];
+        const contextRow = asRecord(contextRows[0]);
+        const rawLastRunInputTokens = Number(contextRow.input_tokens);
+        const rawLastRunCachedInputTokens = Number(contextRow.cached_input_tokens);
+        const lastRunInputTokens =
+          Number.isFinite(rawLastRunInputTokens) && rawLastRunInputTokens >= 0
+            ? Math.floor(rawLastRunInputTokens)
+            : null;
+        const lastRunCachedInputTokens =
+          Number.isFinite(rawLastRunCachedInputTokens) && rawLastRunCachedInputTokens >= 0
+            ? Math.floor(rawLastRunCachedInputTokens)
+            : null;
+        const lastRunContextTokens = (lastRunInputTokens ?? 0) + (lastRunCachedInputTokens ?? 0);
 
         const exclusionRaw = asRecord(supplied.exclusion);
         const descriptor: IssueDescriptor = {
@@ -682,7 +716,11 @@ export function createPlugin() {
             ? (supplied.requiredCapabilities as string[])
             : undefined,
           requiredContextTokens:
-            typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : undefined,
+            typeof supplied.requiredContextTokens === "number"
+              ? supplied.requiredContextTokens
+              : lastRunContextTokens > 0
+                ? lastRunContextTokens
+                : undefined,
           ...(typeof exclusionRaw.excluded === "boolean"
             ? {
                 exclusion: {
@@ -711,6 +749,10 @@ export function createPlugin() {
           isIdle,
           title: String(issue.title ?? ""),
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
+          agentEnv,
+          existingOverrideEnv,
+          lastRunInputTokens,
+          lastRunCachedInputTokens,
         };
       };
 
@@ -766,6 +808,8 @@ export function createPlugin() {
         identifier: string | null;
         agentFloorModelId: string | null;
         pinnedModelId: string | null;
+        agentEnv: Record<string, unknown>;
+        existingOverrideEnv: Record<string, unknown>;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
@@ -780,6 +824,24 @@ export function createPlugin() {
         }
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
+        const pacingActive = config.pacing.mode !== "off";
+        const profileTier = resolveTier(
+          described.descriptor,
+          config.models,
+          config.selection.defaultTier,
+          {
+            isLaneUnserviceable: (model) => pacingActive && hardStopExcluded(laneLedger, model),
+          },
+        ).tier;
+        const profile = profiles.find((entry) => entry.tier === profileTier) ?? null;
+        const contextEstimate = estimateIssueContext({
+          explicitTokens:
+            typeof params.requiredContextTokens === "number" ? params.requiredContextTokens : undefined,
+          lastRunInputTokens: described.lastRunInputTokens,
+          lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+          fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+        });
+        described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
         const nowIso = new Date().toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
@@ -889,6 +951,8 @@ export function createPlugin() {
           identifier: described.identifier,
           agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
           pinnedModelId: described.descriptor.pinnedModelId ?? null,
+          agentEnv: described.agentEnv,
+          existingOverrideEnv: described.existingOverrideEnv,
         };
       };
 
@@ -967,11 +1031,24 @@ export function createPlugin() {
             result.issueId,
           );
 
-          if (!plan.write || !plan.patch) {
+          if (!plan.write || !plan.modelId) {
             return { content: `No write: ${plan.reason}`, data: { decision: result.decision, plan } };
           }
 
-          const patch: IssueUpdatePatch = { ...plan.patch };
+          const selectedModel = result.config.models.find((model) => model.id === plan.modelId);
+          if (!selectedModel) {
+            return {
+              content: `No write: selected model ${plan.modelId} is absent from the resolved roster`,
+              data: { decision: result.decision, plan },
+            };
+          }
+          const patch: IssueUpdatePatch = modelOverrideForContext({
+            model: selectedModel,
+            fleetCeilingTokens: result.config.selection.fleetContextCeilingTokens,
+            compactionRatio: result.config.selection.compactionRatio,
+            agentEnv: result.agentEnv,
+            existingOverrideEnv: result.existingOverrideEnv,
+          });
           let labelNote = "";
           if (plan.labelName && result.decision.effectiveTier) {
             // Operator-supplied id, not a name lookup: there is no label surface
@@ -2018,6 +2095,7 @@ export function createPlugin() {
       const isUsableAndCapable = (
         modelId: string | null,
         tier: Tier,
+        requiredContextTokens: number | undefined,
         config: ResolvedConfig,
         laneLedger: LaneLedger,
         laneOutageOverride: LaneOutageOverride | null,
@@ -2027,6 +2105,7 @@ export function createPlugin() {
         if (!modelId) return false;
         const model = config.models.find((m) => m.id === modelId && m.enabled);
         if (!model) return false;
+        if (typeof requiredContextTokens === "number" && model.contextWindow < requiredContextTokens) return false;
         if (config.pacing.mode === "off") return true;
         if (hardStopExcluded(laneLedger, model)) return false;
         if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
@@ -2128,11 +2207,17 @@ export function createPlugin() {
                 continue;
               }
 
+              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+              if (!selectedModel) continue;
               await ctx.issues.update(
                 issueId,
-                {
-                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
-                } as Parameters<typeof ctx.issues.update>[1],
+                modelOverrideForContext({
+                  model: selectedModel,
+                  fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                  compactionRatio: config.selection.compactionRatio,
+                  agentEnv: described.agentEnv,
+                  existingOverrideEnv: described.existingOverrideEnv,
+                }) as Parameters<typeof ctx.issues.update>[1],
                 company.id,
               );
               await ctx.activity.log({
@@ -2208,17 +2293,17 @@ export function createPlugin() {
               if (!tier) continue;
 
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
-              if (isUsableAndCapable(pinnedModelId, tier, config, laneLedger, laneOutageOverride, modelScores, nowIso)) {
-                continue;
-              }
-
-              const result = await advise(company.id, { issueId }, false, undefined, true);
-              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
-              if (result.decision.modelId === pinnedModelId) continue;
+              const contextEstimate = estimateIssueContext({
+                lastRunInputTokens: described.lastRunInputTokens,
+                lastRunCachedInputTokens: described.lastRunCachedInputTokens,
+                fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+              });
+              described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
               if (
-                !isUsableAndCapable(
-                  result.decision.modelId,
+                isUsableAndCapable(
+                  pinnedModelId,
                   tier,
+                  described.descriptor.requiredContextTokens,
                   config,
                   laneLedger,
                   laneOutageOverride,
@@ -2229,11 +2314,35 @@ export function createPlugin() {
                 continue;
               }
 
+              const result = await advise(company.id, { issueId }, false, undefined, true);
+              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+              if (result.decision.modelId === pinnedModelId) continue;
+              if (
+                !isUsableAndCapable(
+                  result.decision.modelId,
+                  tier,
+                  described.descriptor.requiredContextTokens,
+                  config,
+                  laneLedger,
+                  laneOutageOverride,
+                  modelScores,
+                  nowIso,
+                )
+              ) {
+                continue;
+              }
+
+              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+              if (!selectedModel) continue;
               await ctx.issues.update(
                 issueId,
-                {
-                  assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
-                } as Parameters<typeof ctx.issues.update>[1],
+                modelOverrideForContext({
+                  model: selectedModel,
+                  fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                  compactionRatio: config.selection.compactionRatio,
+                  agentEnv: described.agentEnv,
+                  existingOverrideEnv: described.existingOverrideEnv,
+                }) as Parameters<typeof ctx.issues.update>[1],
                 company.id,
               );
               await ctx.activity.log({
@@ -2383,11 +2492,17 @@ export function createPlugin() {
 
                 if (!(cheaper || incapable || busier)) continue;
 
+                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+                if (!selectedModel) continue;
                 await ctx.issues.update(
                   issueId,
-                  {
-                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
-                  } as Parameters<typeof ctx.issues.update>[1],
+                  modelOverrideForContext({
+                    model: selectedModel,
+                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                    compactionRatio: config.selection.compactionRatio,
+                    agentEnv: described.agentEnv,
+                    existingOverrideEnv: described.existingOverrideEnv,
+                  }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,
                 );
                 await ctx.activity.log({
@@ -2411,11 +2526,17 @@ export function createPlugin() {
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 if (result.decision.modelId === floorModelId) continue;
 
+                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+                if (!selectedModel) continue;
                 await ctx.issues.update(
                   issueId,
-                  {
-                    assigneeAdapterOverrides: { adapterConfig: { model: result.decision.modelId } },
-                  } as Parameters<typeof ctx.issues.update>[1],
+                  modelOverrideForContext({
+                    model: selectedModel,
+                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+                    compactionRatio: config.selection.compactionRatio,
+                    agentEnv: described.agentEnv,
+                    existingOverrideEnv: described.existingOverrideEnv,
+                  }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,
                 );
                 await ctx.activity.log({

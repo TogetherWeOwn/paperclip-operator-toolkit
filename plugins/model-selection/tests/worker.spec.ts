@@ -104,15 +104,109 @@ describe("worker", () => {
     expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
   });
 
-  it("pins the model and preserves unrelated labels when enforcing", async () => {
-    // The issue already carries tier:T1, so no label is added — but the write
-    // must still not disturb the labels that are there.
-    const enforcing = await boot(baseConfig({ selection: { enabled: true, mode: "enforce" } }));
-    await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+  it("includes cached input from the last issue run and skips a narrow candidate", async () => {
+    const t1 = MODELS.find((model) => model.tier === "T1")!;
+    const narrow = { ...t1, id: "narrow", contextWindow: 200_000, costPerMTokIn: 0.1 };
+    const wide = { ...t1, id: "wide", contextWindow: 1_000_000 };
+    const enforcing = await boot(
+      baseConfig({ selection: { enabled: true, mode: "enforce" }, models: [narrow, wide] }),
+    );
+    enforcing.ctx.db.query = async (sql: string) =>
+      sql.includes("usage_json->>'inputTokens'")
+        ? ([{ input_tokens: 100_000, cached_input_tokens: 300_000 }] as never)
+        : ([] as never);
+
+    const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    const decision = (result as {
+      data: { decision: { modelId: string; rejections: Array<{ modelId: string; stage: string }> } };
+    }).data.decision;
+    expect(decision.modelId).toBe("wide");
+    expect(decision.rejections).toContainEqual(
+      expect.objectContaining({ modelId: "narrow", stage: "context-window" }),
+    );
+  });
+
+  it("preserves a narrow assignee-floor model when only cumulative tier totals exist", async () => {
+    const narrowT3 = {
+      ...MODELS.find((model) => model.tier === "T3")!,
+      contextWindow: 200_000,
+    };
+    const floorOnly = issue({
+      assigneeAgentId: AGENT,
+      labels: [{ id: OTHER_LABEL_ID, companyId: COMPANY, name: "area:platform" }],
+      labelIds: [OTHER_LABEL_ID],
+    } as unknown as Partial<Issue>);
+    const enforcing = await boot(
+      baseConfig({
+        selection: { enabled: true, mode: "enforce", defaultTier: "T1" },
+        models: [narrowT3],
+      }),
+      floorOnly,
+      [
+        {
+          id: AGENT,
+          companyId: COMPANY,
+          name: "Mechanical worker",
+          status: "active",
+          adapterType: "claude_local",
+          adapterConfig: { model: narrowT3.id },
+        } as never,
+      ],
+    );
+    const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    const decision = (result as {
+      data: { decision: { modelId: string | null; judgement: { source: string; tier: string } } };
+    }).data.decision;
+
+    expect(decision.judgement).toMatchObject({ source: "agent-floor", tier: "T3" });
+    expect(decision.modelId).toBe(narrowT3.id);
+    const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
+    expect(after?.assigneeAdapterOverrides).toEqual({
+      adapterConfig: {
+        model: narrowT3.id,
+        env: {
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+        },
+      },
+    });
+  });
+
+  it("pins a narrow model with merged env and preserves unrelated labels", async () => {
+    const narrowModels = MODELS.map((model) =>
+      model.id === "claude-opus-5" ? { ...model, contextWindow: 200_000 } : model,
+    );
+    const assigned = issue({ assigneeAgentId: AGENT });
+    const enforcing = await boot(
+      baseConfig({ selection: { enabled: true, mode: "enforce" }, models: narrowModels }),
+      assigned,
+      [
+        {
+          id: AGENT,
+          companyId: COMPANY,
+          name: "Agent",
+          status: "active",
+          adapterType: "claude_local",
+          adapterConfig: {
+            model: "claude-sonnet-5",
+            env: {
+              KEEP_ME: { type: "plain", value: "yes" },
+              CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "1000000" },
+            },
+          },
+        } as never,
+      ],
+    );
+    await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE, requiredContextTokens: 100_000 }, runCtx);
 
     const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
     expect(after?.assigneeAdapterOverrides).toEqual({
-      adapterConfig: { model: "claude-opus-5" },
+      adapterConfig: {
+        model: "claude-opus-5",
+        env: {
+          KEEP_ME: { type: "plain", value: "yes" },
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+        },
+      },
     });
     expect(enforcing.activity).toHaveLength(1);
     expect(enforcing.activity[0]?.metadata?.tierSource).toBe("issue-label");

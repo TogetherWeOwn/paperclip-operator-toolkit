@@ -93,6 +93,30 @@ describe("selection", () => {
     expect(floored).not.toContain("claude-opus-5");
   });
 
+  it("skips a cheaper model whose context window is below the issue estimate", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const narrow = model(t1, {
+      id: "narrow-cheap",
+      contextWindow: 200_000,
+      costPerMTokIn: 0.1,
+      costPerMTokOut: 0.1,
+      costPerMTokCacheRead: 0.1,
+    });
+    const wide = model(t1, { id: "wide", contextWindow: 1_000_000 });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], requiredContextTokens: 202_741 },
+      config: config({ models: [narrow, wide] }),
+    });
+
+    expect(decision.modelId).toBe("wide");
+    expect(decision.rejections).toContainEqual({
+      modelId: "narrow-cheap",
+      stage: "context-window",
+      reason: "context window 200000 < required 202741",
+    });
+  });
+
   it("excludes a model missing a required capability, however cheap it is", () => {
     const decision = selectModel({
       ...base,
@@ -101,6 +125,29 @@ describe("selection", () => {
     });
     expect(decision.modelId).toBe("claude-opus-5");
     expect(decision.rejections.some((r) => r.stage === "capability" && r.modelId.includes("haiku"))).toBe(true);
+  });
+
+  it("declines a sticky model that no longer fits the issue context", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const narrow = model(t1, { id: "narrow-sticky", contextWindow: 200_000 });
+    const wide = model(t1, { id: "wide-fallback", contextWindow: 1_000_000 });
+    const decision = selectModel({
+      ...base,
+      descriptor: {
+        issueId: "i1",
+        labelNames: ["tier:T1"],
+        stickyModelId: narrow.id,
+        requiredContextTokens: 202_741,
+      },
+      config: config({ models: [narrow, wide] }),
+    });
+
+    expect(decision.modelId).toBe(wide.id);
+    expect(decision.rejections).toContainEqual({
+      modelId: narrow.id,
+      stage: "context-window",
+      reason: "context window 200000 < required 202741",
+    });
   });
 
   it("keeps the model already running when it still clears the tier floor", () => {

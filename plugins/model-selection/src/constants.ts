@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.model-selection";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.3.1";
 
 export const TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
