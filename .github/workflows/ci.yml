@@ -487,7 +487,7 @@ jobs:
     # is deliberately no ubuntu-latest fallback; an unavailable private runner
     # must queue visibly rather than consume paid minutes or bypass isolation.
     runs-on: [self-hosted, two-selfhosted]
-    timeout-minutes: 100
+    timeout-minutes: 150
     steps:
       - name: Prove the private runner selected this job
         shell: bash
