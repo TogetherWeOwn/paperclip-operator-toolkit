@@ -59,6 +59,12 @@ names which of the two refused.
 The registry lives in `capability_gate.sh` as `CAPABILITY_REGISTRY`. Editing it is a reviewed
 commit; there is no runtime path that adds an entry.
 
+`github.actions.read` is registered as a T0-owned, repository-scoped `tool` capability with
+`rollback: full`. Its intended use is reading Actions job metadata such as `runner_name`.
+GitHub exposes no narrower App permission for that endpoint; the same `actions:read` permission
+also permits workflow-log downloads. Approval of this capability must therefore preserve the
+repository scope rather than treating “read” as access to job metadata alone.
+
 | field | meaning |
 |---|---|
 | `domain` | the `orgRoleId` that owns this capability and is therefore its responsible decider |

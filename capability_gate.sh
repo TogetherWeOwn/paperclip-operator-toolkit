@@ -227,6 +227,8 @@ pcsql() { pcsql_run -Atq -v ON_ERROR_STOP=1 "$@"; }
 CAPABILITY_REGISTRY='{
   "github.repo.read":        {"domain":"T0","class":"tool",      "rollback":"full",
     "note":"Read-only clone access to a company repository."},
+  "github.actions.read":     {"domain":"T0","class":"tool",      "rollback":"full",
+    "note":"Repository-scoped GitHub Actions read access for job metadata such as runner_name. GitHub offers no narrower App permission, so this also permits workflow-log downloads."},
   "github.repo.push":        {"domain":"T0","class":"tool",      "rollback":"partial",
     "note":"Push access. Rollback is partial: a force-push can be reverted, a leaked secret in history cannot."},
   "github.token":            {"domain":"T0","class":"credential","rollback":"full",

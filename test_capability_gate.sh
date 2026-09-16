@@ -104,6 +104,14 @@ eq "every registry entry carries a domain, class, rollback and note" \
    "$(jq '[to_entries[]|select(.value.domain and .value.class and .value.rollback and .value.note)]|length' <<<"$("$G" registry --json)")" \
    "$(jq 'length' <<<"$("$G" registry --json)")"
 
+actions_read_entry="$(jq -c '.["github.actions.read"] // empty' <<<"$("$G" registry --json)")"
+eq "GitHub Actions read is a T0-owned, reversible tool capability" \
+   "$(jq -r '[.domain,.class,.rollback]|join("/")' <<<"$actions_read_entry")" "T0/tool/full"
+eq "its note limits the grant to repository scope" \
+   "$(jq -r '.note|contains("Repository-scoped")' <<<"$actions_read_entry")" "true"
+eq "its note discloses that the same permission permits workflow-log downloads" \
+   "$(jq -r '.note|contains("workflow-log downloads")' <<<"$actions_read_entry")" "true"
+
 # These two parameters deliberately diverge from the provisioning defaults in
 # lib/reqrecord.sh. They used to live in the byte-identity suite that guarded a
 # duplicated library; keep asserting the divergence now that the queue sources
@@ -201,6 +209,8 @@ eq "the record carries the reasoning verbatim" \
 hdr "4. Who decides — derived from the capability's domain"
 eq "a tool capability is decided by its domain owner alone" "$(mode github.repo.push grant ENG)" "domain"
 eq "  ...and that is T0" "$(decider github.repo.push grant ENG)" "T0"
+eq "GitHub Actions read routes to the T0 domain owner alone" \
+   "$(mode github.actions.read read ENG)/$(decider github.actions.read read ENG)" "domain/T0"
 eq "a finance capability is NOT decided by the tech chief" "$(decider company.spend read ENG)" "F0"
 
 # SEPARATION OF DUTIES, and it is the ESCALATION that provides it, not a
@@ -237,6 +247,18 @@ ORG
 eq "an entirely terminated chain is owner-reserved, not assigned to a corpse" \
    "$(mode github.repo.push grant ENG)" "owner"
 ok_r no_live_decider github.repo.push grant ENG "  ...and the rule names the missing decider"
+base_org
+
+# If T0 is not live, this new route must fail closed just like every other T0
+# capability. This is the focused negative arm: registration must not turn a
+# missing authority into an implicit approval path.
+cat > "$ORG_SNAPSHOT" <<'ORG'
+u-eng	ENG	E0_SPECIALIST	idle		Web Engineer
+u-s0	S0	B3_SECURITY_CHIEF	idle		CISO
+ORG
+eq "GitHub Actions read is owner-reserved when no T0 decider exists" \
+   "$(mode github.actions.read read ENG)" "owner"
+ok_r no_live_decider github.actions.read read ENG "  ...and the fail-closed rule names the missing T0 decider"
 base_org
 
 # ---------------------------------------------------------------------------
