@@ -326,7 +326,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: org_fixture
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U postgres -d org_fixture"
           --health-interval 5s
@@ -334,7 +334,6 @@ jobs:
           --health-retries 20
     env:
       PGHOST: 127.0.0.1
-      PGPORT: 5432
       PGUSER: postgres
       PGPASSWORD: postgres
       PGDATABASE: org_fixture
@@ -345,6 +344,8 @@ jobs:
       PAPERCLIP_STUB_LOG: ${{ github.workspace }}/paperclip-stub.jsonl
       GRANT_LOG: ${{ github.workspace }}/provisioner-grant-log.jsonl
     steps:
+      - name: Resolve the postgres service port
+        run: echo "PGPORT=${{ job.services.postgres.ports[5432] }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Install Postgres client and jq
         uses: awalsh128/cache-apt-pkgs-action@latest
