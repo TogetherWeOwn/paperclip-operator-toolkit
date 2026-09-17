@@ -69,6 +69,7 @@ var JOB_KEYS = {
   dispatchSweep: "dispatch-sweep"
 };
 var TIERS = ["T1", "T2", "T3"];
+var NO_ELIGIBLE_NOTICE_THROTTLE_MS = 60 * 60 * 1e3;
 var PACING_MODES = ["off", "shadow", "enforce"];
 var LOCAL_FOLDER_KEYS = {
   /**

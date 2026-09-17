@@ -618,6 +618,79 @@ const mutants = [
     from: "\n              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
     to: "\n              const result = await advise(company.id, { issueId }, false, undefined, true);",
   },
+  // --- TOG-3111 named mutants: creation-time pin + unpinnable visibility ----
+  // NOTE: the write-path idleness/pin guards are deliberately NOT here. Each
+  // is enforced twice — once at the `advise` result (`!result.isIdle`,
+  // `result.pinnedModelId !== null`) and again inside
+  // `balanceWriteStillSafe`'s fresh re-read — so any single-line mutant of
+  // either copy survives the suite. That's defense in depth working as
+  // designed, not a coverage gap: what IS mutably load-bearing below is the
+  // event wiring, the guards no later re-read duplicates, and the AC3
+  // throttle.
+  {
+    // AC2 exposure-window wiring: driving `pinAtDecisionTime` only from
+    // tests (or only from the scheduled passes) left the event path
+    // untested. Re-pointing the registration at an event that never fires
+    // must fail the issue.created happy path.
+    name: "disable-creation-pin-wiring",
+    file: "src/worker.ts",
+    from: '      ctx.events.on("issue.created", async (event) => {',
+    to: '      ctx.events.on("issue.never", async (event) => {',
+  },
+  {
+    // Same wiring exposure for the OTHER creation moment: a card created
+    // unassigned then assigned by PATCH never sees issue.created with an
+    // assignee (TOG-3008 §3), so only this arm pins it.
+    name: "disable-assignment-arm-wiring",
+    file: "src/worker.ts",
+    from: '            await pinAtDecisionTime(event.companyId, issueId, "issue.updated:assignment");',
+    to: "            ;",
+  },
+  {
+    // Agent-to-agent reassignment must stay repinPass territory: a card that
+    // already had its creation moment under the previous assignee must not be
+    // re-pinned by the event path.
+    name: "assignment-arm-fires-on-reassignment",
+    file: "src/worker.ts",
+    from: "        if (issueId && assignedTo && assignment.from == null) {",
+    to: "        if (issueId && assignedTo) {",
+  },
+  {
+    // `issue.created` carries no assignee; classifying (and later pinning)
+    // an unassigned card would spend a classifier call per board edit and
+    // pin at the wrong moment. The unassigned test observes the classifier
+    // call count directly.
+    name: "classify-unassigned-card-at-creation",
+    file: "src/worker.ts",
+    from: "        if (!described.assigneeAgentId) return;",
+    to: "        if (false) return;",
+  },
+  {
+    // AC4 residual class: when the router's pick IS the floor model, the
+    // creation pin must write nothing (labelOnlyPass/balancePass convention)
+    // — only the core-side dispatch gate closes that gap by construction.
+    // No later re-read duplicates this check, so the floor-equal test is the
+    // sole killer.
+    name: "creation-pin-ignores-floor-equal",
+    file: "src/worker.ts",
+    from:
+      "        if (result.pinnedModelId !== null) return;\n" +
+      "        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);\n" +
+      "        if (result.decision.modelId === floorModelId) {",
+    to:
+      "        if (result.pinnedModelId !== null) return;\n" +
+      "        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);\n" +
+      "        if (false) {",
+  },
+  {
+    // AC3: the notice must fire once per throttle window, not once per
+    // 10-minute pass firing — a sustained outage must stay visible without
+    // flooding the card's activity feed.
+    name: "unpinnable-notice-unthrottled",
+    file: "src/worker.ts",
+    from: "          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;",
+    to: "          if (false) return;",
+  },
 ];
 
 function runTests() {

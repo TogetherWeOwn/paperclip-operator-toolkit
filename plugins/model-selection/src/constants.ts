@@ -221,7 +221,24 @@ export const PLUGIN_STATE_KEYS = {
    * absorbing it does not collide with `laneLedger`/etc.
    */
   dispatchLastFiring: "dispatchLastFiring",
+  /**
+   * TOG-3111 AC3. Per-issue timestamp of the last "cannot pin — no eligible
+   * model on any serviceable lane" activity notice, so a card that stays
+   * unpinnable across repeated pass firings surfaces once per throttle window
+   * instead of on every 10-minute tick. Same shape/rationale as
+   * `tierExhaustedAlarms`, scoped to the per-card notice rather than the
+   * operator alarm card.
+   */
+  noEligibleNotices: "noEligibleNotices",
 } as const;
+
+/**
+ * TOG-3111 AC3. Minimum gap between repeated per-card "cannot pin" notices
+ * for the same issue. One hour: long enough that a sustained outage is still
+ * visible on the card's activity feed, short enough that a pass every 10
+ * minutes cannot flood it.
+ */
+export const NO_ELIGIBLE_NOTICE_THROTTLE_MS = 60 * 60 * 1000;
 
 /** aa.ai's public leaderboard page — the only viable data source (no documented API exists). */
 export const AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";

@@ -331,6 +331,76 @@ safety/authority violation.
 
 ---
 
+## TOG-3111: the pin moves to card creation
+
+Owner directive (2026-09-16): *"a task should not start until the model router
+has set its model."* The scheduled passes (`*/10`) cannot honor that — their row
+queries **exclude cards with a running run**, and a dispatched card is running
+within ~0.2–0.3 s of creation (`docs/routing/TOG-3008-issue-created-pin-feasibility.md`),
+so a card's whole first turn happens before any pass can even see it. It lands
+on the agent floor, which is exactly what the directive forbids.
+
+The plugin half (`src/worker.ts`, `tests/creation-pin.spec.ts`) adds two event
+handlers that see the card from the stream the moment it exists:
+
+- **`issue.created`** — if the card already carries an assignee: classify (if
+  unlabelled), write the `tier:*` label (union, never replace — the host
+  replaces the label set on a `labelIds` write), then pin. This also fixes the
+  classify-skip: `classifyIssues` never saw running cards, so they never got a
+  tier label at all.
+- **`issue.updated` assignment arm** — cards are frequently created unassigned
+  and assigned by a later PATCH, after `issue.created` already fired and found
+  no assignee (the event payload carries none). `assigneeAgentId` null → agent
+  is the other "creation moment". Agent-to-agent reassignment is deliberately
+  ignored: that card already had its creation moment, and moving it is
+  `repinPass` territory.
+
+Semantics are **label-tier, not balance-tier**: the event pin is
+`advise(…, forceTier = the card's own tier label)` — the same decision
+`labelOnlyPass` would produce, just earlier in time. An event path that changed
+routing policy (e.g. adopted `balancePass`'s forced T1) would be a silent policy
+change. The tier is passed explicitly to `advise` rather than re-read from the
+issue after the label write, so correctness never depends on the host's
+label-enriched read-back landing within the same tick.
+
+Guards, in order: `classification.enabled` kill switch → assignee present →
+open status → no `pin:operator` → no existing pin → (classify+label if needed)
+→ advise outcome `selected` → idle + open + unpinned re-read from the advise
+result → **floor-equal skip** → `balanceWriteStillSafe` fresh re-read → write.
+Never re-pins a live card (an override landing on a running card resets a warm
+session); never throws out of an event handler (one card's pin failure must not
+break the loop for the next handler).
+
+**Honest limit:** this cannot own the first turn either. The event bus is
+fire-and-forget and loses the same measured dispatch race — the handler runs at
+~0.26 s against a ~0.2–0.3 s dispatch window. What it does guarantee: every card
+the passes were structurally missing gets labelled and pinned the moment it is
+idle (between turns), which shrinks the unpinned window from "the whole first
+turn" to "one turn at most" — and is the release mechanism the core-side
+dispatch gate needs once it lands (TOG-3111 half 1,
+`docs/upstream/paperclip-dispatch-gate-unpinned-issues.md`: defer
+issue-bound agent-assigned wakes until the card carries an
+`adapterConfig.model` pin).
+
+**Floor-equal residual class:** when the router's pick *is* the floor model,
+the event path (matching pass convention) writes no override — the card already
+runs exactly that model, and a redundant override only adds churn. This is the
+one class where "the router has set the model" is true in the decision stream
+but no pin exists on the card; only the core gate (which can check either)
+closes it by construction.
+
+### Unpinnable cards must be visible (AC3)
+
+`maybeLogUnpinnableCard`: when `advise` returns `no-eligible-model` or
+`tier-exhausted` — from the event path, `labelOnlyPass`, or `balancePass`'s
+unpinned branch, all of which used to `continue` silently — one activity notice
+per hour (`NO_ELIGIBLE_NOTICE_THROTTLE_MS`) lands **on that card**, naming the
+outcome and every lane's state (`lane=verdict@util%`), so a sustained outage
+reads as "cannot pin, here is why" instead of "no news". The throttle state
+(`noEligibleNotices`) prunes entries older than 7 days on write.
+
+---
+
 ## Typed narrower than the host
 
 Three places where the SDK's types are narrower than what the host actually
@@ -372,11 +442,13 @@ root: `ctx.issues`, `ctx.agents`, `ctx.companies`, `ctx.db`, `ctx.state`, ….
 ```
 npm run verify     # typecheck + tests + named mutants + build
 npm test           # unit + reviewed live-config fixture
-npm run test:mutants  # 12 named mutants: tier order, fallback revival, releasedAt
-                       # removal, rework-as-n, 14-day censor, missing-acceptance
-                       # default, cohort randomization, run/card conflation,
-                       # rolling-clock injection, lane-posture bypass, per-tier
-                       # lane collapse, disallowed activity_log read
+npm run test:mutants  # 26 named mutants, one per acceptance-criterion trap:
+                       # tier order, fallback revival, releasedAt removal,
+                       # rework-as-n, 14-day censor, missing-acceptance default,
+                       # cohort randomization, run/card conflation, rolling-clock
+                       # injection, lane-posture bypass, per-tier lane collapse,
+                       # disallowed activity_log read, shadow-pair wiring, earn-in
+                       # guards, TOG-3111 creation-pin wiring/guards/notice throttle
 npm run build      # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce

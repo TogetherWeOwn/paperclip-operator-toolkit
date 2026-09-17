@@ -160,8 +160,18 @@ var PLUGIN_STATE_KEYS = {
    * (`namespace: "dispatch"`, matching the original plugin's key exactly) so
    * absorbing it does not collide with `laneLedger`/etc.
    */
-  dispatchLastFiring: "dispatchLastFiring"
+  dispatchLastFiring: "dispatchLastFiring",
+  /**
+   * TOG-3111 AC3. Per-issue timestamp of the last "cannot pin — no eligible
+   * model on any serviceable lane" activity notice, so a card that stays
+   * unpinnable across repeated pass firings surfaces once per throttle window
+   * instead of on every 10-minute tick. Same shape/rationale as
+   * `tierExhaustedAlarms`, scoped to the per-card notice rather than the
+   * operator alarm card.
+   */
+  noEligibleNotices: "noEligibleNotices"
 };
+var NO_ELIGIBLE_NOTICE_THROTTLE_MS = 60 * 60 * 1e3;
 var AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";
 var AA_FETCH_TIMEOUT_MS = 1e4;
 var AA_MAX_RESPONSE_BYTES = 8e6;
@@ -3685,6 +3695,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           isIdle,
           title: String(issue.title ?? ""),
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
+          assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
+          description: String(issue.description ?? ""),
           agentEnv,
           existingOverrideEnv,
           contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache)
@@ -4053,10 +4065,23 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       ctx.events.on("issue.updated", async (event) => {
         const payload = asRecord(event.payload);
         const changes = asRecord(payload.changes);
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        const assignment = asRecord(changes.assigneeAgentId);
+        const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
+        if (issueId && assignedTo && assignment.from == null) {
+          try {
+            await pinAtDecisionTime(event.companyId, issueId, "issue.updated:assignment");
+          } catch (cause) {
+            ctx.logger.error("assignment-time pin failed", {
+              companyId: event.companyId,
+              issueId,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
         const status = asRecord(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
-        const issueId = typeof event.entityId === "string" ? event.entityId : null;
         if (!issueId || from !== "done" || to === "done" || to === "cancelled" || !to) return;
         await appendReworkSignal(event.companyId, {
           issueId,
@@ -4078,6 +4103,185 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           kind: "rejected",
           excludeAgentId: typeof event.actorId === "string" ? event.actorId : null
         });
+      });
+      const maybeLogUnpinnableCard = async (companyId, issueId, identifier, decision) => {
+        if (!decision) return;
+        if (decision.outcome !== "no-eligible-model" && decision.outcome !== "tier-exhausted") return;
+        const key = {
+          scopeKind: "company",
+          scopeId: companyId,
+          stateKey: PLUGIN_STATE_KEYS.noEligibleNotices
+        };
+        const stored = asRecord(await ctx.state.get(key));
+        const rawLast = stored[issueId];
+        if (typeof rawLast === "string") {
+          const lastAtMs = Date.parse(rawLast);
+          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;
+        }
+        const laneLedger = await readLaneLedger(companyId);
+        const laneStates = Object.values(laneLedger).map(
+          (entry) => `${entry.laneId}=${entry.verdict ?? "?"}@${Math.round(laneEffectiveUtilization(laneLedger, entry.laneId) * 100)}%${entry.error ? "(poll-error)" : ""}`
+        ).join(" ");
+        const pruned = {};
+        for (const [id, at] of Object.entries(stored)) {
+          if (typeof at === "string" && Date.now() - Date.parse(at) < 7 * 24 * 60 * 60 * 1e3) pruned[id] = at;
+        }
+        await ctx.state.set(key, { ...pruned, [issueId]: (/* @__PURE__ */ new Date()).toISOString() });
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection cannot pin this card: ${decision.outcome}. Lane states: ${laneStates || "no lane data"}. It stays on its current model until a lane recovers or an operator pins one (TOG-3111).`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            outcome: decision.outcome,
+            identifier,
+            lanes: Object.values(laneLedger).map((entry) => ({
+              laneId: entry.laneId,
+              verdict: entry.verdict,
+              error: entry.error
+            })),
+            trace: decision.trace
+          }
+        });
+      };
+      const pinAtDecisionTime = async (companyId, issueId, source) => {
+        const config = await companyConfig(companyId);
+        if (!config.classification.enabled) return;
+        const described = await describeIssue(companyId, issueId, {});
+        if (!described) return;
+        if (!described.assigneeAgentId) return;
+        if (!balanceOpenStatuses.has(described.status)) return;
+        if (described.hasOperatorPin) return;
+        if (described.descriptor.pinnedModelId) return;
+        let tier2 = described.hasTierLabel ? tierFromLabels(described.descriptor.labelNames) : null;
+        if (!described.hasTierLabel) {
+          if (!config.classification.baseUrl || !config.classification.modelId) return;
+          let apiKey = null;
+          if (config.classification.apiKeySecretRef) {
+            try {
+              apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef, {
+                companyId,
+                configPath: "classification.apiKeySecretRef"
+              });
+            } catch {
+              ctx.logger.error("creation-pin classification secret unavailable", { companyId, issueId });
+              return;
+            }
+          }
+          const classified = await callClassifier(
+            {
+              baseUrl: config.classification.baseUrl,
+              protocol: config.classification.protocol,
+              modelId: config.classification.modelId,
+              apiKey,
+              system: RUBRIC,
+              userPrompt: buildClassificationPrompt(
+                described.title,
+                described.description,
+                described.descriptor.agentName ?? "",
+                config.classification.descriptionChars
+              ),
+              maxOutputTokens: config.classification.maxOutputTokens,
+              requestTimeoutMs: config.classification.requestTimeoutMs,
+              maxResponseBytes: config.classification.maxResponseBytes
+            },
+            classificationHttp
+          );
+          if (!classified.text) {
+            ctx.logger.info("creation-pin classification skipped", {
+              companyId,
+              issueId,
+              why: classified.error
+            });
+            return;
+          }
+          const judgement = parseClassificationResponse(classified.text);
+          if (!judgement) {
+            ctx.logger.info("creation-pin classification unparseable", { companyId, issueId });
+            return;
+          }
+          const { labelTier } = resolveClassifiedTiers(judgement, {
+            t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+            t2ConfidenceFloor: config.classification.t2ConfidenceFloor
+          });
+          tier2 = labelTier;
+          const labelId = config.tierLabelIds[labelTier];
+          if (labelId) {
+            await ctx.issues.update(
+              issueId,
+              { labelIds: [.../* @__PURE__ */ new Set([...described.existingLabelIds, labelId])] },
+              companyId
+            );
+          }
+          if (judgement.exclusion) {
+            const exclusions = await readClassificationExclusions(companyId);
+            await ctx.state.set(classificationExclusionsKey(companyId), { ...exclusions, [issueId]: true });
+          }
+          await ctx.activity.log({
+            companyId,
+            message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""} at card creation`,
+            entityType: "issue",
+            entityId: issueId,
+            metadata: {
+              tier: labelTier,
+              confidence: judgement.confidence,
+              reason: judgement.reason,
+              source
+            }
+          });
+        }
+        if (!tier2) return;
+        const result = await advise(companyId, { issueId }, false, tier2, false);
+        if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+          await maybeLogUnpinnableCard(companyId, issueId, described.identifier, result?.decision ?? null);
+          return;
+        }
+        if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return;
+        if (result.pinnedModelId !== null) return;
+        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+        if (result.decision.modelId === floorModelId) {
+          ctx.logger.info("creation-time pin skipped: pick equals floor", { companyId, issueId, source });
+          return;
+        }
+        const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+        if (!selectedModel) return;
+        if (!await balanceWriteStillSafe(companyId, issueId, null, config.models)) return;
+        await ctx.issues.update(
+          issueId,
+          modelOverrideForContext({
+            model: selectedModel,
+            fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+            compactionRatio: config.selection.compactionRatio,
+            agentEnv: result.agentEnv,
+            existingOverrideEnv: result.existingOverrideEnv
+          }),
+          companyId
+        );
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection pinned ${result.decision.modelId} (${result.decision.effectiveTier}) at card creation \u2014 TOG-3111 (${source})`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            modelId: result.decision.modelId,
+            tier: result.decision.effectiveTier,
+            source,
+            trace: result.decision.trace
+          }
+        });
+      };
+      ctx.events.on("issue.created", async (event) => {
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        if (!issueId) return;
+        try {
+          await pinAtDecisionTime(event.companyId, issueId, "issue.created");
+        } catch (cause) {
+          ctx.logger.error("creation-time pin failed", {
+            companyId: event.companyId,
+            issueId,
+            error: cause instanceof Error ? cause.message : String(cause)
+          });
+        }
       });
       ctx.tools.register(
         TOOL_NAMES.ancillaryDrift,
@@ -4838,6 +5042,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const result = await advise(company.id, { issueId }, false, void 0, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                 ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier: tier2 });
+                await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
                 continue;
               }
               const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
@@ -5129,7 +5334,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 balanced += 1;
               } else {
                 const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
-                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                  await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
+                  continue;
+                }
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
                 if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);

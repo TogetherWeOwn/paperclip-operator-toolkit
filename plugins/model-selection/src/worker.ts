@@ -18,6 +18,7 @@ import {
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
   LABEL_ONLY_PASS_FETCH_LIMIT,
+  NO_ELIGIBLE_NOTICE_THROTTLE_MS,
   OPERATOR_PIN_LABEL,
   PLUGIN_STATE_KEYS,
   REJECTION_WINDOW_MS,
@@ -708,6 +709,10 @@ export function createPlugin() {
         existingOverrideEnv: Record<string, unknown>;
         /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
         contextUsage: () => Promise<ContextUsage>;
+        /** TOG-3111: the assignment signal a creation-time pin keys on. */
+        assigneeAgentId: string | null;
+        /** TOG-3111: raw description for the classification prompt. */
+        description: string;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
@@ -795,6 +800,8 @@ export function createPlugin() {
           isIdle,
           title: String(issue.title ?? ""),
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
+          assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
+          description: String(issue.description ?? ""),
           agentEnv,
           existingOverrideEnv,
           contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache),
@@ -1292,10 +1299,32 @@ export function createPlugin() {
       ctx.events.on("issue.updated", async (event) => {
         const payload = asRecord(event.payload);
         const changes = asRecord(payload.changes);
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+
+        // TOG-3111: fresh assignment (null -> agent id) is the other
+        // "creation moment" — cards are frequently created unassigned and
+        // assigned by a later PATCH, after `issue.created` already fired and
+        // found no assignee. Agent-to-agent reassignment is deliberately out
+        // of scope: that card already had its creation moment under the
+        // previous assignee, and moving an existing card is repinPass
+        // territory, not a creation pin.
+        const assignment = asRecord(changes.assigneeAgentId);
+        const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
+        if (issueId && assignedTo && assignment.from == null) {
+          try {
+            await pinAtDecisionTime(event.companyId, issueId, "issue.updated:assignment");
+          } catch (cause) {
+            ctx.logger.error("assignment-time pin failed", {
+              companyId: event.companyId,
+              issueId,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+
         const status = asRecord(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
-        const issueId = typeof event.entityId === "string" ? event.entityId : null;
         if (!issueId || from !== "done" || to === "done" || to === "cancelled" || !to) return;
         await appendReworkSignal(event.companyId, {
           issueId,
@@ -1324,6 +1353,266 @@ export function createPlugin() {
           kind: "rejected",
           excludeAgentId: typeof event.actorId === "string" ? event.actorId : null,
         });
+      });
+
+      // --- TOG-3111: creation-time pin + unpinnable-card visibility ---------
+      // The scheduled passes are `*/10` and their row queries EXCLUDE cards
+      // with a running/queued run — a card dispatched within seconds of
+      // creation (measured 0.2-0.3 s create-to-first-run,
+      // docs/routing/TOG-3008-issue-created-pin-feasibility.md) is already
+      // running at every pass firing, so it stays unlabelled and unpinned for
+      // its whole first turn and lands on the agent floor. These handlers see
+      // the card from the event stream the moment it exists. They cannot own
+      // the first turn either (the bus is fire-and-forget and loses the same
+      // measured race); they pin every card the passes were missing as soon
+      // as it is idle — exactly the release mechanism the core-side dispatch
+      // gate (TOG-3111 half 1) needs once it lands.
+
+      /**
+       * TOG-3111 AC3. One visible activity notice per throttle window for a
+       * card the router looked at and could not pin — `no-eligible-model` or
+       * `tier-exhausted`. Without this, labelOnlyPass/balancePass `continue`
+       * silently, and a sustained lane outage reads as "no news" on every
+       * card it strands. Lane states are embedded so the notice answers
+       * "why" without a second lookup.
+       */
+      const maybeLogUnpinnableCard = async (
+        companyId: string,
+        issueId: string,
+        identifier: string | null,
+        decision: SelectionDecision | null,
+      ): Promise<void> => {
+        if (!decision) return;
+        if (decision.outcome !== "no-eligible-model" && decision.outcome !== "tier-exhausted") return;
+        const key = {
+          scopeKind: "company" as const,
+          scopeId: companyId,
+          stateKey: PLUGIN_STATE_KEYS.noEligibleNotices,
+        };
+        const stored = asRecord(await ctx.state.get(key));
+        const rawLast = stored[issueId];
+        if (typeof rawLast === "string") {
+          const lastAtMs = Date.parse(rawLast);
+          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;
+        }
+
+        const laneLedger = await readLaneLedger(companyId);
+        const laneStates = Object.values(laneLedger)
+          .map(
+            (entry) =>
+              `${entry.laneId}=${entry.verdict ?? "?"}@${Math.round(laneEffectiveUtilization(laneLedger, entry.laneId) * 100)}%${entry.error ? "(poll-error)" : ""}`,
+          )
+          .join(" ");
+
+        // Bounded: entries older than a week can never fire the throttle
+        // check again, so drop them on write.
+        const pruned: Record<string, string> = {};
+        for (const [id, at] of Object.entries(stored)) {
+          if (typeof at === "string" && Date.now() - Date.parse(at) < 7 * 24 * 60 * 60 * 1000) pruned[id] = at;
+        }
+        await ctx.state.set(key, { ...pruned, [issueId]: new Date().toISOString() });
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection cannot pin this card: ${decision.outcome}. Lane states: ${
+            laneStates || "no lane data"
+          }. It stays on its current model until a lane recovers or an operator pins one (TOG-3111).`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            outcome: decision.outcome,
+            identifier,
+            lanes: Object.values(laneLedger).map((entry) => ({
+              laneId: entry.laneId,
+              verdict: entry.verdict,
+              error: entry.error,
+            })),
+            trace: decision.trace,
+          },
+        });
+      };
+
+      /**
+       * TOG-3111 half 2. Classify (if needed), label, and pin one card from
+       * the event stream instead of waiting for the 10-minute passes. Label-tier
+       * semantics — the pin is decided at the card's own tier label (existing,
+       * or just written by the classification above), the same outcome
+       * `labelOnlyPass` would produce, NOT balancePass's forced T1: an event
+       * path that changed routing policy would be a silent policy change, and
+       * this only moves the same decision earlier in time. Never writes unless
+       * the card is agent-assigned, open, idle and unpinned;
+       * `balanceWriteStillSafe` re-reads all of that immediately before the
+       * write, because an override landing on a card that just dispatched
+       * would reset a warm session.
+       */
+      const pinAtDecisionTime = async (companyId: string, issueId: string, source: string): Promise<void> => {
+        const config = await companyConfig(companyId);
+        if (!config.classification.enabled) return;
+
+        const described = await describeIssue(companyId, issueId, {});
+        if (!described) return;
+        // `issue.created` carries no assignee (TOG-3008 §3) — an unassigned
+        // card returns here and is picked up by the assignment arm below.
+        if (!described.assigneeAgentId) return;
+        if (!balanceOpenStatuses.has(described.status)) return;
+        if (described.hasOperatorPin) return;
+        if (described.descriptor.pinnedModelId) return;
+
+        // The tier this card is pinned at: its existing label's tier, or the
+        // tier the classification below is about to write. Passed explicitly
+        // to `advise` (its `forceTier` slot) rather than re-read from the
+        // issue: making the label-write -> label-read round trip
+        // load-bearing within one tick would couple correctness to the
+        // host's `issues.get` label enrichment, and the plugin already
+        // knows the answer.
+        let tier: Tier | null = described.hasTierLabel
+          ? tierFromLabels(described.descriptor.labelNames)
+          : null;
+
+        if (!described.hasTierLabel) {
+          // Mirror of classifyIssues' per-row path minus the row query: the
+          // event already named this card; classifyIssues cannot see it
+          // precisely because it dispatches before the next pass fires.
+          if (!config.classification.baseUrl || !config.classification.modelId) return;
+          let apiKey: string | null = null;
+          if (config.classification.apiKeySecretRef) {
+            try {
+              apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef as never, {
+                companyId,
+                configPath: "classification.apiKeySecretRef",
+              });
+            } catch {
+              ctx.logger.error("creation-pin classification secret unavailable", { companyId, issueId });
+              return;
+            }
+          }
+          const classified = await callClassifier(
+            {
+              baseUrl: config.classification.baseUrl,
+              protocol: config.classification.protocol,
+              modelId: config.classification.modelId,
+              apiKey,
+              system: RUBRIC,
+              userPrompt: buildClassificationPrompt(
+                described.title,
+                described.description,
+                described.descriptor.agentName ?? "",
+                config.classification.descriptionChars,
+              ),
+              maxOutputTokens: config.classification.maxOutputTokens,
+              requestTimeoutMs: config.classification.requestTimeoutMs,
+              maxResponseBytes: config.classification.maxResponseBytes,
+            },
+            classificationHttp,
+          );
+          if (!classified.text) {
+            ctx.logger.info("creation-pin classification skipped", {
+              companyId,
+              issueId,
+              why: classified.error,
+            });
+            return;
+          }
+          const judgement = parseClassificationResponse(classified.text);
+          if (!judgement) {
+            ctx.logger.info("creation-pin classification unparseable", { companyId, issueId });
+            return;
+          }
+          const { labelTier } = resolveClassifiedTiers(judgement, {
+            t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+            t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
+          });
+          tier = labelTier;
+          const labelId = config.tierLabelIds[labelTier];
+          if (labelId) {
+            // Union, never replace: the host REPLACES the label set on a
+            // labelIds write (issues.ts syncIssueLabels).
+            await ctx.issues.update(
+              issueId,
+              { labelIds: [...new Set([...described.existingLabelIds, labelId])] } as Parameters<
+                typeof ctx.issues.update
+              >[1],
+              companyId,
+            );
+          }
+          if (judgement.exclusion) {
+            const exclusions = await readClassificationExclusions(companyId);
+            await ctx.state.set(classificationExclusionsKey(companyId), { ...exclusions, [issueId]: true });
+          }
+          await ctx.activity.log({
+            companyId,
+            message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${
+              judgement.exclusion ? ", capability-excluded" : ""
+            } at card creation`,
+            entityType: "issue",
+            entityId: issueId,
+            metadata: {
+              tier: labelTier,
+              confidence: judgement.confidence,
+              reason: judgement.reason,
+              source,
+            },
+          });
+        }
+
+        if (!tier) return; // no label, no classification, nothing to pin at
+        const result = await advise(companyId, { issueId }, false, tier, false);
+        if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+          await maybeLogUnpinnableCard(companyId, issueId, described.identifier, result?.decision ?? null);
+          return;
+        }
+        // `advise` re-described the card: trust its fresher idle/pin reads,
+        // not the pre-classification ones.
+        if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return;
+        if (result.pinnedModelId !== null) return;
+        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+        if (result.decision.modelId === floorModelId) {
+          // The router decided, and its pick IS the floor model — same
+          // convention as labelOnlyPass/balancePass: no redundant override on
+          // a card already running exactly that model.
+          ctx.logger.info("creation-time pin skipped: pick equals floor", { companyId, issueId, source });
+          return;
+        }
+        const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+        if (!selectedModel) return;
+        if (!(await balanceWriteStillSafe(companyId, issueId, null, config.models))) return;
+        await ctx.issues.update(
+          issueId,
+          modelOverrideForContext({
+            model: selectedModel,
+            fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+            compactionRatio: config.selection.compactionRatio,
+            agentEnv: result.agentEnv,
+            existingOverrideEnv: result.existingOverrideEnv,
+          }) as Parameters<typeof ctx.issues.update>[1],
+          companyId,
+        );
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection pinned ${result.decision.modelId} (${result.decision.effectiveTier}) at card creation — TOG-3111 (${source})`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            modelId: result.decision.modelId,
+            tier: result.decision.effectiveTier,
+            source,
+            trace: result.decision.trace,
+          },
+        });
+      };
+
+      ctx.events.on("issue.created", async (event) => {
+        const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        if (!issueId) return;
+        try {
+          await pinAtDecisionTime(event.companyId, issueId, "issue.created");
+        } catch (cause) {
+          // Never let a pin attempt break the event loop for other handlers.
+          ctx.logger.error("creation-time pin failed", {
+            companyId: event.companyId,
+            issueId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
       });
 
       ctx.tools.register(
@@ -2305,6 +2594,9 @@ export function createPlugin() {
               const result = await advise(company.id, { issueId }, false, undefined, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                 ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
+                // TOG-3111 AC3: a card the router cannot pin must be visible
+                // on its own activity feed, not just in this worker's log.
+                await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
                 continue;
               }
               const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
@@ -2692,7 +2984,12 @@ export function createPlugin() {
                 // `pick("T1", floor)` in Python — always T1, never this row's
                 // own tier label.
                 const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
-                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                  // TOG-3111 AC3: same visibility as the label-only pass —
+                  // this branch previously `continue`d without a trace.
+                  await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
+                  continue;
+                }
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
                 if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
