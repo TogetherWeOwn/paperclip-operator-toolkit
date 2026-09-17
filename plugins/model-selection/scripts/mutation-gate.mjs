@@ -201,6 +201,399 @@ const mutants = [
     to: "          await emitDecisionPair(companyId, [buildShadowRecord(recordInput)]);",
   },
   {
+    // TOG-2674: an exhausted account with utilization 1 must not dilute a
+    // serviceable account at 0.02 into a fake lane utilization of 0.51.
+    name: "blend-exhausted-accounts-into-lane-pace",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "    entry.verdict.serviceable &&\n" +
+      "    entry.utilizationMilli !== null &&\n",
+    to: "    entry.utilizationMilli !== null &&\n",
+  },
+  {
+    // TOG-2674: the paired decision stream must retain account-level posture;
+    // lane-only rows cannot explain which accounts were excluded from pace.
+    name: "drop-account-rows-from-decision-log",
+    file: "src/shadow-emit.ts",
+    from: "      accounts: accountSnapshots(verdict),\n",
+    to: "      accounts: [],\n",
+  },
+  {
+    // TOG-2692: a Go account at 0.99 monthly must bind on monthly even when its
+    // weekly allowance reads empty. Choosing the largest window resurrects the
+    // exact weekly-low/monthly-full routing defect.
+    name: "bind-on-longest-window-instead-of-clear-rate",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "  const tightest = [...allowances].sort((left, right) =>\n" +
+      "    left.clearRate! - right.clearRate! || left.name.localeCompare(right.name)\n" +
+      "  )[0] ?? null;",
+    to:
+      "  const tightest = [...allowances].sort((left, right) =>\n" +
+      "    right.windowSeconds! - left.windowSeconds! || left.name.localeCompare(right.name)\n" +
+      "  )[0] ?? null;",
+  },
+  {
+    // TOG-2692: the per-lane `weekly`/`fiveHour` columns must each read their
+    // OWN named window. Copying one governing-window score into both is the
+    // defect measured at 32aa30b9 — identical in 25,000/25,000 lane
+    // observations — and it put a governing number on the quota page under a
+    // `fiveHour` label, which reads as a measurement rather than a data gap.
+    name: "copy-governing-score-into-both-lane-columns",
+    file: "src/shadow-emit.ts",
+    from:
+      "      weekly: namedWindowUtilization(verdict, windowNames.weekly),\n" +
+      "      fiveHour: namedWindowUtilization(verdict, windowNames.fiveHour),\n",
+    to:
+      "      weekly: verdict?.score?.utilization ?? null,\n" +
+      "      fiveHour: verdict?.score?.utilization ?? null,\n",
+  },
+  {
+    // TOG-2692: an unobserved window must report `null`, never `0`. Reusing
+    // pacing.ts's fail-neutral-to-0 gate helper here would render "the 5-hour
+    // window is untouched" for a window nobody measured.
+    name: "fail-neutral-lane-window-columns-to-zero",
+    file: "src/shadow-emit.ts",
+    from: "  return utilizations.length > 0 ? Math.max(...utilizations) : null;\n",
+    to: "  return utilizations.length > 0 ? Math.max(...utilizations) : 0;\n",
+  },
+  {
+    // TOG-2692: final-24h accounts must enter the hard priority tier; leaving
+    // them at priority zero loses the explicit reset-clearing behavior.
+    name: "remove-final-24h-account-priority",
+    file: "src/shadow-emit.ts",
+    from: '  return account.state === "push" ? 100 : 0;\n',
+    to: "  return 0;\n",
+  },
+  {
+    // TOG-2692: a weekly-only governor would reproduce the current defect on
+    // D02/D03/D04 by ignoring their staggered monthly hard limits entirely.
+    name: "go-weekly-only-governor",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "  const allowances = windows.filter((window) =>\n" +
+      "    window.role === \"allowance\" &&\n",
+    to:
+      "  const allowances = windows.filter((window) =>\n" +
+      "    window.name === \"weekly\" &&\n" +
+      "    window.role === \"allowance\" &&\n",
+  },
+  {
+    // TOG-2692: production collector rows report plan_weight. Dropping it from
+    // the default turns Max 20x and Max 5x into equal-capacity accounts.
+    name: "drop-plan-weight-from-default-fields",
+    file: "src/constants.ts",
+    from: 'export const DEFAULT_PACE_WEIGHT_FIELDS = ["plan_weight", "weight"] as const;\n',
+    to: 'export const DEFAULT_PACE_WEIGHT_FIELDS = ["weight"] as const;\n',
+  },
+  {
+    // TOG-2692: unknown production capacity is indeterminate, never an
+    // implicit one-unit subscription.
+    name: "default-unknown-account-weight-to-one",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      '  return reported === null\n' +
+      '    ? { weight: null, source: "unknown" }\n' +
+      '    : { weight: reported, source: "reported" };',
+    to:
+      '  return reported === null\n' +
+      '    ? { weight: 1, source: "reported" }\n' +
+      '    : { weight: reported, source: "reported" };',
+  },
+  {
+    // TOG-2692: a window with no account or allowance weight must remain
+    // unknown at normalization rather than regaining an implicit unit weight.
+    name: "default-unknown-allowance-weight-to-one",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "          allowanceWeight: invalidReportedAllowanceWeight\n" +
+      "            ? null\n" +
+      '            : reportedAllowanceWeight ?? (window.role === "allowance" ? weight.weight : null),\n',
+    to:
+      "          allowanceWeight: invalidReportedAllowanceWeight\n" +
+      "            ? null\n" +
+      '            : reportedAllowanceWeight ?? (window.role === "allowance" ? (weight.weight ?? 1) : null),\n',
+  },
+  {
+    // TOG-2692 review round 2 (P1-2): a window that REPORTS `allowance_weight`
+    // and reports a non-positive/non-numeric one has stated a broken weight.
+    // Silently substituting the account's plan weight publishes `reason: "ok"`
+    // and a `knownWeight` the snapshot never asserted.
+    name: "default-a-broken-reported-allowance-weight-to-plan-weight",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "        const invalidReportedAllowanceWeight = nested !== null &&\n" +
+      '          "allowance_weight" in nested &&\n',
+    to:
+      "        const invalidReportedAllowanceWeight = false && nested !== null &&\n" +
+      '          "allowance_weight" in nested &&\n',
+  },
+  {
+    // TOG-2692: equal logical-account round-robin strands allowance at the
+    // earliest deadline; the Go fixture's 87.35/4.38/8.27 split must kill it.
+    name: "equal-logical-account-round-robin",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "      ? 0\n" +
+      "      : rawShare(entry) / shareDenominator,\n",
+    to:
+      "      ? 0\n" +
+      "      : 1 / serviceableAccountCount,\n",
+  },
+  {
+    // TOG-2692: stable logical-account identity is part of the collector
+    // contract. Missing ids must invalidate the document, never use position.
+    name: "synthesize-missing-account-id-from-position",
+    file: "src/lane-capacity/pace.ts",
+    from: "  const accountKeys = validRecords.map((record) => accountKey(record, accountKeyFields));\n",
+    to: "  const accountKeys = validRecords.map((record, index) => accountKey(record, accountKeyFields) ?? `record-${index + 1}`);\n",
+  },
+  {
+    // TOG-2692: subscription-pool owns the Go account decision. Replacing its
+    // reported target with a locally recomputed window rate must fail.
+    name: "ignore-reported-account-target-rate",
+    file: "src/lane-capacity/pace.ts",
+    from: "    const effectiveTargetBurnRate = reportedTargetBurnRate ?? governing.clearRate;\n",
+    to: "    const effectiveTargetBurnRate = governing.clearRate;\n",
+  },
+  {
+    // TOG-2692 review round 2 (P1-3): a reported decision is only about the
+    // window the account DECLARED. Once a tighter allowance governs, honouring
+    // the stale `target_burn_rate`/`deficit`/`recommended_share`/
+    // `governing_reset_at` paces the account off the window it is no longer on.
+    name: "honour-a-stale-reported-decision-under-a-tighter-governor",
+    file: "src/lane-capacity/pace.ts",
+    from: "    const declaredGoverns = account.governingWindow !== null && governing.name === account.governingWindow;\n",
+    to: "    const declaredGoverns = account.governingWindow !== null;\n",
+  },
+  {
+    // TOG-2692: reported subscription-pool share is authoritative. Falling
+    // through to locally recomputed deficits restores a competing selector.
+    name: "ignore-reported-account-share",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "  const useReportedShares = shareCandidates.length > 0 &&\n" +
+      "    shareCandidates.every((entry) => entry.verdict.recommendedShare != null);\n",
+    to: "  const useReportedShares = false;\n",
+  },
+  {
+    // TOG-2692 review P1: reported shares are a distribution over the pool and
+    // deficits are burn rates. Normalizing each basis against its own total and
+    // summing lets the lane hand out 200% — a mixed fixture must kill it.
+    name: "normalize-reported-and-fallback-shares-separately",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "  const shareDenominator = shareCandidates.reduce((sum, entry) => sum + rawShare(entry), 0);\n" +
+      "  const accounts = internal.map((entry) => ({\n" +
+      "    ...entry.verdict,\n" +
+      "    recommendedShare: !entry.verdict.serviceable || entry.verdict.targetBurnRate == null || shareDenominator <= 0\n" +
+      "      ? 0\n" +
+      "      : rawShare(entry) / shareDenominator,\n" +
+      "  }));\n",
+    to:
+      "  const reportedShareTotal = shareCandidates.reduce((sum, entry) =>\n" +
+      "    entry.verdict.recommendedShare != null ? sum + Math.max(0, entry.verdict.recommendedShare) : sum, 0);\n" +
+      "  const fallbackShareDenominator = shareCandidates.reduce((sum, entry) =>\n" +
+      "    entry.verdict.recommendedShare != null ? sum : sum + Math.max(0, entry.verdict.deficit ?? entry.verdict.targetBurnRate!), 0);\n" +
+      "  const accounts = internal.map((entry) => ({\n" +
+      "    ...entry.verdict,\n" +
+      "    recommendedShare: !entry.verdict.serviceable || entry.verdict.targetBurnRate == null\n" +
+      "      ? 0\n" +
+      "      : entry.verdict.recommendedShare != null && reportedShareTotal > 0\n" +
+      "        ? Math.max(0, entry.verdict.recommendedShare) / reportedShareTotal\n" +
+      "        : fallbackShareDenominator > 0\n" +
+      "          ? Math.max(0, entry.verdict.deficit ?? entry.verdict.targetBurnRate!) / fallbackShareDenominator\n" +
+      "          : 0,\n" +
+      "  }));\n",
+  },
+  {
+    // TOG-2692 review P1: a share basis chosen per-account rather than per-lane
+    // starves every account that does not report a share.
+    name: "mix-reported-and-fallback-share-bases",
+    file: "src/lane-capacity/pace.ts",
+    from: "    shareCandidates.every((entry) => entry.verdict.recommendedShare != null);\n",
+    to: "    shareCandidates.some((entry) => entry.verdict.recommendedShare != null);\n",
+  },
+  {
+    // TOG-2692 review P1: a declared governing window is authoritative.
+    // Substituting the smallest-clear-rate allowance paces the account off a
+    // different subscription allowance than the one it named.
+    name: "substitute-another-allowance-for-a-named-governor",
+    file: "src/lane-capacity/pace.ts",
+    from: "  const declared = allowances.find((window) => window.name === configured) ?? null;\n" +
+      "  if (declared === null) return null;\n",
+    to: "  const declared = allowances.find((window) => window.name === configured) ?? null;\n" +
+      "  if (declared === null) return tightest;\n",
+  },
+  {
+    // TOG-2692 review round 2 (P1-3): the other direction of the same rule. A
+    // declared governor is never stood in for, AND never WIDENS the
+    // constraint: a stale `governing_window: "weekly"` must not mask a monthly
+    // allowance at 0.99 that resets inside the day.
+    name: "honour-a-stale-declared-governor-over-a-tighter-window",
+    file: "src/lane-capacity/pace.ts",
+    from: "  return tightest !== null && tightest.clearRate! < declared.clearRate! ? tightest : declared;\n",
+    to: "  return declared;\n",
+  },
+  {
+    // TOG-2692 review P1: nor may the widest serviceability window stand in for
+    // an unresolvable declared governor.
+    name: "substitute-serviceability-window-for-a-named-governor",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (account.governingWindow !== null) return null;\n",
+    to: "",
+  },
+  {
+    // TOG-2692 review P1: an account whose declared governor cannot be resolved
+    // has no computable allowance and must not be dispatched to.
+    name: "dispatch-to-an-account-with-an-unresolved-governor",
+    file: "src/lane-capacity/pace.ts",
+    from: "          serviceable: accountServiceable && !indeterminateGovernor,\n",
+    to: "          serviceable: accountServiceable,\n",
+  },
+  {
+    // TOG-2692 review P1: an unresolved declared governor is indeterminate at
+    // the lane too, not an exhausted lane and not a paced one.
+    name: "swallow-an-unresolved-governor-at-the-lane",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (internal.some((entry) => entry.indeterminateGovernor)) {\n",
+    to: "  if (false && internal.some((entry) => entry.indeterminateGovernor)) {\n",
+  },
+  {
+    // TOG-2692 review P1: a live binding that puts a bare GLM row on the Go
+    // quota lane bills Z.ai traffic to Go. The subscription lane wins.
+    name: "preserve-a-mis-bound-glm-lane",
+    file: "scripts/assemble-additive-config.mjs",
+    from:
+      "    const laneId = isSubscriptionExclusive(rosterModel)\n" +
+      "      ? inferredLaneId\n" +
+      "      : (migrateZenFromGo ? null : preservedLaneId) ?? rosterLaneId ?? inferredLaneId;\n",
+    to: "    const laneId = (migrateZenFromGo ? null : preservedLaneId) ?? rosterLaneId ?? inferredLaneId;\n",
+  },
+  {
+    // TOG-2692 review P1: the same rule on the live-only path, which no
+    // reviewed roster row passes through.
+    name: "preserve-a-mis-bound-glm-lane-on-live-only-rows",
+    file: "scripts/assemble-additive-config.mjs",
+    from:
+      "    if (isSubscriptionExclusive(merged)) {\n" +
+      "      const exclusiveLaneId = laneForNewModel(merged, availableLaneIds);\n" +
+      "      if (exclusiveLaneId) merged.laneId = exclusiveLaneId;\n" +
+      "      else delete merged.laneId;\n" +
+      "    }\n",
+    to: "",
+  },
+  {
+    // TOG-2692: provider capacity is additive across serviceable subscription
+    // accounts. Averaging account rates understates the pool target.
+    name: "average-account-target-rates",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "  const targetBurnRate = accounts.reduce((sum, account) =>\n" +
+      "    account.serviceable && account.targetBurnRate != null ? sum + account.targetBurnRate : sum,\n" +
+      "  0);\n",
+    to:
+      "  const targetBurnRate = accounts.reduce((sum, account) =>\n" +
+      "    account.serviceable && account.targetBurnRate != null ? sum + account.targetBurnRate : sum,\n" +
+      "  0) / accounts.length;\n",
+  },
+  {
+    // TOG-2692: one serviceable account in its final 24 hours elevates the
+    // provider even when a larger account leaves the weighted aggregate ahead.
+    name: "mask-final-24h-push-with-ahead-aggregate",
+    file: "src/lane-capacity/pace.ts",
+    from: '  if (urgent) state = "behind-urgent";\n',
+    to: '  if ((state === "behind" || state === "on") && urgent) state = "behind-urgent";\n',
+  },
+  {
+    // TOG-2692: bare GLM models are the Z.ai subscription route, never Go.
+    name: "route-bare-glm-to-go",
+    file: "scripts/assemble-additive-config.mjs",
+    from: '    [/^glm-/, "cliproxy-zai"],\n',
+    to: '    [/^glm-/, "cliproxy-opencode-go"],\n',
+  },
+  // --- TOG-2692 review round 2 (af17915c) named mutants -------------------
+  {
+    // P1-1: `indeterminate-account-weight` and
+    // `invalid-configured-governing-window` publish `serviceable: null` because
+    // the lane's capacity could not be COMPUTED, not because no data arrived.
+    // Excluding only `serviceable === false` lets a cheaper indeterminate lane
+    // outrank a known-capacity fallback and dispatch off an unknown allowance.
+    name: "let-an-indeterminate-lane-dispatch",
+    file: "src/engine/pacing.ts",
+    from:
+      "  if (verdict.serviceable === false) return true;\n" +
+      "  return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);\n",
+    to: "  return verdict.serviceable === false;\n",
+  },
+  {
+    // P1-1 inverse: the no-data reasons (`document-unavailable`,
+    // `snapshot-stale`, `no-records`, `invalid-account-identity`) stay
+    // fail-NEUTRAL. Hard-stopping every indeterminate lane takes the fleet off
+    // the air the moment a collector snapshot goes missing.
+    name: "hard-stop-every-lane-with-no-pace-data",
+    file: "src/engine/pacing.ts",
+    from: "  return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);\n",
+    to: "  return verdict.serviceable === null;\n",
+  },
+  {
+    // P1-3: the final-24h push must scan EVERY allowance window. A window
+    // resetting soon with room to spare has a high clear rate, so it is never
+    // the binding/governing window — keying the push on the governing window's
+    // reset alone makes it unreachable exactly when it is needed.
+    name: "key-the-final-24h-push-on-the-governing-window-only",
+    file: "src/lane-capacity/pace.ts",
+    from:
+      "    const windowUrgentResetAt = exhausted\n" +
+      "      ? null\n" +
+      "      : urgentPushResetAt(windows, asOfMs, marginMilli, urgentResetSeconds);\n",
+    to: "    const windowUrgentResetAt = null;\n",
+  },
+  {
+    // P1-3: the published `bindingWindow` must name the window that actually
+    // binds. Relabelling it with the account's declared governor hides the
+    // substitution from every consumer of the paired decision rows.
+    name: "relabel-the-binding-window-with-the-declared-one",
+    file: "src/lane-capacity/pace.ts",
+    from: "        bindingWindow: binding?.name ?? null,\n",
+    to: "        bindingWindow: account.governingWindow ?? binding?.name ?? null,\n",
+  },
+  {
+    // P1-4: `{...live, ...roster}` replaces whole live sections wholesale. A
+    // live `selection: {mode, fleetContextCeilingTokens, compactionRatio}` plus
+    // a reviewed roster's `selection: {mode: "advise"}` assembles to just
+    // `{mode: "advise"}`, and `resolveConfig` silently restores its defaults.
+    name: "replace-the-live-selection-object-wholesale",
+    file: "scripts/assemble-additive-config.mjs",
+    from:
+      "  for (const [key, liveSection] of Object.entries(live)) {\n" +
+      "    if (EXPLICIT_SECTIONS.has(key)) continue;\n" +
+      "    if (!isPlainObject(liveSection) || !isPlainObject(roster[key])) continue;\n" +
+      "    assembled[key] = { ...liveSection, ...roster[key] };\n" +
+      "  }\n",
+    to: "",
+  },
+  {
+    // P1-4 non-vacuity: the section merge is the only thing standing between a
+    // roster refresh and a reset live setting, so the assembly must ASSERT the
+    // outcome rather than trust the spread order.
+    name: "drop-the-dropped-live-settings-assertion",
+    file: "scripts/assemble-additive-config.mjs",
+    from: "  if (droppedLiveSettings.length > 0) {\n",
+    to: "  if (false && droppedLiveSettings.length > 0) {\n",
+  },
+  {
+    // TOG-2692: zero-cost Zen traffic does not debit the Go subscription. The
+    // additive assembler must keep those rows on their free lane.
+    name: "charge-zen-to-go-lane",
+    file: "scripts/assemble-additive-config.mjs",
+    from:
+      "  if (isZeroCostZenModel(model)) {\n" +
+      "    return availableLaneIds.has(\"cliproxy-zen\") ? \"cliproxy-zen\" : null;\n" +
+      "  }\n",
+    to: "",
+  },
+  {
     // TOG-2862/2893: the two index-matching UNION branches only reproduce the
     // `coalesce(issueId, taskId)` predicate they replaced while the task
     // branch is guarded. Without it a run stamped with BOTH keys is attributed
@@ -234,7 +627,28 @@ function runTests() {
   });
 }
 
+/**
+ * A vitest run that never reached its summary decided nothing. This host runs
+ * several agent worktrees at once and a sibling run sweeping stray `vitest`
+ * processes SIGKILLs ours mid-flight: `spawnSync` then reports `status: null`,
+ * which is `!== 0`, which the loop below would otherwise read as "the mutant
+ * was caught". That is a false green on the one gate whose whole job is to
+ * prove the suite can catch things, so a run only counts when it printed a
+ * summary and exited on its own.
+ */
+function completed(result) {
+  return result.signal === null &&
+    result.status !== null &&
+    `${result.stdout}`.includes("Test Files");
+}
+
 const baseline = runTests();
+if (!completed(baseline)) {
+  process.stderr.write(`BROKEN GATE: baseline run did not complete (status ${baseline.status}, signal ${baseline.signal})\n`);
+  process.stderr.write(baseline.stdout ?? "");
+  process.stderr.write(baseline.stderr ?? "");
+  process.exit(1);
+}
 if (baseline.status !== 0) {
   process.stderr.write("BROKEN GATE: baseline suite is red\n");
   process.stderr.write(baseline.stdout);
@@ -260,7 +674,10 @@ try {
     const result = runTests();
     await writeFile(path, original);
 
-    if (result.status === 0) {
+    if (!completed(result)) {
+      console.error(`BROKEN GATE: ${mutant.name} run did not complete (status ${result.status}, signal ${result.signal})`);
+      failures += 1;
+    } else if (result.status === 0) {
       console.error(`SURVIVED: ${mutant.name}`);
       failures += 1;
     } else {

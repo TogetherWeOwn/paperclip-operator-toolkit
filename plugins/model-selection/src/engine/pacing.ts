@@ -242,16 +242,39 @@ export function orderCandidatesByPace(
 }
 
 /**
+ * Lane verdict reasons where the snapshot PARSED and was fresh, and what it
+ * says is that this lane's remaining capacity cannot be computed: an account
+ * with no usable allowance weight, or one naming a governing window this
+ * snapshot cannot resolve. These are evidence, not absence of evidence — the
+ * lane may be at 2% or at 100%, and nothing here can tell them apart.
+ *
+ * They carry `serviceable: null`, which is why they must be named explicitly:
+ * `serviceable === false` alone lets an indeterminate lane through, and because
+ * pace ordering treats an unknown lane as merely unranked, a CHEAPER
+ * indeterminate lane then outranks a fallback whose capacity is known.
+ */
+const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = new Set([
+  "indeterminate-account-weight",
+  "invalid-configured-governing-window",
+]);
+
+/**
  * A lane that is not serviceable (exhausted or unavailable, per the accepted
  * pace engine's own `serviceable` computation) is a hard stop: the model is
- * excluded outright, not merely reordered to the back. `verdict === null`
- * (never polled, malformed document, stale snapshot) is fail-neutral and
- * excludes nothing — an unknown lane is not evidence of exhaustion.
+ * excluded outright, not merely reordered to the back. So is a lane whose
+ * capacity is indeterminate for one of the reasons above — the pace engine
+ * fails closed there, and this is the only place that decision can be enforced.
+ *
+ * `verdict === null` (never polled) and the no-data reasons the pace engine
+ * reports alongside it (malformed document, stale snapshot, no records,
+ * unusable account identity) stay fail-neutral and exclude nothing — an
+ * unobserved lane is not evidence of exhaustion.
  */
 export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry): boolean {
   const verdict = laneVerdictFor(ledger, model.laneId ?? null);
   if (!verdict) return false;
-  return verdict.serviceable === false;
+  if (verdict.serviceable === false) return true;
+  return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);
 }
 
 /**

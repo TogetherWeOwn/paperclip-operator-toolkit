@@ -46,16 +46,6 @@ function canonicalId(id: string): string {
   return id.replace(/^cliproxy\//, "");
 }
 
-/**
- * The two known, deliberate `enabled` corrections made during the TOG-2429
- * audit: the legacy file believed the bare `glm-5.3`/`glm-5.3-flash` ids were
- * Z.ai-served; they are actually OpenCode-Go-served, and the owner rule ("GLM
- * only via Z.ai, never OpenCode Go") disables them. Both are annotated with a
- * "TOG-2429 correction" note in `reviewed-roster.json`. Any OTHER divergence
- * is an unexplained regression this test must catch.
- */
-const EXPECTED_ENABLED_CORRECTIONS = new Set(["glm-5.3:T2", "glm-5.3-flash:T3"]);
-
 describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersedes tier_roster.json", () => {
   it("carries every canonical model id from the legacy roster", () => {
     const reviewedIds = new Set(reviewed.models.map((m) => canonicalId(m.id)));
@@ -83,7 +73,7 @@ describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersed
     expect(lost).toEqual([]);
   });
 
-  it("has no enabled-state divergence beyond the two documented TOG-2429 corrections", () => {
+  it("has no enabled-state divergence from the frozen legacy roster", () => {
     const byCanonTier = new Map<string, ReviewedModel>();
     for (const m of reviewed.models) {
       byCanonTier.set(`${canonicalId(m.id)}:${m.tier}`, m);
@@ -95,10 +85,6 @@ describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersed
       const reviewedModel = byCanonTier.get(key);
       if (!reviewedModel) continue;
       if (legacyModel.enabled === reviewedModel.enabled) continue;
-      if (EXPECTED_ENABLED_CORRECTIONS.has(key)) {
-        expect(reviewedModel.note ?? "").toContain("TOG-2429 correction");
-        continue;
-      }
       unexplained.push(`${key}: legacy=${legacyModel.enabled} reviewed=${reviewedModel.enabled}`);
     }
     expect(unexplained).toEqual([]);

@@ -44,6 +44,9 @@ export const LANE_ID_CODEX = "cliproxy-codex";
 export const LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
 export const LANE_ID_ZAI = "cliproxy-zai";
 
+export const DEFAULT_PACE_ACCOUNT_KEY_FIELDS = ["account_key", "accountKey", "name", "id"] as const;
+export const DEFAULT_PACE_WEIGHT_FIELDS = ["plan_weight", "weight"] as const;
+
 /**
  * 2026-09-06 17:1xZ / 2026-09-07 12:32Z owner rule: per-account active-card
  * ceiling, ported verbatim from `tier_dispatcher.py`'s
@@ -68,6 +71,14 @@ export const DEFAULT_AVOID_PER_LANE: Readonly<Record<string, number>> = {
 
 /** `tier_dispatcher.py`'s `lane_5h()` reads this fixed JSON key; kept as the default window name, canonicalized to the live `five-hour` (hyphenated) window name. */
 export const DEFAULT_FIVE_HOUR_WINDOW_NAME = "five-hour";
+/**
+ * The lane-wide weekly allowance window, reported alongside `five-hour` in the
+ * shadow stream's per-lane snapshot. Distinct from `zai.weeklyWindowName`,
+ * which names the window the Z.ai-specific pace gate reads: that one is a
+ * gating input for one lane, this one is the reporting name for every lane.
+ * They share a default because the live lane documents use `weekly` throughout.
+ */
+export const DEFAULT_WEEKLY_WINDOW_NAME = "weekly";
 /** `tier_dispatcher.py`'s `zai_weekly_pace_ok()` reads `weekly_utilization`/`weekly_resets_at`. */
 export const DEFAULT_ZAI_WEEKLY_WINDOW_NAME = "weekly";
 /** `tier_dispatcher.py`'s `zai_weekly_pace_ok(margin=0.15)` default. */

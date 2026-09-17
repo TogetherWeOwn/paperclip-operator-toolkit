@@ -28,11 +28,10 @@ catalogue the plugin's selection engine reads (`src/config/resolve.js`,
 `tier_roster.json` (the "TOG-2429 audit" pass, 2026-09-13) and is a strict
 superset: 84 entries against the legacy file's 35, including every canonical
 model id and every dated owner-rule note the legacy file carried, preserved
-as a verbatim substring. The audit surfaced and corrected two rows
-(`glm-5.3` T2, `glm-5.3-flash` T3) that the legacy file marked `enabled: true`
-believing them Z.ai-served; they are in fact OpenCode-Go-served, and the
-owner's own rule requires them disabled. Both corrections are recorded
-in-line as `"TOG-2429 correction 2026-09-13"` notes on the affected rows.
+as a verbatim substring. The bare `glm-5.3` T2 and `glm-5.3-flash` T3 rows
+remain enabled because they are the canonical Z.ai subscription-pool routes.
+Their reviewed notes explicitly forbid OpenCode Go; additive assembly binds
+new bare GLM rows to `cliproxy-zai` and fails closed when that lane is absent.
 
 The reviewed catalogue carries no `laneId` — lane binding is a live-merge-time
 concern, handled additively by `scripts/assemble-additive-config.mjs` against

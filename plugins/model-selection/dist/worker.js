@@ -32,6 +32,8 @@ var TOOL_NAMES = {
 var LANE_ID_CODEX = "cliproxy-codex";
 var LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
 var LANE_ID_ZAI = "cliproxy-zai";
+var DEFAULT_PACE_ACCOUNT_KEY_FIELDS = ["account_key", "accountKey", "name", "id"];
+var DEFAULT_PACE_WEIGHT_FIELDS = ["plan_weight", "weight"];
 var DEFAULT_LANE_CAP_PER_ACCOUNT = {
   [LANE_ID_OPENCODE_GO]: 2,
   [LANE_ID_ZAI]: 3
@@ -40,6 +42,7 @@ var DEFAULT_AVOID_PER_LANE = {
   [LANE_ID_CODEX]: 0.99
 };
 var DEFAULT_FIVE_HOUR_WINDOW_NAME = "five-hour";
+var DEFAULT_WEEKLY_WINDOW_NAME = "weekly";
 var DEFAULT_ZAI_WEEKLY_WINDOW_NAME = "weekly";
 var DEFAULT_ZAI_WEEKLY_MARGIN = 0.15;
 var ROUTE_KEYS = {
@@ -289,10 +292,15 @@ function orderCandidatesByPace(candidates, models, ledger, options) {
   }
   return result;
 }
+var INDETERMINATE_CAPACITY_REASONS = /* @__PURE__ */ new Set([
+  "indeterminate-account-weight",
+  "invalid-configured-governing-window"
+]);
 function hardStopExcluded(ledger, model) {
   const verdict = laneVerdictFor(ledger, model.laneId ?? null);
   if (!verdict) return false;
-  return verdict.serviceable === false;
+  if (verdict.serviceable === false) return true;
+  return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);
 }
 function hashUnitInterval(input) {
   let hash = 2166136261;
@@ -525,6 +533,10 @@ function bool(value, fallback) {
 function string(value, fallback) {
   return typeof value === "string" ? value : fallback;
 }
+function fieldList(value, fallback) {
+  const fields = Array.isArray(value) ? value.filter((field) => typeof field === "string" && field.length > 0) : [];
+  return fields.length > 0 ? fields : [...fallback];
+}
 function nullableNum(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -610,8 +622,9 @@ function resolveConfig(raw) {
         lane: {
           laneId: rawLane.laneId,
           free: bool(rawLane.free, false),
-          healthFields: Array.isArray(rawLane.healthFields) ? rawLane.healthFields.filter((f) => typeof f === "string") : ["health", "status"],
-          weightFields: Array.isArray(rawLane.weightFields) ? rawLane.weightFields.filter((f) => typeof f === "string") : ["weight"],
+          healthFields: fieldList(rawLane.healthFields, ["health", "status"]),
+          accountKeyFields: fieldList(rawLane.accountKeyFields, DEFAULT_PACE_ACCOUNT_KEY_FIELDS),
+          weightFields: fieldList(rawLane.weightFields, DEFAULT_PACE_WEIGHT_FIELDS),
           governingWindowField: typeof rawLane.governingWindowField === "string" ? rawLane.governingWindowField : "governing_window",
           windowSecondsField: typeof rawLane.windowSecondsField === "string" ? rawLane.windowSecondsField : "window_seconds",
           staleAfterSecondsField: typeof rawLane.staleAfterSecondsField === "string" ? rawLane.staleAfterSecondsField : "staleAfterSeconds",
@@ -679,6 +692,7 @@ function resolveConfig(raw) {
         return perAccount;
       })(),
       fiveHourWindowName: string(pacing.fiveHourWindowName, DEFAULT_FIVE_HOUR_WINDOW_NAME),
+      weeklyWindowName: string(pacing.weeklyWindowName, DEFAULT_WEEKLY_WINDOW_NAME),
       codexLaneId: string(pacing.codexLaneId, LANE_ID_CODEX),
       opencodeGoLaneId: string(pacing.opencodeGoLaneId, LANE_ID_OPENCODE_GO),
       zai: (() => {
@@ -1267,16 +1281,16 @@ async function fetchAaSnapshot(input) {
   if (response.status < 200 || response.status >= 300) {
     return fail("aa-http-failed");
   }
-  let text;
+  let text2;
   try {
-    text = await response.text();
+    text2 = await response.text();
   } catch {
     return fail("aa-request-failed");
   }
-  if (new TextEncoder().encode(text).byteLength > input.maxResponseBytes) {
+  if (new TextEncoder().encode(text2).byteLength > input.maxResponseBytes) {
     return fail("aa-response-too-large");
   }
-  return { ok: true, html: text, error: null };
+  return { ok: true, html: text2, error: null };
 }
 
 // src/engine/model-id.ts
@@ -2059,6 +2073,20 @@ var DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 15 * 60;
 function positiveNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
+function nonNegativeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function firstNumber(record2, fields, mode = "finite") {
+  const value = firstValue(record2, fields)?.value;
+  return mode === "non-negative" ? nonNegativeNumber(value) : finiteNumber(value);
+}
+function text(record2, fields) {
+  const value = firstValue(record2, fields)?.value;
+  return typeof value === "string" && value.trim() ? value : null;
+}
 function windowSeconds(record2, field, window) {
   const raw = record2[field];
   if (typeof raw === "number") return positiveNumber(raw);
@@ -2070,7 +2098,23 @@ function windowSeconds(record2, field, window) {
 }
 function normalizedWeight(record2, fields) {
   const reported = positiveNumber(firstValue(record2, fields)?.value);
-  return reported === null ? { weight: 1, source: "default" } : { weight: reported, source: "reported" };
+  return reported === null ? { weight: null, source: "unknown" } : { weight: reported, source: "reported" };
+}
+function accountKey(record2, fields) {
+  return text(record2, fields)?.trim() ?? null;
+}
+function hasReportedAccountDecision(account) {
+  return account.governingWindow !== null && (account.targetBurnRate !== null || account.deficit !== null || account.recommendedShare !== null);
+}
+function recordWindows(record2) {
+  return Array.isArray(record2.windows) ? record2.windows.map(recordOf).filter((window) => window !== null) : [];
+}
+function matchingWindowRecord(record2, window) {
+  return recordWindows(record2).find((candidate) => candidate.name === window.name) ?? null;
+}
+function nestedOrFlatValue(record2, nested, nestedField, flatFields) {
+  if (nested && nestedField in nested) return { field: `windows.${nestedField}`, value: nested[nestedField] };
+  return firstValue(record2, flatFields) ?? null;
 }
 function normalizeLaneDocument(input) {
   const document = recordOf(input.document);
@@ -2080,32 +2124,63 @@ function normalizeLaneDocument(input) {
   const records = Array.isArray(document.records) ? document.records : [];
   const observedAt = timestamp(document.observedAt);
   const staleAfterSeconds = positiveNumber(document[input.definition.staleAfterSecondsField ?? "staleAfterSeconds"]);
+  const empty = (error) => ({
+    laneId: input.definition.laneId,
+    free: Boolean(input.definition.free),
+    observedAt,
+    staleAfterSeconds,
+    accounts: [],
+    error
+  });
+  if (records.length === 0) return empty("no-records");
+  const parsedRecords = records.map(recordOf);
+  if (parsedRecords.some((record2) => record2 === null)) return empty("invalid-document");
+  const validRecords = parsedRecords;
+  const accountKeyFields = [...input.definition.accountKeyFields ?? DEFAULT_PACE_ACCOUNT_KEY_FIELDS];
+  const accountKeys = validRecords.map((record2) => accountKey(record2, accountKeyFields));
+  if (accountKeys.some((key) => key === null) || new Set(accountKeys).size !== accountKeys.length) {
+    return empty("invalid-account-identity");
+  }
   const governingWindowField = input.definition.governingWindowField ?? "governing_window";
   const windowSecondsField = input.definition.windowSecondsField ?? "window_seconds";
-  const accounts = records.flatMap((value, index) => {
-    const record2 = recordOf(value);
-    if (!record2) return [];
-    const weight = normalizedWeight(record2, input.definition.weightFields ?? ["weight"]);
+  const weightFields = [...input.definition.weightFields ?? DEFAULT_PACE_WEIGHT_FIELDS];
+  const accounts = validRecords.map((record2, index) => {
+    const weight = normalizedWeight(record2, weightFields);
     const reportedGoverningWindow = typeof record2[governingWindowField] === "string" ? record2[governingWindowField] : null;
-    return [{
-      accountKey: `record-${index + 1}`,
+    return {
+      accountKey: accountKeys[index],
+      authKey: text(record2, ["auth_key", "authKey"]),
+      plan: text(record2, ["plan"]),
       health: normalizeHealth(firstValue(record2, input.definition.healthFields)?.value) ?? "unknown",
       weight: weight.weight,
       weightSource: weight.source,
       governingWindow: reportedGoverningWindow,
+      governingResetAt: timestamp(firstValue(record2, ["governing_reset_at", "governing_resets_at", "governingResetAt", "binding_reset_at", "bindingResetAt"])?.value),
+      normalizedRemaining: firstNumber(record2, ["normalized_remaining", "normalizedRemaining"], "non-negative"),
+      targetBurnRate: firstNumber(record2, ["target_burn_rate", "targetBurnRate", "clear_rate", "clearRate"], "non-negative"),
+      observedBurnRate: firstNumber(record2, ["observed_burn_rate", "observedBurnRate", "recent_burn_units_per_hour"], "non-negative"),
+      deficit: firstNumber(record2, ["deficit"]),
+      recommendedShare: firstNumber(record2, ["recommended_share", "recommendedShare"], "non-negative"),
+      recentBurnUnitsPerHour: firstNumber(record2, ["recent_burn_units_per_hour"], "non-negative"),
+      staleAfterSeconds: positiveNumber(record2.stale_after_seconds),
       windows: input.definition.windows.map((window) => {
-        const utilization = firstValue(record2, window.utilizationFields);
-        const reset = firstValue(record2, window.resetFields);
+        const nested = matchingWindowRecord(record2, window);
+        const utilization = nestedOrFlatValue(record2, nested, "utilization", window.utilizationFields);
+        const reset = nestedOrFlatValue(record2, nested, "resets_at", window.resetFields);
+        const reportedAllowanceWeight = positiveNumber(nested?.allowance_weight);
+        const invalidReportedAllowanceWeight = nested !== null && "allowance_weight" in nested && nested.allowance_weight !== null && nested.allowance_weight !== void 0 && reportedAllowanceWeight === null;
         return {
           name: window.name,
           role: window.role,
           utilization: fraction(utilization?.value),
           resetsAt: timestamp(reset?.value),
-          windowSeconds: windowSeconds(record2, windowSecondsField, window),
+          windowSeconds: positiveNumber(nested?.window_seconds) ?? windowSeconds(record2, windowSecondsField, window),
+          allowanceWeight: invalidReportedAllowanceWeight ? null : reportedAllowanceWeight ?? (window.role === "allowance" ? weight.weight : null),
+          allowanceWeightSource: invalidReportedAllowanceWeight ? "unknown" : reportedAllowanceWeight !== null ? "reported" : weight.source === "reported" ? "account" : "unknown",
           sourcePath: utilization?.field ?? null
         };
       })
-    }];
+    };
   });
   return {
     laneId: input.definition.laneId,
@@ -2113,7 +2188,7 @@ function normalizeLaneDocument(input) {
     observedAt,
     staleAfterSeconds,
     accounts,
-    error: records.length === 0 ? "no-records" : null
+    error: null
   };
 }
 function roundHalfEven(value) {
@@ -2136,21 +2211,55 @@ function weightedMilli(values) {
   const weight = values.reduce((sum, entry) => sum + entry.weight, 0);
   return roundHalfEven(values.reduce((sum, entry) => sum + entry.value * entry.weight, 0) / weight);
 }
-function governingWindow(account) {
-  let fallback = null;
-  for (const window of account.windows) {
-    if (window.role !== "allowance" || window.utilization === null || window.resetsAt === null || window.windowSeconds === null) continue;
-    if (window.name === account.governingWindow) return window;
-    if (fallback === null || window.windowSeconds > fallback.windowSeconds || window.windowSeconds === fallback.windowSeconds && window.name < fallback.name) fallback = window;
+function scoredWindow(window, observedAtMs) {
+  if (window.utilization === null || window.resetsAt === null || window.windowSeconds === null) {
+    return {
+      ...window,
+      elapsed: null,
+      normalizedRemaining: null,
+      paceDebt: null,
+      clearRate: null,
+      serviceable: window.utilization === null || window.utilization < 1
+    };
   }
-  return fallback;
+  const remainingSeconds = (Date.parse(window.resetsAt) - observedAtMs) / 1e3;
+  const elapsed = Math.min(1, Math.max(0, 1 - remainingSeconds / window.windowSeconds));
+  const allowanceWeight = window.allowanceWeight ?? null;
+  const normalizedRemaining = allowanceWeight === null ? null : allowanceWeight * Math.max(0, 1 - window.utilization);
+  const remainingHours = Math.max(1, remainingSeconds / 3600);
+  return {
+    ...window,
+    elapsed,
+    normalizedRemaining,
+    paceDebt: allowanceWeight === null ? null : allowanceWeight * (elapsed - window.utilization),
+    clearRate: normalizedRemaining === null ? null : normalizedRemaining / remainingHours,
+    serviceable: window.utilization < 1
+  };
 }
-function serviceable(account, governing) {
-  if (account.health === "exhausted" || account.health === "unavailable") return false;
-  if (governing?.utilization !== null && governing && governing.utilization >= 1) return false;
-  return account.windows.every(
-    (window) => window.role !== "serviceability" || window.utilization === null || window.utilization < 1
+function bindingWindow(windows, configured) {
+  const allowances = windows.filter(
+    (window) => window.role === "allowance" && window.utilization !== null && window.resetsAt !== null && window.windowSeconds !== null && window.clearRate !== null
   );
+  const tightest = [...allowances].sort(
+    (left, right) => left.clearRate - right.clearRate || left.name.localeCompare(right.name)
+  )[0] ?? null;
+  if (configured === null) return tightest;
+  const declared = allowances.find((window) => window.name === configured) ?? null;
+  if (declared === null) return null;
+  return tightest !== null && tightest.clearRate < declared.clearRate ? tightest : declared;
+}
+function urgentPushResetAt(windows, asOfMs, marginMilli, urgentResetSeconds) {
+  return windows.filter((window) => window.role === "allowance" && window.serviceable && window.utilization !== null && window.elapsed !== null && window.resetsAt !== null && stateFor(toMilli(window.utilization) - toMilli(window.elapsed), marginMilli) === "behind").map((window) => ({ resetsAt: window.resetsAt, resetSeconds: (Date.parse(window.resetsAt) - asOfMs) / 1e3 })).filter((entry) => entry.resetSeconds >= 0 && entry.resetSeconds < urgentResetSeconds).sort((left, right) => left.resetSeconds - right.resetSeconds)[0]?.resetsAt ?? null;
+}
+function governingWindow(account, windows) {
+  const binding = bindingWindow(windows, account.governingWindow);
+  if (binding) return binding;
+  if (account.governingWindow !== null) return null;
+  return windows.filter((window) => window.role === "serviceability" && window.utilization !== null).sort((left, right) => right.windowSeconds - left.windowSeconds || left.name.localeCompare(right.name))[0] ?? null;
+}
+function serviceable(account, windows) {
+  if (account.health === "exhausted" || account.health === "unavailable") return false;
+  return windows.every((window) => window.utilization === null || window.utilization < 1);
 }
 function stateFor(deviationMilli, marginMilli) {
   if (deviationMilli > marginMilli) return "ahead";
@@ -2163,75 +2272,178 @@ function evaluateLanePace(input) {
   const maxSnapshotAgeSeconds = input.policy?.maxSnapshotAgeSeconds ?? DEFAULT_MAX_SNAPSHOT_AGE_SECONDS;
   const asOf = timestamp(input.asOf ?? input.observation.observedAt);
   if (input.observation.free) {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "free", serviceable: true, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "free-lane" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "free", serviceable: true, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "free-lane" };
   }
   if (input.observation.error === "invalid-document" || input.observation.observedAt === null || asOf === null) {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "document-unavailable" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "document-unavailable" };
+  }
+  if (input.observation.error === "invalid-account-identity") {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "invalid-account-identity" };
   }
   if (input.observation.error === "no-records") {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "no-records" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "no-records" };
   }
   const observedAtMs = Date.parse(input.observation.observedAt);
   const asOfMs = Date.parse(asOf);
   const freshnessBudget = Math.min(input.observation.staleAfterSeconds ?? maxSnapshotAgeSeconds, maxSnapshotAgeSeconds);
   if ((asOfMs - observedAtMs) / 1e3 > freshnessBudget) {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "snapshot-stale" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "snapshot-stale" };
   }
   const internal = input.observation.accounts.map((account) => {
-    const governing = governingWindow(account);
-    const accountServiceable = serviceable(account, governing);
+    const windows = account.windows.map((window) => scoredWindow(window, observedAtMs));
+    const binding = bindingWindow(windows, account.governingWindow);
+    const governing = governingWindow(account, windows);
+    const accountStale = account.staleAfterSeconds != null && (asOfMs - observedAtMs) / 1e3 > account.staleAfterSeconds;
+    const accountServiceable = !accountStale && serviceable(account, windows);
+    const unknownAllowanceWeight = windows.some(
+      (window) => window.role === "allowance" && window.utilization !== null && window.resetsAt !== null && window.windowSeconds !== null && window.allowanceWeight === null
+    );
     if (!governing) {
       const exhausted2 = account.health === "exhausted" || account.health === "unavailable";
+      const indeterminateGovernor = accountServiceable && account.governingWindow !== null;
       return {
-        verdict: { accountKey: account.accountKey, health: account.health, weight: account.weight, weightSource: account.weightSource, governingWindow: null, governingResetAt: null, serviceable: accountServiceable, state: exhausted2 ? "exhausted" : "unknown", score: null },
+        verdict: {
+          accountKey: account.accountKey,
+          authKey: account.authKey,
+          plan: account.plan,
+          health: account.health,
+          weight: account.weight,
+          weightSource: account.weightSource,
+          governingWindow: null,
+          governingResetAt: null,
+          bindingWindow: null,
+          bindingResetAt: null,
+          recentBurnUnitsPerHour: account.recentBurnUnitsPerHour,
+          staleAfterSeconds: account.staleAfterSeconds,
+          serviceable: accountServiceable && !indeterminateGovernor,
+          state: exhausted2 ? "exhausted" : "unknown",
+          score: null,
+          normalizedRemaining: null,
+          targetBurnRate: null,
+          observedBurnRate: account.recentBurnUnitsPerHour ?? null,
+          deficit: null,
+          recommendedShare: 0,
+          paceDebt: null,
+          clearRate: null,
+          windows
+        },
         utilizationMilli: null,
         elapsedMilli: null,
-        resetAtMs: null
+        resetAtMs: null,
+        aggregateWeight: null,
+        indeterminateWeight: accountServiceable && unknownAllowanceWeight,
+        indeterminateGovernor
       };
     }
     const utilizationMilli2 = toMilli(governing.utilization);
-    const remainingSeconds = (Date.parse(governing.resetsAt) - observedAtMs) / 1e3;
-    const elapsedMilli2 = toMilli(1 - Math.min(1, Math.max(0, remainingSeconds / governing.windowSeconds)));
+    const elapsedMilli2 = toMilli(governing.elapsed);
     const accountScore = score(utilizationMilli2, elapsedMilli2);
-    const exhausted = account.health === "exhausted" || account.health === "unavailable" || governing.utilization >= 1;
-    let state2 = exhausted ? "exhausted" : stateFor(utilizationMilli2 - elapsedMilli2, marginMilli);
-    const resetSeconds = (Date.parse(governing.resetsAt) - asOfMs) / 1e3;
-    if (state2 === "behind" && resetSeconds >= 0 && resetSeconds < urgentResetSeconds) state2 = "behind-urgent";
+    const exhausted = !accountServiceable;
+    const declaredGoverns = account.governingWindow !== null && governing.name === account.governingWindow;
+    const reportedTargetBurnRate = declaredGoverns ? account.targetBurnRate : null;
+    const reportedDeficit = declaredGoverns ? account.deficit : null;
+    const effectiveTargetBurnRate = reportedTargetBurnRate ?? governing.clearRate;
+    const reportedDecision = declaredGoverns && hasReportedAccountDecision(account);
+    const effectiveDeficit = reportedDeficit ?? ((account.observedBurnRate ?? account.recentBurnUnitsPerHour) == null || effectiveTargetBurnRate == null ? effectiveTargetBurnRate : effectiveTargetBurnRate - (account.observedBurnRate ?? account.recentBurnUnitsPerHour));
+    let state2 = exhausted ? "exhausted" : reportedDecision && effectiveDeficit !== null ? effectiveDeficit > 0 ? "behind" : effectiveDeficit < 0 ? "ahead" : "on" : stateFor(utilizationMilli2 - elapsedMilli2, marginMilli);
+    const resetAt = (declaredGoverns ? account.governingResetAt : null) ?? governing.resetsAt;
+    const resetSeconds = (Date.parse(resetAt) - asOfMs) / 1e3;
+    const governingUrgent = state2 === "behind" && resetSeconds >= 0 && resetSeconds < urgentResetSeconds;
+    const windowUrgentResetAt = exhausted ? null : urgentPushResetAt(windows, asOfMs, marginMilli, urgentResetSeconds);
+    const urgentResetAt = governingUrgent ? windowUrgentResetAt !== null && Date.parse(windowUrgentResetAt) < Date.parse(resetAt) ? windowUrgentResetAt : resetAt : windowUrgentResetAt;
+    if (!exhausted && urgentResetAt !== null) state2 = "push";
     return {
-      verdict: { accountKey: account.accountKey, health: account.health, weight: account.weight, weightSource: account.weightSource, governingWindow: governing.name, governingResetAt: governing.resetsAt, serviceable: accountServiceable, state: state2, score: accountScore },
+      verdict: {
+        accountKey: account.accountKey,
+        authKey: account.authKey,
+        plan: account.plan,
+        health: account.health,
+        weight: account.weight,
+        weightSource: account.weightSource,
+        governingWindow: governing.name,
+        governingResetAt: resetAt,
+        bindingWindow: binding?.name ?? null,
+        bindingResetAt: binding?.resetsAt ?? null,
+        urgentResetAt,
+        recentBurnUnitsPerHour: account.recentBurnUnitsPerHour,
+        staleAfterSeconds: account.staleAfterSeconds,
+        serviceable: accountServiceable,
+        state: state2,
+        score: accountScore,
+        normalizedRemaining: (declaredGoverns ? account.normalizedRemaining : null) ?? governing.normalizedRemaining,
+        targetBurnRate: effectiveTargetBurnRate,
+        observedBurnRate: account.observedBurnRate ?? account.recentBurnUnitsPerHour ?? null,
+        deficit: effectiveDeficit,
+        recommendedShare: declaredGoverns ? account.recommendedShare : null,
+        paceDebt: governing.paceDebt,
+        clearRate: governing.clearRate,
+        windows
+      },
       utilizationMilli: utilizationMilli2,
       elapsedMilli: elapsedMilli2,
-      resetAtMs: Date.parse(governing.resetsAt)
+      resetAtMs: Date.parse(urgentResetAt ?? resetAt),
+      aggregateWeight: governing.allowanceWeight ?? account.weight,
+      indeterminateWeight: accountServiceable && (governing.allowanceWeight ?? account.weight) === null,
+      indeterminateGovernor: false
     };
   });
   const serviceableAccountCount = internal.filter((entry) => entry.verdict.serviceable).length;
-  const accounts = internal.map((entry) => entry.verdict);
+  const shareCandidates = internal.filter((entry) => entry.verdict.serviceable && entry.verdict.targetBurnRate != null);
+  const useReportedShares = shareCandidates.length > 0 && shareCandidates.every((entry) => entry.verdict.recommendedShare != null);
+  const rawShare = (entry) => useReportedShares ? Math.max(0, entry.verdict.recommendedShare) : Math.max(0, entry.verdict.deficit ?? entry.verdict.targetBurnRate);
+  const shareDenominator = shareCandidates.reduce((sum, entry) => sum + rawShare(entry), 0);
+  const accounts = internal.map((entry) => ({
+    ...entry.verdict,
+    recommendedShare: !entry.verdict.serviceable || entry.verdict.targetBurnRate == null || shareDenominator <= 0 ? 0 : rawShare(entry) / shareDenominator
+  }));
+  if (internal.some((entry) => entry.indeterminateWeight)) {
+    const weighted = internal.filter((entry) => entry.verdict.serviceable && entry.aggregateWeight !== null);
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts, knownAccountCount: weighted.length, knownWeight: weighted.reduce((sum, entry) => sum + entry.aggregateWeight, 0), serviceableAccountCount, urgentResetAt: null, reason: "indeterminate-account-weight" };
+  }
+  if (internal.some((entry) => entry.indeterminateGovernor)) {
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts, knownAccountCount: 0, knownWeight: 0, serviceableAccountCount, urgentResetAt: null, reason: "invalid-configured-governing-window" };
+  }
   if (serviceableAccountCount === 0) {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "exhausted", serviceable: false, score: null, accounts, knownAccountCount: internal.filter((entry) => entry.utilizationMilli !== null).length, knownWeight: internal.filter((entry) => entry.utilizationMilli !== null).reduce((sum, entry) => sum + entry.verdict.weight, 0), serviceableAccountCount, urgentResetAt: null, reason: "all-accounts-unserviceable" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "exhausted", serviceable: false, score: null, targetBurnRate: 0, observedBurnRate: 0, deficit: 0, accounts, knownAccountCount: internal.filter((entry) => entry.utilizationMilli !== null).length, knownWeight: internal.filter((entry) => entry.utilizationMilli !== null).reduce((sum, entry) => sum + (entry.aggregateWeight ?? 0), 0), serviceableAccountCount, urgentResetAt: null, reason: "all-accounts-unserviceable" };
   }
   const known = internal.filter(
-    (entry) => entry.utilizationMilli !== null && entry.elapsedMilli !== null && entry.resetAtMs !== null
+    (entry) => entry.verdict.serviceable && entry.utilizationMilli !== null && entry.elapsedMilli !== null && entry.resetAtMs !== null && entry.aggregateWeight !== null
   );
   if (known.length === 0) {
-    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: true, score: null, accounts, knownAccountCount: 0, knownWeight: 0, serviceableAccountCount, urgentResetAt: null, reason: "no-computable-governing-window" };
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: true, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts, knownAccountCount: 0, knownWeight: 0, serviceableAccountCount, urgentResetAt: null, reason: "no-computable-governing-window" };
   }
-  const utilizationMilli = weightedMilli(known.map((entry) => ({ value: entry.utilizationMilli, weight: entry.verdict.weight })));
-  const elapsedMilli = weightedMilli(known.map((entry) => ({ value: entry.elapsedMilli, weight: entry.verdict.weight })));
+  const utilizationMilli = weightedMilli(known.map((entry) => ({ value: entry.utilizationMilli, weight: entry.aggregateWeight })));
+  const elapsedMilli = weightedMilli(known.map((entry) => ({ value: entry.elapsedMilli, weight: entry.aggregateWeight })));
   const laneScore = score(utilizationMilli, elapsedMilli);
+  const targetBurnRate = accounts.reduce(
+    (sum, account) => account.serviceable && account.targetBurnRate != null ? sum + account.targetBurnRate : sum,
+    0
+  );
+  const observedBurnRate = accounts.reduce(
+    (sum, account) => account.serviceable && account.observedBurnRate != null ? sum + account.observedBurnRate : sum,
+    0
+  );
+  const deficit = accounts.reduce(
+    (sum, account) => account.serviceable && account.deficit != null ? sum + account.deficit : sum,
+    0
+  );
   let state = stateFor(utilizationMilli - elapsedMilli, marginMilli);
-  const urgent = known.filter((entry) => entry.verdict.state === "behind-urgent").sort((left, right) => left.resetAtMs - right.resetAtMs)[0];
-  if (state === "behind" && urgent) state = "behind-urgent";
+  const urgent = known.filter((entry) => entry.verdict.state === "push").sort((left, right) => left.resetAtMs - right.resetAtMs)[0];
+  if (urgent) state = "behind-urgent";
   return {
     laneId: input.observation.laneId,
     observedAt: input.observation.observedAt,
     state,
     serviceable: true,
     score: laneScore,
+    targetBurnRate,
+    observedBurnRate,
+    deficit,
     accounts,
     knownAccountCount: known.length,
-    knownWeight: known.reduce((sum, entry) => sum + entry.verdict.weight, 0),
+    knownWeight: known.reduce((sum, entry) => sum + entry.aggregateWeight, 0),
     serviceableAccountCount,
-    urgentResetAt: urgent?.verdict.governingResetAt ?? null,
+    urgentResetAt: urgent?.verdict.urgentResetAt ?? urgent?.verdict.governingResetAt ?? null,
     reason: "ok"
   };
 }
@@ -2360,18 +2572,18 @@ async function pollOne(source, http, now) {
   if (!mediaType?.endsWith("/json") && !mediaType?.endsWith("+json")) {
     return fail("lane-unexpected-media-type");
   }
-  let text;
+  let text2;
   try {
-    text = await response.text();
+    text2 = await response.text();
   } catch {
     return fail("lane-request-failed");
   }
-  if (new TextEncoder().encode(text).byteLength > source.maxResponseBytes) {
+  if (new TextEncoder().encode(text2).byteLength > source.maxResponseBytes) {
     return fail("lane-response-too-large");
   }
   let document;
   try {
-    document = JSON.parse(text);
+    document = JSON.parse(text2);
   } catch {
     return fail("lane-invalid-json");
   }
@@ -2407,7 +2619,59 @@ function laneStateLabel(verdict) {
   if (verdict.serviceable === true) return "available";
   return "unavailable";
 }
-function buildLaneSnapshot(models, ledger, slotFloorFraction, nowIso) {
+function namedWindowUtilization(verdict, windowName) {
+  const utilizations = (verdict?.accounts ?? []).flatMap((account) => {
+    const window = account.windows?.find((entry) => entry.name === windowName);
+    return typeof window?.utilization === "number" ? [window.utilization] : [];
+  });
+  return utilizations.length > 0 ? Math.max(...utilizations) : null;
+}
+function desiredAccountPriority(account) {
+  return account.state === "push" ? 100 : 0;
+}
+function accountSnapshots(verdict) {
+  const accounts = verdict?.accounts ?? [];
+  const reportedShare = accounts.some((account) => account.recommendedShare != null);
+  const fallbackDenominator = reportedShare ? 0 : accounts.reduce(
+    (sum, account) => account.serviceable && account.clearRate != null ? sum + Math.max(0, account.clearRate) : sum,
+    0
+  );
+  return accounts.map((account) => {
+    const priority = desiredAccountPriority(account);
+    const share = !account.serviceable ? 0 : account.recommendedShare ?? (account.clearRate != null && fallbackDenominator > 0 ? Math.max(0, account.clearRate) / fallbackDenominator : 0);
+    const desiredWeight = share <= 0 ? 0 : Math.max(1, Math.min(1e6, Math.round(share * 1e6)));
+    return {
+      accountKey: account.accountKey,
+      authKey: account.authKey ?? null,
+      plan: account.plan ?? null,
+      health: account.health,
+      serviceable: account.serviceable,
+      weight: account.weight,
+      weightSource: account.weightSource,
+      governingWindow: account.governingWindow,
+      governingResetAt: account.governingResetAt,
+      bindingWindow: account.bindingWindow ?? account.governingWindow,
+      bindingResetAt: account.bindingResetAt ?? account.governingResetAt,
+      normalizedRemaining: account.normalizedRemaining ?? null,
+      utilization: account.score?.utilization ?? null,
+      elapsedTarget: account.score?.elapsed ?? null,
+      targetBurnRate: account.targetBurnRate ?? account.clearRate ?? null,
+      observedBurnRate: account.observedBurnRate ?? account.recentBurnUnitsPerHour ?? null,
+      deficit: account.deficit ?? account.paceDebt ?? null,
+      recommendedShare: share,
+      paceDebt: account.paceDebt ?? null,
+      clearRate: account.clearRate ?? null,
+      state: account.state,
+      desiredPriority: account.serviceable ? priority : 0,
+      desiredWeight,
+      // The collector contract does not yet carry the auth that served this
+      // issue. Keep the field explicit and null rather than guessing from the
+      // routing weights.
+      servedAuth: null
+    };
+  });
+}
+function buildLaneSnapshot(models, ledger, slotFloorFraction, windowNames, nowIso) {
   const laneIds = /* @__PURE__ */ new Set();
   for (const model of models) {
     if (model.laneId) laneIds.add(model.laneId);
@@ -2422,7 +2686,7 @@ function buildLaneSnapshot(models, ledger, slotFloorFraction, nowIso) {
     const entry = ledger[laneId];
     if (!entry) {
       allFreshAndClean = false;
-      lanes[laneId] = { weekly: null, fiveHour: null, state: "unavailable", paceDeviation: 0 };
+      lanes[laneId] = { weekly: null, fiveHour: null, state: "unavailable", paceDeviation: 0, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [] };
       continue;
     }
     if (entry.error) {
@@ -2435,15 +2699,21 @@ function buildLaneSnapshot(models, ledger, slotFloorFraction, nowIso) {
     if (!verdict) allFreshAndClean = false;
     const model = models.find((candidate) => candidate.laneId === laneId);
     lanes[laneId] = {
-      // The vendored pace engine reports one governing-window utilization, not
-      // separate weekly/five-hour readings — the host dispatcher's own
-      // five-hour/weekly split is specific to its Anthropic-style windows and
-      // has no equivalent field here. Both columns report the same governing
-      // score rather than fabricate a second number.
-      weekly: verdict?.score?.utilization ?? null,
-      fiveHour: verdict?.score?.utilization ?? null,
+      // Each column reports ITS OWN named window, read off the per-account
+      // window verdicts. These were both `verdict.score.utilization` — one
+      // governing-window number written into both columns, which measured
+      // identical in 25,000/25,000 lane observations and put a governing-window
+      // reading on the quota page under a `fiveHour` label. A mislabelled
+      // number is worse than a missing one: it reads as a measurement. `null`
+      // when this lane reports no such window (see `namedWindowUtilization`).
+      weekly: namedWindowUtilization(verdict, windowNames.weekly),
+      fiveHour: namedWindowUtilization(verdict, windowNames.fiveHour),
       state: laneStateLabel(verdict),
       paceDeviation: verdict?.score?.deviation ?? 0,
+      targetBurnRate: verdict?.targetBurnRate ?? null,
+      observedBurnRate: verdict?.observedBurnRate ?? null,
+      deficit: verdict?.deficit ?? null,
+      accounts: accountSnapshots(verdict),
       ...model ? { slotFactor: slotFactorFor(ledger, model, slotFloorFraction) } : {}
     };
   }
@@ -2504,7 +2774,7 @@ function buildDecisionRecord(input, writer) {
       hadRunningRun: !input.isIdle,
       pinOperator: input.hasOperatorPin
     },
-    laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.nowIso),
+    laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
     // Self-tagged DF-*/PI-* classes are the harness's job to derive
     // (`classify_pair`), not this writer's — an empty array here is correct,
@@ -2623,8 +2893,8 @@ function extractText(protocol, parsed) {
     return typeof message?.content === "string" ? message.content : null;
   }
   const content = Array.isArray(body.content) ? body.content : [];
-  const text = content.filter((block) => !!block && typeof block === "object").map((block) => typeof block.text === "string" ? block.text : "").join("");
-  return text.length > 0 ? text : null;
+  const text2 = content.filter((block) => !!block && typeof block === "object").map((block) => typeof block.text === "string" ? block.text : "").join("");
+  return text2.length > 0 ? text2 : null;
 }
 async function callClassifier(input, http) {
   const fail = (error) => ({ text: null, error });
@@ -2671,18 +2941,18 @@ async function callClassifier(input, http) {
   if (!mediaType?.endsWith("/json") && !mediaType?.endsWith("+json")) {
     return fail("classification-unexpected-media-type");
   }
-  let text;
+  let text2;
   try {
-    text = await response.text();
+    text2 = await response.text();
   } catch {
     return fail("classification-request-failed");
   }
-  if (new TextEncoder().encode(text).byteLength > input.maxResponseBytes) {
+  if (new TextEncoder().encode(text2).byteLength > input.maxResponseBytes) {
     return fail("classification-response-too-large");
   }
   let document;
   try {
-    document = JSON.parse(text);
+    document = JSON.parse(text2);
   } catch {
     return fail("classification-invalid-json");
   }
@@ -2707,8 +2977,8 @@ Description:
 ${truncated}`;
 }
 var TIER_VALUES = ["T1", "T2", "T3"];
-function parseClassificationResponse(text) {
-  const match = /\{[\s\S]*\}/.exec(text);
+function parseClassificationResponse(text2) {
+  const match = /\{[\s\S]*\}/.exec(text2);
   if (!match) return null;
   let parsed;
   try {
@@ -3519,6 +3789,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             models: config.models,
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
+            windowNames: {
+              weekly: config.pacing.weeklyWindowName,
+              fiveHour: config.pacing.fiveHourWindowName
+            },
             operatorOverride: liveOverride
           };
           await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);

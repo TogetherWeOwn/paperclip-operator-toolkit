@@ -31,6 +31,8 @@ var TOOL_NAMES = {
 var LANE_ID_CODEX = "cliproxy-codex";
 var LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
 var LANE_ID_ZAI = "cliproxy-zai";
+var DEFAULT_PACE_ACCOUNT_KEY_FIELDS = ["account_key", "accountKey", "name", "id"];
+var DEFAULT_PACE_WEIGHT_FIELDS = ["plan_weight", "weight"];
 var DEFAULT_LANE_CAP_PER_ACCOUNT = {
   [LANE_ID_OPENCODE_GO]: 2,
   [LANE_ID_ZAI]: 3
@@ -273,10 +275,17 @@ var SELECTION_CONFIG_SCHEMA = {
                 items: { type: "string", minLength: 1 },
                 default: ["health", "status"]
               },
+              accountKeyFields: {
+                type: "array",
+                minItems: 1,
+                items: { type: "string", minLength: 1 },
+                default: [...DEFAULT_PACE_ACCOUNT_KEY_FIELDS]
+              },
               weightFields: {
                 type: "array",
+                minItems: 1,
                 items: { type: "string", minLength: 1 },
-                default: ["weight"]
+                default: [...DEFAULT_PACE_WEIGHT_FIELDS]
               },
               governingWindowField: { type: "string", minLength: 1, default: "governing_window" },
               windowSecondsField: { type: "string", minLength: 1, default: "window_seconds" },
@@ -357,6 +366,8 @@ var SELECTION_CONFIG_SCHEMA = {
         },
         /** Named 5h allowance window `lane_5h()` reads; new admission stops at >= 0.5 utilization (2026-09-07 03:15Z: 0.6 -> 0.5). Default matches this deployment's live hyphenated `five-hour` window name. */
         fiveHourWindowName: { type: "string", minLength: 1, default: "five-hour" },
+        /** Named weekly allowance window reported in the shadow stream's per-lane snapshot. Reporting only — no gate reads it (the Z.ai weekly gate has its own `zai.weeklyWindowName`). */
+        weeklyWindowName: { type: "string", minLength: 1, default: "weekly" },
         /**
          * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
          * fallback rule (2026-09-07 03:15Z owner rule): `codexLaneId` names

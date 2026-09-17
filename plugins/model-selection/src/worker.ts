@@ -988,6 +988,10 @@ export function createPlugin() {
             models: config.models,
             laneLedger,
             slotFloorFraction: config.pacing.slotFloorFraction,
+            windowNames: {
+              weekly: config.pacing.weeklyWindowName,
+              fiveHour: config.pacing.fiveHourWindowName,
+            },
             operatorOverride: liveOverride,
           };
           await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);

@@ -15,11 +15,42 @@ export type DecisionWriter = "host" | "plugin-shadow";
 
 export type ShadowLaneState = "available" | "degraded" | "exhausted" | "unavailable";
 
+export interface ShadowAccountSnapshot {
+  accountKey: string;
+  authKey: string | null;
+  plan: string | null;
+  health: LanePaceVerdict["accounts"][number]["health"];
+  serviceable: boolean;
+  weight: number | null;
+  weightSource: LanePaceVerdict["accounts"][number]["weightSource"];
+  governingWindow: string | null;
+  governingResetAt: string | null;
+  bindingWindow: string | null;
+  bindingResetAt: string | null;
+  normalizedRemaining: number | null;
+  utilization: number | null;
+  elapsedTarget: number | null;
+  targetBurnRate: number | null;
+  observedBurnRate: number | null;
+  deficit: number | null;
+  recommendedShare: number;
+  paceDebt: number | null;
+  clearRate: number | null;
+  state: LanePaceVerdict["accounts"][number]["state"];
+  desiredPriority: number;
+  desiredWeight: number;
+  servedAuth: string | null;
+}
+
 export interface ShadowLaneSnapshot {
   weekly: number | null;
   fiveHour: number | null;
   state: ShadowLaneState;
   paceDeviation: number;
+  targetBurnRate: number | null;
+  observedBurnRate: number | null;
+  deficit: number | null;
+  accounts: ShadowAccountSnapshot[];
   slotFactor?: number;
 }
 
@@ -74,6 +105,13 @@ export interface ShadowRecordInput {
   models: readonly ModelEntry[];
   laneLedger: LaneLedger;
   slotFloorFraction: number;
+  /**
+   * Which named allowance windows the per-lane `weekly`/`fiveHour` columns
+   * report. Config-named rather than inferred from `windowSeconds`, so the
+   * reporting columns and `pacing.fiveHourWindowName`'s admission gate can
+   * never disagree about which window is the five-hour one.
+   */
+  windowNames: { weekly: string; fiveHour: string };
   operatorOverride: OperatorOverrideEntry | null;
 }
 
@@ -99,10 +137,98 @@ function laneStateLabel(verdict: LanePaceVerdict | null): ShadowLaneState {
   return "unavailable";
 }
 
+/**
+ * Utilization of ONE NAMED allowance window across a lane's accounts, for the
+ * comparison stream's per-lane `weekly`/`fiveHour` columns.
+ *
+ * Deliberately NOT `pacing.ts`'s `laneNamedWindowUtilization`. That one is a
+ * GATE input and is fail-neutral to `0`, because an unpolled lane must never
+ * exclude a model on ignorance. A reporting column with the same default is a
+ * false measurement: `0` on the quota page reads as "this window is untouched",
+ * which is the most dangerous thing it could say about a window nobody has
+ * observed. So this returns `null` when no account reports the window at all.
+ *
+ * `max`, not the weight-weighted mean the lane's governing `score` uses. The
+ * column answers "how close is this window to gone", and a mean over one
+ * exhausted and two fresh accounts (1.00, 0.02, 0.02 -> 0.35) hides precisely
+ * the account that is about to stop serving. Max is also the statistic the
+ * `lane_5h()` admission gate reads, so the page and the gate cannot tell
+ * different stories about the same window.
+ *
+ * Every account is scanned, not just the healthy ones the gate filters to: an
+ * exhausted account's 1.00 is the reading the owner most needs, and the gate
+ * drops it only because it is deciding admission rather than describing
+ * capacity.
+ */
+function namedWindowUtilization(verdict: LanePaceVerdict | null, windowName: string): number | null {
+  const utilizations = (verdict?.accounts ?? []).flatMap((account) => {
+    const window = account.windows?.find((entry) => entry.name === windowName);
+    return typeof window?.utilization === "number" ? [window.utilization] : [];
+  });
+  return utilizations.length > 0 ? Math.max(...utilizations) : null;
+}
+
+function desiredAccountPriority(account: LanePaceVerdict["accounts"][number]): number {
+  return account.state === "push" ? 100 : 0;
+}
+
+function accountSnapshots(verdict: LanePaceVerdict | null): ShadowAccountSnapshot[] {
+  const accounts = verdict?.accounts ?? [];
+  const reportedShare = accounts.some((account) => account.recommendedShare != null);
+  const fallbackDenominator = reportedShare
+    ? 0
+    : accounts.reduce((sum, account) =>
+      account.serviceable && account.clearRate != null ? sum + Math.max(0, account.clearRate) : sum,
+    0);
+  return accounts.map((account) => {
+    const priority = desiredAccountPriority(account);
+    const share = !account.serviceable
+      ? 0
+      : account.recommendedShare ?? (
+        account.clearRate != null && fallbackDenominator > 0
+          ? Math.max(0, account.clearRate) / fallbackDenominator
+          : 0
+      );
+    const desiredWeight = share <= 0
+      ? 0
+      : Math.max(1, Math.min(1_000_000, Math.round(share * 1_000_000)));
+    return {
+      accountKey: account.accountKey,
+      authKey: account.authKey ?? null,
+      plan: account.plan ?? null,
+      health: account.health,
+      serviceable: account.serviceable,
+      weight: account.weight,
+      weightSource: account.weightSource,
+      governingWindow: account.governingWindow,
+      governingResetAt: account.governingResetAt,
+      bindingWindow: account.bindingWindow ?? account.governingWindow,
+      bindingResetAt: account.bindingResetAt ?? account.governingResetAt,
+      normalizedRemaining: account.normalizedRemaining ?? null,
+      utilization: account.score?.utilization ?? null,
+      elapsedTarget: account.score?.elapsed ?? null,
+      targetBurnRate: account.targetBurnRate ?? account.clearRate ?? null,
+      observedBurnRate: account.observedBurnRate ?? account.recentBurnUnitsPerHour ?? null,
+      deficit: account.deficit ?? account.paceDebt ?? null,
+      recommendedShare: share,
+      paceDebt: account.paceDebt ?? null,
+      clearRate: account.clearRate ?? null,
+      state: account.state,
+      desiredPriority: account.serviceable ? priority : 0,
+      desiredWeight,
+      // The collector contract does not yet carry the auth that served this
+      // issue. Keep the field explicit and null rather than guessing from the
+      // routing weights.
+      servedAuth: null,
+    };
+  });
+}
+
 function buildLaneSnapshot(
   models: readonly ModelEntry[],
   ledger: LaneLedger,
   slotFloorFraction: number,
+  windowNames: ShadowRecordInput["windowNames"],
   nowIso: string,
 ): ShadowDecisionRecord["laneSnapshot"] {
   const laneIds = new Set<string>();
@@ -121,7 +247,7 @@ function buildLaneSnapshot(
     const entry = ledger[laneId];
     if (!entry) {
       allFreshAndClean = false;
-      lanes[laneId] = { weekly: null, fiveHour: null, state: "unavailable", paceDeviation: 0 };
+      lanes[laneId] = { weekly: null, fiveHour: null, state: "unavailable", paceDeviation: 0, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [] };
       continue;
     }
     if (entry.error) {
@@ -135,15 +261,21 @@ function buildLaneSnapshot(
     if (!verdict) allFreshAndClean = false;
     const model = models.find((candidate) => candidate.laneId === laneId);
     lanes[laneId] = {
-      // The vendored pace engine reports one governing-window utilization, not
-      // separate weekly/five-hour readings — the host dispatcher's own
-      // five-hour/weekly split is specific to its Anthropic-style windows and
-      // has no equivalent field here. Both columns report the same governing
-      // score rather than fabricate a second number.
-      weekly: verdict?.score?.utilization ?? null,
-      fiveHour: verdict?.score?.utilization ?? null,
+      // Each column reports ITS OWN named window, read off the per-account
+      // window verdicts. These were both `verdict.score.utilization` — one
+      // governing-window number written into both columns, which measured
+      // identical in 25,000/25,000 lane observations and put a governing-window
+      // reading on the quota page under a `fiveHour` label. A mislabelled
+      // number is worse than a missing one: it reads as a measurement. `null`
+      // when this lane reports no such window (see `namedWindowUtilization`).
+      weekly: namedWindowUtilization(verdict, windowNames.weekly),
+      fiveHour: namedWindowUtilization(verdict, windowNames.fiveHour),
       state: laneStateLabel(verdict),
       paceDeviation: verdict?.score?.deviation ?? 0,
+      targetBurnRate: verdict?.targetBurnRate ?? null,
+      observedBurnRate: verdict?.observedBurnRate ?? null,
+      deficit: verdict?.deficit ?? null,
+      accounts: accountSnapshots(verdict),
       ...(model ? { slotFactor: slotFactorFor(ledger, model, slotFloorFraction) } : {}),
     };
   }
@@ -212,7 +344,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
       hadRunningRun: !input.isIdle,
       pinOperator: input.hasOperatorPin,
     },
-    laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.nowIso),
+    laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
     // Self-tagged DF-*/PI-* classes are the harness's job to derive
     // (`classify_pair`), not this writer's — an empty array here is correct,

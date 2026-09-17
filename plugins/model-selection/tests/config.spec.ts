@@ -148,7 +148,48 @@ describe("config resolution", () => {
       type: "secret_ref",
       secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4",
     });
+    expect(config.pacing.lanes[0]!.lane.accountKeyFields).toEqual([
+      "account_key",
+      "accountKey",
+      "name",
+      "id",
+    ]);
+    expect(config.pacing.lanes[0]!.lane.weightFields).toEqual(["plan_weight", "weight"]);
     expect(validateConfig(config).errors).toEqual([]);
+  });
+
+  it("threads configured account identity fields into the lane pace definition", () => {
+    const config = resolveConfig({
+      pacing: {
+        lanes: [
+          {
+            laneId: "lane-a",
+            statusUrl: "https://status.example.com/lane-a",
+            accountKeyFields: ["lane", "account_id"],
+            windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+          },
+        ],
+      },
+    });
+
+    expect(config.pacing.lanes[0]!.lane.accountKeyFields).toEqual(["lane", "account_id"]);
+  });
+
+  it("preserves explicit weight fields and restores production defaults for empty lists", () => {
+    const lane = (weightFields: unknown) => ({
+      laneId: "lane-a",
+      statusUrl: "https://status.example.com/lane-a",
+      weightFields,
+      windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+    });
+
+    const explicit = resolveConfig({ pacing: { lanes: [lane(["capacity_weight"])] } });
+    expect(explicit.pacing.lanes[0]!.lane.weightFields).toEqual(["capacity_weight"]);
+
+    for (const weightFields of [[], [null, 7, ""]]) {
+      const fallback = resolveConfig({ pacing: { lanes: [lane(weightFields)] } });
+      expect(fallback.pacing.lanes[0]!.lane.weightFields).toEqual(["plan_weight", "weight"]);
+    }
   });
 
   it("rejects a lane apiKeySecretRef holding a raw string instead of a reference", () => {

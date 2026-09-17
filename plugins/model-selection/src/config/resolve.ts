@@ -4,7 +4,10 @@ import {
   DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS,
   DEFAULT_LANE_CAP_PER_ACCOUNT,
   DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS,
+  DEFAULT_PACE_ACCOUNT_KEY_FIELDS,
+  DEFAULT_PACE_WEIGHT_FIELDS,
   DEFAULT_SLOT_FLOOR_FRACTION,
+  DEFAULT_WEEKLY_WINDOW_NAME,
   DEFAULT_ZAI_WEEKLY_MARGIN,
   DEFAULT_ZAI_WEEKLY_WINDOW_NAME,
   LANE_ID_CODEX,
@@ -92,6 +95,8 @@ export interface ResolvedConfig {
     laneCapPerAccount: Record<string, number>;
     /** TOG-2481 port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
     fiveHourWindowName: string;
+    /** Named weekly allowance window reported in the shadow stream's per-lane snapshot (reporting only). */
+    weeklyWindowName: string;
     /** Which configured lane is Codex, for the T1-Go-fallback / Z.ai long-run-agent-exclusion rules. */
     codexLaneId: string;
     /** Which configured lane is OpenCode Go, for the T1-Go-fallback rule. */
@@ -139,6 +144,13 @@ function bool(value: unknown, fallback: boolean): boolean {
 
 function string(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback;
+}
+
+function fieldList(value: unknown, fallback: readonly string[]): string[] {
+  const fields = Array.isArray(value)
+    ? value.filter((field): field is string => typeof field === "string" && field.length > 0)
+    : [];
+  return fields.length > 0 ? fields : [...fallback];
 }
 
 function nullableNum(value: unknown): number | null {
@@ -262,12 +274,9 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             lane: {
               laneId: rawLane.laneId,
               free: bool(rawLane.free, false),
-              healthFields: Array.isArray(rawLane.healthFields)
-                ? rawLane.healthFields.filter((f): f is string => typeof f === "string")
-                : ["health", "status"],
-              weightFields: Array.isArray(rawLane.weightFields)
-                ? rawLane.weightFields.filter((f): f is string => typeof f === "string")
-                : ["weight"],
+              healthFields: fieldList(rawLane.healthFields, ["health", "status"]),
+              accountKeyFields: fieldList(rawLane.accountKeyFields, DEFAULT_PACE_ACCOUNT_KEY_FIELDS),
+              weightFields: fieldList(rawLane.weightFields, DEFAULT_PACE_WEIGHT_FIELDS),
               governingWindowField:
                 typeof rawLane.governingWindowField === "string" ? rawLane.governingWindowField : "governing_window",
               windowSecondsField:
@@ -348,6 +357,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         return perAccount;
       })(),
       fiveHourWindowName: string(pacing.fiveHourWindowName, DEFAULT_FIVE_HOUR_WINDOW_NAME),
+      weeklyWindowName: string(pacing.weeklyWindowName, DEFAULT_WEEKLY_WINDOW_NAME),
       codexLaneId: string(pacing.codexLaneId, LANE_ID_CODEX),
       opencodeGoLaneId: string(pacing.opencodeGoLaneId, LANE_ID_OPENCODE_GO),
       zai: (() => {
