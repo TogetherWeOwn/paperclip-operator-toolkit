@@ -64,8 +64,14 @@
 # is repo path, line number, credential kind, and file mode — the metadata you
 # need to route the fix, none of the secret. Findings are reported by shape;
 # whether a given token is still live is a separate question answered by
-# attempting it, deliberately not automated here (a scanner that authenticates
-# with every secret it finds is its own incident).
+# attempting it, deliberately not automated HERE (a scanner that authenticates
+# with every secret it finds is its own incident). Since TOG-3209 the answer
+# has a dedicated tool: gh_embedded_token_remediate.py revokes the credential
+# BEFORE scrubbing the URL — `git remote set-url` alone deletes our copy and
+# leaves a `ghs_` token valid at GitHub for up to an hour (measured on
+# TOG-3202: a scrubbed token still authenticated ~5 min later). Scrub-first
+# also destroys the only handle the revoke authenticates with, so the order
+# is revoke, verify 401, THEN scrub.
 #
 # Exit codes:
 #   0  CLEAN     -- no remote URL carries a credential.
@@ -174,5 +180,7 @@ if [[ $FOUND -eq 0 ]]; then
   [[ $QUIET -eq 1 ]] || echo "CLEAN: scanned $SCANNED git config(s); no remote URL embeds a credential"
   exit 0
 fi
-echo "-- scanned $SCANNED git config(s); remediate with: git remote set-url <name> <url-without-credential>"
+echo "-- scanned $SCANNED git config(s); remediate with: ./gh_embedded_token_remediate.py --repo <repo>"
+echo "   (revoke -> verify 401 -> scrub; a bare 'git remote set-url' deletes our copy and"
+echo "    leaves the credential live at GitHub — see TOG-3202/TOG-3209)"
 exit 1

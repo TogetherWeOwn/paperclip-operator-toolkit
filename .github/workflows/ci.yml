@@ -865,6 +865,28 @@ jobs:
       - name: git remote-URL credential scan regression suite
         run: ./test_git_remote_credential_scan.sh
 
+      # TOG-3202/TOG-3209. The scan above locates embedded credentials; this is
+      # the repair half. `git remote set-url` deletes our copy and leaves the
+      # credential live at GitHub for up to an hour — measured: a scrubbed
+      # token still authenticated ~5 min after the sweep reported it
+      # remediated. gh_embedded_token_remediate.py revokes first, because
+      # scrubbing first destroys the only handle the revoke authenticates
+      # with (DELETE /installation/token self-authenticates, so it needs no
+      # PEM and no broker, and works when the broker is down — which is when
+      # embedded tokens get created).
+      #
+      # The suite's load-bearing cases, all offline against a loopback stub
+      # GitHub API with fabricated sentinels: ORDER is proved from one shared
+      # sequence log written by both the stub and a git-shim argv recorder —
+      # the DELETE must precede the `remote set-url`; an unreachable API
+      # scores UNKNOWN, exits 1, and leaves the URL intact so the token stays
+      # revocable (a transport error scored as dead is how a live credential
+      # closes out as remediated); a 204 that does not kill the token is not
+      # a revoke; and the sentinel appears in no output and no git argv while
+      # the stub proves the printed truncated-sha256 ids are honest.
+      - name: embedded-token revoke-before-scrub regression suite
+        run: ./test_gh_embedded_token_remediate.sh
+
       # TOG-918. An issue with no project has no GH_APP_REPOS to read, and the
       # host's getWorkspaceForIssue returns null outright on a null projectId
       # — so BOTH of the broker's scope sources are null together, by
