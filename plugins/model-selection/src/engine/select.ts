@@ -686,9 +686,33 @@ export function selectModel(input: SelectInput): SelectionDecision {
   };
 
   // An untrusted profile means we do not actually know the volume term. Say so
-  // and hold at the floor rather than act on a number we would not defend.
+  // and hold at the floor rather than act on a number we would not defend —
+  // UNLESS the floor itself is not serviceable right now. "Held at floor" is
+  // only ever a statement about cost trust; it says nothing about
+  // availability. And the floor is frequently never a candidate above: a
+  // fleet-wide floor model is usually below `requiredTier` for a T1/T2 card,
+  // so it never reached the `qualified` loop and its lane was never tested
+  // against `ledger`/`laneOutageOverride` at all (TOG-3037). Test it here,
+  // on the exact same predicates, before handing the run back to a lane that
+  // might already be dead. `winner` already cleared every gate above
+  // (including serviceability), so it is always a safe explicit fallback.
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
+    const floorModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
+    const floorModel = floorModelId ? config.models.find((model) => model.id === floorModelId) : undefined;
+    const floorLaneDead =
+      paceActive &&
+      !!floorModel &&
+      (hardStopExcluded(ledger, floorModel) ||
+        (!!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig)) ||
+        laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel));
+    if (floorLaneDead) {
+      trace.push(
+        `held-at-floor declined: floor ${floorModel!.id} lane ${floorModel!.laneId ?? "(none)"} is not serviceable — ` +
+          `writing an explicit pin to ${winner.modelId} instead (${reason})`,
+      );
+      return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+    }
     trace.push(`held at agent floor: ${reason}`);
     return { ...withCandidates, outcome: "held-at-floor", heldReason: reason };
   }

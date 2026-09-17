@@ -1850,6 +1850,15 @@ function selectModel(input) {
   };
   if (config.holdOnUntrustedProfile && !winner.profileTrusted) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
+    const floorModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
+    const floorModel = floorModelId ? config.models.find((model) => model.id === floorModelId) : void 0;
+    const floorLaneDead = paceActive && !!floorModel && (hardStopExcluded(ledger, floorModel) || !!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel));
+    if (floorLaneDead) {
+      trace.push(
+        `held-at-floor declined: floor ${floorModel.id} lane ${floorModel.laneId ?? "(none)"} is not serviceable \u2014 writing an explicit pin to ${winner.modelId} instead (${reason})`
+      );
+      return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+    }
     trace.push(`held at agent floor: ${reason}`);
     return { ...withCandidates, outcome: "held-at-floor", heldReason: reason };
   }
@@ -4810,6 +4819,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 limit $2`,
               [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)]
             );
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = (/* @__PURE__ */ new Date()).toISOString();
             const contextUsageCache = /* @__PURE__ */ new Map();
             let pinned = 0;
             for (const row of candidateRows) {
@@ -4828,8 +4841,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 continue;
               }
               const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-              if (result.decision.modelId === floorModelId) {
-                ctx.logger.info("label-only pass skipped: pick equals floor", {
+              if (result.decision.modelId === floorModelId && isUsableAndCapable(
+                floorModelId,
+                tier2,
+                described.descriptor.requiredContextTokens,
+                config,
+                laneLedger,
+                laneOutageOverride,
+                modelScores,
+                nowIso
+              )) {
+                ctx.logger.info("label-only pass skipped: pick equals healthy floor", {
                   companyId: company.id,
                   issue: identifier,
                   tier: tier2
@@ -4851,7 +4873,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               );
               await ctx.activity.log({
                 companyId: company.id,
-                message: `Model Selection label-only pinned ${result.decision.modelId} (${tier2}) from the existing tier label`,
+                message: result.decision.modelId === floorModelId ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier2}): floor lane unserviceable` : `Model Selection label-only pinned ${result.decision.modelId} (${tier2}) from the existing tier label`,
                 entityType: "issue",
                 entityId: issueId,
                 metadata: { modelId: result.decision.modelId, tier: tier2, trace: result.decision.trace }
@@ -5111,7 +5133,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
                 if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-                if (result.decision.modelId === floorModelId) continue;
+                const floorHealthy = result.decision.modelId === floorModelId && isUsableAndCapable(
+                  floorModelId,
+                  tier2,
+                  described.descriptor.requiredContextTokens,
+                  config,
+                  laneLedger,
+                  laneOutageOverride,
+                  modelScores,
+                  nowIso
+                );
+                if (floorHealthy) continue;
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
                 if (!await balanceWriteStillSafe(company.id, issueId, null, config.models)) continue;
@@ -5128,7 +5160,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 );
                 await ctx.activity.log({
                   companyId: company.id,
-                  message: `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
+                  message: result.decision.modelId === floorModelId ? `Model Selection explicitly pinned ${result.decision.modelId} (T1): floor lane unserviceable` : `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
                   entityType: "issue",
                   entityId: issueId,
                   metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1" }

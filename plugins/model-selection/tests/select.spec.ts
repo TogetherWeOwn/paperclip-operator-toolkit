@@ -204,6 +204,47 @@ describe("selection", () => {
     expect(decision.heldReason).toContain("not trusted");
   });
 
+  it("TOG-3037: writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
+    const floor = model(MODELS.find((m) => m.tier === "T3")!, {
+      id: "gpt-5.6-sol",
+      laneId: "sol-lane",
+    });
+    const thin: VolumeProfile[] = PROFILES.map((p) => ({ ...p, sampleCount: 1 }));
+    const decision = selectModel({
+      ...base,
+      profiles: thin,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], agentFloorModelId: "gpt-5.6-sol" },
+      config: config({
+        models: [...MODELS, floor],
+        pacingMode: "enforce",
+        laneLedger: ledgerWith("sol-lane"),
+      }),
+    });
+    expect(decision.outcome).toBe("selected");
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.trace.some((line) => line.includes("held-at-floor declined"))).toBe(true);
+  });
+
+  it("TOG-3037: still holds at floor, unchanged, when the floor's lane is healthy", () => {
+    const floor = model(MODELS.find((m) => m.tier === "T3")!, {
+      id: "gpt-5.6-sol",
+      laneId: "sol-lane",
+    });
+    const thin: VolumeProfile[] = PROFILES.map((p) => ({ ...p, sampleCount: 1 }));
+    const decision = selectModel({
+      ...base,
+      profiles: thin,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], agentFloorModelId: "gpt-5.6-sol" },
+      config: config({
+        models: [...MODELS, floor],
+        pacingMode: "enforce",
+        laneLedger: {},
+      }),
+    });
+    expect(decision.outcome).toBe("held-at-floor");
+    expect(decision.heldReason).toContain("not trusted");
+  });
+
   it("refuses to choose at all when no candidate can be costed", () => {
     const decision = selectModel({
       ...base,

@@ -2275,6 +2275,15 @@ export function createPlugin() {
               [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)],
             )) as unknown[];
 
+            // TOG-3037. Read fresh, right before the floor-equality check
+            // below — not reused from `advise()`'s own internal read — so a
+            // lane that went bad between that internal read and this pass's
+            // write decision is still caught.
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const modelScores = await readModelScores(company.id);
+            const nowIso = new Date().toISOString();
+
             // TOG-2862. One memo per company per pass: `advise` re-describes
             // the rows that survive the cheap rejections, and without this it
             // would repeat their `heartbeat_runs` read.
@@ -2299,8 +2308,24 @@ export function createPlugin() {
                 continue;
               }
               const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-              if (result.decision.modelId === floorModelId) {
-                ctx.logger.info("label-only pass skipped: pick equals floor", {
+              if (
+                result.decision.modelId === floorModelId &&
+                isUsableAndCapable(
+                  floorModelId,
+                  tier,
+                  described.descriptor.requiredContextTokens,
+                  config,
+                  laneLedger,
+                  laneOutageOverride,
+                  modelScores,
+                  nowIso,
+                )
+              ) {
+                // TOG-3037: elide only while the floor is actually serviceable.
+                // An implicit NULL-override pin to a dead-lane floor is exactly
+                // the invariant violation this pass exists to close, and a
+                // NULL override is invisible to `repinPass` going forward.
+                ctx.logger.info("label-only pass skipped: pick equals healthy floor", {
                   companyId: company.id,
                   issue: identifier,
                   tier,
@@ -2323,7 +2348,10 @@ export function createPlugin() {
               );
               await ctx.activity.log({
                 companyId: company.id,
-                message: `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from the existing tier label`,
+                message:
+                  result.decision.modelId === floorModelId
+                    ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier}): floor lane unserviceable`
+                    : `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from the existing tier label`,
                 entityType: "issue",
                 entityId: issueId,
                 metadata: { modelId: result.decision.modelId, tier, trace: result.decision.trace },
@@ -2668,7 +2696,24 @@ export function createPlugin() {
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
                 if (result.pinnedModelId !== null) continue;
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-                if (result.decision.modelId === floorModelId) continue;
+                // TOG-3037: only elide onto the implicit NULL-override floor
+                // pin while that floor's own lane is serviceable right now —
+                // otherwise write the explicit pin `result.decision.modelId`
+                // already resolved to, same as `floorModelId` in that case,
+                // so `repinPass` can see and repair it later.
+                const floorHealthy =
+                  result.decision.modelId === floorModelId &&
+                  isUsableAndCapable(
+                    floorModelId,
+                    tier,
+                    described.descriptor.requiredContextTokens,
+                    config,
+                    laneLedger,
+                    laneOutageOverride,
+                    modelScores,
+                    nowIso,
+                  );
+                if (floorHealthy) continue;
 
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
@@ -2686,7 +2731,10 @@ export function createPlugin() {
                 );
                 await ctx.activity.log({
                   companyId: company.id,
-                  message: `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
+                  message:
+                    result.decision.modelId === floorModelId
+                      ? `Model Selection explicitly pinned ${result.decision.modelId} (T1): floor lane unserviceable`
+                      : `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
                   entityType: "issue",
                   entityId: issueId,
                   metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1" },

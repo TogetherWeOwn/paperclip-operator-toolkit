@@ -1,4 +1,5 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import type { ScopeKey } from "@paperclipai/plugin-sdk";
 import type { Issue } from "@paperclipai/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -232,6 +233,99 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       const after = await harness.ctx.issues.get("i1", COMPANY);
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
     });
+
+    // TOG-3037: the equality check alone (`pick === floor`, above) treats an
+    // implicit NULL-override floor pin as a neutral no-op, but NULL is an
+    // implicit pin to the floor lane — never tested for serviceability here.
+    // If that lane is exhausted, this pass must write an EXPLICIT pin to a
+    // serviceable candidate instead of leaving the card parked on a dead
+    // lane. This test forces the floor's lane to read exhausted at the
+    // moment this pass takes its own per-company ledger snapshot, then
+    // recovered by the time `advise()` takes its own fresh per-row read — a
+    // real mid-pass race (the ledger is written by a separate poller/operator
+    // action, and a pass walks many rows with real I/O between them) — to
+    // exercise the new health gate deterministically.
+    it("writes an explicit pin instead of silently eliding when the floor's lane reads exhausted at snapshot time", async () => {
+      const modelsWithLane = MODELS.map((m) =>
+        m.id === "claude-haiku-4-5-20251001" ? { ...m, laneId: "lane-sol" } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAgentId: AGENT,
+      });
+      const harness = await boot(
+        baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }),
+        [card],
+        [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })],
+      );
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      const deadLedger = {
+        "lane-sol": {
+          laneId: "lane-sol",
+          fetchedAt: "2026-09-13T00:00:00.000Z",
+          observation: null,
+          error: null,
+          verdict: {
+            laneId: "lane-sol",
+            observedAt: "2026-09-13T00:00:00.000Z",
+            state: "exhausted",
+            serviceable: false,
+            score: null,
+            accounts: [],
+            knownAccountCount: 1,
+            knownWeight: 1,
+            serviceableAccountCount: 0,
+            urgentResetAt: null,
+            reason: "exhausted",
+          },
+        },
+      };
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        deadLedger,
+      );
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let laneLedgerReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneLedger) {
+          laneLedgerReads += 1;
+          return laneLedgerReads === 1 ? deadLedger : {};
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("labelOnlyPass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-haiku-4-5-20251001" } });
+      expect(harness.activity).toHaveLength(1);
+      expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
+    });
+
+    it("still elides when the floor's lane is healthy throughout (unchanged cost)", async () => {
+      const modelsWithLane = MODELS.map((m) =>
+        m.id === "claude-haiku-4-5-20251001" ? { ...m, laneId: "lane-sol" } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAgentId: AGENT,
+      });
+      const harness = await boot(
+        baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }),
+        [card],
+        [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })],
+      );
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      await harness.runJob("labelOnlyPass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
   });
 
   describe("repinPass", () => {
@@ -451,6 +545,67 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+    });
+
+    // TOG-3037: same gap as labelOnlyPass's floor-equality skip, in the
+    // unpinned branch. See the labelOnlyPass test of the same name for why
+    // the race is forced via a `state.get` sequencing mock rather than a
+    // single consistent ledger.
+    it("writes an explicit pin instead of silently eliding when the floor's lane reads exhausted at snapshot time", async () => {
+      const modelsWithLane = MODELS.map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        assigneeAdapterOverrides: null,
+      });
+      const harness = await boot(
+        baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }),
+        [card],
+        [agentRow({ adapterConfig: { model: "claude-opus-5" } })],
+      );
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      const deadLedger = {
+        "lane-opus": {
+          laneId: "lane-opus",
+          fetchedAt: "2026-09-13T00:00:00.000Z",
+          observation: null,
+          error: null,
+          verdict: {
+            laneId: "lane-opus",
+            observedAt: "2026-09-13T00:00:00.000Z",
+            state: "exhausted",
+            serviceable: false,
+            score: null,
+            accounts: [],
+            knownAccountCount: 1,
+            knownWeight: 1,
+            serviceableAccountCount: 0,
+            urgentResetAt: null,
+            reason: "exhausted",
+          },
+        },
+      };
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        deadLedger,
+      );
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let laneLedgerReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneLedger) {
+          laneLedgerReads += 1;
+          return laneLedgerReads === 1 ? deadLedger : {};
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(1);
+      expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
     });
 
     // balance_pass()'s `cheaper = blended(nm) <= 0.8*blended(pm)` cost-down rule.
