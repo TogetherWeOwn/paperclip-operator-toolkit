@@ -143,9 +143,12 @@ interface IssueUpdatePatch {
 
 function summary(decision: SelectionDecision): string {
   if (decision.outcome === "selected") {
+    const wakeNote = decision.wakeScopedTier
+      ? ` — wake-scoped floor ${decision.wakeScopedTier} (card tier ${decision.judgement.tier} unchanged)`
+      : "";
     return `${decision.modelId} at ${decision.effectiveTier} (tier via ${decision.judgement.source})${
       decision.advisory ? " — advisory, nothing written" : ""
-    }`;
+    }${wakeNote}`;
   }
   if (decision.outcome === "held-at-floor") {
     return `Held at the agent floor: ${decision.heldReason}`;
@@ -772,6 +775,10 @@ export function createPlugin() {
           // the passes that only decide repinnability never pay for it.
           requiredContextTokens:
             typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : undefined,
+          // TOG-3210: the caller's PAPERCLIP_WAKE_REASON for this run, if any.
+          // Feeds SelectionConfig.wakeScopedFloor only — resolveTier() never
+          // reads it, so it can never change the card's own judged tier.
+          wakeReason: typeof supplied.wakeReason === "string" ? supplied.wakeReason : undefined,
           ...(typeof exclusionRaw.excluded === "boolean"
             ? {
                 exclusion: {
@@ -948,6 +955,7 @@ export function createPlugin() {
             objective: config.selection.objective,
             modelScores,
             allowExplore,
+            wakeScopedFloor: config.wakeScopedFloor,
           },
           profiles,
           signals,
@@ -1030,7 +1038,17 @@ export function createPlugin() {
         {
           displayName: "Advise a model for an issue",
           description: "Return the tier judgement and costed candidates for one issue. Writes nothing.",
-          parametersSchema: { type: "object" },
+          parametersSchema: {
+            type: "object",
+            properties: {
+              issueId: { type: "string" },
+              wakeReason: {
+                type: "string",
+                description:
+                  "TOG-3210. Pass the run's PAPERCLIP_WAKE_REASON here so a cheap re-check (e.g. a monitor tick) can get a lower advisory floor without ever changing the card's own tier — see wakeScopedFloor config.",
+              },
+            },
+          },
         },
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));
@@ -1053,7 +1071,17 @@ export function createPlugin() {
           displayName: "Apply a model selection to an issue",
           description:
             "Advise, then write the per-issue override and tier label when enforcement is on. No-ops on an issue that already has an override.",
-          parametersSchema: { type: "object" },
+          parametersSchema: {
+            type: "object",
+            properties: {
+              issueId: { type: "string" },
+              wakeReason: {
+                type: "string",
+                description:
+                  "TOG-3210. A wake-scoped decision is always forced advisory, so passing this on `apply` never writes a lowered tier — it only ever affects the returned recommendation for this call.",
+              },
+            },
+          },
         },
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));

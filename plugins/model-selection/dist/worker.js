@@ -570,6 +570,7 @@ function resolveConfig(raw) {
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
   const dispatch = record(root.dispatch);
+  const wakeScopedFloor = record(root.wakeScopedFloor);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
     const model = record(entry);
     if (typeof model.id !== "string" || model.id.length === 0) return [];
@@ -749,6 +750,11 @@ function resolveConfig(raw) {
       idleMinutes: num(dispatch.idleMinutes, 120),
       maxWakesPerFiring: num(dispatch.maxWakesPerFiring, 3),
       focusProjectIds: Array.isArray(dispatch.focusProjectIds) ? dispatch.focusProjectIds.filter((p) => typeof p === "string") : []
+    },
+    wakeScopedFloor: {
+      enabled: bool(wakeScopedFloor.enabled, true),
+      wakeReasons: Array.isArray(wakeScopedFloor.wakeReasons) ? wakeScopedFloor.wakeReasons.filter((r) => typeof r === "string" && r.length > 0) : [],
+      floorTier: tier(wakeScopedFloor.floorTier, "T3")
     }
   };
 }
@@ -831,6 +837,20 @@ function validateConfig(config) {
     warnings.push(
       "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this."
     );
+  }
+  if (config.wakeScopedFloor.enabled && config.wakeScopedFloor.wakeReasons.length === 0) {
+    warnings.push(
+      "wakeScopedFloor.enabled is true but wakeReasons is empty; no decision will ever qualify until an operator names the actual PAPERCLIP_WAKE_REASON values for cheap wakes (e.g. monitor ticks)"
+    );
+  }
+  if (config.wakeScopedFloor.enabled && config.wakeScopedFloor.wakeReasons.length > 0) {
+    const floorIndex = TIER_ORDER.indexOf(config.wakeScopedFloor.floorTier);
+    const defaultIndex = TIER_ORDER.indexOf(config.selection.defaultTier);
+    if (floorIndex >= defaultIndex) {
+      warnings.push(
+        `wakeScopedFloor.floorTier (${config.wakeScopedFloor.floorTier}) is not below selection.defaultTier (${config.selection.defaultTier}); a wake-scoped decision will only ever lower the floor for a card judged above that`
+      );
+    }
   }
   if (config.pacing.mode !== "off") {
     const referencedLaneIds = /* @__PURE__ */ new Set();
@@ -1539,6 +1559,15 @@ function selectModel(input) {
     isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model)
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} \u2014 ${judgement.detail}`);
+  const wakeFloorConfig = config.wakeScopedFloor;
+  const wakeReason = descriptor.wakeReason ?? null;
+  const wakeFloorEligible = !!wakeFloorConfig?.enabled && !!wakeReason && wakeFloorConfig.wakeReasons.includes(wakeReason) && tierIndex(wakeFloorConfig.floorTier) < tierIndex(judgement.tier);
+  const requiredTier = wakeFloorEligible ? wakeFloorConfig.floorTier : judgement.tier;
+  if (wakeFloorEligible) {
+    trace.push(
+      `wake-scoped floor: wake reason "${wakeReason}" lowers the required tier from ${judgement.tier} to ${requiredTier} for this decision only \u2014 card tier unchanged, decision forced advisory`
+    );
+  }
   const base = {
     outcome: "no-eligible-model",
     modelId: null,
@@ -1547,32 +1576,33 @@ function selectModel(input) {
     candidates: [],
     rejections,
     trace,
-    advisory: !config.enforcementEnabled,
+    advisory: !config.enforcementEnabled || wakeFloorEligible,
     heldReason: null,
     pacingApplied: false,
     shadowDiff: null,
-    escalatedFromTier: null
+    escalatedFromTier: null,
+    wakeScopedTier: wakeFloorEligible ? requiredTier : null
   };
   const nowIso = new Date(now).toISOString();
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
   }
-  trace.push(`tier floor ${judgement.tier}: no lower-capability model is eligible`);
+  trace.push(`tier floor ${requiredTier}: no lower-capability model is eligible`);
   if (config.stickyWithinIssue && descriptor.stickyModelId) {
     const stickyModelId = resolveConfiguredModelId(descriptor.stickyModelId, config.models);
     const incumbent = config.models.find(
       (model) => model.id === stickyModelId && model.enabled
     );
     const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
-    if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
+    if (incumbent && tierIndex(incumbent.tier) < tierIndex(requiredTier)) {
       trace.push(
-        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`
+        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${requiredTier} required tier`
       );
       rejections.push({
         modelId: incumbent.id,
         stage: "tier-floor",
-        reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`
+        reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`
       });
     } else if (incumbent && typeof descriptor.requiredContextTokens === "number" && incumbent.contextWindow < descriptor.requiredContextTokens) {
       trace.push(
@@ -1599,7 +1629,6 @@ function selectModel(input) {
       return { ...base, outcome: "selected", modelId: incumbent.id, effectiveTier: incumbent.tier };
     }
   }
-  const requiredTier = judgement.tier;
   const required = new Set(descriptor.requiredCapabilities ?? []);
   if (required.size > 0) {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
@@ -1877,6 +1906,10 @@ function selectModel(input) {
   );
   if (!config.enforcementEnabled) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");
+  } else if (wakeFloorEligible) {
+    trace.push(
+      `advisory mode: wake-scoped floor decisions are never written, regardless of enforcement \u2014 the card's ${judgement.tier} tier is untouched`
+    );
   }
   return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
 }
@@ -3327,7 +3360,8 @@ function asRecord(value) {
 }
 function summary(decision) {
   if (decision.outcome === "selected") {
-    return `${decision.modelId} at ${decision.effectiveTier} (tier via ${decision.judgement.source})${decision.advisory ? " \u2014 advisory, nothing written" : ""}`;
+    const wakeNote = decision.wakeScopedTier ? ` \u2014 wake-scoped floor ${decision.wakeScopedTier} (card tier ${decision.judgement.tier} unchanged)` : "";
+    return `${decision.modelId} at ${decision.effectiveTier} (tier via ${decision.judgement.source})${decision.advisory ? " \u2014 advisory, nothing written" : ""}${wakeNote}`;
   }
   if (decision.outcome === "held-at-floor") {
     return `Held at the agent floor: ${decision.heldReason}`;
@@ -3677,6 +3711,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           // `contextUsage()` and set this themselves (`advise`, `repinPass`) —
           // the passes that only decide repinnability never pay for it.
           requiredContextTokens: typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : void 0,
+          // TOG-3210: the caller's PAPERCLIP_WAKE_REASON for this run, if any.
+          // Feeds SelectionConfig.wakeScopedFloor only — resolveTier() never
+          // reads it, so it can never change the card's own judged tier.
+          wakeReason: typeof supplied.wakeReason === "string" ? supplied.wakeReason : void 0,
           ...typeof exclusionRaw.excluded === "boolean" ? {
             exclusion: {
               excluded: exclusionRaw.excluded,
@@ -3772,7 +3810,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             },
             objective: config.selection.objective,
             modelScores,
-            allowExplore
+            allowExplore,
+            wakeScopedFloor: config.wakeScopedFloor
           },
           profiles,
           signals,
@@ -3843,7 +3882,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         {
           displayName: "Advise a model for an issue",
           description: "Return the tier judgement and costed candidates for one issue. Writes nothing.",
-          parametersSchema: { type: "object" }
+          parametersSchema: {
+            type: "object",
+            properties: {
+              issueId: { type: "string" },
+              wakeReason: {
+                type: "string",
+                description: "TOG-3210. Pass the run's PAPERCLIP_WAKE_REASON here so a cheap re-check (e.g. a monitor tick) can get a lower advisory floor without ever changing the card's own tier \u2014 see wakeScopedFloor config."
+              }
+            }
+          }
         },
         async (params, runCtx) => {
           const result = await advise(runCtx.companyId, asRecord(params));
@@ -3864,7 +3912,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         {
           displayName: "Apply a model selection to an issue",
           description: "Advise, then write the per-issue override and tier label when enforcement is on. No-ops on an issue that already has an override.",
-          parametersSchema: { type: "object" }
+          parametersSchema: {
+            type: "object",
+            properties: {
+              issueId: { type: "string" },
+              wakeReason: {
+                type: "string",
+                description: "TOG-3210. A wake-scoped decision is always forced advisory, so passing this on `apply` never writes a lowered tier \u2014 it only ever affects the returned recommendation for this call."
+              }
+            }
+          }
         },
         async (params, runCtx) => {
           const result = await advise(runCtx.companyId, asRecord(params));

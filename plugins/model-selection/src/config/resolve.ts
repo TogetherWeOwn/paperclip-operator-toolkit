@@ -14,6 +14,7 @@ import {
   LANE_ID_OPENCODE_GO,
   LANE_ID_ZAI,
   PACING_MODES,
+  TIER_ORDER,
   TIERS,
   type PacingMode,
   type Tier,
@@ -126,6 +127,12 @@ export interface ResolvedConfig {
     maxWakesPerFiring: number;
     focusProjectIds: readonly string[];
   };
+  /** TOG-3210. See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
+  wakeScopedFloor: {
+    enabled: boolean;
+    wakeReasons: readonly string[];
+    floorTier: Tier;
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -195,6 +202,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
   const dispatch = record(root.dispatch);
+  const wakeScopedFloor = record(root.wakeScopedFloor);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -414,6 +422,13 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         ? dispatch.focusProjectIds.filter((p): p is string => typeof p === "string")
         : [],
     },
+    wakeScopedFloor: {
+      enabled: bool(wakeScopedFloor.enabled, true),
+      wakeReasons: Array.isArray(wakeScopedFloor.wakeReasons)
+        ? wakeScopedFloor.wakeReasons.filter((r): r is string => typeof r === "string" && r.length > 0)
+        : [],
+      floorTier: tier(wakeScopedFloor.floorTier, "T3"),
+    },
   };
 }
 
@@ -514,6 +529,23 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     warnings.push(
       "earnIn.enabled is true: unproven T1 candidates may be dispatched bounded research/review work. Confirm lane and pace posture gates are live before relying on this.",
     );
+  }
+
+  if (config.wakeScopedFloor.enabled && config.wakeScopedFloor.wakeReasons.length === 0) {
+    warnings.push(
+      "wakeScopedFloor.enabled is true but wakeReasons is empty; no decision will ever qualify until an operator names the actual PAPERCLIP_WAKE_REASON values for cheap wakes (e.g. monitor ticks)",
+    );
+  }
+  if (config.wakeScopedFloor.enabled && config.wakeScopedFloor.wakeReasons.length > 0) {
+    // TIER_ORDER is least- to most-capable (T3..T1) — this must NOT use the
+    // declarative TIERS array above, whose order is unrelated to capability.
+    const floorIndex = TIER_ORDER.indexOf(config.wakeScopedFloor.floorTier);
+    const defaultIndex = TIER_ORDER.indexOf(config.selection.defaultTier);
+    if (floorIndex >= defaultIndex) {
+      warnings.push(
+        `wakeScopedFloor.floorTier (${config.wakeScopedFloor.floorTier}) is not below selection.defaultTier (${config.selection.defaultTier}); a wake-scoped decision will only ever lower the floor for a card judged above that`,
+      );
+    }
   }
 
   // TOG-2137, Defect 6. A model row's `laneId` that does not resolve to a

@@ -1013,3 +1013,128 @@ describe("long-turn engineering agents stay off zai while codex has room (2026-0
     ).toBe(false);
   });
 });
+
+describe("wake-scoped floor (TOG-3210)", () => {
+  it("lowers the required tier for a matching wake reason without touching the judged tier", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },
+      config: config({
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
+    expect(decision.effectiveTier).toBe("T3");
+    expect(decision.wakeScopedTier).toBe("T3");
+    // The card's own judgement is completely untouched — this is what a
+    // caller would write to the tier:* label/pin, and it never moves.
+    expect(decision.judgement.tier).toBe("T1");
+  });
+
+  it("forces advisory even when enforcement is on, so a wake-scoped decision can never be written", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },
+      config: config({
+        enforcementEnabled: true,
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.advisory).toBe(true);
+  });
+
+  it("does not lower the floor when the wake reason is not on the configured allowlist", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "substantive_review" },
+      config: config({
+        enforcementEnabled: true,
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.wakeScopedTier).toBeNull();
+    expect(decision.advisory).toBe(false);
+  });
+
+  it("does not lower the floor when descriptor.wakeReason is absent, even if configured", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({
+        enforcementEnabled: true,
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.wakeScopedTier).toBeNull();
+    expect(decision.advisory).toBe(false);
+  });
+
+  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-TOG-3210 behavior", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },
+      config: config({
+        enforcementEnabled: true,
+        wakeScopedFloor: { enabled: false, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.modelId).toBe("claude-opus-5");
+    expect(decision.wakeScopedTier).toBeNull();
+    expect(decision.advisory).toBe(false);
+  });
+
+  it("never raises the floor: a floorTier at/above the judged tier is a no-op", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T3"], wakeReason: "monitor" },
+      config: config({
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T1" },
+      }),
+    });
+    // Judged tier is already T3, the configured floor (T1) is more capable,
+    // not less — must not upgrade the requirement either.
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
+    expect(decision.effectiveTier).toBe("T3");
+    expect(decision.wakeScopedTier).toBeNull();
+  });
+
+  it("still escalates up the ladder from the lowered floor when nothing is costable there", () => {
+    const t3Model = MODELS.find((entry) => entry.tier === "T3")!;
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },
+      config: config({
+        // No T3 roster row at all — the wake-scoped floor has nothing to land
+        // on and must climb the ladder exactly like an ordinary decision.
+        models: MODELS.filter((entry) => entry.id !== t3Model.id),
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(decision.outcome).toBe("selected");
+    expect(decision.effectiveTier).toBe("T2");
+    expect(decision.escalatedFromTier).toBe("T3");
+  });
+
+  it("sticky within issue is gated against the lowered wake-scoped floor, not the judged tier", () => {
+    const decision = selectModel({
+      ...base,
+      descriptor: {
+        issueId: "i1",
+        labelNames: ["tier:T1"],
+        stickyModelId: "claude-haiku-4-5-20251001",
+        wakeReason: "monitor",
+      },
+      config: config({
+        stickyWithinIssue: true,
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    // Without the wake-scoped floor, sticky would be declined for sitting
+    // below the T1 required tier. With it lowered to T3, the T3 incumbent
+    // now qualifies and sticky wins outright.
+    expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
+    expect(decision.judgement.tier).toBe("T1");
+  });
+});

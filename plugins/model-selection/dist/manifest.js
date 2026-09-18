@@ -547,6 +547,39 @@ var SELECTION_CONFIG_SCHEMA = {
         }
       },
       default: {}
+    },
+    /**
+     * TOG-3210. A monitor tick, continuation wake, or label-only pass
+     * re-checking an already-tiered card is correctly judged T1 (or T2) by
+     * every rubric anchor — the classifier grades the card, not the wake, and
+     * that is correct. What is actually cheap is the RE-CHECK, not the card:
+     * this section lets a caller-supplied `wakeReason` request a lower
+     * required tier for ONE decision without ever touching the card's real
+     * `tier:*` label/pin — see `select.ts`'s `SelectionConfig.wakeScopedFloor`
+     * for the mechanism (the decision is forced advisory, so it can never be
+     * written). One-key rollback, matching the `classification` pattern
+     * above: `wakeScopedFloor.enabled: false` restores byte-identical
+     * pre-TOG-3210 behavior. Default ON, because — unlike `classification` —
+     * this section can never itself cause a write; `wakeReasons` defaults to
+     * empty, so it is a no-op until an operator names the actual
+     * `PAPERCLIP_WAKE_REASON` values their dispatcher sends for cheap wakes.
+     */
+    wakeScopedFloor: {
+      type: "object",
+      title: "Wake-scoped floor (TOG-3210)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true },
+        /** `PAPERCLIP_WAKE_REASON` values treated as a cheap re-check of an already-tiered card. Empty = inert. */
+        wakeReasons: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          default: []
+        },
+        /** The lower floor a matching wake reason gets. Only takes effect below the card's judged tier — never raises it. */
+        floorTier: { type: "string", enum: [...TIERS], default: "T3" }
+      },
+      default: {}
     }
   }
 };

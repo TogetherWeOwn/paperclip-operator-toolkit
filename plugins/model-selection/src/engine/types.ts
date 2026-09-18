@@ -155,6 +155,15 @@ export interface IssueDescriptor {
    * never a role enum. Used only by `ZAI_LONG_RUN_AGENTS` (TOG-2481).
    */
   agentName?: string | null;
+  /**
+   * TOG-3210. `PAPERCLIP_WAKE_REASON` for the run this decision serves, e.g.
+   * `monitor`/`continuation`. Caller-supplied — this plugin never infers it.
+   * Absent/unrecognized behaves exactly as before this field existed: the
+   * card's judged tier is the required tier, full stop. Feeds
+   * `SelectionConfig.wakeScopedFloor` only; never read by `resolveTier`, so a
+   * wake-scoped decision never touches the recorded `tier:*` label/pin.
+   */
+  wakeReason?: string | null;
 }
 
 export interface CostBreakdown {
@@ -274,6 +283,15 @@ export interface SelectionDecision {
    * dispatcher has no equivalent signal at all.
    */
   escalatedFromTier: Tier | null;
+  /**
+   * TOG-3210. Set only when `SelectionConfig.wakeScopedFloor` actually lowered
+   * the required tier below `judgement.tier` for this decision — the tier the
+   * gate/ladder walk started from instead of the card's judged tier. Null on
+   * every ordinary decision. `judgement.tier` (and hence the durable label/
+   * pin) is never altered by this — see `advisory`, which this field's
+   * presence always forces `true` so the lowered tier can never be written.
+   */
+  wakeScopedTier: Tier | null;
 }
 
 /**

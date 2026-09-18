@@ -150,6 +150,28 @@ export interface SelectionConfig {
    * replaces an existing pin rather than seeding new evidence.
    */
   allowExplore?: boolean;
+  /**
+   * TOG-3210. Monitor ticks, continuation wakes, and label-only passes
+   * re-check an already-tiered card; the card is correctly judged T1 by
+   * every rubric anchor, but the RE-CHECK itself is cheap. Absent/disabled:
+   * byte-identical to pre-TOG-3210 behavior. When enabled and
+   * `descriptor.wakeReason` is on `wakeReasons`, the gate/ladder walk below
+   * starts from `floorTier` instead of `judgement.tier` for THIS decision
+   * only — `judgement.tier` itself (what the label/pin encode) is never
+   * touched, and any decision this actually lowers the floor for is forced
+   * `advisory: true` (see `base` below), so `apply.ts`'s
+   * `if (decision.advisory) return nothing(...)` guarantees it can never be
+   * written durably. The card's real tier is restored automatically — with
+   * no extra bookkeeping — the instant a call without a matching wake reason
+   * runs. One-key rollback: `wakeScopedFloor.enabled: false`.
+   */
+  wakeScopedFloor?: {
+    enabled: boolean;
+    /** Operator-curated allowlist of "cheap" wake reasons. Empty = inert even when enabled. */
+    wakeReasons: readonly string[];
+    /** The lower floor a matching wake reason gets. Must be below the card's judged tier to take effect. */
+    floorTier: Tier;
+  };
 }
 
 export interface SelectInput {
@@ -187,6 +209,24 @@ export function selectModel(input: SelectInput): SelectionDecision {
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
 
+  // TOG-3210: a wake-scoped floor never raises the required tier and never
+  // touches `judgement` — it only ever supplies a lower starting rung for the
+  // gate/ladder walk below, for this one decision. Computed here, ahead of
+  // `base`/the sticky block, so both use it consistently.
+  const wakeFloorConfig = config.wakeScopedFloor;
+  const wakeReason = descriptor.wakeReason ?? null;
+  const wakeFloorEligible =
+    !!wakeFloorConfig?.enabled &&
+    !!wakeReason &&
+    wakeFloorConfig.wakeReasons.includes(wakeReason) &&
+    tierIndex(wakeFloorConfig.floorTier) < tierIndex(judgement.tier);
+  const requiredTier: Tier = wakeFloorEligible ? wakeFloorConfig!.floorTier : judgement.tier;
+  if (wakeFloorEligible) {
+    trace.push(
+      `wake-scoped floor: wake reason "${wakeReason}" lowers the required tier from ${judgement.tier} to ${requiredTier} for this decision only — card tier unchanged, decision forced advisory`,
+    );
+  }
+
   const base: SelectionDecision = {
     outcome: "no-eligible-model",
     modelId: null,
@@ -195,11 +235,12 @@ export function selectModel(input: SelectInput): SelectionDecision {
     candidates: [],
     rejections,
     trace,
-    advisory: !config.enforcementEnabled,
+    advisory: !config.enforcementEnabled || wakeFloorEligible,
     heldReason: null,
     pacingApplied: false,
     shadowDiff: null,
     escalatedFromTier: null,
+    wakeScopedTier: wakeFloorEligible ? requiredTier : null,
   };
 
   const nowIso = new Date(now).toISOString();
@@ -212,7 +253,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // Tiers are minimum capability requirements. T1 is the highest requirement;
   // T3 is mechanical work. An exclusion resolves to T1 before this engine runs,
   // so the same admission rule protects both labelled and sensitive work.
-  trace.push(`tier floor ${judgement.tier}: no lower-capability model is eligible`);
+  trace.push(`tier floor ${requiredTier}: no lower-capability model is eligible`);
 
   // Sticky beats cost. A mid-issue model change fires
   // `shouldResetTaskSessionForModelChange` (heartbeat.ts:5127-5133), discarding
@@ -234,14 +275,14 @@ export function selectModel(input: SelectInput): SelectionDecision {
       (model) => model.id === stickyModelId && model.enabled,
     );
     const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
-    if (incumbent && tierIndex(incumbent.tier) < tierIndex(judgement.tier)) {
+    if (incumbent && tierIndex(incumbent.tier) < tierIndex(requiredTier)) {
       trace.push(
-        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${judgement.tier} required tier`,
+        `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${requiredTier} required tier`,
       );
       rejections.push({
         modelId: incumbent.id,
         stage: "tier-floor",
-        reason: `tier ${incumbent.tier} is below the ${judgement.tier} required tier`,
+        reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`,
       });
     } else if (
       incumbent &&
@@ -273,7 +314,6 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
   }
 
-  const requiredTier = judgement.tier;
   const required = new Set(descriptor.requiredCapabilities ?? []);
   if (required.size > 0) {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
@@ -727,6 +767,10 @@ export function selectModel(input: SelectInput): SelectionDecision {
 
   if (!config.enforcementEnabled) {
     trace.push("advisory mode: enforcement is off, so this decision is recorded and not written");
+  } else if (wakeFloorEligible) {
+    trace.push(
+      `advisory mode: wake-scoped floor decisions are never written, regardless of enforcement — the card's ${judgement.tier} tier is untouched`,
+    );
   }
 
   return { ...withCandidates, outcome: "selected", modelId: winner.modelId };

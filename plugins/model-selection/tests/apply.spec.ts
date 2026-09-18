@@ -88,4 +88,19 @@ describe("write policy", () => {
     expect(plan.write).toBe(false);
     expect(plan.reason).toContain("held-at-floor");
   });
+
+  it("TOG-3210: never writes a wake-scoped decision, even in enforce mode — the card's real tier survives untouched", () => {
+    const wakeScoped = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },
+      config: config({
+        enforcementEnabled: true,
+        wakeScopedFloor: { enabled: true, wakeReasons: ["monitor"], floorTier: "T3" },
+      }),
+    });
+    expect(wakeScoped.modelId).toBe("claude-haiku-4-5-20251001");
+    const plan = planApply(wakeScoped, clean, "i1");
+    expect(plan.write).toBe(false);
+    expect(plan.reason).toContain("advisory");
+  });
 });
