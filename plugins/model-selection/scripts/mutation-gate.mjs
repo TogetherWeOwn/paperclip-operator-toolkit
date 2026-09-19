@@ -726,6 +726,51 @@ const mutants = [
     from: "          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;",
     to: "          if (false) return;",
   },
+  // --- TOG-3012: a lost pace verdict must not erase an earned exclusion -----
+  {
+    // The 09-16 incident shape. `hardStopExcluded` read serviceability solely
+    // off `verdict`, which `mergeLedgerEntry` degrades to null on every FAILED
+    // poll — so a lane measured exhausted became admissible again the moment
+    // its poll flapped, and 21 runs launched onto a hard-429ing lane. This
+    // mutant restores that fail-open read.
+    name: "failed-poll-readmits-exhausted-lane",
+    file: "src/engine/pacing.ts",
+    from: "  return (entry.unserviceableSince ?? null) !== null;",
+    to: "  return false;",
+  },
+  {
+    // The upgrade trap. The lane ledger is persisted opaquely — `readLaneLedger`
+    // casts `ctx.state.get(...)` with no schema — so entries written before this
+    // field existed survive the upgrade WITHOUT the key, and `undefined !== null`
+    // is true. Without the `?? null` narrowing, the first post-deploy poll
+    // failure excludes EVERY lane at once and no tier has a candidate anywhere.
+    // Shares an anchor with the mutant above; the gate applies each to a
+    // freshly-read pristine file, so the exactly-once check still holds.
+    name: "undefined-unserviceable-counts-as-observed",
+    file: "src/engine/pacing.ts",
+    from: "  return (entry.unserviceableSince ?? null) !== null;",
+    to: "  return entry.unserviceableSince !== null;",
+  },
+  {
+    // `unserviceableSince` is the ONSET of an outage, not the last time it was
+    // re-confirmed. Refreshing it every poll reports every outage as seconds
+    // old, which is the number an operator reads to decide whether to act.
+    name: "unserviceable-onset-overwritten",
+    file: "src/engine/pacing.ts",
+    from: "    unserviceableSince = priorSince ?? result.fetchedAt;",
+    to: "    unserviceableSince = result.fetchedAt;",
+  },
+  {
+    // The other side of the invariant: stickiness must not OVER-apply. A poll
+    // that returned no verdict is evidence of nothing and must not manufacture
+    // an unserviceable observation — that would exclude a lane whose polls have
+    // merely been failing, which is the original fail-neutral case the
+    // "unobserved lane is not evidence of exhaustion" rule exists to protect.
+    name: "failed-poll-invents-unserviceable-observation",
+    file: "src/engine/pacing.ts",
+    from: "  if (observed === null) {\n    unserviceableSince = priorSince;",
+    to: "  if (observed === null) {\n    unserviceableSince = priorSince ?? result.fetchedAt;",
+  },
 ];
 
 /**

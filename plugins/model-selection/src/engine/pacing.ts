@@ -23,6 +23,32 @@ export interface LaneLedgerEntry {
   fetchedAt: string;
   /** Null on a clean poll. A failed poll degrades `verdict` to null, never overwrites a good one with a stale guess (see `mergeLedgerEntry`). */
   error: string | null;
+  /**
+   * TOG-3012. When a SUCCESSFUL poll last found this lane unserviceable, and
+   * why — the onset timestamp, held across subsequent failed polls.
+   *
+   * `verdict` alone cannot carry this. A failed poll degrades `verdict` to
+   * null (above), and `hardStopExcluded` reads the verdict, so losing the
+   * poll ERASED an exclusion the lane had already earned: a lane measured
+   * exhausted at 16:55Z became admissible again the moment the poll flapped,
+   * which is how 21 runs launched onto a hard-429ing lane on 09-16. Absence
+   * of evidence was being read as evidence of capacity.
+   *
+   * So this field records the OBSERVATION rather than the reading. It is
+   * written only from a verdict that was actually returned, and cleared only
+   * by a later verdict that actually says the lane is serviceable again — a
+   * failed poll leaves it exactly as it was. `unserviceableSince` keeps the
+   * ONSET, not the most recent confirmation, so an operator can see how long
+   * a lane has been out.
+   *
+   * Null on a lane that has never been observed unserviceable — including one
+   * never polled at all, which stays fail-neutral as before. `undefined` on an
+   * entry persisted before this field existed; read it through `?? null` so an
+   * old ledger degrades to "no observation" instead of excluding every lane.
+   */
+  unserviceableSince?: string | null;
+  /** The `verdict.reason` carried by the observation that set `unserviceableSince`. */
+  unserviceableReason?: LanePaceVerdict["reason"] | null;
 }
 
 export type LaneLedger = Record<string, LaneLedgerEntry>;
@@ -48,6 +74,14 @@ export type OperatorOverrideLedger = Record<string, OperatorOverrideEntry>;
  * failure), so a reader always sees either a fresh verdict or an honest
  * "we don't know" rather than a fabricated one. One lane's failure has no
  * effect on any other lane's entry — callers merge one result at a time.
+ *
+ * TOG-3012: that honesty is right for `verdict` and wrong as the ONLY record
+ * of serviceability, because it silently discards a measurement already
+ * taken. `unserviceableSince` is the durable half — updated only from a
+ * verdict this poll actually returned, carried forward untouched when the
+ * poll returned none. The invariant is that a failed poll can never MOVE a
+ * lane from excluded to admissible; only a successful poll finding the lane
+ * serviceable does that.
  */
 export function mergeLedgerEntry(
   ledger: LaneLedger,
@@ -59,6 +93,29 @@ export function mergeLedgerEntry(
     error: string | null;
   },
 ): LaneLedger {
+  const previous = ledger[result.laneId];
+  // `null` = this poll returned no verdict, so it is evidence of nothing and
+  // the prior observation stands. `true`/`false` = a verdict was returned and
+  // it decides the question outright.
+  const observed = result.verdict ? unserviceableVerdict(result.verdict) : null;
+  const priorSince = previous?.unserviceableSince ?? null;
+  const priorReason = previous?.unserviceableReason ?? null;
+
+  let unserviceableSince: string | null;
+  let unserviceableReason: LanePaceVerdict["reason"] | null;
+  if (observed === null) {
+    unserviceableSince = priorSince;
+    unserviceableReason = priorReason;
+  } else if (observed) {
+    // Keep the ONSET across repeated confirmations, so the field measures how
+    // long the lane has been out rather than when it was last re-checked.
+    unserviceableSince = priorSince ?? result.fetchedAt;
+    unserviceableReason = result.verdict!.reason;
+  } else {
+    unserviceableSince = null;
+    unserviceableReason = null;
+  }
+
   return {
     ...ledger,
     [result.laneId]: {
@@ -67,6 +124,8 @@ export function mergeLedgerEntry(
       observation: result.observation ?? null,
       fetchedAt: result.fetchedAt,
       error: result.error,
+      unserviceableSince,
+      unserviceableReason,
     },
   };
 }
@@ -265,14 +324,39 @@ const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = n
  * capacity is indeterminate for one of the reasons above — the pace engine
  * fails closed there, and this is the only place that decision can be enforced.
  *
- * `verdict === null` (never polled) and the no-data reasons the pace engine
- * reports alongside it (malformed document, stale snapshot, no records,
- * unusable account identity) stay fail-neutral and exclude nothing — an
- * unobserved lane is not evidence of exhaustion.
+ * A lane with NO ledger entry at all stays fail-neutral and excludes nothing —
+ * an unobserved lane is not evidence of exhaustion. So do the no-data reasons
+ * the pace engine reports (malformed document, stale snapshot, no records,
+ * unusable account identity): those are a verdict saying "I could not tell".
+ *
+ * TOG-3012: what is NOT fail-neutral any more is a lane this plugin HAS
+ * observed unserviceable and has since lost the reading for. `verdict` goes
+ * null on every failed poll, and reading serviceability solely off `verdict`
+ * meant a flapping poll silently readmitted a lane measured exhausted minutes
+ * earlier. The observation is kept in `unserviceableSince` (see
+ * `mergeLedgerEntry`) precisely so it survives that, and it is authoritative
+ * until a successful poll contradicts it.
  */
 export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry): boolean {
-  const verdict = laneVerdictFor(ledger, model.laneId ?? null);
-  if (!verdict) return false;
+  const laneId = model.laneId ?? null;
+  if (!laneId) return false;
+  const entry = ledger[laneId];
+  if (!entry) return false;
+  if (entry.verdict) return unserviceableVerdict(entry.verdict);
+  // No current reading. Fall back to the last observation that produced one;
+  // `?? null` so a ledger persisted before this field existed reads as "never
+  // observed" rather than excluding every lane it holds.
+  return (entry.unserviceableSince ?? null) !== null;
+}
+
+/**
+ * Whether a verdict the pace engine actually returned makes its lane a hard
+ * stop. Split out of `hardStopExcluded` so the live reading and the durable
+ * observation recorded by `mergeLedgerEntry` are decided by one definition —
+ * if these two ever disagreed, a lane could be recorded unserviceable and
+ * still be admitted, or the reverse.
+ */
+function unserviceableVerdict(verdict: LanePaceVerdict): boolean {
   if (verdict.serviceable === false) return true;
   return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);
 }

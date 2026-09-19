@@ -237,6 +237,22 @@ var DISPATCH_ISSUE_PAGE_LIMIT = 1e3;
 
 // src/engine/pacing.ts
 function mergeLedgerEntry(ledger, result) {
+  const previous = ledger[result.laneId];
+  const observed = result.verdict ? unserviceableVerdict(result.verdict) : null;
+  const priorSince = previous?.unserviceableSince ?? null;
+  const priorReason = previous?.unserviceableReason ?? null;
+  let unserviceableSince;
+  let unserviceableReason;
+  if (observed === null) {
+    unserviceableSince = priorSince;
+    unserviceableReason = priorReason;
+  } else if (observed) {
+    unserviceableSince = priorSince ?? result.fetchedAt;
+    unserviceableReason = result.verdict.reason;
+  } else {
+    unserviceableSince = null;
+    unserviceableReason = null;
+  }
   return {
     ...ledger,
     [result.laneId]: {
@@ -244,7 +260,9 @@ function mergeLedgerEntry(ledger, result) {
       verdict: result.verdict,
       observation: result.observation ?? null,
       fetchedAt: result.fetchedAt,
-      error: result.error
+      error: result.error,
+      unserviceableSince,
+      unserviceableReason
     }
   };
 }
@@ -326,8 +344,14 @@ var INDETERMINATE_CAPACITY_REASONS = /* @__PURE__ */ new Set([
   "invalid-configured-governing-window"
 ]);
 function hardStopExcluded(ledger, model) {
-  const verdict = laneVerdictFor(ledger, model.laneId ?? null);
-  if (!verdict) return false;
+  const laneId = model.laneId ?? null;
+  if (!laneId) return false;
+  const entry = ledger[laneId];
+  if (!entry) return false;
+  if (entry.verdict) return unserviceableVerdict(entry.verdict);
+  return (entry.unserviceableSince ?? null) !== null;
+}
+function unserviceableVerdict(verdict) {
   if (verdict.serviceable === false) return true;
   return verdict.serviceable === null && INDETERMINATE_CAPACITY_REASONS.has(verdict.reason);
 }

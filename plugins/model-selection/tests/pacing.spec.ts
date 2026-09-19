@@ -1264,6 +1264,133 @@ describe("hardStopExcluded", () => {
     };
     expect(hardStopExcluded(unknownLedger, model({ laneId: "lane-a" }))).toBe(false);
   });
+
+  // TOG-3012. The 09-16 incident: codex measured exhausted at 16:55Z, the poll
+  // then flapped, and because exclusion was read solely off `verdict` — which a
+  // failed poll degrades to null — the lane became admissible again and 21 runs
+  // launched onto it. Losing the reading must not erase the measurement.
+  it("keeps excluding a lane it observed unserviceable after the poll stops returning a verdict", () => {
+    // Named mutant: "failed poll readmits an exhausted lane".
+    let ledger: LaneLedger = {};
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "2026-09-16T16:55:00.000Z",
+      verdict: verdict({ serviceable: false, state: "exhausted" }),
+      error: null,
+    });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "2026-09-16T17:00:00.000Z",
+      verdict: null,
+      error: "lane-request-timeout",
+    });
+    // The honest "we don't know" for the live reading is preserved...
+    expect(ledger["lane-a"]!.verdict).toBeNull();
+    // ...but it must not be laundered into "and therefore it has capacity".
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+    expect(ledger["lane-a"]!.unserviceableSince).toBe("2026-09-16T16:55:00.000Z");
+  });
+
+  it("readmits the lane only when a SUCCESSFUL poll finds it serviceable again", () => {
+    // Named mutant: "exclusion is permanent". Stickiness must be clearable by
+    // evidence, or a lane that recovers can never be routed to again.
+    let ledger: LaneLedger = {};
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "t1",
+      verdict: verdict({ serviceable: false, state: "exhausted" }),
+      error: null,
+    });
+    ledger = mergeLedgerEntry(ledger, { laneId: "lane-a", fetchedAt: "t2", verdict: null, error: "boom" });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "t3",
+      verdict: verdict({ serviceable: true, state: "on" }),
+      error: null,
+    });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(false);
+    expect(ledger["lane-a"]!.unserviceableSince).toBeNull();
+    expect(ledger["lane-a"]!.unserviceableReason).toBeNull();
+  });
+
+  it("stays fail-neutral for a lane whose polls have ONLY ever failed", () => {
+    // The original intent, which stickiness must not break: absence of
+    // evidence is still not evidence of exhaustion when there was never an
+    // observation to carry forward.
+    let ledger: LaneLedger = {};
+    ledger = mergeLedgerEntry(ledger, { laneId: "lane-a", fetchedAt: "t1", verdict: null, error: "boom" });
+    ledger = mergeLedgerEntry(ledger, { laneId: "lane-a", fetchedAt: "t2", verdict: null, error: "boom" });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(false);
+    expect(ledger["lane-a"]!.unserviceableSince).toBeNull();
+  });
+
+  it("reads a ledger persisted before this field existed as 'never observed', not as excluded", () => {
+    // Named mutant: "undefined counts as an observation". The deployed ledger
+    // survives the upgrade, and its entries carry no `unserviceableSince` key
+    // at all. `undefined !== null` is true, so a missing key must be narrowed
+    // through `?? null` — otherwise the first post-deploy poll failure excludes
+    // EVERY lane at once and the fleet has no candidates anywhere.
+    const legacyEntry = { laneId: "lane-a", fetchedAt: "t", error: "boom", observation: null, verdict: null };
+    expect("unserviceableSince" in legacyEntry).toBe(false);
+    const ledger: LaneLedger = { "lane-a": legacyEntry };
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(false);
+  });
+
+  it("carries an indeterminate-capacity observation across a lost verdict too", () => {
+    // The indeterminate reasons fail CLOSED while the verdict is present, so
+    // they must stay closed once it is lost — same rule, same evidence.
+    let ledger: LaneLedger = {};
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "t1",
+      verdict: verdict({ serviceable: null, state: "unknown", reason: "indeterminate-account-weight" }),
+      error: null,
+    });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+    ledger = mergeLedgerEntry(ledger, { laneId: "lane-a", fetchedAt: "t2", verdict: null, error: "boom" });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+    expect(ledger["lane-a"]!.unserviceableReason).toBe("indeterminate-account-weight");
+  });
+
+  it("records the ONSET of an outage, not the most recent confirmation of it", () => {
+    // Named mutant: "onset overwritten each poll". The field is what an
+    // operator reads to see how long a lane has been out; refreshing it every
+    // cycle would report every outage as seconds old.
+    let ledger: LaneLedger = {};
+    for (const fetchedAt of ["t1", "t2", "t3"]) {
+      ledger = mergeLedgerEntry(ledger, {
+        laneId: "lane-a",
+        fetchedAt,
+        verdict: verdict({ serviceable: false, state: "exhausted" }),
+        error: null,
+      });
+    }
+    expect(ledger["lane-a"]!.unserviceableSince).toBe("t1");
+    expect(ledger["lane-a"]!.fetchedAt).toBe("t3");
+  });
+
+  it("does not let one lane's lost verdict exclude another lane", () => {
+    let ledger: LaneLedger = {};
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-a",
+      fetchedAt: "t1",
+      verdict: verdict({ laneId: "lane-a", serviceable: false, state: "exhausted" }),
+      error: null,
+    });
+    ledger = mergeLedgerEntry(ledger, {
+      laneId: "lane-b",
+      fetchedAt: "t1",
+      verdict: verdict({ laneId: "lane-b", serviceable: true, state: "on" }),
+      error: null,
+    });
+    ledger = mergeLedgerEntry(ledger, { laneId: "lane-b", fetchedAt: "t2", verdict: null, error: "boom" });
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-a" }))).toBe(true);
+    expect(hardStopExcluded(ledger, model({ laneId: "lane-b" }))).toBe(false);
+  });
 });
 
 describe("slotFactorFor / slotAllowed", () => {
