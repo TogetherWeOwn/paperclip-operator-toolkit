@@ -24,6 +24,7 @@ import {
   laneEffectiveUtilization,
   laneHasRoom,
   laneOutageExcluded,
+  laneVerdictFor,
   orderCandidatesByPace,
   preferredCandidateId,
   slotAllowed,
@@ -283,6 +284,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: incumbent.id,
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`,
+        operand: { kind: "tier-floor", tier: incumbent.tier, requiredTier },
       });
     } else if (
       incumbent &&
@@ -296,6 +298,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: incumbent.id,
         stage: "context-window",
         reason: `context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`,
+        operand: {
+          kind: "context-window",
+          contextWindow: incumbent.contextWindow,
+          requiredContextTokens: descriptor.requiredContextTokens,
+        },
       });
     } else if (incumbent && incumbentUnserviceable) {
       trace.push(
@@ -305,6 +312,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: incumbent.id,
         stage: "lane-unserviceable",
         reason: `lane ${incumbent.laneId ?? "(none)"} is not serviceable`,
+        operand: {
+          kind: "lane-unserviceable",
+          laneId: incumbent.laneId ?? null,
+          verdict: laneVerdictFor(ledger, incumbent.laneId)?.state ?? null,
+        },
       });
     } else if (incumbent) {
       trace.push(
@@ -324,7 +336,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const qualified: ModelEntry[] = [];
   for (const model of config.models) {
     if (!model.enabled) {
-      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster" });
+      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster", operand: { kind: "disabled" } });
       continue;
     }
     const missing = [...required].filter((capability) => !model.capabilities.includes(capability));
@@ -333,6 +345,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "capability",
         reason: `missing ${missing.sort().join(", ")}`,
+        operand: { kind: "capability", missing: missing.sort() },
       });
       continue;
     }
@@ -341,6 +354,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "tier-floor",
         reason: `tier ${model.tier} is below the ${requiredTier} required tier`,
+        operand: { kind: "tier-floor", tier: model.tier, requiredTier },
       });
       continue;
     }
@@ -357,6 +371,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "capability-score",
         reason: `measured ${requiredTier} success rate (p=${score.p}) is below the capability threshold`,
+        operand: { kind: "capability-score", tier: requiredTier, p: score.p },
       });
       continue;
     }
@@ -368,6 +383,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "context-window",
         reason: `context window ${model.contextWindow} < required ${descriptor.requiredContextTokens}`,
+        operand: {
+          kind: "context-window",
+          contextWindow: model.contextWindow,
+          requiredContextTokens: descriptor.requiredContextTokens,
+        },
       });
       continue;
     }
@@ -385,6 +405,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-unserviceable",
         reason: `lane ${model.laneId ?? "(none)"} is not serviceable`,
+        operand: {
+          kind: "lane-unserviceable",
+          laneId: model.laneId ?? null,
+          verdict: laneVerdictFor(ledger, model.laneId)?.state ?? null,
+        },
       });
       continue;
     }
@@ -397,6 +422,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-avoid",
         reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`,
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null },
       });
       continue;
     }
@@ -405,6 +431,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-outage",
         reason: `lane ${model.laneId ?? "(none)"} is under an operator-declared outage`,
+        operand: { kind: "lane-outage", laneId: model.laneId ?? null },
       });
       continue;
     }
@@ -432,6 +459,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
           modelId: model.id,
           stage: "lane-no-room",
           reason: `lane ${model.laneId} has no room for a new active card right now`,
+          operand: { kind: "lane-no-room", laneId: model.laneId },
         });
         continue;
       }
@@ -454,6 +482,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-avoid",
         reason: "T1 stays off opencode-go while the codex lane still has room (Go fallback only)",
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null },
       });
       continue;
     }
@@ -477,6 +506,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         modelId: model.id,
         stage: "lane-avoid",
         reason: `long-turn agent "${descriptor.agentName}" stays off zai while the codex lane still has room (Z.ai 1214 risk)`,
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null },
       });
       continue;
     }
@@ -526,6 +556,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
           modelId: model.id,
           stage: "no-profile",
           reason: `no volume profile for ${requiredTier}; cannot cost this candidate`,
+          operand: { kind: "no-profile", tier: requiredTier },
         });
         continue;
       }

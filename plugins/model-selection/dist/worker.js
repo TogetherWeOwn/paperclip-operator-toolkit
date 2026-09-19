@@ -205,6 +205,7 @@ var LOCAL_FOLDER_KEYS = {
    */
   shadowDecisions: "shadow-decisions"
 };
+var SHADOW_EXPLANATIONS_CAP = 200;
 var DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
@@ -1646,7 +1647,8 @@ function selectModel(input) {
       rejections.push({
         modelId: incumbent.id,
         stage: "tier-floor",
-        reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`
+        reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`,
+        operand: { kind: "tier-floor", tier: incumbent.tier, requiredTier }
       });
     } else if (incumbent && typeof descriptor.requiredContextTokens === "number" && incumbent.contextWindow < descriptor.requiredContextTokens) {
       trace.push(
@@ -1655,7 +1657,12 @@ function selectModel(input) {
       rejections.push({
         modelId: incumbent.id,
         stage: "context-window",
-        reason: `context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`
+        reason: `context window ${incumbent.contextWindow} < required ${descriptor.requiredContextTokens}`,
+        operand: {
+          kind: "context-window",
+          contextWindow: incumbent.contextWindow,
+          requiredContextTokens: descriptor.requiredContextTokens
+        }
       });
     } else if (incumbent && incumbentUnserviceable) {
       trace.push(
@@ -1664,7 +1671,12 @@ function selectModel(input) {
       rejections.push({
         modelId: incumbent.id,
         stage: "lane-unserviceable",
-        reason: `lane ${incumbent.laneId ?? "(none)"} is not serviceable`
+        reason: `lane ${incumbent.laneId ?? "(none)"} is not serviceable`,
+        operand: {
+          kind: "lane-unserviceable",
+          laneId: incumbent.laneId ?? null,
+          verdict: laneVerdictFor(ledger, incumbent.laneId)?.state ?? null
+        }
       });
     } else if (incumbent) {
       trace.push(
@@ -1680,7 +1692,7 @@ function selectModel(input) {
   const qualified = [];
   for (const model of config.models) {
     if (!model.enabled) {
-      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster" });
+      rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster", operand: { kind: "disabled" } });
       continue;
     }
     const missing = [...required].filter((capability) => !model.capabilities.includes(capability));
@@ -1688,7 +1700,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "capability",
-        reason: `missing ${missing.sort().join(", ")}`
+        reason: `missing ${missing.sort().join(", ")}`,
+        operand: { kind: "capability", missing: missing.sort() }
       });
       continue;
     }
@@ -1696,7 +1709,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "tier-floor",
-        reason: `tier ${model.tier} is below the ${requiredTier} required tier`
+        reason: `tier ${model.tier} is below the ${requiredTier} required tier`,
+        operand: { kind: "tier-floor", tier: model.tier, requiredTier }
       });
       continue;
     }
@@ -1705,7 +1719,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "capability-score",
-        reason: `measured ${requiredTier} success rate (p=${score2.p}) is below the capability threshold`
+        reason: `measured ${requiredTier} success rate (p=${score2.p}) is below the capability threshold`,
+        operand: { kind: "capability-score", tier: requiredTier, p: score2.p }
       });
       continue;
     }
@@ -1713,7 +1728,12 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "context-window",
-        reason: `context window ${model.contextWindow} < required ${descriptor.requiredContextTokens}`
+        reason: `context window ${model.contextWindow} < required ${descriptor.requiredContextTokens}`,
+        operand: {
+          kind: "context-window",
+          contextWindow: model.contextWindow,
+          requiredContextTokens: descriptor.requiredContextTokens
+        }
       });
       continue;
     }
@@ -1721,7 +1741,12 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "lane-unserviceable",
-        reason: `lane ${model.laneId ?? "(none)"} is not serviceable`
+        reason: `lane ${model.laneId ?? "(none)"} is not serviceable`,
+        operand: {
+          kind: "lane-unserviceable",
+          laneId: model.laneId ?? null,
+          verdict: laneVerdictFor(ledger, model.laneId)?.state ?? null
+        }
       });
       continue;
     }
@@ -1729,7 +1754,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "lane-avoid",
-        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`
+        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`,
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null }
       });
       continue;
     }
@@ -1737,7 +1763,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "lane-outage",
-        reason: `lane ${model.laneId ?? "(none)"} is under an operator-declared outage`
+        reason: `lane ${model.laneId ?? "(none)"} is under an operator-declared outage`,
+        operand: { kind: "lane-outage", laneId: model.laneId ?? null }
       });
       continue;
     }
@@ -1759,7 +1786,8 @@ function selectModel(input) {
         rejections.push({
           modelId: model.id,
           stage: "lane-no-room",
-          reason: `lane ${model.laneId} has no room for a new active card right now`
+          reason: `lane ${model.laneId} has no room for a new active card right now`,
+          operand: { kind: "lane-no-room", laneId: model.laneId }
         });
         continue;
       }
@@ -1768,7 +1796,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "lane-avoid",
-        reason: "T1 stays off opencode-go while the codex lane still has room (Go fallback only)"
+        reason: "T1 stays off opencode-go while the codex lane still has room (Go fallback only)",
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null }
       });
       continue;
     }
@@ -1778,7 +1807,8 @@ function selectModel(input) {
       rejections.push({
         modelId: model.id,
         stage: "lane-avoid",
-        reason: `long-turn agent "${descriptor.agentName}" stays off zai while the codex lane still has room (Z.ai 1214 risk)`
+        reason: `long-turn agent "${descriptor.agentName}" stays off zai while the codex lane still has room (Z.ai 1214 risk)`,
+        operand: { kind: "lane-avoid", laneId: model.laneId ?? null }
       });
       continue;
     }
@@ -1809,7 +1839,8 @@ function selectModel(input) {
         rejections.push({
           modelId: model.id,
           stage: "no-profile",
-          reason: `no volume profile for ${requiredTier}; cannot cost this candidate`
+          reason: `no volume profile for ${requiredTier}; cannot cost this candidate`,
+          operand: { kind: "no-profile", tier: requiredTier }
         });
         continue;
       }
@@ -2859,7 +2890,7 @@ function buildDecisionRecord(input, writer) {
     ts: input.nowIso,
     // Best-effort, not an independently-verified trigger classification — the
     // harness re-derives its own classes from stateFingerprint/laneSnapshot
-    // rather than trusting a writer's self-tagged fields (see `explanations`).
+    // rather than trusting a writer's self-tagged field.
     trigger: input.hasOverride ? "repin" : "new-card",
     tier: tier2,
     pickedModel: decision.modelId,
@@ -2872,10 +2903,18 @@ function buildDecisionRecord(input, writer) {
     },
     laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
-    // Self-tagged DF-*/PI-* classes are the harness's job to derive
-    // (`classify_pair`), not this writer's — an empty array here is correct,
-    // not a placeholder.
-    explanations: [],
+    // TOG-3211: one entry per rejected candidate, naming the gate that
+    // rejected it and that gate's operand — `pickWhy`/`trace` only summarise
+    // the outcome ("no model cleared the gates (112 rejected)"), which was
+    // not reconstructable after the fact once the roster grew past what a
+    // human could enumerate by hand. Capped, with the excess counted rather
+    // than silently dropped, so a truncated list never reads as complete.
+    explanations: decision.rejections.slice(0, SHADOW_EXPLANATIONS_CAP).map((rejection) => ({
+      modelId: rejection.modelId,
+      gate: rejection.stage,
+      operand: rejection.operand
+    })),
+    explanationsTruncated: Math.max(0, decision.rejections.length - SHADOW_EXPLANATIONS_CAP),
     operatorOverride: input.operatorOverride ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt } : null,
     pickWhy: decision.trace.join("; ")
   };

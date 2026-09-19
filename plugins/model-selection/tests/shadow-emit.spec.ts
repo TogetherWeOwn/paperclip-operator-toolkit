@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SHADOW_EXPLANATIONS_CAP } from "../src/constants.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import { selectModel } from "../src/engine/select.js";
 import { buildHostRecord, buildShadowRecord, SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
@@ -104,7 +105,10 @@ describe("paired decision records", () => {
       expect(candidate.lane).toBe("lane-a");
     }
     expect(record.laneSnapshot.lanes["lane-a"]!.accounts).toEqual([]);
-    expect(record.explanations).toEqual([]);
+    expect(record.explanations).toEqual(
+      decision.rejections.map((r) => ({ modelId: r.modelId, gate: r.stage, operand: r.operand })),
+    );
+    expect(record.explanationsTruncated).toBe(0);
     expect(record.operatorOverride).toBeNull();
     expect(typeof record.pickWhy).toBe("string");
   });
@@ -412,6 +416,77 @@ describe("paired decision records", () => {
     });
     expect(record.laneSnapshot.lanes["lane-a"]!.state).toBe("unavailable");
     expect(record.laneSnapshot.quality).toBe("cached");
+  });
+
+  it("names the correct gate in explanations, not another gate that also applies", () => {
+    // TOG-3211 acceptance: `flaky` is both disabled AND on a lane the ledger
+    // reports unserviceable. `select.ts` checks `disabled` first and never
+    // reaches the lane check for this model, so the persisted explanation
+    // must name `disabled` — a wrong-but-populated `lane-unserviceable`
+    // explanation must fail this assertion.
+    const t1 = MODELS_WITH_LANES.find((entry) => entry.tier === "T1")!;
+    const flaky = { ...t1, id: "flaky", enabled: false, laneId: "lane-a" };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i-explain", labelNames: ["tier:T1"] },
+      config: config({ models: [flaky, t1], pacingMode: "enforce" }),
+    });
+    const record = buildShadowRecord({
+      issueId: "i-explain",
+      issueIdentifier: null,
+      nowIso: NOW_ISO,
+      decision,
+      descriptor: { issueId: "i-explain", labelNames: ["tier:T1"] },
+      status: "todo",
+      hasOverride: false,
+      hasOperatorPin: false,
+      isIdle: true,
+      models: [flaky, t1],
+      laneLedger: { "lane-a": { laneId: "lane-a", verdict: verdict({ state: "exhausted", serviceable: false, score: null }), fetchedAt: NOW_ISO, error: null, observation: null } },
+      slotFloorFraction: 0.25,
+      windowNames: WINDOW_NAMES,
+      operatorOverride: null,
+    });
+    expect(record.explanations).toContainEqual({
+      modelId: "flaky",
+      gate: "disabled",
+      operand: { kind: "disabled" },
+    });
+    expect(record.explanations.some((e) => e.modelId === "flaky" && e.gate === "lane-unserviceable")).toBe(false);
+  });
+
+  it("caps explanations and reports the excess via explanationsTruncated instead of a silent cut", () => {
+    const t1 = MODELS_WITH_LANES.find((entry) => entry.tier === "T1")!;
+    const overCap = SHADOW_EXPLANATIONS_CAP + 5;
+    const models = Array.from({ length: overCap }, (_, i) => ({
+      ...t1,
+      id: `disabled-${i}`,
+      enabled: false,
+    }));
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i-cap", labelNames: ["tier:T1"] },
+      config: config({ models }),
+    });
+    expect(decision.rejections.length).toBe(overCap);
+    const record = buildShadowRecord({
+      issueId: "i-cap",
+      issueIdentifier: null,
+      nowIso: NOW_ISO,
+      decision,
+      descriptor: { issueId: "i-cap", labelNames: ["tier:T1"] },
+      status: "todo",
+      hasOverride: false,
+      hasOperatorPin: false,
+      isIdle: true,
+      models,
+      laneLedger: {},
+      slotFloorFraction: 0.25,
+      windowNames: WINDOW_NAMES,
+      operatorOverride: null,
+    });
+    expect(record.explanations.length).toBe(SHADOW_EXPLANATIONS_CAP);
+    expect(record.explanationsTruncated).toBe(5);
   });
 
   it("reports a live operator override with its id and expiry", () => {

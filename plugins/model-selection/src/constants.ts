@@ -280,6 +280,17 @@ export const LOCAL_FOLDER_KEYS = {
   shadowDecisions: "shadow-decisions",
 } as const;
 
+/**
+ * TOG-3211. Cap on how many `rejections` entries a decision record's
+ * `explanations` carries. TOG-3200 measured up to 112 rejected candidates in
+ * one decision on today's roster; this leaves headroom while still keeping
+ * the record bounded as the roster grows, rather than letting it scale
+ * unbounded with roster size. A decision with more rejections than this
+ * reports the excess in `explanationsTruncated` instead of silently
+ * dropping them.
+ */
+export const SHADOW_EXPLANATIONS_CAP = 200;
+
 /** Ahead-of-line throttling never drives a lane's slot share below this. */
 export const DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
 

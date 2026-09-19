@@ -204,6 +204,24 @@ export interface Candidate extends CostBreakdown {
   fallbackOnly: boolean;
 }
 
+/**
+ * TOG-3211. The machine-readable operand behind a `Rejection.reason` string —
+ * the exact tier compared, lane and its verdict, or disabled flag, keyed by
+ * `stage` so a consumer never has to parse `reason` prose to tell two
+ * plausible gates apart on the same candidate.
+ */
+export type RejectionOperand =
+  | { kind: "disabled" }
+  | { kind: "capability"; missing: string[] }
+  | { kind: "capability-score"; tier: Tier; p: number | null }
+  | { kind: "context-window"; contextWindow: number; requiredContextTokens: number }
+  | { kind: "tier-floor"; tier: Tier; requiredTier: Tier }
+  | { kind: "no-profile"; tier: Tier }
+  | { kind: "lane-unserviceable"; laneId: string | null; verdict: string | null }
+  | { kind: "lane-avoid"; laneId: string | null }
+  | { kind: "lane-outage"; laneId: string | null }
+  | { kind: "lane-no-room"; laneId: string };
+
 export interface Rejection {
   modelId: string;
   /**
@@ -229,6 +247,8 @@ export interface Rejection {
     | "lane-outage"
     | "lane-no-room";
   reason: string;
+  /** TOG-3211. Structured counterpart to `reason` — see `RejectionOperand`. */
+  operand: RejectionOperand;
 }
 
 /**

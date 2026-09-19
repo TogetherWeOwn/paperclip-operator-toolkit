@@ -1,5 +1,6 @@
+import { SHADOW_EXPLANATIONS_CAP } from "./constants.js";
 import { slotFactorFor, type LaneLedger, type OperatorOverrideEntry } from "./engine/pacing.js";
-import type { IssueDescriptor, ModelEntry, SelectionDecision } from "./engine/types.js";
+import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, SelectionDecision } from "./engine/types.js";
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
@@ -64,6 +65,17 @@ export interface ShadowCandidate {
   blended: number;
 }
 
+/**
+ * TOG-3211. One rejected candidate's gate and operand — the machine-readable
+ * counterpart to `Rejection.reason`, so a consumer can tell which of several
+ * plausible gates actually excluded a model without parsing prose.
+ */
+export interface ShadowExplanation {
+  modelId: string;
+  gate: Rejection["stage"];
+  operand: RejectionOperand;
+}
+
 export interface ShadowDecisionRecord {
   schema: typeof SHADOW_SCHEMA_VERSION;
   writer: DecisionWriter;
@@ -87,7 +99,15 @@ export interface ShadowDecisionRecord {
     lanes: Record<string, ShadowLaneSnapshot>;
   };
   candidates: ShadowCandidate[];
-  explanations: string[];
+  /**
+   * TOG-3211. One entry per rejected candidate, capped at
+   * `SHADOW_EXPLANATIONS_CAP` — see `explanationsTruncated` for the count of
+   * any rejections that did not fit, so a capped list never reads as a
+   * complete one.
+   */
+  explanations: ShadowExplanation[];
+  /** TOG-3211. Count of rejections dropped past `SHADOW_EXPLANATIONS_CAP`; 0 when nothing was cut. */
+  explanationsTruncated: number;
   operatorOverride: { id: string; expiresAt: string } | null;
   pickWhy: string;
 }
@@ -333,7 +353,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     ts: input.nowIso,
     // Best-effort, not an independently-verified trigger classification — the
     // harness re-derives its own classes from stateFingerprint/laneSnapshot
-    // rather than trusting a writer's self-tagged fields (see `explanations`).
+    // rather than trusting a writer's self-tagged field.
     trigger: input.hasOverride ? "repin" : "new-card",
     tier,
     pickedModel: decision.modelId,
@@ -346,10 +366,18 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     },
     laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
-    // Self-tagged DF-*/PI-* classes are the harness's job to derive
-    // (`classify_pair`), not this writer's — an empty array here is correct,
-    // not a placeholder.
-    explanations: [],
+    // TOG-3211: one entry per rejected candidate, naming the gate that
+    // rejected it and that gate's operand — `pickWhy`/`trace` only summarise
+    // the outcome ("no model cleared the gates (112 rejected)"), which was
+    // not reconstructable after the fact once the roster grew past what a
+    // human could enumerate by hand. Capped, with the excess counted rather
+    // than silently dropped, so a truncated list never reads as complete.
+    explanations: decision.rejections.slice(0, SHADOW_EXPLANATIONS_CAP).map((rejection) => ({
+      modelId: rejection.modelId,
+      gate: rejection.stage,
+      operand: rejection.operand,
+    })),
+    explanationsTruncated: Math.max(0, decision.rejections.length - SHADOW_EXPLANATIONS_CAP),
     operatorOverride: input.operatorOverride
       ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt }
       : null,

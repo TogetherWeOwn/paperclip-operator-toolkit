@@ -219,6 +219,16 @@ const mutants = [
     to: "      accounts: [],\n",
   },
   {
+    // TOG-3211: `explanations` must name the gate that rejected each
+    // candidate — this failure is silent in production (the job still
+    // reports `succeeded`), so only the suite can distinguish an empty
+    // explanations array from a populated one.
+    name: "empty-the-explanations-array",
+    file: "src/shadow-emit.ts",
+    from: "    explanations: decision.rejections.slice(0, SHADOW_EXPLANATIONS_CAP).map((rejection) => ({\n      modelId: rejection.modelId,\n      gate: rejection.stage,\n      operand: rejection.operand,\n    })),\n",
+    to: "    explanations: [],\n",
+  },
+  {
     // TOG-2692: a Go account at 0.99 monthly must bind on monthly even when its
     // weekly allowance reads empty. Choosing the largest window resurrects the
     // exact weekly-low/monthly-full routing defect.

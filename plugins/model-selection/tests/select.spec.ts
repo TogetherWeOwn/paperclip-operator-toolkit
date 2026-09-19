@@ -93,6 +93,32 @@ describe("selection", () => {
     expect(floored).not.toContain("claude-opus-5");
   });
 
+  it("records the gate that actually rejected a candidate, not another one that also applies", () => {
+    // TOG-3211 acceptance: `flaky` is BOTH disabled in the roster AND sitting
+    // on a lane the pace ledger reports unserviceable — either fact alone
+    // would explain a rejection, and TOG-3200's by-hand reconstruction from
+    // roster shape (which cannot see the `continue` order below) could
+    // plausibly have picked either. `select.ts` checks `!model.enabled`
+    // first and `continue`s immediately, so `lane-unserviceable` is never
+    // even evaluated for this model — the correct recorded gate is
+    // `disabled`. A wrong-but-populated `lane-unserviceable` explanation
+    // must fail this assertion.
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    const flaky = model(t1, { id: "flaky", enabled: false, laneId: "dead-lane" });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T1"] },
+      config: config({ models: [flaky, t1], laneLedger: ledgerWith("dead-lane"), pacingMode: "enforce" }),
+    });
+    const rejection = decision.rejections.find((r) => r.modelId === "flaky");
+    expect(rejection).toEqual({
+      modelId: "flaky",
+      stage: "disabled",
+      reason: "disabled in the roster",
+      operand: { kind: "disabled" },
+    });
+  });
+
   it("skips a cheaper model whose context window is below the issue estimate", () => {
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
     const narrow = model(t1, {
@@ -114,6 +140,7 @@ describe("selection", () => {
       modelId: "narrow-cheap",
       stage: "context-window",
       reason: "context window 200000 < required 202741",
+      operand: { kind: "context-window", contextWindow: 200_000, requiredContextTokens: 202_741 },
     });
   });
 
@@ -147,6 +174,7 @@ describe("selection", () => {
       modelId: narrow.id,
       stage: "context-window",
       reason: "context window 200000 < required 202741",
+      operand: { kind: "context-window", contextWindow: 200_000, requiredContextTokens: 202_741 },
     });
   });
 
