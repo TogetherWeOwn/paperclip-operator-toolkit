@@ -288,6 +288,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+
+# `merge_group` is INERT until a merge-queue rule exists on `main` (TOG-3145).
+# It is here first, and on purpose, because the ordering is a trap: if the
+# ruleset gains the merge-queue rule while this trigger is absent, every queue
+# entry sits forever waiting for nine required checks that no event will ever
+# start, and NOTHING can merge. Trigger first, rule second -- and this half is
+# the half an agent can land, because the rule needs `administration=write`,
+# which this repo's App profile does not carry.
+#
+# Nothing about the PR path changes: with no queue configured, GitHub never
+# emits a merge_group event, so this file behaves exactly as it did before.
 
 # push and pull_request used to both fire, unfiltered, on every PR commit:
 # two independent runner VMs ran the full suite set (incl. "Offline suites")
@@ -309,6 +321,14 @@ permissions:
 # Cancel a superseded run on the same ref rather than letting it burn the full
 # ~70min Offline-suites job to completion. Keyed on PR number when present so
 # concurrent PRs never cancel each other; falls back to the ref for push-to-main.
+#
+# This is already merge-queue safe and must stay that way. A merge_group event
+# carries no `pull_request`, so it falls through to `github.ref`, which is the
+# per-entry `refs/heads/gh-readonly-queue/main/pr-<n>-<base-sha>` -- unique to
+# that entry. Two queue entries therefore never share a group and can never
+# cancel each other. Do not "simplify" this key to the PR number alone: that
+# would put a queue entry and its own still-running PR run in one group, and
+# cancel-in-progress would kill whichever the queue is waiting on.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
