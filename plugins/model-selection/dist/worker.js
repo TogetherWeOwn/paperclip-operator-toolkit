@@ -2,7 +2,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.3.2";
+var PLUGIN_VERSION = "0.4.0";
 var TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
   advise: "model_selection_advise",
@@ -13,11 +13,15 @@ var TOOL_NAMES = {
   /**
    * TOG-2137, Defect 3. Report where an agent's ancillary model pins
    * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
-   * ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree
-   * with the lane-aware T3 recommendation. Read-only, always advisory: there
-   * is no write path from this plugin to any of these surfaces (`ctx.agents`
-   * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
-   * host's own internal API), so this can never be anything but a report.
+   * ANTHROPIC_DEFAULT_* env var) disagree with the lane-aware T3
+   * recommendation. Read-only, always advisory: there is no write path from
+   * this plugin to any of these surfaces (`ctx.agents` has no update method,
+   * and `ctx.http.fetch` is SSRF-blocked from the host's own internal API),
+   * so this can never be anything but a report.
+   *
+   * TOG-3348: `runtimeConfig.modelProfiles.cheap` was a fifth surface here
+   * until Paperclip migration 0236 (v2026.916.0) deleted it with no
+   * replacement; removed rather than kept as a frozen snapshot.
    */
   ancillaryDrift: "model_selection_ancillary_drift",
   /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */
@@ -2078,11 +2082,7 @@ function selectModel(input) {
 // src/engine/ancillary.ts
 var ANCILLARY_ENV_KEYS = ["ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"];
 var ANTHROPIC_DEFAULT_PREFIX = "ANTHROPIC_DEFAULT_";
-var CHEAP_PROFILE_SURFACE = "runtimeConfig.modelProfiles.cheap";
-function remediationFor(surface) {
-  if (surface === CHEAP_PROFILE_SURFACE) {
-    return "no ctx.agents write method exists in the plugin SDK, so this plugin can only report the drift; a differently-authenticated operator tool with a direct PATCH /api/agents/{id} can act on it (docs/model-lane-probe.md)";
-  }
+function remediationFor(_surface) {
   return "console only \u2014 adapterConfig is 403 to every agent, structurally; this plugin has no write path to it either";
 }
 function recommendAncillaryModel(input) {
@@ -2125,14 +2125,6 @@ function readAncillarySurfaces(agent) {
       const { modelId, unresolvable } = envBindingModelId(env[key]);
       readings.push({ surface: key, currentModelId: modelId, unresolvable });
     }
-  }
-  const runtimeConfig = agent.runtimeConfig && typeof agent.runtimeConfig === "object" ? agent.runtimeConfig : null;
-  const modelProfiles = runtimeConfig && typeof runtimeConfig.modelProfiles === "object" && runtimeConfig.modelProfiles ? runtimeConfig.modelProfiles : null;
-  const cheap = modelProfiles && typeof modelProfiles.cheap === "object" && modelProfiles.cheap ? modelProfiles.cheap : null;
-  if (cheap) {
-    const adapterConfig = cheap.adapterConfig && typeof cheap.adapterConfig === "object" ? cheap.adapterConfig : null;
-    const modelId = adapterConfig && typeof adapterConfig.model === "string" ? adapterConfig.model : null;
-    readings.push({ surface: CHEAP_PROFILE_SURFACE, currentModelId: modelId, unresolvable: false });
   }
   return readings;
 }
@@ -2178,7 +2170,17 @@ function estimateIssueContext(input) {
   if (lastRun !== null) return { tokens: lastRun, source: "last-run-context" };
   return { tokens: null, source: "none" };
 }
+var ANCILLARY_MODEL_ENV_KEYS = [
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+];
+function isSecretBinding(binding) {
+  if (!binding || typeof binding !== "object") return false;
+  const type = binding.type;
+  return type === "secret_ref" || type === "user_secret_ref";
+}
 function modelOverrideForContext(input) {
+  const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== void 0;
   const agentEnv = input.agentEnv ?? {};
   const overrideEnv = input.existingOverrideEnv ?? {};
   const env = { ...agentEnv, ...overrideEnv };
@@ -2192,6 +2194,12 @@ function modelOverrideForContext(input) {
     };
   } else {
     delete env[CONTEXT_LIMIT_ENV_KEY];
+  }
+  if (agentEnvKnown) {
+    for (const key of ANCILLARY_MODEL_ENV_KEYS) {
+      if (isSecretBinding(env[key])) continue;
+      env[key] = { type: "plain", value: input.model.id };
+    }
   }
   const mustWriteEnv = Object.keys(env).length > 0 || CONTEXT_LIMIT_ENV_KEY in agentEnv || CONTEXT_LIMIT_ENV_KEY in overrideEnv;
   return {
@@ -3909,7 +3917,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const isIdle = !issue.checkoutRunId && !issue.executionRunId && scheduledRetryStatus !== "queued" && scheduledRetryStatus !== "running";
         let agentFloorModelId = null;
         let agentName = null;
-        let agentEnv = {};
+        let agentEnv = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -4614,8 +4622,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   {
                     id: agent.id,
                     name: agent.name,
-                    adapterConfig: asRecord(agent.adapterConfig),
-                    runtimeConfig: asRecord(agent.runtimeConfig)
+                    adapterConfig: asRecord(agent.adapterConfig)
                   },
                   recommendedModelId,
                   config.models

@@ -23,7 +23,16 @@ export interface ApplyPlan {
   /** Whether anything should be written at all. */
   write: boolean;
   issueId: string;
-  /** The selected model id. The caller builds the full env-preserving override. */
+  /**
+   * The selected model id. The caller builds the full env-preserving override.
+   *
+   * TOG-3045 — if you came here looking for the sub-call surface pins
+   * (`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`), they are
+   * NOT here. This function is pure and never sees an env map. All five override
+   * write paths build their patch through `modelOverrideForContext`
+   * (`engine/context.ts`), which is therefore the only place the env merge can
+   * live without being duplicated four times.
+   */
   modelId: string | null;
   /**
    * Tier label to attach alongside, per ADR-0008.

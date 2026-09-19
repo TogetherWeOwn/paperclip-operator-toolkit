@@ -12,7 +12,7 @@ import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
-import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
+import { MODELS, NO_ESCALATION, PROFILES, subCallPins } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
@@ -241,6 +241,7 @@ describe("worker", () => {
         model: narrowT3.id,
         env: {
           CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+          ...subCallPins(narrowT3.id),
         },
       },
     });
@@ -280,6 +281,7 @@ describe("worker", () => {
         env: {
           KEEP_ME: { type: "plain", value: "yes" },
           CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+          ...subCallPins("claude-opus-5"),
         },
       },
     });
@@ -331,8 +333,12 @@ describe("worker", () => {
     );
 
     const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
+    // The agent row carries no `env` at all, but it was READ successfully, so
+    // the sub-call pins still land — there is nothing to preserve and nothing
+    // to lose. Contrast the unreadable-agent case, where env is left alone
+    // entirely (`context.spec.ts`, "writes no env at all when ... unknown").
     expect(after?.assigneeAdapterOverrides).toEqual({
-      adapterConfig: { model: "claude-opus-5" },
+      adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
     });
     expect(new Set(after?.labelIds ?? [])).toEqual(new Set([OTHER_LABEL_ID, TIER_LABEL_ID]));
     expect(enforcing.activity[0]?.metadata?.tierSource).toBe("capability-exclusion");

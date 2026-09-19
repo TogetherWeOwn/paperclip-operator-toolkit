@@ -922,6 +922,48 @@ const mutants = [
     from: "  if (observed === null) {\n    unserviceableSince = priorSince;",
     to: "  if (observed === null) {\n    unserviceableSince = priorSince ?? result.fetchedAt;",
   },
+  // --- TOG-3045 sub-call surface pins -------------------------------------
+  {
+    // The whole point of the card: a repin that evacuates the main model off an
+    // exhausted lane and leaves the haiku-class sub-calls pointed at it. That
+    // is not a degradation — run 6d0c6de7 on TOG-3002 died `acpx_turn_failed`.
+    name: "drop-subcall-surface-pins",
+    file: "src/engine/context.ts",
+    from:
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: input.model.id };\n",
+    to: "      void key;\n",
+  },
+  {
+    // The dangerous half. `assigneeAdapterOverrides.adapterConfig` merges into
+    // the run config by SHALLOW top-level spread (mergeModelProfileAdapterConfig,
+    // heartbeat.ts:3705-3714), so an issue-level `env` REPLACES the agent's
+    // whole env object. Writing only the keys we care about therefore wipes
+    // every GH token and secret binding the agent carries, for that run.
+    name: "write-only-the-subcall-keys",
+    file: "src/engine/context.ts",
+    from: "  const env: AdapterEnv = { ...agentEnv, ...overrideEnv };",
+    to: "  const env: AdapterEnv = {};",
+  },
+  {
+    // `agentEnv: null` means the agent row was NOT read (no assignee, or the
+    // read threw) — distinct from an agent with no env. Splicing into an
+    // unknown base commits exactly the wipe above, because the base we merged
+    // was empty for want of knowledge rather than for want of bindings.
+    name: "splice-subcalls-into-an-unknown-agent-env",
+    file: "src/engine/context.ts",
+    from: "  if (agentEnvKnown) {",
+    to: "  if (agentEnvKnown || true) {",
+  },
+  {
+    // A secret-bound surface cannot be read back or reconstructed, so we never
+    // clobber one — the same rule `ancillaryDriftForAgent` applies when it
+    // refuses to call a secret-bound surface "drifted".
+    name: "overwrite-a-secret-bound-subcall-surface",
+    file: "src/engine/context.ts",
+    from: "      if (isSecretBinding(env[key])) continue;\n",
+    to: "",
+  },
 ];
 
 /**

@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import manifest from "../src/manifest.js";
 import { BALANCE_PASS_FETCH_LIMIT, BALANCE_PASS_JOB_BUDGET_MS, PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
-import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
+import { MODELS, NO_ESCALATION, PROFILES, subCallPins } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const AGENT = "agent-1";
@@ -176,7 +176,9 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       await harness.runJob("labelOnlyPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      });
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.message).toContain("label-only pinned");
     });
@@ -299,7 +301,9 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       await harness.runJob("labelOnlyPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-haiku-4-5-20251001" } });
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-haiku-4-5-20251001", env: subCallPins("claude-haiku-4-5-20251001") },
+      });
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
     });
@@ -516,7 +520,9 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       await harness.runJob("balancePass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      });
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.metadata?.tier).toBe("T1");
     });
@@ -603,7 +609,9 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       await harness.runJob("balancePass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      });
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
     });

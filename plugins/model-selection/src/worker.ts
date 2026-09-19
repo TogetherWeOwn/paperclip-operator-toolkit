@@ -735,7 +735,8 @@ export function createPlugin() {
         isIdle: boolean;
         title: string;
         identifier: string | null;
-        agentEnv: Record<string, unknown>;
+        /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
+        agentEnv: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
         contextUsage: () => Promise<ContextUsage>;
@@ -767,7 +768,11 @@ export function createPlugin() {
 
         let agentFloorModelId: string | null = null;
         let agentName: string | null = null;
-        let agentEnv: Record<string, unknown> = {};
+        // Stays `null` unless we actually read the agent row. An unreadable or
+        // absent assignee must not be reported as "the agent has no env vars":
+        // the override write replaces the whole env object, so that conflation
+        // would wipe the agent's real bindings for the run (TOG-3045).
+        let agentEnv: Record<string, unknown> | null = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -902,7 +907,8 @@ export function createPlugin() {
         identifier: string | null;
         agentFloorModelId: string | null;
         pinnedModelId: string | null;
-        agentEnv: Record<string, unknown>;
+        /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
+        agentEnv: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;

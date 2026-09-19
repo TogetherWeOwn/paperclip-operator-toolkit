@@ -209,3 +209,19 @@ export function config(overrides: Partial<SelectionConfig> = {}): SelectionConfi
     ...overrides,
   };
 }
+
+/**
+ * TOG-3045. The sub-call surface pins every override write now carries, pointed
+ * at the model that write pinned.
+ *
+ * The key names are spelled out LITERALLY on purpose. Deriving them from
+ * `ANCILLARY_MODEL_ENV_KEYS` would make every expectation here self-fulfilling:
+ * dropping a key from the production constant would shrink the expected object
+ * to match, and the suite would stay green through the regression.
+ */
+export function subCallPins(modelId: string): Record<string, unknown> {
+  return {
+    ANTHROPIC_SMALL_FAST_MODEL: { type: "plain", value: modelId },
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: modelId },
+  };
+}

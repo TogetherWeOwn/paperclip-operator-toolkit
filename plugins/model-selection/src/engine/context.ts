@@ -59,11 +59,62 @@ export function estimateIssueContext(input: ContextEstimateInput): ContextEstima
 
 export type AdapterEnv = Record<string, unknown>;
 
+/**
+ * TOG-3045. The sub-call model surfaces a pin must carry alongside the main
+ * model, or the evacuation is partial.
+ *
+ * TOG-3034 measured the fleet (`docs/routing/TOG-3012-lane-exhaustion-autoheal.md`
+ * §#1b): 24 of 26 agents point both of these at the CLIProxy Codex lane. Repin
+ * the main model away from an exhausted lane and leave these behind, and the
+ * card's haiku-class sub-calls still resolve to the dead lane — a run that reads
+ * as successfully evacuated and then fails on a sub-call.
+ *
+ * Deliberately NOT in this list:
+ *
+ * - `CLAUDE_CODE_SUBAGENT_MODEL` — an `env.*` surface this write path could
+ *   reach, but out of TOG-3045's scope; it steers Task-tool subagents, not the
+ *   harness's own haiku-class calls, so its correct target is a separate
+ *   question. `ANCILLARY_ENV_KEYS` in `engine/ancillary.ts` still *reports*
+ *   drift on it.
+ * - `runtimeConfig.modelProfiles.cheap` — genuinely unreachable from here. It is
+ *   read off the agent row only (`readAgentRuntimeModelProfile`,
+ *   `heartbeat.ts:~1246`) and `assigneeAdapterOverrides` never touches it, so
+ *   covering it needs an agent-row write. Forbidden per the owner rule and
+ *   ADR-0010; it is on the doc's core-blocked list.
+ */
+export const ANCILLARY_MODEL_ENV_KEYS = [
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+] as const;
+
+/**
+ * A secret-bound env value. We can neither read what it resolves to nor
+ * reconstruct it, so we never overwrite one — the same rule
+ * `ancillaryDriftForAgent` applies when it refuses to call a secret-bound
+ * surface "drifted".
+ */
+function isSecretBinding(binding: unknown): boolean {
+  if (!binding || typeof binding !== "object") return false;
+  const type = (binding as Record<string, unknown>).type;
+  return type === "secret_ref" || type === "user_secret_ref";
+}
+
 export interface ModelOverrideInput {
   model: Pick<ModelEntry, "id" | "contextWindow">;
   fleetCeilingTokens: number;
   compactionRatio: number;
-  agentEnv?: AdapterEnv;
+  /**
+   * The assignee agent's `adapterConfig.env`, or `null`/absent when it is
+   * UNKNOWN — no assignee, or the agent read failed.
+   *
+   * The distinction is load-bearing, not cosmetic. Because the host replaces the
+   * whole `env` object (see below), writing an env map we built from an unknown
+   * base would delete every binding the agent actually carries — GH tokens and
+   * all. So an unknown agent env suppresses the ancillary writes entirely: the
+   * main model pin still lands, and the run keeps the agent's env untouched.
+   * A known-but-empty env (`{}`) is a different fact and does get them.
+   */
+  agentEnv?: AdapterEnv | null;
   existingOverrideEnv?: AdapterEnv;
 }
 
@@ -71,13 +122,17 @@ export interface ModelOverrideInput {
  * Build the complete issue-level adapter override.
  *
  * The host shallow-spreads `issueOverrides.adapterConfig` over the agent
- * adapter config, so an issue-level `env` object replaces the agent's `env`
- * object. Merge the maps here before writing; otherwise adding the compaction
- * ceiling silently deletes every unrelated agent env binding.
+ * adapter config — `{...baseConfig, ...modelProfile.adapterConfig, ...issueAdapterConfig}`,
+ * `mergeModelProfileAdapterConfig`, `heartbeat.ts:3705-3714` — so an issue-level
+ * `env` object replaces the agent's `env` object wholesale, per key it does not
+ * carry included. Merge the maps here before writing; otherwise adding the
+ * compaction ceiling or a sub-call pin silently deletes every unrelated agent
+ * env binding.
  */
 export function modelOverrideForContext(input: ModelOverrideInput): {
   assigneeAdapterOverrides: { adapterConfig: { model: string; env?: AdapterEnv } };
 } {
+  const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== undefined;
   const agentEnv = input.agentEnv ?? {};
   const overrideEnv = input.existingOverrideEnv ?? {};
   const env: AdapterEnv = { ...agentEnv, ...overrideEnv };
@@ -95,6 +150,19 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
     };
   } else {
     delete env[CONTEXT_LIMIT_ENV_KEY];
+  }
+
+  // Point the haiku-class sub-call surfaces at the same model the main pin just
+  // selected. That model cleared the lane ledger, the serviceability hard stop
+  // and the pace gate to be chosen at all, so it is healthy BY CONSTRUCTION —
+  // which is the property the sub-calls were missing. It may be dearer than a
+  // dedicated T3 pick; a sub-call on a live lane beats a cheap one on a dead
+  // lane, and these are per-issue, not a fleet default.
+  if (agentEnvKnown) {
+    for (const key of ANCILLARY_MODEL_ENV_KEYS) {
+      if (isSecretBinding(env[key])) continue;
+      env[key] = { type: "plain", value: input.model.id };
+    }
   }
 
   const mustWriteEnv =
