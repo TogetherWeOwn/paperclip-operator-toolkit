@@ -60,6 +60,8 @@ export interface ClassificationConfig {
   t3ConfidenceFloor: number;
   t2ConfidenceFloor: number;
   batchSize: number;
+  /** TOG-3200: re-examine a `tier:*` label this plugin did not write. Defaults on. */
+  reclassifyForeignLabels: boolean;
 }
 
 export interface ResolvedConfig {
@@ -395,6 +397,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       t3ConfidenceFloor: num(classification.t3ConfidenceFloor, 0.7),
       t2ConfidenceFloor: num(classification.t2ConfidenceFloor, 0.6),
       batchSize: num(classification.batchSize, 20),
+      reclassifyForeignLabels: bool(classification.reclassifyForeignLabels, true),
     },
     earnIn: {
       enabled: bool(earnIn.enabled, false),

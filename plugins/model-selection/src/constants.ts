@@ -198,6 +198,22 @@ export const PLUGIN_STATE_KEYS = {
    */
   classificationExclusions: "classificationExclusions",
   /**
+   * TOG-3200. Per-issue provenance for the `tier:*` label: `{issueId: "T2"}`
+   * for every tier label THIS job wrote. Without it `classifyIssues` cannot
+   * tell its own verdict from an agent's self-assessment, so it had to skip
+   * every card already carrying a tier label — and that skip is what starved
+   * it.
+   *
+   * Measured 2026-09-17: 1,542 tier labels exist company-wide, of which 44
+   * (2.9%) were written by this plugin. The rest are agent self-assessments
+   * made under a bundle instruction that says to go up a tier when in doubt.
+   * Because 120 of the 126 eligible open cards already carried one, the job
+   * ran 36 times that day and classified ZERO issues. Provenance is what makes
+   * the skip narrow enough to be correct: skip our own recorded verdict,
+   * re-examine somebody else's.
+   */
+  classifierLabeledIssues: "classifierLabeledIssues",
+  /**
    * TOG-2481 port of `lane_outage.json` — an operator-declared outage the
    * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
    * not deploy-time config: the Python source is a hand-edited file read
@@ -314,6 +330,24 @@ export const FREE_MUST_BE_PROVEN_USD = 0.1;
  * `tier_dispatcher.py` `pick()`'s `blended(m)<=cheapest*1.20` band.
  */
 export const COST_BAND_MULTIPLIER = 1.2;
+
+/**
+ * TOG-3200. How many candidate rows `classifyIssues` FETCHES per
+ * `classification.batchSize` it intends to classify.
+ *
+ * The fetch and the write cap used to be the same number, which is a
+ * starvation bug the moment any candidate is skipped after the row query: the
+ * query cannot see labels, so `pin:operator` cards, and (now) cards this job
+ * has already classified, are filtered per-row afterwards. With `limit =
+ * batchSize` the same top-N rows come back every run, get skipped every run,
+ * and row N+1 is never reached. Over-fetching and stopping at `batchSize`
+ * ACTUAL classifications lets the backlog drain.
+ */
+export const CLASSIFY_FETCH_MULTIPLIER = 10;
+/** Hard ceiling on that over-fetch, so a large `batchSize` cannot page the whole board. */
+export const CLASSIFY_FETCH_LIMIT_MAX = 400;
+/** Stop starting new classifications with a minute left before the host's 300 s job RPC wall. */
+export const CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1000;
 
 /** `tier_dispatcher.py` `label_only_pass()`'s fixed `limit 100` row fetch. No separate write cap in the source. */
 export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;

@@ -138,6 +138,22 @@ var PLUGIN_STATE_KEYS = {
    */
   classificationExclusions: "classificationExclusions",
   /**
+   * TOG-3200. Per-issue provenance for the `tier:*` label: `{issueId: "T2"}`
+   * for every tier label THIS job wrote. Without it `classifyIssues` cannot
+   * tell its own verdict from an agent's self-assessment, so it had to skip
+   * every card already carrying a tier label — and that skip is what starved
+   * it.
+   *
+   * Measured 2026-09-17: 1,542 tier labels exist company-wide, of which 44
+   * (2.9%) were written by this plugin. The rest are agent self-assessments
+   * made under a bundle instruction that says to go up a tier when in doubt.
+   * Because 120 of the 126 eligible open cards already carried one, the job
+   * ran 36 times that day and classified ZERO issues. Provenance is what makes
+   * the skip narrow enough to be correct: skip our own recorded verdict,
+   * re-examine somebody else's.
+   */
+  classifierLabeledIssues: "classifierLabeledIssues",
+  /**
    * TOG-2481 port of `lane_outage.json` — an operator-declared outage the
    * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
    * not deploy-time config: the Python source is a hand-edited file read
@@ -205,6 +221,9 @@ var REWORK_WEIGHT_REJECTED = 0.5;
 var EXPLORE_FRACTION = 0.1;
 var FREE_MUST_BE_PROVEN_USD = 0.1;
 var COST_BAND_MULTIPLIER = 1.2;
+var CLASSIFY_FETCH_MULTIPLIER = 10;
+var CLASSIFY_FETCH_LIMIT_MAX = 400;
+var CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1e3;
 var LABEL_ONLY_PASS_FETCH_LIMIT = 100;
 var REPIN_PASS_FETCH_LIMIT = 400;
 var REPIN_PASS_WRITE_LIMIT = 6;
@@ -727,7 +746,8 @@ function resolveConfig(raw) {
       maxOutputTokens: num(classification.maxOutputTokens, 120),
       t3ConfidenceFloor: num(classification.t3ConfidenceFloor, 0.7),
       t2ConfidenceFloor: num(classification.t2ConfidenceFloor, 0.6),
-      batchSize: num(classification.batchSize, 20)
+      batchSize: num(classification.batchSize, 20),
+      reclassifyForeignLabels: bool(classification.reclassifyForeignLabels, true)
     },
     earnIn: {
       enabled: bool(earnIn.enabled, false),
@@ -3019,8 +3039,14 @@ var RUBRIC = `You classify a software-company work item into a model tier. Answe
 T1 = judgement-heavy, consequential, trust-sensitive, or irreversible: architecture/design decisions; security or adversarial review; incident response; upstream/public actions; owner-facing decisions; factual analysis that feeds consequential decisions; credentials, permissions, access, production deploys, approvals, policy.
 T2 = ordinary engineering and fact-producing knowledge work: implementation with tests, normal code review, CI, runbooks, debugging, data pipelines, bounded multi-app automation with deterministic checks, research or reports that must discover or reconcile facts.
 T3 = mechanically checkable, low-stakes transformation of supplied evidence: formatting, renames, boilerplate, verbatim extraction, status restatement, label/triage hygiene, registering an existing test, deterministic reruns. A report or summary is T3 only when it creates no new factual premise.
+Anchors. These resolve the boundaries that get misread most often. They do not move the definitions above; they say which side of them specific recurring work sits on:
+- Reviewing a named PR, commit or SHA against criteria that are already written down is T2, even when the code under review is security-sensitive. Reviewing is not deciding. Choosing whether to ADOPT a security posture, or giving an approval that is itself the irreversible act, stays T1.
+- Work that PRESENTS options for someone else to choose is T2. Only work that MAKES or COMMITS TO the decision is T1. "Owner-facing decisions" above means the deciding, not the informing.
+- A coordinating or parent card whose own body says the work happens elsewhere ("do not build here", "track only", "the children do the work") is T3: its output is restated status, not engineering.
+- Building or fixing a tool, plugin, CI harness or test rig against a stated failure is T2. Its acceptance test is a deterministic check, which is what makes it ordinary engineering rather than judgement.
+- Entering, transcribing or reconciling roster, score or measurement data from a supplied source is T2, and re-running a measurement whose method is already fixed is T2.
 exclusion=true when the task touches secrets, credentials, permissions, access reviews, provisioning, or owner approvals (these must stay on the assignee's default model regardless of tier).
-Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).`;
+Be conservative where conservatism buys safety, and only there. If you are unsure between T1 and T2, choose T1 only when a concrete T1 trigger is actually present in the item: an irreversible or externally-visible action, credentials/permissions/access, a production deploy, an approval, a security-posture decision, or an incident in progress. Otherwise choose T2. If you are unsure between T2 and T3, choose T2. Do not choose T1 because the subject matter sounds important, because the card is high priority, or because it names a sensitive system that it does not itself change.`;
 function buildClassificationPrompt(title, description, agentRole, descriptionChars) {
   const truncated = (description ?? "").slice(0, descriptionChars);
   return `Assignee role: ${agentRole}
@@ -3569,6 +3595,19 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const out = {};
         for (const [issueId, excluded] of Object.entries(stored)) {
           if (excluded === true) out[issueId] = true;
+        }
+        return out;
+      };
+      const classifierLabeledKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues
+      });
+      const readClassifierLabeled = async (companyId) => {
+        const stored = asRecord(await ctx.state.get(classifierLabeledKey(companyId)));
+        const out = {};
+        for (const [issueId, tier2] of Object.entries(stored)) {
+          if (typeof tier2 === "string" && TIERS.includes(tier2)) out[issueId] = tier2;
         }
         return out;
       };
@@ -4884,6 +4923,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 continue;
               }
             }
+            const classifyFetchLimit = Math.min(
+              config.classification.batchSize * CLASSIFY_FETCH_MULTIPLIER,
+              CLASSIFY_FETCH_LIMIT_MAX
+            );
+            const classifyDeadline = Date.now() + CLASSIFY_JOB_BUDGET_MS;
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
@@ -4907,15 +4951,19 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
                          i.updated_at desc
                 limit $2`,
-              [company.id, String(config.classification.batchSize)]
+              [company.id, String(classifyFetchLimit)]
             );
             const exclusions = await readClassificationExclusions(company.id);
+            const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
+            let reclassified = 0;
             for (const row of candidateRows) {
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
+              if (classified >= config.classification.batchSize) break;
+              if (Date.now() >= classifyDeadline) break;
               let issue;
               try {
                 issue = await ctx.issues.get(issueId, company.id);
@@ -4924,8 +4972,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               }
               if (!issue) continue;
               const labelNames = (issue.labels ?? []).map((label) => label.name).filter((name) => typeof name === "string");
-              if (labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX))) continue;
+              const existingLabelIds = issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
               if (labelNames.includes(OPERATOR_PIN_LABEL)) continue;
+              const existingLabelTier = tierFromLabels(labelNames);
+              const ourRecordedTier = classifierLabeled[issueId];
+              const ourLabelId = ourRecordedTier ? config.tierLabelIds[ourRecordedTier] : void 0;
+              const stillCarriesOurLabel = ourRecordedTier !== void 0 && (ourRecordedTier === existingLabelTier || typeof ourLabelId === "string" && existingLabelIds.includes(ourLabelId));
+              const isForeignLabel = existingLabelTier !== null && !stillCarriesOurLabel;
+              if (existingLabelTier !== null) {
+                if (!config.classification.reclassifyForeignLabels) continue;
+                if (!isForeignLabel) continue;
+              }
               const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
               const title = typeof r.title === "string" ? r.title : "";
               const description = typeof r.description === "string" ? r.description : "";
@@ -4959,13 +5016,22 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               });
               const labelId = config.tierLabelIds[labelTier];
               if (labelId) {
-                const existingLabelIds = issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
-                const nextLabelIds = [.../* @__PURE__ */ new Set([...existingLabelIds, labelId])];
+                const tierLabelIdsOnIssue = new Set(
+                  (issue.labels ?? []).filter((label) => typeof label.name === "string" && label.name.startsWith(TIER_LABEL_PREFIX)).map((label) => label.id).filter((id) => typeof id === "string")
+                );
+                for (const id of Object.values(config.tierLabelIds)) {
+                  if (typeof id === "string") tierLabelIdsOnIssue.add(id);
+                }
+                const nextLabelIds = [
+                  .../* @__PURE__ */ new Set([...existingLabelIds.filter((id) => !tierLabelIdsOnIssue.has(id)), labelId])
+                ];
                 await ctx.issues.update(
                   issueId,
                   { labelIds: nextLabelIds },
                   company.id
                 );
+                await ctx.state.set(classifierLabeledKey(company.id), { ...classifierLabeled, [issueId]: labelTier });
+                classifierLabeled[issueId] = labelTier;
               }
               if (judgement.exclusion) {
                 await ctx.state.set(classificationExclusionsKey(company.id), { ...exclusions, [issueId]: true });
@@ -4973,14 +5039,26 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               }
               await ctx.activity.log({
                 companyId: company.id,
-                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}`,
+                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}${isForeignLabel ? `, replacing an unattributed ${existingLabelTier} label` : ""}`,
                 entityType: "issue",
                 entityId: issueId,
-                metadata: { tier: labelTier, pickTier, confidence: judgement.confidence, reason: judgement.reason }
+                metadata: {
+                  tier: labelTier,
+                  pickTier,
+                  confidence: judgement.confidence,
+                  reason: judgement.reason,
+                  ...isForeignLabel ? { replacedLabelTier: existingLabelTier } : {}
+                }
               });
               classified += 1;
+              if (isForeignLabel) reclassified += 1;
             }
-            ctx.logger.info("issue classification pass complete", { companyId: company.id, classified, candidates: candidateRows.length });
+            ctx.logger.info("issue classification pass complete", {
+              companyId: company.id,
+              classified,
+              reclassified,
+              candidates: candidateRows.length
+            });
           } catch (cause) {
             ctx.logger.error("issue classification failed for a company", {
               companyId: company.id,

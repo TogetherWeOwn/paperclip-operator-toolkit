@@ -936,4 +936,214 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
     });
   });
+
+  /**
+   * TOG-3200. `classifyIssues` used to skip any card carrying a `tier:*` label,
+   * which made it a one-shot stamp. Measured 2026-09-17: 120 of 126 eligible
+   * open cards already carried one, 1,498 of the company's 1,542 tier labels
+   * (97.1%) were written by somebody other than this plugin, and the job ran 36
+   * times that day writing ZERO classifications while 53% of runs and 93.8% of
+   * spend sat on T1.
+   */
+  describe("classifyIssues foreign-label reclassification", () => {
+    function classifyConfig(overrides: Record<string, unknown> = {}) {
+      return baseConfig({
+        classification: {
+          enabled: true,
+          baseUrl: "https://classifier.example.com",
+          modelId: "gpt-5.6-luna",
+          ...overrides,
+        },
+      });
+    }
+
+    /** Stub the classifier HTTP call and record how many times it was asked. */
+    function stubClassifier(
+      harness: Awaited<ReturnType<typeof boot>>,
+      verdict: { tier: string; confidence: number; exclusion?: boolean },
+    ) {
+      const calls: string[] = [];
+      harness.ctx.http.fetch = (async (_url: string, init: { body: string }) => {
+        calls.push(init.body);
+        return {
+          status: 200,
+          headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "application/json" : null) },
+          redirected: false,
+          text: async () =>
+            JSON.stringify({
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    tier: verdict.tier,
+                    confidence: verdict.confidence,
+                    exclusion: verdict.exclusion ?? false,
+                    reason: "test",
+                  }),
+                },
+              ],
+            }),
+        };
+      }) as typeof harness.ctx.http.fetch;
+      return calls;
+    }
+
+    function classifyRow(id: string) {
+      return { id, identifier: id, status: "in_progress", agent_name: "Founding Engineer", title: "A card", description: "d" };
+    }
+
+    it("reclassifies a card whose tier label this plugin did not write", async () => {
+      // The whole defect in one case: an agent self-assessed T1, the plugin had
+      // no record of writing it, and the old code skipped the card forever.
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(classifyConfig(), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      const calls = stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(calls).toHaveLength(1);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).toEqual(["lbl-T2"]);
+    });
+
+    it("DROPS the foreign tier label rather than adding alongside it", async () => {
+      // An additive write would leave tier:T1 and tier:T2 both attached, and
+      // `tierFromLabels` resolves a two-tier card by taking the most capable —
+      // so the card would still route T1 and the fix would be silently inert.
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1", "lbl-other"] });
+      const harness = await boot(classifyConfig(), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      stubClassifier(harness, { tier: "T3", confidence: 0.95 });
+
+      await harness.runJob("classifyIssues");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).not.toContain("lbl-T1");
+      expect(after?.labelIds).toContain("lbl-T3");
+      // Non-tier labels are untouched — this job writes a tier, not a triage.
+      expect(after?.labelIds).toContain("lbl-other");
+    });
+
+    it("does NOT reclassify a card whose tier label this plugin did write", async () => {
+      // Re-running the classifier against its own last answer is pure spend,
+      // and on a T1 lane at 0.915 weekly utilisation that spend is the problem
+      // the card is about.
+      const card = issue("i1", { labels: [tierLabel("T2")], labelIds: ["lbl-T2"] });
+      const harness = await boot(classifyConfig(), [card]);
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues },
+        { i1: "T2" },
+      );
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      const calls = stubClassifier(harness, { tier: "T3", confidence: 0.95 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(calls).toHaveLength(0);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).toEqual(["lbl-T2"]);
+    });
+
+    it("records provenance so the next run skips the card it just classified", async () => {
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(classifyConfig(), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      const calls = stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+      await harness.runJob("classifyIssues");
+      await harness.runJob("classifyIssues");
+
+      // Two runs, one classifier call: the second run recognised its own label.
+      //
+      // This also pins the label-view tie-break. The harness patches `labelIds`
+      // without rehydrating `labels`, so on run 2 the name view still reads
+      // tier:T1 while the id view reads lbl-T2 — the two disagree. That must
+      // resolve to "ours": resolving it to "foreign" would re-run the
+      // classifier on this card on every job tick, forever.
+      expect(calls).toHaveLength(1);
+      const stored = await harness.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues,
+      } as ScopeKey);
+      expect(stored).toEqual({ i1: "T2" });
+    });
+
+    it("never touches a pin:operator card, foreign label or not", async () => {
+      // "Leave the model choice on this issue alone" outranks reclassification.
+      const card = issue("i1", { labels: [tierLabel("T1"), operatorPinLabel()], labelIds: ["lbl-T1", "lbl-op"] });
+      const harness = await boot(classifyConfig(), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      const calls = stubClassifier(harness, { tier: "T3", confidence: 0.95 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(calls).toHaveLength(0);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).toEqual(["lbl-T1", "lbl-op"]);
+    });
+
+    it("restores the pre-3200 unconditional skip when reclassifyForeignLabels is false", async () => {
+      // The documented one-key rollback. If this stops working the change has
+      // no off switch.
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(classifyConfig({ reclassifyForeignLabels: false }), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+      const calls = stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(calls).toHaveLength(0);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).toEqual(["lbl-T1"]);
+    });
+
+    it("still classifies an unlabelled card, and adds without dropping anything", async () => {
+      const card = issue("i1", { labels: [], labelIds: ["lbl-other"] });
+      const harness = await boot(classifyConfig(), [card]);
+      harness.ctx.db.query = async () => [classifyRow("i1")] as never;
+
+      stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+      await harness.runJob("classifyIssues");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.labelIds).toEqual(["lbl-other", "lbl-T2"]);
+    });
+
+    it("over-fetches candidates so skipped rows cannot starve the batch", async () => {
+      // With `limit = batchSize` the row query returned the same top-N rows
+      // every run. Once those rows are all skipped after the fact — which is
+      // precisely what provenance now causes — row N+1 was never reached and
+      // the job classified nothing forever. The fetch limit must exceed the
+      // write cap.
+      let seenLimitArg: string | null = null;
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(classifyConfig({ batchSize: 3 }), [card]);
+      harness.ctx.db.query = (async (query: string, params: string[]) => {
+        if (query.includes("from issues i")) {
+          seenLimitArg = params[1] ?? null;
+          return [classifyRow("i1")];
+        }
+        return [];
+      }) as typeof harness.ctx.db.query;
+      stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(Number(seenLimitArg)).toBeGreaterThan(3);
+      expect(Number(seenLimitArg)).toBe(30);
+    });
+
+    it("stops at batchSize ACTUAL classifications, not at batchSize rows scanned", async () => {
+      const cards = ["i1", "i2", "i3", "i4", "i5"].map((id) => issue(id, { labels: [], labelIds: [] }));
+      const harness = await boot(classifyConfig({ batchSize: 2 }), cards);
+      harness.ctx.db.query = async () => cards.map((c) => classifyRow(c.id)) as never;
+      const calls = stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+
+      await harness.runJob("classifyIssues");
+
+      expect(calls).toHaveLength(2);
+    });
+  });
 });

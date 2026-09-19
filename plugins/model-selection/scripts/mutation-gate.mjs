@@ -618,6 +618,41 @@ const mutants = [
     from: "\n              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
     to: "\n              const result = await advise(company.id, { issueId }, false, undefined, true);",
   },
+  // --- TOG-3200 named mutants ---------------------------------------------
+  // Each of these three restores one shape that made `classifyIssues` write
+  // zero classifications in 36 consecutive runs on 2026-09-17 while 53% of runs
+  // and 93.8% of spend sat on T1. All three fail SILENTLY — the job still
+  // reports "succeeded" with empty logs — so the suite is the only thing that
+  // can tell the difference.
+  {
+    // The original defect, exactly: skip any card carrying a tier:* label. 120
+    // of 126 eligible open cards carried one and 97.1% of those labels were not
+    // this plugin's, so this single `continue` starved the job completely.
+    name: "skip-any-tier-label-unconditionally",
+    file: "src/worker.ts",
+    from: "              if (existingLabelTier !== null) {\n                if (!config.classification.reclassifyForeignLabels) continue;\n                if (!isForeignLabel) continue;\n              }",
+    to: "              if (existingLabelTier !== null) continue;",
+  },
+  {
+    // Write the new tier label ADDITIVELY instead of replacing the foreign one.
+    // The card then carries two tier labels, and `tierFromLabels` resolves that
+    // by taking the most capable — so every corrected T1 stays T1 and the whole
+    // change is inert while still looking like it ran.
+    name: "add-tier-label-without-dropping-foreign",
+    file: "src/worker.ts",
+    from: "                  ...new Set([...existingLabelIds.filter((id) => !tierLabelIdsOnIssue.has(id)), labelId]),",
+    to: "                  ...new Set([...existingLabelIds, labelId]),",
+  },
+  {
+    // Collapse the candidate fetch back onto the write cap. Every label-based
+    // skip happens after the row query, so the same top-N rows return every run
+    // and row N+1 is never reached — the job goes permanently quiet once the
+    // head of the queue is classified.
+    name: "fetch-limit-equals-batch-size",
+    file: "src/worker.ts",
+    from: "            const classifyFetchLimit = Math.min(\n              config.classification.batchSize * CLASSIFY_FETCH_MULTIPLIER,\n              CLASSIFY_FETCH_LIMIT_MAX,\n            );",
+    to: "            const classifyFetchLimit = config.classification.batchSize;",
+  },
   // --- TOG-3111 named mutants: creation-time pin + unpinnable visibility ----
   // NOTE: the write-path idleness/pin guards are deliberately NOT here. Each
   // is enforced twice — once at the `advise` result (`!result.isIdle`,
@@ -693,6 +728,34 @@ const mutants = [
   },
 ];
 
+/**
+ * TOG-3200. Optional comma-separated name filter, e.g.
+ * `MUTANTS=skip-any-tier-label-unconditionally node scripts/mutation-gate.mjs`.
+ *
+ * The full sweep takes ~25 minutes, and the same sibling sweeper described
+ * under `completed()` below kills the RUNNER as readily as it kills one vitest
+ * child — when it does, every mutant after the kill point goes unrun. Without a
+ * way to resume, the only recovery is another 25-minute roll of the same dice.
+ *
+ * A filtered run is NOT a passing gate and must never be reported as one, so
+ * the summary line below prints the filtered count against the total and says
+ * PARTIAL. An unset `MUTANTS` runs everything, exactly as before.
+ */
+const mutantFilter = (process.env.MUTANTS ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter((name) => name.length > 0);
+const selected = mutantFilter.length > 0
+  ? mutants.filter((mutant) => mutantFilter.includes(mutant.name))
+  : mutants;
+if (mutantFilter.length > 0) {
+  const unknown = mutantFilter.filter((name) => !mutants.some((mutant) => mutant.name === name));
+  if (unknown.length > 0) {
+    process.stderr.write(`BROKEN GATE: unknown mutant name(s): ${unknown.join(", ")}\n`);
+    process.exit(1);
+  }
+}
+
 function runTests() {
   return spawnSync(process.execPath, ["node_modules/vitest/vitest.mjs", "run"], {
     cwd: root,
@@ -732,7 +795,7 @@ if (baseline.status !== 0) {
 const scratch = await mkdtemp(join(tmpdir(), "model-selection-mutants-"));
 let failures = 0;
 try {
-  for (const mutant of mutants) {
+  for (const mutant of selected) {
     const path = join(root, mutant.file);
     const original = await readFile(path, "utf8");
     const occurrences = original.split(mutant.from).length - 1;
@@ -762,4 +825,8 @@ try {
 }
 
 if (failures > 0) process.exit(1);
+if (selected.length !== mutants.length) {
+  console.log(`mutation gate PARTIAL: ${selected.length}/${mutants.length} mutants run, all killed — NOT a passing gate`);
+  process.exit(0);
+}
 console.log(`mutation gate: ${mutants.length}/${mutants.length} killed`);

@@ -14,6 +14,9 @@ import {
   BALANCE_PASS_PROBATION_PRICE_USD,
   BALANCE_PASS_WRITE_LIMIT,
   CARD_LEDGER_WINDOW_DAYS,
+  CLASSIFY_FETCH_LIMIT_MAX,
+  CLASSIFY_FETCH_MULTIPLIER,
+  CLASSIFY_JOB_BUDGET_MS,
   DISPATCH_ISSUE_PAGE_LIMIT,
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
@@ -504,6 +507,28 @@ export function createPlugin() {
         const out: Record<string, boolean> = {};
         for (const [issueId, excluded] of Object.entries(stored)) {
           if (excluded === true) out[issueId] = true;
+        }
+        return out;
+      };
+
+      /**
+       * TOG-3200. Provenance for the `tier:*` labels this job wrote:
+       * `{issueId: "T2"}`. Same shape and lifecycle as the exclusions map
+       * above, and read in the same place — the classify job's per-candidate
+       * loop — so the job can distinguish its own recorded verdict from an
+       * agent's self-assessment.
+       */
+      const classifierLabeledKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues,
+      });
+
+      const readClassifierLabeled = async (companyId: string): Promise<Record<string, Tier>> => {
+        const stored = asRecord(await ctx.state.get(classifierLabeledKey(companyId)));
+        const out: Record<string, Tier> = {};
+        for (const [issueId, tier] of Object.entries(stored)) {
+          if (typeof tier === "string" && (TIERS as readonly string[]).includes(tier)) out[issueId] = tier as Tier;
         }
         return out;
       };
@@ -2277,13 +2302,19 @@ export function createPlugin() {
 
       // --- scheduled LLM tier classification (TOG-2481, tier_dispatcher.py
       // main()) -----------------------------------------------------------
-      // For every open, agent-assigned issue with no tier:* label, no
-      // per-issue override, no `pin:operator`, and no running/queued run,
-      // classify it with the RUBRIC and write a tier:* label (never a status
-      // or assignee change — same contract as the ported script's file-level
-      // docstring). The AC3 kill switch is `classification.enabled: false`
-      // (default): a company that never sets it true gets byte-identical
-      // behavior to before this job existed.
+      // For every open, agent-assigned issue with no per-issue override, no
+      // `pin:operator`, and no running/queued run, classify it with the RUBRIC
+      // and write a tier:* label (never a status or assignee change — same
+      // contract as the ported script's file-level docstring). The AC3 kill
+      // switch is `classification.enabled: false` (default): a company that
+      // never sets it true gets byte-identical behavior to before this job
+      // existed.
+      //
+      // TOG-3200 removed "with no tier:* label" from that list. An existing
+      // label now ends the candidate only when THIS job wrote it
+      // (`classifierLabeledIssues` provenance); a label written by anybody else
+      // is re-examined and replaced. `classification.reclassifyForeignLabels:
+      // false` is the one-key rollback to the old unconditional skip.
       ctx.jobs.register(JOB_KEYS.classifyIssues, async () => {
         const companies = listKnownCompanies();
         for (const company of companies) {
@@ -2310,6 +2341,16 @@ export function createPlugin() {
             // running/queued run. `labels`/`issue_labels` are not allowlisted
             // (PLUGIN_DATABASE_CORE_READ_TABLES), so label/pin state is read via
             // `ctx.issues.get()` per row below rather than a live SQL join.
+            //
+            // TOG-3200: over-fetch. Because every label-based skip happens
+            // per-row AFTER this query, a `limit batchSize` returns the same
+            // top-N skipped rows on every run and never reaches row N+1. The
+            // loop below stops at `batchSize` actual classifications instead.
+            const classifyFetchLimit = Math.min(
+              config.classification.batchSize * CLASSIFY_FETCH_MULTIPLIER,
+              CLASSIFY_FETCH_LIMIT_MAX,
+            );
+            const classifyDeadline = Date.now() + CLASSIFY_JOB_BUDGET_MS;
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
@@ -2333,21 +2374,26 @@ export function createPlugin() {
                 order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
                          i.updated_at desc
                 limit $2`,
-              [company.id, String(config.classification.batchSize)],
+              [company.id, String(classifyFetchLimit)],
             )) as unknown[];
 
             const exclusions = await readClassificationExclusions(company.id);
+            const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
+            let reclassified = 0;
             for (const row of candidateRows) {
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
 
-              // Skip an issue that already carries a tier:* label — the row query
-              // above cannot see labels (not allowlisted), so this check happens
-              // per candidate via `ctx.issues.get()`, same source `describeIssue`
-              // uses for label reads elsewhere in this worker.
+              if (classified >= config.classification.batchSize) break;
+              if (Date.now() >= classifyDeadline) break;
+
+              // The row query above cannot see labels (not allowlisted), so
+              // label and pin state is read per candidate via
+              // `ctx.issues.get()` — the same source `describeIssue` uses for
+              // label reads elsewhere in this worker.
               let issue: Awaited<ReturnType<typeof ctx.issues.get>>;
               try {
                 issue = await ctx.issues.get(issueId, company.id);
@@ -2358,8 +2404,46 @@ export function createPlugin() {
               const labelNames = (issue.labels ?? [])
                 .map((label) => label.name)
                 .filter((name): name is string => typeof name === "string");
-              if (labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX))) continue;
+              const existingLabelIds =
+                issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
+
+              // An operator pin means "leave the model choice on this issue
+              // alone" — unchanged, and checked before anything else.
               if (labelNames.includes(OPERATOR_PIN_LABEL)) continue;
+
+              // TOG-3200. An existing tier:* label used to end the candidate
+              // here unconditionally, which made classification a one-shot
+              // stamp. Measured 2026-09-17: 120 of 126 eligible open cards
+              // carried one, 97% of them agent self-assessments rather than
+              // this job's verdict, and the job classified 0 issues in 36 runs.
+              //
+              // The skip is now provenance-scoped. Our OWN recorded verdict
+              // still ends the candidate — re-running the classifier against
+              // its own last answer is pure spend. Somebody else's label is
+              // re-examined and replaced, because it is exactly the input the
+              // card says is wrong. `reclassifyForeignLabels: false` restores
+              // the old unconditional skip.
+              //
+              // "Ours" is checked against BOTH label views the host exposes —
+              // the `tier:*` name and the label id we actually wrote — and
+              // either one matching is enough. The two can only disagree if a
+              // caller returns them inconsistently, and the asymmetry of the
+              // mistake decides which way to lean: wrongly calling a label
+              // foreign re-runs the classifier on every job tick forever, while
+              // wrongly calling it ours just leaves the card on the tier we
+              // ourselves assigned. So a disagreement resolves to "ours".
+              const existingLabelTier = tierFromLabels(labelNames);
+              const ourRecordedTier = classifierLabeled[issueId];
+              const ourLabelId = ourRecordedTier ? config.tierLabelIds[ourRecordedTier] : undefined;
+              const stillCarriesOurLabel =
+                ourRecordedTier !== undefined &&
+                (ourRecordedTier === existingLabelTier ||
+                  (typeof ourLabelId === "string" && existingLabelIds.includes(ourLabelId)));
+              const isForeignLabel = existingLabelTier !== null && !stillCarriesOurLabel;
+              if (existingLabelTier !== null) {
+                if (!config.classification.reclassifyForeignLabels) continue;
+                if (!isForeignLabel) continue;
+              }
 
               const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
               const title = typeof r.title === "string" ? r.title : "";
@@ -2399,14 +2483,34 @@ export function createPlugin() {
 
               const labelId = config.tierLabelIds[labelTier];
               if (labelId) {
-                const existingLabelIds =
-                  issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
-                const nextLabelIds = [...new Set([...existingLabelIds, labelId])];
+                // TOG-3200: adding is only correct when there was no tier label
+                // to begin with. Replacing a foreign one means DROPPING it —
+                // leaving both would be a two-tier card, and `tierFromLabels`
+                // resolves that by taking the most capable, so an additive
+                // write would silently preserve every T1 it was meant to
+                // correct. Drop every tier:* id, then add the one verdict.
+                const tierLabelIdsOnIssue = new Set(
+                  (issue.labels ?? [])
+                    .filter((label) => typeof label.name === "string" && label.name.startsWith(TIER_LABEL_PREFIX))
+                    .map((label) => label.id)
+                    .filter((id): id is string => typeof id === "string"),
+                );
+                for (const id of Object.values(config.tierLabelIds)) {
+                  if (typeof id === "string") tierLabelIdsOnIssue.add(id);
+                }
+                const nextLabelIds = [
+                  ...new Set([...existingLabelIds.filter((id) => !tierLabelIdsOnIssue.has(id)), labelId]),
+                ];
                 await ctx.issues.update(
                   issueId,
                   { labelIds: nextLabelIds } as Parameters<typeof ctx.issues.update>[1],
                   company.id,
                 );
+                // Record provenance only once the write landed — a label we
+                // failed to write is not a label we own, and claiming it would
+                // make this card permanently unreclassifiable.
+                await ctx.state.set(classifierLabeledKey(company.id), { ...classifierLabeled, [issueId]: labelTier });
+                classifierLabeled[issueId] = labelTier;
               }
 
               if (judgement.exclusion) {
@@ -2416,15 +2520,27 @@ export function createPlugin() {
 
               await ctx.activity.log({
                 companyId: company.id,
-                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}`,
+                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}${isForeignLabel ? `, replacing an unattributed ${existingLabelTier} label` : ""}`,
                 entityType: "issue",
                 entityId: issueId,
-                metadata: { tier: labelTier, pickTier, confidence: judgement.confidence, reason: judgement.reason },
+                metadata: {
+                  tier: labelTier,
+                  pickTier,
+                  confidence: judgement.confidence,
+                  reason: judgement.reason,
+                  ...(isForeignLabel ? { replacedLabelTier: existingLabelTier } : {}),
+                },
               });
               classified += 1;
+              if (isForeignLabel) reclassified += 1;
             }
 
-            ctx.logger.info("issue classification pass complete", { companyId: company.id, classified, candidates: candidateRows.length });
+            ctx.logger.info("issue classification pass complete", {
+              companyId: company.id,
+              classified,
+              reclassified,
+              candidates: candidateRows.length,
+            });
           } catch (cause) {
             ctx.logger.error("issue classification failed for a company", {
               companyId: company.id,

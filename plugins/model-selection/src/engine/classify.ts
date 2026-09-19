@@ -1,17 +1,45 @@
 import type { Tier } from "../constants.js";
 
 /**
- * Ported VERBATIM from `tier_dispatcher.py` lines 316-322 (`RUBRIC`). Every
- * word here is an operator-reviewed classification policy, not engine code —
- * changing it is a policy change, not a refactor.
+ * Originally ported VERBATIM from `tier_dispatcher.py` lines 316-322 (`RUBRIC`).
+ * Every word here is an operator-reviewed classification policy, not engine
+ * code — changing it is a policy change, not a refactor.
+ *
+ * TOG-3200 (2026-09-17) amends it for the first time. The three tier
+ * DEFINITIONS are unchanged. What is added is a block of per-class anchors and
+ * a bound on the closing tie-break, both from measurement rather than taste:
+ *
+ *  - Of the 44 classifications this rubric has ever produced, 34 (77.3%) were
+ *    T1 and ZERO were T3. Confidence never fell below 0.82, so
+ *    `applyConfidenceDemotion` never fired, and `exclusion` was never true, so
+ *    `resolveClassifiedTiers` never forced a pick tier. The T1 skew is the
+ *    closing "choose the higher" instruction — not the demotion ladder, and
+ *    not the exclusion rule.
+ *  - A one-by-one audit of 32 T1-labelled cards that actually ran on
+ *    2026-09-17 found 9 false-T1 (28.1% by count, 26.4% of sampled spend) and
+ *    23 (72%) that genuinely need T1. Each anchor below names one audited
+ *    class. That 72% is why this is not a blanket downgrade: the standing
+ *    owner rule is that moving work down that genuinely needs T1 is a failure,
+ *    not a saving.
+ *
+ * Every false-T1 class the audit found was ALREADY described as T2 or T3 by
+ * the unamended text — the labellers simply did not apply it there. So the
+ * anchors restate existing policy at the boundaries that were misread; they do
+ * not move a boundary.
  */
 export const RUBRIC = `You classify a software-company work item into a model tier. Answer ONLY a JSON object:
 {"tier":"T1"|"T2"|"T3","confidence":0.0-1.0,"exclusion":true|false,"reason":"<=20 words"}
 T1 = judgement-heavy, consequential, trust-sensitive, or irreversible: architecture/design decisions; security or adversarial review; incident response; upstream/public actions; owner-facing decisions; factual analysis that feeds consequential decisions; credentials, permissions, access, production deploys, approvals, policy.
 T2 = ordinary engineering and fact-producing knowledge work: implementation with tests, normal code review, CI, runbooks, debugging, data pipelines, bounded multi-app automation with deterministic checks, research or reports that must discover or reconcile facts.
 T3 = mechanically checkable, low-stakes transformation of supplied evidence: formatting, renames, boilerplate, verbatim extraction, status restatement, label/triage hygiene, registering an existing test, deterministic reruns. A report or summary is T3 only when it creates no new factual premise.
+Anchors. These resolve the boundaries that get misread most often. They do not move the definitions above; they say which side of them specific recurring work sits on:
+- Reviewing a named PR, commit or SHA against criteria that are already written down is T2, even when the code under review is security-sensitive. Reviewing is not deciding. Choosing whether to ADOPT a security posture, or giving an approval that is itself the irreversible act, stays T1.
+- Work that PRESENTS options for someone else to choose is T2. Only work that MAKES or COMMITS TO the decision is T1. "Owner-facing decisions" above means the deciding, not the informing.
+- A coordinating or parent card whose own body says the work happens elsewhere ("do not build here", "track only", "the children do the work") is T3: its output is restated status, not engineering.
+- Building or fixing a tool, plugin, CI harness or test rig against a stated failure is T2. Its acceptance test is a deterministic check, which is what makes it ordinary engineering rather than judgement.
+- Entering, transcribing or reconciling roster, score or measurement data from a supplied source is T2, and re-running a measurement whose method is already fixed is T2.
 exclusion=true when the task touches secrets, credentials, permissions, access reviews, provisioning, or owner approvals (these must stay on the assignee's default model regardless of tier).
-Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).`;
+Be conservative where conservatism buys safety, and only there. If you are unsure between T1 and T2, choose T1 only when a concrete T1 trigger is actually present in the item: an irreversible or externally-visible action, credentials/permissions/access, a production deploy, an approval, a security-posture decision, or an incident in progress. Otherwise choose T2. If you are unsure between T2 and T3, choose T2. Do not choose T1 because the subject matter sounds important, because the card is high priority, or because it names a sensitive system that it does not itself change.`;
 
 /** Ported from `tier_dispatcher.py`'s `classify()` line 325 (the user-turn prompt body). */
 export function buildClassificationPrompt(

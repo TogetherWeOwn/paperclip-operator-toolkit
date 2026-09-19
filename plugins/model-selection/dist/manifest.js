@@ -87,6 +87,7 @@ var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
 var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
 var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
+var CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1e3;
 var BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1e3;
 
 // src/config/schema.ts
@@ -442,7 +443,23 @@ var SELECTION_CONFIG_SCHEMA = {
         /** `T2` demotes to `T1` below this confidence (tier_dispatcher.py main():387). */
         t2ConfidenceFloor: { type: "number", minimum: 0, maximum: 1, default: 0.6 },
         /** How many eligible issues one job run classifies. */
-        batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 }
+        batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 },
+        /**
+         * TOG-3200. Re-examine a card whose `tier:*` label this plugin did not
+         * write (provenance in `PLUGIN_STATE_KEYS.classifierLabeledIssues`).
+         *
+         * Defaults TRUE, deliberately: with it false the job is a one-shot
+         * stamp that never revisits a card, and on 2026-09-17 that meant 36
+         * consecutive runs classifying zero issues while 97% of the board's
+         * tier labels were agent self-assessments. A default of false would
+         * make the fix inert until somebody wrote a config key, which is the
+         * same failure in a new place.
+         *
+         * Rollback is this one key: set it false and the job returns to its
+         * pre-3200 skip-any-tier-label behaviour exactly. A `pin:operator`
+         * card is still never touched either way.
+         */
+        reclassifyForeignLabels: { type: "boolean", default: true }
       },
       default: {}
     },

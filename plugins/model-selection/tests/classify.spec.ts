@@ -8,15 +8,63 @@ import {
   RUBRIC,
 } from "../src/engine/classify.js";
 
-describe("RUBRIC (tier_dispatcher.py lines 316-322, ported verbatim)", () => {
-  it("keeps the exclusion clause and the conservative-tiebreak clause word for word", () => {
-    // These two sentences are the two dated operator rules embedded directly
-    // in the rubric text rather than in main()'s control flow. A rewrite that
-    // paraphrases them is a policy change, not a refactor.
+describe("RUBRIC (tier_dispatcher.py lines 316-322, amended by TOG-3200)", () => {
+  it("keeps the exclusion clause word for word", () => {
+    // This sentence is a dated operator rule embedded directly in the rubric
+    // text rather than in main()'s control flow. A rewrite that paraphrases it
+    // is a policy change, not a refactor. TOG-3200 left it untouched: the
+    // measured T1 skew came from the tie-break, not from exclusion — across
+    // all 44 classifications this rubric ever produced, `exclusion` was never
+    // once true.
     expect(RUBRIC).toContain(
       "exclusion=true when the task touches secrets, credentials, permissions, access reviews, provisioning, or owner approvals",
     );
-    expect(RUBRIC).toContain("Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).");
+  });
+
+  it("keeps the three tier definitions unamended", () => {
+    // TOG-3200 adds anchors and bounds the tie-break. It does not move a tier
+    // boundary — 72% of the audited T1 cards genuinely needed T1, so the
+    // definitions themselves were not the defect.
+    expect(RUBRIC).toContain(
+      "T1 = judgement-heavy, consequential, trust-sensitive, or irreversible: architecture/design decisions",
+    );
+    expect(RUBRIC).toContain("T2 = ordinary engineering and fact-producing knowledge work");
+    expect(RUBRIC).toContain("T3 = mechanically checkable, low-stakes transformation of supplied evidence");
+  });
+
+  it("bounds the conservative tie-break to cases with a concrete T1 trigger", () => {
+    // The old text was an unconditional "if unsure between tiers choose the
+    // higher (T1 > T2 > T3)". It produced 34 T1 and 0 T3 out of 44 verdicts
+    // while confidence never fell below 0.82 — so the demotion ladder never
+    // fired and this sentence was the whole skew. Restoring the unconditional
+    // form would reinstate it.
+    expect(RUBRIC).not.toContain("Be conservative: if unsure between tiers choose the higher (T1 > T2 > T3).");
+    expect(RUBRIC).toContain("Be conservative where conservatism buys safety, and only there.");
+    expect(RUBRIC).toContain(
+      "choose T1 only when a concrete T1 trigger is actually present in the item",
+    );
+    expect(RUBRIC).toContain("If you are unsure between T2 and T3, choose T2.");
+    expect(RUBRIC).toContain("Do not choose T1 because the subject matter sounds important");
+  });
+
+  it("anchors the four false-T1 classes the 2026-09-17 audit measured", () => {
+    // Each of these is one audited class from the 9 false-T1 cards found in a
+    // 32-card sample (28.1% by count, 26.4% of sampled spend). Each was
+    // ALREADY T2/T3 under the unamended definitions; the anchors say so
+    // explicitly at the boundary that was misread.
+    expect(RUBRIC).toContain("Reviewing a named PR, commit or SHA against criteria that are already written down is T2");
+    expect(RUBRIC).toContain("Work that PRESENTS options for someone else to choose is T2");
+    expect(RUBRIC).toContain("A coordinating or parent card whose own body says the work happens elsewhere");
+    expect(RUBRIC).toContain("Building or fixing a tool, plugin, CI harness or test rig against a stated failure is T2");
+  });
+
+  it("keeps each anchor's T1 carve-out so the downgrade cannot over-reach", () => {
+    // The owner's boundary: moving work down that genuinely needs T1 is a
+    // failure, not a saving. Every anchor that lowers a class names what stays
+    // at T1 in the same breath. Dropping a carve-out turns an anchor into a
+    // blanket downgrade.
+    expect(RUBRIC).toContain("Choosing whether to ADOPT a security posture");
+    expect(RUBRIC).toContain("Only work that MAKES or COMMITS TO the decision is T1");
   });
 
   it("places fact-producing reports above mechanical supplied-evidence transformations", () => {
