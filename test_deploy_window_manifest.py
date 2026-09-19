@@ -626,14 +626,23 @@ class TestDeployLineAnchor(GateFixture):
             "control failed: gc did not prune, so arm A proved nothing",
         )
 
-    def test_the_live_anchor_table_names_the_tog_1010_specification(self) -> None:
-        """Guards the REAL table. The tree is named relative to STAGING and
-        the commit is the tip of the fork line TOG-1010 must re-test."""
+    def test_the_tog_516_governor_line_was_retired_not_forgotten(self) -> None:
+        """Guards the REAL table against silent re-addition.
+
+        TOG-2278 (2026-09-19): the checkout backing
+        `refs/deploy-line/tog-516-governor` (tree
+        `TOG-516-paperclip-v2026.817.0-governor`, commit
+        `f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a`) is gone from this host and
+        unrecoverable from any repo or backup path this container can reach.
+        Re-adding it from an old card description would only put the gate
+        back into a DRIFT no fix can clear -- there is no tree to check out.
+        TOG-1010 (done) and TOG-1043 (done) show nothing outstanding depends
+        on the tree itself; see deploy_window_manifest.py's ANCHORS comment
+        for the full accounting, including where TOG-894's not-yet-extracted
+        fix survives instead."""
         live = load_gate()
-        self.assertIn("refs/deploy-line/tog-516-governor", live.ANCHORS)
-        tree, commit, _purpose = live.ANCHORS["refs/deploy-line/tog-516-governor"]
-        self.assertEqual(tree, "TOG-516-paperclip-v2026.817.0-governor")
-        self.assertEqual(commit, "f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a")
+        self.assertNotIn("refs/deploy-line/tog-516-governor", live.ANCHORS)
+        self.assertEqual(live.ANCHORS, {})
 
 
 if __name__ == "__main__":

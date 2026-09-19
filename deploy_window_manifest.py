@@ -268,14 +268,34 @@ def withdrawal_invariant() -> str | None:
 # deliberately, by an operator or by the card that establishes the line; this
 # gate only ever READS. An absent ref is a red with a one-command repair.
 #
+# TOG-2278 (2026-09-19): the tog-516-governor line above was RETIRED, not
+# just emptied by accident. The checkout `TOG-516-paperclip-v2026.817.0-
+# governor` is gone from this host -- no ref, no working tree, no object --
+# and a search of every git repo and backup path reachable from this
+# container (deployment-staging/, deployment-backups/, every worktree, every
+# other agent workspace) found neither the tree nor commit
+# f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a anywhere. ANCHOR_TREE_UNREADABLE
+# has no repair here: there is no ref to create and no tree to check out, so
+# leaving the row in place could only ever report DRIFT, forever, which is
+# how a real future drift gets ignored.
+#
+# This is not the loss the block above warns about, though. TOG-1010 -- the
+# consumer this line was anchored FOR -- is `done`: it used the specification
+# to re-test all 9 concerns against v2026.831.1 (9/9 still broken, three-arm
+# mutation-tested) and made the sequencing call (Tier 1 = TOG-702, then
+# TOG-894). The 10-commit -> defect table itself survives verbatim in
+# TOG-1010's own description, independent of this tree. TOG-702's actual
+# diff was independently extracted and durably packaged before the tree
+# vanished (TOG-1043, done, reviewed owner-approval packet with full diff),
+# so nothing outstanding depends on the tree for it. TOG-894's diff has no
+# equivalent extraction yet, but an earlier version of that same fix (with
+# TOG-888/901/905) survives in
+# deployment-staging/TOG-921-fourfix-backup/tog921-four-fixes.bundle, also
+# attached to TOG-2278 as a document; upstream work is owner-paused
+# (2026-09-14), so nothing is waiting on it live.
+#
 # line name -> (tree, commit the ref must resolve to, what the line is for)
-ANCHORS: dict[str, tuple[str, str, str]] = {
-    "refs/deploy-line/tog-516-governor": (
-        "TOG-516-paperclip-v2026.817.0-governor",
-        "f471ef3c0eae0034b4cf394d6b4ffe0a46f9e07a",
-        "TOG-1010 re-test specification: the 10-commit fork line over v2026.817.0",
-    ),
-}
+ANCHORS: dict[str, tuple[str, str, str]] = {}
 
 
 def ref_target(tree: Path, ref: str) -> str | None:
