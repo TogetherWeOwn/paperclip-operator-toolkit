@@ -198,15 +198,32 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    it("skips a card with no tier label at all", async () => {
+    // TOG-3024 (TOG-3012 root cause #3, 2026-09-16 16:40Z incident). Positive
+    // control: before this fix, `labelOnlyPass` gated on `tierFromLabels(...)`
+    // alone and `continue`d when it was null, so a card with NO tier:* label
+    // was never even handed to `advise()` — not "considered and left alone",
+    // simply invisible to the pass. Give the card an agent with no resolvable
+    // floor model so the fallback must fall all the way to
+    // `config.selection.defaultTier` (T1 here) to produce a pin; if the old
+    // unconditional `continue` were restored, this assertion would fail back
+    // to `null`.
+    it("pins a card with no tier label via the config-default fallback (TOG-3024)", async () => {
       const card = issue("i1", { labels: [], labelIds: [] });
-      const harness = await boot(baseConfig(), [card]);
+      const harness = await boot(
+        baseConfig({ selection: { enabled: true, mode: "enforce", holdOnUntrustedProfile: true, defaultTier: "T1" } }),
+        [card],
+        [agentRow({ adapterConfig: {} })],
+      );
       harness.ctx.db.query = async () => [idleRow("i1")] as never;
 
       await harness.runJob("labelOnlyPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      });
+      expect(harness.activity).toHaveLength(1);
+      expect(harness.activity[0]?.metadata?.fromLabel).toBe(false);
     });
 
     it("skips when the pick equals the agent's own floor model", async () => {
@@ -393,6 +410,53 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       expect(harness.activity[0]?.message).toContain("re-pinned");
     });
 
+    // TOG-3024. Positive control: before this fix `repinPass` gated on
+    // `tierFromLabels(...)` alone, so an unlabelled card was invisible to it
+    // even though it carried a live pin — a pin to a now-hard-stopped lane
+    // would sit there forever with no label to trigger a repin. Same fixture
+    // as the labelled hard-stop test above, minus the tier label.
+    it("re-pins an unlabelled but pinned card off a lane hard stop (TOG-3024)", async () => {
+      const modelsWithLane = withOpusAlt().map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
+      const card = issue("i1", {
+        labels: [],
+        labelIds: [],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }), [card]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        {
+          "lane-opus": {
+            laneId: "lane-opus",
+            fetchedAt: "2026-09-13T00:00:00.000Z",
+            observation: null,
+            error: null,
+            verdict: {
+              laneId: "lane-opus",
+              observedAt: "2026-09-13T00:00:00.000Z",
+              state: "exhausted",
+              serviceable: false,
+              score: null,
+              accounts: [],
+              knownAccountCount: 1,
+              knownWeight: 1,
+              serviceableAccountCount: 0,
+              urgentResetAt: null,
+              reason: "exhausted",
+            },
+          },
+        },
+      );
+
+      await harness.runJob("repinPass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(1);
+      expect(harness.activity[0]?.message).toContain("re-pinned");
+    });
+
     it("never repins a card that carries pin:operator (survives a routine repin)", async () => {
       const modelsWithLane = MODELS.map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
       const card = issue("i1", {
@@ -542,6 +606,14 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
     });
 
+    // TOG-3024 scope decision: `balancePass`'s unpinned+labelled branch force-
+    // pins to T1 unconditionally (see the rule above this describe block).
+    // Extending that same force-T1 promotion to a bare unpinned+unlabelled
+    // card would be a policy change well beyond the incident this fix targets
+    // — it would push every previously-invisible idle card onto the most
+    // expensive tier. So this specific sub-case (no pin AND no label) keeps
+    // the pre-fix skip; `labelOnlyPass` (above) is what makes a truly
+    // invisible unlabelled card visible again.
     it("skips an unpinned card with no tier label", async () => {
       const card = issue("i1", { labels: [], labelIds: [], assigneeAdapterOverrides: null });
       const harness = await boot(baseConfig(), [card]);
@@ -614,6 +686,29 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       });
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
+    });
+
+    // TOG-3024. Positive control for the OTHER balancePass sub-case: a card
+    // that already carries a pin but no label. Before this fix the pass
+    // gated on `tierFromLabels(...)` alone, so this card was invisible to
+    // cost-down rebalancing even though it has a real pin to evaluate.
+    it("re-pins a pinned-but-unlabelled card onto a cheaper candidate (TOG-3024)", async () => {
+      const cheapModels = withOpusAlt().map((m) =>
+        m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
+      );
+      const card = issue("i1", {
+        labels: [],
+        labelIds: [],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: cheapModels }), [card]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity[0]?.metadata?.cheaper).toBe(true);
     });
 
     // balance_pass()'s `cheaper = blended(nm) <= 0.8*blended(pm)` cost-down rule.

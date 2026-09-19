@@ -2869,6 +2869,54 @@ async function pollLanes(input) {
   );
 }
 
+// src/lane-capacity/run-failure.ts
+var LANE_EXHAUSTION_PHRASES = [
+  /all credentials for model\s+\S+\s+are cooling down/i,
+  /all credentials .{0,40}cooling down/i,
+  /usage[_ ]limit[_ ]reached/i,
+  /all upstream accounts .{0,40}(exhausted|unavailable|cooling)/i,
+  /weekly (quota|limit) (exhausted|reached)/i
+];
+var MODEL_IN_COOLDOWN_RE = /all credentials for model\s+([^\s,)]+)\s+are cooling down/i;
+function laneExhaustionFromRunFailure(input) {
+  const haystack = [input.error ?? "", input.errorCode ?? ""].join(" ");
+  if (!haystack.trim()) return null;
+  const matched = LANE_EXHAUSTION_PHRASES.find((phrase) => phrase.test(haystack));
+  if (!matched) return null;
+  const embedded = MODEL_IN_COOLDOWN_RE.exec(haystack)?.[1] ?? null;
+  const fromText = resolveConfiguredModelId(embedded, input.models);
+  const modelId = fromText ?? resolveConfiguredModelId(input.fallbackModelId ?? null, input.models);
+  if (!modelId) return null;
+  const laneId = input.models.find((model) => model.id === modelId)?.laneId ?? null;
+  if (!laneId) return null;
+  return {
+    modelId,
+    laneId,
+    matchedPhrase: matched.source,
+    modelFromErrorText: fromText !== null
+  };
+}
+function mergeLaneOutage(existing, addition, nowIso) {
+  const live = existing && existing.until > nowIso ? existing : null;
+  const lanes = [.../* @__PURE__ */ new Set([...live?.lanes ?? [], ...addition.lanes])];
+  const models = [.../* @__PURE__ */ new Set([...live?.models ?? [], ...addition.models])];
+  const until = live && live.until > addition.until ? live.until : addition.until;
+  const reason = live?.reason ? `${live.reason}; ${addition.reason ?? ""}`.replace(/; $/, "") : addition.reason;
+  return { lanes, models, until, ...reason ? { reason } : {} };
+}
+var AUTO_QUARANTINE_SECONDS = 15 * 60;
+function autoQuarantineFor(verdict, nowMs, ttlSeconds = AUTO_QUARANTINE_SECONDS) {
+  return {
+    lanes: [verdict.laneId],
+    // The lane is what ran out, not the individual model — every model on the
+    // lane shares the same exhausted credentials. Listing only the lane keeps
+    // the record honest and lets a lane with several models clear in one go.
+    models: [],
+    until: new Date(nowMs + ttlSeconds * 1e3).toISOString(),
+    reason: `auto: run rejected on ${verdict.laneId} (${verdict.modelId}) with a lane-capacity error`
+  };
+}
+
 // src/shadow-emit.ts
 var SHADOW_SCHEMA_VERSION = "tog2138-decision-v1";
 function laneStateLabel(verdict) {
@@ -5337,6 +5385,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const r = asRecord(rows[0]);
         return typeof r.n === "number" ? r.n : 0;
       };
+      const tierWithFallback = (descriptor, models, defaultTier) => tierFromLabels(descriptor.labelNames) ?? tierOfModel(descriptor.pinnedModelId, models) ?? tierOfModel(descriptor.agentFloorModelId, models) ?? defaultTier;
       ctx.jobs.register(JOB_KEYS.labelOnlyPass, async () => {
         const companies = listKnownCompanies();
         for (const company of companies) {
@@ -5378,8 +5427,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
-              const tier2 = tierFromLabels(described.descriptor.labelNames);
-              if (!tier2) continue;
+              const labelTier = tierFromLabels(described.descriptor.labelNames);
+              const tier2 = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
               const result = await advise(company.id, { issueId }, false, void 0, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                 ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier: tier2 });
@@ -5419,10 +5468,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               );
               await ctx.activity.log({
                 companyId: company.id,
-                message: result.decision.modelId === floorModelId ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier2}): floor lane unserviceable` : `Model Selection label-only pinned ${result.decision.modelId} (${tier2}) from the existing tier label`,
+                message: result.decision.modelId === floorModelId ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier2}): floor lane unserviceable` : `Model Selection label-only pinned ${result.decision.modelId} (${tier2}) from ${labelTier ? "the existing tier label" : "the tier floor/default (no tier label present)"}`,
                 entityType: "issue",
                 entityId: issueId,
-                metadata: { modelId: result.decision.modelId, tier: tier2, trace: result.decision.trace }
+                metadata: { modelId: result.decision.modelId, tier: tier2, fromLabel: labelTier !== null, trace: result.decision.trace }
               });
               pinned += 1;
             }
@@ -5435,12 +5484,13 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
-      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
-        const companies = listKnownCompanies();
-        for (const company of companies) {
+      const runRepinPassForCompany = async (companyId) => {
+        const company = { id: companyId };
+        let repinnedTotal = 0;
+        {
           try {
             const config = await companyConfig(company.id);
-            if (!config.classification.enabled) continue;
+            if (!config.classification.enabled) return 0;
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
@@ -5476,8 +5526,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
-              const tier2 = tierFromLabels(described.descriptor.labelNames);
-              if (!tier2) continue;
+              const tier2 = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
               const usage = await described.contextUsage();
               const contextEstimate = estimateIssueContext({
@@ -5535,6 +5584,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               });
               repinned += 1;
             }
+            repinnedTotal = repinned;
             ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("repin pass failed for a company", {
@@ -5543,6 +5593,73 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
           }
         }
+        return repinnedTotal;
+      };
+      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
+        for (const company of listKnownCompanies()) {
+          await runRepinPassForCompany(company.id);
+        }
+      });
+      ctx.events.on("agent.run.failed", async (event) => {
+        const payload = asRecord(event.payload);
+        const companyId = event.companyId;
+        const issueId = typeof payload.issueId === "string" ? payload.issueId : null;
+        let config;
+        try {
+          config = await companyConfig(companyId);
+        } catch {
+          return;
+        }
+        if (config.models.length === 0) return;
+        const fallbackModelId = async () => {
+          if (!issueId) return null;
+          try {
+            const described = await describeIssue(companyId, issueId, {});
+            return described?.descriptor.pinnedModelId ?? null;
+          } catch {
+            return null;
+          }
+        };
+        const quickVerdict = laneExhaustionFromRunFailure({
+          error: typeof payload.error === "string" ? payload.error : null,
+          errorCode: typeof payload.errorCode === "string" ? payload.errorCode : null,
+          models: config.models
+        });
+        const verdict = quickVerdict ?? laneExhaustionFromRunFailure({
+          error: typeof payload.error === "string" ? payload.error : null,
+          errorCode: typeof payload.errorCode === "string" ? payload.errorCode : null,
+          models: config.models,
+          fallbackModelId: await fallbackModelId()
+        });
+        if (!verdict) return;
+        const nowMs = Date.parse(event.occurredAt) || Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        const existing = await readLaneOutage(companyId);
+        if (isLaneOutageActive(existing, nowIso) && existing.lanes.includes(verdict.laneId)) {
+          ctx.logger.info("lane already quarantined, skipping repeat sweep", {
+            companyId,
+            laneId: verdict.laneId,
+            until: existing.until
+          });
+          return;
+        }
+        const addition = autoQuarantineFor(verdict, nowMs);
+        await ctx.state.set(laneOutageKey(companyId), mergeLaneOutage(existing, addition, nowIso));
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection quarantined lane ${verdict.laneId} until ${addition.until}: a run was rejected on ${verdict.modelId} with a lane-capacity error. Re-pinning open cards off this lane now.`,
+          ...issueId ? { entityType: "issue", entityId: issueId } : {},
+          metadata: {
+            laneId: verdict.laneId,
+            modelId: verdict.modelId,
+            until: addition.until,
+            matchedPhrase: verdict.matchedPhrase,
+            modelFromErrorText: verdict.modelFromErrorText,
+            runId: typeof payload.runId === "string" ? payload.runId : null
+          }
+        });
+        const repinned = await runRepinPassForCompany(companyId);
+        ctx.logger.info("lane quarantine repin complete", { companyId, laneId: verdict.laneId, repinned });
       });
       ctx.jobs.register(JOB_KEYS.balancePass, async () => {
         const companies = listKnownCompanies();
@@ -5611,10 +5728,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               if (!described.isIdle) continue;
               if (described.hasOperatorPin) continue;
               const status = described.status;
-              const tier2 = tierFromLabels(described.descriptor.labelNames);
-              if (!tier2) continue;
+              const labelTier = tierFromLabels(described.descriptor.labelNames);
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
               const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : void 0;
+              if (!labelTier && !pinnedModelId) continue;
+              const tier2 = labelTier ?? tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
               if (pinnedModelId && pinnedModel) {
                 const currentUtilization = pinnedModel.laneId ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId) : null;
                 const result = await advise(company.id, { issueId }, false, void 0, true, contextUsageCache);

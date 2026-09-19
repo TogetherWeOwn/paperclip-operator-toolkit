@@ -46,7 +46,7 @@ import { estimateIssueContext, modelOverrideForContext } from "./engine/context.
 import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
-import { resolveTier, tierFromLabels } from "./engine/tier.js";
+import { resolveTier, tierFromLabels, tierOfModel } from "./engine/tier.js";
 import {
   accumulateRunStats,
   applyDerivedTiers,
@@ -76,6 +76,7 @@ import {
   activeZaiPaceOverride,
   blendedListPrice,
   hardStopExcluded,
+  isLaneOutageActive,
   laneAvoidExcluded,
   laneEffectiveUtilization,
   laneHasRoom,
@@ -89,6 +90,7 @@ import {
   type ZaiPaceOverride,
 } from "./engine/pacing.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
+import { autoQuarantineFor, laneExhaustionFromRunFailure, mergeLaneOutage } from "./lane-capacity/run-failure.js";
 import { buildHostRecord, buildShadowRecord } from "./shadow-emit.js";
 import { LAST_RUN_CONTEXT_USAGE_SQL, REFRESH_SCORE_CLOSING_RUNS_SQL, REFRESH_SCORE_RUNS_SQL } from "./sql.js";
 import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
@@ -2699,6 +2701,31 @@ export function createPlugin() {
         return typeof r.n === "number" ? r.n : 0;
       };
 
+      /**
+       * TOG-3024 (TOG-3012 root cause #3, 2026-09-16 16:40Z incident).
+       * `labelOnlyPass`/`repinPass`/`balancePass` used to gate on
+       * `tierFromLabels(...)` alone and `continue` when it returned null — so
+       * a card with no tier:* label at all (label inherited-and-cleared,
+       * classification disabled, or the classifier hasn't reached it yet) was
+       * not routed conservatively, it was never considered by any of the
+       * three passes. TOG-2983/2987/2989 sat exactly like this during the
+       * incident until an operator hand-labelled them.
+       *
+       * `resolveTier()` (engine/tier.ts) already establishes the fallback a
+       * missing label should take — pin's own tier, then the assignee's
+       * floor, then `selection.defaultTier` — per ADR-0008's "a missing
+       * label is not a missing decision." This mirrors that same precedence
+       * (skipping the pin-serviceability and capability-exclusion steps,
+       * which these three passes don't otherwise evaluate) so a label-less
+       * candidate resolves to the same answer `advise()` would give it,
+       * instead of being invisible to the sweep that is supposed to catch it.
+       */
+      const tierWithFallback = (descriptor: IssueDescriptor, models: ResolvedConfig["models"], defaultTier: Tier): Tier =>
+        tierFromLabels(descriptor.labelNames) ??
+        tierOfModel(descriptor.pinnedModelId, models) ??
+        tierOfModel(descriptor.agentFloorModelId, models) ??
+        defaultTier;
+
       // --- scheduled label-only pass (TOG-2481, tier_dispatcher.py
       // label_only_pass()) --------------------------------------------------
       // 2026-09-07 01:0xZ owner rule: a card that already carries a tier:*
@@ -2767,8 +2794,8 @@ export function createPlugin() {
               const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
-              const tier = tierFromLabels(described.descriptor.labelNames);
-              if (!tier) continue;
+              const labelTier = tierFromLabels(described.descriptor.labelNames);
+              const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
               const result = await advise(company.id, { issueId }, false, undefined, false, contextUsageCache);
               if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
@@ -2822,10 +2849,12 @@ export function createPlugin() {
                 message:
                   result.decision.modelId === floorModelId
                     ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier}): floor lane unserviceable`
-                    : `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from the existing tier label`,
+                    : `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from ${
+                        labelTier ? "the existing tier label" : "the tier floor/default (no tier label present)"
+                      }`,
                 entityType: "issue",
                 entityId: issueId,
-                metadata: { modelId: result.decision.modelId, tier, trace: result.decision.trace },
+                metadata: { modelId: result.decision.modelId, tier, fromLabel: labelTier !== null, trace: result.decision.trace },
               });
               pinned += 1;
             }
@@ -2845,12 +2874,22 @@ export function createPlugin() {
       // been measurably demoted for their tier, get re-pinned within the same
       // tier. Capped at REPIN_PASS_WRITE_LIMIT writes per run, same as the
       // Python source's `limit=6` default.
-      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
-        const companies = listKnownCompanies();
-        for (const company of companies) {
+      /**
+       * One company's repin sweep.
+       *
+       * Extracted from the job callback (same pattern and same reason as
+       * `runAaIndexRefresh`) so TOG-3012's `agent.run.failed` handler can run
+       * the identical sweep for the affected company the moment a lane
+       * rejects a run, instead of waiting out the remainder of the
+       * ten-minute cron. There is exactly one repin rule and it lives here.
+       */
+      const runRepinPassForCompany = async (companyId: string): Promise<number> => {
+        const company = { id: companyId };
+        let repinnedTotal = 0;
+        {
           try {
             const config = await companyConfig(company.id);
-            if (!config.classification.enabled) continue;
+            if (!config.classification.enabled) return 0;
 
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
@@ -2894,8 +2933,7 @@ export function createPlugin() {
               const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
               if (!described) continue;
               if (described.hasOperatorPin) continue;
-              const tier = tierFromLabels(described.descriptor.labelNames);
-              if (!tier) continue;
+              const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
               // First point in the pass that actually needs the measurement —
@@ -2964,6 +3002,7 @@ export function createPlugin() {
               void identifier;
             }
 
+            repinnedTotal = repinned;
             ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("repin pass failed for a company", {
@@ -2972,6 +3011,116 @@ export function createPlugin() {
             });
           }
         }
+        return repinnedTotal;
+      };
+
+      ctx.jobs.register(JOB_KEYS.repinPass, async () => {
+        for (const company of listKnownCompanies()) {
+          await runRepinPassForCompany(company.id);
+        }
+      });
+
+      // --- TOG-3012: immediate lane quarantine from a rejected run ----------
+      //
+      // The owner directive after the 2026-09-16 Codex exhaustion: "paperclip
+      // should be able to handle this without your intervention". The router
+      // already picked the right replacement model for all 14 affected cards
+      // — it just did not know the lane was dead for ~5m50s (the `pollLanes`
+      // cadence) and did not act for ~10m after that (the `repinPass`
+      // cadence). 21 runs launched into the gap.
+      //
+      // `agent.run.failed` carries `heartbeat_runs.error` verbatim
+      // (`heartbeat.ts` `publishRunLifecyclePluginEvent`), which means the
+      // lane's own rejection reaches this plugin within milliseconds. A
+      // rejection at the point of use is better evidence than a telemetry
+      // snapshot: there is no freshness question about it.
+      //
+      // Deliberate scope limit, stated so nobody reads more into this than it
+      // does: the plugin event bus is fire-and-forget
+      // (`activity-log.ts:47`, `void bus.emit(...)`), so NO plugin handler can
+      // gate a dispatch. This shrinks the window in which a run can start on a
+      // dead lane from ~15 minutes to the round trip of this handler; it
+      // cannot close it to zero. Closing it to zero requires dispatch itself
+      // to consult the ledger, which is core, not plugin.
+      ctx.events.on("agent.run.failed", async (event) => {
+        const payload = asRecord(event.payload);
+        const companyId = event.companyId;
+        const issueId = typeof payload.issueId === "string" ? payload.issueId : null;
+
+        let config: Awaited<ReturnType<typeof companyConfig>>;
+        try {
+          config = await companyConfig(companyId);
+        } catch {
+          return;
+        }
+        if (config.models.length === 0) return;
+
+        // Only consulted for rejections that name no model (an `errorCode`-only
+        // `usage_limit_reached`). Read lazily so an ordinary run failure —
+        // overwhelmingly the common case — costs zero extra queries.
+        const fallbackModelId = async (): Promise<string | null> => {
+          if (!issueId) return null;
+          try {
+            const described = await describeIssue(companyId, issueId, {});
+            return described?.descriptor.pinnedModelId ?? null;
+          } catch {
+            return null;
+          }
+        };
+
+        const quickVerdict = laneExhaustionFromRunFailure({
+          error: typeof payload.error === "string" ? payload.error : null,
+          errorCode: typeof payload.errorCode === "string" ? payload.errorCode : null,
+          models: config.models,
+        });
+        const verdict = quickVerdict
+          ?? laneExhaustionFromRunFailure({
+            error: typeof payload.error === "string" ? payload.error : null,
+            errorCode: typeof payload.errorCode === "string" ? payload.errorCode : null,
+            models: config.models,
+            fallbackModelId: await fallbackModelId(),
+          });
+        if (!verdict) return;
+
+        const nowMs = Date.parse(event.occurredAt) || Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        const existing = await readLaneOutage(companyId);
+
+        // Storm control. An exhausted lane rejects every run on it, so this
+        // handler fires once per failure — 21 times in the 2026-09-16
+        // incident. Re-running the repin sweep for each would be pure waste:
+        // the first one already moved every card off the lane. If the lane is
+        // ALREADY inside an active outage window, record nothing and sweep
+        // nothing; the quarantine is doing its job.
+        if (isLaneOutageActive(existing, nowIso) && existing!.lanes.includes(verdict.laneId)) {
+          ctx.logger.info("lane already quarantined, skipping repeat sweep", {
+            companyId,
+            laneId: verdict.laneId,
+            until: existing!.until,
+          });
+          return;
+        }
+
+        const addition = autoQuarantineFor(verdict, nowMs);
+        await ctx.state.set(laneOutageKey(companyId), mergeLaneOutage(existing, addition, nowIso));
+        await ctx.activity.log({
+          companyId,
+          message:
+            `Model Selection quarantined lane ${verdict.laneId} until ${addition.until}: a run was rejected `
+            + `on ${verdict.modelId} with a lane-capacity error. Re-pinning open cards off this lane now.`,
+          ...(issueId ? { entityType: "issue" as const, entityId: issueId } : {}),
+          metadata: {
+            laneId: verdict.laneId,
+            modelId: verdict.modelId,
+            until: addition.until,
+            matchedPhrase: verdict.matchedPhrase,
+            modelFromErrorText: verdict.modelFromErrorText,
+            runId: typeof payload.runId === "string" ? payload.runId : null,
+          },
+        });
+
+        const repinned = await runRepinPassForCompany(companyId);
+        ctx.logger.info("lane quarantine repin complete", { companyId, laneId: verdict.laneId, repinned });
       });
 
       // --- scheduled balance pass (TOG-2481, tier_dispatcher.py
@@ -3059,11 +3208,20 @@ export function createPlugin() {
               if (!described.isIdle) continue;
               if (described.hasOperatorPin) continue;
               const status = described.status;
-              const tier = tierFromLabels(described.descriptor.labelNames);
-              if (!tier) continue;
-
+              const labelTier = tierFromLabels(described.descriptor.labelNames);
               const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
               const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : undefined;
+              // TOG-3024: the unpinned branch below force-pins T1 for a
+              // *recorded* former-exclusion judgement (an explicit tier:*
+              // label with no pin yet) — that is a floor-lift, not a
+              // rebalance, and must stay gated on an actual label rather than
+              // defaulting every bare unpinned+unlabelled idle card straight
+              // to T1. Only the pinned branch gets the tierWithFallback
+              // treatment: a card that already has a pin just needs SOME
+              // tier bucket to run its capability/cost checks against, same
+              // as labelOnlyPass/repinPass.
+              if (!labelTier && !pinnedModelId) continue;
+              const tier = labelTier ?? tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
               if (pinnedModelId && pinnedModel) {
                 const currentUtilization = pinnedModel.laneId
