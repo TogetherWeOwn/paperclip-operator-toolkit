@@ -4,8 +4,11 @@ import type { Issue } from "@paperclipai/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TOOL_NAMES } from "../src/constants.js";
+import { LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TIERS, TOOL_NAMES } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
+import { BENCHMARK_SPEC_VERSION, type BenchmarkRow } from "../src/engine/benchmark-prior.js";
+import { buildModelScore } from "../src/engine/scores.js";
+import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
@@ -40,6 +43,36 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
     models: MODELS,
     tierLabelIds: { T1: TIER_LABEL_ID },
     ...overrides,
+  };
+}
+
+/**
+ * A benchmark basket that clears the coverage gate (4 populated, 0.85 weight),
+ * so the score it backs carries a `blended` basis. A promotion needs one: the
+ * overlay refuses to promote on an `index-only` basis, and a fixture with no
+ * basket would make this test pass for the wrong reason — or, once that refusal
+ * landed, fail while the wiring it exists to cover was perfectly fine.
+ */
+const STRONG_BASKET = {
+  terminalBenchV4Pass1: 0.5,
+  mercorApex11Pass1: 0.6,
+  automationBenchAaGuardrailAdjusted: 0.6,
+  aaOmniscienceSignedIndex: 30,
+};
+
+/**
+ * A stored score that promotes the configured-T2 `claude-sonnet-5` to T1.
+ * `tiers.T1.capable` is forced true because the capability gate in `select.ts`
+ * is a separate concern from the tier bucket — a promoted model that still
+ * reads `capable: false` would be rejected before the tier overlay could show.
+ */
+function promotedSonnet(basket: BenchmarkRow | null = STRONG_BASKET): ModelScore {
+  const score = buildModelScore("claude-sonnet-5", 38, {}, TIERS, basket);
+  return {
+    ...score,
+    tiers: { ...score.tiers, T1: { ...score.tiers.T1, capable: true } },
+    derivedTier: "T1",
+    tierSpecVersion: BENCHMARK_SPEC_VERSION,
   };
 }
 
@@ -86,6 +119,48 @@ describe("worker", () => {
     // database.namespace.migrate capability that unit tests could not see.
     const result = pluginManifestV1Schema.safeParse(manifest);
     expect(result.success).toBe(true);
+  });
+
+  // TOG-2988: the derived tier has to reach `selectModel`, not just sit on the
+  // stored score. Unit-testing `applyDerivedTiers` directly leaves the wiring
+  // uncovered — the same gap TOG-2373 found for the shadow emitter — so these
+  // two drive the real advise path and read the model actually chosen.
+  it("selects on the derived tier, not the roster's configured tier", async () => {
+    // claude-sonnet-5 is configured T2. Promoted to T1 by its score, it becomes
+    // the cheapest T1 candidate for a tier:T1 card and must beat opus.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
+      { modelScores: [promotedSonnet()] },
+    );
+    const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-sonnet-5");
+  });
+
+  // The same promotion, minus the basket. The selection path must decline it:
+  // an aa.ai composite on its own is not evidence a model can carry T1 work.
+  it("does not select a model promoted on an index-only basis", async () => {
+    // Identical to the promoted fixture in every other respect — same forced
+    // `capable: true`, same T1 verdict — so the only thing that can decline it
+    // is the basis. Without that, the capability gate would refuse it first and
+    // the assertion would prove nothing.
+    const indexOnly = promotedSonnet(null);
+    expect(indexOnly.priorBasis).toBe("index-only");
+    expect(indexOnly.tiers.T1.capable).toBe(true);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
+      { modelScores: [indexOnly] },
+    );
+    const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+  });
+
+  it("keeps the configured tier when the stored tier came from another spec version", async () => {
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
+      { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "tog2636-v0" }] },
+    );
+    const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
   });
 
   it("advises a model without writing anything", async () => {

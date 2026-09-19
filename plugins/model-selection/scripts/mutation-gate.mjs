@@ -200,6 +200,147 @@ const mutants = [
     from: "          await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);",
     to: "          await emitDecisionPair(companyId, [buildShadowRecord(recordInput)]);",
   },
+  // --- TOG-2988 named mutants: five-benchmark prior and derived tiers ------
+  // No mutant for MIN_POPULATED_BENCHMARKS: under the v1 weights no two
+  // benchmarks reach 0.75, so the count gate is unreachable on its own and any
+  // mutant of it would be unkillable by construction. The assumption is pinned
+  // by a test instead ("cannot reach the weight gate with two benchmarks").
+  {
+    // Trap 1, the headline failure mode: `priorP(null)` is 0.8, which is
+    // exactly SCORE_THRESHOLDS.T2. Reusing that default for tiering promotes
+    // every unscored model to T2 on no evidence. Tiering must fail closed.
+    name: "unscored-model-defaults-to-0.8-prior",
+    file: "src/engine/benchmark-prior.ts",
+    from: "  if (typeof aaIndex !== \"number\" || !Number.isFinite(aaIndex)) return null;",
+    to: "  if (typeof aaIndex !== \"number\" || !Number.isFinite(aaIndex)) return 0.8;",
+  },
+  {
+    // The weight half of the coverage gate. Three LIGHT benchmarks (0.60
+    // weight) must not stand in for the basket.
+    name: "drop-available-weight-gate",
+    file: "src/engine/benchmark-prior.ts",
+    from: "  if (availableWeight < MIN_AVAILABLE_WEIGHT) return null;\n",
+    to: "",
+  },
+  {
+    // Trap 2: an absent benchmark is not a zero. Coercing it moves the prior
+    // and lets a publisher's coverage gap read as a measured failure.
+    name: "treat-absent-benchmark-as-zero",
+    file: "src/engine/benchmark-prior.ts",
+    from:
+      "    const raw = row[key];\n" +
+      "    if (typeof raw !== \"number\" || !Number.isFinite(raw)) continue;\n" +
+      "    weighted += weight * clip(raw / anchor);",
+    to:
+      "    const raw = row[key];\n" +
+      "    const safe = typeof raw === \"number\" && Number.isFinite(raw) ? raw : 0;\n" +
+      "    weighted += weight * clip(safe / anchor);",
+  },
+  {
+    // Trap 2, inverse: Omniscience is a SIGNED index and legitimately negative.
+    // Skipping negatives would let a model dodge its own worst result and score
+    // as though it had never been measured on that benchmark.
+    name: "skip-negative-omniscience-index",
+    file: "src/engine/benchmark-prior.ts",
+    from: "    if (typeof raw !== \"number\" || !Number.isFinite(raw)) continue;",
+    to: "    if (typeof raw !== \"number\" || !Number.isFinite(raw) || raw < 0) continue;",
+  },
+  {
+    // Re-normalising by the full 1.0 rather than the available weight penalises
+    // a model for a benchmark nobody published for it.
+    name: "normalise-basket-by-full-weight",
+    file: "src/engine/benchmark-prior.ts",
+    from: "  return weighted / availableWeight;",
+    to: "  return weighted;",
+  },
+  {
+    // The basket must be mapped onto the index prior's 0.55..1.0 range before
+    // blending; blending a raw 0..1 basket drags every measured model down.
+    name: "blend-raw-basket-without-range-map",
+    file: "src/engine/benchmark-prior.ts",
+    from: "    value: (1 - BENCHMARK_BLEND) * index + BENCHMARK_BLEND * (0.55 + 0.45 * basket),",
+    to: "    value: (1 - BENCHMARK_BLEND) * index + BENCHMARK_BLEND * basket,",
+  },
+  {
+    // Trap 3 on identity: `U` is aa.ai AutomationBench's guardrail-adjusted
+    // partial score, never Zapier's strictScore. A relabelling here reads as a
+    // harmless rename and silently changes what the tier means.
+    name: "relabel-automationbench-as-strict-score",
+    file: "src/engine/benchmark-prior.ts",
+    from: '  { key: "automationBenchAaGuardrailAdjusted", anchor: 0.7, weight: 0.2 },',
+    to: '  { key: "automationBenchStrictScore", anchor: 0.7, weight: 0.2 },',
+  },
+  {
+    // TIER_ORDER is ASCENDING capability (["T3","T2","T1"]) because select.ts
+    // compares tiers by index. Walking it as-written matches T3's 0.75 before
+    // T1's 0.85 and labels EVERY model T3.
+    name: "cut-tiers-in-ascending-capability-order",
+    file: "src/engine/scores.ts",
+    from: "const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse();",
+    to: "const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = TIER_ORDER;",
+  },
+  {
+    // Trap 3: below the T3 floor means labelled T3 WITH A FLAG, not dropped and
+    // not quietly indistinguishable from a model that earned T3.
+    name: "never-flag-below-t3-floor",
+    file: "src/engine/scores.ts",
+    from: '  return { tier: "T3", belowT3Floor: true };',
+    to: '  return { tier: "T3", belowT3Floor: false };',
+  },
+  {
+    // Versioning requirement: a tier written under a superseded spec describes
+    // a rule this build no longer implements. It must be ignored until
+    // refreshScores rewrites it, never reinterpreted under the new spec.
+    name: "ignore-spec-version-when-overlaying-tier",
+    file: "src/engine/scores.ts",
+    from: "    if (score.tierSpecVersion !== specVersion) return model;\n",
+    to: "",
+  },
+  {
+    // An unscored model must retain its configured tier, not be overlaid with
+    // a null tier that no downstream tier comparison can handle.
+    name: "overlay-null-derived-tier",
+    file: "src/engine/scores.ts",
+    from: "    if (!score || !score.derivedTier) return model;",
+    to: "    if (!score) return model;",
+  },
+  {
+    // The wiring mutant. Every unit test above passes against a stored score
+    // that never reaches selectModel; only a worker-level test that drives
+    // advise() and reads the chosen model can kill this. Same gap TOG-2373
+    // found for the shadow emitter.
+    name: "bypass-derived-tier-overlay-in-selection",
+    file: "src/worker.ts",
+    from: "            models: applyDerivedTiers(config.models, modelScores),",
+    to: "            models: config.models,",
+  },
+  {
+    // The duplicate-id defect this gate exists to keep fixed. A score is one
+    // verdict per model id; the roster lists some ids twice. Rewriting every
+    // matching row flips `gpt-5.6-sol`'s deliberate T2 placement to T1 and
+    // vacates the T2 rung entirely.
+    name: "retier-every-row-sharing-a-model-id",
+    file: "src/engine/scores.ts",
+    from: "      if (model.tier !== topRung(model.id)) return model;",
+    to: "      // mutant: promote every row, not just the model's top rung",
+  },
+  {
+    // Promotion on the aa.ai composite alone, with no admissible agentic
+    // basket behind it.
+    name: "promote-on-an-index-only-basis",
+    file: "src/engine/scores.ts",
+    from: '      if (score.priorBasis === "index-only") return model;',
+    to: "      // mutant: allow a promotion with no benchmark basket",
+  },
+  {
+    // A disabled row is not a rung the fleet can select from. Counting one
+    // suppresses a live promotion — `glm-5.3` holds a disabled T1 row beside
+    // its enabled T2 one, so this pins its top rung at T1 and it never moves.
+    name: "count-disabled-rows-as-the-top-rung",
+    file: "src/engine/scores.ts",
+    from: "    if (model.enabled !== false) raise(enabledTop, model.id, model.tier);",
+    to: "    raise(enabledTop, model.id, model.tier);",
+  },
   {
     // TOG-2674: an exhausted account with utilization 1 must not dilute a
     // serviceable account at 0.02 into a fake lane utilization of 0.51.

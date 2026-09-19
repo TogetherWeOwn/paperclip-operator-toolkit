@@ -355,6 +355,23 @@ export interface ModelScore {
   priorP: number;
   tiers: Record<Tier, TierScore>;
   overall: TierScore;
+  /**
+   * TOG-2988: the tier this model's OVERALL posterior earns, or null when the
+   * model is unscored (no aa.ai composite index) and its configured tier must be
+   * retained. Distinct from `tiers[T].capable`, which is a per-tier quality gate
+   * — a model can be tiered T1 here and still fail `capable` for T1 work.
+   */
+  derivedTier?: Tier | null;
+  /** Posterior fell below the T3 threshold: labelled T3, but earned no tier. */
+  belowT3Floor?: boolean;
+  /** How the prior behind `derivedTier` was reached. */
+  priorBasis?: "blended" | "index-only" | "unscored";
+  /**
+   * Benchmark spec version the tier was cut under (e.g. `tog2636-v1`). A tier
+   * written under one version stays distinguishable from one written under the
+   * next, so a re-tier can never silently rewrite history.
+   */
+  tierSpecVersion?: string;
 }
 
 /**

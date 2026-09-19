@@ -913,26 +913,149 @@ function validateConfig(config) {
   return { errors, warnings };
 }
 
+// src/engine/benchmark-prior.ts
+var BENCHMARK_SPEC_VERSION = "tog2636-v1";
+var BENCHMARKS = [
+  { key: "terminalBenchV4Pass1", anchor: 0.6, weight: 0.25 },
+  { key: "mercorApex11Pass1", anchor: 0.7, weight: 0.2 },
+  { key: "automationBenchAaGuardrailAdjusted", anchor: 0.7, weight: 0.2 },
+  { key: "aaOmniscienceSignedIndex", anchor: 45, weight: 0.2 },
+  { key: "deepSweV11Pass1", anchor: 0.75, weight: 0.15 }
+];
+var MIN_POPULATED_BENCHMARKS = 3;
+var MIN_AVAILABLE_WEIGHT = 0.75;
+var BENCHMARK_BLEND = 0.3;
+function clip(value, lo = 0, hi = 1) {
+  return Math.max(lo, Math.min(hi, value));
+}
+function benchmarkPrior(row) {
+  if (!row) return null;
+  let weighted = 0;
+  let availableWeight = 0;
+  let populated = 0;
+  for (const { key, anchor, weight } of BENCHMARKS) {
+    const raw = row[key];
+    if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+    weighted += weight * clip(raw / anchor);
+    availableWeight += weight;
+    populated += 1;
+  }
+  if (populated < MIN_POPULATED_BENCHMARKS) return null;
+  if (availableWeight < MIN_AVAILABLE_WEIGHT) return null;
+  return weighted / availableWeight;
+}
+function indexPriorOrNull(aaIndex) {
+  if (typeof aaIndex !== "number" || !Number.isFinite(aaIndex)) return null;
+  return clip(0.55 + 0.45 * (aaIndex / 60), 0.55, 1);
+}
+function blendedPrior(aaIndex, row) {
+  const index = indexPriorOrNull(aaIndex);
+  if (index === null) return { value: null, basis: "unscored" };
+  const basket = benchmarkPrior(row);
+  if (basket === null) return { value: index, basis: "index-only" };
+  return {
+    value: (1 - BENCHMARK_BLEND) * index + BENCHMARK_BLEND * (0.55 + 0.45 * basket),
+    basis: "blended"
+  };
+}
+
+// src/engine/cost.ts
+var MIN_PROFILE_SAMPLES = 5;
+var PROFILE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1e3;
+function tierIndex(tier2) {
+  return TIER_ORDER.indexOf(tier2);
+}
+function tierAbove(tier2) {
+  return TIER_ORDER[tierIndex(tier2) + 1] ?? null;
+}
+function resolveProfile(tier2, profiles, now) {
+  const profile = profiles.find((entry) => entry.tier === tier2) ?? null;
+  if (!profile) {
+    return { profile: null, trusted: false, reason: `no volume profile recorded for ${tier2}` };
+  }
+  if (profile.sampleCount < MIN_PROFILE_SAMPLES) {
+    return {
+      profile,
+      trusted: false,
+      reason: `${tier2} profile has ${profile.sampleCount} runs, below the ${MIN_PROFILE_SAMPLES}-run minimum`
+    };
+  }
+  const age = now - Date.parse(profile.computedAt);
+  if (!Number.isFinite(age)) {
+    return { profile, trusted: false, reason: `${tier2} profile has an unparseable computedAt` };
+  }
+  if (age > PROFILE_MAX_AGE_MS) {
+    const days = Math.round(age / (24 * 60 * 60 * 1e3));
+    return { profile, trusted: false, reason: `${tier2} profile is ${days} days old` };
+  }
+  return { profile, trusted: true, reason: `${tier2} profile: ${profile.sampleCount} runs` };
+}
+function runCost(model, profile) {
+  const inputCostUsd = profile.avgInputTokens / 1e6 * model.costPerMTokIn;
+  const cacheReadCostUsd = profile.avgCacheReadTokens / 1e6 * model.costPerMTokCacheRead;
+  const outputCostUsd = profile.avgOutputTokens / 1e6 * model.costPerMTokOut;
+  return {
+    inputCostUsd,
+    cacheReadCostUsd,
+    outputCostUsd,
+    runCostUsd: inputCostUsd + cacheReadCostUsd + outputCostUsd
+  };
+}
+function escalationRisk(tier2, models, profiles, signals, now) {
+  const above = tierAbove(tier2);
+  if (!above) return 0;
+  const signal = signals.find((entry) => entry.tier === tier2);
+  if (!signal || signal.sampleCount <= 0) return 0;
+  const silentRate = signal.silentFailureCount * 10 / signal.sampleCount;
+  const effectiveRate = Math.min(1, Math.max(0, signal.escalationRate) + silentRate);
+  if (effectiveRate <= 0) return 0;
+  const verdict = resolveProfile(above, profiles, now);
+  if (!verdict.profile) return 0;
+  const redo = models.filter((model) => model.enabled && !model.fallbackOnly && model.tier === above).map((model) => runCost(model, verdict.profile).runCostUsd).sort((left, right) => left - right)[0];
+  return redo === void 0 ? 0 : redo * effectiveRate;
+}
+function costOf(model, profileTier, profiles, models, signals, now) {
+  const verdict = resolveProfile(profileTier, profiles, now);
+  if (!verdict.profile) return null;
+  const direct = runCost(model, verdict.profile);
+  const escalationRiskUsd = escalationRisk(model.tier, models, profiles, signals, now);
+  return {
+    modelId: model.id,
+    ...direct,
+    escalationRiskUsd,
+    expectedCostUsd: direct.runCostUsd + escalationRiskUsd,
+    profileTier,
+    profileTrusted: verdict.trusted
+  };
+}
+
 // src/engine/scores.ts
 function priorP(aaIndex) {
   if (aaIndex === null) return 0.8;
   return Math.max(0.55, Math.min(1, 0.55 + 0.45 * (aaIndex / 60)));
 }
-var AGENTIC_PRIOR_BLEND = 0.3;
-function agenticPriorP(scores) {
-  if (!scores) return null;
-  const values = [scores.terminalbenchHard, scores.tau2, scores.ifbench, scores.gpqa, scores.hle].filter(
-    (v) => typeof v === "number"
-  );
-  if (values.length === 0) return null;
-  const avg = values.reduce((a, b) => a + b, 0) / values.length;
-  return Math.max(0.55, Math.min(1, 0.55 + 0.45 * avg));
+function blendedPriorP(aaIndex, benchmarkRow) {
+  const blended = blendedPrior(aaIndex, benchmarkRow);
+  if (blended.value !== null) return blended.value;
+  return priorP(aaIndex);
 }
-function blendedPriorP(aaIndex, agenticScores) {
-  const indexPrior = priorP(aaIndex);
-  const agentic = agenticPriorP(agenticScores);
-  if (agentic === null) return indexPrior;
-  return (1 - AGENTIC_PRIOR_BLEND) * indexPrior + AGENTIC_PRIOR_BLEND * agentic;
+var TIER_ORDER_BY_CAPABILITY_DESC = [...TIER_ORDER].reverse();
+function tierForPosterior(p, thresholds = SCORE_THRESHOLDS) {
+  for (const tier2 of TIER_ORDER_BY_CAPABILITY_DESC) {
+    const threshold = thresholds[tier2];
+    if (threshold !== void 0 && p >= threshold) return { tier: tier2, belowT3Floor: false };
+  }
+  return { tier: "T3", belowT3Floor: true };
+}
+function deriveModelTier(aaIndex, benchmarkRow, overallStats, priorK = SCORE_PRIOR_K, thresholds = SCORE_THRESHOLDS) {
+  const { value: prior, basis } = blendedPrior(aaIndex, benchmarkRow);
+  if (prior === null) {
+    return { tier: null, belowT3Floor: false, basis, prior: null, p: null, specVersion: BENCHMARK_SPEC_VERSION };
+  }
+  const nEff = overallStats.wOk + overallStats.wBad;
+  const p = (overallStats.wOk + priorK * prior) / (nEff + priorK);
+  const { tier: tier2, belowT3Floor } = tierForPosterior(p, thresholds);
+  return { tier: tier2, belowT3Floor, basis, prior: round(prior, 4), p: round(p, 4), specVersion: BENCHMARK_SPEC_VERSION };
 }
 function emptyTierScoreStats() {
   return { n: 0, ok: 0, failInfra: 0, failModel: 0, tmo: 0, wOk: 0, wBad: 0, rework: 0, okCost: [], okMins: [] };
@@ -979,8 +1102,8 @@ function summarize(stats, tier2, priorPValue, priorK = SCORE_PRIOR_K, provenN = 
     rework: stats.rework
   };
 }
-function buildModelScore(modelId, aaIndex, statsByTier, tiers, agenticScores) {
-  const pp = blendedPriorP(aaIndex, agenticScores);
+function buildModelScore(modelId, aaIndex, statsByTier, tiers, benchmarkRow) {
+  const pp = blendedPriorP(aaIndex, benchmarkRow);
   const tierScores = {};
   for (const tier2 of tiers) {
     const stats = statsByTier[tier2];
@@ -1015,13 +1138,46 @@ function buildModelScore(modelId, aaIndex, statsByTier, tiers, agenticScores) {
     agg.okCost.push(...stats.okCost);
     agg.okMins.push(...stats.okMins);
   }
+  const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg);
   return {
     modelId,
     aaIndex,
     priorP: round(pp, 3),
     tiers: tierScores,
-    overall: summarize(agg, null, pp)
+    overall: summarize(agg, null, pp),
+    derivedTier: derivedTier.tier,
+    belowT3Floor: derivedTier.belowT3Floor,
+    priorBasis: derivedTier.basis,
+    tierSpecVersion: derivedTier.specVersion
   };
+}
+function applyDerivedTiers(models, scoresByModelId, specVersion = BENCHMARK_SPEC_VERSION) {
+  const topRung = topConfiguredRungs(models);
+  return models.map((model) => {
+    const score2 = scoresByModelId[model.id];
+    if (!score2 || !score2.derivedTier) return model;
+    if (score2.tierSpecVersion !== specVersion) return model;
+    const derived = score2.derivedTier;
+    if (derived === model.tier) return model;
+    if (tierIndex(derived) > tierIndex(model.tier)) {
+      if (score2.priorBasis === "index-only") return model;
+      if (model.tier !== topRung(model.id)) return model;
+    }
+    return { ...model, tier: derived };
+  });
+}
+function topConfiguredRungs(models) {
+  const enabledTop = /* @__PURE__ */ new Map();
+  const anyTop = /* @__PURE__ */ new Map();
+  const raise = (into, id, tier2) => {
+    const current = into.get(id);
+    if (current === void 0 || tierIndex(tier2) > tierIndex(current)) into.set(id, tier2);
+  };
+  for (const model of models) {
+    raise(anyTop, model.id, model.tier);
+    if (model.enabled !== false) raise(enabledTop, model.id, model.tier);
+  }
+  return (modelId) => enabledTop.get(modelId) ?? anyTop.get(modelId);
 }
 var FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
 var MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
@@ -1376,76 +1532,6 @@ function resolveConfiguredModelId(modelId, models) {
   if (!modelId.startsWith(OMNIROUTE_PROVIDER_PREFIX)) return null;
   const directModelId = modelId.slice(OMNIROUTE_PROVIDER_PREFIX.length);
   return models.some((model) => model.id === directModelId) ? directModelId : null;
-}
-
-// src/engine/cost.ts
-var MIN_PROFILE_SAMPLES = 5;
-var PROFILE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1e3;
-function tierIndex(tier2) {
-  return TIER_ORDER.indexOf(tier2);
-}
-function tierAbove(tier2) {
-  return TIER_ORDER[tierIndex(tier2) + 1] ?? null;
-}
-function resolveProfile(tier2, profiles, now) {
-  const profile = profiles.find((entry) => entry.tier === tier2) ?? null;
-  if (!profile) {
-    return { profile: null, trusted: false, reason: `no volume profile recorded for ${tier2}` };
-  }
-  if (profile.sampleCount < MIN_PROFILE_SAMPLES) {
-    return {
-      profile,
-      trusted: false,
-      reason: `${tier2} profile has ${profile.sampleCount} runs, below the ${MIN_PROFILE_SAMPLES}-run minimum`
-    };
-  }
-  const age = now - Date.parse(profile.computedAt);
-  if (!Number.isFinite(age)) {
-    return { profile, trusted: false, reason: `${tier2} profile has an unparseable computedAt` };
-  }
-  if (age > PROFILE_MAX_AGE_MS) {
-    const days = Math.round(age / (24 * 60 * 60 * 1e3));
-    return { profile, trusted: false, reason: `${tier2} profile is ${days} days old` };
-  }
-  return { profile, trusted: true, reason: `${tier2} profile: ${profile.sampleCount} runs` };
-}
-function runCost(model, profile) {
-  const inputCostUsd = profile.avgInputTokens / 1e6 * model.costPerMTokIn;
-  const cacheReadCostUsd = profile.avgCacheReadTokens / 1e6 * model.costPerMTokCacheRead;
-  const outputCostUsd = profile.avgOutputTokens / 1e6 * model.costPerMTokOut;
-  return {
-    inputCostUsd,
-    cacheReadCostUsd,
-    outputCostUsd,
-    runCostUsd: inputCostUsd + cacheReadCostUsd + outputCostUsd
-  };
-}
-function escalationRisk(tier2, models, profiles, signals, now) {
-  const above = tierAbove(tier2);
-  if (!above) return 0;
-  const signal = signals.find((entry) => entry.tier === tier2);
-  if (!signal || signal.sampleCount <= 0) return 0;
-  const silentRate = signal.silentFailureCount * 10 / signal.sampleCount;
-  const effectiveRate = Math.min(1, Math.max(0, signal.escalationRate) + silentRate);
-  if (effectiveRate <= 0) return 0;
-  const verdict = resolveProfile(above, profiles, now);
-  if (!verdict.profile) return 0;
-  const redo = models.filter((model) => model.enabled && !model.fallbackOnly && model.tier === above).map((model) => runCost(model, verdict.profile).runCostUsd).sort((left, right) => left - right)[0];
-  return redo === void 0 ? 0 : redo * effectiveRate;
-}
-function costOf(model, profileTier, profiles, models, signals, now) {
-  const verdict = resolveProfile(profileTier, profiles, now);
-  if (!verdict.profile) return null;
-  const direct = runCost(model, verdict.profile);
-  const escalationRiskUsd = escalationRisk(model.tier, models, profiles, signals, now);
-  return {
-    modelId: model.id,
-    ...direct,
-    escalationRiskUsd,
-    expectedCostUsd: direct.runCostUsd + escalationRiskUsd,
-    profileTier,
-    profileTrusted: verdict.trusted
-  };
 }
 
 // src/engine/objective.ts
@@ -2162,6 +2248,45 @@ function buildQualitySignals(rows, computedAt) {
     computedAt
   }));
 }
+
+// src/engine/benchmark-data.ts
+var FROZEN_BENCHMARK_ROWS = {
+  "claude-fable-5-1": { terminalBenchV4Pass1: 0.52020202020202, mercorApex11Pass1: 0.6859999999999999, automationBenchAaGuardrailAdjusted: 0.5937591715646424, aaOmniscienceSignedIndex: 43.45 },
+  "claude-haiku-4-5-20251001": { aaOmniscienceSignedIndex: -7.56666666666667 },
+  "claude-opus-5": { terminalBenchV4Pass1: 0.48989898989899, mercorApex11Pass1: 0.6579999999999999, automationBenchAaGuardrailAdjusted: 0.565735557649325, aaOmniscienceSignedIndex: 37.0666666666667 },
+  "claude-sonnet-5": { terminalBenchV4Pass1: 0.141414141414141, aaOmniscienceSignedIndex: 16.45 },
+  "deepseek-v4-flash": { terminalBenchV4Pass1: 0.121212121212121, aaOmniscienceSignedIndex: -14.2833333333333 },
+  "deepseek-v4-flash-free": { terminalBenchV4Pass1: 0.121212121212121, aaOmniscienceSignedIndex: -14.2833333333333 },
+  "deepseek-v4-flash-vision-exp": { terminalBenchV4Pass1: 0.121212121212121, aaOmniscienceSignedIndex: -17.6333333333333 },
+  "deepseek-v4-pro": { terminalBenchV4Pass1: 0.141414141414141, automationBenchAaGuardrailAdjusted: 0.5671165546344002, aaOmniscienceSignedIndex: 0.833333333333333 },
+  "deepseek-v4.1-flash": { terminalBenchV4Pass1: 0.267676767676768, automationBenchAaGuardrailAdjusted: 0.6889097769674057, aaOmniscienceSignedIndex: -5.3 },
+  "gemini-3-flash": { aaOmniscienceSignedIndex: -4.31666666666667 },
+  "gemini-3.6-flash-high": { terminalBenchV4Pass1: 0.0707070707070707, mercorApex11Pass1: 0.469, aaOmniscienceSignedIndex: 22.1333333333333 },
+  "gemini-3.7-flash-high": { terminalBenchV4Pass1: 0.136363636363636, mercorApex11Pass1: 0.6779999999999999, aaOmniscienceSignedIndex: 26.4833333333333 },
+  "gemini-3.8-flash-high": { terminalBenchV4Pass1: 0.196969696969697, mercorApex11Pass1: 0.643, automationBenchAaGuardrailAdjusted: 0.5993009432118243, aaOmniscienceSignedIndex: 29.55 },
+  "glm-5": { aaOmniscienceSignedIndex: 0.266666666666667 },
+  "glm-5.1": { terminalBenchV4Pass1: 0.0202020202020202, aaOmniscienceSignedIndex: 0.85 },
+  "glm-5.2": { terminalBenchV4Pass1: 0.0101010101010101, aaOmniscienceSignedIndex: 4.43333333333333 },
+  "glm-5.3": { terminalBenchV4Pass1: 0.419191919191919, mercorApex11Pass1: 0.5660000000000001, automationBenchAaGuardrailAdjusted: 0.622028649962642, aaOmniscienceSignedIndex: 14.3 },
+  "glm-5.3-flash": { terminalBenchV4Pass1: 0.328282828282828, mercorApex11Pass1: 0.528, automationBenchAaGuardrailAdjusted: 0.6036862782167782, aaOmniscienceSignedIndex: 7.46666666666667 },
+  "gpt-5.5": { terminalBenchV4Pass1: 0.146464646464646, mercorApex11Pass1: 0.551, aaOmniscienceSignedIndex: 20.5166666666667 },
+  "gpt-5.6-luna": { terminalBenchV4Pass1: 0.116161616161616, automationBenchAaGuardrailAdjusted: 0.5020861763756194, aaOmniscienceSignedIndex: -10.2833333333333 },
+  "gpt-5.6-sol": { terminalBenchV4Pass1: 0.398989898989899, mercorApex11Pass1: 0.514, automationBenchAaGuardrailAdjusted: 0.6008114996276329, aaOmniscienceSignedIndex: 21.9666666666667 },
+  "gpt-5.6-terra": { terminalBenchV4Pass1: 0.353535353535354, mercorApex11Pass1: 0.5820000000000001, automationBenchAaGuardrailAdjusted: 0.5964995802534495, aaOmniscienceSignedIndex: 0.05 },
+  "gpt-oss-120b-medium": { terminalBenchV4Pass1: 0, automationBenchAaGuardrailAdjusted: 0.0019906990691605595, aaOmniscienceSignedIndex: -49.25 },
+  "mimo-v2-omni": { aaOmniscienceSignedIndex: -20.1333333333333 },
+  "mimo-v2-pro": { aaOmniscienceSignedIndex: 4.61666666666667 },
+  "mimo-v2.5-pro": { terminalBenchV4Pass1: 0, aaOmniscienceSignedIndex: 3.25 },
+  "minimax-m2.5": { aaOmniscienceSignedIndex: -38.8666666666667 },
+  "minimax-m3": { terminalBenchV4Pass1: 0.0202020202020202, automationBenchAaGuardrailAdjusted: 0.21251257600749407, aaOmniscienceSignedIndex: 1.35 },
+  "qwen3.6-plus": { aaOmniscienceSignedIndex: 0.883333333333333 },
+  "qwen3.7-max": { terminalBenchV4Pass1: 0.0151515151515152, aaOmniscienceSignedIndex: 13.4833333333333 },
+  "qwen3.8-max": { terminalBenchV4Pass1: 0.186868686868687, aaOmniscienceSignedIndex: 3.4 },
+  "zai-openai/glm-5.3": { terminalBenchV4Pass1: 0.419191919191919, mercorApex11Pass1: 0.5660000000000001, automationBenchAaGuardrailAdjusted: 0.622028649962642, aaOmniscienceSignedIndex: 14.3 },
+  "zai-openai/glm-5.3-flash": { terminalBenchV4Pass1: 0.328282828282828, mercorApex11Pass1: 0.528, automationBenchAaGuardrailAdjusted: 0.6036862782167782, aaOmniscienceSignedIndex: 7.46666666666667 },
+  "zai/glm-5.3": { terminalBenchV4Pass1: 0.419191919191919, mercorApex11Pass1: 0.5660000000000001, automationBenchAaGuardrailAdjusted: 0.622028649962642, aaOmniscienceSignedIndex: 14.3 },
+  "zai/glm-5.3-flash": { terminalBenchV4Pass1: 0.328282828282828, mercorApex11Pass1: 0.528, automationBenchAaGuardrailAdjusted: 0.6036862782167782, aaOmniscienceSignedIndex: 7.46666666666667 }
+};
 
 // src/lane-capacity/value-normalization.ts
 function recordOf(value) {
@@ -3888,7 +4013,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           config: {
             enforcementEnabled: config.selection.enabled && config.selection.mode === "enforce",
             defaultTier: config.selection.defaultTier,
-            models: config.models,
+            // TOG-2988: the roster's hand-placed tier is overlaid with the tier
+            // `refreshScores` derived from the model's posterior. Unscored models
+            // and scores from a superseded spec version keep the configured tier.
+            models: applyDerivedTiers(config.models, modelScores),
             holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
             stickyWithinIssue: config.selection.stickyModelWithinIssue,
             pacingMode: config.pacing.mode,
@@ -4884,21 +5012,20 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const live = aaSnapshot.bySlug[slug]?.intelligenceIndex;
               return typeof live === "number" ? live : model.aaIndex;
             };
-            const liveAgenticScores = (model) => {
-              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
-              const record2 = slug ? aaSnapshot.bySlug[slug] : null;
-              if (!record2) return null;
-              return {
-                terminalbenchHard: record2.terminalbenchHard,
-                tau2: record2.tau2,
-                ifbench: record2.ifbench,
-                gpqa: record2.gpqa,
-                hle: record2.hle
-              };
-            };
+            const benchmarkRow = (model) => FROZEN_BENCHMARK_ROWS[model.id] ?? null;
             const modelScores = config.models.map(
-              (model) => buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, liveAgenticScores(model))
+              (model) => buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, benchmarkRow(model))
             );
+            const scoresByModelId = {};
+            for (const score2 of modelScores) scoresByModelId[score2.modelId] = score2;
+            const overlaid = applyDerivedTiers(config.models, scoresByModelId);
+            const retierings = overlaid.flatMap((model, index) => {
+              const configured = config.models[index];
+              if (!configured || configured.tier === model.tier) return [];
+              const p = scoresByModelId[model.id]?.overall.p;
+              const lane = configured.laneId ? `@${configured.laneId}` : "";
+              return [`${model.id}${lane} ${configured.tier} -> ${model.tier} (p=${p})`];
+            });
             const cardIssueRows = await ctx.db.query(
               `select id::text as id,
                       extract(epoch from coalesce(completed_at, cancelled_at)) * 1000 as closed_at_ms,
@@ -4944,7 +5071,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const priorPByModel = {};
             const blendedListPriceByModel = {};
             for (const model of config.models) {
-              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), liveAgenticScores(model));
+              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), benchmarkRow(model));
               blendedListPriceByModel[model.id] = null;
             }
             const cardLedger = buildCardLedger(
@@ -4953,11 +5080,20 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               priorPByModel,
               blendedListPriceByModel
             );
-            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger });
+            const computedAt = (/* @__PURE__ */ new Date()).toISOString();
+            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger, computedAt });
             ctx.logger.info("model scores refreshed", {
               companyId: company.id,
               models: modelScores.length,
-              cardsInLedger: cardRows.length
+              cardsInLedger: cardRows.length,
+              tierSpecVersion: BENCHMARK_SPEC_VERSION,
+              computedAt,
+              retiered: retierings.length,
+              unscored: modelScores.filter((score2) => score2.derivedTier === null).length,
+              belowT3Floor: modelScores.filter((score2) => score2.belowT3Floor).length,
+              // Named, not just counted: a tier move is the one thing here an
+              // operator may need to reverse, and a bare count cannot be acted on.
+              retierings
             });
           } catch (cause) {
             ctx.logger.error("score refresh failed for a company", {

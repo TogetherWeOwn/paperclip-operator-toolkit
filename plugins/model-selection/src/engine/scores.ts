@@ -5,8 +5,16 @@ import {
   SCORE_PRIOR_K,
   SCORE_PROVEN_N,
   SCORE_THRESHOLDS,
+  TIER_ORDER,
   type Tier,
 } from "../constants.js";
+import {
+  BENCHMARK_SPEC_VERSION,
+  blendedPrior,
+  type BenchmarkRow,
+  type PriorBasis,
+} from "./benchmark-prior.js";
+import { tierIndex } from "./cost.js";
 import type { CardLedgerEntry, ModelScore, TierScore, TierScoreStats } from "./types.js";
 
 /**
@@ -19,50 +27,90 @@ export function priorP(aaIndex: number | null): number {
 }
 
 /**
- * aa.ai agentic sub-benchmark scores (TOG-2438 scope expansion), each
- * already on a 0..1 scale. Optional/nullable per-field — mirrors
- * `AaModelRecord`'s own null gaps, never fabricated.
+ * Blends the composite-index prior with the TOG-2636 five-benchmark basket
+ * (TOG-2988). Replaces the TOG-2438 agentic sub-score average, which keyed off
+ * whatever aa.ai columns happened to be populated rather than a fixed basket.
+ *
+ * Falls back to the plain index prior when the basket misses its coverage gate,
+ * so a caller that supplies no `benchmarkRow` sees byte-identical behavior to
+ * before this blend existed.
+ *
+ * SELECTION-TIME contract, distinct from the tiering one: this always returns a
+ * number, and an unscored model (`aaIndex === null`) gets `priorP(null)` — the
+ * 0.8 "assume roughly T2 until measured" default. `deriveModelTier` deliberately
+ * does NOT reuse that path; see its own note.
  */
-export interface AgenticSubScores {
-  terminalbenchHard?: number | null;
-  tau2?: number | null;
-  ifbench?: number | null;
-  gpqa?: number | null;
-  hle?: number | null;
+export function blendedPriorP(aaIndex: number | null, benchmarkRow?: BenchmarkRow | null): number {
+  const blended = blendedPrior(aaIndex, benchmarkRow);
+  if (blended.value !== null) return blended.value;
+  return priorP(aaIndex);
 }
 
-/** Weight `priorP` gives the composite intelligence index when an agentic prior is also available. */
-const AGENTIC_PRIOR_BLEND = 0.3;
+/** `TIER_ORDER` is ascending capability; tier cuts must test the hardest threshold first. */
+const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse();
 
 /**
- * A secondary, agentic-benchmark-derived prior, same 0.55-1.0 shape as
- * `priorP`'s index mapping. Returns null when no sub-benchmark is available
- * at all — the caller then falls back to the index-only prior, never a
- * fabricated midpoint. Averages only the sub-benchmarks aa.ai actually
- * populated for this slug.
+ * Tier from a posterior. T3 is the RESIDUAL bucket, not a fourth threshold.
+ *
+ * A model with `p < SCORE_THRESHOLDS.T3` clears no tier at all. It is labelled
+ * T3 and flagged `belowT3Floor` rather than dropped, because `tier` (the
+ * roster's work-class bucket) and `capable` (the per-tier quality gate in
+ * `select.ts`) are already separate concepts in this engine: flooring the LABEL
+ * does not promote the model, since `summarize`'s `capable` still refuses to let
+ * it win T3 work. Dropping it instead would contradict the owner's own live
+ * TOG-2969 placement of `claude-haiku-4-5` at T3 on an index of 15.41.
  */
-export function agenticPriorP(scores: AgenticSubScores | null | undefined): number | null {
-  if (!scores) return null;
-  const values = [scores.terminalbenchHard, scores.tau2, scores.ifbench, scores.gpqa, scores.hle].filter(
-    (v): v is number => typeof v === "number",
-  );
-  if (values.length === 0) return null;
-  const avg = values.reduce((a, b) => a + b, 0) / values.length;
-  return Math.max(0.55, Math.min(1.0, 0.55 + 0.45 * avg));
+export function tierForPosterior(
+  p: number,
+  thresholds: Partial<Record<Tier, number>> = SCORE_THRESHOLDS,
+): { tier: Tier; belowT3Floor: boolean } {
+  // MOST CAPABLE FIRST. `TIER_ORDER` is ascending capability (`["T3","T2","T1"]`)
+  // because `select.ts` compares tiers by index; walking it as-written would
+  // match T3's 0.75 before T1's 0.85 and label every model T3.
+  for (const tier of TIER_ORDER_BY_CAPABILITY_DESC) {
+    const threshold = thresholds[tier];
+    if (threshold !== undefined && p >= threshold) return { tier, belowT3Floor: false };
+  }
+  return { tier: "T3", belowT3Floor: true };
+}
+
+/** A model's derived tier and the evidence trail behind it. */
+export interface DerivedTier {
+  /** Null ONLY when unscored — the caller must then retain the existing tier. */
+  tier: Tier | null;
+  belowT3Floor: boolean;
+  basis: PriorBasis;
+  /** The blended prior, or null when unscored. */
+  prior: number | null;
+  /** The posterior the tier was cut from, or null when unscored. */
+  p: number | null;
+  specVersion: string;
 }
 
 /**
- * Blends the composite-index prior with the agentic sub-score prior when
- * the latter is available (TOG-2438 scope expansion — "an additional prior
- * alongside the composite index"). Falls back to the plain index prior when
- * no agentic score is available, so a caller that never supplies
- * `agenticScores` sees byte-identical behavior to before this blend existed.
+ * Derive one model's tier from its posterior.
+ *
+ * FAILS CLOSED on an unscored model. `aaIndex === null` means there is no
+ * evidence to tier from, so this returns `tier: null` and the caller retains
+ * whatever tier the model already had. It must never fall through to
+ * `priorP(null) === 0.8`: that value is exactly `SCORE_THRESHOLDS.T2`, so a
+ * naive reuse would promote every unscored model to T2 on no evidence at all.
  */
-export function blendedPriorP(aaIndex: number | null, agenticScores?: AgenticSubScores | null): number {
-  const indexPrior = priorP(aaIndex);
-  const agentic = agenticPriorP(agenticScores);
-  if (agentic === null) return indexPrior;
-  return (1 - AGENTIC_PRIOR_BLEND) * indexPrior + AGENTIC_PRIOR_BLEND * agentic;
+export function deriveModelTier(
+  aaIndex: number | null,
+  benchmarkRow: BenchmarkRow | null | undefined,
+  overallStats: TierScoreStats,
+  priorK: number = SCORE_PRIOR_K,
+  thresholds: Partial<Record<Tier, number>> = SCORE_THRESHOLDS,
+): DerivedTier {
+  const { value: prior, basis } = blendedPrior(aaIndex, benchmarkRow);
+  if (prior === null) {
+    return { tier: null, belowT3Floor: false, basis, prior: null, p: null, specVersion: BENCHMARK_SPEC_VERSION };
+  }
+  const nEff = overallStats.wOk + overallStats.wBad;
+  const p = (overallStats.wOk + priorK * prior) / (nEff + priorK);
+  const { tier, belowT3Floor } = tierForPosterior(p, thresholds);
+  return { tier, belowT3Floor, basis, prior: round(prior, 4), p: round(p, 4), specVersion: BENCHMARK_SPEC_VERSION };
 }
 
 export function emptyTierScoreStats(): TierScoreStats {
@@ -132,9 +180,9 @@ export function buildModelScore(
   aaIndex: number | null,
   statsByTier: Partial<Record<Tier, TierScoreStats>>,
   tiers: readonly Tier[],
-  agenticScores?: AgenticSubScores | null,
+  benchmarkRow?: BenchmarkRow | null,
 ): ModelScore {
-  const pp = blendedPriorP(aaIndex, agenticScores);
+  const pp = blendedPriorP(aaIndex, benchmarkRow);
   const tierScores = {} as Record<Tier, TierScore>;
   for (const tier of tiers) {
     const stats = statsByTier[tier];
@@ -173,13 +221,114 @@ export function buildModelScore(
     (agg.okMins as number[]).push(...stats.okMins);
   }
 
+  // TOG-2988: the tier is cut from the OVERALL posterior — one number per model,
+  // across all tiers — not from any per-tier `capable` gate. Conflating the two
+  // is what produced equal-index models landing in different tiers.
+  const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg);
+
   return {
     modelId,
     aaIndex,
     priorP: round(pp, 3),
     tiers: tierScores,
     overall: summarize(agg, null, pp),
+    derivedTier: derivedTier.tier,
+    belowT3Floor: derivedTier.belowT3Floor,
+    priorBasis: derivedTier.basis,
+    tierSpecVersion: derivedTier.specVersion,
   };
+}
+
+/**
+ * Overlay each model's derived tier onto the roster the engine selects from.
+ *
+ * This is how `refreshScores`'s tier write reaches selection. The plugin's
+ * `ctx.config` is READ-ONLY (`get()` only — there is no config write in the
+ * host SDK), so the derived tier cannot be persisted back into the operator's
+ * roster document from inside the plugin. It is persisted in plugin state on
+ * the `ModelScore` and applied here, at the one seam every selection passes
+ * through, which gives the same live effect: the router alone decides the tier.
+ *
+ * Retains the configured tier for any model whose score is missing, unscored,
+ * or written under a different spec version than the one now running. That last
+ * case matters: after a version bump the stored tiers describe a spec this build
+ * no longer implements, and honouring them would apply a rule nobody can read
+ * off the current source. Stale tiers are ignored until `refreshScores` rewrites
+ * them, never silently reinterpreted.
+ *
+ * Operates on ROWS, not model ids. The roster lists some models more than once
+ * — a model id can hold two rows at different tiers and lanes — so a rewrite
+ * keyed on the id alone rewrites placements nobody derived. Demotions apply to
+ * every row; promotions are refused on an index-only basis and confined to the
+ * model's top enabled rung (see the two notes inline).
+ */
+export function applyDerivedTiers<T extends RosterRow>(
+  models: readonly T[],
+  scoresByModelId: Readonly<Record<string, ModelScore>>,
+  specVersion: string = BENCHMARK_SPEC_VERSION,
+): T[] {
+  const topRung = topConfiguredRungs(models);
+  return models.map((model) => {
+    const score = scoresByModelId[model.id];
+    if (!score || !score.derivedTier) return model;
+    if (score.tierSpecVersion !== specVersion) return model;
+    const derived = score.derivedTier;
+    if (derived === model.tier) return model;
+
+    if (tierIndex(derived) > tierIndex(model.tier)) {
+      // PROMOTION. Two refusals, both fail-closed; neither applies to a
+      // demotion, which is always safe to act on and always applies per row.
+      //
+      // 1. An `index-only` basis means the five-benchmark basket missed its
+      //    coverage gate, so there is no admissible agentic evidence for this
+      //    model at all — only the aa.ai composite. That is enough to keep a
+      //    model where it is, or to move it down, but not to hand it harder
+      //    work: the two models this fires hardest on measure worst of the
+      //    whole capture on the agentic benchmarks we DO have (TOG-2988
+      //    review). Retain, and let a populated basket do the promoting.
+      if (score.priorBasis === "index-only") return model;
+      // 2. A model listed at more than one rung is placed there deliberately
+      //    (`gpt-5.6-sol` carries both T1 and T2 on the codex lane). The
+      //    derived tier is one verdict per MODEL — the best rung its quality
+      //    justifies — while a roster entry is one PLACEMENT, and a model that
+      //    qualifies for T1 still qualifies for the T2 row it was explicitly
+      //    given. Only the model's top rung moves up, so a promotion can never
+      //    vacate a lower rung the operator listed it at.
+      if (model.tier !== topRung(model.id)) return model;
+    }
+
+    return { ...model, tier: derived };
+  });
+}
+
+interface RosterRow {
+  id: string;
+  tier: Tier;
+  /** Absent in callers that carry no enablement (tests, ad-hoc rosters). */
+  enabled?: boolean;
+}
+
+/**
+ * The most capable rung each model id is configured at.
+ *
+ * Counts enabled rows only — a disabled row is not a rung the fleet can select
+ * from, and letting one define the top rung would suppress a live promotion
+ * (`glm-5.3` carries a disabled T1 OpenCode-Go row beside its enabled T2 Z.ai
+ * one). Falls back to all rows for a model with nothing enabled, so every id
+ * still has a defined answer.
+ */
+function topConfiguredRungs(models: readonly RosterRow[]): (modelId: string) => Tier | undefined {
+  const enabledTop = new Map<string, Tier>();
+  const anyTop = new Map<string, Tier>();
+  const raise = (into: Map<string, Tier>, id: string, tier: Tier): void => {
+    const current = into.get(id);
+    if (current === undefined || tierIndex(tier) > tierIndex(current)) into.set(id, tier);
+  };
+  for (const model of models) {
+    raise(anyTop, model.id, model.tier);
+    if (model.enabled !== false) raise(enabledTop, model.id, model.tier);
+  }
+  return (modelId) => enabledTop.get(modelId) ?? anyTop.get(modelId);
 }
 
 // ---- rework-signal folding (model_scores.py lines 93-131) ------------------

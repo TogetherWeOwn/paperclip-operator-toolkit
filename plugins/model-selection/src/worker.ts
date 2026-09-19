@@ -49,17 +49,19 @@ import { selectModel } from "./engine/select.js";
 import { resolveTier, tierFromLabels } from "./engine/tier.js";
 import {
   accumulateRunStats,
+  applyDerivedTiers,
   blendedPriorP,
   buildCardLedger,
   buildModelScore,
   findClosingRun,
   foldReworkIntoStats,
-  type AgenticSubScores,
   type CardRow,
   type ClosingRunCandidate,
   type ReworkClosingRun,
   type RunOutcomeRow,
 } from "./engine/scores.js";
+import { BENCHMARK_SPEC_VERSION, type BenchmarkRow } from "./engine/benchmark-prior.js";
+import { FROZEN_BENCHMARK_ROWS } from "./engine/benchmark-data.js";
 import type {
   CardLedgerEntry,
   IssueDescriptor,
@@ -955,7 +957,10 @@ export function createPlugin() {
           config: {
             enforcementEnabled: config.selection.enabled && config.selection.mode === "enforce",
             defaultTier: config.selection.defaultTier,
-            models: config.models,
+            // TOG-2988: the roster's hand-placed tier is overlaid with the tier
+            // `refreshScores` derived from the model's posterior. Unscored models
+            // and scores from a superseded spec version keep the configured tier.
+            models: applyDerivedTiers(config.models, modelScores),
             holdOnUntrustedProfile: config.selection.holdOnUntrustedProfile,
             stickyWithinIssue: config.selection.stickyModelWithinIssue,
             pacingMode: config.pacing.mode,
@@ -2197,26 +2202,37 @@ export function createPlugin() {
               const live = aaSnapshot.bySlug[slug]?.intelligenceIndex;
               return typeof live === "number" ? live : model.aaIndex;
             };
-            // TOG-2438 scope expansion: agentic sub-scores as an additional
-            // prior alongside the composite index (blendedPriorP), never a
-            // replacement for it — null when the model has no resolved slug
-            // or aa.ai has no sub-benchmark data for it.
-            const liveAgenticScores = (model: (typeof config.models)[number]): AgenticSubScores | null => {
-              const slug = resolveAaSlug(model.id, aaKnownSlugs, model.aaSlug ?? null);
-              const record = slug ? aaSnapshot.bySlug[slug] : null;
-              if (!record) return null;
-              return {
-                terminalbenchHard: record.terminalbenchHard,
-                tau2: record.tau2,
-                ifbench: record.ifbench,
-                gpqa: record.gpqa,
-                hle: record.hle,
-              };
-            };
+            // TOG-2988: the TOG-2636 five-benchmark basket, superseding the
+            // TOG-2438 agentic sub-score average. Frozen `tog2636-v1` vectors —
+            // three of the five benchmarks are not aa.ai columns at all, and
+            // mixing live aa.ai rows with the capture would blend effort levels
+            // (see `benchmark-data.ts`). The composite index half stays live.
+            const benchmarkRow = (model: (typeof config.models)[number]): BenchmarkRow | null =>
+              FROZEN_BENCHMARK_ROWS[model.id] ?? null;
 
             const modelScores: ModelScore[] = config.models.map((model) =>
-              buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, liveAgenticScores(model)),
+              buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, benchmarkRow(model)),
             );
+
+            // TOG-2974 owner directive: the router alone decides the tier, so
+            // this is applied live rather than shadowed. An unscored model keeps
+            // its configured tier — `derivedTier` is null there, never 0.8's T2.
+            //
+            // The log is diffed against the SAME overlay selection runs through,
+            // row by row, rather than re-deriving it from the scores. A score is
+            // per model id and the roster lists some ids twice, so a `find()` by
+            // id reports the first row's move and hides the second's — and the
+            // hidden one is exactly what an operator would need to reverse.
+            const scoresByModelId: Record<string, ModelScore> = {};
+            for (const score of modelScores) scoresByModelId[score.modelId] = score;
+            const overlaid = applyDerivedTiers(config.models, scoresByModelId);
+            const retierings = overlaid.flatMap((model, index) => {
+              const configured = config.models[index];
+              if (!configured || configured.tier === model.tier) return [];
+              const p = scoresByModelId[model.id]?.overall.p;
+              const lane = configured.laneId ? `@${configured.laneId}` : "";
+              return [`${model.id}${lane} ${configured.tier} -> ${model.tier} (p=${p})`];
+            });
 
             const cardIssueRows = (await ctx.db.query(
               `select id::text as id,
@@ -2273,7 +2289,7 @@ export function createPlugin() {
             const priorPByModel: Record<string, number> = {};
             const blendedListPriceByModel: Record<string, number | null> = {};
             for (const model of config.models) {
-              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), liveAgenticScores(model));
+              priorPByModel[model.id] = blendedPriorP(liveAaIndex(model), benchmarkRow(model));
               blendedListPriceByModel[model.id] = null;
             }
 
@@ -2284,11 +2300,25 @@ export function createPlugin() {
               blendedListPriceByModel,
             );
 
-            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger });
+            // `computedAt` stamps the capture itself. Without it a stalled
+            // refresh (the failure TOG-2862 gates for) is undetectable from the
+            // stored state: the fleet keeps routing on whatever tiers the last
+            // successful pass wrote, and the spec-version guard cannot see it —
+            // that guard catches a code change, never a stale capture.
+            const computedAt = new Date().toISOString();
+            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger, computedAt });
             ctx.logger.info("model scores refreshed", {
               companyId: company.id,
               models: modelScores.length,
               cardsInLedger: cardRows.length,
+              tierSpecVersion: BENCHMARK_SPEC_VERSION,
+              computedAt,
+              retiered: retierings.length,
+              unscored: modelScores.filter((score) => score.derivedTier === null).length,
+              belowT3Floor: modelScores.filter((score) => score.belowT3Floor).length,
+              // Named, not just counted: a tier move is the one thing here an
+              // operator may need to reverse, and a bare count cannot be acted on.
+              retierings,
             });
           } catch (cause) {
             ctx.logger.error("score refresh failed for a company", {
