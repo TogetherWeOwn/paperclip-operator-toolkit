@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.model-selection";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.3.2";
+export const PLUGIN_VERSION = "0.4.0";
 
 export const TOOL_NAMES = {
   /** Advise a tier + model for one issue. Read-only, always safe to call. */
@@ -13,11 +13,15 @@ export const TOOL_NAMES = {
   /**
    * TOG-2137, Defect 3. Report where an agent's ancillary model pins
    * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
-   * ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree
-   * with the lane-aware T3 recommendation. Read-only, always advisory: there
-   * is no write path from this plugin to any of these surfaces (`ctx.agents`
-   * has no update method, and `ctx.http.fetch` is SSRF-blocked from the
-   * host's own internal API), so this can never be anything but a report.
+   * ANTHROPIC_DEFAULT_* env var) disagree with the lane-aware T3
+   * recommendation. Read-only, always advisory: there is no write path from
+   * this plugin to any of these surfaces (`ctx.agents` has no update method,
+   * and `ctx.http.fetch` is SSRF-blocked from the host's own internal API),
+   * so this can never be anything but a report.
+   *
+   * TOG-3348: `runtimeConfig.modelProfiles.cheap` was a fifth surface here
+   * until Paperclip migration 0236 (v2026.916.0) deleted it with no
+   * replacement; removed rather than kept as a frozen snapshot.
    */
   ancillaryDrift: "model_selection_ancillary_drift",
   /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (TOG-2438). */

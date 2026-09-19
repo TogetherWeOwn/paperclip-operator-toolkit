@@ -1716,7 +1716,6 @@ export function createPlugin() {
                     id: agent.id,
                     name: agent.name,
                     adapterConfig: asRecord(agent.adapterConfig),
-                    runtimeConfig: asRecord(agent.runtimeConfig),
                   },
                   recommendedModelId,
                   config.models,

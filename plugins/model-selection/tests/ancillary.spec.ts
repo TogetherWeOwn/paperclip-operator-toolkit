@@ -48,7 +48,6 @@ describe("readAncillarySurfaces", () => {
       id: "a1",
       name: "Agent",
       adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "claude-haiku-4-5-20251001" } },
-      runtimeConfig: null,
     });
     expect(readings).toEqual([
       { surface: "ANTHROPIC_SMALL_FAST_MODEL", currentModelId: "claude-haiku-4-5-20251001", unresolvable: false },
@@ -60,7 +59,6 @@ describe("readAncillarySurfaces", () => {
       id: "a1",
       name: "Agent",
       adapterConfig: { env: { ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: "claude-haiku-4-5-20251001" } } },
-      runtimeConfig: null,
     });
     expect(readings).toEqual([
       { surface: "ANTHROPIC_DEFAULT_HAIKU_MODEL", currentModelId: "claude-haiku-4-5-20251001", unresolvable: false },
@@ -72,25 +70,12 @@ describe("readAncillarySurfaces", () => {
       id: "a1",
       name: "Agent",
       adapterConfig: { env: { CLAUDE_CODE_SUBAGENT_MODEL: { type: "secret_ref", secretId: "sec-1" } } },
-      runtimeConfig: null,
     });
     expect(readings).toEqual([{ surface: "CLAUDE_CODE_SUBAGENT_MODEL", currentModelId: null, unresolvable: true }]);
   });
 
-  it("reads runtimeConfig.modelProfiles.cheap.adapterConfig.model", () => {
-    const readings = readAncillarySurfaces({
-      id: "a1",
-      name: "Agent",
-      adapterConfig: null,
-      runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { model: "claude-sonnet-5" } } } },
-    });
-    expect(readings).toEqual([
-      { surface: "runtimeConfig.modelProfiles.cheap", currentModelId: "claude-sonnet-5", unresolvable: false },
-    ]);
-  });
-
   it("reports nothing for an agent with no ancillary surfaces configured", () => {
-    expect(readAncillarySurfaces({ id: "a1", name: "Agent", adapterConfig: null, runtimeConfig: null })).toEqual([]);
+    expect(readAncillarySurfaces({ id: "a1", name: "Agent", adapterConfig: null })).toEqual([]);
   });
 
   it("reads every ANTHROPIC_DEFAULT_* key as its own surface, not just ANTHROPIC_DEFAULT_HAIKU_MODEL", () => {
@@ -104,7 +89,6 @@ describe("readAncillarySurfaces", () => {
           ANTHROPIC_DEFAULT_SONNET_MODEL: "model-f",
         },
       },
-      runtimeConfig: null,
     });
     expect(readings.map((r) => r.surface).sort()).toEqual(
       ["ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"].sort(),
@@ -123,15 +107,9 @@ describe("readAncillarySurfaces", () => {
           UNRELATED_VAR: "not-ancillary",
         },
       },
-      runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { model: "model-d" } } } },
     });
     expect(readings.map((r) => r.surface).sort()).toEqual(
-      [
-        "ANTHROPIC_SMALL_FAST_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "runtimeConfig.modelProfiles.cheap",
-      ].sort(),
+      ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"].sort(),
     );
   });
 });
@@ -141,7 +119,6 @@ describe("ancillaryDriftForAgent", () => {
     id: "a1",
     name: "Mechanical worker",
     adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "old-haiku" } },
-    runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { model: "cliproxy/claude-haiku-4-5-20251001" } } } },
   };
 
   it("reports only the surface that disagrees with the recommendation", () => {
@@ -163,7 +140,6 @@ describe("ancillaryDriftForAgent", () => {
         id: "a1",
         name: "Agent",
         adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "cliproxy/claude-haiku-4-5-20251001" } },
-        runtimeConfig: null,
       },
       "claude-haiku-4-5-20251001",
       MODELS,
@@ -177,7 +153,6 @@ describe("ancillaryDriftForAgent", () => {
         id: "a1",
         name: "Agent",
         adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: { type: "secret_ref", secretId: "sec-1" } } },
-        runtimeConfig: null,
       },
       "claude-haiku-4-5-20251001",
       MODELS,
@@ -187,20 +162,5 @@ describe("ancillaryDriftForAgent", () => {
 
   it("reports nothing when there is no recommendation to compare against", () => {
     expect(ancillaryDriftForAgent(agent, null)).toEqual([]);
-  });
-
-  it("gives the runtimeConfig.modelProfiles.cheap surface a distinct remediation naming the operator PATCH path", () => {
-    const drift = ancillaryDriftForAgent(
-      {
-        id: "a1",
-        name: "Agent",
-        adapterConfig: null,
-        runtimeConfig: { modelProfiles: { cheap: { adapterConfig: { model: "stale-model" } } } },
-      },
-      "claude-haiku-4-5-20251001",
-      MODELS,
-    );
-    expect(drift).toHaveLength(1);
-    expect(drift[0]?.remediation).toContain("PATCH /api/agents/{id}");
   });
 });

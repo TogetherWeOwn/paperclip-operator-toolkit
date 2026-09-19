@@ -244,7 +244,7 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Report ancillary model pin drift",
       description:
         "Report which agents' ancillary model pins (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every " +
-        "ANTHROPIC_DEFAULT_* env var, runtimeConfig.modelProfiles.cheap) disagree with the lane-aware T3 " +
+        "ANTHROPIC_DEFAULT_* env var) disagree with the lane-aware T3 " +
         "recommendation, and who must act on each surface. Read-only; there is no write path from this " +
         "plugin to any of these surfaces.",
       parametersSchema: { type: "object", additionalProperties: false, properties: {} } as unknown as Record<

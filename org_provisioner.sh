@@ -503,31 +503,60 @@ cmd_create() {
   # for an adapter that does not declare one would invent config the host would
   # then have to validate. Adapters are opted in here explicitly, never by
   # default -- a new adapter with the same defect must be added to this list.
+  #
+  # TOG-3348: Paperclip migration 0236 (v2026.916.0) deletes
+  # runtime_config.modelProfiles outright -- upstream PR #12683 removes the
+  # cheap/recovery model distinction entirely (recovery work now runs on the
+  # agent's single configured model, there is no replacement field) -- and
+  # `shared/validators/agent.ts` rejects the key on every write from then on.
+  # Dropping this block pre-upgrade would reopen TOG-689 today; sending it
+  # unconditionally post-upgrade would 400 every claude_local agent creation.
+  # Neither timing is known in advance from here, so `build_create_payload`
+  # is tried WITH the legacy field first and, only if the host's response
+  # names `modelProfiles` as the rejection, retried once WITHOUT it -- "attempt
+  # the action and read the failure reason," not a version guess.
   local payload out new_id cheap_profile_json='{}'
   case "$ADAPTER_TYPE" in
     claude_local) cheap_profile_json='{"cheap":{"enabled":false,"adapterConfig":{"effort":""}}}' ;;
   esac
-  payload="$(jq -cn \
-    --arg name "$title" --arg title "$title" --arg parent "$caller_id" \
-    --arg adapter "$ADAPTER_TYPE" --arg tpl "$template" --arg cap "$capabilities" \
-    --argjson cheap "$cheap_profile_json" \
-    --arg mode "$ASSIGNMENT_BASELINE_MODE" \
-    --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
-    --argjson budget "$AGENT_BUDGET_CENTS" '
-    {
-      name:$name, role:"general", title:$title, capabilities:$cap,
-      adapterType:$adapter, adapterConfig:{},
-      runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}
-                     + (if ($cheap|length) > 0 then {modelProfiles:$cheap} else {} end)),
-      budgetMonthlyCents:$budget,
-      permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:$can_assign,
-                   authorizationPolicy:{assignmentPolicy:{mode:$mode}}},
-      metadata:{permissionProfile:$tpl, provisionedBy:"org_provisioner"},
-      reportsTo:$parent
-    }')"
-  out="$(pc agent create --company-id "$COMPANY_ID" --payload-json "$payload" --json)"
-  new_id="$(jq -r '.id' <<<"$out")"
-  [[ -n "$new_id" && "$new_id" != "null" ]] || die "agent creation failed"
+
+  build_create_payload() {
+    local cheap="$1"
+    jq -cn \
+      --arg name "$title" --arg title "$title" --arg parent "$caller_id" \
+      --arg adapter "$ADAPTER_TYPE" --arg tpl "$template" --arg cap "$capabilities" \
+      --argjson cheap "$cheap" \
+      --arg mode "$ASSIGNMENT_BASELINE_MODE" \
+      --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
+      --argjson budget "$AGENT_BUDGET_CENTS" '
+      {
+        name:$name, role:"general", title:$title, capabilities:$cap,
+        adapterType:$adapter, adapterConfig:{},
+        runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}
+                       + (if ($cheap|length) > 0 then {modelProfiles:$cheap} else {} end)),
+        budgetMonthlyCents:$budget,
+        permissions:{canCreateAgents:false, canCreateSkills:false, canAssignTasks:$can_assign,
+                     authorizationPolicy:{assignmentPolicy:{mode:$mode}}},
+        metadata:{permissionProfile:$tpl, provisionedBy:"org_provisioner"},
+        reportsTo:$parent
+      }'
+  }
+
+  # Never let a validation rejection trip `set -e` here -- both attempts must
+  # run to completion so the fallback branch below can inspect the response.
+  try_create() { pc agent create --company-id "$COMPANY_ID" --payload-json "$1" --json 2>&1 || true; }
+
+  payload="$(build_create_payload "$cheap_profile_json")"
+  out="$(try_create "$payload")"
+  new_id="$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)"
+
+  if [[ -z "$new_id" && "$cheap_profile_json" != '{}' ]] && grep -qi 'modelprofiles' <<<"$out"; then
+    echo "NOTE: host rejected legacy runtimeConfig.modelProfiles (TOG-3348, migration 0236) -- retrying create without it" >&2
+    payload="$(build_create_payload '{}')"
+    out="$(try_create "$payload")"
+    new_id="$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)"
+  fi
+  [[ -n "$new_id" && "$new_id" != "null" ]] || die "agent creation failed: $out"
 
   # Invariant 11 (as amended by TOG-984): the assignment baseline, plus legacy
   # creator flags still off. Must run BEFORE the grant replacement, because this

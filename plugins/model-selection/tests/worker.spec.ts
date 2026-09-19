@@ -1009,9 +1009,6 @@ describe("worker", () => {
       const h = await boot(baseConfig(), issue(), [
         agentWith({
           adapterConfig: { env: { ANTHROPIC_SMALL_FAST_MODEL: "cliproxy/claude-haiku-4-5-20251001" } },
-          runtimeConfig: {
-            modelProfiles: { cheap: { adapterConfig: { model: "claude-haiku-4-5-20251001" } } },
-          },
         }),
       ]);
       const result = await h.executeTool(TOOL_NAMES.ancillaryDrift, {}, runCtx);

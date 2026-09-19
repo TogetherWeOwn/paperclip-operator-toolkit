@@ -14,8 +14,15 @@ import type { QualitySignal, SelectionDecision, VolumeProfile } from "./types.js
  * structurally (confirmed against the plugin SDK's actual client surface —
  * `ctx.agents` has no write method at all, and `ctx.http.fetch` is
  * SSRF-blocked from reaching the host's own internal API even as a
- * workaround). `docs/model-lane-probe.md` documents the same split for a
- * differently-authenticated probe tool.
+ * workaround).
+ *
+ * TOG-3348: `runtimeConfig.modelProfiles.cheap` was a fifth ancillary surface
+ * here until Paperclip migration 0236 (v2026.916.0) deleted the column with
+ * no replacement — there is no longer a distinct "cheap/recovery model"
+ * concept on the host at all, so there is nothing left to read or report
+ * drift against. Removed rather than snapshotted: a frozen copy of a value
+ * the host no longer has any concept of would just be reporting drift
+ * against a fiction.
  */
 export const ANCILLARY_ENV_KEYS = ["ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] as const;
 export type AncillaryEnvKey = (typeof ANCILLARY_ENV_KEYS)[number];
@@ -23,24 +30,10 @@ export type AncillaryEnvKey = (typeof ANCILLARY_ENV_KEYS)[number];
 /** Any env key in this family is an ancillary surface, not just `ANTHROPIC_DEFAULT_HAIKU_MODEL`. */
 export const ANTHROPIC_DEFAULT_PREFIX = "ANTHROPIC_DEFAULT_";
 
-/**
- * `MODEL_PROFILE_KEYS` (`@paperclipai/shared/constants.ts`) names exactly one
- * ancillary profile key today: `cheap`. This plugin has no write path to it
- * either — see `remediationFor` below — but a differently-authenticated
- * operator tool with a direct `PATCH /api/agents/{id}` can (`docs/model-lane-probe.md`),
- * which is why its remediation text differs from the env.* surfaces'.
- */
 export type AncillarySurfaceKey = string;
-export const CHEAP_PROFILE_SURFACE: AncillarySurfaceKey = "runtimeConfig.modelProfiles.cheap";
 
-/** Why this plugin cannot write the surface itself, and who can. */
-export function remediationFor(surface: AncillarySurfaceKey): string {
-  if (surface === CHEAP_PROFILE_SURFACE) {
-    return (
-      "no ctx.agents write method exists in the plugin SDK, so this plugin can only report the drift; " +
-      "a differently-authenticated operator tool with a direct PATCH /api/agents/{id} can act on it (docs/model-lane-probe.md)"
-    );
-  }
+/** Why this plugin cannot write the surface itself. */
+export function remediationFor(_surface: AncillarySurfaceKey): string {
   return "console only — adapterConfig is 403 to every agent, structurally; this plugin has no write path to it either";
 }
 
@@ -110,10 +103,9 @@ export interface AncillaryAgentLike {
   id: string;
   name: string;
   adapterConfig: Record<string, unknown> | null | undefined;
-  runtimeConfig: Record<string, unknown> | null | undefined;
 }
 
-/** Read the four ancillary surfaces off one agent. Read-only, same as everywhere else `ctx.agents` is used in this plugin. */
+/** Read the ancillary env surfaces off one agent. Read-only, same as everywhere else `ctx.agents` is used in this plugin. */
 export function readAncillarySurfaces(agent: AncillaryAgentLike): AncillarySurfaceReading[] {
   const readings: AncillarySurfaceReading[] = [];
 
@@ -128,27 +120,6 @@ export function readAncillarySurfaces(agent: AncillaryAgentLike): AncillarySurfa
       const { modelId, unresolvable } = envBindingModelId(env[key]);
       readings.push({ surface: key, currentModelId: modelId, unresolvable });
     }
-  }
-
-  const runtimeConfig =
-    agent.runtimeConfig && typeof agent.runtimeConfig === "object"
-      ? (agent.runtimeConfig as Record<string, unknown>)
-      : null;
-  const modelProfiles =
-    runtimeConfig && typeof runtimeConfig.modelProfiles === "object" && runtimeConfig.modelProfiles
-      ? (runtimeConfig.modelProfiles as Record<string, unknown>)
-      : null;
-  const cheap =
-    modelProfiles && typeof modelProfiles.cheap === "object" && modelProfiles.cheap
-      ? (modelProfiles.cheap as Record<string, unknown>)
-      : null;
-  if (cheap) {
-    const adapterConfig =
-      cheap.adapterConfig && typeof cheap.adapterConfig === "object"
-        ? (cheap.adapterConfig as Record<string, unknown>)
-        : null;
-    const modelId = adapterConfig && typeof adapterConfig.model === "string" ? adapterConfig.model : null;
-    readings.push({ surface: CHEAP_PROFILE_SURFACE, currentModelId: modelId, unresolvable: false });
   }
 
   return readings;
