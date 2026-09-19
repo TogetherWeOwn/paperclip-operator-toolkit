@@ -1417,6 +1417,14 @@ jobs:
       - name: model lane probe suite
         run: ./test_model_lane_probe.sh
 
+      # TOG-2897 / TOG-2391 AC3. A lane can advertise the server-side
+      # web_search tool, drop its manifest before dispatch, and still leave the
+      # surrounding agent run succeeded. The six offline controls pin the exact
+      # failure payload, the inline-200 and silent-memory variants, and the exit
+      # boundary: MANIFEST_DROP is 3 and pages; quota/transport is 4 and does not.
+      - name: web_search lane passthrough probe suite
+        run: python3 -m unittest -v test_websearch_lane_probe.py
+
       # TOG-894 ask 2. opencode_shared_budget_probe.sh decides whether the paid
       # OpenCode budget is SHARED across lanes or throttled per lane. The two
       # have opposite control surfaces: under sharing, a per-lane enable/disable
