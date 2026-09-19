@@ -444,15 +444,111 @@ test('an unreachable broker fails within the timeout rather than hanging', async
   try {
     const r = await run(
       ['credential', 'get'],
-      brokerEnv(b.base, { GH_APP_TOKEN_SOURCE: 'broker', GH_APP_BROKER_TIMEOUT_MS: '400' }),
+      brokerEnv(b.base, {
+        GH_APP_TOKEN_SOURCE: 'broker',
+        GH_APP_BROKER_TIMEOUT_MS: '400',
+        GH_APP_BROKER_RETRIES: '0',
+      }),
       { stdin: 'host=github.com\n' }
     )
     assert.equal(r.code, 1)
-    assert.match(r.stderr, /broker unreachable/)
+    assert.match(r.stderr, /broker timed out/)
+    assert.match(r.stderr, /GH_APP_BROKER_TIMEOUT_MS/)
     assert.match(r.stdout, /^quit=1$/m)
     assert.ok(Date.now() - started < 8000, `took ${Date.now() - started}ms`)
   } finally {
     await b.close()
+  }
+})
+
+// --- TOG-2899: retry-with-backoff on a transient broker failure -------------
+
+test('a timeout is retried before falling closed, and names the timeout knob', async () => {
+  const b = await stub(() => null) // accepts, never responds, every attempt
+  try {
+    const r = await run(
+      ['credential', 'get'],
+      brokerEnv(b.base, {
+        GH_APP_TOKEN_SOURCE: 'broker',
+        GH_APP_BROKER_TIMEOUT_MS: '300',
+        GH_APP_BROKER_RETRIES: '2',
+        GH_APP_BROKER_RETRY_DELAY_MS: '50',
+      }),
+      { stdin: 'host=github.com\n' }
+    )
+    assert.equal(r.code, 1)
+    assert.equal(b.calls.length, 3, 'one initial attempt plus two retries')
+    assert.match(r.stderr, /attempt 1\/3.*retrying in 50ms/)
+    assert.match(r.stderr, /attempt 2\/3.*retrying in 50ms/)
+    // Final failure still names the workaround.
+    assert.match(r.stderr, /broker timed out.*GH_APP_BROKER_TIMEOUT_MS/)
+  } finally {
+    await b.close()
+  }
+})
+
+test('a transient failure succeeds on retry without falling back to the PEM', async () => {
+  let calls = 0
+  const b = await stub(() => {
+    calls += 1
+    return calls === 1 ? [503, { error: 'busy' }] : brokerOk()()
+  })
+  const dir = scratch('retry-success')
+  try {
+    const r = await run(
+      ['credential', 'get'],
+      brokerEnv(b.base, { PAPERCLIP_RUN_SCRATCH_DIR: dir, GH_APP_BROKER_RETRY_DELAY_MS: '50' }),
+      { stdin: 'host=github.com\n' }
+    )
+    assert.equal(r.code, 0, r.stderr)
+    assert.ok(r.stdout.includes(FAKE_BROKER_TOKEN))
+    assert.equal(b.calls.length, 2)
+    assert.match(r.stderr, /broker refused \(503.*attempt 1\/2/)
+  } finally {
+    await b.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a definitive refusal (403) is not retried', async () => {
+  const b = await stub(() => [403, { error: 'nope' }])
+  try {
+    const r = await run(
+      ['credential', 'get'],
+      brokerEnv(b.base, { GH_APP_TOKEN_SOURCE: 'broker', GH_APP_BROKER_RETRY_DELAY_MS: '50' }),
+      { stdin: 'host=github.com\n' }
+    )
+    assert.equal(r.code, 1)
+    assert.equal(b.calls.length, 1, 'a definitive refusal must not be retried')
+    assert.doesNotMatch(r.stderr, /retrying/)
+  } finally {
+    await b.close()
+  }
+})
+
+test('a 404 (route absent) falls back to the PEM without a local retry', async () => {
+  const b = await stub(() => [404, { error: 'Unknown plugin' }])
+  const g = await stub(githubOk())
+  const dir = scratch('404-no-retry')
+  try {
+    const r = await run(
+      ['credential', 'get'],
+      brokerEnv(b.base, {
+        PAPERCLIP_RUN_SCRATCH_DIR: dir,
+        GH_API_URL: g.base,
+        GH_APP_ID: '1',
+        GH_APP_PRIVATE_KEY: PEM,
+        GH_APP_BROKER_RETRY_DELAY_MS: '50',
+      }),
+      { stdin: 'host=github.com\n' }
+    )
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal(b.calls.length, 1, 'a stable 404 must not be retried before falling back')
+    assert.doesNotMatch(r.stderr, /retrying/)
+  } finally {
+    await b.close()
+    await g.close()
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -484,6 +580,29 @@ test('source mode reports readiness and mints nothing', async () => {
     assert.equal(b.calls.length, 0, 'source must not mint')
     assert.ok(!r.stdout.includes('pk_test_key'), 'must not echo the API key')
     assert.ok(out.credentials.every((c) => /^(broker|pem):[0-9a-f]{16}$/.test(c)))
+  } finally {
+    await b.close()
+  }
+})
+
+test('source mode reports the TOG-2899 broker timeout/retry defaults, and their overrides', async () => {
+  const b = await stub(brokerOk())
+  try {
+    const defaults = await run(['source'], brokerEnv(b.base))
+    assert.equal(defaults.code, 0, defaults.stderr)
+    const d = JSON.parse(defaults.stdout).broker
+    assert.equal(d.timeoutMs, 60000)
+    assert.equal(d.retries, 1)
+    assert.equal(d.retryDelayMs, 1000)
+
+    const overridden = await run(
+      ['source'],
+      brokerEnv(b.base, { GH_APP_BROKER_TIMEOUT_MS: '5000', GH_APP_BROKER_RETRIES: '3', GH_APP_BROKER_RETRY_DELAY_MS: '250' })
+    )
+    const o = JSON.parse(overridden.stdout).broker
+    assert.equal(o.timeoutMs, 5000)
+    assert.equal(o.retries, 3)
+    assert.equal(o.retryDelayMs, 250)
   } finally {
     await b.close()
   }
