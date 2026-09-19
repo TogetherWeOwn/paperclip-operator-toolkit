@@ -19,75 +19,94 @@
 # would otherwise notice.
 #
 # ---------------------------------------------------------------------------
-# THE CENTRAL RULE: HTTP 200 IS NOT THE QUESTION. THE BILLING LEG IS.
+# THE LANE THIS WATCHES IS THE DIRECT CLIPROXY ENDPOINT, AND ONLY THAT.
+# (TOG-2927, 2026-09-16.)
 #
-# What must be true is that the request lands on the owner's SUBSCRIPTION
-# connection and cannot land anywhere else. That is a fact about routing, and
-# the only honest way to hold it is to MEASURE THE ROUTE.
+# Until 2026-09-13 the fleet reached models through OmniRoute, and this file was
+# built around that gateway's routing: a combo leg set from `GET /v1/combos` and
+# an `x-omniroute-provider` response header, used together to prove a request
+# landed on the owner's SUBSCRIPTION connection and could not fail over onto a
+# pay-as-you-go one.
+#
+# THE OWNER RETIRED THAT LANE. Owner rule 2026-09-13: everything except
+# Hindsight goes direct to CLIProxy, and the cutover completed 2026-09-16 07:36Z
+# (TOG-2880). Every agent in this company now runs with
+# `ANTHROPIC_BASE_URL=http://cliproxy:8317` — measured in-run 2026-09-16 — and no
+# fleet traffic transits OmniRoute.
+#
+# So the OmniRoute gates were not merely unused, they were UNANSWERABLE: the
+# direct endpoint serves neither `/v1/combos` nor `x-omniroute-provider`, and the
+# probe returned exit 5 UNKNOWN against a completely healthy lane, run after run
+# (TOG-2927, 2026-09-16 12:26Z — 77 surface rows, 2 ids, 0 alarms, 2 unmeasured;
+# both ids in fact answering 200). An UNKNOWN that nobody can ever clear is a
+# monitor being retired by attrition: it teaches its readers to skip it, which
+# destroys the signal exactly as thoroughly as a false page does.
+#
+# DO NOT RESTORE THE COMBO / PROVIDER GATES without first re-measuring that fleet
+# traffic transits OmniRoute again. Binding an OmniRoute credential so the old
+# gates could answer was proposed and REJECTED (TOG-2936; TOG-2933 cancelled) —
+# it would have measured, carefully, a lane nothing routes through.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS FILE NO LONGER TESTS FOR A `cliproxy/` PREFIX. (TOG-985.)
+# WHAT "PINNED" MEANS ON A DIRECT LANE — AND WHY IT IS STILL MEASURED.
 #
-# It used to. Until 2026-09-05 the pin gate was `[[ $model == cliproxy/* ]]`,
-# on the stated premise that "a BARE id fails OPEN onto a pay-as-you-go leg".
-# THAT PREMISE WAS WRONG ON THIS GATEWAY, and the gate built on it fired a
-# fleet-wide ALARM (TOG-985) against 24 agents carrying the ids the OWNER had
-# chosen the same evening. A monitor that pages on the owner's own correct
-# configuration is worse than no monitor: it is the signal-destroying kind.
+# The old question, "which of this gateway's connections got billed?", was a
+# question about FAN-OUT. A direct endpoint has none: no combo, no failover leg,
+# no second provider to fail open onto. That removes GATE A's dormant-leg case
+# as a fact about the world, not as an oversight.
 #
-# The correction, from the operator and then re-measured here independently on
-# 2026-09-05: on this OmniRoute the bare ids are COMBOS, not unrouted strings.
+# What it does NOT remove is the rule the whole file is built on: HTTP 200 IS NOT
+# THE QUESTION. A probe that only asks "did something answer 200?" is precisely
+# the status-only monitor the rest of this file argues against. On a direct lane
+# the question becomes WHICH LANE ANSWERED, and it is measured, in two places:
 #
-#     GET /v1/combos  ->  claude-sonnet-5   strategy=priority, exactly ONE leg
-#                         claude-opus-5     strategy=priority, exactly ONE leg
-#     both legs: providerId openai-compatible-chat-1628780c-…  (= cliproxy-main,
-#     the owner's subscription connection)
+#   GATE A — THE ENDPOINT PIN (configuration, no inference request).
+#     The base URL this probe will call must BE the fleet's lane,
+#     PINNED_LANE_ENDPOINT. A fleet quietly re-pointed at another endpoint —
+#     a second proxy, a PAYG-capable gateway, a stale host — would otherwise
+#     produce a green run against a lane nobody uses. Like the leg-set gate it
+#     replaces, it is a property of the CONFIGURATION, so it is answerable even
+#     when the gateway will not serve, and it therefore ranks above both network
+#     gates.
 #
-# And per-request, from the response headers of a live call:
+#   GATE B — THE SERVING LANE (measured, one request).
+#     CLIProxy stamps every response with its own trace header,
+#     `X-Cpa-Trace-Id` — measured live 2026-09-16 against http://cliproxy:8317,
+#     and advertised by that endpoint's own `Access-Control-Expose-Headers`
+#     alongside the rest of the `X-CPA-*` (CLIProxyAPI) namespace. A 200 that
+#     carries it was served BY CLIProxy. A 200 WITHOUT it was served by
+#     something else answering at this address, and that is `unmeasured` —
+#     alive is not the same as on the pinned lane — for exactly the reason a 200
+#     with no `x-omniroute-provider` used to be.
 #
-#     model=claude-sonnet-5           -> x-omniroute-decision: strategy=priority;
-#                                        provider=openai-compatible-chat-1628780c-…
-#     model=cliproxy/claude-sonnet-5  -> x-omniroute-decision: strategy=single;
-#                                        provider=openai-compatible-chat-1628780c-…
+#   GATE C — LIVENESS (the HTTP status). Unchanged.
 #
-# SAME CONNECTION. The prefixed form resolves directly; the bare form resolves
-# through a one-leg combo. Neither touches OpenRouter. There is no PAYG leg in
-# either. The prefix was never the property that mattered — it only correlated
-# with it on the day it was written.
+# ---------------------------------------------------------------------------
+# TWO RULES CARRIED OVER FROM THE OMNIROUTE ERA, BECAUSE THEY ARE STILL TRUE.
 #
-# The property that DOES matter is now checked directly, and in two places:
+# 1. THE PREFIX IS NOT THE PIN, AND PREFIXING IS NOT A FIX. (TOG-985.) Until
+#    2026-09-05 the pin gate here was `[[ $model == cliproxy/* ]]`, on the stated
+#    premise that a BARE id fails open onto a pay-as-you-go leg. That premise was
+#    wrong, and the gate built on it fired a fleet-wide ALARM against 24 agents
+#    carrying the ids the OWNER had chosen the same evening. A monitor that pages
+#    on the owner's own correct configuration is worse than no monitor. Decide by
+#    MEASUREMENT, never by the spelling of an id — and never "fix" a lane by
+#    decorating its id: `cliproxy/` is a provider NAMESPACE, so a wrong pairing
+#    produces an id nothing serves (`cliproxy/opencode-go/deepseek-v4-pro` -> 400
+#    model_not_found, measured 2026-09-03). Which spelling the fleet should carry
+#    is a question for the OWNER, who chooses the fleet's model ids. It is not a
+#    defect for this probe to page on.
 #
-#   GATE A — THE LEG SET (configuration, no inference request).
-#     If the id names a combo, EVERY leg of that combo must sit on the pinned
-#     connection. A one-leg cliproxy combo is PINNED. A combo with a second,
-#     openrouter leg is a genuine fail-open — it bills the subscription today
-#     and a PAYG account the first time the first leg errors — and no
-#     single request would ever reveal it. This is the gate the prefix test was
-#     reaching for, and it is strictly stronger: `hindsight/retain` is bare AND
-#     off-subscription (providerId=openrouter, measured cost 0.0000130000), and
-#     it is caught here while the prefix test would have caught it for the
-#     wrong reason and cleared `claude-sonnet-5` for the wrong reason too.
+# 2. REASONING EFFORT BELONGS IN THE REQUEST'S `effort` FIELD, NEVER GLUED ONTO
+#    THE MODEL STRING. A caller who "fixes" a lane by suffixing the id turns a
+#    working lane into a 400 — `cliproxy/claude-haiku-4-5-20251001-low` -> 400,
+#    measured. That lands on GATE C, and it is unchanged.
 #
-#   GATE B — THE RESOLVED PROVIDER (measured, one request).
-#     The gateway reports where the request actually went, in
-#     `x-omniroute-provider`. It must be the pinned connection. This catches a
-#     leg set that changed under us since the combo read, a prefixed id whose
-#     catalogue entry was repointed, and any route we have not thought of.
-#
-# Prefixing is therefore NOT a fix and this tool must never again recommend one.
-# `cliproxy/` is a provider NAMESPACE, not a string decoration: prefixing an id
-# from another namespace produces an id nothing serves —
-# `cliproxy/opencode-go/deepseek-v4-pro` -> 400 model_not_found, measured
-# 2026-09-03. Whether to prefer the prefixed form over the bare combo is a real
-# question (the prefixed form fails CLOSED if the combo is ever deleted) but it
-# is a question for the OWNER, who chooses the fleet's model ids. It is not a
-# defect for this probe to page on.
-#
-# STILL TRUE, AND STILL CHECKED, is the third trap: reasoning effort belongs in
-# the request's `effort` field, never glued onto the model string. A caller who
-# "fixes" a lane by suffixing the id turns a working lane into a 400 —
-# `cliproxy/claude-haiku-4-5-20251001-low` -> 400, measured. That is GATE C, the
-# plain liveness check, and it is unchanged.
+# A BOUNDARY WORTH KNOWING BEFORE READING AN ALARM: Hindsight is the one service
+# the owner exempted from the direct-CLIProxy rule. A Hindsight id is therefore
+# not servable here and would read as ALARM-dead — correctly, because this probe
+# reads the fleet's CHEAP/SMALL-FAST surfaces, and a lane that CLIProxy cannot
+# serve does not belong on one.
 #
 # ---------------------------------------------------------------------------
 # WHY IT READS TWO SURFACES AND REPORTS THEM SEPARATELY.
@@ -119,17 +138,17 @@
 # ---------------------------------------------------------------------------
 # WHY IT PROBES DISTINCT IDS, NOT AGENTS.
 #
-# 47 agents x 3 surfaces = 141 rows and, today, ONE distinct id. Probing per row
-# would fire 141 inference requests to learn one fact, against a gateway whose
-# quota this company has already drained once (TOG-477: an 89-minute drain became
-# a 5.5-hour outage). The probe is per DISTINCT id, and the report maps each
-# verdict back to every surface that referenced it — same coverage, 1 request.
+# 47 agents x 3 surfaces = 141 rows and, today, two distinct ids. Probing per row
+# would fire 141 inference requests to learn one fact, against a lane whose quota
+# this company has already drained once (TOG-477: an 89-minute drain became a
+# 5.5-hour outage). The probe is per DISTINCT id, and the report maps each
+# verdict back to every surface that referenced it — same coverage, 2 requests.
 #
 # ---------------------------------------------------------------------------
 # EXIT CODES — distinct so a caller can tell them apart.
-#   0  ok       — every referenced id resolves onto the pinned connection AND answers 200
+#   0  ok       — every referenced id is served by the pinned lane AND answers 200
 #   2  REFUSED  — bad usage or bad input
-#   3  ALARM    — an id is dead (non-200) or UNPINNED (routes off the pinned connection)
+#   3  ALARM    — an id is dead (non-200), or the lane is not the pinned one
 #   5  UNKNOWN  — could not measure. NOT green.
 # ===========================================================================
 set -uo pipefail
@@ -142,41 +161,50 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # the suite run in CI with no database and no gateway.
 #
 #   MODEL_SURFACE_SOURCE_CMD  stdout: agentId\tagentName\tsurface\tmodelId
-#   MODEL_PROBE_CMD           argv: <modelId>; stdout: "<httpCode>\t<body>\t<resolvedProvider>"
-#   COMBO_SOURCE_CMD          stdout: comboName\tlegProviderId  (one line per leg)
+#   MODEL_PROBE_CMD           argv: <modelId>; stdout: "<httpCode>\t<body>\t<servedByLane>"
 #
-# Absent, all three default to the real thing: pg_source.js and curl.
+# Absent, both default to the real thing: pg_source.js and curl.
 #
-# MODEL_PROBE_CMD GREW A THIRD FIELD (TOG-985) and old two-field stubs still
-# work: an absent third field is read as "the route was not reported", which is
+# THE THIRD FIELD IS THE MEASUREMENT, and an old two-field stub still works: an
+# absent third field is read as "the serving lane was not reported", which is
 # UNMEASURED rather than pinned. A seam that silently scored a missing
-# measurement as a pass would reintroduce the exact bug this rewrite removes.
+# measurement as a pass would reintroduce the exact bug TOG-985 cost a fleet-wide
+# false alarm to remove. (Before 2026-09-16 that field carried an OmniRoute
+# connection id; it now carries the endpoint that served the request. Same
+# contract, same failure-closed reading of an empty value.)
 MODEL_SURFACE_SOURCE_CMD="${MODEL_SURFACE_SOURCE_CMD:-}"
 MODEL_PROBE_CMD="${MODEL_PROBE_CMD:-}"
-COMBO_SOURCE_CMD="${COMBO_SOURCE_CMD:-}"
 
-# THE CONNECTION THE OWNER'S SUBSCRIPTION LIVES ON. This is the pin: an id is
-# pinned if and only if it routes here, whatever its name looks like.
+# THE LANE THE FLEET RUNS ON. This is the pin: an id is pinned if and only if the
+# request is served here.
 #
-# It is an opaque OmniRoute connection id, `openai-compatible-chat-<uuid>`,
-# which is the cliproxy-main connection (account `cliproxy-main`; see
-# omniroute/TOG-352-register-cliproxy.sh, which registers it and documents that
-# the generated id is `openai-compatible-chat-<uuid>`, NOT
-# `openai-compatible-<prefix>`). Verified live 2026-09-05 against
-# GET /v1/combos and the `x-omniroute-provider` response header.
+# It is the direct CLIProxy endpoint every agent in this company carries as
+# ANTHROPIC_BASE_URL (measured in-run 2026-09-16), after the 2026-09-13 owner
+# rule and the 2026-09-16 07:36Z cutover (TOG-2880) took OmniRoute out of the
+# path for everything except Hindsight.
 #
-# IT IS DELIBERATELY NOT DEFAULTED TO A PREFIX MATCH like `openai-compatible*`.
-# Any future OpenAI-compatible connection — including a PAYG one — would match
-# such a pattern, and the monitor would clear the very leg it exists to catch.
-PINNED_CONNECTION_ID="${PINNED_CONNECTION_ID:-openai-compatible-chat-1628780c-65a8-4743-82b6-afaa483f06a2}"
+# IT IS DELIBERATELY AN EXACT URL AND NOT A PATTERN like `http://cliproxy:*`.
+# Any future endpoint on that host — including one that fans out to a PAYG
+# provider — would match such a pattern, and the monitor would clear the very
+# drift it exists to catch.
+PINNED_LANE_ENDPOINT="${PINNED_LANE_ENDPOINT:-http://cliproxy:8317}"
+PINNED_LANE_ENDPOINT="${PINNED_LANE_ENDPOINT%/}"
 
-# The floor for "we actually read something". Today the fleet is 47 agents x 3
-# surfaces = 141. Pinned at 1 rather than 141 because this tool must stay
-# correct for a company of any size — a caller who wants the real floor sets it.
+# GATE B's marker. CLIProxy stamps its own trace id on every response; a 200
+# without it was served by something that is not CLIProxy, whatever address it
+# answered at. Overridable by NAME so a CLIProxy release that renames the header
+# is a one-variable fix rather than a silent stream of UNKNOWNs — but it is never
+# defaulted to empty, because an empty marker would clear every 200 that reached
+# anything at all.
+LANE_IDENTITY_HEADER="${LANE_IDENTITY_HEADER:-x-cpa-trace-id}"
+
+# The floor for "we actually read something". Today the fleet is 26 agents and 77
+# surface rows. Pinned at 1 rather than 77 because this tool must stay correct
+# for a company of any size — a caller who wants the real floor sets it.
 MIN_SURFACES_EXPECTED="${MIN_SURFACES_EXPECTED:-1}"
 
-# Per-request ceiling. The gateway is a proxy in front of a proxy; a hung leg
-# must not hold the probe open past its schedule interval.
+# Per-request ceiling. A hung lane must not hold the probe open past its
+# schedule interval.
 PROBE_MAX_TIME="${PROBE_MAX_TIME:-60}"
 
 # TOG-981. The liveness budget, and it is NOT a "how little can we ask for"
@@ -188,8 +216,7 @@ PROBE_MAX_TIME="${PROBE_MAX_TIME:-60}"
 #     {"code":"bad_gateway","message":"upstream returned an empty response
 #      without usable output"}
 #
-# Measured 2026-09-05 against the live gateway, 4 attempts per cell, on
-# `cliproxy/claude-sonnet-5` — an id that is prefix-pinned and completely
+# Measured 2026-09-05, 4 attempts per cell, on an id that was completely
 # healthy:
 #
 #     max_tokens=1     non-stream   0/4 200   <-- the old probe. FALSE ALARM-dead.
@@ -197,9 +224,9 @@ PROBE_MAX_TIME="${PROBE_MAX_TIME:-60}"
 #     max_tokens=1024  non-stream   4/4 200   <-- this setting
 #     max_tokens=1024  stream       4/4 200
 #
-# So the old value reported a healthy lane as DEAD on every reasoning model,
-# and would have paged an operator for a gateway that was serving fine. The
-# floor must sit above the reasoning preamble, not at 1.
+# So the old value reported a healthy lane as DEAD on every reasoning model, and
+# would have paged an operator for a lane that was serving fine. The floor must
+# sit above the reasoning preamble, not at 1.
 #
 # THIS DOES NOT WEAKEN DETECTION. The gates that catch a genuinely bad id are
 # resolution-time, not generation-time, so they fire before any token budget is
@@ -212,7 +239,7 @@ PROBE_MAX_TIME="${PROBE_MAX_TIME:-60}"
 #     cliproxy/claude-haiku-4-5-20251001     -> 200 (control, still passes)
 #
 # The cost of the larger budget is one short completion per DISTINCT id per run
-# (2 ids today, not 72 — see "WHY IT PROBES DISTINCT IDS" above), which is the
+# (2 ids today, not 77 — see "WHY IT PROBES DISTINCT IDS" above), which is the
 # quota this monitor was always meant to spend.
 PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-1024}"
 
@@ -235,10 +262,12 @@ options:
 
 exit: 0 ok · 2 refused · 3 ALARM (dead or unpinned) · 5 UNKNOWN (not measured)
 
-"pinned" means the request RESOLVES onto the owner's subscription connection —
-measured from the gateway's own x-omniroute-provider header and from the combo's
-leg set. It is NOT a test for a `cliproxy/` prefix; a bare id that names a
-single-leg combo on that connection is pinned, and prefixing an id is not a fix.
+"pinned" means the request is SERVED BY the fleet's own lane — the direct CLIProxy
+endpoint — measured from the endpoint the probe calls and from CLIProxy's own trace
+header on the response. It is NOT a test for a `cliproxy/` prefix; that string test
+was wrong and cost a fleet-wide false alarm (TOG-985), and prefixing an id is not a fix.
+OmniRoute's combo and provider gates were removed on 2026-09-16 because the owner
+retired that lane (TOG-2880/TOG-2927), not because the routing question stopped mattering.
 EOF
 }
 
@@ -264,81 +293,12 @@ read_surfaces() {
   "$HERE/pg_source.js" model-surfaces
 }
 
-# --- the combo leg set (GATE A) ---------------------------------------------
-# `comboName\tlegProviderId`, one line per leg. Read ONCE per run, from the same
-# gateway the probe talks to, with the same agent token — no management
-# credential and no database is needed for this.
-#
-# AN UNREADABLE COMBO LIST IS NOT AN EMPTY ONE. If this read fails, every bare
-# id becomes "not a known combo", which would score as a route we cannot vouch
-# for. That is handled at the call site as UNMEASURED, never as pinned and never
-# as an alarm — the combo table being unreachable says nothing about the fleet.
-COMBO_LEGS=""
-COMBO_LEGS_READ=0     # 0 = not attempted, 1 = read ok, 2 = read failed
-read_combo_legs() {
-  (( COMBO_LEGS_READ != 0 )) && return 0
-  local raw rc=0
-  if [[ -n "$COMBO_SOURCE_CMD" ]]; then
-    raw="$(eval "$COMBO_SOURCE_CMD" 2>/dev/null)" || rc=$?
-  else
-    if [[ -z "$ANTHROPIC_BASE_URL" ]]; then
-      rc=1
-    else
-      local token="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
-      if [[ -z "$token" ]]; then
-        rc=1
-      else
-        # Same /proc discipline as probe_model: the token goes in a 0600 config
-        # file, never on argv.
-        _ensure_rundir || return 1
-        raw="$(curl -sS --max-time "$PROBE_MAX_TIME" --config "$RUNDIR/auth.conf" \
-                 "${ANTHROPIC_BASE_URL%/}/v1/combos" 2>/dev/null \
-               | python3 -c '
-import json,sys
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-data = doc.get("data")
-if not isinstance(data, list):
-    sys.exit(1)
-for combo in data:
-    name = combo.get("name")
-    legs = combo.get("models")
-    if not name or not isinstance(legs, list) or not legs:
-        # A combo with no readable legs must not read as "no off-leg legs".
-        print("%s\t(unreadable)" % (name or "(unnamed)"))
-        continue
-    for leg in legs:
-        print("%s\t%s" % (name, leg.get("providerId") or "(none)"))
-')" || rc=$?
-      fi
-    fi
-  fi
-  if (( rc != 0 )) || [[ -z "$raw" ]]; then
-    COMBO_LEGS_READ=2
-    return 0
-  fi
-  COMBO_LEGS="$raw"
-  COMBO_LEGS_READ=1
-  return 0
-}
-
-# Echoes one of: pinned | offleg:<providerId> | notcombo | unknown
-combo_verdict_for() {
-  local want="$1"
-  read_combo_legs
-  (( COMBO_LEGS_READ == 2 )) && { printf 'unknown'; return 0; }
-  local name provider found=0 bad=""
-  while IFS=$'\t' read -r name provider; do
-    [[ "$name" == "$want" ]] || continue
-    found=1
-    [[ "$provider" == "$PINNED_CONNECTION_ID" ]] || bad="$provider"
-  done <<< "$COMBO_LEGS"
-  if (( found == 0 )); then printf 'notcombo'; return 0; fi
-  if [[ -n "$bad" ]]; then printf 'offleg:%s' "$bad"; return 0; fi
-  printf 'pinned'
-}
+# --- GATE A: the endpoint pin -----------------------------------------------
+# Configuration, not network. Echoes the endpoint this run will actually call,
+# or the empty string when the caller drives the probe through MODEL_PROBE_CMD
+# and has declared no endpoint — in which case the seam's own third field is the
+# only lane evidence there is, and GATE B carries the whole weight.
+lane_endpoint() { printf '%s' "${ANTHROPIC_BASE_URL%/}"; }
 
 # --- the probe --------------------------------------------------------------
 #
@@ -388,6 +348,7 @@ probe_model() {
 
   _ensure_rundir || return 1
 
+  local base="${ANTHROPIC_BASE_URL%/}"
   local body="$RUNDIR/resp.body" hdrs="$RUNDIR/resp.hdrs" code
   : > "$body"; : > "$hdrs"
   # This asks the lane "are you there", not for content — but it must ask with
@@ -402,24 +363,26 @@ probe_model() {
         --data-binary @- \
         -D "$hdrs" \
         -o "$body" -w '%{http_code}' \
-        "${ANTHROPIC_BASE_URL%/}/v1/messages" 2>/dev/null)"
+        "$base/v1/messages" 2>/dev/null)"
   # A code of 000 means no response completed. There is by definition no body,
   # and printing the stale file as one is how TOG-485 reported four failures
-  # that never happened. Same for the route: no response means no route was
-  # reported, and an empty third field is UNMEASURED downstream, not pinned.
+  # that never happened. Same for the lane: no response means nothing served it,
+  # and an empty third field is UNMEASURED downstream, not pinned.
   if [[ "$code" == "000" || -z "$code" ]]; then
     printf '000\t(no response completed)\t\n'
     return 0
   fi
-  # GATE B's measurement. `x-omniroute-provider` is the connection the gateway
-  # actually dispatched to — the single most load-bearing value in this file,
-  # because it is the billing leg stated by the thing that did the billing
-  # rather than inferred from the id's spelling.
-  local resolved
-  resolved="$(tr -d '\r' < "$hdrs" \
-              | sed -n 's/^[Xx]-[Oo]mniroute-[Pp]rovider:[[:space:]]*//p' \
-              | tail -n1)"
-  printf '%s\t%s\t%s\n' "$code" "$(tr -d '\n\r\t' < "$body" | cut -c1-200)" "$resolved"
+  # GATE B's measurement. The serving lane is reported as the endpoint that
+  # answered — and it is reported ONLY when CLIProxy's own trace header is on
+  # the response. Without that header something else answered at this address,
+  # and echoing the URL we dialled would be asserting the very thing the gate
+  # exists to check.
+  local marker served=""
+  marker="$(tr -d '\r' < "$hdrs" \
+            | sed -n "s/^[[:space:]]*$(printf '%s' "$LANE_IDENTITY_HEADER" | tr 'A-Z' 'a-z')[[:space:]]*:[[:space:]]*//Ip" \
+            | tail -n1)"
+  [[ -n "$marker" ]] && served="$base"
+  printf '%s\t%s\t%s\n' "$code" "$(tr -d '\n\r\t' < "$body" | cut -c1-200)" "$served"
 }
 
 json_str() {
@@ -540,58 +503,62 @@ cmd_check() {
   collect
 
   local alarms=0 checked=0 unmeasured=0
-  local model out code body resolved verdict reason legs
+  local model out code body served verdict reason
 
   if [[ -n "$SURFACE_FILTER" ]]; then
     echo "SCOPE: only surfaces containing \"$SURFACE_FILTER\". Other surfaces were NOT probed." >&2
+  fi
+
+  # GATE A, evaluated once for the run: the endpoint this probe will call must
+  # be the fleet's pinned lane. Empty means no endpoint was declared — the
+  # caller is driving the probe through the seam — and an absent declaration is
+  # not a mismatch.
+  local endpoint offpin=0
+  endpoint="$(lane_endpoint)"
+  if [[ -n "$endpoint" && "$endpoint" != "$PINNED_LANE_ENDPOINT" ]]; then
+    offpin=1
   fi
 
   while IFS= read -r model; do
     [[ -z "$model" ]] && continue
     checked=$((checked + 1))
 
-    # GATE A — the leg set. Configuration only, no inference request, so it is
-    # answerable even when the gateway will not serve. A combo whose legs are
-    # not ALL on the pinned connection is the real fail-open.
-    legs="$(combo_verdict_for "$model")"
-
-    # GATES B and C — where the request actually went, and whether it answered.
+    # GATES B and C — which lane served the request, and whether it answered.
     local prc=0
     out="$(probe_model "$model" 2>/dev/null)" || prc=$?
     if (( prc != 0 )); then
-      code=""; body="probe command exited $prc"; resolved=""
+      code=""; body="probe command exited $prc"; served=""
     else
-      # Three tab-separated fields. A two-field stub (the pre-TOG-985 seam
-      # shape) leaves `resolved` empty, which is unmeasured — never pinned.
+      # Three tab-separated fields. A two-field stub leaves `served` empty,
+      # which is unmeasured — never pinned.
       code="${out%%$'\t'*}"
       local rest="${out#*$'\t'}"
       if [[ "$rest" == "$out" ]]; then
-        body=""; resolved=""
+        body=""; served=""
       else
         body="${rest%%$'\t'*}"
-        resolved="${rest#*$'\t'}"
-        [[ "$resolved" == "$rest" ]] && resolved=""
+        served="${rest#*$'\t'}"
+        [[ "$served" == "$rest" ]] && served=""
       fi
     fi
 
     # A code of 000 is curl's "no response completed" — no request reached the
-    # gateway at all. `is_int 000` is TRUE and `000 != 200` is TRUE, so the
-    # obvious ordering reports an unreachable GATEWAY as a dead LANE and pages
+    # lane at all. `is_int 000` is TRUE and `000 != 200` is TRUE, so the
+    # obvious ordering reports an unreachable ENDPOINT as a dead LANE and pages
     # the wrong on-call for an outage that may be the network in between. It is
     # unmeasured, and it is the one non-integer-shaped value that still parses
     # as an integer.
     local measured=1
     if ! is_int "$code" || [[ "$code" == "000" ]]; then measured=0; fi
 
-    if [[ "$legs" == offleg:* ]]; then
-      # GATE A, ranked above BOTH network gates for the same reason the prefix
+    if (( offpin == 1 )); then
+      # GATE A, ranked above BOTH network gates for the same reason the leg-set
       # gate used to be: it is a property of the configuration, fully measured
-      # even when the gateway is unreachable. A combo with an off-connection leg
-      # serves the subscription today and bills elsewhere the moment the first
-      # leg errors — and NO single request would reveal it, because the request
-      # that reveals it is the one that fails over.
+      # even when the endpoint is unreachable. A run against an endpoint that is
+      # not the fleet's lane can only ever report on a lane nobody uses, and
+      # reporting THAT as green is the failure this whole file exists to end.
       verdict="ALARM-unpinned"
-      reason="combo '$model' has a leg on '${legs#offleg:}', not the pinned connection '$PINNED_CONNECTION_ID'. It fails OVER onto that leg, so it bills the wrong account on exactly the requests nobody is watching."
+      reason="this run probes '$endpoint', which is not the pinned lane '$PINNED_LANE_ENDPOINT'. Whatever it answers is a fact about some other endpoint, so it cannot clear the fleet's lane."
       alarms=$((alarms + 1))
     elif (( measured == 0 )); then
       # Could not tell. NOT a pass, and NOT an alarm either.
@@ -602,42 +569,28 @@ cmd_check() {
       verdict="ALARM-dead"
       reason="HTTP $code: ${body:-no body}"
       alarms=$((alarms + 1))
-    elif [[ -z "$resolved" ]]; then
-      # HTTP 200 but the gateway did not say where it went. The lane is alive
-      # and the BILLING LEG IS UNVERIFIED, which is the whole question — so this
-      # is unmeasured, not ok. Scoring it green here is precisely how a
-      # status-only monitor stays green through a fail-open.
+    elif [[ -z "$served" ]]; then
+      # HTTP 200 but nothing identified the lane that served it. The id is alive
+      # and THE LANE IS UNVERIFIED, which is the whole question — so this is
+      # unmeasured, not ok. Scoring it green here is precisely how a status-only
+      # monitor stays green while pointed at the wrong thing.
       verdict="unmeasured"
-      reason="HTTP 200 but no x-omniroute-provider header, so the billing leg was NOT verified. Alive is not the same as pinned."
+      reason="HTTP 200 but no $LANE_IDENTITY_HEADER header, so the lane that served it was NOT identified. Alive is not the same as on the pinned lane."
       unmeasured=$((unmeasured + 1))
-    elif [[ "$resolved" != "$PINNED_CONNECTION_ID" ]]; then
-      # GATE B. The gateway itself says the request went somewhere else.
+    elif [[ "${served%/}" != "$PINNED_LANE_ENDPOINT" ]]; then
+      # GATE B. Something other than the fleet's lane answered.
       verdict="ALARM-unpinned"
-      reason="HTTP 200 but the gateway resolved it onto '$resolved', not the pinned connection '$PINNED_CONNECTION_ID'. Live, and billed to the wrong account."
+      reason="HTTP 200 but it was served by '$served', not the pinned lane '$PINNED_LANE_ENDPOINT'. Live, on a lane the fleet does not route through."
       alarms=$((alarms + 1))
-    elif [[ "$legs" == "unknown" ]]; then
-      # The route was measured and is correct, but the combo table could not be
-      # read, so a second failover leg cannot be ruled out. Half-measured.
-      verdict="unmeasured"
-      reason="HTTP 200 and resolved onto the pinned connection, but the combo list could not be read, so a dormant failover leg could not be ruled out."
-      unmeasured=$((unmeasured + 1))
     else
       verdict="ok"
-      # Say WHICH of the two shapes cleared it. "pinned" and "notcombo" are both
-      # fine and they are fine for different reasons; collapsing them is how the
-      # last reader concluded the prefix was the property that mattered.
-      if [[ "$legs" == "pinned" ]]; then
-        reason="HTTP 200, resolved onto the pinned connection; combo with every leg on it"
-      else
-        reason="HTTP 200, resolved onto the pinned connection; direct id, not a combo"
-      fi
+      reason="HTTP 200, served by the pinned lane $PINNED_LANE_ENDPOINT (identified by $LANE_IDENTITY_HEADER)"
     fi
 
     if (( AS_JSON == 1 )); then
-      printf '{"model":%s,"verdict":%s,"httpCode":%s,"resolvedProvider":%s,"pinnedConnection":%s,"comboLegs":%s,"reason":%s,"referencedBy":%d}\n' \
+      printf '{"model":%s,"verdict":%s,"httpCode":%s,"servedBy":%s,"pinnedLane":%s,"reason":%s,"referencedBy":%d}\n' \
         "$(json_str "$model")" "$(json_str "$verdict")" "$(json_str "${code:-}")" \
-        "$(json_str "${resolved:-}")" "$(json_str "$PINNED_CONNECTION_ID")" \
-        "$(json_str "$legs")" \
+        "$(json_str "${served:-}")" "$(json_str "$PINNED_LANE_ENDPOINT")" \
         "$(json_str "$reason")" "$(refs_for "$model" | wc -l)"
     else
       printf '%-16s %s\n' "$verdict" "$model"

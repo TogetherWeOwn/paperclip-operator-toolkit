@@ -8,43 +8,48 @@
 # same way the roster arrives through ROSTER_SOURCE_CMD in
 # test_quota_brake.sh. That is what lets CI run this.
 #
-# THE FIXTURES ARE REAL. Every model id, HTTP code, combo leg set and resolved
-# provider below was measured against the live gateway — the liveness codes on
-# 2026-08-30, and the routing facts on 2026-09-05 (TOG-985):
+# THE LANE UNDER TEST CHANGED ON 2026-09-16 (TOG-2927). The owner retired
+# OmniRoute for everything but Hindsight (2026-09-13 rule; 07:36Z cutover,
+# TOG-2880), so the fleet now reaches models at the direct CLIProxy endpoint and
+# the probe's routing gates are about THAT lane. The combo/provider fixtures
+# that used to live here described a gateway no fleet traffic transits; they are
+# gone, and the assertions they carried are re-expressed against the direct lane
+# rather than dropped. See §2.
 #
-#     cliproxy/claude-haiku-4-5-20251001      -> 200, provider=<PINNED>
-#     cliproxy/claude-sonnet-5                -> 200, provider=<PINNED>, strategy=single
-#     claude-sonnet-5                (BARE)   -> 200, provider=<PINNED>, strategy=priority
-#                                                one-leg combo on <PINNED>
-#     hindsight/retain               (BARE)   -> 200, provider=openrouter,
-#                                                cost 0.0000130000 — a REAL off-leg
+# THE FIXTURES ARE REAL. Every model id, HTTP code and serving-lane fact below
+# was measured against the live lane — the liveness codes on 2026-08-30 and
+# 2026-09-05, and the direct-lane facts in-run on 2026-09-16:
+#
+#     claude-haiku-4-5-20251001               -> 200 from http://cliproxy:8317,
+#                                                x-cpa-trace-id present
+#     gpt-5.6-luna                            -> 200 from http://cliproxy:8317,
+#                                                x-cpa-trace-id present
+#     claude-sonnet-5                (BARE)   -> 200 from http://cliproxy:8317
 #     cliproxy/claude-haiku-4-5      (undated)-> 400 unknown provider for model
 #     cliproxy/claude-haiku-4-5-20251001-low  -> 400 unknown provider for model
 #
-# where <PINNED> is openai-compatible-chat-1628780c-… = cliproxy-main, the
-# owner's subscription connection.
-#
 # WHAT THIS SUITE IS BUILT TO CATCH, beyond the happy path:
 #
-#  * THE FAIL-OPEN, WHICH IS A ROUTE AND NOT A SPELLING. Section 2 pins that an
-#    id resolving onto a connection other than the owner's subscription is an
-#    ALARM at HTTP 200, and — the part with teeth — that a combo carrying a
-#    DORMANT off-connection failover leg alarms even while every request today
-#    succeeds on the right leg. No single request reveals that one; only the leg
-#    set does.
+#  * THE FAIL-OPEN, WHICH IS A LANE AND NOT A SPELLING. Section 2 pins that an
+#    id answering 200 from an endpoint other than the fleet's own lane is an
+#    ALARM, and — the part with teeth — that a run POINTED at the wrong endpoint
+#    alarms even when its probe cannot complete at all. That one is the direct
+#    heir of the dormant-failover-leg case: it is a property of configuration, so
+#    no single successful request can clear it and no failed one can hide it.
 #
 #  * THE FALSE ALARM THIS SUITE ONCE ENFORCED. Section 2b pins the TOG-985
-#    regression directly: a bare id that resolves onto the pinned connection is
-#    OK, exit 0. The old suite asserted the opposite — it required an ALARM on
-#    any id lacking a `cliproxy/` prefix — and that assertion is why the probe
-#    paged the fleet over the owner's own chosen model ids. A monitor that fires
-#    on a correct configuration destroys the signal exactly as thoroughly as one
-#    that stays silent on a broken one, so both directions are pinned here.
+#    regression directly: a bare id served by the pinned lane is OK, exit 0. The
+#    old suite asserted the opposite — it required an ALARM on any id lacking a
+#    `cliproxy/` prefix — and that assertion is why the probe paged the fleet
+#    over the owner's own chosen model ids. A monitor that fires on a correct
+#    configuration destroys the signal exactly as thoroughly as one that stays
+#    silent on a broken one, so both directions are pinned here.
 #
 #  * A MONITOR THAT READS GREEN WHILE BLIND. Section 4 asserts that an
-#    unreadable source, ZERO surface rows, a short read and a probe that
-#    returns no HTTP status all exit non-zero — 5, never 0. Zero alarms counted
-#    from a source that never answered is "never ran", not "clean".
+#    unreadable source, ZERO surface rows, a short read, a probe that returns no
+#    HTTP status, and a 200 whose serving lane was never identified all exit
+#    non-zero — 5, never 0. Zero alarms counted from a source that never
+#    answered is "never ran", not "clean".
 #
 #  * ONE SURFACE FIXED, THE OTHER STILL DEAD. Section 3 is TOG-679/TOG-680's
 #    actual disagreement replayed: adapterConfig pinned and healthy while
@@ -81,16 +86,10 @@ export MODEL_SURFACE_SOURCE_CMD="false"
 export MODEL_PROBE_CMD="false"
 unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY 2>/dev/null || true
 
-# The connection the fixtures treat as the owner's subscription. Pinned to the
-# real id so a fixture and the shipped default can never disagree silently.
-PINNED_CONN='openai-compatible-chat-1628780c-65a8-4743-82b6-afaa483f06a2'
-export PINNED_CONNECTION_ID="$PINNED_CONN"
-
-# Most sections are about liveness and coverage, not about combos, and for those
-# every id under test is a direct (non-combo) id. An empty combo list would be
-# read as "could not read", so the default emits one unrelated row: a readable
-# list in which nothing under test is a combo.
-export COMBO_SOURCE_CMD="printf 'unrelated/combo\t%s\n' '$PINNED_CONN'"
+# The lane the fixtures treat as the fleet's own. Pinned to the real endpoint so
+# a fixture and the shipped default can never disagree silently.
+PINNED_LANE='http://cliproxy:8317'
+export PINNED_LANE_ENDPOINT="$PINNED_LANE"
 
 # --- fixture helpers --------------------------------------------------------
 
@@ -116,37 +115,33 @@ surfaces() {
   printf 'cat %q' "$f"
 }
 
-# A probe that answers from a lookup table: "<model>=<code>:<body>" pairs.
-# An id absent from the table is a test-authoring bug and answers 000, which
-# the tool reports as unmeasured rather than as a pass.
+# A probe that answers from a lookup table: "<model>=<code>:<body>" pairs, with
+# an optional "@<servingLane>" suffix.
 #
-# The resolved provider is the THIRD field the tool now reads (TOG-985). It
-# defaults to the pinned connection so that the many cases here that are about
-# liveness do not each have to restate the routing; a case that is ABOUT routing
-# passes a "<model>=<code>:<body>:<provider>" triple, and `probe_table_noroute`
-# below emits the old two-field shape on purpose.
+# An id absent from the table is a test-authoring bug and answers 000, which the
+# tool reports as unmeasured rather than as a pass.
+#
+# The serving lane is the THIRD field the tool reads. It defaults to the pinned
+# lane so that the many cases here that are about LIVENESS do not each have to
+# restate the routing; a case that is ABOUT routing appends `@<endpoint>`, and
+# `probe_table_nolane` below emits the two-field shape on purpose. The suffix is
+# split at the LAST `@` — a JSON body may contain colons, which is why the lane
+# cannot simply be the last colon-separated field.
 probe_table() {
   local f; f="$(new_fixture probe.sh)"
   {
     echo '#!/usr/bin/env bash'
     echo 'case "$1" in'
-    local pair model rest code body provider
+    local pair model rest code body lane
     for pair in "$@"; do
       model="${pair%%=*}"; rest="${pair#*=}"
-      code="${rest%%:*}"; rest="${rest#*:}"
-      # The body may itself contain colons (it is JSON), so the provider is
-      # taken from the LAST colon-separated field and only when it looks like a
-      # provider id rather than part of the JSON.
-      provider="$PINNED_CONN"
-      if [[ "$rest" == *:* ]]; then
-        local tail="${rest##*:}"
-        if [[ "$tail" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-          provider="$tail"; rest="${rest%:*}"
-        fi
+      lane="$PINNED_LANE"
+      if [[ "$rest" == *@* ]]; then
+        lane="${rest##*@}"; rest="${rest%@*}"
       fi
-      body="$rest"
+      code="${rest%%:*}"; body="${rest#*:}"
       printf '  %q) printf "%%s\\t%%s\\t%%s\\n" %q %q %q ;;\n' \
-        "$model" "$code" "$body" "$provider"
+        "$model" "$code" "$body" "$lane"
     done
     echo '  *) printf "000\t(no response completed)\t\n" ;;'
     echo 'esac'
@@ -155,10 +150,10 @@ probe_table() {
   printf '%q' "$f"
 }
 
-# A probe stub emitting the PRE-TOG-985 two-field shape: code and body, no
-# resolved provider. The tool must read the missing route as unmeasured.
-probe_table_noroute() {
-  local f; f="$(new_fixture probe_noroute.sh)"
+# A probe stub emitting the two-field shape: code and body, no serving lane. The
+# tool must read the missing measurement as unmeasured.
+probe_table_nolane() {
+  local f; f="$(new_fixture probe_nolane.sh)"
   {
     echo '#!/usr/bin/env bash'
     echo 'case "$1" in'
@@ -173,23 +168,6 @@ probe_table_noroute() {
   } > "$f"
   chmod +x "$f"
   printf '%q' "$f"
-}
-
-# A combo list source: "<comboName>=<providerId>[,<providerId>...]" pairs.
-combo_table() {
-  local f; f="$(new_fixture combos.tsv)"
-  local pair name legs leg
-  : > "$f"
-  for pair in "$@"; do
-    name="${pair%%=*}"; legs="${pair#*=}"
-    while [[ -n "$legs" ]]; do
-      leg="${legs%%,*}"
-      printf '%s\t%s\n' "$name" "$leg" >> "$f"
-      [[ "$legs" == *,* ]] || break
-      legs="${legs#*,}"
-    done
-  done
-  printf 'cat %q' "$f"
 }
 
 # run <expected_exit> <name> <expect_substr> -- runs $TOOL with the given args.
@@ -217,25 +195,25 @@ BARE='claude-haiku-4-5-20251001'
 UNDATED='cliproxy/claude-haiku-4-5'
 LOW='cliproxy/claude-haiku-4-5-20251001-low'
 
-# The bare id at the centre of TOG-985: a one-leg combo on the pinned
-# connection. Correct, and the old prefix gate alarmed on it.
+# The bare id at the centre of TOG-985. Correct, and the old prefix gate alarmed
+# on it.
 COMBO_OK='claude-sonnet-5'
-# A bare id that really is off-subscription. Measured: provider=openrouter.
-OFFLEG='hindsight/retain'
+# An endpoint that is not the fleet's lane.
+OTHER_LANE='http://some-other-gateway:9999'
 
 SF='adapterConfig.env.ANTHROPIC_SMALL_FAST_MODEL'
 DH='adapterConfig.env.ANTHROPIC_DEFAULT_HAIKU_MODEL'
 CH='runtimeConfig.modelProfiles.cheap'
 
 # ===========================================================================
-sect "1. the healthy fleet — every surface pinned and live"
+sect "1. the healthy fleet — every surface on the pinned lane and live"
 # ===========================================================================
 MODEL_SURFACE_SOURCE_CMD="$(surfaces \
   "a1	Agent One	$SF	$PINNED" \
   "a1	Agent One	$DH	$PINNED" \
   "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="$(probe_table "$PINNED=200:{\"id\":\"msg_x\"}")" \
-run 0 "all three surfaces pinned and 200 -> ok" "HTTP 200, resolved onto the pinned connection" check
+run 0 "all three surfaces on the pinned lane and 200 -> ok" "served by the pinned lane" check
 
 # The coverage claim is that BOTH surfaces were looked at. If the report does
 # not name them, a reader cannot tell a two-surface probe from a one-surface
@@ -252,101 +230,99 @@ MODEL_SURFACE_SOURCE_CMD="$(surfaces \
 MODEL_PROBE_CMD="$(probe_table "$PINNED=200:ok")" \
 run 0 "the healthy report names the runtimeConfig surface" "$CH" check
 
+# The healthy reason must name the lane and the evidence that identified it. A
+# bare "ok" cannot be told apart from a status-only monitor's "ok".
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
+MODEL_PROBE_CMD="$(probe_table "$PINNED=200:ok")" \
+run 0 "the ok reason names the lane it was served by" "$PINNED_LANE" check
+
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
+MODEL_PROBE_CMD="$(probe_table "$PINNED=200:ok")" \
+run 0 "the ok reason names the header that identified the lane" "x-cpa-trace-id" check
+
 # ===========================================================================
-sect "2. THE FAIL-OPEN — an id that routes off the subscription, at HTTP 200"
+sect "2. THE FAIL-OPEN — a lane that is not the fleet's, at HTTP 200"
 # ===========================================================================
-# The gateway itself reports the connection it dispatched to. An id that
-# answers 200 from the WRONG connection is live, is billed to the wrong
-# account, and is invisible to every status-only monitor. If this assertion is
-# ever relaxed to "200 is fine", the tool stops detecting the harder of its two
-# failures.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:{\"id\":\"gen_x\"}:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
-run 3 "an id resolving onto openrouter at HTTP 200 -> ALARM-unpinned" "ALARM-unpinned" check
+# An id that answers 200 from an endpoint the fleet does not route through is
+# live and is telling you nothing about the fleet. If this assertion is ever
+# relaxed to "200 is fine", the tool stops detecting the harder of its two
+# failures and becomes a curl in a loop.
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:{\"id\":\"msg_x\"}@$OTHER_LANE")" \
+run 3 "an id served by another endpoint at HTTP 200 -> ALARM-unpinned" "ALARM-unpinned" check
 
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:{\"id\":\"gen_x\"}:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
-run 3 "the unpinned alarm names the connection it actually reached" "openrouter" check
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:{\"id\":\"msg_x\"}@$OTHER_LANE")" \
+run 3 "the unpinned alarm names the lane it actually reached" "$OTHER_LANE" check
 
-# THE DORMANT LEG — the case no single request can reveal. Every request today
-# succeeds on the pinned leg; the combo carries a second, openrouter leg that
-# takes over the first time the pinned one errors. The route measurement alone
-# would call this healthy. Only the leg set catches it, and this is the
-# assertion that makes GATE A worth having.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:{\"id\":\"msg_x\"}")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN,openrouter")" \
-run 3 "a combo with a DORMANT off-connection failover leg -> ALARM-unpinned" \
-  "ALARM-unpinned" check
+# THE CONFIGURATION CASE — the direct heir of the dormant-failover-leg test. The
+# probe is POINTED at an endpoint that is not the fleet's lane. Every request it
+# makes could succeed and it would still have measured the wrong thing, so this
+# must alarm on configuration alone, BEFORE any network result, and it must
+# alarm even when the probe cannot complete at all.
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
+ANTHROPIC_BASE_URL="$OTHER_LANE" \
+run 3 "a run pointed at a non-pinned endpoint -> ALARM-unpinned" "ALARM-unpinned" check
 
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:{\"id\":\"msg_x\"}")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN,openrouter")" \
-run 3 "the dormant-leg alarm explains the failover, not a live misroute" \
-  "fails OVER" check
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="false" \
+ANTHROPIC_BASE_URL="$OTHER_LANE" \
+run 3 "the endpoint pin alarms even when the probe cannot run" "ALARM-unpinned" check
+
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="false" \
+ANTHROPIC_BASE_URL="$OTHER_LANE" \
+run 3 "the endpoint-pin alarm explains that it measured another endpoint" \
+  "cannot clear the fleet's lane" check
+
+# ...and a trailing slash is the same endpoint, not a different one. A monitor
+# that pages on a URL's punctuation is a monitor that gets silenced.
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok")" \
+ANTHROPIC_BASE_URL="$PINNED_LANE/" \
+run 0 "a trailing slash on the base URL is still the pinned lane" "served by the pinned lane" check
 
 # An alarm must name the agents to fix. A finding with no fix list is a page
 # with no runbook.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
 run 3 "an alarm names the affected agent" "Agent One" check
 
 # ===========================================================================
-sect "2b. THE TOG-985 REGRESSION — a bare id on the subscription is NOT an alarm"
+sect "2b. THE TOG-985 REGRESSION — a bare id on the pinned lane is NOT an alarm"
 # ===========================================================================
 # This is the assertion the old suite had INVERTED. It required an ALARM on any
 # id without a `cliproxy/` prefix, so when the owner set the fleet's cheap
-# profile to `claude-sonnet-5` — a one-leg combo on the subscription — the probe
-# paged on 24 agents that were configured exactly as intended. Measured
-# 2026-09-05: `claude-sonnet-5` resolves to strategy=priority, provider =
-# the pinned connection, one leg, no OpenRouter anywhere in it.
+# profile to a bare id the probe paged on 24 agents that were configured exactly
+# as intended. The prefix was never the property that mattered — the lane is.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
 MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:{\"id\":\"msg_x\"}")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN")" \
-run 0 "a bare one-leg combo on the pinned connection -> ok, NOT an alarm" \
-  "HTTP 200, resolved onto the pinned connection" check
-
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:{\"id\":\"msg_x\"}")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN")" \
-run 0 "the ok reason says WHY a bare id cleared: every combo leg is pinned" \
-  "combo with every leg on it" check
+run 0 "a bare id served by the pinned lane -> ok, NOT an alarm" \
+  "served by the pinned lane" check
 
 # The whole fleet on the owner's bare id is a clean run, not a 24-agent page.
 FLEET=(); for i in $(seq 1 24); do FLEET+=("a$i	Agent $i	$CH	$COMBO_OK"); done
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "${FLEET[@]}")" \
 MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:ok")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN")" \
 run 0 "24 agents on the owner's bare id -> 0 alarms" "0 alarm(s)" check
 
 # The prefixed form is equally fine — this is NOT a rule that bans the prefix,
-# only one that stops treating it as the measurement. Both spellings reach the
-# same connection (measured: strategy=single vs strategy=priority, same
-# provider), so both are ok and neither is a "fix" for the other.
+# only one that stops treating it as the measurement. Both spellings are ok when
+# the pinned lane serves them, and neither is a "fix" for the other.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces \
   "a1	Agent One	$CH	$COMBO_OK" \
   "a2	Agent Two	$CH	cliproxy/claude-sonnet-5")" \
 MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:ok" "cliproxy/claude-sonnet-5=200:ok")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN")" \
 run 0 "bare and prefixed forms of the same model are both ok" "0 alarm(s)" check
 
-# ...and the direct id's reason must say it cleared as a direct id, not as a
-# combo whose legs were checked. Collapsing those two is how a reader concludes
-# the prefix was the property that mattered.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a2	Agent Two	$CH	cliproxy/claude-sonnet-5")" \
-MODEL_PROBE_CMD="$(probe_table "cliproxy/claude-sonnet-5=200:ok")" \
-run 0 "a direct (non-combo) id says so in its reason" "direct id, not a combo" check
-
-# THE PREFIX MUST NOT BE THE TEST. A prefixed id that routes somewhere else is
-# an alarm despite the prefix — the mirror of the case above, and the reason
-# the string test cannot be kept "as a cheap first check".
+# THE PREFIX MUST NOT BE THE TEST. A prefixed id served by another endpoint is
+# an alarm despite the prefix — the mirror of the case above, and the reason the
+# string test cannot be kept "as a cheap first check".
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	cliproxy/claude-sonnet-5")" \
-MODEL_PROBE_CMD="$(probe_table "cliproxy/claude-sonnet-5=200:ok:some-other-connection")" \
-run 3 "a PREFIXED id that resolves elsewhere is still ALARM-unpinned" \
-  "some-other-connection" check
+MODEL_PROBE_CMD="$(probe_table "cliproxy/claude-sonnet-5=200:ok@$OTHER_LANE")" \
+run 3 "a PREFIXED id served by another endpoint is still ALARM-unpinned" \
+  "$OTHER_LANE" check
 
 # ===========================================================================
 sect "3. a dead lane, and ONE SURFACE FIXED WHILE THE OTHER IS NOT"
@@ -365,9 +341,9 @@ MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$LOW")" \
 MODEL_PROBE_CMD="$(probe_table "$LOW=400:{\"error\":{\"message\":\"unknown provider for model claude-haiku-4-5-20251001-low\"}}")" \
 run 3 "-low suffixed id -> ALARM-dead" "ALARM-dead" check
 
-# THE TOG-679/TOG-680 DISAGREEMENT, REPLAYED. adapterConfig is pinned and
-# healthy; runtimeConfig.modelProfiles.cheap is undated and dead. A tool that
-# collapsed the two surfaces would probe the first id it saw and exit 0.
+# THE TOG-679/TOG-680 DISAGREEMENT, REPLAYED. adapterConfig is healthy;
+# runtimeConfig.modelProfiles.cheap is undated and dead. A tool that collapsed
+# the two surfaces would probe the first id it saw and exit 0.
 DRIFT_SRC="$(surfaces \
   "a1	Agent One	$SF	$PINNED" \
   "a1	Agent One	$DH	$PINNED" \
@@ -406,23 +382,23 @@ run 5 "an unreadable surface source -> UNKNOWN, never 0" "could not read the mod
 MODEL_SURFACE_SOURCE_CMD="true" \
 run 5 "ZERO surface rows -> UNKNOWN, never 0" "Zero rows is 'never looked'" check
 
-# The floor. A source that answers with three rows when the fleet is 141 has
+# The floor. A source that answers with three rows when the fleet is 77 has
 # half-failed, and half-failing must not read as a clean fleet.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="$(probe_table "$PINNED=200:ok")" \
-MIN_SURFACES_EXPECTED=141 \
+MIN_SURFACES_EXPECTED=77 \
 run 5 "a short read against the expected floor -> UNKNOWN" "not a clean fleet" check
 
 # A probe that returns no HTTP status is neither a pass nor an alarm: reporting
-# an unreachable gateway as a dead lane pages the wrong on-call.
+# an unreachable endpoint as a dead lane pages the wrong on-call.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="false" \
 run 5 "a probe command that fails -> UNKNOWN, not ALARM" "unmeasured" check
 
 # HTTP 000 is curl's "no response completed" — it means the request never
-# reached the gateway. `is_int 000` is TRUE and `000 != 200` is TRUE, so the
-# naive ordering scores it as a DEAD LANE and pages the model owner for what
-# may be a network fault. It is unmeasured.
+# reached the lane. `is_int 000` is TRUE and `000 != 200` is TRUE, so the naive
+# ordering scores it as a DEAD LANE and pages the model owner for what may be a
+# network fault. It is unmeasured.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="$(probe_table "other/model=200:ok")" \
 run 5 "an HTTP code of 000 -> UNKNOWN, not a dead lane" "no HTTP status" check
@@ -431,40 +407,21 @@ MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="$(probe_table "other/model=200:ok")" \
 run 5 "an HTTP code of 000 is not reported as ALARM-dead" "unmeasured" check
 
-# GATE A reads the CONFIGURED LEG SET, so it is fully measured even when the
-# gateway will not serve a request. A combo with an off-connection leg must
-# alarm regardless — the billing exposure is there whether or not the lane
-# answers today.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="false" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=$PINNED_CONN,openrouter")" \
-run 3 "an off-leg combo alarms even when the probe cannot run" "ALARM-unpinned" check
-
-# THE MISSING MEASUREMENT MUST NOT READ AS A PASS. Two ways the route can go
-# unmeasured, and both are exit 5: the seam emits the old two-field shape, or
-# the gateway answers 200 without the header. "Alive" is not "pinned", and
-# scoring either as ok is how a status-only monitor stays green through a
-# fail-open.
+# THE MISSING MEASUREMENT MUST NOT READ AS A PASS. A 200 whose serving lane was
+# never identified is `unmeasured`: "alive" is not "on the pinned lane", and
+# scoring it green is how a status-only monitor stays green while pointed at
+# something else wearing the right address. This is the assertion that carried
+# the whole exit-5 result of 2026-09-16 — it must keep its teeth on the lane the
+# fleet actually uses, not be relaxed because the old gateway's header is gone.
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
-MODEL_PROBE_CMD="$(probe_table_noroute "$PINNED=200:ok")" \
-run 5 "a probe that reports no resolved provider -> UNKNOWN, not ok" \
-  "billing leg was NOT verified" check
+MODEL_PROBE_CMD="$(probe_table_nolane "$PINNED=200:ok")" \
+run 5 "a probe that reports no serving lane -> UNKNOWN, not ok" \
+  "was NOT identified" check
 
-# The combo list being unreadable is also not a pass: a dormant failover leg
-# cannot be ruled out, even though the route we measured was correct.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:ok")" \
-COMBO_SOURCE_CMD="false" \
-run 5 "an unreadable combo list -> UNKNOWN, not ok" \
-  "dormant failover leg could not be ruled out" check
-
-# A combo whose legs come back unreadable must not be scored as a combo with no
-# off-legs. It is an off-leg of unknown provider, which is an alarm.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$COMBO_OK")" \
-MODEL_PROBE_CMD="$(probe_table "$COMBO_OK=200:ok")" \
-COMBO_SOURCE_CMD="$(combo_table "$COMBO_OK=(unreadable)")" \
-run 3 "a combo with unreadable legs is an alarm, not an empty leg set" \
-  "ALARM-unpinned" check
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
+MODEL_PROBE_CMD="$(probe_table_nolane "$PINNED=200:ok")" \
+run 5 "the unidentified-lane reason says alive is not pinned" \
+  "Alive is not the same as on the pinned lane" check
 
 # A row that lost a column is corruption, not an absent model id. `IFS=$'\t'
 # read` shifts every field left on a short row, so the model id would silently
@@ -484,7 +441,7 @@ run 2 "a non-integer floor is REFUSED, not silently zero" "must be an integer" c
 sect "5. a filtered run must never read as full coverage"
 # ===========================================================================
 MODEL_SURFACE_SOURCE_CMD="$DRIFT_SRC" MODEL_PROBE_CMD="$DRIFT_PROBE" \
-run 0 "--surface can prove the adapterConfig half alone" "HTTP 200, resolved onto the pinned connection" \
+run 0 "--surface can prove the adapterConfig half alone" "served by the pinned lane" \
   check --surface adapterConfig
 
 MODEL_SURFACE_SOURCE_CMD="$DRIFT_SRC" MODEL_PROBE_CMD="$DRIFT_PROBE" \
@@ -513,7 +470,7 @@ run 0 "surfaces lists the inventory without touching the network" "$CH" surfaces
 
 # The quiet path must stay small enough to read. 47 agents x 3 surfaces is 141
 # lines of "everything is fine" on every scheduled run, and an alarm buried in
-# 141 lines is an alarm nobody sees.
+# 141 lines is invisible.
 BIG=(); for i in $(seq 1 47); do
   BIG+=("a$i	Agent $i	$SF	$PINNED" "a$i	Agent $i	$DH	$PINNED" "a$i	Agent $i	$CH	$PINNED")
 done
@@ -535,10 +492,9 @@ run 0 "the collapsed report still totals 141 surface rows" "across 141 surface r
 
 # A capped alarm list must say it was capped. A silently truncated list reads
 # as the whole fix list.
-BIG_OFF=(); for i in $(seq 1 47); do BIG_OFF+=("a$i	Agent $i	$CH	$OFFLEG"); done
+BIG_OFF=(); for i in $(seq 1 47); do BIG_OFF+=("a$i	Agent $i	$CH	$BARE"); done
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "${BIG_OFF[@]}")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
 run 3 "a capped alarm list says it was capped" "WITHHELD" check
 
 MODEL_SURFACE_SOURCE_CMD="$DRIFT_SRC" MODEL_PROBE_CMD="$DRIFT_PROBE" \
@@ -547,24 +503,21 @@ run 3 "--json carries the dead verdict" '"verdict":"ALARM-dead"' check --json
 MODEL_SURFACE_SOURCE_CMD="$DRIFT_SRC" MODEL_PROBE_CMD="$DRIFT_PROBE" \
 run 3 "--json carries the healthy id alongside it" '"verdict":"ok"' check --json
 
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
 run 3 "--json distinguishes unpinned from dead" '"verdict":"ALARM-unpinned"' check --json
 
 # The JSON must carry the MEASUREMENT, not just the verdict. An alerting
-# pipeline that cannot see which connection was reached cannot tell a real
-# misroute from a monitor bug — which is the whole of TOG-985.
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
-run 3 "--json carries the resolved provider" '"resolvedProvider":"openrouter"' check --json
+# pipeline that cannot see which lane was reached cannot tell a real misroute
+# from a monitor bug — which is the whole of TOG-985.
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
+run 3 "--json carries the lane that served it" "\"servedBy\":\"$OTHER_LANE\"" check --json
 
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
-run 3 "--json carries the connection it was compared against" \
-  "\"pinnedConnection\":\"$PINNED_CONN\"" check --json
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
+run 3 "--json carries the lane it was compared against" \
+  "\"pinnedLane\":\"$PINNED_LANE\"" check --json
 
 # One JSON object per DISTINCT id — not per surface row. 141 rows referencing
 # one id is one line, which is what makes the JSONL usable as an alert payload.
@@ -583,14 +536,13 @@ MODEL_PROBE_CMD="$(probe_table "other/model=200:ok")" \
 run 5 "--json carries the unmeasured verdict" '"verdict":"unmeasured"' check --json
 
 # ===========================================================================
-sect "7. the liveness budget — the probe must not manufacture its own 502 (TOG-981)"
+sect "7. the REAL request — budget, and the header that identifies the lane"
 # ===========================================================================
-# WHAT BROKE. The probe asked for `max_tokens: 1`, reasoning as if the cheapest
-# possible request were the safest one. On a REASONING model that budget is
-# consumed before the first output token exists, so the gateway returns an
-# EMPTY upstream body and renders it as 502 bad_gateway. Measured 2026-09-05
-# against the live gateway on `cliproxy/claude-sonnet-5` — prefix-pinned and
-# entirely healthy — 4 attempts per cell:
+# WHAT BROKE (TOG-981). The probe asked for `max_tokens: 1`, reasoning as if the
+# cheapest possible request were the safest one. On a REASONING model that
+# budget is consumed before the first output token exists, so the gateway
+# returns an EMPTY upstream body and renders it as 502 bad_gateway. Measured
+# 2026-09-05, 4 attempts per cell, on an entirely healthy id:
 #
 #     max_tokens=1     non-stream   0/4 200   <-- the old probe. FALSE ALARM-dead.
 #     max_tokens=1024  non-stream   4/4 200
@@ -601,21 +553,28 @@ sect "7. the liveness budget — the probe must not manufacture its own 502 (TOG
 # pages while the system is fine. Both destroy the signal.
 #
 # These cases pin the REAL curl path, which the MODEL_PROBE_CMD seam bypasses —
-# so they assert on the request the tool would actually send. A stub `curl` on
-# PATH captures the body; no network is touched.
+# so they assert on the request the tool would actually send, and on how it
+# reads the response. A stub `curl` on PATH captures the body; no network is
+# touched.
+#
+# `emit_marker` decides whether the stub stamps CLIProxy's trace header on its
+# response, which is the tool's only evidence of WHICH lane answered.
 budget_probe() {
-  local capture="$1" bindir; bindir="$(mktemp -d "$WORK/bin.XXXXXXXX")"
+  local capture="$1" emit_marker="${2:-1}" bindir
+  bindir="$(mktemp -d "$WORK/bin.XXXXXXXX")"
   {
     echo '#!/usr/bin/env bash'
     # curl is invoked with --data-binary @- : the payload arrives on stdin.
     printf 'cat > %q\n' "$capture"
     echo 'printf "200"'
     # -o <file> is where the tool expects the body and -D <file> the headers.
-    # The stub must supply the provider header, or these cases would go
-    # unmeasured for a reason that has nothing to do with the token budget.
     echo 'while [[ $# -gt 0 ]]; do'
     echo '  [[ "$1" == "-o" ]] && printf "{}" > "$2"'
-    printf '  [[ "$1" == "-D" ]] && printf "HTTP/1.1 200 OK\\r\\nx-omniroute-provider: %%s\\r\\n" %q > "$2"\n' "$PINNED_CONN"
+    if [[ "$emit_marker" == "1" ]]; then
+      echo '  [[ "$1" == "-D" ]] && printf "HTTP/1.1 200 OK\r\nX-Cpa-Trace-Id: 20260916-abc\r\n" > "$2"'
+    else
+      echo '  [[ "$1" == "-D" ]] && printf "HTTP/1.1 200 OK\r\n" > "$2"'
+    fi
     echo '  shift'
     echo 'done'
     echo 'exit 0'
@@ -628,7 +587,7 @@ CAP="$WORK/sent-default.json"
 BIN="$(budget_probe "$CAP")"
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="" \
-ANTHROPIC_BASE_URL="http://stub.invalid" ANTHROPIC_AUTH_TOKEN="t" \
+ANTHROPIC_BASE_URL="$PINNED_LANE" ANTHROPIC_AUTH_TOKEN="t" \
 PATH="$BIN:$PATH" "$TOOL" check >/dev/null 2>&1
 sent_mt="$(sed -n 's/.*"max_tokens":\([0-9]*\).*/\1/p' "$CAP" 2>/dev/null)"
 if [[ -n "$sent_mt" ]] && (( sent_mt >= 512 )); then
@@ -643,12 +602,43 @@ CAP2="$WORK/sent-override.json"
 BIN2="$(budget_probe "$CAP2")"
 MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
 MODEL_PROBE_CMD="" PROBE_MAX_TOKENS=777 \
-ANTHROPIC_BASE_URL="http://stub.invalid" ANTHROPIC_AUTH_TOKEN="t" \
+ANTHROPIC_BASE_URL="$PINNED_LANE" ANTHROPIC_AUTH_TOKEN="t" \
 PATH="$BIN2:$PATH" "$TOOL" check >/dev/null 2>&1
 if grep -q '"max_tokens":777' "$CAP2" 2>/dev/null; then
   ok "PROBE_MAX_TOKENS overrides the default"
 else
   bad "PROBE_MAX_TOKENS did not reach the request body"
+fi
+
+# THE REAL PATH MUST READ THE HEADER, NOT ASSUME IT. These two cases differ in
+# exactly one byte of the stubbed response — whether CLIProxy's trace header is
+# present — and they must produce different verdicts. If the tool ever reports
+# the URL it dialled as the lane that served the request, both go green and
+# GATE B becomes decoration.
+CAP3="$WORK/sent-marker.json"
+BIN3="$(budget_probe "$CAP3" 1)"
+rc=0
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
+MODEL_PROBE_CMD="" \
+ANTHROPIC_BASE_URL="$PINNED_LANE" ANTHROPIC_AUTH_TOKEN="t" \
+PATH="$BIN3:$PATH" "$TOOL" check >/dev/null 2>&1 || rc=$?
+if [[ "$rc" == "0" ]]; then
+  ok "the real path clears a 200 that carries CLIProxy's trace header"
+else
+  bad "the real path exited $rc on a 200 carrying the trace header, wanted 0"
+fi
+
+CAP4="$WORK/sent-nomarker.json"
+BIN4="$(budget_probe "$CAP4" 0)"
+out4=""; rc=0
+out4="$(MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$PINNED")" \
+  MODEL_PROBE_CMD="" \
+  ANTHROPIC_BASE_URL="$PINNED_LANE" ANTHROPIC_AUTH_TOKEN="t" \
+  PATH="$BIN4:$PATH" "$TOOL" check 2>&1)" || rc=$?
+if [[ "$rc" == "5" && "$out4" == *"was NOT identified"* ]]; then
+  ok "the real path reports a 200 WITHOUT the trace header as unmeasured"
+else
+  bad "the real path exited $rc on a 200 with no trace header, wanted 5 (unmeasured)"
 fi
 
 # THE BUDGET MUST NOT BUY SILENCE. A larger max_tokens changes only how much
@@ -658,10 +648,9 @@ MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$UNDATED")" \
 MODEL_PROBE_CMD="$(probe_table "$UNDATED=400:{\"error\":{\"message\":\"unknown provider for model claude-haiku-4-5\"}}")" \
 run 3 "a resolution-time 400 still alarms at the larger budget" "ALARM-dead" check
 
-MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$OFFLEG")" \
-MODEL_PROBE_CMD="$(probe_table "$OFFLEG=200:ok:openrouter")" \
-COMBO_SOURCE_CMD="$(combo_table "$OFFLEG=openrouter")" \
-run 3 "the off-connection fail-open still alarms at the larger budget" "ALARM-unpinned" check
+MODEL_SURFACE_SOURCE_CMD="$(surfaces "a1	Agent One	$CH	$BARE")" \
+MODEL_PROBE_CMD="$(probe_table "$BARE=200:ok@$OTHER_LANE")" \
+run 3 "the off-lane fail-open still alarms at the larger budget" "ALARM-unpinned" check
 
 # ===========================================================================
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

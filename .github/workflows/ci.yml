@@ -1376,27 +1376,32 @@ jobs:
       # THE ASSERTIONS THAT MATTER MOST ARE §2 AND §2b, AND THEY PULL IN
       # OPPOSITE DIRECTIONS ON PURPOSE.
       #
-      # §2 is the fail-open: an id that answers HTTP 200 from the WRONG
-      # connection is live, is billed to the wrong account, and is invisible to
-      # every status-only monitor — harder to see than a dead lane, which at
-      # least breaks. Measured 2026-09-05: `hindsight/retain` returns 200 with
-      # provider=openrouter and a real cost. §2 also pins the case no single
-      # request can reveal — a combo carrying a DORMANT off-connection failover
-      # leg, correct on every request until the pinned leg errors. If §2 ever
-      # "simplifies" to "200 is fine", the tool stops detecting what it exists
-      # for.
+      # THE LANE IT WATCHES CHANGED ON 2026-09-16 (TOG-2927). The owner retired
+      # OmniRoute for everything but Hindsight, so the probe measures the direct
+      # endpoint `http://cliproxy:8317` and the combo / x-omniroute-provider
+      # gates are GONE. Do not restore them: with no OmniRoute credential in the
+      # run environment they are unanswerable, which made the scheduled check
+      # return exit 5 over 77 healthy rows. A standing UNKNOWN destroys the
+      # signal exactly as thoroughly as a standing false alarm.
+      #
+      # §2 is the fail-open: an id that answers HTTP 200 from an endpoint the
+      # fleet does not route through is live and tells you nothing — harder to
+      # see than a dead lane, which at least breaks. §2 also pins the case no
+      # single request can reveal: a run POINTED at the wrong endpoint alarms on
+      # configuration alone, even when its probe cannot complete at all. If §2
+      # ever "simplifies" to "200 is fine", the tool stops detecting what it
+      # exists for and becomes a curl in a loop.
       #
       # §2b is the other cliff, and it is a REGRESSION TEST FOR THIS MONITOR
       # (TOG-985). The pin gate used to be a string test for a `cliproxy/`
-      # prefix. That premise was false on this gateway — the bare ids are
-      # single-leg combos on the SAME subscription connection — so the probe
-      # paged on all 24 agents over ids the owner had deliberately chosen. §2b
-      # pins that a bare id resolving onto the pinned connection is exit 0. Do
-      # not "restore" the prefix check as a cheap first gate: §2b's last case
-      # pins that a PREFIXED id resolving elsewhere is still an alarm, which is
-      # the same fact from the other side. A monitor that fires on a correct
-      # configuration destroys the signal exactly as thoroughly as one that
-      # stays silent on a broken one.
+      # prefix. That premise was false — the prefix only ever correlated with
+      # the property that mattered — so the probe paged on all 24 agents over ids
+      # the owner had deliberately chosen. §2b pins that a bare id served by the
+      # pinned lane is exit 0. Do not "restore" the prefix check as a cheap first
+      # gate: §2b's last case pins that a PREFIXED id served elsewhere is still
+      # an alarm, which is the same fact from the other side. A monitor that
+      # fires on a correct configuration destroys the signal exactly as
+      # thoroughly as one that stays silent on a broken one.
       #
       # §3 replays the TOG-679/TOG-680 disagreement: adapterConfig pinned and
       # healthy while runtimeConfig.modelProfiles.cheap is undated and 400. The
@@ -1406,14 +1411,20 @@ jobs:
       # §4 is the blind-monitor half: an unreadable source, zero surface rows, a
       # short read, and HTTP 000 all exit 5 and never 0. 000 is curl's "no
       # response completed" and it parses as an integer that is not 200, so the
-      # naive ordering reports an unreachable gateway as a dead lane. §4 also
-      # covers the two ways the ROUTE can go unmeasured — a 200 with no
-      # x-omniroute-provider header, and an unreadable combo list — because
-      # "alive" is not "pinned" and scoring either as ok is how a status-only
-      # monitor stays green straight through a fail-open.
+      # naive ordering reports an unreachable endpoint as a dead lane. §4 also
+      # covers the way the ROUTE goes unmeasured — a 200 carrying no
+      # X-Cpa-Trace-Id, so the endpoint that served it was never identified —
+      # because "alive" is not "on the pinned lane" and scoring that as ok is how
+      # a status-only monitor stays green straight through a fail-open.
       #
-      # Offline: the surface rows, the HTTP result and the combo leg set all
-      # arrive through *_CMD seams, so there is no database and no gateway.
+      # §7 separates those two on the REAL curl path, not through the seam: two
+      # stubbed responses differing in exactly one byte (the trace header present
+      # or absent) must give exit 0 and exit 5. If the tool ever reported the URL
+      # it DIALLED as the lane that SERVED, both go green and the gate is
+      # decoration.
+      #
+      # Offline: the surface rows and the HTTP result arrive through *_CMD seams,
+      # and §7's real-path cases stub `curl` on PATH — no database, no network.
       - name: model lane probe suite
         run: ./test_model_lane_probe.sh
 

@@ -16,79 +16,81 @@ The cheap/small-fast profile is also the **recovery** profile. A dead value here
 make small calls fail — it blocks status-recovery itself, which is the mechanism that would
 otherwise notice the failure. That is the loop TOG-679 sat inside for a day.
 
-## HTTP 200 is not the question — the billing leg is
+## The lane this watches is the direct CLIProxy endpoint, and only that
 
-This is the part that makes the probe worth more than a curl in a loop.
+**Changed 2026-09-16 (TOG-2927) by owner rule.** The owner's 2026-09-13 decision routes
+everything except Hindsight straight to CLIProxy, and the 07:36Z cutover (TOG-2880) completed it.
+The OmniRoute gateway is therefore not a lane the fleet transits any more, so this probe measures
+`http://cliproxy:8317` — the endpoint the fleet's own runs are configured with — and nothing else.
 
-| Model id | HTTP | Resolves onto | What it means |
+**Do not restore the combo / provider gates.** They read `GET /v1/combos` and
+`x-omniroute-provider` on the retired gateway. With no OmniRoute credential in the run
+environment they are unanswerable, and an unanswerable gate is `unmeasured`: on 2026-09-16 the
+scheduled check returned **exit 5 across 77 healthy surface rows** for exactly that reason, and
+the first reading of it was that the lane needed a credential binding. It did not. The binding
+proposal (TOG-2936) was **rejected** and TOG-2933 was **cancelled**; the owner's instruction was
+to treat the OmniRoute row as *removed, not red*. Restoring those gates re-creates a standing
+exit-5, which is the same destroyed signal as a false alarm. Anyone reversing this must first
+re-measure that fleet traffic actually transits OmniRoute again.
+
+### HTTP 200 is not the question — which lane served it is
+
+That distinction survives the cutover intact; only the lane it is asked about changed.
+
+| Model id | HTTP | Served by | What it means |
 |---|---|---|---|
-| `cliproxy/claude-haiku-4-5-20251001` | **200** | pinned connection | pinned, direct id |
-| `cliproxy/claude-sonnet-5` | **200** | pinned connection | pinned, `strategy=single` |
-| `claude-sonnet-5` (bare) | **200** | pinned connection | pinned — a **one-leg combo**, `strategy=priority` |
-| `hindsight/retain` (bare) | **200** | **`openrouter`** | genuinely off-subscription; measured cost `0.0000130000` |
+| `claude-haiku-4-5-20251001` | **200** | `http://cliproxy:8317` | live on the fleet's lane |
+| `gpt-5.6-luna` | **200** | `http://cliproxy:8317` | live on the fleet's lane |
+| `claude-sonnet-5` (bare) | **200** | `http://cliproxy:8317` | live — the bare form is fine (see below) |
 | `cliproxy/claude-haiku-4-5` (undated) | 400 | — | `unknown provider for model claude-haiku-4-5` |
 | `cliproxy/claude-haiku-4-5-20251001-low` | 400 | — | effort belongs in the `effort` field, not the id |
 
-Two ids can both answer 200 and bill different accounts. A status-only monitor cannot tell them
-apart, and the misrouted case is the harder of the two to notice — nothing breaks, the bill just
-moves. So the probe measures **where the request went**, and `ALARM-unpinned` is not a lesser
-finding than `ALARM-dead`.
+Two endpoints can both answer 200 for the same model id. A status-only monitor cannot tell them
+apart, and the misrouted case is the harder of the two to notice — nothing breaks. So the probe
+measures **where the request went**, and `ALARM-unpinned` is not a lesser finding than
+`ALARM-dead`.
 
 ### The `cliproxy/` prefix was the wrong test, and it cost a fleet-wide false alarm
 
 Until 2026-09-05 the pin gate was a string test, `[[ $model == cliproxy/* ]]`, on the premise
-that a bare id "fails open onto a PAYG leg". **That premise is false on this gateway**, and the
-gate built on it fired TOG-985: an ALARM against all 24 agents, on the ids the *owner* had chosen
-that same evening. A monitor that pages on a correct configuration destroys the signal exactly as
-thoroughly as one that stays quiet on a broken one.
+that a bare id "fails open onto a PAYG leg". **That premise was false then and is still false**,
+and the gate built on it fired TOG-985: an ALARM against all 24 agents, on the ids the *owner* had
+chosen that same evening. A monitor that pages on a correct configuration destroys the signal
+exactly as thoroughly as one that stays quiet on a broken one.
 
-What is actually true here, re-measured independently on 2026-09-05:
+`cliproxy/` is a provider namespace, not a string decoration: prefixing an id from another
+namespace yields an id nothing serves (`cliproxy/opencode-go/deepseek-v4-pro` → 400
+`model_not_found`, measured 2026-09-03). **Prefixing is not a fix and this probe must never
+recommend one.** Which spelling the fleet prefers is a question for the **owner**, who chooses the
+model ids, not a defect for a monitor to page on.
 
-```
-GET /v1/combos
-  claude-sonnet-5   strategy=priority, ONE leg  -> openai-compatible-chat-1628780c-…
-  claude-opus-5     strategy=priority, ONE leg  -> openai-compatible-chat-1628780c-…
-```
-
-and per request, from the gateway's own response headers:
-
-```
-model=claude-sonnet-5           x-omniroute-decision: strategy=priority; provider=openai-compatible-chat-1628780c-…
-model=cliproxy/claude-sonnet-5  x-omniroute-decision: strategy=single;   provider=openai-compatible-chat-1628780c-…
-```
-
-Same connection — `cliproxy-main`, the owner's subscription. The prefixed form resolves directly;
-the bare form resolves through a one-leg combo. Neither touches OpenRouter. The prefix only ever
-*correlated* with the property that mattered, on the day it was written.
-
-**Prefixing is not a fix and this probe must never recommend one.** `cliproxy/` is a provider
-namespace, not a string decoration: prefixing an id from another namespace yields an id nothing
-serves (`cliproxy/opencode-go/deepseek-v4-pro` → 400 `model_not_found`, measured 2026-09-03).
-Whether the fleet should prefer the prefixed form is a real question — it fails *closed* if the
-combo is ever deleted — but it is a question for the **owner**, who chooses the model ids, not a
-defect for a monitor to page on.
-
-### What replaced it: three gates, all measured
+### The two gates that replaced it, both measured
 
 | Gate | What it reads | Catches |
 |---|---|---|
-| **A — the leg set** | `GET /v1/combos`; every leg of a named combo | a **dormant** off-connection failover leg. Bills correctly today, wrongly the first time the pinned leg errors. **No single request can reveal this.** |
-| **B — the resolved provider** | `x-omniroute-provider` on the probe response | a live misroute: the gateway itself says where it dispatched |
+| **A — the endpoint pin** | `ANTHROPIC_BASE_URL` vs `PINNED_LANE_ENDPOINT` | a probe **pointed at the wrong lane**. Every request it makes could succeed and it would still have measured the wrong thing. **A property of configuration — no single request can reveal it, and none can clear it.** |
+| **B — the serving lane** | `X-Cpa-Trace-Id` on the probe response | that the endpoint which answered is the one we dialled and is CLIProxy — not something else wearing the same address |
 | **C — liveness** | the HTTP status | a dead id, including the undated and `-low` traps |
 
-Gate A is strictly stronger than the prefix test it replaced, and in both directions: it clears
-`claude-sonnet-5` (bare, one pinned leg) and it catches `hindsight/retain` (bare, `openrouter`) —
-whereas the prefix test got the first one wrong and the second one right for the wrong reason.
+Gate A is hoisted above both network gates for the reason the retired combo gate was: it is
+answerable even when the endpoint will not serve, and a misconfigured base URL is exactly the
+fail-open no single request can surface.
 
-Gate B is why a 200 with **no** `x-omniroute-provider` header is `unmeasured`, not `ok`: the lane
-is alive and the billing leg is unverified, which is the whole question. Likewise an unreadable
-combo list is `unmeasured` even when the measured route was correct — a dormant leg cannot be
-ruled out.
+Gate B is why a 200 with **no** `X-Cpa-Trace-Id` is `unmeasured`, not `ok`: the lane is alive and
+its identity is unverified, which is the whole question. CLIProxy stamps that header on every
+response and advertises it in the endpoint's own `Access-Control-Expose-Headers`, so its absence
+is a real signal rather than a quirk of one deployment.
 
 One correction to the commissioning issue's own trap list: it warns against re-citing
 `gpt-5.4-mini`'s 2026-08-29 503 as current. Re-measured 2026-08-30, that id returns **200**. The
 503 had self-resolved, exactly as TOG-679's did — which is the argument for a probe rather than a
 hand-check.
+
+### Hindsight is the one thing still off this lane, and is deliberately out of scope
+
+The owner's rule exempts Hindsight. No cheap/small-fast surface references a Hindsight id, so no
+row this probe reads is affected; if one ever is, it will show as `ALARM-unpinned` and the right
+response is to scope it out explicitly, not to widen the pin.
 
 ## Both surfaces, because they drift independently
 
@@ -115,6 +117,11 @@ resolve onto the pinned connection, so the fleet disagrees across surfaces *by i
 probe is green. Note that the surfaces no longer agree on a single id, which is a thing to know
 before reading any older claim in this file that they do.
 
+Re-measured 2026-09-16: **77 rows**, two distinct ids — `claude-haiku-4-5-20251001` (5 rows) and
+`gpt-5.6-luna` (72 rows). Both answer 200 from `http://cliproxy:8317` carrying `X-Cpa-Trace-Id`.
+The fleet's ids turn over on the owner's schedule; **re-read `surfaces` before citing any id list
+in this file as current.**
+
 ### Why the database and not the API
 
 `GET /api/agents/{id}` returns `adapterConfig` and `runtimeConfig` for **yourself** and redacts
@@ -140,34 +147,33 @@ export MODEL_SURFACE_SOURCE_CMD="$PWD/pg_source.js model-surfaces"   # optional;
 
 | Exit | Meaning |
 |---|---|
-| `0` | every referenced id **resolves onto the pinned connection** and answers 200 |
+| `0` | every referenced id answers 200 **from the pinned lane**, identified by its own header |
 | `2` | REFUSED — bad invocation |
-| `3` | **ALARM** — an id is dead (non-200) or unpinned (routes, or can fail over, off the pinned connection) |
+| `3` | **ALARM** — an id is dead (non-200) or unpinned (served by, or probed against, an endpoint that is not the fleet's lane) |
 | `5` | **UNKNOWN** — could not measure. Not green. |
 
-Options: `--surface SUBSTR`, `--json`, `--long`. Env: `PINNED_CONNECTION_ID` (default is the
-`cliproxy-main` connection id), `COMBO_SOURCE_CMD`, `MIN_SURFACES_EXPECTED`, `PROBE_MAX_TIME`,
-`PROBE_MAX_TOKENS`, `ALARM_NAME_CAP`.
+Options: `--surface SUBSTR`, `--json`, `--long`. Env: `PINNED_LANE_ENDPOINT` (default
+`http://cliproxy:8317`), `LANE_IDENTITY_HEADER` (default `x-cpa-trace-id`),
+`MIN_SURFACES_EXPECTED`, `PROBE_MAX_TIME`, `PROBE_MAX_TOKENS`, `ALARM_NAME_CAP`.
 
-`PINNED_CONNECTION_ID` is deliberately an exact id and **not** a pattern like
-`openai-compatible*`: any future OpenAI-compatible connection — including a pay-as-you-go one —
-would match such a pattern, and the monitor would clear the very leg it exists to catch.
+`PINNED_LANE_ENDPOINT` is deliberately an exact URL and **not** a pattern like `*cliproxy*`: any
+future host with that substring in its name would match, and the monitor would clear the very
+misroute it exists to catch. A trailing slash is normalised away — punctuation is not a finding.
 
 ### The verdict ladder, and why its order is load-bearing
 
 ```
-combo has an off-connection leg   →  ALARM-unpinned    ranked ABOVE both network gates
-unmeasured (curl 000 / non-integer)  →  unmeasured
-non-200                           →  ALARM-dead
-200 but no provider header        →  unmeasured        alive ≠ pinned
-resolved provider ≠ pinned        →  ALARM-unpinned
-combo list unreadable             →  unmeasured        dormant leg not ruled out
-else                              →  ok
+probe pointed off the pinned endpoint  →  ALARM-unpinned    ranked ABOVE both network gates
+unmeasured (curl 000 / non-integer)    →  unmeasured
+non-200                                →  ALARM-dead
+200 but no lane-identity header        →  unmeasured        alive ≠ on the pinned lane
+serving lane ≠ pinned lane             →  ALARM-unpinned
+else                                   →  ok
 ```
 
-Gate A is hoisted above both network gates because **the leg set is a property of the
-configuration**, fully measurable even when the gateway will not serve — and a dormant failover
-leg is exactly the fail-open case that no single request can surface.
+Gate A is hoisted above both network gates because **the endpoint a run is pointed at is a
+property of the configuration**, fully measurable even when that endpoint will not serve — and a
+probe aimed at the wrong lane is exactly the fail-open case that no single request can surface.
 
 `000` is curl's "no response completed": the request never reached the gateway. But `is_int 000`
 is true and `000 != 200` is true, so the naive ordering pages the model owner for what may be a
@@ -203,20 +209,28 @@ The per-run scratch also avoids the TOG-485 stale-shared-file trap.
 
 ## Verification
 
-- **Suite:** 56 assertions, 8 sections, **56 passed / 0 failed** (2026-09-05). Every assertion
+- **Suite:** 58 assertions, 7 sections, **58 passed / 0 failed** (2026-09-16). Every assertion
   pins the *reason string* as well as the exit code — a refusal from the wrong branch must fail.
 - **Hermetic:** green under `env -u DATABASE_URL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN
   -u ANTHROPIC_API_KEY -u PAPERCLIP_COMPANY_ID`.
-- **End-to-end against the real gateway**, not just fixtures (re-run 2026-09-05):
+- **End-to-end against the real lane**, not just fixtures (re-run 2026-09-16):
 
   | Injected | Real result | Verdict | Exit |
   |---|---|---|---|
-  | `cliproxy/claude-haiku-4-5-20251001-low` | HTTP 400 `model_not_found` | `ALARM-dead` | 3 |
-  | `hindsight/retain` — bare, real off-leg | HTTP **200**, `provider=openrouter` | `ALARM-unpinned` | 3 |
-  | the real fleet (72 rows, 2 ids) | HTTP 200, both on the pinned connection | `ok` | **0** |
+  | `cliproxy/claude-haiku-4-5-20251001-low` | HTTP 400 `unknown provider for model …` | `ALARM-dead` | 3 |
+  | base URL set to the retired `http://omniroute:4000` | refused before any request | `ALARM-unpinned` | 3 |
+  | the real fleet (77 rows, 2 ids) | HTTP 200 from `http://cliproxy:8317`, both carrying `X-Cpa-Trace-Id` | `ok` | **0** |
 
-  The last row is the TOG-985 regression: the same fleet that the prefix gate paged on is green
-  under the routing gates, and the two alarm rows show detection was not weakened to get there.
+  The last row is the TOG-985 regression *and* the TOG-2927 acceptance: the same fleet that the
+  prefix gate paged on, and that the retired combo gates scored `unmeasured` (exit 5, 0 of 2 ids
+  measured), is now measured and green — and the two alarm rows are the positive control showing
+  detection was not weakened to get there. A green run that cannot produce a red one is not a
+  finding.
+
+  The two gate-B halves are separated on the **real** curl path, not only through the seam: two
+  stubbed responses differing in exactly one byte — whether `X-Cpa-Trace-Id` is present — must
+  produce `ok` and `unmeasured` respectively. If the tool ever reported the URL it *dialled* as
+  the lane that *served*, both would go green and gate B would be decoration.
 
 The fixture allocator uses `mktemp` rather than a counter, because every caller invokes the
 helpers as `SRC="$(surfaces ...)"` — a command-substitution **subshell** — so shell state is
