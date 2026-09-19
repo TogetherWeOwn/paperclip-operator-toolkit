@@ -262,5 +262,93 @@ hdr "Rejects bad arguments instead of guessing"
 "$TOOL" --prefix 'a/../b' >/dev/null 2>&1; (( $? == 2 )) && ok "rejects a path-escaping prefix" || bad "accepted a path-escaping prefix"
 "$TOOL" --bogus >/dev/null 2>&1; (( $? == 2 )) && ok "rejects an unknown flag" || bad "accepted an unknown flag"
 
+# --- 8. --staleness-only (TOG-2370) -----------------------------------------
+# Once host_db_backup.sh can also write into this directory, signal 1
+# (log suppression) is permanently tripped by a wedged in-server scheduler
+# and can never clear again (TOG-1138). --staleness-only answers a narrower,
+# always-answerable question: is there a recent usable archive at all,
+# regardless of which script wrote it. It must never read the log.
+hdr "--staleness-only ignores the log and answers only 'is there a recent usable archive'"
+SO="$WORK/staleness-only"; mkdir -p "$SO"
+mkgz "$SO/paperclip-20260913-000000.sql.gz"
+OUT="$("$TOOL" --log "$WORK/stall.log" --backup-dir "$SO" --no-health --staleness-only 2>&1)"; RC=$?
+(( RC == 0 )) && ok "a fresh archive is healthy even with a stalled log fixture" || bad "expected exit 0, got $RC ($OUT)"
+grep -q "server log and the orphan/truncation signal were not evaluated" <<<"$OUT" \
+  && ok "says the log was not evaluated" || bad "did not disclose that the log was skipped"
+
+hdr "--staleness-only: a host-authored -hostcron archive counts as usable"
+HC="$WORK/staleness-hostcron"; mkdir -p "$HC"
+mkgz "$HC/paperclip-20260913-010000-hostcron.sql.gz"
+OUT="$("$TOOL" --backup-dir "$HC" --no-health --staleness-only 2>&1)"; RC=$?
+(( RC == 0 )) && ok "a -hostcron archive alone clears staleness" || bad "expected exit 0, got $RC ($OUT)"
+
+hdr "--staleness-only: a stale archive is still a stall"
+touch -d "@$(( $(date -u +%s) - 3 * 3600 ))" "$SO/paperclip-20260913-000000.sql.gz"
+OUT="$("$TOOL" --backup-dir "$SO" --no-health --staleness-only 2>&1)"; RC=$?
+(( RC == 1 )) && ok "a 3h-old archive still trips staleness" || bad "expected exit 1, got $RC ($OUT)"
+grep -q "STALE" <<<"$OUT" && ok "names the staleness signal" || bad "no STALE reason"
+
+hdr "--staleness-only: an unreadable backup directory is inconclusive, not healthy"
+OUT="$("$TOOL" --backup-dir "$WORK/no-such-dir" --no-health --staleness-only 2>&1)"; RC=$?
+(( RC == 2 )) && ok "a missing backup dir is exit 2, never 0 or silently healthy" || bad "expected exit 2, got $RC ($OUT)"
+
+hdr "--staleness-only: JSON reports stalenessOnly:true and skips log fields"
+JSO="$("$TOOL" --backup-dir "$SO" --no-health --staleness-only --json 2>/dev/null)"
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["stalenessOnly"] is True; assert d["verdict"]=="stall"' <<<"$JSO" 2>/dev/null \
+    && ok "JSON stalenessOnly flag set on a staleness-only run" || bad "stalenessOnly JSON field wrong: $JSO"
+fi
+
+# --- 9. producer filter: a -hostcron archive must not answer for the -------
+#        in-server scheduler in DEFAULT (combined) mode (TOG-2998)
+# db_backup_stall.sh globs "$PREFIX"-*.sql.gz with PREFIX=paperclip, and
+# host_db_backup.sh writes paperclip-<ts>-hostcron.sql.gz into the SAME
+# directory -- so before this fix, a host-side archive alone cleared signal 3
+# even though the in-server scheduler had produced nothing. This is the RED
+# case from the issue: it must read as a stall in default mode, against a
+# directory where the in-server scheduler is by construction 100% absent.
+hdr "Default mode: a hostcron-only directory is a stall, not health (TOG-2998)"
+HO="$WORK/hostcron-only"; mkdir -p "$HO"
+mkgz "$HO/paperclip-20260916-162700-hostcron.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$HO" --no-health 2>&1)"; RC=$?
+(( RC == 1 )) && ok "a fresh -hostcron-only archive still reports a stall in default mode" || bad "expected exit 1, got $RC ($OUT)"
+grep -q "NO USABLE BACKUP" <<<"$OUT" && ok "names the no-usable-backup signal" || bad "no NO USABLE BACKUP reason"
+grep -q "excluded from this verdict" <<<"$OUT" && ok "surfaces the excluded host archive as a note" || bad "did not disclose the excluded host archive"
+
+# Negative control for the same rule: a fresh IN-SERVER archive alongside the
+# hostcron one must still clear it -- proving the filter excludes only the
+# tagged producer, not the whole directory.
+mkgz "$HO/paperclip-20260916-162700.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$HO" --no-health 2>&1)"; RC=$?
+(( RC == 0 )) && ok "an in-server archive alongside a hostcron one clears the stall" || bad "expected exit 0, got $RC ($OUT)"
+
+hdr "Default mode: --include-all-producers restores the legacy all-writers view"
+IA="$WORK/include-all"; mkdir -p "$IA"
+mkgz "$IA/paperclip-20260916-162700-hostcron.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$IA" --no-health --include-all-producers 2>&1)"; RC=$?
+(( RC == 0 )) && ok "--include-all-producers lets a hostcron archive clear the verdict" || bad "expected exit 0, got $RC ($OUT)"
+
+hdr "--exclude-suffix accepts a custom producer tag"
+CT="$WORK/custom-tag"; mkdir -p "$CT"
+mkgz "$CT/paperclip-20260916-162700-nightly.sql.gz"
+OUT="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$CT" --no-health --exclude-suffix nightly 2>&1)"; RC=$?
+(( RC == 1 )) && ok "a custom --exclude-suffix excludes its own tagged archive" || bad "expected exit 1, got $RC ($OUT)"
+"$TOOL" --exclude-suffix '../escape' >/dev/null 2>&1; (( $? == 2 )) && ok "rejects a path-escaping exclude-suffix" || bad "accepted a path-escaping exclude-suffix"
+
+hdr "JSON reports excludeEnabled, excludeSuffix and the host archive's own freshness"
+JHD="$WORK/hostcron-only-json"; mkdir -p "$JHD"
+mkgz "$JHD/paperclip-20260916-162700-hostcron.sql.gz"
+JHO="$("$TOOL" --log "$WORK/healthy.log" --backup-dir "$JHD" --no-health --json 2>/dev/null)"
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["excludeEnabled"] is True
+assert d["excludeSuffix"] == "hostcron"
+assert d["newestHostArchive"].endswith("-hostcron.sql.gz")
+assert d["newestHostArchiveAgeMinutes"] >= 0
+assert d["newestUsableBackup"] == "none"' <<<"$JHO" 2>/dev/null \
+    && ok "JSON exposes the excluded host archive without counting it toward the verdict" || bad "producer-filter JSON fields wrong: $JHO"
+fi
+
 printf '\n\033[1mTOTAL\033[0m  %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
