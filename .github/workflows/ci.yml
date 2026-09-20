@@ -1650,6 +1650,15 @@ jobs:
             '/- name: Report steps that never ran/{n;/if: always()/d;}' \
             'wired with if: always()' || rc=1
 
+            # 7. TOG-3427. Count only `"skipped"` as dark again. On a fail-fast
+            # abort the unreached steps still carry `conclusion: null` at
+            # report time, so this reverts the tool to reading 0 dark and
+            # printing "all N steps executed" over a 55-step abort — the exact
+            # false green the abort-null fixture pins.
+            dark_mutation "null-conclusions-not-counted-as-dark" ci_dark_steps.sh \
+            's/select(.conclusion != "success" and .conclusion != "failure")/select(.conclusion=="skipped")/' \
+            'an aborted run never prints the clean banner' || rc=1
+
           exit $rc
 
       # TOG-345. Whether two runs of one agent can implement one issue twice.

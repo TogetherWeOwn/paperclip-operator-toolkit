@@ -141,14 +141,22 @@ JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
 TOTAL="$(jq   '[.steps[]] | length'                                   "$TMP/job.json")"
 RAN="$(jq     '[.steps[] | select(.conclusion=="success")] | length'  "$TMP/job.json")"
 FAILED="$(jq  '[.steps[] | select(.conclusion=="failure")] | length'  "$TMP/job.json")"
-# `skipped` in a job with no `if:` means "never reached", not "deliberately
-# conditional". Both are worth naming; the distinction belongs to the reader.
-DARK="$(jq    '[.steps[] | select(.conclusion=="skipped")] | length'  "$TMP/job.json")"
+# Dark means "registered but never executed". A step that ran to a verdict has
+# conclusion `success` or `failure`; everything else — `skipped` on a finalised
+# job, `cancelled`, and above all `null` — is dark. The `null` case is the
+# load-bearing one (TOG-3427): this reporter runs INSIDE the job under
+# `if: always()`, so on a fail-fast abort the unreached steps still carry
+# `conclusion: null` at report time — the runner only rewrites them to
+# `"skipped"` when the job finalises. Counting only `"skipped"` therefore reads
+# 0 dark on exactly the runs this tool exists to describe, and prints the clean
+# banner over them. In a fail-fast job with no `if:` steps, `skipped` and `null`
+# both mean "never reached"; the distinction belongs to the reader.
+DARK="$(jq    '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")] | length' "$TMP/job.json")"
 
 CULPRIT="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/job.json")"
 CULPRIT_NO="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/job.json")"
 
-jq -r '[.steps[] | select(.conclusion=="skipped")][] | "  \(.number)\t\(.name)"' \
+jq -r '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")][] | "  \(.number)\t\(.name)"' \
    "$TMP/job.json" > "$TMP/dark.txt"
 
 # --- report -------------------------------------------------------------------

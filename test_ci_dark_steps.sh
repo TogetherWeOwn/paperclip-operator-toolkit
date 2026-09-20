@@ -17,6 +17,14 @@
 #                                 79 skipped. The outage itself.
 #   job-100786202472-green.json   PR #198 d794f39c — 95 steps, 0 skipped. The
 #                                 same job once the expiry was re-issued.
+#   job-105959891748-abort-null.json  run 35466576547, Offline suites, TOG-3427:
+#                                 80 success, 1 failure, 55 conclusions still
+#                                 `null` — the at-report-time view of a fail-fast
+#                                 abort. CONSTRUCTED, not recorded: the finalised
+#                                 job object rewrites those nulls to "skipped",
+#                                 which is exactly the state that hid the bug, so
+#                                 re-recording this fixture from the API would
+#                                 un-write the test. Counts match the card.
 #
 # Re-record with:
 #   gh api repos/TogetherWeOwn/paperclip-ops-tooling/actions/jobs/<id> > <fixture>
@@ -35,6 +43,7 @@ TOOL="$HERE/ci_dark_steps.sh"
 FIXTURES="$HERE/test/fixtures/ci_dark_steps"
 DARK="$FIXTURES/job-100695318458-dark.json"
 GREEN="$FIXTURES/job-100786202472-green.json"
+ABORT_NULL="$FIXTURES/job-105959891748-abort-null.json"
 PASS=0; FAIL=0
 
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -54,7 +63,7 @@ command -v jq >/dev/null 2>&1 || { echo "test_ci_dark_steps: jq is required" >&2
 [[ -x "$TOOL" ]] || { echo "test_ci_dark_steps: $TOOL is not executable" >&2; exit 2; }
 # A missing fixture is a hard error, never a skip. A skipped test is a deleted
 # test that still prints a zero exit (TOG-339).
-for f in "$DARK" "$GREEN"; do
+for f in "$DARK" "$GREEN" "$ABORT_NULL"; do
   [[ -s "$f" ]] || { echo "test_ci_dark_steps: recorded fixture missing or empty: $f" >&2; exit 2; }
 done
 
@@ -95,6 +104,45 @@ assert $? "the dark list names the mutation gates" \
 grep -q 'Executed: 13 passed, 1 failed. Not run: 79.' <<< "$OUT"
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
+
+# ---------------------------------------------------------------------------
+hdr "The fail-fast abort as the reporter sees it — null conclusions are dark (TOG-3427)"
+
+OUT_A="$("$TOOL" report --job-json "$ABORT_NULL" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "an aborted run still exits 0" \
+  "got exit $RC — the reporter must not replace the real failure's attribution"
+
+grep -q '55 of 136 steps never ran' <<< "$OUT_A"
+assert $? "the abort names the count of steps that did not execute" \
+  "expected '55 of 136 steps never ran'"
+
+grep -q 'Rehearsal package expiry probe' <<< "$OUT_A"
+assert $? "the abort names the step that aborted the job" \
+  "the culprit step is not attributed"
+
+grep -q '::error title=' <<< "$OUT_A"
+assert $? "an aborted run emits a ::error annotation so it surfaces on the run summary" \
+  "no ::error annotation; the report would only be visible to someone opening the log"
+
+grep -q 'Secret scan' <<< "$OUT_A"
+assert $? "the abort list names Secret scan" \
+  "Secret scan is missing from the report of un-run steps"
+
+grep -qi 'mutation-gated' <<< "$OUT_A"
+assert $? "the abort list names the mutation gates" \
+  "no mutation-gated step is reported, so vacuity protection looks intact when it is not"
+
+grep -q 'Executed: 80 passed, 1 failed. Not run: 55.' <<< "$OUT_A"
+assert $? "the executed/not-run tally is reported exactly" \
+  "tally line missing or wrong"
+
+# The false green this card exists to kill: the old `conclusion=="skipped"`
+# selector reads ZERO dark here (all unreached steps are still null), so the
+# DARK -eq 0 branch prints "all N steps executed" over a 55-step abort.
+! grep -q 'all .* steps executed' <<< "$OUT_A"
+assert $? "an aborted run never prints the clean banner" \
+  "the false green is back: 'all N steps executed' over unreached steps"
 
 # ---------------------------------------------------------------------------
 hdr "The green fixture — silence is the feature"
