@@ -52,6 +52,17 @@ every `git push`. Treat a non-zero exit as a stop.**
 | 3 | **indeterminate** — a detector could not run | **not a pass.** Fix what it names, or proceed knowing you are unguarded |
 | 2 | usage error | fix the invocation |
 
+**Also check the push will get a credential — `./gh_push_preflight.sh`.** The broker derives
+the push credential's repository scope from the issue's project; an issue with no project 409s
+at `git push`, after the work is done (TOG-291, TOG-995). Run it before implementing and again
+before pushing, alongside the guard above:
+
+```bash
+./gh_push_preflight.sh --issue <uuid>   # 0 push can get a credential · 1 no scope / lifecycle refusal, message names the fix · 2 could not measure — not a pass
+```
+
+Full contract, oracle, and lifecycle terms: the header of `gh_push_preflight.sh` (TOG-918).
+
 **Why this is a required step and not a suggestion.** Two runs of one agent have implemented one
 issue end to end, independently, twice: TOG-253 (PRs #15 and #16) and TOG-258 (PRs #27 and #28). In
 both cases one PR merged and the other was closed as a duplicate. Each incident cost a full
