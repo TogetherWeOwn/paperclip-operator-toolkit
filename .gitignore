@@ -71,6 +71,16 @@ node_modules/
 !plugins/dispatch/dist/
 !plugins/dispatch/dist/*.js
 
+# TOG-3354: model-selection's dist/*.js.map are esbuild sourcemaps regenerated
+# on every build. Tracking them forces every stacked plugin PR to conflict on
+# exactly the .map (the mappings line rewrites wholesale), serialising
+# TOG-3012 work. The .js stays TRACKED: plugin_deploy_drift.sh evaluates
+# dist/manifest.js straight from git blobs, and the operator BEFORE/AFTER
+# bundle copies dist/ from the merged commit with no build step. Maps are
+# debug-only (a missing .map never breaks the worker) and rebuild
+# deterministically via `npm ci --include=dev && npm run build`.
+plugins/model-selection/dist/*.map
+
 # Python bytecode. Until TOG-917 this was covered only BY ACCIDENT: `.claude/`
 # above ignores every __pycache__ that happens to sit under a worktree, and
 # nothing covered one created next to a tracked .py. CI's own parse gate makes
