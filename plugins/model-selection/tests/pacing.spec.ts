@@ -1103,6 +1103,49 @@ describe("orderCandidatesByPace", () => {
     const ordered = orderCandidatesByPace(candidates, models, ledger);
     expect(ordered[0]!.modelId).toBe("newer-model");
   });
+
+  it("TOG-3406: same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
+    // config/reviewed-roster.json's claude-opus-4-8 releasedAt was fabricated
+    // to land AFTER claude-opus-5's real GA date (TOG-3406 root cause) — that
+    // data bug is fixed separately in the roster file itself, since no
+    // comparator can safely out-guess a wrong date from the id alone. This
+    // exercises the named family rule against the now-correct chronology.
+    const models = [
+      model({ id: "claude-opus-4-8", tier: "T1", laneId: "lane-a", releasedAt: "2026-05-05" }),
+      model({ id: "claude-opus-5", tier: "T1", laneId: "lane-a", releasedAt: "2026-06-24" }),
+    ];
+    const ledger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "on" }) },
+    };
+    const candidates = [
+      candidate({ modelId: "claude-opus-4-8", tier: "T1", expectedCostUsd: 1, releasedAt: "2026-05-05" }),
+      candidate({ modelId: "claude-opus-5", tier: "T1", expectedCostUsd: 1, releasedAt: "2026-06-24" }),
+    ];
+    const ordered = orderCandidatesByPace(candidates, models, ledger);
+    expect(ordered[0]!.modelId).toBe("claude-opus-5");
+  });
+
+  it("TOG-3406: an explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
+    const models = [
+      model({
+        id: "claude-opus-4-8",
+        tier: "T1",
+        laneId: "lane-a",
+        releasedAt: "2026-05-05",
+        earnIn: { verdict: "provenBetter" },
+      }),
+      model({ id: "claude-opus-5", tier: "T1", laneId: "lane-a", releasedAt: "2026-06-24" }),
+    ];
+    const ledger: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "on" }) },
+    };
+    const candidates = [
+      candidate({ modelId: "claude-opus-4-8", tier: "T1", expectedCostUsd: 1, releasedAt: "2026-05-05" }),
+      candidate({ modelId: "claude-opus-5", tier: "T1", expectedCostUsd: 1, releasedAt: "2026-06-24" }),
+    ];
+    const ordered = orderCandidatesByPace(candidates, models, ledger);
+    expect(ordered[0]!.modelId).toBe("claude-opus-4-8");
+  });
 });
 
 describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {

@@ -249,6 +249,35 @@ var DISPATCH_ISSUE_PAGE_LIMIT = 1e3;
 var LANE_EVIDENCE_WINDOW_HOURS = 24;
 var LANE_EVIDENCE_TTL_MS = 6e4;
 
+// src/engine/same-price-family.ts
+function modelFamily(modelId) {
+  const bare = modelId.includes("/") ? modelId.slice(modelId.lastIndexOf("/") + 1) : modelId;
+  const segments = bare.split("-");
+  while (segments.length > 1 && /^\d/.test(segments[segments.length - 1])) {
+    segments.pop();
+  }
+  return segments.join("-");
+}
+function priceSignature(model) {
+  return `${model.costPerMTokIn}:${model.costPerMTokOut}:${model.costPerMTokCacheRead}`;
+}
+function sharesPriceFamily(a, b) {
+  return a.id !== b.id && a.enabled !== false && b.enabled !== false && a.tier === b.tier && modelFamily(a.id) === modelFamily(b.id) && priceSignature(a) === priceSignature(b);
+}
+function provenBetterVerdict(model) {
+  const earnIn = model.earnIn;
+  if (!earnIn || typeof earnIn !== "object") return false;
+  return earnIn.verdict === "provenBetter";
+}
+function compareSamePriceFamily(a, b) {
+  if (!sharesPriceFamily(a, b)) return 0;
+  const aIsOlder = Date.parse(a.releasedAt) < Date.parse(b.releasedAt);
+  const older = aIsOlder ? a : b;
+  const newer = aIsOlder ? b : a;
+  const winner = provenBetterVerdict(older) ? older : newer;
+  return winner === a ? -1 : 1;
+}
+
 // src/engine/pacing.ts
 function mergeLedgerEntry(ledger, result) {
   const previous = ledger[result.laneId];
@@ -344,6 +373,10 @@ function orderCandidatesByPace(candidates, models, ledger, options) {
       const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
       if (deviationDelta !== 0) return deviationDelta;
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
+      if (leftModel && rightModel) {
+        const familyOrder = compareSamePriceFamily(leftModel, rightModel);
+        if (familyOrder !== 0) return familyOrder;
+      }
       const leftRelease = leftModel?.releasedAt ?? "1970-01-01";
       const rightRelease = rightModel?.releasedAt ?? "1970-01-01";
       if (leftRelease !== rightRelease) return leftRelease > rightRelease ? -1 : 1;
@@ -1740,13 +1773,13 @@ function applyPickOrdering(candidates, models, ledger, modelScores, requiredTier
   if (candidates.length === 0) {
     return { ordered: [], explored: false, exploreModelId: null };
   }
-  const modelOf2 = (candidate) => models.find((model) => model.id === candidate.modelId);
+  const modelOf3 = (candidate) => models.find((model) => model.id === candidate.modelId);
   const utilizationOf = (candidate) => {
-    const model = modelOf2(candidate);
+    const model = modelOf3(candidate);
     return model?.laneId ? laneEffectiveUtilization(ledger, model.laneId) : 0.5;
   };
   const listPriceOf = (candidate) => {
-    const model = modelOf2(candidate);
+    const model = modelOf3(candidate);
     return model ? blendedListPrice(model) : candidate.expectedCostUsd;
   };
   const provenOf = (candidate) => provenFor(modelScores, candidate.modelId, requiredTier);
@@ -1776,6 +1809,40 @@ function applyPickOrdering(candidates, models, ledger, modelScores, requiredTier
     return a.modelId.localeCompare(b.modelId);
   });
   return { ordered: [...bandOrdered, ...rest], explored: false, exploreModelId: null };
+}
+
+// src/engine/free-lane-earn-in.ts
+function modelOf2(models, candidate) {
+  return models.find((model) => model.id === candidate.modelId);
+}
+function freeEarnInCandidates(candidates, models, ledger, modelScores, requiredTier) {
+  const picks = [];
+  for (const candidate of candidates) {
+    const model = modelOf2(models, candidate);
+    const laneId = model?.laneId ?? null;
+    if (!laneId) continue;
+    const verdict = laneVerdictFor(ledger, laneId);
+    if (!verdict || verdict.state !== "free" || verdict.serviceable !== true) continue;
+    const tierScore = modelScores?.[candidate.modelId]?.tiers[requiredTier];
+    if (tierScore?.proven) continue;
+    if (tierScore?.capable === false) continue;
+    picks.push({ candidate, laneId, observations: tierScore?.n ?? 0 });
+  }
+  return picks;
+}
+function freeEarnInWinner(candidates, models, ledger, modelScores, requiredTier) {
+  const picks = freeEarnInCandidates(candidates, models, ledger, modelScores, requiredTier);
+  if (picks.length === 0) return null;
+  const sorted = [...picks].sort((a, b) => {
+    if (a.candidate.expectedCostUsd !== b.candidate.expectedCostUsd) {
+      return a.candidate.expectedCostUsd - b.candidate.expectedCostUsd;
+    }
+    if (a.candidate.releasedAt !== b.candidate.releasedAt) {
+      return a.candidate.releasedAt > b.candidate.releasedAt ? -1 : 1;
+    }
+    return a.candidate.modelId.localeCompare(b.candidate.modelId);
+  });
+  return sorted[0];
 }
 
 // src/engine/select.ts
@@ -2248,6 +2315,12 @@ function selectModel(input) {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
       return left.expectedCostUsd - right.expectedCostUsd;
     }
+    const leftModel = config.models.find((model) => model.id === left.modelId);
+    const rightModel = config.models.find((model) => model.id === right.modelId);
+    if (leftModel && rightModel) {
+      const familyOrder = compareSamePriceFamily(leftModel, rightModel);
+      if (familyOrder !== 0) return familyOrder;
+    }
     const releaseOrder = Date.parse(right.releasedAt) - Date.parse(left.releasedAt);
     if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
@@ -2305,12 +2378,24 @@ function selectModel(input) {
   }
   const paceOnlyWinner = orderedCandidates[paceWinnerIndex];
   const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0].modelId;
+  const earnInPick = freeEarnInWinner(orderedCandidates, config.models, ledger, config.modelScores, requiredTier);
+  const earnInOverridden = !!overrideModelId && orderedCandidates.some((candidate) => candidate.modelId === overrideModelId);
+  if (earnInPick && !earnInOverridden && earnInPick.candidate.modelId !== orderedCandidates[0]?.modelId) {
+    trace.push(
+      `free-lane earn-in: routing to unproven ${earnInPick.candidate.modelId} on serviceable free lane ${earnInPick.laneId} (${earnInPick.observations} recorded ${requiredTier} runs, not yet proven) to gather ${requiredTier} evidence`
+    );
+    orderedCandidates = [
+      earnInPick.candidate,
+      ...orderedCandidates.filter((candidate) => candidate.modelId !== earnInPick.candidate.modelId)
+    ];
+  }
+  const earnInWinner = earnInPick && !earnInOverridden ? earnInPick.candidate : null;
   const listPriceWinner = candidates[0];
   const cardLedger = input.cardLedger ?? {};
   const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
   const objective = config.objective ?? "list-price";
-  let winner = paceOnlyWinner;
-  if (objective === "cost-per-accepted-card") {
+  let winner = earnInWinner ?? paceOnlyWinner;
+  if (!earnInWinner && objective === "cost-per-accepted-card") {
     const objectiveOrdered = orderByObjective(orderedCandidates, objective, cardLedger);
     if (objectiveOrdered.length > 0) {
       winner = paceEnforced ? objectiveOrdered[pickWinnerIndex(objectiveOrdered)] : objectiveOrdered[0];

@@ -683,7 +683,7 @@
       "aaIndex": 51,
       "aaIndexUpdatedAt": "2026-09-09",
       "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor Claude Opus 5 (max) idx 51 (exact Opus 4.8 row not in v4.3 table). Superseded by claude-opus-5 at same price \u2014 owner same-price-prefer-newer rule. Tiered+disabled per TOG-2429 audit.",
-      "releasedAt": "2026-08-20",
+      "releasedAt": "2026-05-05",
       "fallbackOnly": false,
       "earnIn": null
     },
@@ -704,7 +704,7 @@
       "aaIndex": 51,
       "aaIndexUpdatedAt": "2026-09-09",
       "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5 at same price. Tiered+disabled per TOG-2429 audit.",
-      "releasedAt": "2026-08-05",
+      "releasedAt": "2026-03-10",
       "fallbackOnly": false,
       "earnIn": null
     },
@@ -725,7 +725,7 @@
       "aaIndex": 51,
       "aaIndexUpdatedAt": "2026-09-09",
       "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Also reachable via Google Antigravity sub on a different, telemetry-blind path (TOG-1921) \u2014 that is a separate access route, not this CLIProxy entry. Tiered+disabled per TOG-2429 audit.",
-      "releasedAt": "2026-07-20",
+      "releasedAt": "2026-01-15",
       "fallbackOnly": false,
       "earnIn": null
     },
@@ -746,7 +746,7 @@
       "aaIndex": 51,
       "aaIndexUpdatedAt": "2026-09-09",
       "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Opus family nearest-neighbor idx 51. Superseded by claude-opus-5. Tiered+disabled per TOG-2429 audit.",
-      "releasedAt": "2026-07-20",
+      "releasedAt": "2026-01-15",
       "fallbackOnly": false,
       "earnIn": null
     },
@@ -830,7 +830,7 @@
       "aaIndex": 38,
       "aaIndexUpdatedAt": "2026-09-09",
       "note": "aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Sonnet family nearest-neighbor 'Claude Sonnet 5 (max)' idx 38 used as ceiling estimate (Sonnet 4.6 row not in v4.3 table; 'Claude Sonnet 4.6 (Non-reasoning, low)' idx 23 is the only exact match, listed for context). Superseded by claude-sonnet-5, and Claude is disabled for T2/T3 while sol/luna are available (2026-09-08 operator rule). Tiered+disabled per TOG-2429 audit.",
-      "releasedAt": "2026-07-01",
+      "releasedAt": "2026-04-15",
       "fallbackOnly": false,
       "earnIn": null
     },

@@ -1,5 +1,6 @@
 import type { LanePaceObservation, LanePaceVerdict, PaceState } from "../lane-capacity/pace.js";
 import { OPERATOR_PIN_LABEL } from "../constants.js";
+import { compareSamePriceFamily } from "./same-price-family.js";
 import type { Candidate, ModelEntry } from "./types.js";
 
 /**
@@ -285,6 +286,16 @@ export function orderCandidatesByPace(
       if (deviationDelta !== 0) return deviationDelta;
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
+
+      // TOG-3406 owner rule: same vendor family, tier, and price — the newer
+      // release wins outright unless the older one carries an explicit
+      // earn-in verdict proving it's better. This runs before the plain
+      // release-date fallback below because it is a strict same-family match
+      // rather than a same-price coincidence across unrelated models.
+      if (leftModel && rightModel) {
+        const familyOrder = compareSamePriceFamily(leftModel, rightModel);
+        if (familyOrder !== 0) return familyOrder;
+      }
 
       // Release date: prefer the newer release when everything else ties —
       // matches `select.ts`'s own exact-cost tie-break (newest releasedAt,

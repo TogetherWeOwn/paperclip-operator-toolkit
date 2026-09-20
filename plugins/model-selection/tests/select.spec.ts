@@ -405,6 +405,34 @@ describe("selection", () => {
     expect(decision.modelId).toBe("alpha");
   });
 
+  it("TOG-3406: same-price-family rule prefers the newer release for a same-price sibling pair", () => {
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const older = model(t2, { id: "vendor-model-4-8", releasedAt: "2026-05-05" });
+    const newer = model(t2, { id: "vendor-model-5", releasedAt: "2026-06-24" });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T2"] },
+      config: config({ models: [older, newer] }),
+    });
+    expect(decision.modelId).toBe("vendor-model-5");
+  });
+
+  it("TOG-3406: a provenBetter earn-in verdict lets the older same-price-family model win", () => {
+    const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+    const older = model(t2, {
+      id: "vendor-model-4-8",
+      releasedAt: "2026-05-05",
+      earnIn: { verdict: "provenBetter" },
+    });
+    const newer = model(t2, { id: "vendor-model-5", releasedAt: "2026-06-24" });
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "i1", labelNames: ["tier:T2"] },
+      config: config({ models: [older, newer] }),
+    });
+    expect(decision.modelId).toBe("vendor-model-4-8");
+  });
+
   describe("TOG-2137 Defect 2: tier-exhaustion escalation", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;

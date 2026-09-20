@@ -25,6 +25,8 @@ import {
 } from "./lane-evidence.js";
 import { LANE_ID_CODEX, LANE_ID_OPENCODE_GO, LANE_ID_ZAI } from "../constants.js";
 import { applyPickOrdering } from "./pick-order.js";
+import { freeEarnInWinner } from "./free-lane-earn-in.js";
+import { compareSamePriceFamily } from "./same-price-family.js";
 import {
   avoidThresholdFor,
   hardStopExcluded,
@@ -951,6 +953,17 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
       return left.expectedCostUsd - right.expectedCostUsd;
     }
+    // TOG-3406 owner rule: same vendor family, tier, and price — the newer
+    // release wins outright unless the older one carries an explicit
+    // earn-in verdict proving it's better. Checked before the plain
+    // newest-release fallback, which stays as the tiebreak for a same-price
+    // coincidence across unrelated models.
+    const leftModel = config.models.find((model) => model.id === left.modelId);
+    const rightModel = config.models.find((model) => model.id === right.modelId);
+    if (leftModel && rightModel) {
+      const familyOrder = compareSamePriceFamily(leftModel, rightModel);
+      if (familyOrder !== 0) return familyOrder;
+    }
     const releaseOrder = Date.parse(right.releasedAt) - Date.parse(left.releasedAt);
     if (releaseOrder !== 0) return releaseOrder;
     return left.modelId.localeCompare(right.modelId);
@@ -1066,6 +1079,48 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const paceOnlyWinner = orderedCandidates[paceWinnerIndex]!;
   const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0]!.modelId;
 
+  // TOG-3406 rule (b), 2026-09-19 owner rule: a free subscription lane whose
+  // credential is serviceable and under its per-account cap wins its tier over
+  // a paid/earned model until it has enough observations to be judged —
+  // otherwise a new subscription can never earn placement (21:12Z TOG-3399/
+  // 3401 experiment: unproven Meta rows lost to earned opus-4-8 on every rung
+  // because cost-0 does not outrank an earned score).
+  //
+  // Placement is deliberately POST-pace, after the `pacingApplied` measurement
+  // above (which stays a pure pace-vs-cost signal for the 48h comparison
+  // stream), in every pacing mode including `shadow`: `applyPickOrdering`'s
+  // free-must-be-proven filter demotes exactly these candidates, and pace
+  // ranks `free` 4th, so an earlier placement would be reordered away before
+  // it could win. This is a pure reorder of the already-gated single-rung
+  // `orderedCandidates` array — never an admission bypass (cap/5h gates,
+  // capability, hard stop all ran upstream) and never cross-tier (the ladder
+  // settled the rung above). An operator override still wins outright (the
+  // `pickWinnerIndex` override branch below is untouched). The slot throttle
+  // needs no special handling: only an `ahead` lane throttles, and a `free`
+  // verdict always clears `slotAllowed`, so the earn-in winner would survive
+  // that walk identically. An explicitly-switched `objective` yields to this —
+  // an owner rule about who wins the tier beats the experimental
+  // cost-per-accepted-card observation switch (shipped config is `list-price`
+  // anyway, so this changes nothing deployed). `allowExplore === false`
+  // (repin/label-only/balance) does NOT suppress this: that flag gates the
+  // random 10% sampling roll, while this is a deterministic owner rule about
+  // who wins the tier. Sticky continuity is unaffected — a sticky incumbent
+  // returns before this runs.
+  const earnInPick = freeEarnInWinner(orderedCandidates, config.models, ledger, config.modelScores, requiredTier);
+  const earnInOverridden =
+    !!overrideModelId && orderedCandidates.some((candidate) => candidate.modelId === overrideModelId);
+  if (earnInPick && !earnInOverridden && earnInPick.candidate.modelId !== orderedCandidates[0]?.modelId) {
+    trace.push(
+      `free-lane earn-in: routing to unproven ${earnInPick.candidate.modelId} on serviceable free lane ` +
+        `${earnInPick.laneId} (${earnInPick.observations} recorded ${requiredTier} runs, not yet proven) to gather ${requiredTier} evidence`,
+    );
+    orderedCandidates = [
+      earnInPick.candidate,
+      ...orderedCandidates.filter((candidate) => candidate.modelId !== earnInPick.candidate.modelId),
+    ];
+  }
+  const earnInWinner = earnInPick && !earnInOverridden ? earnInPick.candidate : null;
+
   const listPriceWinner = candidates[0]!;
   const cardLedger = input.cardLedger ?? {};
   const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
@@ -1075,8 +1130,12 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // (TOG-2136 hard constraint) — the alternate ordering above only feeds the
   // shadow-diff record, observed for 7 days before any enforcement proposal.
   const objective = config.objective ?? "list-price";
-  let winner = paceOnlyWinner;
-  if (objective === "cost-per-accepted-card") {
+  // Earn-in already sits at orderedCandidates[0] and clears the slot throttle
+  // (only `ahead` throttles), so paceOnlyWinner IS the earn-in pick in both
+  // modes — this line is belt and braces, and the objective guard below is
+  // the part that actually holds the win against the experimental re-rank.
+  let winner = earnInWinner ?? paceOnlyWinner;
+  if (!earnInWinner && objective === "cost-per-accepted-card") {
     const objectiveOrdered = orderByObjective(orderedCandidates, objective, cardLedger);
     if (objectiveOrdered.length > 0) {
       winner = paceEnforced ? objectiveOrdered[pickWinnerIndex(objectiveOrdered)]! : objectiveOrdered[0]!;
