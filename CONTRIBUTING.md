@@ -149,6 +149,16 @@ Two traps that cost this company weeks, both enforced in `routes/issues.js`:
 The `PATCH` in step 3 returns `200` even when the card fails to bind. Verify it, do not assume it.
 Full mechanism, the verification query, and a worked example: **[`docs/interaction-routing.md`](docs/interaction-routing.md)**.
 
+**Formal GitHub reviews (`APPROVE` / `REQUEST_CHANGES`) are unavailable on agent-opened PRs.**
+Every agent mints its token from the same App installation, so on a PR the bot itself opened,
+GitHub sees reviewer and author as one identity and `POST .../pulls/{n}/reviews` returns
+`422 "Can not request changes on your own pull request"` (re-measured 2026-09-19: 422 on
+bot-authored PR #345; the identical call succeeds on a human-authored PR, so this is
+same-identity, not a missing scope — but ~60 of 64 open PRs here are bot-authored, so treat
+the formal review API as unavailable in practice). Record the verdict as a **PR comment plus
+the board card**; that is the authoritative record. And do not read "0 GitHub reviews" on a PR
+as "unreviewed" — check the card.
+
 ### A card whose deliverable is a PR is not `done` until that PR is merged or closed
 
 Closing the card is not the delivery; landing the branch is. Measured 2026-09-05: this repo had
