@@ -293,7 +293,6 @@ fi
 # is not actually named.
 # ---------------------------------------------------------------------------
 DECLARED=$(cat <<'EOF'
-OmniRoute|refs/heads/fix/quota-signal-errortext-threading|ba4b1927dcc199df518e7aef1b9bc7023ee05689|TOG-1100|2026-09-05T15:41:02Z|Adversarial review TOG-1099 closed 15:41:02Z; pushed 15:44:20Z. Narrowed class per TOG-1094 (vendor defect fix, no policy/secrets/tenant data).
 paperclip|refs/heads/fix/mcp-gateway-legacy-path-bearer|e949815ac77c96560c6787aec7c70325840a55ce|TOG-1023|2026-09-05T16:04:41Z|Adversarial review TOG-1102 closed 16:04:41Z; pushed 16:30:38Z. Narrowed class per TOG-1094. Added-line scan over the published diff: 0 TOG ids, 0 host URLs, 0 tenant data.
 EOF
 )
@@ -519,9 +518,13 @@ while IFS=$'\t' read -r name parent; do
       #
       # So: print loudly, count separately, and leave the exit code alone.
       # Silence was the actual defect; an unresolved item that names itself in
-      # the summary is not silent. Set DISCLOSURE_AUDIT_STRICT_UNRESOLVED=1 to
-      # make this class fail the gate -- the intended end state, once each ref
-      # below has been adjudicated either into DECLARED or as genuinely theirs.
+      # the summary is not silent.
+      #
+      # ARMED 2026-09-20 (TOG-3329): strict is now the DEFAULT. Every ref in
+      # this class has been adjudicated (all removed from the public forks or
+      # confirmed upstream), so a NEW unresolved ref is a regression that must
+      # fail the gate, not warn. Set DISCLOSURE_AUDIT_STRICT_UNRESOLVED=0 to
+      # opt out temporarily (e.g. mid-adjudication of a fresh finding).
       if grep -qEi 'tog-?[0-9]{3,}' <<<"$ref"; then
         unresolved=$((unresolved+1))
         UNRESOLVED_LIST+=("$name $ref @ ${sha:0:10} author=$email")
@@ -590,8 +593,8 @@ if [ "$unresolved" -ne 0 ]; then
   printf '   %s\n' "${UNRESOLVED_LIST[@]}"
   printf 'Each needs a one-time provenance ruling: add to DECLARED (with the card\n'
   printf 'whose gate closed before the push), or confirm it is genuinely upstream.\n'
-  if [ -n "${DISCLOSURE_AUDIT_STRICT_UNRESOLVED:-}" ]; then
-    printf 'FAIL: DISCLOSURE_AUDIT_STRICT_UNRESOLVED is set and %s ref(s) are unadjudicated.\n' "$unresolved"
+  if [ "${DISCLOSURE_AUDIT_STRICT_UNRESOLVED:-1}" != "0" ]; then
+    printf 'FAIL: strict mode (default; DISCLOSURE_AUDIT_STRICT_UNRESOLVED!=0) and %s ref(s) are unadjudicated.\n' "$unresolved"
     exit 1
   fi
 fi

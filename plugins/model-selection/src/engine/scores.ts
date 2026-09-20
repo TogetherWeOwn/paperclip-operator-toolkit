@@ -339,6 +339,22 @@ function topConfiguredRungs(models: readonly RosterRow[]): (modelId: string) => 
 // captured signal against the run window it already has in hand — same
 // semantics (72h/48h closing-run match), different data source.
 
+// ---- quality (p) vs availability split — TOG-3230 ---------------------
+//
+// p is a PURE QUALITY posterior: wOk / nEff where nEff = wOk + wBad.
+// INFRA_RE failures are excused (weight 0, failInfra++ only, no wBad) so
+// they never enter nEff or p. This is deliberate: on the frozen
+// HOST_EVIDENCE_ROWS fixture 285/376.5 = 75.7% of all failures are infra;
+// counting them in p would collapse e.g. claude-opus-5 T1 (90.8% infra
+// share but p=0.965) and glm-5.3 T1 (93.8% infra, p=0.885) to ~0.5 and make
+// p a mixed availability signal. Availability owns infra instead:
+// select.ts excludes via availability.ts (quota/cooldown/accounts) and
+// lane-evidence.ts (Wilson proven-dead + zero-success). p stays quality;
+// availability stays serviceability. Do not give INFRA_RE a non-zero
+// weight without also removing that second term — otherwise infra is
+// double-counted or silently excused in both places. The failInfra counter
+// is retained separately for observability, never for p.
+
 const FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
 const MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
 const INFRA_RE =
@@ -348,7 +364,14 @@ export function normModelId(modelId: string): string {
   return modelId.replace(/^(cliproxy\/|openrouter\/|opencode-go\/)/, "");
 }
 
-/** Ported from `model_scores.py`'s `classify()` (lines 50-55). */
+/**
+ * Ported from `model_scores.py`'s `classify()` (lines 50-55).
+ *
+ * INFRA_RE -> {kind:"infra", weight:0.0} is intentional (TOG-3230): infra
+ * is excluded from the quality posterior p and counted only as failInfra.
+ * See the header above and scores.spec.ts's rawReplayCases / HOST_EVIDENCE
+ * 75.7% regression for the invariant this preserves.
+ */
 export function classifyRunFailure(
   errorText: string | null,
   errorCode: string | null,
