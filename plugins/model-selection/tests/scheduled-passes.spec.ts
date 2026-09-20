@@ -4,7 +4,12 @@ import type { Issue } from "@paperclipai/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { BALANCE_PASS_FETCH_LIMIT, BALANCE_PASS_JOB_BUDGET_MS, PLUGIN_STATE_KEYS } from "../src/constants.js";
+import {
+  BALANCE_PASS_FETCH_LIMIT,
+  BALANCE_PASS_JOB_BUDGET_MS,
+  LABEL_ONLY_PASS_FETCH_LIMIT,
+  PLUGIN_STATE_KEYS,
+} from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, PROFILES, subCallPins } from "./fixtures.js";
 
@@ -92,6 +97,48 @@ async function boot(config: Record<string, unknown>, seedIssues: Issue[] = [], a
 
 function idleRow(id: string, status = "in_progress", extra: Record<string, unknown> = {}) {
   return { id, identifier: id, status, ...extra };
+}
+
+function classifyConfig(overrides: Record<string, unknown> = {}) {
+  return baseConfig({
+    classification: {
+      enabled: true,
+      baseUrl: "https://classifier.example.com",
+      modelId: "gpt-5.6-luna",
+      ...overrides,
+    },
+  });
+}
+
+/** Stub the classifier HTTP call and record how many times it was asked. */
+function stubClassifier(
+  harness: Awaited<ReturnType<typeof boot>>,
+  verdict: { tier: string; confidence: number; exclusion?: boolean },
+) {
+  const calls: string[] = [];
+  harness.ctx.http.fetch = (async (_url: string, init: { body: string }) => {
+    calls.push(init.body);
+    return {
+      status: 200,
+      headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "application/json" : null) },
+      redirected: false,
+      text: async () =>
+        JSON.stringify({
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                tier: verdict.tier,
+                confidence: verdict.confidence,
+                exclusion: verdict.exclusion ?? false,
+                reason: "test",
+              }),
+            },
+          ],
+        }),
+    };
+  }) as typeof harness.ctx.http.fetch;
+  return calls;
 }
 
 /**
@@ -1124,48 +1171,6 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
    * spend sat on T1.
    */
   describe("classifyIssues foreign-label reclassification", () => {
-    function classifyConfig(overrides: Record<string, unknown> = {}) {
-      return baseConfig({
-        classification: {
-          enabled: true,
-          baseUrl: "https://classifier.example.com",
-          modelId: "gpt-5.6-luna",
-          ...overrides,
-        },
-      });
-    }
-
-    /** Stub the classifier HTTP call and record how many times it was asked. */
-    function stubClassifier(
-      harness: Awaited<ReturnType<typeof boot>>,
-      verdict: { tier: string; confidence: number; exclusion?: boolean },
-    ) {
-      const calls: string[] = [];
-      harness.ctx.http.fetch = (async (_url: string, init: { body: string }) => {
-        calls.push(init.body);
-        return {
-          status: 200,
-          headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "application/json" : null) },
-          redirected: false,
-          text: async () =>
-            JSON.stringify({
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({
-                    tier: verdict.tier,
-                    confidence: verdict.confidence,
-                    exclusion: verdict.exclusion ?? false,
-                    reason: "test",
-                  }),
-                },
-              ],
-            }),
-        };
-      }) as typeof harness.ctx.http.fetch;
-      return calls;
-    }
-
     function classifyRow(id: string) {
       return { id, identifier: id, status: "in_progress", agent_name: "Founding Engineer", title: "A card", description: "d" };
     }
@@ -1322,6 +1327,306 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       await harness.runJob("classifyIssues");
 
       expect(calls).toHaveLength(2);
+    });
+  });
+
+  describe("TOG-3585 incremental scans", () => {
+    function scanMarkKey(stateKey: string) {
+      return { scopeKind: "company", scopeId: COMPANY, stateKey } as never;
+    }
+
+    function skipLogs(harness: Awaited<ReturnType<typeof boot>>) {
+      return (harness.logs as Array<{ level: string; message: string }>).filter((entry) =>
+        entry.message.includes("no issues changed since last scan"),
+      );
+    }
+
+    it("classifyIssues skips the per-candidate work when nothing changed since its watermark", async () => {
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(
+        baseConfig({ classification: { enabled: true, baseUrl: "https://x.example.com", modelId: "m" } }),
+        [card],
+      );
+      await harness.ctx.state.set(scanMarkKey(PLUGIN_STATE_KEYS.classifyLastScanAt), {
+        at: new Date().toISOString(),
+      });
+      // No rows changed since the mark: the row query returns nothing.
+      harness.ctx.db.query = async () => [] as never;
+
+      await harness.runJob("classifyIssues");
+
+      expect(skipLogs(harness)).toHaveLength(1);
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("classifyIssues advances its watermark past a drained scan", async () => {
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(
+        baseConfig({ classification: { enabled: true, baseUrl: "https://x.example.com", modelId: "m" } }),
+        [card],
+      );
+      const before = Date.now();
+      harness.ctx.db.query = async () => [] as never;
+
+      await harness.runJob("classifyIssues");
+
+      const stored = (await harness.ctx.state.get(scanMarkKey(PLUGIN_STATE_KEYS.classifyLastScanAt))) as {
+        at: string;
+      };
+      expect(Date.parse(stored.at)).toBeGreaterThanOrEqual(before);
+    });
+
+    it("classifyIssues creeps the watermark to the oldest EXAMINED row when a batch-size break cuts a drained fetch short", async () => {
+      // Two rows fetched, both well under the fetch limit (10x batchSize) —
+      // a drained fetch by the old, buggy definition. With batchSize=1 only
+      // the first row is ever examined before the break fires. Pre-fix,
+      // "drained" alone jumped the mark straight to the firing start,
+      // silently starving row B (never examined) out of every future scan.
+      const oldIso = "2026-01-01T00:00:00.000Z";
+      const newIso = "2026-01-02T00:00:00.000Z";
+      const rowA = { id: "i1", identifier: "i1", status: "in_progress", agent_name: "x", title: "t", description: "d", updated_at: oldIso };
+      const rowB = { id: "i2", identifier: "i2", status: "in_progress", agent_name: "x", title: "t", description: "d", updated_at: newIso };
+      const cardA = issue("i1", { labels: [], labelIds: [] });
+      const cardB = issue("i2", { labels: [], labelIds: [] });
+      const harness = await boot(classifyConfig({ batchSize: 1 }), [cardA, cardB]);
+      harness.ctx.db.query = async () => [rowA, rowB] as never;
+      stubClassifier(harness, { tier: "T2", confidence: 0.9 });
+      const before = Date.now();
+
+      await harness.runJob("classifyIssues");
+
+      const stored = (await harness.ctx.state.get(scanMarkKey(PLUGIN_STATE_KEYS.classifyLastScanAt))) as {
+        at: string;
+      };
+      expect(stored.at).toBe(oldIso);
+      expect(Date.parse(stored.at)).toBeLessThan(before);
+    });
+
+    it("repinPass creeps the watermark to the oldest EXAMINED row when the write-limit break cuts a drained fetch short", async () => {
+      // Same fixture as "stops writing once REPIN_PASS_WRITE_LIMIT (6)..." —
+      // 8 eligible cards, all on an exhausted lane, only the first 6 (write
+      // limit) ever get examined before the break fires. Pre-fix this
+      // drained fetch (8 rows, well under REPIN_PASS_FETCH_LIMIT) would have
+      // jumped the mark to the firing start, starving cards 7 and 8.
+      const modelsWithLane = withOpusAlt().map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
+      const base = Date.parse("2026-01-01T00:00:00.000Z");
+      const cards = Array.from({ length: 8 }, (_, i) =>
+        issue(`i${i}`, {
+          labels: [tierLabel("T1")],
+          labelIds: ["lbl-T1"],
+          assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+        }),
+      );
+      const harness = await boot(baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }), cards);
+      harness.ctx.db.query = async () =>
+        cards.map((c, i) => idleRow(c.id, "in_progress", { updated_at: new Date(base + i * 1000).toISOString() })) as never;
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        {
+          "lane-opus": {
+            laneId: "lane-opus",
+            fetchedAt: "2026-09-13T00:00:00.000Z",
+            observation: null,
+            error: null,
+            verdict: {
+              laneId: "lane-opus",
+              observedAt: "2026-09-13T00:00:00.000Z",
+              state: "exhausted",
+              serviceable: false,
+              score: null,
+              accounts: [],
+              knownAccountCount: 1,
+              knownWeight: 1,
+              serviceableAccountCount: 0,
+              urgentResetAt: null,
+              reason: "exhausted",
+            },
+          },
+        },
+      );
+      const before = Date.now();
+
+      await harness.runJob("repinPass");
+
+      const stored = (await harness.ctx.state.get(scanMarkKey(PLUGIN_STATE_KEYS.repinLastScanAt))) as { at: string };
+      expect(stored.at).toBe(new Date(base).toISOString());
+      expect(Date.parse(stored.at)).toBeLessThan(before);
+    });
+
+    it("labelOnlyPass skips when nothing changed and scans when rows return", async () => {
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(baseConfig(), [card]);
+      await harness.ctx.state.set(scanMarkKey(PLUGIN_STATE_KEYS.labelOnlyLastScanAt), {
+        at: new Date().toISOString(),
+      });
+      harness.ctx.db.query = async () => [] as never;
+
+      await harness.runJob("labelOnlyPass");
+
+      expect(skipLogs(harness)).toHaveLength(1);
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    it("labelOnlyPass creeps the watermark to the oldest FETCHED row when the fetch itself is capped, not merely to the newest", async () => {
+      // TOG-3622: a capped (limit-hit) fetch is the OTHER shape of the
+      // starvation bug — unfetched rows beyond the limit are always newer
+      // than the fetched batch only when the fetch is oldest-first. This
+      // pins that ordering by construction: LABEL_ONLY_PASS_FETCH_LIMIT rows
+      // is enough to hit the cap, and every row carries an operator pin so
+      // the loop `continue`s immediately without ever breaking early —
+      // fullyExamined stays true, isolating the capped-fetch branch.
+      const base = Date.parse("2026-01-01T00:00:00.000Z");
+      const cards = Array.from({ length: LABEL_ONLY_PASS_FETCH_LIMIT }, (_, i) =>
+        issue(`i${i}`, { labels: [operatorPinLabel()], labelIds: ["lbl-op"] }),
+      );
+      const harness = await boot(baseConfig(), cards);
+      harness.ctx.db.query = async () =>
+        cards.map((c, i) => idleRow(c.id, "in_progress", { updated_at: new Date(base + i * 1000).toISOString() })) as never;
+      const before = Date.now();
+
+      await harness.runJob("labelOnlyPass");
+
+      const stored = (await harness.ctx.state.get(scanMarkKey(PLUGIN_STATE_KEYS.labelOnlyLastScanAt))) as { at: string };
+      expect(stored.at).toBe(new Date(base).toISOString());
+      expect(Date.parse(stored.at)).toBeLessThan(before);
+    });
+
+    it("classifyIssues, labelOnlyPass, and repinPass all issue their candidate-fetch SQL ordered oldest-first", async () => {
+      // TOG-3626: the fixture-level ASC/DESC tests above are necessary but not
+      // sufficient — every `db.query` stub ignores the SQL text, so a
+      // regression that silently reverts a query back to `updated_at desc`
+      // (the exact bug TOG-3622 found) leaves the whole suite green. Assert
+      // directly on the issued SQL for all three watermarked passes so a DESC
+      // reintroduction fails here even when nothing else catches it.
+      const classifyQueries: string[] = [];
+      {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(
+          baseConfig({ classification: { enabled: true, baseUrl: "https://x.example.com", modelId: "m" } }),
+          [card],
+        );
+        harness.ctx.db.query = (async (query: string) => {
+          classifyQueries.push(query);
+          return [];
+        }) as typeof harness.ctx.db.query;
+        await harness.runJob("classifyIssues");
+      }
+      const labelOnlyQueries: string[] = [];
+      {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(baseConfig(), [card]);
+        harness.ctx.db.query = (async (query: string) => {
+          labelOnlyQueries.push(query);
+          return [];
+        }) as typeof harness.ctx.db.query;
+        await harness.runJob("labelOnlyPass");
+      }
+      const repinQueries: string[] = [];
+      {
+        const card = issue("i1", { labels: [], labelIds: [] });
+        const harness = await boot(baseConfig(), [card]);
+        harness.ctx.db.query = (async (query: string) => {
+          repinQueries.push(query);
+          return [];
+        }) as typeof harness.ctx.db.query;
+        await harness.runJob("repinPass");
+      }
+
+      const rowQueries = [
+        ...classifyQueries.filter((q) => q.includes("from issues i")),
+        ...labelOnlyQueries.filter((q) => q.includes("from issues i")),
+        ...repinQueries.filter((q) => q.includes("from issues i")),
+      ];
+      expect(rowQueries.length).toBeGreaterThanOrEqual(3);
+      for (const q of rowQueries) {
+        expect(q).toMatch(/order by i\.updated_at asc/);
+        expect(q).not.toMatch(/updated_at desc/);
+      }
+    });
+
+    it("repinPass skips on its watermark but the reactive path still scans fully", async () => {
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(baseConfig(), [card]);
+      await harness.ctx.state.set(scanMarkKey(PLUGIN_STATE_KEYS.repinLastScanAt), {
+        at: new Date().toISOString(),
+      });
+      const queries: string[] = [];
+      harness.ctx.db.query = (async (query: string) => {
+        queries.push(query);
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("repinPass");
+
+      // The scheduled firing probed with a cursor predicate and skipped.
+      expect(queries.some((q) => q.includes("i.updated_at > $3"))).toBe(true);
+      expect(skipLogs(harness)).toHaveLength(1);
+    });
+
+    it("the reactive agent.run.failed path sweeps the full repin candidate set, no cursor, even with a fresh watermark", async () => {
+      const modelsWithLane = withOpusAlt().map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: modelsWithLane }), [card]);
+      // A watermark set to "now" would make the SCHEDULED job skip entirely
+      // (as the test above confirms). The reactive path must ignore it.
+      await harness.ctx.state.set(scanMarkKey(PLUGIN_STATE_KEYS.repinLastScanAt), {
+        at: new Date().toISOString(),
+      });
+      const repinQueries: string[] = [];
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("join agents a") && query.includes("adapterConfig'->>'model' is not null")) {
+          repinQueries.push(query);
+          return [idleRow("i1")];
+        }
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.emit(
+        "agent.run.failed",
+        { issueId: "i1", error: "All credentials for model claude-opus-5 are cooling down" },
+        { companyId: COMPANY },
+      );
+
+      // A full, cursor-free sweep: the candidate query ran, and it carried no
+      // `i.updated_at > $3` incremental predicate despite the fresh mark
+      // written above.
+      expect(repinQueries.length).toBeGreaterThan(0);
+      expect(repinQueries.every((q) => !q.includes("i.updated_at > $3"))).toBe(true);
+    });
+
+    it("balancePass skips the whole cycle on a quiet board and runs it when the aggregate is unreadable", async () => {
+      const card = issue("i1", { labels: [], labelIds: [] });
+      const harness = await boot(baseConfig(), [card]);
+      await harness.ctx.state.set(scanMarkKey(PLUGIN_STATE_KEYS.balanceLastScanAt), {
+        at: new Date().toISOString(),
+      });
+      // Aggregate answers "nothing newer than the mark"; the page fetch must
+      // never run.
+      const pageQueries: string[] = [];
+      harness.ctx.db.query = (async (query: string) => {
+        if (query.includes("max_updated")) return [{ max_updated: new Date(0).toISOString() }] as never;
+        pageQueries.push(query);
+        return [];
+      }) as typeof harness.ctx.db.query;
+
+      await harness.runJob("balancePass");
+
+      expect(skipLogs(harness)).toHaveLength(1);
+      expect(pageQueries).toHaveLength(0);
+
+      // Fail-open: when the aggregate shape is missing (a fake returning card
+      // rows for every query, like the legacy overrides), the cycle runs
+      // instead of skipping.
+      const harness2 = await boot(baseConfig(), [card]);
+      harness2.ctx.db.query = async () => [idleRow("i1")] as never;
+
+      await harness2.runJob("balancePass");
+
+      expect(skipLogs(harness2)).toHaveLength(0);
     });
   });
 });

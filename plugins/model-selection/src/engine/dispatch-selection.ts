@@ -84,6 +84,19 @@ export const BUDGET_RAIL_MIRROR_SOURCE = "issues.summaries.getOrchestration#invo
  * added refused_monitor_armed / parked_on_human_ask / refused_in_review, so
  * this is now eight, but the report-order and diffability guarantees are
  * unchanged.
+ *
+ * TOG-3585 adds two more, appended before `woken` so every existing counter
+ * keeps its position:
+ *
+ *   - `actionable_idle_assignee`: the new candidate class — todo/in_progress,
+ *     rails passed, assignee with no running run, woken regardless of
+ *     `idleMinutes`. Counted separately from the threshold-based `actionable`
+ *     set (which never appears as its own counter — it feeds `candidates_ready`
+ *     and `picks`) so the report shows how much of each firing rides the new
+ *     class vs the old threshold.
+ *   - `skipped_lane_down`: a pick the sweep refused to wake because its lane
+ *     read down at wake time. Counted, never silently dropped — "wakes into a
+ *     lane reading exhausted = 0" is only verifiable if the skips are visible.
  */
 export const SELECTION_COUNTERS = [
   "refused_backlog",
@@ -93,6 +106,8 @@ export const SELECTION_COUNTERS = [
   "parked_on_human_ask",
   "refused_in_review",
   "parked_on_named_owner",
+  "actionable_idle_assignee",
+  "skipped_lane_down",
   "woken",
 ] as const;
 export type SelectionCounter = (typeof SELECTION_COUNTERS)[number];
@@ -282,6 +297,14 @@ export interface ClassifyIssueInput {
   idleMinutes: number;
   idle: IdleResult;
   nowMs: number;
+  /**
+   * TOG-3585: `true` when the assignee holds NO running/queued run right now
+   * (read once per firing from `heartbeat_runs`, not per issue). The new
+   * candidate class keys on agent-idleness rather than issue-idleness: an
+   * idle agent holding an executable card gets woken even when the card
+   * itself is below the `idleMinutes` threshold.
+   */
+  assigneeIdle?: boolean;
 }
 
 export type ClassifyOutcome =
@@ -295,6 +318,7 @@ export type ClassifyOutcome =
   | "refused_in_review"
   | "parked_on_named_owner"
   | "wakeable_not_idle"
+  | "actionable_idle_assignee"
   | "actionable";
 
 export interface ClassifyResult {
@@ -311,7 +335,16 @@ export interface ClassifyResult {
  * the SERVER would have stopped, which is on the assignee rail.
  */
 export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
-  const { issue, blockedBy = [], invocationBlock = null, pendingInteractions, idleMinutes, idle, nowMs } = input;
+  const {
+    issue,
+    blockedBy = [],
+    invocationBlock = null,
+    pendingInteractions,
+    idleMinutes,
+    idle,
+    nowMs,
+    assigneeIdle = false,
+  } = input;
 
   if ((TERMINAL_STATUSES as readonly string[]).includes(issue.status)) {
     return { outcome: "excluded_terminal" };
@@ -357,6 +390,13 @@ export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
     return { outcome: "parked_on_named_owner", wakeable: true };
   }
   if (idle.idleMs < idleMinutes * 60_000) {
+    // TOG-3585: below the threshold, but the assignee holds no running run —
+    // an idle agent with an executable card. Eligible regardless of
+    // `idleMinutes`, but only for todo/in_progress: in_review, armed-monitor
+    // and human-ask cards were already refused above and stay refused.
+    if (assigneeIdle && (issue.status === "todo" || issue.status === "in_progress")) {
+      return { outcome: "actionable_idle_assignee", wakeable: true };
+    }
     return { outcome: "wakeable_not_idle", wakeable: true };
   }
   return { outcome: "actionable", wakeable: true };
@@ -434,6 +474,29 @@ export interface SelectDispatchOptions {
   maxWakesPerFiring: number;
   focusProjectIds?: string[];
   now: number | Date;
+  /**
+   * TOG-3585: the set of assignee agent ids holding NO running/queued run at
+   * sweep time (one `heartbeat_runs` read per firing, not per issue). Entries
+   * whose assignee is in this set skip the `idleMinutes` threshold via the
+   * `actionable_idle_assignee` class. Omitted/empty = the old behavior: only
+   * the threshold-based `actionable` class is selectable.
+   */
+  idleAssignees?: ReadonlySet<string>;
+  /**
+   * TOG-3585: per-issue lane the wake would run on, for the lane-down gate.
+   * When set for an issue, a down lane demotes the pick to
+   * `skipped_lane_down` instead of waking into it. Issues with no entry are
+   * lane-unknown and stay selectable (fail-neutral — a broken instrument must
+   * not take dispatch down).
+   */
+  laneByIssueId?: ReadonlyMap<string, string | null>;
+  /**
+   * TOG-3585: `true` when the issue's lane reads down. Read once per firing
+   * from the lane ledger (hard stop), the outage override and the collector
+   * availability snapshot — NOT re-derived per issue, so the gate is O(lanes),
+   * not O(issues).
+   */
+  isLaneDown?: (laneId: string) => boolean;
 }
 
 export interface ParkedEntry {
@@ -455,6 +518,11 @@ export interface RoutingGapSummary {
   owners?: RoutingOwnersResult;
 }
 
+export interface LaneDownSkip {
+  issue: DispatchIssue;
+  laneId: string;
+}
+
 export interface SelectDispatchResult {
   counters: Record<SelectionCounter, number>;
   legacy: { candidates_ready: number; runnable_queue: number; deadlocked_agents: null };
@@ -462,6 +530,19 @@ export interface SelectDispatchResult {
   parked: ParkedEntry[];
   budgetBlocked: BudgetBlockedEntry[];
   actionable: ActionableCandidate[];
+  /**
+   * TOG-3585: the subset of `actionable` riding the new idle-assignee class
+   * (below the `idleMinutes` threshold, assignee holding no run). Reported
+   * alongside, never folded in — the operator report shows how much of each
+   * firing the new class contributes.
+   */
+  idleAssigneeActionable: ActionableCandidate[];
+  /**
+   * TOG-3585: picks the lane-down gate refused to wake. Counted as
+   * `skipped_lane_down` and listed here with the lane that refused them, so
+   * "wakes into a lane reading exhausted = 0" is checkable per firing.
+   */
+  laneDownSkipped: LaneDownSkip[];
   coalescedWithEarlierPick: ActionableCandidate[];
   overflow: ActionableCandidate[];
   excludedTerminal: number;
@@ -480,7 +561,15 @@ export function selectDispatch(
   population: DispatchPopulationEntry[],
   options: SelectDispatchOptions,
 ): SelectDispatchResult {
-  const { idleMinutes, maxWakesPerFiring, focusProjectIds = [], now } = options;
+  const {
+    idleMinutes,
+    maxWakesPerFiring,
+    focusProjectIds = [],
+    now,
+    idleAssignees,
+    laneByIssueId,
+    isLaneDown,
+  } = options;
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
 
   const counters: Record<SelectionCounter, number> = {
@@ -491,6 +580,8 @@ export function selectDispatch(
     parked_on_human_ask: 0,
     refused_in_review: 0,
     parked_on_named_owner: 0,
+    actionable_idle_assignee: 0,
+    skipped_lane_down: 0,
     // Filled in by the worker after the wake attempts. The policy cannot know
     // it: whether a wake succeeds is the server's call, not ours.
     woken: 0,
@@ -498,6 +589,8 @@ export function selectDispatch(
 
   const focus = new Set(focusProjectIds);
   const actionable: ActionableCandidate[] = [];
+  const idleAssigneeActionable: ActionableCandidate[] = [];
+  const laneDownSkipped: LaneDownSkip[] = [];
   const parked: ParkedEntry[] = [];
   const budgetBlocked: BudgetBlockedEntry[] = [];
   let wakeable = 0;
@@ -507,7 +600,24 @@ export function selectDispatch(
   for (const entry of population) {
     const { issue, blockedBy = [], runs = [], invocationBlock = null, pendingInteractions } = entry;
     const idle = computeIdleMs(issue, runs, nowMs);
-    const result = classifyIssue({ issue, blockedBy, invocationBlock, pendingInteractions, idleMinutes, idle, nowMs });
+    // TOG-3585: agent-idle comes from the firing-wide set, never from the
+    // issue's own runs. An ACTIVE run scoped to this issue means idle 0 and
+    // keeps the card under the threshold (the assignee is busy ON this card);
+    // the new class is for agents with no running run at all.
+    const assigneeIdle =
+      !!issue.assigneeAgentId &&
+      !!idleAssignees?.has(issue.assigneeAgentId) &&
+      !runs.some((run) => run.issueId === issue.id && (run.status === "queued" || run.status === "running"));
+    const result = classifyIssue({
+      issue,
+      blockedBy,
+      invocationBlock,
+      pendingInteractions,
+      idleMinutes,
+      idle,
+      nowMs,
+      assigneeIdle,
+    });
 
     if (result.outcome === "excluded_terminal") {
       excludedTerminal += 1;
@@ -525,7 +635,7 @@ export function selectDispatch(
       parked.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
       continue;
     }
-    if (result.outcome !== "actionable") continue;
+    if (result.outcome !== "actionable" && result.outcome !== "actionable_idle_assignee") continue;
 
     // The focus filter runs LAST, after the counters, so the five numbers
     // describe the whole company and only the SELECTION narrows. The retired
@@ -536,7 +646,21 @@ export function selectDispatch(
       continue;
     }
 
-    actionable.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
+    // TOG-3585 lane-down gate: a pick whose lane reads down is refused BEFORE
+    // the wake, counted as `skipped_lane_down` and listed with the lane — the
+    // acceptance "wakes into a lane reading exhausted = 0" is only checkable
+    // if the skips are visible. Lane-unknown (no entry) stays selectable:
+    // fail-neutral, a broken instrument must not take dispatch down.
+    const laneId = laneByIssueId?.get(issue.id) ?? null;
+    if (laneId !== null && isLaneDown?.(laneId)) {
+      counters.skipped_lane_down += 1;
+      laneDownSkipped.push({ issue, laneId });
+      continue;
+    }
+
+    const candidate = { issue, idleMs: idle.idleMs, idleAnchor: idle.anchor };
+    actionable.push(candidate);
+    if (result.outcome === "actionable_idle_assignee") idleAssigneeActionable.push(candidate);
   }
 
   const { picks, coalescedWithEarlierPick, overflow } = spreadAcrossAssignees(actionable, maxWakesPerFiring);
@@ -544,8 +668,9 @@ export function selectDispatch(
   return {
     counters,
     legacy: {
-      // The set we would select from: rails passed, not parked, idle over
-      // threshold, in focus.
+      // The set we would select from: rails passed, not parked, not
+      // lane-down, in focus — both the threshold class and the TOG-3585
+      // idle-assignee class.
       candidates_ready: actionable.length,
       // The wakeable surface: rails 1-3 passed, before our two own rails. This
       // is the 26 in docs/dispatch-plugin-facts.md §3.
@@ -559,6 +684,8 @@ export function selectDispatch(
     // was measurable. Reported alongside them, never folded into one of them.
     budgetBlocked,
     actionable,
+    idleAssigneeActionable,
+    laneDownSkipped,
     coalescedWithEarlierPick,
     overflow,
     excludedTerminal,

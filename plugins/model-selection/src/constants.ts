@@ -241,6 +241,18 @@ export const PLUGIN_STATE_KEYS = {
   /** Keyset cursor for the bounded balance-pass page, persisted per company. */
   balancePassCursor: "balancePassCursor",
   /**
+   * TOG-3585: per-pass high-water marks (`{at: ISOString}`) for the
+   * incremental scans. Each pass reads only issues updated since its own
+   * mark and advances the mark past what it scanned. A pass whose scan finds
+   * nothing logs a skip and still advances — an empty scan proves nothing
+   * changed. Separate keys per pass (not one shared cursor) so a slow pass
+   * never starves a fast one.
+   */
+  classifyLastScanAt: "classifyLastScanAt",
+  labelOnlyLastScanAt: "labelOnlyLastScanAt",
+  repinLastScanAt: "repinLastScanAt",
+  balanceLastScanAt: "balanceLastScanAt",
+  /**
    * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
    * summary a sweep compares against to gate the activity-log line to state
    * changes only. Namespaced separately from the rest of this plugin's state

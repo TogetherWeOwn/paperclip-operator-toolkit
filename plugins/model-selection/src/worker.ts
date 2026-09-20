@@ -119,11 +119,20 @@ import {
   selectDispatch,
   summariseRoutingGap,
   identifyRoutingOwners,
+  isMonitorArmed,
+  isParkedOnNamedOwner,
   TERMINAL_STATUSES as DISPATCH_TERMINAL_STATUSES,
   type DispatchIssue,
   type DispatchPopulationEntry,
 } from "./engine/dispatch-selection.js";
-import { summariseFiring, hasStateChanged, emitMetrics, logStateChange, type WakeOutcome } from "./dispatch-reporting.js";
+import {
+  summariseFiring,
+  hasStateChanged,
+  emitMetrics,
+  logStateChange,
+  wakeFailureCodeFor,
+  type WakeOutcome,
+} from "./dispatch-reporting.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -2521,19 +2530,26 @@ export function createPlugin() {
               CLASSIFY_FETCH_LIMIT_MAX,
             );
             const classifyDeadline = Date.now() + CLASSIFY_JOB_BUDGET_MS;
+            // TOG-3585: incremental scan — only issues updated since this
+            // pass's own watermark. A bare `updated_at` predicate on the
+            // existing row query: strictly fewer rows than before, same shape.
+            const classifyFiringStartMs = Date.now();
+            const classifySinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.classifyLastScanAt)).toISOString();
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
                       i.status as status,
                       coalesce(a.name,'') as agent_name,
                       i.title as title,
-                      coalesce(i.description,'') as description
+                      coalesce(i.description,'') as description,
+                      i.updated_at as updated_at
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
                   and i.assignee_agent_id is not null
+                  and i.updated_at > $3
                   and (i.assignee_adapter_overrides is null
                        or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
                   and not exists (
@@ -2541,24 +2557,46 @@ export function createPlugin() {
                      where r.status in ('running','queued')
                        and r.context_snapshot->>'issueId' = i.id::text
                   )
-                order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
-                         i.updated_at desc
+                order by i.updated_at asc
                 limit $2`,
-              [company.id, String(classifyFetchLimit)],
+              [company.id, String(classifyFetchLimit), classifySinceIso],
             )) as unknown[];
+            if (candidateRows.length === 0) {
+              // TOG-3585: the observable skip — nothing changed since the
+              // watermark, so the firing costs one row query and zero
+              // per-candidate reads. Logger only, never activity: a skip is
+              // routine, not a state change.
+              ctx.logger.info("issue classification pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: classifySinceIso,
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.classifyLastScanAt, classifyFiringStartMs);
+              continue;
+            }
 
             const exclusions = await readClassificationExclusions(company.id);
             const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
             let reclassified = 0;
+            // TOG-3585: rows this loop actually reached, for the watermark
+            // fix below — a `break` on the batch/deadline budget must not be
+            // mistaken for having examined every fetched row.
+            const examinedRows: unknown[] = [];
+            let brokeEarly = false;
             for (const row of candidateRows) {
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) continue;
+              if (!issueId) {
+                examinedRows.push(row);
+                continue;
+              }
 
-              if (classified >= config.classification.batchSize) break;
-              if (Date.now() >= classifyDeadline) break;
+              if (classified >= config.classification.batchSize || Date.now() >= classifyDeadline) {
+                brokeEarly = true;
+                break;
+              }
+              examinedRows.push(row);
 
               // The row query above cannot see labels (not allowlisted), so
               // label and pin state is read per candidate via
@@ -2705,6 +2743,14 @@ export function createPlugin() {
               if (isForeignLabel) reclassified += 1;
             }
 
+            await advanceScanMark(
+              company.id,
+              PLUGIN_STATE_KEYS.classifyLastScanAt,
+              examinedRows,
+              classifyFetchLimit,
+              classifyFiringStartMs,
+              !brokeEarly,
+            );
             ctx.logger.info("issue classification pass complete", {
               companyId: company.id,
               classified,
@@ -2739,6 +2785,79 @@ export function createPlugin() {
             .map((row) => asRecord(row).issue_id)
             .filter((issueId): issueId is string => typeof issueId === "string" && issueId.length > 0),
         );
+      };
+
+      /**
+       * TOG-3585: incremental-scan watermarks. Each router pass reads only
+       * issues updated since its own mark and advances the mark past what it
+       * scanned. Three fail-open rules keep a broken clock from starving a
+       * pass:
+       *
+       *   - an unreadable or unparseable mark reads as epoch (full scan);
+       *   - the mark advances to the firing start only when the fetch did NOT
+       *     hit its row limit (drained); on a capped fetch it advances to the
+       *     oldest `updated_at` actually seen, so cap-skipped rows stay
+       *     visible next firing;
+       *   - rows without a parseable `updated_at` never move the mark.
+       */
+      const readScanMark = async (companyId: string, stateKey: string): Promise<number> => {
+        const stored = asRecord(await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey }));
+        const at = typeof stored.at === "string" ? Date.parse(stored.at) : Number.NaN;
+        return Number.isFinite(at) ? at : 0;
+      };
+
+      const writeScanMark = async (companyId: string, stateKey: string, atMs: number): Promise<void> => {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: companyId, stateKey },
+          { at: new Date(atMs).toISOString() },
+        );
+      };
+
+      const oldestUpdatedAtMs = (rows: unknown[]): number | null => {
+        let oldest: number | null = null;
+        for (const row of rows) {
+          const raw = asRecord(row).updated_at;
+          const ms = raw instanceof Date ? raw.getTime() : typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+          if (!Number.isFinite(ms)) continue;
+          if (oldest === null || ms < oldest) oldest = ms;
+        }
+        return oldest;
+      };
+
+      /**
+       * TOG-3585: advance the watermark after a bounded fetch. Drained (fewer
+       * rows than the limit) AND fully examined means everything newer than
+       * the mark was seen — jump to the firing start. Otherwise (capped
+       * fetch, or the caller's own loop broke early on a write/time budget
+       * before working through every fetched row) rows remain unexamined —
+       * creep to the oldest of the rows the caller actually looked at, so
+       * next firing overlaps rather than skips.
+       *
+       * `fullyExamined` defaults to true for callers whose loop has no early
+       * break other than draining `rows` itself (e.g. `labelOnlyPass`).
+       * Callers with a batch-size or wall-clock break (`classifyIssues`,
+       * `runRepinPassForCompany`) must pass `false` — and only the subset of
+       * rows their loop actually reached — whenever that break fires, even
+       * if the underlying fetch was itself uncapped. Conflating "fetch
+       * wasn't capped" with "loop wasn't cut short" is exactly the
+       * starvation bug this pass fixes: it silently dropped fetched-but-
+       * unexamined rows from every future scan until they were touched
+       * again.
+       */
+      const advanceScanMark = async (
+        companyId: string,
+        stateKey: string,
+        rows: unknown[],
+        fetchLimit: number,
+        firingStartMs: number,
+        fullyExamined = true,
+      ): Promise<void> => {
+        if (fullyExamined && rows.length < fetchLimit) {
+          await writeScanMark(companyId, stateKey, firingStartMs);
+          return;
+        }
+        const oldest = oldestUpdatedAtMs(rows);
+        if (oldest !== null) await writeScanMark(companyId, stateKey, oldest);
       };
 
       /** Final fail-closed read immediately before a balance write. */
@@ -2881,16 +3000,23 @@ export function createPlugin() {
             // "has no override" candidates here, and confirms the tier:*
             // label (and absence of pin:operator) per row via
             // `ctx.issues.get()` below, exactly like `describeIssue` does.
+            // TOG-3585: incremental scan on this pass's own watermark.
+            const labelOnlyFiringStartMs = Date.now();
+            const labelOnlySinceIso = new Date(
+              await readScanMark(company.id, PLUGIN_STATE_KEYS.labelOnlyLastScanAt),
+            ).toISOString();
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
                       i.status as status,
-                      coalesce(a.adapter_config->>'model','') as floor_model
+                      coalesce(a.adapter_config->>'model','') as floor_model,
+                      i.updated_at as updated_at
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
+                  and i.updated_at > $3
                   and (i.assignee_adapter_overrides is null
                        or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
                   and not exists (
@@ -2898,10 +3024,18 @@ export function createPlugin() {
                      where r.status in ('running','queued')
                        and r.context_snapshot->>'issueId' = i.id::text
                   )
-                order by i.updated_at desc
+                order by i.updated_at asc
                 limit $2`,
-              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)],
+              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT), labelOnlySinceIso],
             )) as unknown[];
+            if (candidateRows.length === 0) {
+              ctx.logger.info("label-only pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: labelOnlySinceIso,
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.labelOnlyLastScanAt, labelOnlyFiringStartMs);
+              continue;
+            }
 
             // TOG-3037. Read fresh, right before the floor-equality check
             // below — not reused from `advise()`'s own internal read — so a
@@ -2992,6 +3126,13 @@ export function createPlugin() {
               pinned += 1;
             }
 
+            await advanceScanMark(
+              company.id,
+              PLUGIN_STATE_KEYS.labelOnlyLastScanAt,
+              candidateRows,
+              LABEL_ONLY_PASS_FETCH_LIMIT,
+              labelOnlyFiringStartMs,
+            );
             ctx.logger.info("label-only pass complete", { companyId: company.id, pinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("label-only pass failed for a company", {
@@ -3015,8 +3156,17 @@ export function createPlugin() {
        * the identical sweep for the affected company the moment a lane
        * rejects a run, instead of waiting out the remainder of the
        * ten-minute cron. There is exactly one repin rule and it lives here.
+       *
+       * TOG-3585: the scheduled job passes its incremental watermark
+       * (`sinceIso` + `firingStartMs`) so the scan covers only issues updated
+       * since the last firing. The reactive `agent.run.failed` caller passes
+       * neither — a lane rejection must sweep the full candidate set
+       * immediately, never a cursor-narrowed one.
        */
-      const runRepinPassForCompany = async (companyId: string): Promise<number> => {
+      const runRepinPassForCompany = async (
+        companyId: string,
+        incremental?: { sinceIso: string; firingStartMs: number },
+      ): Promise<number> => {
         const company = { id: companyId };
         let repinnedTotal = 0;
         {
@@ -3035,6 +3185,7 @@ export function createPlugin() {
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
                   and i.assignee_adapter_overrides->'adapterConfig'->>'model' is not null
+                  ${incremental ? "and i.updated_at > $3" : ""}
                   and not exists (
                     select 1 from heartbeat_runs r
                      where r.status in ('running','queued')
@@ -3042,8 +3193,18 @@ export function createPlugin() {
                   )
                 order by i.updated_at asc
                 limit $2`,
-              [company.id, String(REPIN_PASS_FETCH_LIMIT)],
+              incremental
+                ? [company.id, String(REPIN_PASS_FETCH_LIMIT), incremental.sinceIso]
+                : [company.id, String(REPIN_PASS_FETCH_LIMIT)],
             )) as unknown[];
+            if (incremental && candidateRows.length === 0) {
+              ctx.logger.info("repin pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: incremental.sinceIso,
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt, incremental.firingStartMs);
+              return 0;
+            }
 
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
@@ -3056,8 +3217,17 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let repinned = 0;
+            // TOG-3585: rows this loop actually reached, for the watermark
+            // fix below — a `break` on the write limit must not be mistaken
+            // for having examined every fetched row.
+            const examinedRows: unknown[] = [];
+            let brokeEarly = false;
             for (const row of candidateRows) {
-              if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
+              if (repinned >= REPIN_PASS_WRITE_LIMIT) {
+                brokeEarly = true;
+                break;
+              }
+              examinedRows.push(row);
               const r = asRecord(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
@@ -3136,6 +3306,16 @@ export function createPlugin() {
             }
 
             repinnedTotal = repinned;
+            if (incremental) {
+              await advanceScanMark(
+                company.id,
+                PLUGIN_STATE_KEYS.repinLastScanAt,
+                examinedRows,
+                REPIN_PASS_FETCH_LIMIT,
+                incremental.firingStartMs,
+                !brokeEarly,
+              );
+            }
             ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("repin pass failed for a company", {
@@ -3149,7 +3329,11 @@ export function createPlugin() {
 
       ctx.jobs.register(JOB_KEYS.repinPass, async () => {
         for (const company of listKnownCompanies()) {
-          await runRepinPassForCompany(company.id);
+          // TOG-3585: the scheduled firing scans incrementally; the reactive
+          // `agent.run.failed` caller below passes no cursor (full sweep).
+          const firingStartMs = Date.now();
+          const sinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt)).toISOString();
+          await runRepinPassForCompany(company.id, { sinceIso, firingStartMs });
         }
       });
 
@@ -3283,6 +3467,51 @@ export function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+
+            // TOG-3585: incremental gate — one aggregate row before the page
+            // fetch. When nothing in the candidate statuses changed since the
+            // last scan, the whole per-row cycle (describe + advise per card)
+            // is skipped. The keyset id-cycle below is untouched: a skip
+            // advances only the scan mark, never the page cursor, so no card
+            // is ever skipped past. Fail-open: an unreadable aggregate runs
+            // the cycle instead of skipping it.
+            const balanceFiringStartMs = startedAt;
+            const balanceScanMarkMs = await readScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt);
+            // Null/unparseable aggregate (or a thrown read) = instrument
+            // failure, not proof of quiet — fall through and run the cycle.
+            const balanceMaxMs = await (async (): Promise<number | null> => {
+              try {
+                // Alias-free on purpose: the balance page query below matches
+                // on `from issues i`, and test fakes (like production
+                // readers) key row shapes off that alias. The aggregate
+                // returns a different shape and must not be mistaken for a
+                // page fetch.
+                const maxRows = (await ctx.db.query(
+                  `select max(updated_at) as max_updated
+                     from issues
+                    where company_id = $1
+                      and status in ('todo','in_progress','blocked','in_review')`,
+                  [company.id],
+                )) as unknown[];
+                const rawMax = asRecord(maxRows[0]).max_updated;
+                if (rawMax instanceof Date) return rawMax.getTime();
+                if (typeof rawMax === "string") {
+                  const ms = Date.parse(rawMax);
+                  return Number.isFinite(ms) ? ms : null;
+                }
+                return null;
+              } catch {
+                return null;
+              }
+            })();
+            if (balanceMaxMs !== null && balanceMaxMs <= balanceScanMarkMs) {
+              ctx.logger.info("balance pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: new Date(balanceScanMarkMs).toISOString(),
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
+              continue;
+            }
 
             const cursorKey = {
               scopeKind: "company" as const,
@@ -3552,6 +3781,12 @@ export function createPlugin() {
               scanned === candidateRows.length && candidateRows.length < BALANCE_PASS_FETCH_LIMIT;
             const nextAfterId = cycleComplete ? null : lastScannedId || null;
             await ctx.state.set(cursorKey, { afterId: nextAfterId });
+            // TOG-3585: the id-cycle cursor above preserves position; the
+            // scan mark records that this firing SAW the board, so the next
+            // firing's aggregate gate can skip a quiet board. Always advanced
+            // on a completed cycle — even budget-exhausted — because the mark
+            // is about "board seen", not "cycle drained".
+            await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
             ctx.logger.info("balance pass complete", {
               companyId: company.id,
               balanced,
@@ -3635,9 +3870,25 @@ export function createPlugin() {
 
             const assigned = nonTerminal.filter((issue) => issue.assigneeAgentId);
             const population: DispatchPopulationEntry[] = [];
+            // TOG-3585: assignees with a running/queued run seen in this
+            // firing's orchestration reads. Union'd with the firing-wide
+            // `agent_id` query below — an agent is busy if EITHER source says
+            // so. A run on an unreadable or terminal card still keeps its
+            // agent busy, which the orchestration union alone would miss.
+            const busyAssigneesFromRuns = new Set<string>();
             let unreadable = 0;
+            const sweepNowMs = Date.now();
             for (const issue of nonTerminal) {
               if (!issue.assigneeAgentId) {
+                population.push({ issue });
+                continue;
+              }
+              // TOG-3585: the row already answers the descriptor and
+              // monitor rails — skip both per-issue RPCs for cards
+              // `classifyIssue` will refuse on row data alone. This is a
+              // pure RPC saving, not a policy change: classification
+              // re-verifies from the same row.
+              if (isParkedOnNamedOwner(issue) || isMonitorArmed(issue, sweepNowMs)) {
                 population.push({ issue });
                 continue;
               }
@@ -3653,16 +3904,26 @@ export function createPlugin() {
                 // getOrchestration, which is exactly how TOG-2426 and
                 // TOG-2319/2455/1677 slipped past the sweep.
                 const interactions = await ctx.issues.listInteractions(issue.id, company.id);
+                const runs = orchestration.runs.map((r) => ({
+                  issueId: r.issueId,
+                  status: r.status,
+                  finishedAt: r.finishedAt,
+                  startedAt: r.startedAt,
+                  createdAt: r.createdAt,
+                }));
+                // TOG-3585: an active run scoped to this card keeps its
+                // assignee busy even if the firing-wide `agent_id` query
+                // misses it — union'd into `busyAssignees` below.
+                if (
+                  issue.assigneeAgentId &&
+                  runs.some((r) => r.issueId === issue.id && (r.status === "queued" || r.status === "running"))
+                ) {
+                  busyAssigneesFromRuns.add(issue.assigneeAgentId);
+                }
                 population.push({
                   issue,
                   blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
-                  runs: orchestration.runs.map((r) => ({
-                    issueId: r.issueId,
-                    status: r.status,
-                    finishedAt: r.finishedAt,
-                    startedAt: r.startedAt,
-                    createdAt: r.createdAt,
-                  })),
+                  runs,
                   invocationBlock:
                     orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null,
                   pendingInteractions: interactions
@@ -3686,11 +3947,113 @@ export function createPlugin() {
               notes.push(`${unreadable} assigned issues could not be read and are excluded from selection`);
             }
 
+            // TOG-3585: firing-wide agent busyness. The orchestration union
+            // above sees runs on gathered cards; this query sees runs
+            // ANYWHERE (terminal/unreadable cards included). One indexed
+            // `(company_id, status)` scan per firing, not per issue.
+            const busyAssignees = new Set<string>(busyAssigneesFromRuns);
+            try {
+              const busyRows = (await ctx.db.query(
+                `select distinct agent_id::text as agent_id
+                   from heartbeat_runs
+                  where company_id = $1
+                    and status in ('running','queued')
+                    and agent_id is not null`,
+                [company.id],
+              )) as unknown[];
+              for (const row of busyRows) {
+                const agentId = asRecord(row).agent_id;
+                if (typeof agentId === "string" && agentId.length > 0) busyAssignees.add(agentId);
+              }
+            } catch (cause) {
+              // Fail-open: without the busy set every assignee reads idle and
+              // the new class over-selects — but the per-issue active-run
+              // guard inside selectDispatch still holds, and the note says so.
+              notes.push("agent busyness unreadable this firing — idle-assignee class may over-select");
+              ctx.logger.warn("dispatch sweep: could not read busy agents, failing open", {
+                companyId: company.id,
+                error: cause instanceof Error ? cause.message : String(cause),
+              });
+            }
+            const idleAssignees = new Set<string>();
+            for (const entry of population) {
+              const assignee = entry.issue.assigneeAgentId;
+              if (assignee && !busyAssignees.has(assignee)) idleAssignees.add(assignee);
+            }
+
+            // TOG-3585: lane-down gate, read once per firing. Three signals,
+            // OR'd: the pace-ledger hard stop (a measured exhaustion), the
+            // operator outage override (TOG-3012 quarantine), and the
+            // collector availability snapshot's `unavailable` state. UNKNOWN
+            // availability never gates — fail-neutral, a broken instrument
+            // must not take dispatch down (TOG-3132 policy).
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const availability = await readAvailability(company.id, sweepNowMs);
+            const nowIso = new Date(sweepNowMs).toISOString();
+            const unavailableLanes = new Set(
+              availability.lanes.filter((lane) => lane.state === "unavailable").map((lane) => lane.laneId),
+            );
+            const isLaneDown = (laneId: string): boolean => {
+              if (hardStopExcluded(laneLedger, { laneId } as never)) return true;
+              if (
+                isLaneOutageActive(laneOutageOverride, nowIso) &&
+                (laneOutageOverride?.lanes ?? []).includes(laneId)
+              ) {
+                return true;
+              }
+              return unavailableLanes.has(laneId);
+            };
+
+            // TOG-3585: the lane a wake would run on, from rows already in
+            // hand — pin model first, agent floor second, unknown last (and
+            // unknown stays selectable). Agent rows are fetched once per
+            // distinct assignee and cached for the firing; an unreadable
+            // agent degrades to lane-unknown, never to a skip.
+            const agentFloorLaneByAgent = new Map<string, string | null>();
+            const laneOfModel = (modelId: string | null): string | null => {
+              if (!modelId) return null;
+              const resolved = resolveConfiguredModelId(modelId, config.models);
+              return config.models.find((m) => m.id === resolved)?.laneId ?? null;
+            };
+            const floorLaneOf = async (assigneeAgentId: string): Promise<string | null> => {
+              if (agentFloorLaneByAgent.has(assigneeAgentId)) {
+                return agentFloorLaneByAgent.get(assigneeAgentId) ?? null;
+              }
+              let lane: string | null = null;
+              try {
+                const agent = await ctx.agents.get(assigneeAgentId, company.id);
+                const adapterConfig = asRecord(asRecord(agent).adapterConfig);
+                const floorModel = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+                lane = laneOfModel(floorModel);
+              } catch {
+                lane = null;
+              }
+              agentFloorLaneByAgent.set(assigneeAgentId, lane);
+              return lane;
+            };
+            const laneByIssueId = new Map<string, string | null>();
+            for (const entry of population) {
+              const assignee = entry.issue.assigneeAgentId;
+              if (!assignee) continue;
+              const row = entry.issue as unknown as Record<string, unknown>;
+              const overrides = asRecord(row.assigneeAdapterOverrides ?? row.assignee_adapter_overrides);
+              const pinned = asRecord(overrides.adapterConfig).model;
+              const pinnedLane = laneOfModel(typeof pinned === "string" ? pinned : null);
+              laneByIssueId.set(
+                entry.issue.id,
+                pinnedLane ?? (await floorLaneOf(assignee)),
+              );
+            }
+
             const selection = selectDispatch(population, {
               idleMinutes: dispatchConfig.idleMinutes,
               maxWakesPerFiring: dispatchConfig.maxWakesPerFiring,
               focusProjectIds: [...dispatchConfig.focusProjectIds],
-              now: Date.now(),
+              now: sweepNowMs,
+              idleAssignees,
+              laneByIssueId,
+              isLaneDown,
             });
             (selection as { routingGap?: typeof routingGap }).routingGap = routingGap;
 
@@ -3707,12 +4070,36 @@ export function createPlugin() {
                     contextSource: "plugin.dispatch.sweep",
                     idempotencyKey: `dispatch:${job.runId}:${pick.issue.id}`,
                   });
-                  wakeOutcomes.push({ issueId: pick.issue.id, queued: result.queued });
+                  // A `queued: false` answer without a throw is still a
+                  // failure with a reason — TOG-3585 counts it, never drops it.
+                  if (result.queued) {
+                    wakeOutcomes.push({ issueId: pick.issue.id, queued: true });
+                  } else {
+                    const message = "requestWakeup answered queued:false without an error";
+                    wakeOutcomes.push({
+                      issueId: pick.issue.id,
+                      queued: false,
+                      error: { code: wakeFailureCodeFor(message), message },
+                    });
+                    ctx.logger.error("dispatch sweep: wake not queued", {
+                      companyId: company.id,
+                      issueId: pick.issue.id,
+                      code: wakeFailureCodeFor(message),
+                      error: message,
+                    });
+                  }
                 } catch (cause) {
-                  wakeOutcomes.push({
+                  const message = cause instanceof Error ? cause.message : String(cause);
+                  const code = wakeFailureCodeFor(message);
+                  wakeOutcomes.push({ issueId: pick.issue.id, queued: false, error: { code, message } });
+                  // TOG-3585: the plugin_logs half of failure persistence —
+                  // code + message on the host log line, matching what lands
+                  // in `dispatchLastFiring` via the summary.
+                  ctx.logger.error("dispatch sweep: wake failed", {
+                    companyId: company.id,
                     issueId: pick.issue.id,
-                    queued: false,
-                    error: cause instanceof Error ? cause.message : String(cause),
+                    code,
+                    error: message,
                   });
                 }
               }
@@ -3744,6 +4131,10 @@ export function createPlugin() {
               runnableQueue: summary.legacy.runnable_queue,
               routingGap: summary.routingGapCount,
               assignedGathered: assigned.length,
+              idleAssigneePicks: summary.idleAssigneePickedIssueIds.length,
+              laneDownSkips: summary.laneDownSkippedIssueIds.length,
+              wakeFailures: summary.wakeFailures,
+              wakeFailuresByReason: summary.wakeFailuresByReason,
             });
           } catch (cause) {
             ctx.logger.error("dispatch sweep failed for a company", {

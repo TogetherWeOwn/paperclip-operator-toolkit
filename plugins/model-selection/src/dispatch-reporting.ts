@@ -18,10 +18,32 @@ import { LEGACY_COUNTERS, SELECTION_COUNTERS } from "./engine/dispatch-selection
 
 export const METRIC_PREFIX = "dispatch";
 
+/**
+ * TOG-3585: a wake failure's machine-readable reason. The worker maps the
+ * `requestWakeup` throw into one of these codes so the summary can count
+ * failures per reason; the free-text `message` is preserved alongside for the
+ * operator. `unknown` is the fallback — a failure with no recognised cause
+ * still counts, never vanishes.
+ */
+export type WakeFailureCode =
+  | "budget_block"
+  | "blocked"
+  | "unassigned"
+  | "bad_status"
+  | "rate_limited"
+  | "timeout"
+  | "unknown";
+
+export interface WakeFailure {
+  code: WakeFailureCode;
+  message: string;
+}
+
 export interface WakeOutcome {
   issueId: string;
   queued: boolean;
-  error?: string;
+  /** TOG-3585: structured failure, persisted in `dispatchLastFiring` and counted per reason. */
+  error?: WakeFailure | string;
 }
 
 export interface FiringSummary {
@@ -31,10 +53,42 @@ export interface FiringSummary {
   pickedIssueIds: string[];
   parkedIssueIds: string[];
   budgetBlockedIssueIds: string[];
+  /** TOG-3585: picks the lane-down gate refused to wake, per firing. */
+  laneDownSkippedIssueIds: string[];
+  /** TOG-3585: picks riding the new idle-assignee class, per firing. */
+  idleAssigneePickedIssueIds: string[];
   routingGapCount: number;
   routingOwnerIds: string[];
   routingOwnersComplete: boolean;
   wakeFailures: number;
+  /** TOG-3585: `wakeFailures` broken down by `WakeFailureCode`. 100 % of wake failures carry a reason. */
+  wakeFailuresByReason: Record<string, number>;
+  /** TOG-3585: per-issue codes, so `dispatchLastFiring` names WHICH wake failed with WHAT. */
+  wakeFailureDetails: Array<{ issueId: string; code: WakeFailureCode; message: string }>;
+}
+
+/**
+ * TOG-3585: map a `requestWakeup` throw to a stable code. Matches the server
+ * rails the selection policy mirrors (assignee, status, blockers, budgets)
+ * plus the two transport failures a sweep actually sees (429/rate-limit, RPC
+ * timeout). Anything unrecognised is `unknown` — still counted, never dropped.
+ */
+export function wakeFailureCodeFor(message: string): WakeFailureCode {
+  const text = message.toLowerCase();
+  if (/no assigned agent|no assignee/.test(text)) return "unassigned";
+  if (/not wakeable in status|bad status|backlog|terminal/.test(text)) return "bad_status";
+  if (/blocked by|unresolved blocker/.test(text)) return "blocked";
+  if (/budget|invocation.?block|quota|exhausted|insufficient/.test(text)) return "budget_block";
+  if (/429|rate.?limit|too many/.test(text)) return "rate_limited";
+  if (/timed? ?out|deadline|rpc.*(fail|error)|unavailable/.test(text)) return "timeout";
+  return "unknown";
+}
+
+/** Normalize the legacy string form into the structured form. */
+export function normalizeWakeFailure(error: WakeOutcome["error"]): WakeFailure | null {
+  if (!error) return null;
+  if (typeof error === "string") return { code: wakeFailureCodeFor(error), message: error };
+  return { code: error.code, message: error.message };
 }
 
 /** Reduce one firing's selection + wake results to the shape both channels read from. */
@@ -44,19 +98,36 @@ export function summariseFiring(
   wakeOutcomes: WakeOutcome[],
 ): FiringSummary {
   const woken = wakeOutcomes.filter((outcome) => outcome.queued).length;
-  const wakeFailures = wakeOutcomes.filter((outcome) => !outcome.queued).length;
+  const failures = wakeOutcomes.filter((outcome) => !outcome.queued);
+  const wakeFailureDetails = failures.map((outcome) => {
+    const failure = normalizeWakeFailure(outcome.error) ?? {
+      code: "unknown" as WakeFailureCode,
+      message: "wake not queued, no error recorded",
+    };
+    return { issueId: outcome.issueId, code: failure.code, message: failure.message };
+  });
+  const wakeFailuresByReason: Record<string, number> = {};
+  for (const detail of wakeFailureDetails) {
+    wakeFailuresByReason[detail.code] = (wakeFailuresByReason[detail.code] ?? 0) + 1;
+  }
+  const pickedIds = new Set(selection.picks.map((p) => p.issue.id));
+  const idleAssigneeIds = new Set((selection.idleAssigneeActionable ?? []).map((p) => p.issue.id));
 
   return {
     companyId,
     counters: { ...selection.counters, woken },
     legacy: { ...selection.legacy },
-    pickedIssueIds: selection.picks.map((p) => p.issue.id).sort(),
+    pickedIssueIds: [...pickedIds].sort(),
     parkedIssueIds: selection.parked.map((p) => p.issue.id).sort(),
     budgetBlockedIssueIds: selection.budgetBlocked.map((b) => b.issue.id).sort(),
+    laneDownSkippedIssueIds: (selection.laneDownSkipped ?? []).map((s) => s.issue.id).sort(),
+    idleAssigneePickedIssueIds: [...pickedIds].filter((id) => idleAssigneeIds.has(id)).sort(),
     routingGapCount: selection.routingGap?.count ?? 0,
     routingOwnerIds: (selection.routingGap?.owners?.owners ?? []).map((o) => o.agentId).sort(),
     routingOwnersComplete: selection.routingGap?.owners?.complete ?? false,
-    wakeFailures,
+    wakeFailures: failures.length,
+    wakeFailuresByReason,
+    wakeFailureDetails,
   };
 }
 
@@ -74,6 +145,14 @@ export function summariseFiring(
 function canonicalise(summary: FiringSummary): Record<string, unknown> {
   const sortedCounters = Object.fromEntries(Object.entries(summary.counters).sort(([a], [b]) => a.localeCompare(b)));
   const sortedLegacy = Object.fromEntries(Object.entries(summary.legacy).sort(([a], [b]) => a.localeCompare(b)));
+  const sortedReasons = Object.fromEntries(
+    Object.entries(summary.wakeFailuresByReason ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  );
+  // TOG-3585: failure details compare on (issue, code) only — messages carry
+  // request ids and timings that change every firing and would defeat the gate.
+  const failureKeys = [...(summary.wakeFailureDetails ?? [])]
+    .map((d) => `${d.issueId}:${d.code}`)
+    .sort();
   return {
     companyId: summary.companyId,
     counters: sortedCounters,
@@ -81,10 +160,14 @@ function canonicalise(summary: FiringSummary): Record<string, unknown> {
     pickedIssueIds: [...summary.pickedIssueIds].sort(),
     parkedIssueIds: [...summary.parkedIssueIds].sort(),
     budgetBlockedIssueIds: [...summary.budgetBlockedIssueIds].sort(),
+    laneDownSkippedIssueIds: [...(summary.laneDownSkippedIssueIds ?? [])].sort(),
+    idleAssigneePickedIssueIds: [...(summary.idleAssigneePickedIssueIds ?? [])].sort(),
     routingGapCount: summary.routingGapCount,
     routingOwnerIds: [...summary.routingOwnerIds].sort(),
     routingOwnersComplete: summary.routingOwnersComplete,
     wakeFailures: summary.wakeFailures,
+    wakeFailuresByReason: sortedReasons,
+    wakeFailureKeys: failureKeys,
   };
 }
 
@@ -125,6 +208,34 @@ export async function emitMetrics(
   }
   await ctx.metrics.write(`${METRIC_PREFIX}.routing_gap`, summary.routingGapCount, tags);
   await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary.wakeFailures, tags);
+  // TOG-3585: per-reason failure series, so "wake failures logged with a
+  // reason 100 %" is graphable. A reason that never fired this run still gets
+  // its zero — same always-write contract as the selection counters above.
+  const reasons: string[] = [
+    "budget_block",
+    "blocked",
+    "unassigned",
+    "bad_status",
+    "rate_limited",
+    "timeout",
+    "unknown",
+  ];
+  for (const reason of reasons) {
+    await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary.wakeFailuresByReason?.[reason] ?? 0, {
+      ...tags,
+      reason,
+    });
+  }
+  await ctx.metrics.write(
+    `${METRIC_PREFIX}.lane_down_skips`,
+    summary.laneDownSkippedIssueIds?.length ?? 0,
+    tags,
+  );
+  await ctx.metrics.write(
+    `${METRIC_PREFIX}.idle_assignee_picks`,
+    summary.idleAssigneePickedIssueIds?.length ?? 0,
+    tags,
+  );
 }
 
 interface ActivityCtx {
@@ -159,10 +270,27 @@ export async function logStateChange(
         }.`
       : " Unassigned (routing gap): 0.";
 
+  // TOG-3585: name the new class and the two failure surfaces inline, so the
+  // 7-day acceptance (idle-assignee picks per firing, failures with a reason,
+  // lane-down skips) is readable without opening metadata.
+  const idleAssigneePicks = summary.idleAssigneePickedIssueIds?.length ?? 0;
+  const laneDownSkips = summary.laneDownSkippedIssueIds?.length ?? 0;
+  const failureReasons = Object.entries(summary.wakeFailuresByReason ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, count]) => `${code} ${count}`)
+    .join(", ");
+  const failures =
+    summary.wakeFailures > 0
+      ? ` Wake failures: ${summary.wakeFailures}${failureReasons ? ` (${failureReasons})` : ""}.`
+      : "";
+
   const message =
     `Dispatch sweep (${mode}): ${action} of ${summary.legacy.candidates_ready} ` +
-    `candidates from a wakeable surface of ${summary.legacy.runnable_queue}. ` +
+    `candidates from a wakeable surface of ${summary.legacy.runnable_queue} ` +
+    `(${idleAssigneePicks} idle-assignee). ` +
     `Parked on a named owner: ${summary.counters.parked_on_named_owner ?? 0}.` +
+    ` Lane-down skips: ${laneDownSkips}.` +
+    failures +
     routing;
 
   await ctx.activity.log({

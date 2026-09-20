@@ -181,6 +181,18 @@ var PLUGIN_STATE_KEYS = {
   /** Keyset cursor for the bounded balance-pass page, persisted per company. */
   balancePassCursor: "balancePassCursor",
   /**
+   * TOG-3585: per-pass high-water marks (`{at: ISOString}`) for the
+   * incremental scans. Each pass reads only issues updated since its own
+   * mark and advances the mark past what it scanned. A pass whose scan finds
+   * nothing logs a skip and still advances — an empty scan proves nothing
+   * changed. Separate keys per pass (not one shared cursor) so a slow pass
+   * never starves a fast one.
+   */
+  classifyLastScanAt: "classifyLastScanAt",
+  labelOnlyLastScanAt: "labelOnlyLastScanAt",
+  repinLastScanAt: "repinLastScanAt",
+  balanceLastScanAt: "balanceLastScanAt",
+  /**
    * TOG-2481 port of the `dispatch` plugin's `stateKey()` — the last-firing
    * summary a sweep compares against to gate the activity-log line to state
    * changes only. Namespaced separately from the rest of this plugin's state
@@ -3986,6 +3998,8 @@ var SELECTION_COUNTERS = [
   "parked_on_human_ask",
   "refused_in_review",
   "parked_on_named_owner",
+  "actionable_idle_assignee",
+  "skipped_lane_down",
   "woken"
 ];
 var LEGACY_COUNTERS = ["candidates_ready", "runnable_queue", "deadlocked_agents"];
@@ -4036,7 +4050,16 @@ function isReviewerNamedAssignee(interactions, assigneeAgentId) {
   );
 }
 function classifyIssue(input) {
-  const { issue, blockedBy = [], invocationBlock = null, pendingInteractions, idleMinutes, idle, nowMs } = input;
+  const {
+    issue,
+    blockedBy = [],
+    invocationBlock = null,
+    pendingInteractions,
+    idleMinutes,
+    idle,
+    nowMs,
+    assigneeIdle = false
+  } = input;
   if (TERMINAL_STATUSES2.includes(issue.status)) {
     return { outcome: "excluded_terminal" };
   }
@@ -4065,6 +4088,9 @@ function classifyIssue(input) {
     return { outcome: "parked_on_named_owner", wakeable: true };
   }
   if (idle.idleMs < idleMinutes * 6e4) {
+    if (assigneeIdle && (issue.status === "todo" || issue.status === "in_progress")) {
+      return { outcome: "actionable_idle_assignee", wakeable: true };
+    }
     return { outcome: "wakeable_not_idle", wakeable: true };
   }
   return { outcome: "actionable", wakeable: true };
@@ -4097,7 +4123,15 @@ function spreadAcrossAssignees(actionable, maxPicks) {
   return { picks, coalescedWithEarlierPick: coalesced, overflow };
 }
 function selectDispatch(population, options) {
-  const { idleMinutes, maxWakesPerFiring, focusProjectIds = [], now } = options;
+  const {
+    idleMinutes,
+    maxWakesPerFiring,
+    focusProjectIds = [],
+    now,
+    idleAssignees,
+    laneByIssueId,
+    isLaneDown
+  } = options;
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
   const counters = {
     refused_backlog: 0,
@@ -4107,12 +4141,16 @@ function selectDispatch(population, options) {
     parked_on_human_ask: 0,
     refused_in_review: 0,
     parked_on_named_owner: 0,
+    actionable_idle_assignee: 0,
+    skipped_lane_down: 0,
     // Filled in by the worker after the wake attempts. The policy cannot know
     // it: whether a wake succeeds is the server's call, not ours.
     woken: 0
   };
   const focus = new Set(focusProjectIds);
   const actionable = [];
+  const idleAssigneeActionable = [];
+  const laneDownSkipped = [];
   const parked = [];
   const budgetBlocked = [];
   let wakeable = 0;
@@ -4121,7 +4159,17 @@ function selectDispatch(population, options) {
   for (const entry of population) {
     const { issue, blockedBy = [], runs = [], invocationBlock = null, pendingInteractions } = entry;
     const idle = computeIdleMs(issue, runs, nowMs);
-    const result = classifyIssue({ issue, blockedBy, invocationBlock, pendingInteractions, idleMinutes, idle, nowMs });
+    const assigneeIdle = !!issue.assigneeAgentId && !!idleAssignees?.has(issue.assigneeAgentId) && !runs.some((run) => run.issueId === issue.id && (run.status === "queued" || run.status === "running"));
+    const result = classifyIssue({
+      issue,
+      blockedBy,
+      invocationBlock,
+      pendingInteractions,
+      idleMinutes,
+      idle,
+      nowMs,
+      assigneeIdle
+    });
     if (result.outcome === "excluded_terminal") {
       excludedTerminal += 1;
       continue;
@@ -4136,19 +4184,28 @@ function selectDispatch(population, options) {
       parked.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
       continue;
     }
-    if (result.outcome !== "actionable") continue;
+    if (result.outcome !== "actionable" && result.outcome !== "actionable_idle_assignee") continue;
     if (focus.size > 0 && !focus.has(issue.projectId ?? "")) {
       outOfFocus += 1;
       continue;
     }
-    actionable.push({ issue, idleMs: idle.idleMs, idleAnchor: idle.anchor });
+    const laneId = laneByIssueId?.get(issue.id) ?? null;
+    if (laneId !== null && isLaneDown?.(laneId)) {
+      counters.skipped_lane_down += 1;
+      laneDownSkipped.push({ issue, laneId });
+      continue;
+    }
+    const candidate = { issue, idleMs: idle.idleMs, idleAnchor: idle.anchor };
+    actionable.push(candidate);
+    if (result.outcome === "actionable_idle_assignee") idleAssigneeActionable.push(candidate);
   }
   const { picks, coalescedWithEarlierPick, overflow } = spreadAcrossAssignees(actionable, maxWakesPerFiring);
   return {
     counters,
     legacy: {
-      // The set we would select from: rails passed, not parked, idle over
-      // threshold, in focus.
+      // The set we would select from: rails passed, not parked, not
+      // lane-down, in focus — both the threshold class and the TOG-3585
+      // idle-assignee class.
       candidates_ready: actionable.length,
       // The wakeable surface: rails 1-3 passed, before our two own rails. This
       // is the 26 in docs/dispatch-plugin-facts.md §3.
@@ -4162,6 +4219,8 @@ function selectDispatch(population, options) {
     // was measurable. Reported alongside them, never folded into one of them.
     budgetBlocked,
     actionable,
+    idleAssigneeActionable,
+    laneDownSkipped,
     coalescedWithEarlierPick,
     overflow,
     excludedTerminal,
@@ -4198,25 +4257,61 @@ function summariseRoutingGap(population) {
 
 // src/dispatch-reporting.ts
 var METRIC_PREFIX = "dispatch";
+function wakeFailureCodeFor(message) {
+  const text2 = message.toLowerCase();
+  if (/no assigned agent|no assignee/.test(text2)) return "unassigned";
+  if (/not wakeable in status|bad status|backlog|terminal/.test(text2)) return "bad_status";
+  if (/blocked by|unresolved blocker/.test(text2)) return "blocked";
+  if (/budget|invocation.?block|quota|exhausted|insufficient/.test(text2)) return "budget_block";
+  if (/429|rate.?limit|too many/.test(text2)) return "rate_limited";
+  if (/timed? ?out|deadline|rpc.*(fail|error)|unavailable/.test(text2)) return "timeout";
+  return "unknown";
+}
+function normalizeWakeFailure(error) {
+  if (!error) return null;
+  if (typeof error === "string") return { code: wakeFailureCodeFor(error), message: error };
+  return { code: error.code, message: error.message };
+}
 function summariseFiring(companyId, selection, wakeOutcomes) {
   const woken = wakeOutcomes.filter((outcome) => outcome.queued).length;
-  const wakeFailures = wakeOutcomes.filter((outcome) => !outcome.queued).length;
+  const failures = wakeOutcomes.filter((outcome) => !outcome.queued);
+  const wakeFailureDetails = failures.map((outcome) => {
+    const failure = normalizeWakeFailure(outcome.error) ?? {
+      code: "unknown",
+      message: "wake not queued, no error recorded"
+    };
+    return { issueId: outcome.issueId, code: failure.code, message: failure.message };
+  });
+  const wakeFailuresByReason = {};
+  for (const detail of wakeFailureDetails) {
+    wakeFailuresByReason[detail.code] = (wakeFailuresByReason[detail.code] ?? 0) + 1;
+  }
+  const pickedIds = new Set(selection.picks.map((p) => p.issue.id));
+  const idleAssigneeIds = new Set((selection.idleAssigneeActionable ?? []).map((p) => p.issue.id));
   return {
     companyId,
     counters: { ...selection.counters, woken },
     legacy: { ...selection.legacy },
-    pickedIssueIds: selection.picks.map((p) => p.issue.id).sort(),
+    pickedIssueIds: [...pickedIds].sort(),
     parkedIssueIds: selection.parked.map((p) => p.issue.id).sort(),
     budgetBlockedIssueIds: selection.budgetBlocked.map((b) => b.issue.id).sort(),
+    laneDownSkippedIssueIds: (selection.laneDownSkipped ?? []).map((s) => s.issue.id).sort(),
+    idleAssigneePickedIssueIds: [...pickedIds].filter((id) => idleAssigneeIds.has(id)).sort(),
     routingGapCount: selection.routingGap?.count ?? 0,
     routingOwnerIds: (selection.routingGap?.owners?.owners ?? []).map((o) => o.agentId).sort(),
     routingOwnersComplete: selection.routingGap?.owners?.complete ?? false,
-    wakeFailures
+    wakeFailures: failures.length,
+    wakeFailuresByReason,
+    wakeFailureDetails
   };
 }
 function canonicalise(summary2) {
   const sortedCounters = Object.fromEntries(Object.entries(summary2.counters).sort(([a], [b]) => a.localeCompare(b)));
   const sortedLegacy = Object.fromEntries(Object.entries(summary2.legacy).sort(([a], [b]) => a.localeCompare(b)));
+  const sortedReasons = Object.fromEntries(
+    Object.entries(summary2.wakeFailuresByReason ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  );
+  const failureKeys = [...summary2.wakeFailureDetails ?? []].map((d) => `${d.issueId}:${d.code}`).sort();
   return {
     companyId: summary2.companyId,
     counters: sortedCounters,
@@ -4224,10 +4319,14 @@ function canonicalise(summary2) {
     pickedIssueIds: [...summary2.pickedIssueIds].sort(),
     parkedIssueIds: [...summary2.parkedIssueIds].sort(),
     budgetBlockedIssueIds: [...summary2.budgetBlockedIssueIds].sort(),
+    laneDownSkippedIssueIds: [...summary2.laneDownSkippedIssueIds ?? []].sort(),
+    idleAssigneePickedIssueIds: [...summary2.idleAssigneePickedIssueIds ?? []].sort(),
     routingGapCount: summary2.routingGapCount,
     routingOwnerIds: [...summary2.routingOwnerIds].sort(),
     routingOwnersComplete: summary2.routingOwnersComplete,
-    wakeFailures: summary2.wakeFailures
+    wakeFailures: summary2.wakeFailures,
+    wakeFailuresByReason: sortedReasons,
+    wakeFailureKeys: failureKeys
   };
 }
 function hasStateChanged(previous, current) {
@@ -4248,13 +4347,42 @@ async function emitMetrics(ctx, input) {
   }
   await ctx.metrics.write(`${METRIC_PREFIX}.routing_gap`, summary2.routingGapCount, tags);
   await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary2.wakeFailures, tags);
+  const reasons = [
+    "budget_block",
+    "blocked",
+    "unassigned",
+    "bad_status",
+    "rate_limited",
+    "timeout",
+    "unknown"
+  ];
+  for (const reason of reasons) {
+    await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary2.wakeFailuresByReason?.[reason] ?? 0, {
+      ...tags,
+      reason
+    });
+  }
+  await ctx.metrics.write(
+    `${METRIC_PREFIX}.lane_down_skips`,
+    summary2.laneDownSkippedIssueIds?.length ?? 0,
+    tags
+  );
+  await ctx.metrics.write(
+    `${METRIC_PREFIX}.idle_assignee_picks`,
+    summary2.idleAssigneePickedIssueIds?.length ?? 0,
+    tags
+  );
 }
 async function logStateChange(ctx, input) {
   const { companyId, summary: summary2, wakeEnabled, notes = [] } = input;
   const mode = wakeEnabled ? "live" : "report-only";
   const action = wakeEnabled ? "woken" : "would have woken";
   const routing = summary2.routingGapCount > 0 ? ` Unassigned (routing gap): ${summary2.routingGapCount}${summary2.routingOwnersComplete ? "" : " (routing owners: partial list)"}.` : " Unassigned (routing gap): 0.";
-  const message = `Dispatch sweep (${mode}): ${action} of ${summary2.legacy.candidates_ready} candidates from a wakeable surface of ${summary2.legacy.runnable_queue}. Parked on a named owner: ${summary2.counters.parked_on_named_owner ?? 0}.` + routing;
+  const idleAssigneePicks = summary2.idleAssigneePickedIssueIds?.length ?? 0;
+  const laneDownSkips = summary2.laneDownSkippedIssueIds?.length ?? 0;
+  const failureReasons = Object.entries(summary2.wakeFailuresByReason ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([code, count]) => `${code} ${count}`).join(", ");
+  const failures = summary2.wakeFailures > 0 ? ` Wake failures: ${summary2.wakeFailures}${failureReasons ? ` (${failureReasons})` : ""}.` : "";
+  const message = `Dispatch sweep (${mode}): ${action} of ${summary2.legacy.candidates_ready} candidates from a wakeable surface of ${summary2.legacy.runnable_queue} (${idleAssigneePicks} idle-assignee). Parked on a named owner: ${summary2.counters.parked_on_named_owner ?? 0}. Lane-down skips: ${laneDownSkips}.` + failures + routing;
   await ctx.activity.log({
     companyId,
     message,
@@ -5883,19 +6011,23 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               CLASSIFY_FETCH_LIMIT_MAX
             );
             const classifyDeadline = Date.now() + CLASSIFY_JOB_BUDGET_MS;
+            const classifyFiringStartMs = Date.now();
+            const classifySinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.classifyLastScanAt)).toISOString();
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
                       i.status as status,
                       coalesce(a.name,'') as agent_name,
                       i.title as title,
-                      coalesce(i.description,'') as description
+                      coalesce(i.description,'') as description,
+                      i.updated_at as updated_at
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
                   and i.assignee_agent_id is not null
+                  and i.updated_at > $3
                   and (i.assignee_adapter_overrides is null
                        or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
                   and not exists (
@@ -5903,22 +6035,37 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                      where r.status in ('running','queued')
                        and r.context_snapshot->>'issueId' = i.id::text
                   )
-                order by case i.status when 'todo' then 0 when 'blocked' then 1 when 'in_review' then 2 else 3 end,
-                         i.updated_at desc
+                order by i.updated_at asc
                 limit $2`,
-              [company.id, String(classifyFetchLimit)]
+              [company.id, String(classifyFetchLimit), classifySinceIso]
             );
+            if (candidateRows.length === 0) {
+              ctx.logger.info("issue classification pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: classifySinceIso
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.classifyLastScanAt, classifyFiringStartMs);
+              continue;
+            }
             const exclusions = await readClassificationExclusions(company.id);
             const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
             let reclassified = 0;
+            const examinedRows = [];
+            let brokeEarly = false;
             for (const row of candidateRows) {
               const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) continue;
-              if (classified >= config.classification.batchSize) break;
-              if (Date.now() >= classifyDeadline) break;
+              if (!issueId) {
+                examinedRows.push(row);
+                continue;
+              }
+              if (classified >= config.classification.batchSize || Date.now() >= classifyDeadline) {
+                brokeEarly = true;
+                break;
+              }
+              examinedRows.push(row);
               let issue;
               try {
                 issue = await ctx.issues.get(issueId, company.id);
@@ -6008,6 +6155,14 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               classified += 1;
               if (isForeignLabel) reclassified += 1;
             }
+            await advanceScanMark(
+              company.id,
+              PLUGIN_STATE_KEYS.classifyLastScanAt,
+              examinedRows,
+              classifyFetchLimit,
+              classifyFiringStartMs,
+              !brokeEarly
+            );
             ctx.logger.info("issue classification pass complete", {
               companyId: company.id,
               classified,
@@ -6035,6 +6190,35 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         return new Set(
           rows.map((row) => asRecord2(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
         );
+      };
+      const readScanMark = async (companyId, stateKey) => {
+        const stored = asRecord2(await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey }));
+        const at = typeof stored.at === "string" ? Date.parse(stored.at) : Number.NaN;
+        return Number.isFinite(at) ? at : 0;
+      };
+      const writeScanMark = async (companyId, stateKey, atMs) => {
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: companyId, stateKey },
+          { at: new Date(atMs).toISOString() }
+        );
+      };
+      const oldestUpdatedAtMs = (rows) => {
+        let oldest = null;
+        for (const row of rows) {
+          const raw = asRecord2(row).updated_at;
+          const ms = raw instanceof Date ? raw.getTime() : typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+          if (!Number.isFinite(ms)) continue;
+          if (oldest === null || ms < oldest) oldest = ms;
+        }
+        return oldest;
+      };
+      const advanceScanMark = async (companyId, stateKey, rows, fetchLimit, firingStartMs, fullyExamined = true) => {
+        if (fullyExamined && rows.length < fetchLimit) {
+          await writeScanMark(companyId, stateKey, firingStartMs);
+          return;
+        }
+        const oldest = oldestUpdatedAtMs(rows);
+        if (oldest !== null) await writeScanMark(companyId, stateKey, oldest);
       };
       const balanceWriteStillSafe = async (companyId, issueId, expectedPinnedModelId, models) => {
         const issue = await ctx.issues.get(issueId, companyId);
@@ -6093,16 +6277,22 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+            const labelOnlyFiringStartMs = Date.now();
+            const labelOnlySinceIso = new Date(
+              await readScanMark(company.id, PLUGIN_STATE_KEYS.labelOnlyLastScanAt)
+            ).toISOString();
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
                       i.identifier as identifier,
                       i.status as status,
-                      coalesce(a.adapter_config->>'model','') as floor_model
+                      coalesce(a.adapter_config->>'model','') as floor_model,
+                      i.updated_at as updated_at
                  from issues i
                  join agents a on a.id = i.assignee_agent_id
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
+                  and i.updated_at > $3
                   and (i.assignee_adapter_overrides is null
                        or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
                   and not exists (
@@ -6110,10 +6300,18 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                      where r.status in ('running','queued')
                        and r.context_snapshot->>'issueId' = i.id::text
                   )
-                order by i.updated_at desc
+                order by i.updated_at asc
                 limit $2`,
-              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT)]
+              [company.id, String(LABEL_ONLY_PASS_FETCH_LIMIT), labelOnlySinceIso]
             );
+            if (candidateRows.length === 0) {
+              ctx.logger.info("label-only pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: labelOnlySinceIso
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.labelOnlyLastScanAt, labelOnlyFiringStartMs);
+              continue;
+            }
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const modelScores = await readModelScores(company.id);
@@ -6176,6 +6374,13 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               });
               pinned += 1;
             }
+            await advanceScanMark(
+              company.id,
+              PLUGIN_STATE_KEYS.labelOnlyLastScanAt,
+              candidateRows,
+              LABEL_ONLY_PASS_FETCH_LIMIT,
+              labelOnlyFiringStartMs
+            );
             ctx.logger.info("label-only pass complete", { companyId: company.id, pinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("label-only pass failed for a company", {
@@ -6185,7 +6390,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
-      const runRepinPassForCompany = async (companyId) => {
+      const runRepinPassForCompany = async (companyId, incremental) => {
         const company = { id: companyId };
         let repinnedTotal = 0;
         {
@@ -6203,6 +6408,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
                   and i.assignee_adapter_overrides->'adapterConfig'->>'model' is not null
+                  ${incremental ? "and i.updated_at > $3" : ""}
                   and not exists (
                     select 1 from heartbeat_runs r
                      where r.status in ('running','queued')
@@ -6210,16 +6416,30 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   )
                 order by i.updated_at asc
                 limit $2`,
-              [company.id, String(REPIN_PASS_FETCH_LIMIT)]
+              incremental ? [company.id, String(REPIN_PASS_FETCH_LIMIT), incremental.sinceIso] : [company.id, String(REPIN_PASS_FETCH_LIMIT)]
             );
+            if (incremental && candidateRows.length === 0) {
+              ctx.logger.info("repin pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: incremental.sinceIso
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt, incremental.firingStartMs);
+              return 0;
+            }
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const modelScores = await readModelScores(company.id);
             const nowIso = (/* @__PURE__ */ new Date()).toISOString();
             const contextUsageCache = /* @__PURE__ */ new Map();
             let repinned = 0;
+            const examinedRows = [];
+            let brokeEarly = false;
             for (const row of candidateRows) {
-              if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
+              if (repinned >= REPIN_PASS_WRITE_LIMIT) {
+                brokeEarly = true;
+                break;
+              }
+              examinedRows.push(row);
               const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
@@ -6286,6 +6506,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               repinned += 1;
             }
             repinnedTotal = repinned;
+            if (incremental) {
+              await advanceScanMark(
+                company.id,
+                PLUGIN_STATE_KEYS.repinLastScanAt,
+                examinedRows,
+                REPIN_PASS_FETCH_LIMIT,
+                incremental.firingStartMs,
+                !brokeEarly
+              );
+            }
             ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
           } catch (cause) {
             ctx.logger.error("repin pass failed for a company", {
@@ -6298,7 +6528,9 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       };
       ctx.jobs.register(JOB_KEYS.repinPass, async () => {
         for (const company of listKnownCompanies()) {
-          await runRepinPassForCompany(company.id);
+          const firingStartMs = Date.now();
+          const sinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt)).toISOString();
+          await runRepinPassForCompany(company.id, { sinceIso, firingStartMs });
         }
       });
       ctx.events.on("agent.run.failed", async (event) => {
@@ -6379,6 +6611,36 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+            const balanceFiringStartMs = startedAt;
+            const balanceScanMarkMs = await readScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt);
+            const balanceMaxMs = await (async () => {
+              try {
+                const maxRows = await ctx.db.query(
+                  `select max(updated_at) as max_updated
+                     from issues
+                    where company_id = $1
+                      and status in ('todo','in_progress','blocked','in_review')`,
+                  [company.id]
+                );
+                const rawMax = asRecord2(maxRows[0]).max_updated;
+                if (rawMax instanceof Date) return rawMax.getTime();
+                if (typeof rawMax === "string") {
+                  const ms = Date.parse(rawMax);
+                  return Number.isFinite(ms) ? ms : null;
+                }
+                return null;
+              } catch {
+                return null;
+              }
+            })();
+            if (balanceMaxMs !== null && balanceMaxMs <= balanceScanMarkMs) {
+              ctx.logger.info("balance pass skipped: no issues changed since last scan", {
+                companyId: company.id,
+                since: new Date(balanceScanMarkMs).toISOString()
+              });
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
+              continue;
+            }
             const cursorKey = {
               scopeKind: "company",
               scopeId: company.id,
@@ -6560,6 +6822,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const cycleComplete = scanned === candidateRows.length && candidateRows.length < BALANCE_PASS_FETCH_LIMIT;
             const nextAfterId = cycleComplete ? null : lastScannedId || null;
             await ctx.state.set(cursorKey, { afterId: nextAfterId });
+            await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
             ctx.logger.info("balance pass complete", {
               companyId: company.id,
               balanced,
@@ -6626,9 +6889,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             }
             const assigned = nonTerminal.filter((issue) => issue.assigneeAgentId);
             const population = [];
+            const busyAssigneesFromRuns = /* @__PURE__ */ new Set();
             let unreadable = 0;
+            const sweepNowMs = Date.now();
             for (const issue of nonTerminal) {
               if (!issue.assigneeAgentId) {
+                population.push({ issue });
+                continue;
+              }
+              if (isParkedOnNamedOwner(issue) || isMonitorArmed(issue, sweepNowMs)) {
                 population.push({ issue });
                 continue;
               }
@@ -6639,16 +6908,20 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 });
                 const relation = orchestration.relations[issue.id];
                 const interactions = await ctx.issues.listInteractions(issue.id, company.id);
+                const runs = orchestration.runs.map((r) => ({
+                  issueId: r.issueId,
+                  status: r.status,
+                  finishedAt: r.finishedAt,
+                  startedAt: r.startedAt,
+                  createdAt: r.createdAt
+                }));
+                if (issue.assigneeAgentId && runs.some((r) => r.issueId === issue.id && (r.status === "queued" || r.status === "running"))) {
+                  busyAssigneesFromRuns.add(issue.assigneeAgentId);
+                }
                 population.push({
                   issue,
                   blockedBy: (relation?.blockedBy ?? []).map((b) => ({ id: b.id, status: b.status })),
-                  runs: orchestration.runs.map((r) => ({
-                    issueId: r.issueId,
-                    status: r.status,
-                    finishedAt: r.finishedAt,
-                    startedAt: r.startedAt,
-                    createdAt: r.createdAt
-                  })),
+                  runs,
                   invocationBlock: orchestration.invocationBlocks.find((b) => b.issueId === issue.id) ?? null,
                   pendingInteractions: interactions.filter((i) => i.status === "pending").map((i) => ({
                     status: i.status,
@@ -6668,11 +6941,89 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             if (unreadable > 0) {
               notes.push(`${unreadable} assigned issues could not be read and are excluded from selection`);
             }
+            const busyAssignees = new Set(busyAssigneesFromRuns);
+            try {
+              const busyRows = await ctx.db.query(
+                `select distinct agent_id::text as agent_id
+                   from heartbeat_runs
+                  where company_id = $1
+                    and status in ('running','queued')
+                    and agent_id is not null`,
+                [company.id]
+              );
+              for (const row of busyRows) {
+                const agentId = asRecord2(row).agent_id;
+                if (typeof agentId === "string" && agentId.length > 0) busyAssignees.add(agentId);
+              }
+            } catch (cause) {
+              notes.push("agent busyness unreadable this firing \u2014 idle-assignee class may over-select");
+              ctx.logger.warn("dispatch sweep: could not read busy agents, failing open", {
+                companyId: company.id,
+                error: cause instanceof Error ? cause.message : String(cause)
+              });
+            }
+            const idleAssignees = /* @__PURE__ */ new Set();
+            for (const entry of population) {
+              const assignee = entry.issue.assigneeAgentId;
+              if (assignee && !busyAssignees.has(assignee)) idleAssignees.add(assignee);
+            }
+            const laneLedger = await readLaneLedger(company.id);
+            const laneOutageOverride = await readLaneOutage(company.id);
+            const availability = await readAvailability(company.id, sweepNowMs);
+            const nowIso = new Date(sweepNowMs).toISOString();
+            const unavailableLanes = new Set(
+              availability.lanes.filter((lane) => lane.state === "unavailable").map((lane) => lane.laneId)
+            );
+            const isLaneDown = (laneId) => {
+              if (hardStopExcluded(laneLedger, { laneId })) return true;
+              if (isLaneOutageActive(laneOutageOverride, nowIso) && (laneOutageOverride?.lanes ?? []).includes(laneId)) {
+                return true;
+              }
+              return unavailableLanes.has(laneId);
+            };
+            const agentFloorLaneByAgent = /* @__PURE__ */ new Map();
+            const laneOfModel = (modelId) => {
+              if (!modelId) return null;
+              const resolved = resolveConfiguredModelId(modelId, config.models);
+              return config.models.find((m) => m.id === resolved)?.laneId ?? null;
+            };
+            const floorLaneOf = async (assigneeAgentId) => {
+              if (agentFloorLaneByAgent.has(assigneeAgentId)) {
+                return agentFloorLaneByAgent.get(assigneeAgentId) ?? null;
+              }
+              let lane = null;
+              try {
+                const agent = await ctx.agents.get(assigneeAgentId, company.id);
+                const adapterConfig = asRecord2(asRecord2(agent).adapterConfig);
+                const floorModel = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+                lane = laneOfModel(floorModel);
+              } catch {
+                lane = null;
+              }
+              agentFloorLaneByAgent.set(assigneeAgentId, lane);
+              return lane;
+            };
+            const laneByIssueId = /* @__PURE__ */ new Map();
+            for (const entry of population) {
+              const assignee = entry.issue.assigneeAgentId;
+              if (!assignee) continue;
+              const row = entry.issue;
+              const overrides = asRecord2(row.assigneeAdapterOverrides ?? row.assignee_adapter_overrides);
+              const pinned = asRecord2(overrides.adapterConfig).model;
+              const pinnedLane = laneOfModel(typeof pinned === "string" ? pinned : null);
+              laneByIssueId.set(
+                entry.issue.id,
+                pinnedLane ?? await floorLaneOf(assignee)
+              );
+            }
             const selection = selectDispatch(population, {
               idleMinutes: dispatchConfig.idleMinutes,
               maxWakesPerFiring: dispatchConfig.maxWakesPerFiring,
               focusProjectIds: [...dispatchConfig.focusProjectIds],
-              now: Date.now()
+              now: sweepNowMs,
+              idleAssignees,
+              laneByIssueId,
+              isLaneDown
             });
             selection.routingGap = routingGap;
             const wakeOutcomes = [];
@@ -6684,12 +7035,31 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     contextSource: "plugin.dispatch.sweep",
                     idempotencyKey: `dispatch:${job.runId}:${pick.issue.id}`
                   });
-                  wakeOutcomes.push({ issueId: pick.issue.id, queued: result.queued });
+                  if (result.queued) {
+                    wakeOutcomes.push({ issueId: pick.issue.id, queued: true });
+                  } else {
+                    const message = "requestWakeup answered queued:false without an error";
+                    wakeOutcomes.push({
+                      issueId: pick.issue.id,
+                      queued: false,
+                      error: { code: wakeFailureCodeFor(message), message }
+                    });
+                    ctx.logger.error("dispatch sweep: wake not queued", {
+                      companyId: company.id,
+                      issueId: pick.issue.id,
+                      code: wakeFailureCodeFor(message),
+                      error: message
+                    });
+                  }
                 } catch (cause) {
-                  wakeOutcomes.push({
+                  const message = cause instanceof Error ? cause.message : String(cause);
+                  const code = wakeFailureCodeFor(message);
+                  wakeOutcomes.push({ issueId: pick.issue.id, queued: false, error: { code, message } });
+                  ctx.logger.error("dispatch sweep: wake failed", {
+                    companyId: company.id,
                     issueId: pick.issue.id,
-                    queued: false,
-                    error: cause instanceof Error ? cause.message : String(cause)
+                    code,
+                    error: message
                   });
                 }
               }
@@ -6712,7 +7082,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               candidatesReady: summary2.legacy.candidates_ready,
               runnableQueue: summary2.legacy.runnable_queue,
               routingGap: summary2.routingGapCount,
-              assignedGathered: assigned.length
+              assignedGathered: assigned.length,
+              idleAssigneePicks: summary2.idleAssigneePickedIssueIds.length,
+              laneDownSkips: summary2.laneDownSkippedIssueIds.length,
+              wakeFailures: summary2.wakeFailures,
+              wakeFailuresByReason: summary2.wakeFailuresByReason
             });
           } catch (cause) {
             ctx.logger.error("dispatch sweep failed for a company", {

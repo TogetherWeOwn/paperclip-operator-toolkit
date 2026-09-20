@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import manifest from "../src/manifest.js";
 import { JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
+import { wakeFailureCodeFor } from "../src/dispatch-reporting.js";
 import { createPlugin } from "../src/worker.js";
 
 const COMPANY = "co-1";
@@ -251,13 +252,20 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
 
   it("anchors idle to the last finished run, not issue.createdAt, when a run exists", async () => {
     const card = issue("i1", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
+    // TOG-3585: the sibling running run keeps agent-1 busy, so the new
+    // idle-assignee class cannot claim i1 — this test isolates the anchoring
+    // rule (without it, i1 would wake via `actionable_idle_assignee` and the
+    // assertion would prove nothing about anchoring).
+    const sibling = issue("i2", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       card,
+      sibling,
     ]);
     // Finished 5 minutes ago — well under the 30-minute idle threshold, even
     // though the issue itself was created a day ago.
     withOrchestration(harness, {
       i1: [{ issueId: "i1", status: "succeeded", finishedAt: new Date(NOW - 5 * 60_000).toISOString() }],
+      i2: [{ issueId: "i2", status: "running" }],
     });
 
     await harness.runJob(JOB_KEYS.dispatchSweep);
@@ -721,5 +729,153 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(harness.activity).toHaveLength(2);
     const companyIds = harness.activity.map((entry) => (entry.metadata as { companyId: string }).companyId).sort();
     expect(companyIds).toEqual(["co-1", "co-2"]);
+  });
+});
+
+describe("dispatch sweep TOG-3585: idle-assignee class, lane-down gate, coded wake failures", () => {
+  const wakeConfig = { dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } };
+
+  it("wakes a below-threshold card whose assignee holds no running run (actionable_idle_assignee)", async () => {
+    // Created 5 minutes ago — under the 30-minute threshold, so the old code
+    // counted this as wakeable_not_idle and never picked it.
+    const card = issue("i1", { createdAt: new Date(NOW - 5 * 60_000) });
+    const harness = await boot(baseConfig(wakeConfig), [card]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      idleAssigneePickedIssueIds: string[];
+    };
+    // Named mutant: "assigneeIdle not threaded". Without the firing-wide idle
+    // set, this card stays wakeable_not_idle and woken drops to 0.
+    expect(metadata.counters.woken).toBe(1);
+    expect(metadata.counters.actionable_idle_assignee).toBe(1);
+    expect(metadata.idleAssigneePickedIssueIds).toEqual(["i1"]);
+  });
+
+  it("keeps a below-threshold card quiet when its assignee is busy on another card", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 5 * 60_000) });
+    const sibling = issue("i2", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig(wakeConfig), [card, sibling]);
+    withOrchestration(harness, {
+      i1: [],
+      i2: [{ issueId: "i2", status: "running" }],
+    });
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    // i2's active run keeps agent-1 busy: i1 is wakeable_not_idle (no
+    // counter), i2 is idle-0 on its own active run. Neither wakes.
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    expect(metadata.counters.actionable_idle_assignee ?? 0).toBe(0);
+  });
+
+  it("keeps the rails: an in_review card below the threshold stays refused even with an idle assignee", async () => {
+    const reviewing = issue("i1", { status: "in_review", createdAt: new Date(NOW - 5 * 60_000) });
+    const harness = await boot(baseConfig(wakeConfig), [reviewing]);
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
+    expect(metadata.counters.refused_in_review).toBe(1);
+    expect(metadata.counters.actionable_idle_assignee ?? 0).toBe(0);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+  });
+
+  it("refuses to wake into a lane the ledger reads unserviceable (skipped_lane_down)", async () => {
+    const models = [{ id: "m1", laneId: "lane-a", enabled: true }];
+    const card = issue("i1", {
+      createdAt: new Date(NOW - 60 * 60_000),
+      assigneeAdapterOverrides: { adapterConfig: { model: "m1" } },
+    } as never);
+    const harness = await boot(baseConfig({ ...wakeConfig, models } as never), [card]);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      { "lane-a": { verdict: { serviceable: false } } },
+    );
+    withOrchestration(harness, {});
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      laneDownSkippedIssueIds: string[];
+      pickedIssueIds: string[];
+    };
+    // Named mutant: "lane gate removed". Without it this card wakes onto a
+    // measured-dead lane — the acceptance's wakes-into-exhausted = 0 verbatim.
+    expect(metadata.counters.skipped_lane_down).toBe(1);
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    expect(metadata.laneDownSkippedIssueIds).toEqual(["i1"]);
+    expect(metadata.pickedIssueIds).toEqual([]);
+    const laneSkips = harness.metrics.find((m) => m.name === "dispatch.lane_down_skips");
+    expect(laneSkips?.value).toBe(1);
+  });
+
+  it("persists a wake failure with code + message and counts it per reason", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig(wakeConfig), [card]);
+    withOrchestration(harness, {});
+    harness.ctx.issues.requestWakeup = (async () => {
+      throw new Error("429 rate limited by dispatcher");
+    }) as typeof harness.ctx.issues.requestWakeup;
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      wakeFailures: number;
+      wakeFailuresByReason: Record<string, number>;
+      wakeFailureDetails: Array<{ issueId: string; code: string; message: string }>;
+    };
+    // Named mutant: "failure reason dropped". A bare count without the code
+    // cannot distinguish a 429 lane from a budget refusal — the post-916 gap
+    // (9 failures, 0 reasons) verbatim.
+    expect(metadata.wakeFailures).toBe(1);
+    expect(metadata.wakeFailuresByReason).toEqual({ rate_limited: 1 });
+    expect(metadata.wakeFailureDetails).toHaveLength(1);
+    expect(metadata.wakeFailureDetails[0]).toMatchObject({ issueId: "i1", code: "rate_limited" });
+    expect(metadata.wakeFailureDetails[0]?.message).toContain("429");
+    const reasonSeries = harness.metrics.find(
+      (m) => m.name === "dispatch.wake_failures" && (m.tags as Record<string, string>).reason === "rate_limited",
+    );
+    expect(reasonSeries?.value).toBe(1);
+    const errorLogs = (harness.logs as Array<{ level: string; message: string; meta: Record<string, unknown> }>).filter(
+      (entry) => entry.level === "error" && entry.message.includes("wake failed"),
+    );
+    expect(errorLogs).toHaveLength(1);
+    expect(errorLogs[0]?.meta.code).toBe("rate_limited");
+  });
+
+  it("counts a queued:false answer without a throw as a failure with a reason, not a silent non-wake", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
+    const harness = await boot(baseConfig(wakeConfig), [card]);
+    withOrchestration(harness, {});
+    harness.ctx.issues.requestWakeup = (async () => ({ queued: false, runId: null })) as never;
+
+    await harness.runJob(JOB_KEYS.dispatchSweep);
+
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      wakeFailures: number;
+      wakeFailuresByReason: Record<string, number>;
+    };
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    expect(metadata.wakeFailures).toBe(1);
+    expect(Object.values(metadata.wakeFailuresByReason).reduce((a, b) => a + b, 0)).toBe(1);
+  });
+
+  it("maps requestWakeup throws to stable codes", () => {
+    expect(wakeFailureCodeFor("Issue has no assigned agent to wake")).toBe("unassigned");
+    expect(wakeFailureCodeFor("Issue is not wakeable in status: backlog")).toBe("bad_status");
+    expect(wakeFailureCodeFor("Issue is blocked by unresolved blockers")).toBe("blocked");
+    expect(wakeFailureCodeFor("monthly_budget_exhausted for agent")).toBe("budget_block");
+    expect(wakeFailureCodeFor("429 Too Many Requests")).toBe("rate_limited");
+    expect(wakeFailureCodeFor("RPC timeout after 10000ms")).toBe("timeout");
+    expect(wakeFailureCodeFor("something entirely new")).toBe("unknown");
   });
 });
