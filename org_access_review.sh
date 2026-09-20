@@ -25,6 +25,15 @@
 #  11. SAFER ALTERNATIVES — risky asks that were granted, and denials that
 #                          recorded no safer route, with nobody having read
 #                          the alternatives on the record (TOG-388)
+#  12. TOOL-GATEWAY CEILING — live GitHub tool-gateway grant ceiling
+#                          (none/read/write/destructive, per tool_catalog_entries'
+#                          own risk taxonomy) vs. tool_grant_expectations.json,
+#                          a role -> ceiling table authored by the tool-gateway
+#                          provisioning owner, not by audit (TOG-3408). Reports
+#                          both over-grants and under-grants; checks 1-2 above
+#                          diff Paperclip PERMISSION KEYS only, which by
+#                          org_provisioner.sh's own disclaimer say nothing about
+#                          external tool access.
 #
 # Read-only. Exits non-zero when findings exist, so it can be wired to CI,
 # a cron, or a routine.
@@ -507,6 +516,92 @@ else
         " — clear it with: org_request_queue.sh ack-risk --request \(.requestId) --auditor <ROLE> --note \"...\""' <<<"$rr")"
     done <<<"$rr_json"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+hdr "12. Tool-gateway grant ceiling drift (role vs. actual GitHub risk ceiling)"
+# TOG-3408 (TOG-996 follow-up). org_provisioner.sh's own template catalog
+# deliberately disclaims tool access ("Paperclip RBAC never implies external
+# tool or data access" — org_provisioner.sh, near TEMPLATES_JSON), so checks
+# 1-2 above cannot answer "does this agent's tool-gateway grant match its
+# role" — they diff Paperclip permission KEYS, which by that same disclaimer
+# say nothing about GitHub access. This check is the other half: it diffs
+# each live agent's actual GitHub tool-gateway ceiling (the highest
+# tool_catalog_entries risk tier — none/read/write/destructive — reachable
+# through its own native tool profile) against tool_grant_expectations.json,
+# a role -> ceiling table authored by the tool-gateway provisioning owner
+# (not by audit), per TOG-3408's control-author/control-tester separation.
+#
+# none < read < write < destructive is the platform's own risk taxonomy
+# (tool_catalog_entries.is_write / is_destructive), reused rather than
+# invented. Per the mapping file's own header, no role's expected ceiling is
+# ever "destructive" — so any agent actually holding a destructive-tier grant
+# is always an over-grant finding here, independent of role.
+TOOL_MAP="${TOOL_MAP:-$HERE/tool_grant_expectations.json}"
+if [[ ! -r "$TOOL_MAP" ]]; then
+  note "tool_grant_expectations.json not found next to this script — tool-gateway grant ceiling drift went UNREVIEWED"
+elif ! jq -e . "$TOOL_MAP" >/dev/null 2>&1; then
+  note "tool_grant_expectations.json does not parse as JSON — tool-gateway grant ceiling drift went UNREVIEWED"
+else
+  ceiling_rank() {
+    case "$1" in
+      none) echo 0 ;; read) echo 1 ;; write) echo 2 ;; destructive) echo 3 ;; *) echo -1 ;;
+    esac
+  }
+  expected_ceiling_for() {
+    local tpl="$1" title="$2" v
+    v="$(jq -r --arg t "$title" '.titleOverrides[$t] // empty' "$TOOL_MAP")"
+    if [[ -z "$v" ]]; then
+      v="$(jq -r --arg k "$tpl" '.templateDefaults[$k] // empty' "$TOOL_MAP")"
+    fi
+    printf '%s' "$v"
+  }
+  while IFS='|' read -r role tpl title actual; do
+    [[ -n "$title" ]] || continue
+    label="${role:-$title}"
+    if [[ -z "$tpl" ]]; then
+      good "$label — server built-in, no declared template (tool ceiling: ${actual:-none})"
+      continue
+    fi
+    exp="$(expected_ceiling_for "$tpl" "$title")"
+    if [[ -z "$exp" ]]; then
+      note "$label [$tpl] — no tool-gateway ceiling expectation on record for this template"
+      continue
+    fi
+    actual_rank="$(ceiling_rank "${actual:-none}")"
+    exp_rank="$(ceiling_rank "$exp")"
+    if [[ "$actual_rank" -eq "$exp_rank" ]]; then
+      good "$label [$tpl] — tool-gateway ceiling matches expectation ($exp)"
+    elif [[ "$actual_rank" -gt "$exp_rank" ]]; then
+      note "$label [$tpl] — TOOL-GATEWAY OVER-GRANT: actual ceiling '${actual:-none}' exceeds expected '$exp'"
+    else
+      note "$label [$tpl] — TOOL-GATEWAY UNDER-GRANT: actual ceiling '${actual:-none}' is below expected '$exp'"
+    fi
+  done < <(sql "
+WITH ceiling AS (
+  SELECT a.id,
+         CASE
+           WHEN bool_or(COALESCE(tce.is_destructive, false)) THEN 'destructive'
+           WHEN bool_or(COALESCE(tce.is_write, false))       THEN 'write'
+           WHEN count(tce.id) > 0                             THEN 'read'
+           ELSE 'none'
+         END AS actual
+  FROM agents a
+  LEFT JOIN tool_profiles tp ON tp.company_id = a.company_id
+    AND tp.profile_key LIKE ('native:' || a.id::text || ':%')
+  LEFT JOIN tool_profile_entries tpe ON tpe.profile_id = tp.id AND tpe.company_id = a.company_id
+  LEFT JOIN tool_catalog_entries tce ON tce.id = tpe.catalog_entry_id
+  WHERE a.company_id = :'cid'::uuid AND a.status <> 'terminated'
+  GROUP BY a.id
+)
+SELECT COALESCE(a.metadata->>'orgRoleId',''),
+       COALESCE(a.metadata->>'permissionProfile',''),
+       a.title,
+       c.actual
+FROM agents a
+JOIN ceiling c ON c.id = a.id
+WHERE a.company_id = :'cid'::uuid AND a.status <> 'terminated'
+ORDER BY 2, 3;")
 fi
 
 # --------------------------------------------------------------------------
