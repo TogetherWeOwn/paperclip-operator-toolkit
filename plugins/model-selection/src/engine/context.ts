@@ -119,6 +119,13 @@ export interface ModelOverrideInput {
 }
 
 /**
+ * Env keys this plugin writes, and is therefore entitled to carry forward from
+ * a previous pin. Everything else in an existing override is a value some other
+ * writer owns, which this plugin can neither re-derive nor re-validate.
+ */
+const PLUGIN_OWNED_ENV_KEYS: readonly string[] = [CONTEXT_LIMIT_ENV_KEY];
+
+/**
  * Build the complete issue-level adapter override.
  *
  * The host shallow-spreads `issueOverrides.adapterConfig` over the agent
@@ -128,6 +135,19 @@ export interface ModelOverrideInput {
  * carry included. Merge the maps here before writing; otherwise adding the
  * compaction ceiling or a sub-call pin silently deletes every unrelated agent
  * env binding.
+ *
+ * The agent side of that merge (`agentEnv`) is re-read from the agent record on
+ * every pass (`worker.ts` describeIssue), so it always describes the assignee as
+ * of now. The existing override is not: it is a snapshot written by an earlier
+ * repin, under whatever assignment held at the time. Spreading it wholesale
+ * ratchets that snapshot onto every later pin — so reassigning a card injects
+ * the previous assignee's secret refs (TOG-3235), and unbinding a secret never
+ * takes effect because the pin keeps re-supplying the dead ref. So when the
+ * assignee env is KNOWN we rebuild from it and carry forward only the keys this
+ * plugin owns; the assignee's own bindings come back from `agentEnv`, the source
+ * of truth, and never needed the snapshot. When the assignee env is UNKNOWN we
+ * cannot rebuild, so we fall back to preserving the existing override rather than
+ * clobber bindings we cannot see.
  */
 export function modelOverrideForContext(input: ModelOverrideInput): {
   assigneeAdapterOverrides: { adapterConfig: { model: string; env?: AdapterEnv } };
@@ -135,7 +155,19 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
   const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== undefined;
   const agentEnv = input.agentEnv ?? {};
   const overrideEnv = input.existingOverrideEnv ?? {};
-  const env: AdapterEnv = { ...agentEnv, ...overrideEnv };
+  // Known assignee: rebuild from `agentEnv` and carry forward only plugin-owned
+  // keys from the old pin. Unknown assignee: we have no current base to rebuild
+  // from, so preserve the existing override instead of clobbering unseen bindings.
+  let carriedOverrideEnv: AdapterEnv;
+  if (agentEnvKnown) {
+    carriedOverrideEnv = {};
+    for (const key of PLUGIN_OWNED_ENV_KEYS) {
+      if (key in overrideEnv) carriedOverrideEnv[key] = overrideEnv[key];
+    }
+  } else {
+    carriedOverrideEnv = overrideEnv;
+  }
+  const env: AdapterEnv = { ...agentEnv, ...carriedOverrideEnv };
   const fleetCeiling = positiveInteger(input.fleetCeilingTokens);
   const modelWindow = positiveInteger(input.model.contextWindow);
   const ratio =

@@ -17,7 +17,7 @@ const subCalls = (modelId: string) => ({
 });
 
 describe("context fit", () => {
-  it("sets a 75% compaction ceiling and preserves unrelated agent and issue env", () => {
+  it("sets a 75% compaction ceiling from the current agent env and drops a stale override key", () => {
     const patch = modelOverrideForContext({
       model: narrowModel,
       fleetCeilingTokens: 1_000_000,
@@ -26,7 +26,10 @@ describe("context fit", () => {
         KEEP_AGENT: { type: "plain", value: "agent" },
         [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "1000000" },
       },
-      existingOverrideEnv: { KEEP_ISSUE: { type: "plain", value: "issue" } },
+      // A non-plugin key left on the pin by an earlier repin. TOG-3235: it is
+      // not this plugin's to re-assert, and the current agent env is the source
+      // of truth, so it must not survive.
+      existingOverrideEnv: { STALE_ISSUE: { type: "plain", value: "issue" } },
     });
 
     expect(patch).toEqual({
@@ -35,7 +38,6 @@ describe("context fit", () => {
           model: "glm-5.3",
           env: {
             KEEP_AGENT: { type: "plain", value: "agent" },
-            KEEP_ISSUE: { type: "plain", value: "issue" },
             [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
             ...subCalls("glm-5.3"),
           },
@@ -54,14 +56,15 @@ describe("context fit", () => {
         [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "1000000" },
       },
       existingOverrideEnv: {
-        KEEP_ISSUE: { type: "plain", value: "issue" },
+        STALE_ISSUE: { type: "plain", value: "issue" },
         [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
       },
     });
 
+    // The stale override key is dropped; the inherited ceiling is cleared
+    // because the wide model no longer needs it.
     expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
       KEEP_AGENT: { type: "plain", value: "agent" },
-      KEEP_ISSUE: { type: "plain", value: "issue" },
       ...subCalls("claude-opus-5"),
     });
   });
@@ -97,6 +100,78 @@ describe("context fit", () => {
       assigneeAdapterOverrides: {
         adapterConfig: { model: "claude-opus-5" },
       },
+    });
+  });
+
+  // TOG-3235. The previous pin's env is a snapshot taken under whatever
+  // assignment held when it was written. Spreading it forward wholesale
+  // reassigns agent A's secret refs onto agent B, and every run on that card
+  // then fails `configuration_incomplete` while B succeeds everywhere else.
+  it("does not carry a previous assignee's env forward onto the current known assignee", () => {
+    const previousAssigneeEnv = {
+      COOLIFY_API_TOKEN_DEPLOY: { type: "secret_ref", key: "coolify_api_token_deploy" },
+      DISCORD_CLIENT_SECRET: { type: "secret_ref", key: "discord_client_secret" },
+      CF_ACCESS_STAGING_CLIENT_ID: { type: "secret_ref", key: "cf_access_staging_client_id" },
+      [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
+    };
+
+    const patch = modelOverrideForContext({
+      model: narrowModel,
+      fleetCeilingTokens: 1_000_000,
+      compactionRatio: 0.75,
+      // The card was reassigned to an agent that binds none of those secrets.
+      agentEnv: { B_ONLY: { type: "plain", value: "b" } },
+      existingOverrideEnv: previousAssigneeEnv,
+    });
+
+    const env = patch.assigneeAdapterOverrides.adapterConfig.env ?? {};
+    for (const strandedKey of Object.keys(previousAssigneeEnv)) {
+      if (strandedKey === CONTEXT_LIMIT_ENV_KEY) continue;
+      expect(env).not.toHaveProperty(strandedKey);
+    }
+    // ...and the plugin still does its own job: B's bindings survive, the plugin
+    // key still carries, and the narrow model still gets its compaction ceiling.
+    expect(env).toEqual({
+      B_ONLY: { type: "plain", value: "b" },
+      [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
+      ...subCalls("glm-5.3"),
+    });
+  });
+
+  // The TOG-3088 shape: an agent with no bindings inherits a poisoned pin. A
+  // wide-model repin for that known-but-empty agent must write only the pin's
+  // own keys (the sub-call surfaces), never the stranded foreign secret refs.
+  it("strands a poisoned pin's foreign refs when repinned for a known-but-empty agent", () => {
+    const patch = modelOverrideForContext({
+      model: fleetModel,
+      fleetCeilingTokens: 1_000_000,
+      compactionRatio: 0.75,
+      agentEnv: {},
+      existingOverrideEnv: {
+        COOLIFY_API_TOKEN_DEPLOY: { type: "secret_ref", key: "coolify_api_token_deploy" },
+        TWO_BOT_STAGING_DATABASE_URL: { type: "secret_ref", key: "two/bot/staging/database-url" },
+      },
+    });
+
+    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual(subCalls("claude-opus-5"));
+  });
+
+  // Unbinding a secret on the agent record must actually take effect: the pin's
+  // copy of the dead ref must not resurrect it on the next pass.
+  it("lets an unbound agent secret disappear instead of resupplying it from the pin", () => {
+    const patch = modelOverrideForContext({
+      model: narrowModel,
+      fleetCeilingTokens: 1_000_000,
+      compactionRatio: 0.75,
+      // REVOKED_REF was removed from the agent record; only the pin still has it.
+      agentEnv: { STILL_BOUND: { type: "secret_ref", key: "still_bound" } },
+      existingOverrideEnv: { REVOKED_REF: { type: "secret_ref", key: "revoked_ref" } },
+    });
+
+    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
+      STILL_BOUND: { type: "secret_ref", key: "still_bound" },
+      [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
+      ...subCalls("glm-5.3"),
     });
   });
 
@@ -168,7 +243,9 @@ describe("sub-call surface pins", () => {
         ANTHROPIC_SMALL_FAST_MODEL: exhaustedLane,
         ANTHROPIC_DEFAULT_HAIKU_MODEL: exhaustedLane,
       },
-      existingOverrideEnv: { ISSUE_SCOPED: { type: "plain", value: "issue" } },
+      // TOG-3235: a non-plugin key left on the pin by an earlier repin is not
+      // re-asserted for a known agent; the agent env is the source of truth.
+      existingOverrideEnv: { STALE_ISSUE: { type: "plain", value: "issue" } },
     });
 
     expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
@@ -176,7 +253,6 @@ describe("sub-call surface pins", () => {
       GH_APP_REPOS: { type: "plain", value: "paperclip-ops-tooling" },
       PAPERCLIP_API_KEY: { type: "user_secret_ref", key: "paperclip_api_key" },
       SOME_BARE_STRING: "kept-verbatim",
-      ISSUE_SCOPED: { type: "plain", value: "issue" },
       [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "150000" },
       ...subCalls("glm-5.3"),
     });

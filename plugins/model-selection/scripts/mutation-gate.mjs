@@ -1191,7 +1191,7 @@ const mutants = [
     // every GH token and secret binding the agent carries, for that run.
     name: "write-only-the-subcall-keys",
     file: "src/engine/context.ts",
-    from: "  const env: AdapterEnv = { ...agentEnv, ...overrideEnv };",
+    from: "  const env: AdapterEnv = { ...agentEnv, ...carriedOverrideEnv };",
     to: "  const env: AdapterEnv = {};",
   },
   {
@@ -1201,8 +1201,8 @@ const mutants = [
     // was empty for want of knowledge rather than for want of bindings.
     name: "splice-subcalls-into-an-unknown-agent-env",
     file: "src/engine/context.ts",
-    from: "  if (agentEnvKnown) {",
-    to: "  if (agentEnvKnown || true) {",
+    from: "  let carriedOverrideEnv: AdapterEnv;\n  if (agentEnvKnown) {",
+    to: "  let carriedOverrideEnv: AdapterEnv;\n  if (agentEnvKnown || true) {",
   },
   {
     // A secret-bound surface cannot be read back or reconstructed, so we never

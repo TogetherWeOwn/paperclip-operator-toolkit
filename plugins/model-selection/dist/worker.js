@@ -2474,11 +2474,21 @@ function isSecretBinding(binding) {
   const type = binding.type;
   return type === "secret_ref" || type === "user_secret_ref";
 }
+var PLUGIN_OWNED_ENV_KEYS = [CONTEXT_LIMIT_ENV_KEY];
 function modelOverrideForContext(input) {
   const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== void 0;
   const agentEnv = input.agentEnv ?? {};
   const overrideEnv = input.existingOverrideEnv ?? {};
-  const env = { ...agentEnv, ...overrideEnv };
+  let carriedOverrideEnv;
+  if (agentEnvKnown) {
+    carriedOverrideEnv = {};
+    for (const key of PLUGIN_OWNED_ENV_KEYS) {
+      if (key in overrideEnv) carriedOverrideEnv[key] = overrideEnv[key];
+    }
+  } else {
+    carriedOverrideEnv = overrideEnv;
+  }
+  const env = { ...agentEnv, ...carriedOverrideEnv };
   const fleetCeiling = positiveInteger(input.fleetCeilingTokens);
   const modelWindow = positiveInteger(input.model.contextWindow);
   const ratio = Number.isFinite(input.compactionRatio) && input.compactionRatio > 0 && input.compactionRatio < 1 ? input.compactionRatio : 0.75;
