@@ -5,6 +5,7 @@ import { resolveConfiguredModelId } from "./model-id.js";
 import { computeShadowDiff, orderByObjective } from "./objective.js";
 import { resolveTier } from "./tier.js";
 import type {
+  AvailabilityNote,
   Candidate,
   CardLedgerEntry,
   IssueDescriptor,
@@ -15,6 +16,13 @@ import type {
   SelectionDecision,
   VolumeProfile,
 } from "./types.js";
+import type { AvailabilitySnapshot, AvailabilityTerm, LaneAvailability } from "./availability.js";
+import {
+  costDownWouldAbandonProvenLane,
+  evidenceStateFor,
+  type LaneEvidenceSnapshot,
+  type LaneEvidenceState,
+} from "./lane-evidence.js";
 import { LANE_ID_CODEX, LANE_ID_OPENCODE_GO, LANE_ID_ZAI } from "../constants.js";
 import { applyPickOrdering } from "./pick-order.js";
 import {
@@ -152,6 +160,17 @@ export interface SelectionConfig {
    */
   allowExplore?: boolean;
   /**
+   * TOG-3132 AC-4. When true, a model whose lane availability is UNKNOWN is
+   * excluded rather than merely recorded. Defaults to FALSE, and that
+   * asymmetry is deliberate: the agent floor is itself a cliproxy lane
+   * (`the-agent-floor-is-itself-on-cliproxy`), so a dead telemetry feed that
+   * excluded every candidate would not fall back to a known-good path — it
+   * would move the whole fleet to an unmeasured one. Either way the UNKNOWN
+   * is recorded on `decision.availability.unknown` and traced, which is the
+   * part `pacing_verdict.py` actually forbids skipping.
+   */
+  holdOnUnknownAvailability?: boolean;
+  /**
    * TOG-3210. Monitor ticks, continuation wakes, and label-only passes
    * re-check an already-tiered card; the card is correctly judged T1 by
    * every rubric anchor, but the RE-CHECK itself is cheap. Absent/disabled:
@@ -183,6 +202,26 @@ export interface SelectInput {
   now: number;
   /** TOG-1917 §2.2 card ledger, keyed `${modelId}:${tier}`. Only consulted for the shadow diff / non-default objective. */
   cardLedger?: Readonly<Record<string, CardLedgerEntry>>;
+  /**
+   * TOG-3132: the availability term. Read per decision from the published
+   * quota-contract document (`worker.ts` `readAvailability`), never cached in
+   * config — both measured failure shapes were transient (Z.ai's cooldown
+   * ~4 minutes, Claude's window recovered inside two hours), so a value held
+   * past its window is the same defect as the static `enabled` boolean this
+   * supplements. Absent means "not configured" and changes nothing.
+   */
+  availability?: AvailabilitySnapshot;
+  /**
+   * TOG-3132, second failure shape: run-outcome evidence per lane, from
+   * `heartbeat_runs`. Distinct from `availability`, which can only speak about
+   * lanes that publish a quota contract — `devin/*` publishes none and still
+   * refused 74 of 74 dispatches at the provider level, so the availability
+   * term reads it UNKNOWN/`unmapped` and lets it through.
+   *
+   * Absent means every lane is `unproven`: nothing is excluded, but no
+   * cost-down move may abandon a proven-good lane on no evidence.
+   */
+  laneEvidence?: LaneEvidenceSnapshot;
 }
 
 export function selectModel(input: SelectInput): SelectionDecision {
@@ -205,8 +244,193 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
   const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
 
+  // ---- TOG-3132: the availability term ------------------------------------
+  //
+  // Independent of `pacingMode`, and deliberately so. `hardStopExcluded` above
+  // is the PACE engine's verdict: it only fires on a lane that was polled AND
+  // produced an account identity the pace engine could key on, and it is
+  // fail-neutral otherwise (`pacing.ts:275`) — an unpolled lane excludes
+  // nothing and says nothing. That is the right posture for a pacer and the
+  // wrong one for serviceability, because the two outages on 2026-09-16/17
+  // were invisible to it: one lane published `health: "healthy"` at 0.46
+  // weekly while refusing every request (the binding state was the
+  // `subscription-pool` cooldown, which no pace window encodes), and the
+  // other stood on a single credential behind a per-account limiter.
+  //
+  // So this gate reads the published quota-contract document directly and
+  // carries the three terms the pace verdict has no field for — cooldown,
+  // serviceable account COUNT, and an explicit staleness UNKNOWN. It is
+  // enabled by supplying `input.availability`, not by `pacing.mode`.
+  const availability = input.availability;
+  const availableLanes = new Map<string, LaneAvailability>(
+    (availability?.lanes ?? []).map((lane) => [lane.laneId, lane]),
+  );
+  const holdOnUnknownAvailability = config.holdOnUnknownAvailability ?? false;
+  const trafficScale = descriptor.trafficScale ?? "issue";
+  const excludedByLane: AvailabilityNote[] = [];
+  const unknownLanes: AvailabilityNote[] = [];
+
+  type LaneRead =
+    | { state: "available" }
+    | { state: "unavailable" | "unknown"; term: AvailabilityTerm; reason: string };
+
+  /**
+   * Pure: no recording, no side effects, so `resolveTier` can consult it
+   * without the tier walk leaving phantom rejections behind.
+   */
+  function laneRead(model: ModelEntry): LaneRead {
+    if (!availability) return { state: "available" };
+    if (availability.unreadableReason) {
+      return { state: "unknown", term: "staleness", reason: availability.unreadableReason };
+    }
+    const laneId = model.laneId ?? null;
+    if (!laneId) {
+      // A model with no lane is UNKNOWN, not healthy. Reading an absent lane
+      // as available is how a gate silently enforces on nothing.
+      return { state: "unknown", term: "unmapped", reason: `${model.id} declares no laneId` };
+    }
+    const lane = availableLanes.get(laneId);
+    if (!lane) {
+      return { state: "unknown", term: "unmapped", reason: `lane ${laneId} is absent from the snapshot` };
+    }
+    if (lane.state === "unavailable") {
+      return { state: "unavailable", term: lane.term ?? "health", reason: `lane ${laneId}: ${lane.reason}` };
+    }
+    if (lane.state === "unknown") {
+      return { state: "unknown", term: lane.term ?? "staleness", reason: `lane ${laneId}: ${lane.reason}` };
+    }
+    // AC-3. Quota is not the only way to run out: the 00:39Z lane had 54% of
+    // its weekly allowance left and still refused, because one credential
+    // behind a requests-per-window limiter cannot carry fleet-scale arrival.
+    if (trafficScale === "fleet-default" && lane.serviceableAccountCount <= 1) {
+      return {
+        state: "unavailable",
+        term: "accounts",
+        reason:
+          `lane ${laneId}: ${lane.serviceableAccountCount} serviceable account(s) cannot carry ` +
+          `fleet-default-scale traffic at any quota level`,
+      };
+    }
+    return { state: "available" };
+  }
+
+  /**
+   * Record the verdict and answer whether the model may proceed. UNKNOWN is
+   * recorded either way — an UNKNOWN that is not said has become a quiet
+   * pass, which is the single thing `pacing_verdict.py` forbids.
+   */
+  function clearsLane(model: ModelEntry): boolean {
+    const read = laneRead(model);
+    if (read.state === "available") return true;
+    const note: AvailabilityNote = {
+      modelId: model.id,
+      laneId: model.laneId ?? null,
+      term: read.term,
+      reason: read.reason,
+    };
+    const bucket = read.state === "unavailable" ? excludedByLane : unknownLanes;
+    // The sticky branch and the qualification loop can both reach the same
+    // incumbent; one lane failure is one note.
+    if (!bucket.some((entry) => entry.modelId === model.id)) bucket.push(note);
+    if (read.state === "unknown" && !holdOnUnknownAvailability) return true;
+    if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-availability")) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-availability",
+        reason: `${read.term}: ${read.reason}`,
+        operand: { kind: "lane-availability", laneId: model.laneId ?? null, term: read.term, state: read.state },
+      });
+    }
+    return false;
+  }
+
+  // ---- TOG-3132: the lane-evidence term -----------------------------------
+  // The availability term above can only see lanes that publish a quota
+  // contract. This one sees what actually happened when the fleet dispatched
+  // to a lane, which is the only signal that catches a provider-level refusal
+  // (`503 auth_unavailable: no auth available (providers=devin)`, 74/74 on
+  // 2026-09-17) on a lane no contract document mentions.
+  const laneEvidence = input.laneEvidence;
+  const evidenceExcluded: AvailabilityNote[] = [];
+  const incumbentEvidence: LaneEvidenceState = evidenceStateFor(
+    laneEvidence,
+    config.models.find(
+      (model) => model.id === resolveConfiguredModelId(descriptor.stickyModelId ?? "", config.models),
+    )?.laneId ?? null,
+  );
+
+  /**
+   * Answer whether a model's lane has the evidence to carry this decision.
+   *
+   * Two refusals, and they are different acts:
+   *   * `proven-dead` EXCLUDES, the same discipline as a missing capability.
+   *   * `unproven` excludes ONLY when taking this candidate would abandon a
+   *     proven-good incumbent — the cost-down guard. An unproven lane is still
+   *     freely selectable for a card that is not already on a proven-good one,
+   *     which is what keeps `balance_pass`'s exploration slot alive.
+   */
+  function clearsEvidence(model: ModelEntry): boolean {
+    if (!laneEvidence) return true;
+    const state = evidenceStateFor(laneEvidence, model.laneId ?? null);
+    const record = laneEvidence.lanes.find((lane) => lane.laneId === model.laneId);
+    const detail =
+      record?.reason ??
+      laneEvidence.unreadableReason ??
+      `lane ${model.laneId ?? "(none)"} has no recorded runs in the ${laneEvidence.windowHours}h window`;
+
+    if (state === "proven-dead") {
+      const note: AvailabilityNote = {
+        modelId: model.id,
+        laneId: model.laneId ?? null,
+        term: "evidence",
+        reason: detail,
+      };
+      if (!evidenceExcluded.some((entry) => entry.modelId === model.id)) evidenceExcluded.push(note);
+      if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-evidence")) {
+        // The RULE is named, not just the verdict: `zero-success` and
+        // `wilson-upper` are different operator findings (AC-6).
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-evidence",
+          reason: `proven-dead [${record?.rule ?? "unknown"}]: ${detail}`,
+          operand: {
+            kind: "lane-evidence",
+            laneId: model.laneId ?? null,
+            state: "proven-dead",
+            rule: record?.rule ?? null,
+          },
+        });
+      }
+      return false;
+    }
+    if (costDownWouldAbandonProvenLane(incumbentEvidence, state)) {
+      const note: AvailabilityNote = {
+        modelId: model.id,
+        laneId: model.laneId ?? null,
+        term: "evidence",
+        reason: `${detail} — refusing to move off a proven-good lane onto an ${state} one`,
+      };
+      if (!evidenceExcluded.some((entry) => entry.modelId === model.id)) evidenceExcluded.push(note);
+      if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-evidence")) {
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-evidence",
+          reason: `${state}: ${detail} — incumbent lane is proven-good`,
+          operand: { kind: "lane-evidence", laneId: model.laneId ?? null, state, rule: null },
+        });
+      }
+      return false;
+    }
+    return true;
+  }
+
   const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
-    isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model),
+    // An issue-override pin on a lane that will not serve falls through to the
+    // tier label / agent floor, the same as for the pace hard stop. An UNKNOWN
+    // never moves a pin: a blind instrument is not grounds to discard a
+    // recorded human judgement.
+    isLaneUnserviceable: (model) =>
+      (paceActive && hardStopExcluded(ledger, model)) || laneRead(model).state === "unavailable",
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
 
@@ -241,6 +465,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
     pacingApplied: false,
     shadowDiff: null,
     escalatedFromTier: null,
+    // Live references: every early return below carries whatever the gate had
+    // recorded by then, so a decision can never report an empty availability
+    // record it did not actually observe.
+    availability: {
+      configured: Boolean(availability),
+      unreadableReason: availability?.unreadableReason ?? null,
+      excluded: excludedByLane,
+      unknown: unknownLanes,
+      selectedOnUnknownLane: false,
+      evidenceExcluded,
+      incumbentEvidence,
+    },
     wakeScopedTier: wakeFloorEligible ? requiredTier : null,
   };
 
@@ -318,6 +554,23 @@ export function selectModel(input: SelectInput): SelectionDecision {
           verdict: laneVerdictFor(ledger, incumbent.laneId)?.state ?? null,
         },
       });
+    } else if (incumbent && !clearsEvidence(incumbent)) {
+      // A warm prompt cache on a lane that has never once returned a run is
+      // worth nothing — same reasoning as the availability branch below, from
+      // the instrument that can actually see `providers=devin`. Note this can
+      // only fire on `proven-dead`: the cost-down guard compares the incumbent
+      // against itself here, and a lane is never worse than itself.
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} evidence — ` +
+          `${evidenceExcluded.find((note) => note.modelId === incumbent.id)?.reason ?? "proven-dead"}`,
+      );
+    } else if (incumbent && !clearsLane(incumbent)) {
+      // Same reasoning as the hard stop above, from the other input. A warm
+      // prompt cache on a lane returning 500 is worth nothing.
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} availability — ` +
+          `${excludedByLane.concat(unknownLanes).find((note) => note.modelId === incumbent.id)?.reason ?? "unavailable"}`,
+      );
     } else if (incumbent) {
       trace.push(
         `sticky: ${incumbent.id} is already running this issue — switching would reset the session and discard the prompt cache`,
@@ -413,6 +666,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
+    // TOG-3132 AC-1: the availability term excludes, exactly as a missing
+    // capability does, and never merely down-ranks. Measured on TOG-811, the
+    // down-ranking alternative is not a weaker version of this — it is a
+    // no-op: the router's `normalizeHealth` buckets `health: "cooldown"` as
+    // degraded, `postureFor` turns degraded into `avoid`, and an avoided lane
+    // stays selectable. It looks handled and keeps taking traffic.
+    if (!clearsLane(model)) continue;
+    // TOG-3132 second failure shape. Same exclusion discipline, different
+    // instrument: `clearsLane` reads the published contract, this reads what
+    // dispatches to the lane actually did. `devin/*` passes the first and
+    // fails this one.
+    if (!clearsEvidence(model)) continue;
     // TOG-2481: lane avoid threshold and operator-declared outage, ported from
     // `tier_dispatcher.py`'s `AVOID`/`AVOID_LANE` and `lane_outage.json`. Both
     // are gated the same as the hard stop above (`paceActive` only) and, like
@@ -513,6 +778,47 @@ export function selectModel(input: SelectInput): SelectionDecision {
     qualified.push(model);
   }
 
+  // Say what the availability term did on EVERY decision, including when it did
+  // nothing. A gate that is silent when unconfigured is indistinguishable from
+  // a gate that is silent because it is broken.
+  if (!availability) {
+    trace.push("lane availability: no lane input supplied — the term is not configured and excluded nothing");
+  } else if (excludedByLane.length > 0) {
+    trace.push(
+      `lane availability excluded ${excludedByLane.length} candidate(s): ` +
+        excludedByLane.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; "),
+    );
+  }
+  if (unknownLanes.length > 0) {
+    trace.push(
+      `lane availability UNKNOWN for ${unknownLanes.length} candidate(s): ` +
+        unknownLanes.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; "),
+    );
+  }
+
+  // Same discipline for the evidence term: say what it did on every decision,
+  // including nothing. AC-6 — this is the line that has to answer "why did this
+  // card not get opus" from `decisions.jsonl` alone.
+  if (!laneEvidence) {
+    trace.push("lane evidence: no run-outcome input supplied — the term is not configured and excluded nothing");
+  } else {
+    trace.push(
+      `lane evidence over ${laneEvidence.windowHours}h` +
+        (laneEvidence.unreadableReason
+          ? ` UNREADABLE (${laneEvidence.unreadableReason}) — every lane is unproven`
+          : `: ${laneEvidence.lanes.filter((lane) => lane.state === "proven-good").length} proven-good, ` +
+            `${laneEvidence.lanes.filter((lane) => lane.state === "proven-dead").length} proven-dead, ` +
+            `${laneEvidence.lanes.filter((lane) => lane.state === "unproven").length} unproven`) +
+        `; incumbent lane is ${incumbentEvidence}`,
+    );
+    if (evidenceExcluded.length > 0) {
+      trace.push(
+        `lane evidence excluded ${evidenceExcluded.length} candidate(s): ` +
+          evidenceExcluded.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; "),
+      );
+    }
+  }
+
   if (qualified.length === 0) {
     // TOG-2137, Defect 2. Distinguish a genuine capacity dead end from an
     // ordinary config/capability gap. If every model from `requiredTier`
@@ -527,12 +833,42 @@ export function selectModel(input: SelectInput): SelectionDecision {
       const rejectedModel = config.models.find((entry) => entry.id === rejection.modelId);
       return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
     });
+    // `lane-availability` counts here alongside `lane-unserviceable` (TOG-3132):
+    // both are capacity, and which of the two inputs saw the outage first is an
+    // implementation detail. Routing a wholly-unserviceable tier to
+    // `no-eligible-model` would report a capacity outage as a config gap and
+    // strand it — `tier-exhausted` is the outcome that reaches an operator.
+    // `lane-evidence` joins them for the same reason: a tier whose every lane
+    // has proven dead is a capacity outage, and the fact that run history
+    // rather than a quota document is what proved it changes nothing about who
+    // needs to hear about it.
+    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence"]);
+    // ...with one exception, and it is the tri-state one. If the only reason
+    // nothing qualified is that `holdOnUnknownAvailability` excluded lanes
+    // nobody could READ, that is not a capacity dead end — it is a blind
+    // instrument, and reporting it as `tier-exhausted` would send an operator
+    // to the quota dashboards for a telemetry outage. Hold at the floor, which
+    // is what this engine already does for the other "we do not actually know"
+    // input (an untrusted volume profile).
+    const unknownModelIds = new Set(unknownLanes.map((note) => note.modelId));
+    if (
+      atOrAboveRequired.length > 0 &&
+      atOrAboveRequired.every(
+        (rejection) => rejection.stage === "lane-availability" && unknownModelIds.has(rejection.modelId),
+      )
+    ) {
+      const reason =
+        `lane availability is UNKNOWN for every candidate at or above ${requiredTier} ` +
+        `(${unknownLanes.map((note) => note.reason).join("; ")}) and selection.holdOnUnknownAvailability is on`;
+      trace.push(`held at agent floor: ${reason}`);
+      return { ...base, outcome: "held-at-floor", heldReason: reason };
+    }
     const tierExhausted =
-      atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => rejection.stage === "lane-unserviceable");
+      atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => CAPACITY_STAGES.has(rejection.stage));
     if (tierExhausted) {
       trace.push(
-        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by the pace ` +
-          `serviceability hard stop (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) — nowhere left to escalate to`,
+        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by a capacity ` +
+          `gate (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) — nowhere left to escalate to`,
       );
       return { ...base, outcome: "tier-exhausted", effectiveTier: requiredTier };
     }
@@ -771,16 +1107,40 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     const floorModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
     const floorModel = floorModelId ? config.models.find((model) => model.id === floorModelId) : undefined;
+    // TOG-3132 AC-3: the floor still exists, so the availability term is
+    // encoded here too. The pace predicates above are gated on `paceActive`;
+    // the availability term deliberately is not — it is supplied by
+    // `input.availability`, not by `pacing.mode`, so a floor on a lane that a
+    // published contract calls unavailable is dead whether or not pacing runs.
+    // UNKNOWN is not dead: consistent with `isLaneUnserviceable`, a blind
+    // instrument is not grounds to discard a recorded human judgement.
+    const floorLaneRead = floorModel ? laneRead(floorModel) : null;
+    const floorLaneUnavailable = floorLaneRead !== null && floorLaneRead.state === "unavailable";
+    if (floorModel && floorLaneRead !== null && floorLaneRead.state === "unavailable") {
+      // `excluded` on the decision is a live reference, so the floor's own
+      // exclusion is answerable in `decisions.jsonl` even though the floor
+      // never entered the candidate loop (AC-6).
+      if (!excludedByLane.some((entry) => entry.modelId === floorModel.id)) {
+        excludedByLane.push({
+          modelId: floorModel.id,
+          laneId: floorModel.laneId ?? null,
+          term: floorLaneRead.term,
+          reason: floorLaneRead.reason,
+        });
+      }
+    }
     const floorLaneDead =
-      paceActive &&
       !!floorModel &&
-      (hardStopExcluded(ledger, floorModel) ||
-        (!!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig)) ||
-        laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel));
+      ((paceActive &&
+        (hardStopExcluded(ledger, floorModel) ||
+          (!!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig)) ||
+          laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel))) ||
+        floorLaneUnavailable);
     if (floorLaneDead) {
       trace.push(
-        `held-at-floor declined: floor ${floorModel!.id} lane ${floorModel!.laneId ?? "(none)"} is not serviceable — ` +
-          `writing an explicit pin to ${winner.modelId} instead (${reason})`,
+        `held-at-floor declined: floor ${floorModel!.id} lane ${floorModel!.laneId ?? "(none)"} is not serviceable` +
+          (floorLaneUnavailable ? ` [${floorLaneRead!.term}: ${floorLaneRead!.reason}]` : "") +
+          ` — writing an explicit pin to ${winner.modelId} instead (${reason})`,
       );
       return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
     }
@@ -804,5 +1164,22 @@ export function selectModel(input: SelectInput): SelectionDecision {
     );
   }
 
-  return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+  // AC-4: an UNKNOWN that reaches a selection is SAID. Under the default
+  // policy this model was allowed through on a lane nobody could read, and a
+  // decision stream that recorded that as an ordinary pick would be lying by
+  // omission about what the engine actually knew.
+  const winnerUnknown = unknownLanes.find((note) => note.modelId === winner.modelId);
+  if (winnerUnknown) {
+    trace.push(
+      `availability UNKNOWN for the selected model: ${winnerUnknown.reason} — not treated as available; ` +
+        `selection proceeded because selection.holdOnUnknownAvailability is off`,
+    );
+  }
+
+  return {
+    ...withCandidates,
+    outcome: "selected",
+    modelId: winner.modelId,
+    availability: { ...withCandidates.availability, selectedOnUnknownLane: Boolean(winnerUnknown) },
+  };
 }

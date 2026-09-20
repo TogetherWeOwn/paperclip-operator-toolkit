@@ -49,6 +49,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         defaultTier: { type: "string", enum: [...TIERS], default: "T1" },
         stickyModelWithinIssue: { type: "boolean", default: true },
         holdOnUntrustedProfile: { type: "boolean", default: true },
+        holdOnUnknownAvailability: { type: "boolean", default: false },
         /**
          * Which cost term orders candidates. `list-price` (default) is the
          * existing `expectedCostUsd` sort, byte-for-byte unchanged.

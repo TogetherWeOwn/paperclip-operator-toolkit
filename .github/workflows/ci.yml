@@ -5416,7 +5416,13 @@ jobs:
   model-selection-suite:
     name: model-selection suite
     runs-on: [self-hosted, two-selfhosted]
-    timeout-minutes: 20
+    # TOG-3132: the named mutation gate (scripts/mutation-gate.mjs) grew from 55
+    # to 115 mutants over this card's life; each mutant re-runs the full Vitest
+    # suite, so under self-hosted fleet load the job exceeded the old 20m cap and
+    # was cancelled (not a red test — a timeout). A rerun could never fix that.
+    # 45m gives >2x headroom and is still well under the 150m Offline job.
+    # Longer-term the gate should be sharded; tracked separately.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: plugins/model-selection

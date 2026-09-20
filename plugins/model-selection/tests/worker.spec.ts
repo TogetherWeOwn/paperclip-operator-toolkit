@@ -12,7 +12,7 @@ import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
-import { MODELS, NO_ESCALATION, PROFILES, subCallPins } from "./fixtures.js";
+import { LANED_MODELS, MODELS, NO_ESCALATION, PROFILES, account, laneDoc, subCallPins } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
@@ -469,6 +469,77 @@ describe("worker", () => {
     expect((result as { content: string }).content).toContain("no configured label id");
     const after = await enforcing.ctx.issues.get(ISSUE, COMPANY);
     expect(after?.assigneeAdapterOverrides).not.toBeNull();
+  });
+
+  it("reads lane availability from plugin state and will not pin a dead lane", async () => {
+    // End-to-end proof that the term is actually plumbed through config
+    // resolution, the state read, and `selectModel`: same config, same issue,
+    // ONE difference in the stored lane document.
+    //
+    // `observedAt` is real-clock `now`, not the fixtures' `NOW`: the worker
+    // reads `Date.now()`, and a document dated to a fixture constant would
+    // cross the 120-minute staleness cutoff on its own and make both arms
+    // UNKNOWN — a test that passes for a calendar reason rather than a code one.
+    const t3Label = { id: TIER_LABEL_ID, companyId: COMPANY, name: "tier:T3" };
+    const t3Issue = issue({ labels: [t3Label], labelIds: [TIER_LABEL_ID] } as unknown as Partial<Issue>);
+    const laned = {
+      selection: { enabled: true, mode: "enforce" },
+      models: LANED_MODELS,
+      tierLabelIds: { T3: TIER_LABEL_ID },
+    };
+    const observedAt = new Date().toISOString();
+    const arm = async (zai: Array<Record<string, unknown>>) => {
+      const harnessForArm = await boot(laned, t3Issue);
+      await harnessForArm.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneAvailability },
+        laneDoc([account("claude", "claude-a"), account("claude", "claude-b"), ...zai], observedAt),
+      );
+      await harnessForArm.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+      const after = await harnessForArm.ctx.issues.get(ISSUE, COMPANY);
+      return (after?.assigneeAdapterOverrides as { adapterConfig?: { model?: string } } | null)?.adapterConfig?.model
+        ?? null;
+    };
+
+    // Live zai: the cheapest eligible row wins, as it does today.
+    expect(await arm([account("zai", "zai-a"), account("zai", "zai-b")])).toBe("claude-haiku-4-5-20251001");
+    // Exhausted zai: the same selection escalates off the dead lane.
+    expect(
+      await arm([
+        account("zai", "zai-a", { health: "exhausted" }),
+        account("zai", "zai-b", { health: "exhausted" }),
+      ]),
+    ).toBe("claude-sonnet-5");
+  });
+
+  it("reads lane evidence from heartbeat_runs and will not pin a lane proven dead", async () => {
+    // TOG-3132. The sibling test above proves the AVAILABILITY term is plumbed.
+    // It cannot prove this one: `devin/*` publishes no quota contract at all,
+    // which is why the availability term passed it and it took 0-for-69. The
+    // only end-to-end proof that the run-outcome term reaches `selectModel` is
+    // a pair of arms differing in nothing but the `heartbeat_runs` counts.
+    const t3Label = { id: TIER_LABEL_ID, companyId: COMPANY, name: "tier:T3" };
+    const t3Issue = issue({ labels: [t3Label], labelIds: [TIER_LABEL_ID] } as unknown as Partial<Issue>);
+    const laned = {
+      selection: { enabled: true, mode: "enforce" },
+      models: LANED_MODELS,
+      tierLabelIds: { T3: TIER_LABEL_ID },
+    };
+    const arm = async (haiku: { succeeded: number; failed: number }) => {
+      const harnessForArm = await boot(laned, t3Issue);
+      harnessForArm.ctx.db.query = (async (sql: string) =>
+        sql.includes("as failed")
+          ? [{ model: "claude-haiku-4-5-20251001", ...haiku }, { model: "claude-sonnet-5", succeeded: 34, failed: 8 }]
+          : []) as never;
+      await harnessForArm.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+      const after = await harnessForArm.ctx.issues.get(ISSUE, COMPANY);
+      return (after?.assigneeAdapterOverrides as { adapterConfig?: { model?: string } } | null)?.adapterConfig?.model
+        ?? null;
+    };
+
+    // Healthy zai: the cheapest eligible row wins, as it does today.
+    expect(await arm({ succeeded: 34, failed: 8 })).toBe("claude-haiku-4-5-20251001");
+    // The measured devin shape, 0 of 74: the same selection escalates off it.
+    expect(await arm({ succeeded: 0, failed: 74 })).toBe("claude-sonnet-5");
   });
 
   it("reports a missing issue rather than throwing", async () => {

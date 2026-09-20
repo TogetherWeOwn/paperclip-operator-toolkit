@@ -145,6 +145,13 @@ export const PLUGIN_STATE_KEYS = {
   volumeProfiles: "volumeProfiles",
   /** Per-company lane pace verdicts and slot-throttle counters. */
   laneLedger: "laneLedger",
+  /**
+   * Per-company published quota-contract document, the input to the TOG-3132
+   * availability term. Written by the collector (TOG-3133); until that runs,
+   * every lane reads UNKNOWN — recorded and traced, and under the default
+   * policy not blocking.
+   */
+  laneAvailability: "laneAvailability",
   /** Per-issue operator overrides, each with an expiry (TOG-2137). */
   operatorOverrides: "operatorOverrides",
   /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (TOG-2137). */
@@ -390,3 +397,22 @@ export const BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
  * paginating through, matching the standalone plugin's own behavior exactly.
  */
 export const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
+
+/**
+ * TOG-3132: lookback for the lane-evidence aggregate over `heartbeat_runs`.
+ *
+ * 24h is the window the 2026-09-17 measurement was taken over, and the
+ * shortest one that made `devin/*` conclusive (0/74). Much shorter and a lane
+ * taking only a few cards an hour never leaves `unproven`; much longer and a
+ * lane fixed an hour ago stays excluded by yesterday's failures.
+ */
+export const LANE_EVIDENCE_WINDOW_HOURS = 24;
+
+/**
+ * How long a lane-evidence aggregate is reused before the query is re-run.
+ *
+ * Per-sweep de-duplication, not a cache of the verdict: `balance_pass` walks
+ * every open card and would otherwise re-run the same company-wide aggregate
+ * once per issue.
+ */
+export const LANE_EVIDENCE_TTL_MS = 60_000;

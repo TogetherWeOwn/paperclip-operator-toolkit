@@ -1,4 +1,5 @@
 import type { Tier } from "../constants.js";
+import type { AvailabilityTerm } from "./availability.js";
 
 /**
  * A model this company is willing to run a harness on, with the three rates
@@ -156,6 +157,14 @@ export interface IssueDescriptor {
    */
   agentName?: string | null;
   /**
+   * TOG-3132 AC-3. `fleet-default` means this selection keys traffic for the
+   * fleet rather than one card, so a lane standing on a single serviceable
+   * account is ineligible at any quota level — 09-17 00:39Z was 0.46 weekly
+   * utilization and still a refusal, because the limiter is
+   * requests-per-window PER ACCOUNT. Defaults to `issue`.
+   */
+  trafficScale?: "issue" | "fleet-default";
+  /**
    * TOG-3210. `PAPERCLIP_WAKE_REASON` for the run this decision serves, e.g.
    * `monitor`/`continuation`. Caller-supplied — this plugin never infers it.
    * Absent/unrecognized behaves exactly as before this field existed: the
@@ -220,7 +229,9 @@ export type RejectionOperand =
   | { kind: "lane-unserviceable"; laneId: string | null; verdict: string | null }
   | { kind: "lane-avoid"; laneId: string | null }
   | { kind: "lane-outage"; laneId: string | null }
-  | { kind: "lane-no-room"; laneId: string };
+  | { kind: "lane-no-room"; laneId: string }
+  | { kind: "lane-availability"; laneId: string | null; term: string; state: "unavailable" | "unknown" }
+  | { kind: "lane-evidence"; laneId: string | null; state: string; rule: string | null };
 
 export interface Rejection {
   modelId: string;
@@ -234,6 +245,16 @@ export interface Rejection {
    * threshold and `lane_outage.json` operator override, respectively — both
    * distinct from `lane-unserviceable` (the pace engine's own
    * exhausted/unavailable health check).
+   *
+   * `lane-availability` (TOG-3132) is a fourth, independent capacity stage.
+   * It is NOT a duplicate of `lane-unserviceable`: that one is the pace
+   * engine's verdict, reached only when a lane is polled AND the poll
+   * produced an account identity it could key on, and it is deliberately
+   * fail-neutral otherwise (`pacing.ts:275`). This stage reads the published
+   * quota-contract document directly and carries the three terms the pace
+   * verdict has no field for — the `subscription-pool` cooldown, the
+   * serviceable account COUNT, and an explicit staleness UNKNOWN. Both are
+   * capacity, so both count toward `tier-exhausted`.
    */
   stage:
     | "disabled"
@@ -245,10 +266,54 @@ export interface Rejection {
     | "lane-unserviceable"
     | "lane-avoid"
     | "lane-outage"
-    | "lane-no-room";
+    | "lane-no-room"
+    | "lane-availability"
+    /** TOG-3132: run-outcome evidence — `proven-dead`, or the cost-down guard. */
+    | "lane-evidence";
   reason: string;
   /** TOG-3211. Structured counterpart to `reason` — see `RejectionOperand`. */
   operand: RejectionOperand;
+}
+
+/**
+ * One model's availability verdict, carried structurally so `decisions.jsonl`
+ * can answer "why did this card not get opus" by the TERM rather than by
+ * grepping prose out of the trace (TOG-3132 AC-6).
+ */
+export interface AvailabilityNote {
+  modelId: string;
+  laneId: string | null;
+  term: AvailabilityTerm;
+  reason: string;
+}
+
+/** What the availability gate saw, and did, on this decision. */
+export interface AvailabilityReport {
+  /** False when no availability input was supplied at all. */
+  configured: boolean;
+  /** Set when the whole snapshot was unreadable. Every lane is then UNKNOWN. */
+  unreadableReason: string | null;
+  /** Models excluded, with the term that excluded each. */
+  excluded: readonly AvailabilityNote[];
+  /**
+   * Models whose lane state could not be read. Present in the record because
+   * an UNKNOWN that is not said has become a quiet pass — the one thing
+   * `pacing_verdict.py` forbids (TOG-3132 AC-4).
+   */
+  unknown: readonly AvailabilityNote[];
+  /** True when the selected model's own lane state was UNKNOWN. */
+  selectedOnUnknownLane: boolean;
+  /**
+   * TOG-3132 second failure shape. Models excluded by the RUN-OUTCOME term
+   * rather than the published contract — a lane that is `proven-dead`, or an
+   * `unproven` one that would have taken a cost-down move off a proven-good
+   * lane. Kept separate from `excluded` because the two answer different
+   * operator questions: `excluded` means "the lane said it would not serve",
+   * this means "the lane said nothing and did not serve".
+   */
+  evidenceExcluded: readonly AvailabilityNote[];
+  /** Evidence state of the lane the incumbent (sticky) model sits on. */
+  incumbentEvidence: "proven-good" | "proven-dead" | "unproven";
 }
 
 /**
@@ -303,6 +368,8 @@ export interface SelectionDecision {
    * dispatcher has no equivalent signal at all.
    */
   escalatedFromTier: Tier | null;
+  /** What the lane-availability gate saw. Never null: an absent input is said. */
+  availability: AvailabilityReport;
   /**
    * TOG-3210. Set only when `SelectionConfig.wakeScopedFloor` actually lowered
    * the required tier below `judgement.tier` for this decision — the tier the

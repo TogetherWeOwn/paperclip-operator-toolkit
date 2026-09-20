@@ -18,6 +18,8 @@ import {
   CLASSIFY_FETCH_MULTIPLIER,
   CLASSIFY_JOB_BUDGET_MS,
   DISPATCH_ISSUE_PAGE_LIMIT,
+  LANE_EVIDENCE_TTL_MS,
+  LANE_EVIDENCE_WINDOW_HOURS,
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
   LABEL_ONLY_PASS_FETCH_LIMIT,
@@ -46,6 +48,7 @@ import { estimateIssueContext, modelOverrideForContext } from "./engine/context.
 import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
+import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
 import { resolveTier, tierFromLabels, tierOfModel } from "./engine/tier.js";
 import {
   accumulateRunStats,
@@ -89,10 +92,22 @@ import {
   type OperatorOverrideLedger,
   type ZaiPaceOverride,
 } from "./engine/pacing.js";
+import { availabilityDocumentFrom } from "./lane-capacity/availability-source.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "./lane-capacity/poll.js";
 import { autoQuarantineFor, laneExhaustionFromRunFailure, mergeLaneOutage } from "./lane-capacity/run-failure.js";
 import { buildHostRecord, buildShadowRecord } from "./shadow-emit.js";
-import { LAST_RUN_CONTEXT_USAGE_SQL, REFRESH_SCORE_CLOSING_RUNS_SQL, REFRESH_SCORE_RUNS_SQL } from "./sql.js";
+import {
+  LANE_EVIDENCE_RUNS_SQL,
+  LAST_RUN_CONTEXT_USAGE_SQL,
+  REFRESH_SCORE_CLOSING_RUNS_SQL,
+  REFRESH_SCORE_RUNS_SQL,
+} from "./sql.js";
+import {
+  buildLaneEvidence,
+  costDownWouldAbandonProvenLane,
+  evidenceStateFor,
+  type LaneEvidenceSnapshot,
+} from "./engine/lane-evidence.js";
 import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
 import {
   buildClassificationPrompt,
@@ -245,6 +260,96 @@ export function createPlugin() {
       const readLaneLedger = async (companyId: string): Promise<LaneLedger> => {
         const stored = await ctx.state.get(laneLedgerKey(companyId));
         return stored && typeof stored === "object" ? (stored as LaneLedger) : {};
+      };
+
+      // --- TOG-3132: lane availability -------------------------------------
+
+      const laneAvailabilityKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneAvailability,
+      });
+
+      /**
+       * Read fresh on every decision, never memoized: both measured outage
+       * shapes were transient (a ~4-minute cooldown, a window that recovered
+       * inside two hours), so a snapshot held past its window reintroduces
+       * exactly the staleness this term exists to detect. `normalizeAvailability`
+       * converts an unreadable document into a snapshot of UNKNOWNs rather
+       * than throwing — a broken instrument must not take selection down.
+       */
+      const readAvailability = async (
+        companyId: string,
+        nowMs: number,
+      ): Promise<AvailabilitySnapshot> => {
+        const stored = await ctx.state.get(laneAvailabilityKey(companyId));
+        return normalizeAvailability(stored, nowMs);
+      };
+
+      /**
+       * TOG-3132, second failure shape: the lane-evidence term's input.
+       *
+       * Short-TTL and re-read rather than cached in config, for the same reason
+       * the availability term is. The TTL exists only so the three scheduled
+       * sweeps do not re-run this aggregate once per issue — `balance_pass`
+       * alone walks every open card.
+       *
+       * Fails to UNREADABLE, never throws: a broken instrument marks every lane
+       * `unproven`, which excludes nothing and merely blocks a cost-down move.
+       * A term that took selection down when its own query failed would be a
+       * worse outage than the one it exists to prevent.
+       */
+      let laneEvidenceCache: { companyId: string; atMs: number; snapshot: LaneEvidenceSnapshot } | null =
+        null;
+
+      const readLaneEvidence = async (
+        companyId: string,
+        models: readonly ModelEntry[],
+        nowMs: number,
+      ): Promise<LaneEvidenceSnapshot> => {
+        if (
+          laneEvidenceCache &&
+          laneEvidenceCache.companyId === companyId &&
+          nowMs - laneEvidenceCache.atMs < LANE_EVIDENCE_TTL_MS
+        ) {
+          return laneEvidenceCache.snapshot;
+        }
+        let snapshot: LaneEvidenceSnapshot;
+        try {
+          const rows = (await ctx.db.query(LANE_EVIDENCE_RUNS_SQL, [
+            companyId,
+            String(LANE_EVIDENCE_WINDOW_HOURS),
+          ])) as unknown[];
+          // The model -> lane fold. `providers=devin` is ONE credential failing
+          // for seven model ids at once: per model each looks like a thin
+          // sample, per lane they are one conclusive 0/74.
+          const byLane = new Map<string, { succeeded: number; failed: number }>();
+          for (const row of rows) {
+            const record = asRecord(row);
+            const modelId = typeof record.model === "string" ? record.model : null;
+            if (!modelId) continue;
+            const laneId = models.find((entry) => entry.id === modelId)?.laneId ?? null;
+            if (!laneId) continue;
+            const bucket = byLane.get(laneId) ?? { succeeded: 0, failed: 0 };
+            bucket.succeeded += Number(record.succeeded) || 0;
+            bucket.failed += Number(record.failed) || 0;
+            byLane.set(laneId, bucket);
+          }
+          snapshot = buildLaneEvidence(
+            [...byLane.entries()].map(([laneId, counts]) => ({ laneId, ...counts })),
+            LANE_EVIDENCE_WINDOW_HOURS,
+          );
+        } catch (error) {
+          snapshot = {
+            lanes: [],
+            windowHours: LANE_EVIDENCE_WINDOW_HOURS,
+            unreadableReason: `heartbeat_runs read failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          };
+        }
+        laneEvidenceCache = { companyId, atMs: nowMs, snapshot };
+        return snapshot;
       };
 
       const operatorOverridesKey = (companyId: string) => ({
@@ -993,12 +1098,15 @@ export function createPlugin() {
             objective: config.selection.objective,
             modelScores,
             allowExplore,
+            holdOnUnknownAvailability: config.selection.holdOnUnknownAvailability,
             wakeScopedFloor: config.wakeScopedFloor,
           },
           profiles,
           signals,
           now,
           cardLedger,
+          availability: await readAvailability(companyId, now),
+          laneEvidence: await readLaneEvidence(companyId, config.models, now),
         });
 
         // Whether the CURRENTLY PINNED model (not the newly-computed winner) sits
@@ -1013,6 +1121,17 @@ export function createPlugin() {
           config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
 
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
+
+        // TOG-3132 AC-6, the operational half: the term is the metric name, so
+        // "which term is taking candidates out right now" is answerable without
+        // reparsing the decision stream. `lane_unknown_selected` is the one that
+        // must not be silent — it counts decisions made on an unread lane.
+        for (const note of decision.availability.excluded) {
+          await ctx.metrics.write(`model_selection.lane_excluded.${note.term}`, 1);
+        }
+        if (decision.availability.selectedOnUnknownLane) {
+          await ctx.metrics.write("model_selection.lane_unknown_selected", 1);
+        }
 
         if (decision.shadowDiff) {
           const stored = asRecord(await ctx.state.get(shadowDiffsKey(companyId)));
@@ -1916,9 +2035,23 @@ export function createPlugin() {
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
 
+            // TOG-3132 AC-2: the availability term's writer. Published from the
+            // same poll the ledger comes from, so the selector and the pacer can
+            // never disagree about what was observed. Written on EVERY poll,
+            // including one where nothing produced records — leaving the prior
+            // document in place would let a dead poller keep publishing a
+            // freshness it no longer has, and an empty document is read as
+            // unreadable, which `select.ts` says rather than passes.
+            const availabilityDocument = availabilityDocumentFrom({
+              results,
+              observedAt: fetchedAt,
+            });
+            await ctx.state.set(laneAvailabilityKey(company.id), availabilityDocument);
+
             ctx.logger.info("lane capacity polled", {
               companyId: company.id,
               lanes: [...results, ...secretFailures].map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(","),
+              availabilityRecords: availabilityDocument.records.length,
             });
           } catch (cause) {
             ctx.logger.error("lane capacity poll failed for a company", {
@@ -3292,6 +3425,43 @@ export function createPlugin() {
 
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+
+                // TOG-3132. 2026-09-17 08:10:14Z this pass moved TOG-3088 off
+                // `claude-haiku-4-5-20251001` (the only healthy T3 lane) onto
+                // `deepseek-v4-flash` (0/3) for `cost-down`, and did the same to
+                // seven more cards in eleven hours. `selectModel` now excludes a
+                // PROVEN-DEAD lane outright, but `deepseek-v4-flash` at 0/3 is
+                // not proven dead — it is unproven, and nothing about a cheaper
+                // price is evidence it will serve.
+                //
+                // `incapable` and `busier` are deliberately exempt: those are
+                // "this card cannot stay here", and refusing to move it would
+                // wedge it on a lane already judged unusable. Only a move made
+                // PURELY to save money has to clear this bar.
+                if (cheaper && !incapable && !busier) {
+                  const evidence = await readLaneEvidence(company.id, config.models, now);
+                  const from = evidenceStateFor(evidence, pinnedModel.laneId ?? null);
+                  const to = evidenceStateFor(evidence, selectedModel.laneId ?? null);
+                  if (costDownWouldAbandonProvenLane(from, to)) {
+                    await ctx.activity.log({
+                      companyId: company.id,
+                      message:
+                        `Model Selection held ${pinnedModelId} (cost-down to ${selectedModel.id} refused): ` +
+                        `lane ${pinnedModel.laneId ?? "(none)"} is proven-good over ` +
+                        `${evidence.windowHours}h, lane ${selectedModel.laneId ?? "(none)"} is ${to}`,
+                      entityType: "issue",
+                      entityId: issueId,
+                      metadata: {
+                        from: pinnedModelId,
+                        heldAgainst: selectedModel.id,
+                        fromEvidence: from,
+                        toEvidence: to,
+                        reason: "lane-evidence",
+                      },
+                    });
+                    continue;
+                  }
+                }
                 if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) continue;
                 await ctx.issues.update(
                   issueId,

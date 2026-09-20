@@ -50,6 +50,14 @@ export interface LanePollResult {
    * rather than re-derived from it. Null exactly when `verdict` is null.
    */
   observation: LanePaceObservation | null;
+  /**
+   * The document's own `records` array, untouched. `observation` has already
+   * applied the lane's field mapping and is what everything downstream reads;
+   * this is retained only so `availability-source.ts` can pass through fields
+   * the pace normalizer has no use for — today that is the `subscription-pool`
+   * cooldown (TOG-3132 AC-2). Absent when the document carried no array there.
+   */
+  rawRecords?: readonly unknown[];
   /** Null on a clean poll. Fail-neutral: an error here never throws upstream. */
   error: string | null;
 }
@@ -159,11 +167,13 @@ async function pollOne(
   }
 
   const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);
+  const rawRecords = (document as { records?: unknown }).records;
   return {
     laneId: source.laneId,
     fetchedAt,
     verdict: evaluated?.verdict ?? null,
     observation: evaluated?.observation ?? null,
+    ...(Array.isArray(rawRecords) ? { rawRecords: rawRecords as readonly unknown[] } : {}),
     error: null,
   };
 }

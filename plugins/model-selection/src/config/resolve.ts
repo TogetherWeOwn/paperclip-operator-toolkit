@@ -71,6 +71,8 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
+    /** TOG-3132: exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
+    holdOnUnknownAvailability: boolean;
     objective: SelectionObjective;
     fleetContextCeilingTokens: number;
     compactionRatio: number;
@@ -318,6 +320,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
+      holdOnUnknownAvailability: bool(selection.holdOnUnknownAvailability, false),
       objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
       compactionRatio: num(selection.compactionRatio, 0.75),

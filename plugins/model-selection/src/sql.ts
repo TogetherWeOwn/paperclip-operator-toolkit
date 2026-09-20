@@ -102,3 +102,27 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
    and status = 'succeeded'
    and finished_at > now() - ($2 || ' days')::interval
    and usage_json ? 'model'`;
+
+/**
+ * TOG-3132: per-model run outcomes, the input to the lane-evidence term.
+ * Aggregated to lanes in `worker.ts`, because the model -> lane map lives in
+ * config and not in the database.
+ *
+ * `succeeded` is the success value — `completed` does not exist on this table.
+ *
+ * `cancelled` and `interrupted` are deliberately NOT counted as failures: they
+ * are fleet or operator actions, not a lane refusing to serve, and counting
+ * them would let one busy deploy window mark every lane dead. Measured
+ * 2026-09-17, no row in either status carries `usage_json ? 'model'` anyway.
+ *
+ * Alias-free on purpose: the host rejects a dotted reference after `from` as a
+ * cross-schema read (`tests/sql-guard.spec.ts`, the v0.3.1 failure).
+ */
+export const LANE_EVIDENCE_RUNS_SQL = `select usage_json->>'model' as model,
+       count(*) filter (where status = 'succeeded')::int as succeeded,
+       count(*) filter (where status in ('failed','timed_out'))::int as failed
+  from heartbeat_runs
+ where company_id = $1
+   and created_at > now() - ($2 || ' hours')::interval
+   and usage_json ? 'model'
+ group by 1`;

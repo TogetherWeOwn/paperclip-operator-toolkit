@@ -85,6 +85,13 @@ var PLUGIN_STATE_KEYS = {
   volumeProfiles: "volumeProfiles",
   /** Per-company lane pace verdicts and slot-throttle counters. */
   laneLedger: "laneLedger",
+  /**
+   * Per-company published quota-contract document, the input to the TOG-3132
+   * availability term. Written by the collector (TOG-3133); until that runs,
+   * every lane reads UNKNOWN — recorded and traced, and under the default
+   * policy not blocking.
+   */
+  laneAvailability: "laneAvailability",
   /** Per-issue operator overrides, each with an expiry (TOG-2137). */
   operatorOverrides: "operatorOverrides",
   /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (TOG-2137). */
@@ -239,6 +246,8 @@ var BALANCE_PASS_COST_DOWN_MULTIPLIER = 0.8;
 var BALANCE_PASS_BUSIER_UTILIZATION_DELTA = 0.25;
 var BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
 var DISPATCH_ISSUE_PAGE_LIMIT = 1e3;
+var LANE_EVIDENCE_WINDOW_HOURS = 24;
+var LANE_EVIDENCE_TTL_MS = 6e4;
 
 // src/engine/pacing.ts
 function mergeLedgerEntry(ledger, result) {
@@ -704,6 +713,7 @@ function resolveConfig(raw) {
       defaultTier: tier(selection.defaultTier, "T1"),
       stickyModelWithinIssue: bool(selection.stickyModelWithinIssue, true),
       holdOnUntrustedProfile: bool(selection.holdOnUntrustedProfile, true),
+      holdOnUnknownAvailability: bool(selection.holdOnUnknownAvailability, false),
       objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1e6),
       compactionRatio: num(selection.compactionRatio, 0.75)
@@ -1633,6 +1643,95 @@ function resolveTier(descriptor, models, configDefaultTier, options) {
   };
 }
 
+// src/engine/lane-evidence.ts
+var Z_95 = 1.959963985;
+var EVIDENCE_MIN_SAMPLES = 5;
+var EVIDENCE_ZERO_SUCCESS_SAMPLES = EVIDENCE_MIN_SAMPLES;
+var EVIDENCE_DEAD_THRESHOLD = 0.2;
+var EVIDENCE_GOOD_THRESHOLD = 0.5;
+function wilsonInterval(successes, total, z = Z_95) {
+  if (total <= 0) return { lower: 0, upper: 1 };
+  const phat = successes / total;
+  const z2 = z * z;
+  const denominator = 1 + z2 / total;
+  const center = (phat + z2 / (2 * total)) / denominator;
+  const margin = z / denominator * Math.sqrt(phat * (1 - phat) / total + z2 / (4 * total * total));
+  return {
+    lower: Math.max(0, center - margin),
+    upper: Math.min(1, center + margin)
+  };
+}
+function evaluateLaneEvidence(counts, thresholds = {}) {
+  const minSamples = thresholds.minSamples ?? EVIDENCE_MIN_SAMPLES;
+  const zeroSuccessSamples = thresholds.zeroSuccessSamples ?? EVIDENCE_ZERO_SUCCESS_SAMPLES;
+  const dead = thresholds.deadThreshold ?? EVIDENCE_DEAD_THRESHOLD;
+  const good = thresholds.goodThreshold ?? EVIDENCE_GOOD_THRESHOLD;
+  const succeeded = Math.max(0, Math.trunc(counts.succeeded));
+  const failed = Math.max(0, Math.trunc(counts.failed));
+  const total = succeeded + failed;
+  const { lower, upper } = wilsonInterval(succeeded, total);
+  const successRate = total > 0 ? succeeded / total : null;
+  const base = {
+    laneId: counts.laneId,
+    succeeded,
+    failed,
+    total,
+    successRate,
+    lowerBound: lower,
+    upperBound: upper
+  };
+  if (total === 0) {
+    return {
+      ...base,
+      state: "unproven",
+      rule: "no-runs",
+      reason: `${counts.laneId}: no recorded runs in the window`
+    };
+  }
+  if (succeeded === 0 && total >= zeroSuccessSamples) {
+    return {
+      ...base,
+      state: "proven-dead",
+      rule: "zero-success",
+      reason: `${counts.laneId}: 0/${total} succeeded \u2014 no lane success in ${total} observations (zero-success rule fires at ${zeroSuccessSamples})`
+    };
+  }
+  if (upper <= dead) {
+    return {
+      ...base,
+      state: "proven-dead",
+      rule: "wilson-upper",
+      reason: `${counts.laneId}: ${succeeded}/${total} succeeded \u2014 95% upper bound ${upper.toFixed(3)} is at or below the ${dead} dead threshold`
+    };
+  }
+  if (total >= minSamples && lower >= good) {
+    return {
+      ...base,
+      state: "proven-good",
+      rule: "wilson-lower",
+      reason: `${counts.laneId}: ${succeeded}/${total} succeeded \u2014 95% lower bound ${lower.toFixed(3)} is at or above the ${good} good threshold`
+    };
+  }
+  return {
+    ...base,
+    state: "unproven",
+    rule: "inconclusive",
+    reason: `${counts.laneId}: ${succeeded}/${total} succeeded \u2014 95% interval [${lower.toFixed(3)}, ${upper.toFixed(3)}] proves neither good nor dead`
+  };
+}
+function buildLaneEvidence(counts, windowHours, thresholds = {}) {
+  const lanes = counts.map((entry) => evaluateLaneEvidence(entry, thresholds)).sort((left, right) => left.laneId.localeCompare(right.laneId));
+  return { lanes, windowHours, unreadableReason: null };
+}
+function evidenceStateFor(snapshot, laneId) {
+  if (!snapshot || snapshot.unreadableReason) return "unproven";
+  if (!laneId) return "unproven";
+  return snapshot.lanes.find((lane) => lane.laneId === laneId)?.state ?? "unproven";
+}
+function costDownWouldAbandonProvenLane(fromState, toState) {
+  return fromState === "proven-good" && toState !== "proven-good";
+}
+
 // src/engine/pick-order.ts
 function provenFor(modelScores, modelId, tier2) {
   return modelScores[modelId]?.tiers[tier2]?.proven ?? false;
@@ -1690,8 +1789,126 @@ function selectModel(input) {
   const ledger = config.laneLedger ?? {};
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
   const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
+  const availability = input.availability;
+  const availableLanes = new Map(
+    (availability?.lanes ?? []).map((lane) => [lane.laneId, lane])
+  );
+  const holdOnUnknownAvailability = config.holdOnUnknownAvailability ?? false;
+  const trafficScale = descriptor.trafficScale ?? "issue";
+  const excludedByLane = [];
+  const unknownLanes = [];
+  function laneRead(model) {
+    if (!availability) return { state: "available" };
+    if (availability.unreadableReason) {
+      return { state: "unknown", term: "staleness", reason: availability.unreadableReason };
+    }
+    const laneId = model.laneId ?? null;
+    if (!laneId) {
+      return { state: "unknown", term: "unmapped", reason: `${model.id} declares no laneId` };
+    }
+    const lane = availableLanes.get(laneId);
+    if (!lane) {
+      return { state: "unknown", term: "unmapped", reason: `lane ${laneId} is absent from the snapshot` };
+    }
+    if (lane.state === "unavailable") {
+      return { state: "unavailable", term: lane.term ?? "health", reason: `lane ${laneId}: ${lane.reason}` };
+    }
+    if (lane.state === "unknown") {
+      return { state: "unknown", term: lane.term ?? "staleness", reason: `lane ${laneId}: ${lane.reason}` };
+    }
+    if (trafficScale === "fleet-default" && lane.serviceableAccountCount <= 1) {
+      return {
+        state: "unavailable",
+        term: "accounts",
+        reason: `lane ${laneId}: ${lane.serviceableAccountCount} serviceable account(s) cannot carry fleet-default-scale traffic at any quota level`
+      };
+    }
+    return { state: "available" };
+  }
+  function clearsLane(model) {
+    const read = laneRead(model);
+    if (read.state === "available") return true;
+    const note = {
+      modelId: model.id,
+      laneId: model.laneId ?? null,
+      term: read.term,
+      reason: read.reason
+    };
+    const bucket = read.state === "unavailable" ? excludedByLane : unknownLanes;
+    if (!bucket.some((entry) => entry.modelId === model.id)) bucket.push(note);
+    if (read.state === "unknown" && !holdOnUnknownAvailability) return true;
+    if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-availability")) {
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-availability",
+        reason: `${read.term}: ${read.reason}`,
+        operand: { kind: "lane-availability", laneId: model.laneId ?? null, term: read.term, state: read.state }
+      });
+    }
+    return false;
+  }
+  const laneEvidence = input.laneEvidence;
+  const evidenceExcluded = [];
+  const incumbentEvidence = evidenceStateFor(
+    laneEvidence,
+    config.models.find(
+      (model) => model.id === resolveConfiguredModelId(descriptor.stickyModelId ?? "", config.models)
+    )?.laneId ?? null
+  );
+  function clearsEvidence(model) {
+    if (!laneEvidence) return true;
+    const state = evidenceStateFor(laneEvidence, model.laneId ?? null);
+    const record2 = laneEvidence.lanes.find((lane) => lane.laneId === model.laneId);
+    const detail = record2?.reason ?? laneEvidence.unreadableReason ?? `lane ${model.laneId ?? "(none)"} has no recorded runs in the ${laneEvidence.windowHours}h window`;
+    if (state === "proven-dead") {
+      const note = {
+        modelId: model.id,
+        laneId: model.laneId ?? null,
+        term: "evidence",
+        reason: detail
+      };
+      if (!evidenceExcluded.some((entry) => entry.modelId === model.id)) evidenceExcluded.push(note);
+      if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-evidence")) {
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-evidence",
+          reason: `proven-dead [${record2?.rule ?? "unknown"}]: ${detail}`,
+          operand: {
+            kind: "lane-evidence",
+            laneId: model.laneId ?? null,
+            state: "proven-dead",
+            rule: record2?.rule ?? null
+          }
+        });
+      }
+      return false;
+    }
+    if (costDownWouldAbandonProvenLane(incumbentEvidence, state)) {
+      const note = {
+        modelId: model.id,
+        laneId: model.laneId ?? null,
+        term: "evidence",
+        reason: `${detail} \u2014 refusing to move off a proven-good lane onto an ${state} one`
+      };
+      if (!evidenceExcluded.some((entry) => entry.modelId === model.id)) evidenceExcluded.push(note);
+      if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-evidence")) {
+        rejections.push({
+          modelId: model.id,
+          stage: "lane-evidence",
+          reason: `${state}: ${detail} \u2014 incumbent lane is proven-good`,
+          operand: { kind: "lane-evidence", laneId: model.laneId ?? null, state, rule: null }
+        });
+      }
+      return false;
+    }
+    return true;
+  }
   const judgement = resolveTier(descriptor, config.models, config.defaultTier, {
-    isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model)
+    // An issue-override pin on a lane that will not serve falls through to the
+    // tier label / agent floor, the same as for the pace hard stop. An UNKNOWN
+    // never moves a pin: a blind instrument is not grounds to discard a
+    // recorded human judgement.
+    isLaneUnserviceable: (model) => paceActive && hardStopExcluded(ledger, model) || laneRead(model).state === "unavailable"
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} \u2014 ${judgement.detail}`);
   const wakeFloorConfig = config.wakeScopedFloor;
@@ -1716,6 +1933,18 @@ function selectModel(input) {
     pacingApplied: false,
     shadowDiff: null,
     escalatedFromTier: null,
+    // Live references: every early return below carries whatever the gate had
+    // recorded by then, so a decision can never report an empty availability
+    // record it did not actually observe.
+    availability: {
+      configured: Boolean(availability),
+      unreadableReason: availability?.unreadableReason ?? null,
+      excluded: excludedByLane,
+      unknown: unknownLanes,
+      selectedOnUnknownLane: false,
+      evidenceExcluded,
+      incumbentEvidence
+    },
     wakeScopedTier: wakeFloorEligible ? requiredTier : null
   };
   const nowIso = new Date(now).toISOString();
@@ -1768,6 +1997,14 @@ function selectModel(input) {
           verdict: laneVerdictFor(ledger, incumbent.laneId)?.state ?? null
         }
       });
+    } else if (incumbent && !clearsEvidence(incumbent)) {
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} evidence \u2014 ${evidenceExcluded.find((note) => note.modelId === incumbent.id)?.reason ?? "proven-dead"}`
+      );
+    } else if (incumbent && !clearsLane(incumbent)) {
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} availability \u2014 ${excludedByLane.concat(unknownLanes).find((note) => note.modelId === incumbent.id)?.reason ?? "unavailable"}`
+      );
     } else if (incumbent) {
       trace.push(
         `sticky: ${incumbent.id} is already running this issue \u2014 switching would reset the session and discard the prompt cache`
@@ -1840,6 +2077,8 @@ function selectModel(input) {
       });
       continue;
     }
+    if (!clearsLane(model)) continue;
+    if (!clearsEvidence(model)) continue;
     if (paceActive && config.laneAvoidConfig && laneAvoidExcluded(ledger, model, config.laneAvoidConfig)) {
       rejections.push({
         modelId: model.id,
@@ -1904,15 +2143,48 @@ function selectModel(input) {
     }
     qualified.push(model);
   }
+  if (!availability) {
+    trace.push("lane availability: no lane input supplied \u2014 the term is not configured and excluded nothing");
+  } else if (excludedByLane.length > 0) {
+    trace.push(
+      `lane availability excluded ${excludedByLane.length} candidate(s): ` + excludedByLane.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; ")
+    );
+  }
+  if (unknownLanes.length > 0) {
+    trace.push(
+      `lane availability UNKNOWN for ${unknownLanes.length} candidate(s): ` + unknownLanes.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; ")
+    );
+  }
+  if (!laneEvidence) {
+    trace.push("lane evidence: no run-outcome input supplied \u2014 the term is not configured and excluded nothing");
+  } else {
+    trace.push(
+      `lane evidence over ${laneEvidence.windowHours}h` + (laneEvidence.unreadableReason ? ` UNREADABLE (${laneEvidence.unreadableReason}) \u2014 every lane is unproven` : `: ${laneEvidence.lanes.filter((lane) => lane.state === "proven-good").length} proven-good, ${laneEvidence.lanes.filter((lane) => lane.state === "proven-dead").length} proven-dead, ${laneEvidence.lanes.filter((lane) => lane.state === "unproven").length} unproven`) + `; incumbent lane is ${incumbentEvidence}`
+    );
+    if (evidenceExcluded.length > 0) {
+      trace.push(
+        `lane evidence excluded ${evidenceExcluded.length} candidate(s): ` + evidenceExcluded.map((note) => `${note.modelId} [${note.term}] ${note.reason}`).join("; ")
+      );
+    }
+  }
   if (qualified.length === 0) {
     const atOrAboveRequired = rejections.filter((rejection) => {
       const rejectedModel = config.models.find((entry) => entry.id === rejection.modelId);
       return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
     });
-    const tierExhausted = atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => rejection.stage === "lane-unserviceable");
+    const CAPACITY_STAGES = /* @__PURE__ */ new Set(["lane-unserviceable", "lane-availability", "lane-evidence"]);
+    const unknownModelIds = new Set(unknownLanes.map((note) => note.modelId));
+    if (atOrAboveRequired.length > 0 && atOrAboveRequired.every(
+      (rejection) => rejection.stage === "lane-availability" && unknownModelIds.has(rejection.modelId)
+    )) {
+      const reason = `lane availability is UNKNOWN for every candidate at or above ${requiredTier} (${unknownLanes.map((note) => note.reason).join("; ")}) and selection.holdOnUnknownAvailability is on`;
+      trace.push(`held at agent floor: ${reason}`);
+      return { ...base, outcome: "held-at-floor", heldReason: reason };
+    }
+    const tierExhausted = atOrAboveRequired.length > 0 && atOrAboveRequired.every((rejection) => CAPACITY_STAGES.has(rejection.stage));
     if (tierExhausted) {
       trace.push(
-        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by the pace serviceability hard stop (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) \u2014 nowhere left to escalate to`
+        `tier exhausted: every candidate from ${requiredTier} through the T1 ceiling was excluded by a capacity gate (${atOrAboveRequired.length} rejection${atOrAboveRequired.length === 1 ? "" : "s"}) \u2014 nowhere left to escalate to`
       );
       return { ...base, outcome: "tier-exhausted", effectiveTier: requiredTier };
     }
@@ -2056,10 +2328,22 @@ function selectModel(input) {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     const floorModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
     const floorModel = floorModelId ? config.models.find((model) => model.id === floorModelId) : void 0;
-    const floorLaneDead = paceActive && !!floorModel && (hardStopExcluded(ledger, floorModel) || !!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel));
+    const floorLaneRead = floorModel ? laneRead(floorModel) : null;
+    const floorLaneUnavailable = floorLaneRead !== null && floorLaneRead.state === "unavailable";
+    if (floorModel && floorLaneRead !== null && floorLaneRead.state === "unavailable") {
+      if (!excludedByLane.some((entry) => entry.modelId === floorModel.id)) {
+        excludedByLane.push({
+          modelId: floorModel.id,
+          laneId: floorModel.laneId ?? null,
+          term: floorLaneRead.term,
+          reason: floorLaneRead.reason
+        });
+      }
+    }
+    const floorLaneDead = !!floorModel && (paceActive && (hardStopExcluded(ledger, floorModel) || !!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel)) || floorLaneUnavailable);
     if (floorLaneDead) {
       trace.push(
-        `held-at-floor declined: floor ${floorModel.id} lane ${floorModel.laneId ?? "(none)"} is not serviceable \u2014 writing an explicit pin to ${winner.modelId} instead (${reason})`
+        `held-at-floor declined: floor ${floorModel.id} lane ${floorModel.laneId ?? "(none)"} is not serviceable` + (floorLaneUnavailable ? ` [${floorLaneRead.term}: ${floorLaneRead.reason}]` : "") + ` \u2014 writing an explicit pin to ${winner.modelId} instead (${reason})`
       );
       return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
     }
@@ -2076,7 +2360,18 @@ function selectModel(input) {
       `advisory mode: wake-scoped floor decisions are never written, regardless of enforcement \u2014 the card's ${judgement.tier} tier is untouched`
     );
   }
-  return { ...withCandidates, outcome: "selected", modelId: winner.modelId };
+  const winnerUnknown = unknownLanes.find((note) => note.modelId === winner.modelId);
+  if (winnerUnknown) {
+    trace.push(
+      `availability UNKNOWN for the selected model: ${winnerUnknown.reason} \u2014 not treated as available; selection proceeded because selection.holdOnUnknownAvailability is off`
+    );
+  }
+  return {
+    ...withCandidates,
+    outcome: "selected",
+    modelId: winner.modelId,
+    availability: { ...withCandidates.availability, selectedOnUnknownLane: Boolean(winnerUnknown) }
+  };
 }
 
 // src/engine/ancillary.ts
@@ -2257,6 +2552,175 @@ function buildQualitySignals(rows, computedAt) {
   }));
 }
 
+// src/engine/availability.ts
+var MAX_AGE_MINUTES = 120;
+var FUTURE_TOLERANCE_MS = 6e4;
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function parseTs(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function bindingAllowance(windows, nowMs) {
+  let binding = null;
+  for (const window of windows) {
+    if (window.role !== "allowance") continue;
+    const utilization = finite(window.utilization);
+    const weight = finite(window.allowance_weight);
+    const reset = parseTs(window.resets_at);
+    if (utilization === null || weight === null || reset === null) continue;
+    const hoursToReset = Math.max((reset - nowMs) / 36e5, 1);
+    const remaining = Math.max(0, 1 - utilization) * weight;
+    const clearRate = remaining / hoursToReset;
+    const name = typeof window.name === "string" ? window.name : "(unnamed)";
+    if (!binding || clearRate < binding.clearRate || clearRate === binding.clearRate && reset < binding.reset) {
+      binding = { remaining, name, clearRate, reset };
+    }
+  }
+  return binding ? { remaining: binding.remaining, name: binding.name } : null;
+}
+function evaluateRecord(raw, observedAtMs, nowMs) {
+  const key = typeof raw.account_key === "string" ? raw.account_key : "(unkeyed)";
+  const ageMs = nowMs - observedAtMs;
+  if (ageMs < -FUTURE_TOLERANCE_MS) {
+    return { state: "unknown", term: "staleness", reason: `${key}: observation is in the future` };
+  }
+  const declared = finite(raw.stale_after_seconds);
+  const cutoffMs = Math.min(
+    MAX_AGE_MINUTES * 6e4,
+    declared !== null && declared > 0 ? declared * 1e3 : Number.POSITIVE_INFINITY
+  );
+  if (ageMs > cutoffMs) {
+    return {
+      state: "unknown",
+      term: "staleness",
+      reason: `${key}: sample age ${Math.round(ageMs / 6e4)}min exceeds the ${Math.round(cutoffMs / 6e4)}min cutoff`
+    };
+  }
+  const cooldown = asRecord(raw.cooldown);
+  if (cooldown) {
+    const until = parseTs(cooldown.until);
+    const why = typeof cooldown.reason === "string" ? `: ${cooldown.reason}` : "";
+    if (until === null) {
+      return {
+        state: "unavailable",
+        term: "cooldown",
+        reason: `${key}: cooldown present with no readable \`until\`${why}`
+      };
+    }
+    if (until > nowMs) {
+      return {
+        state: "unavailable",
+        term: "cooldown",
+        reason: `${key}: in cooldown until ${new Date(until).toISOString()}${why}`
+      };
+    }
+  }
+  const health = typeof raw.health === "string" ? raw.health : null;
+  if (health === null) {
+    return { state: "unknown", term: "staleness", reason: `${key}: no health field` };
+  }
+  if (health !== "healthy") {
+    const term = health === "cooldown" || health === "cooling_down" ? "cooldown" : "health";
+    return { state: "unavailable", term, reason: `${key}: health ${health}` };
+  }
+  const windows = Array.isArray(raw.windows) ? raw.windows.flatMap((w) => {
+    const rec = asRecord(w);
+    return rec ? [rec] : [];
+  }) : [];
+  if (windows.length === 0) {
+    return { state: "unknown", term: "staleness", reason: `${key}: no windows published` };
+  }
+  for (const window of windows) {
+    const utilization = finite(window.utilization);
+    if (utilization !== null && utilization >= 1) {
+      const name = typeof window.name === "string" ? window.name : "(unnamed)";
+      return {
+        state: "unavailable",
+        term: "quota",
+        reason: `${key}: window ${name} at utilization ${utilization.toFixed(2)}`
+      };
+    }
+  }
+  const binding = bindingAllowance(windows, nowMs);
+  if (!binding) {
+    return { state: "unknown", term: "staleness", reason: `${key}: no readable allowance window` };
+  }
+  if (binding.remaining <= 0) {
+    return {
+      state: "unavailable",
+      term: "quota",
+      reason: `${key}: binding allowance ${binding.name} has no remaining allowance`
+    };
+  }
+  return { state: "available", term: null, reason: `${key}: serviceable` };
+}
+function rollUp(laneId, verdicts, ageMinutes) {
+  const serviceable2 = verdicts.filter((v) => v.state === "available");
+  const unavailable = verdicts.filter((v) => v.state === "unavailable");
+  const unknown = verdicts.filter((v) => v.state === "unknown");
+  const base = {
+    laneId,
+    accountCount: verdicts.length,
+    serviceableAccountCount: serviceable2.length,
+    ageMinutes
+  };
+  if (serviceable2.length > 0) {
+    return {
+      ...base,
+      state: "available",
+      term: null,
+      reason: `${serviceable2.length}/${verdicts.length} accounts serviceable`
+    };
+  }
+  if (unavailable.length > 0) {
+    const order = ["cooldown", "quota", "health"];
+    const term = order.find((t) => unavailable.some((v) => v.term === t)) ?? unavailable[0].term ?? "health";
+    const reasons = unavailable.map((v) => v.reason).join("; ");
+    return { ...base, state: "unavailable", term, reason: `no serviceable account \u2014 ${reasons}` };
+  }
+  return {
+    ...base,
+    state: "unknown",
+    term: "staleness",
+    reason: unknown.length > 0 ? unknown.map((v) => v.reason).join("; ") : "no records for this lane"
+  };
+}
+function normalizeAvailability(raw, nowMs, options = {}) {
+  const document = asRecord(raw);
+  if (!document) {
+    return { lanes: [], unreadableReason: "availability document is not an object" };
+  }
+  const observedAtMs = parseTs(document.observedAt);
+  if (observedAtMs === null) {
+    return { lanes: [], unreadableReason: "availability document has no readable observedAt" };
+  }
+  const records = Array.isArray(document.records) ? document.records.flatMap((r) => {
+    const rec = asRecord(r);
+    return rec ? [rec] : [];
+  }) : [];
+  if (records.length === 0) {
+    return { lanes: [], unreadableReason: "availability document carried no records" };
+  }
+  const ageMinutes = (nowMs - observedAtMs) / 6e4;
+  const laneIdOf = options.laneIdOf ?? ((rec) => typeof rec.provider === "string" ? rec.provider : null);
+  const byLane = /* @__PURE__ */ new Map();
+  for (const record2 of records) {
+    const laneId = laneIdOf(record2);
+    if (!laneId) continue;
+    const verdicts = byLane.get(laneId) ?? [];
+    verdicts.push(evaluateRecord(record2, observedAtMs, nowMs));
+    byLane.set(laneId, verdicts);
+  }
+  const lanes = [...byLane.entries()].map(([laneId, verdicts]) => rollUp(laneId, verdicts, ageMinutes)).sort((left, right) => left.laneId.localeCompare(right.laneId));
+  return { lanes, unreadableReason: null };
+}
+
 // src/engine/benchmark-data.ts
 var FROZEN_BENCHMARK_ROWS = {
   "claude-fable-5-1": { terminalBenchV4Pass1: 0.52020202020202, mercorApex11Pass1: 0.6859999999999999, automationBenchAaGuardrailAdjusted: 0.5937591715646424, aaOmniscienceSignedIndex: 43.45 },
@@ -2295,6 +2759,77 @@ var FROZEN_BENCHMARK_ROWS = {
   "zai/glm-5.3": { terminalBenchV4Pass1: 0.419191919191919, mercorApex11Pass1: 0.5660000000000001, automationBenchAaGuardrailAdjusted: 0.622028649962642, aaOmniscienceSignedIndex: 14.3 },
   "zai/glm-5.3-flash": { terminalBenchV4Pass1: 0.328282828282828, mercorApex11Pass1: 0.528, automationBenchAaGuardrailAdjusted: 0.6036862782167782, aaOmniscienceSignedIndex: 7.46666666666667 }
 };
+
+// src/lane-capacity/availability-source.ts
+var MAX_AGE_SECONDS = MAX_AGE_MINUTES * 60;
+function parseMs(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+function remainingFreshnessSeconds(account, observation, laneObservedAtMs, stampMs) {
+  const declared = account.staleAfterSeconds ?? observation.staleAfterSeconds;
+  const cutoff = typeof declared === "number" && Number.isFinite(declared) && declared > 0 ? Math.min(declared, MAX_AGE_SECONDS) : MAX_AGE_SECONDS;
+  const lagSeconds = Math.max(0, (stampMs - laneObservedAtMs) / 1e3);
+  const remaining = Math.floor(cutoff - lagSeconds);
+  return remaining > 0 ? remaining : null;
+}
+function windowsOf(account) {
+  return account.windows.map((window) => ({
+    name: window.name,
+    role: window.role,
+    utilization: window.utilization,
+    // `bindingAllowance` needs a weight on the allowance window; the account's
+    // own weight is the contract's fallback when the window does not report one.
+    allowance_weight: window.allowanceWeight ?? account.weight,
+    resets_at: window.resetsAt
+  }));
+}
+function publishedRecordFor(rawRecords, accountKey2) {
+  if (!rawRecords) return null;
+  for (const raw of rawRecords) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record2 = raw;
+    if (record2.account_key === accountKey2) return record2;
+  }
+  return null;
+}
+function healthOf(published, account) {
+  if (published && typeof published.health === "string" && published.health.trim()) {
+    return published.health;
+  }
+  return account.health === "unknown" ? null : account.health;
+}
+function availabilityDocumentFrom(input) {
+  const stampMs = parseMs(input.observedAt);
+  const records = [];
+  if (stampMs === null) return { observedAt: input.observedAt, records };
+  for (const result of input.results) {
+    const observation = result.observation;
+    if (!observation) continue;
+    const laneObservedAtMs = parseMs(observation.observedAt);
+    if (laneObservedAtMs === null) continue;
+    for (const account of observation.accounts) {
+      const remaining = remainingFreshnessSeconds(account, observation, laneObservedAtMs, stampMs);
+      if (remaining === null) continue;
+      const published = publishedRecordFor(result.rawRecords, account.accountKey);
+      const cooldown = published?.cooldown;
+      const health = healthOf(published, account);
+      records.push({
+        // The lane id, not the document's own `provider`: `ModelEntry.laneId`
+        // is what the reader matches on, and a lane may poll a publisher whose
+        // provider string differs from the lane it is configured as.
+        provider: result.laneId,
+        account_key: account.accountKey,
+        stale_after_seconds: remaining,
+        windows: windowsOf(account),
+        ...health === null ? {} : { health },
+        ...cooldown && typeof cooldown === "object" && !Array.isArray(cooldown) ? { cooldown } : {}
+      });
+    }
+  }
+  return { observedAt: input.observedAt, records };
+}
 
 // src/lane-capacity/value-normalization.ts
 function recordOf(value) {
@@ -2851,11 +3386,13 @@ async function pollOne(source, http, now) {
     return fail("lane-invalid-json");
   }
   const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);
+  const rawRecords = document.records;
   return {
     laneId: source.laneId,
     fetchedAt,
     verdict: evaluated?.verdict ?? null,
     observation: evaluated?.observation ?? null,
+    ...Array.isArray(rawRecords) ? { rawRecords } : {},
     error: null
   };
 }
@@ -3156,6 +3693,14 @@ var REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot->>'issueI
    and status = 'succeeded'
    and finished_at > now() - ($2 || ' days')::interval
    and usage_json ? 'model'`;
+var LANE_EVIDENCE_RUNS_SQL = `select usage_json->>'model' as model,
+       count(*) filter (where status = 'succeeded')::int as succeeded,
+       count(*) filter (where status in ('failed','timed_out'))::int as failed
+  from heartbeat_runs
+ where company_id = $1
+   and created_at > now() - ($2 || ' hours')::interval
+   and usage_json ? 'model'
+ group by 1`;
 
 // src/engine/classify-call.ts
 function upstreamUrl(baseUrl, protocol) {
@@ -3625,7 +4170,7 @@ async function logStateChange(ctx, input) {
 }
 
 // src/worker.ts
-function asRecord(value) {
+function asRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function summary(decision) {
@@ -3661,7 +4206,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.volumeProfiles
       });
       const readProfiles = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(profilesKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(profilesKey(companyId)));
         return {
           profiles: Array.isArray(stored.profiles) ? stored.profiles : [],
           signals: Array.isArray(stored.signals) ? stored.signals : []
@@ -3675,6 +4220,52 @@ function createPlugin() {
       const readLaneLedger = async (companyId) => {
         const stored = await ctx.state.get(laneLedgerKey(companyId));
         return stored && typeof stored === "object" ? stored : {};
+      };
+      const laneAvailabilityKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.laneAvailability
+      });
+      const readAvailability = async (companyId, nowMs) => {
+        const stored = await ctx.state.get(laneAvailabilityKey(companyId));
+        return normalizeAvailability(stored, nowMs);
+      };
+      let laneEvidenceCache = null;
+      const readLaneEvidence = async (companyId, models, nowMs) => {
+        if (laneEvidenceCache && laneEvidenceCache.companyId === companyId && nowMs - laneEvidenceCache.atMs < LANE_EVIDENCE_TTL_MS) {
+          return laneEvidenceCache.snapshot;
+        }
+        let snapshot;
+        try {
+          const rows = await ctx.db.query(LANE_EVIDENCE_RUNS_SQL, [
+            companyId,
+            String(LANE_EVIDENCE_WINDOW_HOURS)
+          ]);
+          const byLane = /* @__PURE__ */ new Map();
+          for (const row of rows) {
+            const record2 = asRecord2(row);
+            const modelId = typeof record2.model === "string" ? record2.model : null;
+            if (!modelId) continue;
+            const laneId = models.find((entry) => entry.id === modelId)?.laneId ?? null;
+            if (!laneId) continue;
+            const bucket = byLane.get(laneId) ?? { succeeded: 0, failed: 0 };
+            bucket.succeeded += Number(record2.succeeded) || 0;
+            bucket.failed += Number(record2.failed) || 0;
+            byLane.set(laneId, bucket);
+          }
+          snapshot = buildLaneEvidence(
+            [...byLane.entries()].map(([laneId, counts]) => ({ laneId, ...counts })),
+            LANE_EVIDENCE_WINDOW_HOURS
+          );
+        } catch (error) {
+          snapshot = {
+            lanes: [],
+            windowHours: LANE_EVIDENCE_WINDOW_HOURS,
+            unreadableReason: `heartbeat_runs read failed: ${error instanceof Error ? error.message : String(error)}`
+          };
+        }
+        laneEvidenceCache = { companyId, atMs: nowMs, snapshot };
+        return snapshot;
       };
       const operatorOverridesKey = (companyId) => ({
         scopeKind: "company",
@@ -3722,7 +4313,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.paceRepinHistory
       });
       const readPaceRepinHistory = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(paceRepinHistoryKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(paceRepinHistoryKey(companyId)));
         const history = {};
         for (const [issueId, at] of Object.entries(stored)) {
           if (typeof at === "string") history[issueId] = at;
@@ -3735,7 +4326,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.tierExhaustedAlarms
       });
       const readTierExhaustedAlarms = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
         const alarms = {};
         for (const [issueId, at] of Object.entries(stored)) {
           if (typeof at === "string") alarms[issueId] = at;
@@ -3818,7 +4409,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.reworkSignals
       });
       const readReworkSignals = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(reworkSignalsKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(reworkSignalsKey(companyId)));
         return Array.isArray(stored.signals) ? stored.signals : [];
       };
       const scoresKey = (companyId) => ({
@@ -3835,7 +4426,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.classificationExclusions
       });
       const readClassificationExclusions = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(classificationExclusionsKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(classificationExclusionsKey(companyId)));
         const out = {};
         for (const [issueId, excluded] of Object.entries(stored)) {
           if (excluded === true) out[issueId] = true;
@@ -3848,7 +4439,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues
       });
       const readClassifierLabeled = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(classifierLabeledKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(classifierLabeledKey(companyId)));
         const out = {};
         for (const [issueId, tier2] of Object.entries(stored)) {
           if (typeof tier2 === "string" && TIERS.includes(tier2)) out[issueId] = tier2;
@@ -3856,12 +4447,12 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         return out;
       };
       const readCardLedger = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
-        const ledger = asRecord(stored.cardLedger);
+        const stored = asRecord2(await ctx.state.get(scoresKey(companyId)));
+        const ledger = asRecord2(stored.cardLedger);
         return ledger;
       };
       const readModelScores = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(scoresKey(companyId)));
         const scores = Array.isArray(stored.modelScores) ? stored.modelScores : [];
         const byModelId = {};
         for (const score2 of scores) byModelId[score2.modelId] = score2;
@@ -3888,7 +4479,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         );
         const weightByLane = {};
         for (const row of rows) {
-          const r = asRecord(row);
+          const r = asRecord2(row);
           const rawModelId = typeof r.pinned_model === "string" ? r.pinned_model : null;
           const modelId = resolveConfiguredModelId(rawModelId, models);
           const model = models.find((m) => m.id === modelId);
@@ -3907,16 +4498,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.aaSnapshotHistory
       });
       const readAaSnapshot = async () => {
-        const stored = asRecord(await ctx.state.get(aaSnapshotKey()));
+        const stored = asRecord2(await ctx.state.get(aaSnapshotKey()));
         return {
           fetchedAt: typeof stored.fetchedAt === "string" ? stored.fetchedAt : null,
-          bySlug: asRecord(stored.bySlug),
+          bySlug: asRecord2(stored.bySlug),
           lastAttemptAt: typeof stored.lastAttemptAt === "string" ? stored.lastAttemptAt : null,
           lastError: typeof stored.lastError === "string" ? stored.lastError : null
         };
       };
       const appendAaSnapshotHistory = async (entry) => {
-        const stored = asRecord(await ctx.state.get(aaSnapshotHistoryKey()));
+        const stored = asRecord2(await ctx.state.get(aaSnapshotHistoryKey()));
         const existing = Array.isArray(stored.entries) ? stored.entries : [];
         const next = [...existing, entry].slice(-AA_SNAPSHOT_HISTORY_LIMIT);
         await ctx.state.set(aaSnapshotHistoryKey(), { entries: next });
@@ -3927,7 +4518,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.aaDriftSurfaced
       });
       const readAaDriftSurfaced = async (companyId) => {
-        const stored = asRecord(await ctx.state.get(aaDriftSurfacedKey(companyId)));
+        const stored = asRecord2(await ctx.state.get(aaDriftSurfacedKey(companyId)));
         return new Set(Array.isArray(stored.keys) ? stored.keys : []);
       };
       const aaHttp = {
@@ -3935,7 +4526,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       };
       const readLastRunContextUsage = async (companyId, issueId) => {
         const contextRows = await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId]);
-        const contextRow = asRecord(contextRows[0]);
+        const contextRow = asRecord2(contextRows[0]);
         const rawInput = Number(contextRow.input_tokens);
         const rawCached = Number(contextRow.cached_input_tokens);
         return {
@@ -3955,9 +4546,9 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       const describeIssue = async (companyId, issueId, supplied, contextUsageCache) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
-        const overrides = asRecord(issue.assigneeAdapterOverrides);
-        const adapterConfig = asRecord(overrides.adapterConfig);
-        const existingOverrideEnv = asRecord(adapterConfig.env);
+        const overrides = asRecord2(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord2(overrides.adapterConfig);
+        const existingOverrideEnv = asRecord2(adapterConfig.env);
         const pinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const labels = issue.labels ?? [];
         const labelNames = labels.map((label) => label.name).filter((name) => typeof name === "string");
@@ -3970,15 +4561,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         if (typeof assigneeAgentId === "string") {
           try {
             const agent = await ctx.agents.get(assigneeAgentId, companyId);
-            const agentRecord = asRecord(agent);
-            const config = asRecord(agentRecord.adapterConfig);
+            const agentRecord = asRecord2(agent);
+            const config = asRecord2(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
-            agentEnv = asRecord(config.env);
+            agentEnv = asRecord2(config.env);
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
           }
         }
-        const exclusionRaw = asRecord(supplied.exclusion);
+        const exclusionRaw = asRecord2(supplied.exclusion);
         const descriptor = {
           issueId,
           labelNames,
@@ -4097,12 +4688,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             objective: config.selection.objective,
             modelScores,
             allowExplore,
+            holdOnUnknownAvailability: config.selection.holdOnUnknownAvailability,
             wakeScopedFloor: config.wakeScopedFloor
           },
           profiles,
           signals,
           now,
-          cardLedger
+          cardLedger,
+          availability: await readAvailability(companyId, now),
+          laneEvidence: await readLaneEvidence(companyId, config.models, now)
         });
         const pinnedModelId = resolveConfiguredModelId(
           described.descriptor.pinnedModelId,
@@ -4111,8 +4705,14 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         const pinnedModel = config.models.find((model) => model.id === pinnedModelId);
         const isServiceabilityHardStop = config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
+        for (const note of decision.availability.excluded) {
+          await ctx.metrics.write(`model_selection.lane_excluded.${note.term}`, 1);
+        }
+        if (decision.availability.selectedOnUnknownLane) {
+          await ctx.metrics.write("model_selection.lane_unknown_selected", 1);
+        }
         if (decision.shadowDiff) {
-          const stored = asRecord(await ctx.state.get(shadowDiffsKey(companyId)));
+          const stored = asRecord2(await ctx.state.get(shadowDiffsKey(companyId)));
           const existing = Array.isArray(stored.records) ? stored.records : [];
           const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1e3;
           const records = [
@@ -4180,7 +4780,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const result = await advise(runCtx.companyId, asRecord(params));
+          const result = await advise(runCtx.companyId, asRecord2(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
@@ -4210,7 +4810,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const result = await advise(runCtx.companyId, asRecord(params));
+          const result = await advise(runCtx.companyId, asRecord2(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
@@ -4314,7 +4914,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord(params);
+          const supplied = asRecord2(params);
           const issueId = typeof supplied.issueId === "string" ? supplied.issueId : null;
           const modelId = typeof supplied.modelId === "string" ? supplied.modelId : null;
           if (!issueId || !modelId) {
@@ -4357,7 +4957,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord(params);
+          const supplied = asRecord2(params);
           const lanes = Array.isArray(supplied.lanes) ? supplied.lanes.filter((l) => typeof l === "string") : [];
           const models = Array.isArray(supplied.models) ? supplied.models.filter((m) => typeof m === "string") : [];
           const until = typeof supplied.until === "string" ? supplied.until : null;
@@ -4387,7 +4987,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord(params);
+          const supplied = asRecord2(params);
           const until = typeof supplied.until === "string" ? supplied.until : null;
           if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
           if (typeof supplied.margin !== "number") {
@@ -4406,10 +5006,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         await ctx.state.set(reworkSignalsKey(companyId), { signals: [...pruned, signal] });
       };
       ctx.events.on("issue.updated", async (event) => {
-        const payload = asRecord(event.payload);
-        const changes = asRecord(payload.changes);
+        const payload = asRecord2(event.payload);
+        const changes = asRecord2(payload.changes);
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
-        const assignment = asRecord(changes.assigneeAgentId);
+        const assignment = asRecord2(changes.assigneeAgentId);
         const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
         if (issueId && assignedTo && assignment.from == null) {
           try {
@@ -4422,7 +5022,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
           }
         }
-        const status = asRecord(changes.status);
+        const status = asRecord2(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
         if (!issueId || from !== "done" || to === "done" || to === "cancelled" || !to) return;
@@ -4435,7 +5035,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       });
       const REJECTION_RE = /request(ed)? changes|^## *(rejected|fail|blocked by review)|not accepted|changes requested|re-?do this|does not pass review/i;
       ctx.events.on("issue.comment.created", async (event) => {
-        const payload = asRecord(event.payload);
+        const payload = asRecord2(event.payload);
         const snippet = typeof payload.bodySnippet === "string" ? payload.bodySnippet : "";
         if (!REJECTION_RE.test(snippet)) return;
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
@@ -4455,7 +5055,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           scopeId: companyId,
           stateKey: PLUGIN_STATE_KEYS.noEligibleNotices
         };
-        const stored = asRecord(await ctx.state.get(key));
+        const stored = asRecord2(await ctx.state.get(key));
         const rawLast = stored[issueId];
         if (typeof rawLast === "string") {
           const lastAtMs = Date.parse(rawLast);
@@ -4670,7 +5270,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   {
                     id: agent.id,
                     name: agent.name,
-                    adapterConfig: asRecord(agent.adapterConfig)
+                    adapterConfig: asRecord2(agent.adapterConfig)
                   },
                   recommendedModelId,
                   config.models
@@ -4752,7 +5352,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               [company.id, String(config.profiles.windowDays)]
             );
             const runRows = (Array.isArray(rows) ? rows : []).map((row) => {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               return {
                 model: typeof r.model === "string" ? r.model : null,
                 inputTokens: Number(r.input_tokens ?? 0),
@@ -4828,9 +5428,15 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               ledger = mergeLedgerEntry(ledger, result);
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
+            const availabilityDocument = availabilityDocumentFrom({
+              results,
+              observedAt: fetchedAt
+            });
+            await ctx.state.set(laneAvailabilityKey(company.id), availabilityDocument);
             ctx.logger.info("lane capacity polled", {
               companyId: company.id,
-              lanes: [...results, ...secretFailures].map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(",")
+              lanes: [...results, ...secretFailures].map((r) => `${r.laneId}:${r.verdict?.state ?? "error"}`).join(","),
+              availabilityRecords: availabilityDocument.records.length
             });
           } catch (cause) {
             ctx.logger.error("lane capacity poll failed for a company", {
@@ -4981,11 +5587,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             );
             const issueIds = /* @__PURE__ */ new Set();
             for (const row of scoreRunRows) {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
             }
             for (const row of closingRunRows) {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
             }
             const tierByIssue = /* @__PURE__ */ new Map();
@@ -5012,7 +5618,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               return null;
             };
             const runOutcomeRows = scoreRunRows.flatMap((row) => {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const modelId = resolveConfiguredModelId(
                 typeof r.model === "string" ? r.model : null,
                 config.models
@@ -5032,7 +5638,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
             let statsByModel = accumulateRunStats(runOutcomeRows);
             const closingRuns = closingRunRows.flatMap((row) => {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const modelId = resolveConfiguredModelId(
                 typeof r.model === "string" ? r.model : null,
                 config.models
@@ -5103,7 +5709,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             }
             const cardRows = [];
             for (const row of cardIssueRows) {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               if (!issueId) continue;
               const closingRun = latestClosingRunByIssue.get(issueId);
@@ -5212,7 +5818,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             let classified = 0;
             let reclassified = 0;
             for (const row of candidateRows) {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -5332,7 +5938,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           [companyId]
         );
         return new Set(
-          rows.map((row) => asRecord(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
+          rows.map((row) => asRecord2(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
         );
       };
       const balanceWriteStillSafe = async (companyId, issueId, expectedPinnedModelId, models) => {
@@ -5343,8 +5949,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           return false;
         }
         if ((issue.labels ?? []).some((label) => label.name === OPERATOR_PIN_LABEL)) return false;
-        const overrides = asRecord(issue.assigneeAdapterOverrides);
-        const adapterConfig = asRecord(overrides.adapterConfig);
+        const overrides = asRecord2(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord2(overrides.adapterConfig);
         const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const currentPinnedModelId = resolveConfiguredModelId(rawPinnedModelId, models);
         if (rawPinnedModelId && !currentPinnedModelId) return false;
@@ -5358,7 +5964,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             limit 1`,
           [companyId, issueId]
         );
-        return !activeRows.some((row) => asRecord(row).issue_id === issueId);
+        return !activeRows.some((row) => asRecord2(row).issue_id === issueId);
       };
       const isUsableAndCapable = (modelId, tier2, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
         if (!modelId) return false;
@@ -5382,7 +5988,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               and i.assignee_adapter_overrides->'adapterConfig'->>'model' = $2`,
           [companyId, modelId]
         );
-        const r = asRecord(rows[0]);
+        const r = asRecord2(rows[0]);
         return typeof r.n === "number" ? r.n : 0;
       };
       const tierWithFallback = (descriptor, models, defaultTier) => tierFromLabels(descriptor.labelNames) ?? tierOfModel(descriptor.pinnedModelId, models) ?? tierOfModel(descriptor.agentFloorModelId, models) ?? defaultTier;
@@ -5420,7 +6026,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const contextUsageCache = /* @__PURE__ */ new Map();
             let pinned = 0;
             for (const row of candidateRows) {
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -5519,7 +6125,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             let repinned = 0;
             for (const row of candidateRows) {
               if (repinned >= REPIN_PASS_WRITE_LIMIT) break;
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -5601,7 +6207,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         }
       });
       ctx.events.on("agent.run.failed", async (event) => {
-        const payload = asRecord(event.payload);
+        const payload = asRecord2(event.payload);
         const companyId = event.companyId;
         const issueId = typeof payload.issueId === "string" ? payload.issueId : null;
         let config;
@@ -5683,7 +6289,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               scopeId: company.id,
               stateKey: PLUGIN_STATE_KEYS.balancePassCursor
             };
-            const storedCursor = asRecord(await ctx.state.get(cursorKey));
+            const storedCursor = asRecord2(await ctx.state.get(cursorKey));
             const afterId = typeof storedCursor.afterId === "string" ? storedCursor.afterId : "";
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
@@ -5715,7 +6321,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 budgetExhausted = true;
                 break;
               }
-              const r = asRecord(row);
+              const r = asRecord2(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -5771,6 +6377,27 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 if (!(cheaper || incapable || busier)) continue;
                 const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
                 if (!selectedModel) continue;
+                if (cheaper && !incapable && !busier) {
+                  const evidence = await readLaneEvidence(company.id, config.models, now);
+                  const from = evidenceStateFor(evidence, pinnedModel.laneId ?? null);
+                  const to = evidenceStateFor(evidence, selectedModel.laneId ?? null);
+                  if (costDownWouldAbandonProvenLane(from, to)) {
+                    await ctx.activity.log({
+                      companyId: company.id,
+                      message: `Model Selection held ${pinnedModelId} (cost-down to ${selectedModel.id} refused): lane ${pinnedModel.laneId ?? "(none)"} is proven-good over ${evidence.windowHours}h, lane ${selectedModel.laneId ?? "(none)"} is ${to}`,
+                      entityType: "issue",
+                      entityId: issueId,
+                      metadata: {
+                        from: pinnedModelId,
+                        heldAgainst: selectedModel.id,
+                        fromEvidence: from,
+                        toEvidence: to,
+                        reason: "lane-evidence"
+                      }
+                    });
+                    continue;
+                  }
+                }
                 if (!await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models)) continue;
                 await ctx.issues.update(
                   issueId,
@@ -6000,7 +6627,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
-      const persistedCompanies = asRecord(await ctx.state.get(knownCompaniesKey()));
+      const persistedCompanies = asRecord2(await ctx.state.get(knownCompaniesKey()));
       if (Array.isArray(persistedCompanies.ids)) {
         for (const id of persistedCompanies.ids) {
           if (typeof id === "string") knownCompanyIds.add(id);

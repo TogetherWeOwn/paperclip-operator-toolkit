@@ -731,6 +731,81 @@ describe("scheduled passes (TOG-2481 tier_dispatcher.py port)", () => {
       expect(harness.activity[0]?.metadata?.cheaper).toBe(true);
     });
 
+    // TOG-3132. The cost-down rule above is exactly the 2026-09-17T08:10:14Z
+    // move: `claude-haiku-4-5-20251001` (12/12) -> `deepseek-v4-flash` (0/3),
+    // reason `cost-down`. `selectModel`'s own cost-down guard CANNOT stop it
+    // here: this pass calls `advise(..., suppressSticky = true)`, so the
+    // incumbent pin never reaches the engine as `stickyModelId` and the engine
+    // reads the incumbent lane as unproven. This guard, in the pass that does
+    // the writing, is the only thing between a proven lane and an unproven one.
+    const evidenceRows = (rows: Array<Record<string, unknown>>) => async (sql: string) =>
+      (sql.includes("as failed") ? rows : [idleRow("i1")]) as never;
+    const twoLaneCostDown = () =>
+      withOpusAlt({ costPerMTokIn: 1, costPerMTokOut: 5, laneId: "lane-thin" }).map((m) =>
+        m.id === "claude-opus-5"
+          ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500, laneId: "lane-proven" }
+          : m,
+      );
+    const pinnedToOpus = () =>
+      issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+
+    it("refuses a cost-down re-pin that leaves a proven-good lane for an unproven one", async () => {
+      const harness = await boot(baseConfig({ models: twoLaneCostDown() }), [pinnedToOpus()]);
+      harness.ctx.db.query = evidenceRows([
+        { model: "claude-opus-5", succeeded: 34, failed: 8 },
+        // 0/4, not 0/5: one observation short of the zero-success rule, so the
+        // destination is genuinely UNPROVEN and it is the cost-down guard —
+        // not the dead-lane exclusion — that has to refuse this move.
+        { model: "claude-opus-5-alt", succeeded: 0, failed: 4 },
+      ]);
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity[0]?.metadata?.reason).toBe("lane-evidence");
+      expect(harness.activity[0]?.message).toContain("cost-down to claude-opus-5-alt refused");
+    });
+
+    it("refuses the same re-pin outright once the destination reaches 0/5", async () => {
+      // One more failure on the destination and the protection changes hands:
+      // the zero-success rule drops the lane from the candidate set, so the
+      // cost-down guard is never consulted. The card must still not move.
+      const harness = await boot(baseConfig({ models: twoLaneCostDown() }), [pinnedToOpus()]);
+      harness.ctx.db.query = evidenceRows([
+        { model: "claude-opus-5", succeeded: 34, failed: 8 },
+        { model: "claude-opus-5-alt", succeeded: 0, failed: 5 },
+      ]);
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+    });
+
+    it("allows the same cost-down re-pin once the destination lane is proven", async () => {
+      // The control that keeps the guard from being a blanket freeze on
+      // cost-down: identical config and card, the destination's counts alone
+      // changed from 0/5 to 34/8.
+      const harness = await boot(baseConfig({ models: twoLaneCostDown() }), [pinnedToOpus()]);
+      harness.ctx.db.query = evidenceRows([
+        { model: "claude-opus-5", succeeded: 34, failed: 8 },
+        { model: "claude-opus-5-alt", succeeded: 34, failed: 8 },
+      ]);
+
+      await harness.runJob("balancePass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5-alt", env: subCallPins("claude-opus-5-alt") },
+      });
+      expect(harness.activity[0]?.metadata?.cheaper).toBe(true);
+    });
+
     // balance_pass()'s `busier = (cur_u-new_u)>=0.25` rebalance rule.
     it("re-pins onto a far-less-busy lane even when cost is unchanged (busier >= 0.25)", async () => {
       const laned = withOpusAlt().map((m) => {

@@ -769,6 +769,152 @@ const mutants = [
     from: "\n              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
     to: "\n              const result = await advise(company.id, { issueId }, false, undefined, true);",
   },
+  // --- TOG-3132 acceptance-criteria named mutants -------------------------
+  // One per failure shape the availability term exists to catch. Each is the
+  // natural wrong implementation, not a syntactic nonsense edit: every one of
+  // them is something a reasonable person would write.
+  {
+    // AC-1 "down-rank instead of exclude" in its purest form: the gate is
+    // computed, recorded, traced — and then not acted on.
+    name: "availability-gate-never-consulted",
+    file: "src/engine/select.ts",
+    from: "    if (!clearsLane(model)) continue;\n",
+    to: "",
+  },
+  {
+    // AC-1, measured: this IS the router's `normalizeHealth` bucketing, where
+    // "cooldown" is degraded -> `avoid` -> still selectable (TOG-811).
+    name: "cooldown-health-merely-down-ranked",
+    file: "src/engine/availability.ts",
+    from: '  if (health !== "healthy") {',
+    to: '  if (health !== "healthy" && health !== "cooldown" && health !== "cooling_down") {',
+  },
+  {
+    // AC-2: the cooldown must be read off the RECORD. Gating it on the
+    // presence of windows reproduces the fail-open path exactly — a pure
+    // cooldown record carries no utilization, so it yields no evidence.
+    name: "cooldown-read-off-windows-not-record",
+    file: "src/engine/availability.ts",
+    from: "  const cooldown = asRecord(raw.cooldown);",
+    to: "  const cooldown = Array.isArray(raw.windows) && raw.windows.length > 0 ? asRecord(raw.cooldown) : null;",
+  },
+  {
+    // AC-3 off-by-one: "a lane with no accounts is ineligible" is trivially
+    // true and enforces nothing. The rule is about the LAST account.
+    name: "fleet-default-allows-a-single-account",
+    file: "src/engine/select.ts",
+    from: "lane.serviceableAccountCount <= 1",
+    to: "lane.serviceableAccountCount <= 0",
+  },
+  {
+    // AC-3: counting rows rather than serviceable rows. Subtle, and it
+    // survives every assertion that does not put a dead account on a live lane.
+    name: "count-all-accounts-not-serviceable-ones",
+    file: "src/engine/availability.ts",
+    from: "    serviceableAccountCount: serviceable.length,",
+    to: "    serviceableAccountCount: verdicts.length,",
+  },
+  {
+    // AC-4: 120 minutes is a floor for every consumer, not a number to relax
+    // locally when a feed is lagging.
+    name: "relax-the-120-minute-staleness-cutoff",
+    file: "src/engine/availability.ts",
+    from: "  if (ageMs > cutoffMs) {",
+    to: "  if (ageMs > cutoffMs * 100) {",
+  },
+  {
+    // AC-4, the quiet pass: UNKNOWN proceeds (correct, by default) but is no
+    // longer recorded or said. This is the one `pacing_verdict.py` forbids.
+    name: "unknown-passes-silently",
+    file: "src/engine/select.ts",
+    from: '    if (read.state === "available") return true;',
+    to: '    if (read.state !== "unavailable") return true;',
+  },
+  {
+    // AC-1: a model with no laneId read as healthy. The gate then enforces on
+    // nothing and looks perfectly green while doing it.
+    name: "unmapped-model-read-as-available",
+    file: "src/engine/select.ts",
+    from: '      return { state: "unknown", term: "unmapped", reason: `${model.id} declares no laneId` };',
+    to: '      return { state: "available" };',
+  },
+  {
+    // AC-1: sticky returning before the gate — the pre-TOG-3132 behaviour.
+    name: "sticky-skips-the-availability-gate",
+    file: "src/engine/select.ts",
+    from: "    } else if (incumbent && !clearsLane(incumbent)) {",
+    to: "    } else if (false) {",
+  },
+  {
+    // Integration with TOG-2137: a wholly-unserviceable tier reported as
+    // `no-eligible-model` sends a capacity outage to the wrong owner.
+    name: "availability-exclusion-not-counted-as-capacity",
+    file: "src/engine/select.ts",
+    from:
+      'const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence"]);',
+    to: 'const CAPACITY_STAGES = new Set(["lane-unserviceable"]);',
+  },
+  {
+    // AC-3, after the TOG-3037 merge. TOG-3037's floor exit tests the floor's
+    // lane against the PACE predicates, every one of them gated on
+    // `paceActive`. Dropping the availability half restores exactly that
+    // pre-merge behaviour: with `pacingMode` unset the floor check then fires
+    // on nothing, and a floor whose lane a published contract calls
+    // unavailable takes the run anyway.
+    name: "floor-exit-ignores-the-availability-term",
+    file: "src/engine/select.ts",
+    from:
+      "          laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel))) ||\n" +
+      "        floorLaneUnavailable);",
+    to: "          laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel))));",
+  },
+  // --- TOG-3132 AC-2: the WRITER --------------------------------------------
+  // Every mutant above this block was green for a week against a state key that
+  // nothing wrote. These five are the ones that would have caught that.
+  {
+    // The defect itself: a producer that emits no records. `select.ts` reads the
+    // empty document as unreadable, which with `holdOnUnknownAvailability` off
+    // is a quiet pass for every candidate — the gate present and inert.
+    name: "availability-writer-emits-nothing",
+    file: "src/lane-capacity/availability-source.ts",
+    from: "      if (remaining === null) continue;",
+    to: "      if (remaining === null) continue;\n      if (true) continue;",
+  },
+  {
+    // AC-4. The document carries one `observedAt` and the reader ages every
+    // record from it, so dropping the per-lane lag hands a dead publisher the
+    // poll's freshness.
+    name: "availability-writer-ignores-lane-lag",
+    file: "src/lane-capacity/availability-source.ts",
+    from: "  const lagSeconds = Math.max(0, (stampMs - laneObservedAtMs) / 1000);",
+    to: "  const lagSeconds = 0;",
+  },
+  {
+    // AC-6. `normalizeHealth` folds `cooldown` into `degraded`; publishing the
+    // normalized value still excludes, but `decisions.jsonl` can no longer say
+    // a four-minute cooldown apart from a spent five-hour window.
+    name: "availability-writer-publishes-normalized-health",
+    file: "src/lane-capacity/availability-source.ts",
+    from: '  if (published && typeof published.health === "string" && published.health.trim()) {',
+    to: "  if (false) {",
+  },
+  {
+    // `ModelEntry.laneId` is the reader's match key. Keying on the publisher's
+    // own `provider` string publishes lanes no model matches — an exclusion
+    // that applies to nothing, which looks identical to a healthy fleet.
+    name: "availability-writer-keys-by-provider",
+    file: "src/lane-capacity/availability-source.ts",
+    from: "        provider: result.laneId,",
+    to: "        provider: (published?.provider as string) ?? result.laneId,",
+  },
+  {
+    // AC-2's cooldown term. The 00:39Z lane published `health: healthy` with
+    // real quota headroom; the cooldown was the only true thing about it.
+    name: "availability-writer-drops-cooldown",
+    file: "src/lane-capacity/availability-source.ts",
+    from: "  const cooldown = published?.cooldown;",
+    to: "  const cooldown = undefined;",
+  },
   // --- TOG-3200 named mutants ---------------------------------------------
   // Each of these three restores one shape that made `classifyIssues` write
   // zero classifications in 36 consecutive runs on 2026-09-17 while 53% of runs
@@ -876,6 +1022,109 @@ const mutants = [
     file: "src/worker.ts",
     from: "          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;",
     to: "          if (false) return;",
+  },
+
+  // --- TOG-3132 second failure shape: the LANE-EVIDENCE term ----------------
+  // The availability term above reads a published quota contract. `devin/*`
+  // publishes none and still refused 74 of 74 dispatches, so every mutant in
+  // this block is a way the run-outcome term can look present and catch
+  // nothing. Each is the natural wrong implementation, not a nonsense edit.
+  {
+    // The purest inert form: the verdict is computed, recorded, traced — and
+    // then not acted on. This is exactly the shape the availability term
+    // shipped in for a week against a state key with no writer.
+    name: "evidence-gate-never-consulted",
+    file: "src/engine/select.ts",
+    from: "    if (!clearsEvidence(model)) continue;\n",
+    to: "",
+  },
+  {
+    // "Down-rank, don't exclude" applied to a proven-dead lane. AC-1 forbids
+    // it: a lane at 0/74 that is merely sorted last is still selected the
+    // moment it is the cheapest thing left, which is how it got the traffic.
+    name: "proven-dead-does-not-exclude",
+    file: "src/engine/lane-evidence.ts",
+    from: "  if (upper <= dead) {",
+    to: "  if (false) {",
+  },
+  {
+    // The point estimate instead of the confidence bound — the veto the
+    // President measured as re-selecting every newly-added lane. Kills
+    // `devin/gpt-6-astra` at 0 runs (rate 0 => "dead") and, worse, calls a
+    // 1/1 lane proven-good.
+    name: "evidence-uses-rate-not-bound",
+    file: "src/engine/lane-evidence.ts",
+    from: "  if (upper <= dead) {",
+    to: "  if ((successRate ?? 0) <= dead) {",
+  },
+  {
+    // A lane with no history reads as available. This is the specific defect:
+    // zero runs means zero observed failures, so any rate-shaped test passes it.
+    name: "zero-history-lane-treated-as-good",
+    file: "src/engine/lane-evidence.ts",
+    from: '  if (!snapshot || snapshot.unreadableReason) return "unproven";',
+    to: '  if (!snapshot || snapshot.unreadableReason) return "proven-good";',
+  },
+  {
+    // A lane absent from the snapshot fails OPEN. Same class as the
+    // `unmapped` hole the availability term has, now on this instrument.
+    name: "unmapped-lane-fails-open-on-evidence",
+    file: "src/engine/lane-evidence.ts",
+    from: '  return snapshot.lanes.find((lane) => lane.laneId === laneId)?.state ?? "unproven";',
+    to: '  return snapshot.lanes.find((lane) => lane.laneId === laneId)?.state ?? "proven-good";',
+  },
+  {
+    // The cost-down guard inverted to a no-op: every mutant above can be green
+    // while `deepseek-v4-flash` at 0/3 still takes TOG-3088 off haiku, because
+    // 0/3 is unproven, not dead. This is the 08:10:14Z move itself.
+    name: "cost-down-guard-is-a-no-op",
+    file: "src/engine/lane-evidence.ts",
+    from: '  return fromState === "proven-good" && toState !== "proven-good";',
+    to: "  return false;",
+  },
+  {
+    // The guard over-applied: blocking every cost-down move, not just the ones
+    // leaving a proven lane. The positive control that stops this gate from
+    // being "freeze all routing" and still reading green.
+    name: "cost-down-guard-blocks-everything",
+    file: "src/engine/lane-evidence.ts",
+    from: '  return fromState === "proven-good" && toState !== "proven-good";',
+    to: "  return true;",
+  },
+  {
+    // Sticky returning before the evidence gate — a card wedged on a lane that
+    // has never once returned a run, for the sake of a worthless prompt cache.
+    name: "sticky-skips-the-evidence-gate",
+    file: "src/engine/select.ts",
+    from: "    } else if (incumbent && !clearsEvidence(incumbent)) {",
+    to: "    } else if (false) {",
+  },
+  {
+    // AC-2, the WRITER. Every mutant above this one stays green when the
+    // worker never supplies the term at all — which is a shipped no-op, and
+    // the exact defect this card was reopened for.
+    name: "lane-evidence-never-supplied-to-select",
+    file: "src/worker.ts",
+    from: "          laneEvidence: await readLaneEvidence(companyId, config.models, now),\n",
+    to: "",
+  },
+  {
+    // The balance-pass half of the writer. `selectModel` excluding a dead lane
+    // does NOT stop a cost-down move onto an *unproven* one — that move is
+    // made in the worker, and this is the line that refuses it.
+    name: "balance-pass-cost-down-guard-removed",
+    file: "src/worker.ts",
+    from: "                if (cheaper && !incapable && !busier) {",
+    to: "                if (false) {",
+  },
+  {
+    // `succeeded` is the success value. `completed` does not exist on this
+    // table, so this mutant makes every lane read 0 successes — and every lane
+    // proven-dead, which is a fleet-wide outage that reads as a working gate.
+    name: "evidence-sql-wrong-success-status",
+    file: "src/sql.ts",
+    from: "count(*) filter (where status = 'succeeded')::int as succeeded",
+    to: "count(*) filter (where status = 'completed')::int as succeeded",
   },
   // --- TOG-3012: a lost pace verdict must not erase an earned exclusion -----
   {

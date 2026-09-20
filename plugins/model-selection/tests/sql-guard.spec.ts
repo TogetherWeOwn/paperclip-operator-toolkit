@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { LAST_RUN_CONTEXT_USAGE_SQL, REFRESH_SCORE_CLOSING_RUNS_SQL, REFRESH_SCORE_RUNS_SQL } from "../src/sql.js";
+import {
+  LANE_EVIDENCE_RUNS_SQL,
+  LAST_RUN_CONTEXT_USAGE_SQL,
+  REFRESH_SCORE_CLOSING_RUNS_SQL,
+  REFRESH_SCORE_RUNS_SQL,
+} from "../src/sql.js";
 
 type SqlRef = { schema: string; table: string; keyword: string };
 
@@ -28,8 +33,23 @@ describe("scheduled SQL namespace guard", () => {
     // branches are alias-free precisely so no dotted reference can follow a
     // `from`/`join` token and be mistaken for a schema qualifier.
     ["last-run context usage", LAST_RUN_CONTEXT_USAGE_SQL],
+    // TOG-3132: the lane-evidence aggregate runs on the same path and is
+    // alias-free for the same reason.
+    ["lane evidence runs", LANE_EVIDENCE_RUNS_SQL],
   ])("accepts the exact scheduled %s query", (_name, query) => {
     expect(() => validateLikeHost(query, "plugin_model_selection_test")).not.toThrow();
+  });
+
+  // TOG-3132: the success status on `heartbeat_runs` is `succeeded`, not
+  // `completed`. A query that counts `completed` finds zero successes for every
+  // lane, so every lane reads proven-dead and the term excludes the whole
+  // roster. Nothing else in the suite reads this string, so assert it here.
+  it("counts the lane-evidence numerator on the real success status", () => {
+    expect(LANE_EVIDENCE_RUNS_SQL).toContain("status = 'succeeded'");
+    expect(LANE_EVIDENCE_RUNS_SQL).not.toContain("'completed'");
+    // The denominator side must stay a failure list, not a catch-all: a
+    // cancelled or interrupted run is a fleet/operator action, not lane health.
+    expect(LANE_EVIDENCE_RUNS_SQL).toContain("status in ('failed','timed_out')");
   });
 
   it("reproduces the v0.3.1 alias failure", () => {

@@ -210,6 +210,78 @@ export function config(overrides: Partial<SelectionConfig> = {}): SelectionConfi
   };
 }
 
+// --- TOG-3132: lane availability fixtures ----------------------------------
+
+/**
+ * The same three models, each pinned to the lane it actually serves on. Kept
+ * separate from `MODELS` so every existing test keeps running with the
+ * availability term absent — that is the "term not configured" control.
+ *
+ * haiku sits alone on `zai` and the two stronger rows share `claude`, so a
+ * single lane failure has a visible, unambiguous effect in either direction:
+ * kill `zai` and a T3 pick must escalate to sonnet, kill `claude` and it must
+ * fall back to haiku.
+ */
+export const LANE_BY_MODEL: Record<string, string> = {
+  "claude-haiku-4-5-20251001": "zai",
+  "claude-sonnet-5": "claude",
+  "claude-opus-5": "claude",
+};
+
+export const LANED_MODELS: ModelEntry[] = MODELS.map((entry) => ({
+  ...entry,
+  laneId: LANE_BY_MODEL[entry.id] ?? null,
+}));
+
+/**
+ * A quota-contract document in the shape `cliproxy_quota_contract.py`
+ * canonicalizes: an `observedAt` stamp over per-account records keyed by
+ * `provider`.
+ */
+export function laneDoc(
+  records: Array<Record<string, unknown>>,
+  observedAt = new Date(NOW - 5 * 60 * 1000).toISOString(),
+): Record<string, unknown> {
+  return { observedAt, records };
+}
+
+/** One healthy account with real headroom: the control that must NOT be excluded. */
+export function account(
+  provider: string,
+  accountKey: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    account_key: accountKey,
+    auth_key: `${accountKey}-auth`,
+    provider,
+    plan: "max",
+    plan_weight: 1,
+    health: "healthy",
+    recent_burn_units_per_hour: 10,
+    stale_after_seconds: 3600,
+    windows: [
+      {
+        name: "weekly",
+        role: "allowance",
+        utilization: 0.46,
+        resets_at: new Date(NOW + 48 * 3600 * 1000).toISOString(),
+        window_seconds: 604_800,
+        allowance_weight: 1,
+      },
+      {
+        name: "five_hour",
+        role: "serviceability",
+        utilization: 0.6,
+        resets_at: new Date(NOW + 2 * 3600 * 1000).toISOString(),
+        window_seconds: 18_000,
+        allowance_weight: 1,
+      },
+    ],
+    ...overrides,
+  };
+}
+
 /**
  * TOG-3045. The sub-call surface pins every override write now carries, pointed
  * at the model that write pinned.
