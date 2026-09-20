@@ -92,6 +92,7 @@ operator-run.
 | `external_disclosure.js` | Offline grant-construction and read-only preflight fixture. Production submit is disabled here; the host-authenticated `gh-token-broker` route proves the current run/session, renders capability and authority before mutation, consumes the short-lived confirmation once, and persists the redacted receipt. See [`docs/external-disclosure-grants.md`](docs/external-disclosure-grants.md) and the [TOG-574 incident review](docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md). | `node --test test/external-disclosure.test.mjs`, `plugins/gh-token-broker/test/broker.test.mjs` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
 | `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
+| `gh-shim` | Canonical source for `/paperclip/.local/bin/gh`, which PATH-shadows the real `gh` and mints a fresh installation token per invocation via `gh-app-token.js` (TOG-113) so a long CI run cannot outlive a static `GH_TOKEN`. Never overrides an explicit `GH_TOKEN`/`GITHUB_TOKEN`, and — since TOG-1448 — never gates minting on `GH_APP_PRIVATE_KEY` being bound, since the helper already does its own broker-first/PEM-fallback selection. Deploy steps in [`GH-CREDENTIAL-CUTOVER.md`](GH-CREDENTIAL-CUTOVER.md#deploying-the-gh-shim). | `test_gh_shim.sh` (offline) |
 | `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
 | `plugins/omniroute-broker` | Narrow OmniRoute management-operation broker. Resolves the existing management credential host-side and exposes only exact allowlisted verbs; key mint, reveal and regeneration surfaces are absent. This Ops Tooling path is authoritative (TOG-537), not Model Router. | `plugins/omniroute-broker/test/broker.test.mjs`, `test_tog473_mapping_guard.mjs` |
 | `plugin_manifest_gate.sh` | Does activating a plugin package change what it is **allowed to do**? Compares the evaluated authorization surface — `capabilities`, and each route's `auth` / `checkoutPolicy` / `companyResolution` — against a reviewed git ref, so comments and formatting are invisible to it and a changed `auth` is not. Unrecognised manifest keys fail closed. Run it before any activation; see `docs/plugin-package-path.md` for why. | `test_plugin_manifest_gate.sh` |
@@ -118,6 +119,7 @@ operator-run.
 node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 node --test test/external-disclosure.test.mjs
 ./test_gh_token_argv.sh
+./test_gh_shim.sh
 ./test_gh_ci_status.sh
 ./test_sibling_guard.sh
 ./test_agent_endpoint_preflight.sh
