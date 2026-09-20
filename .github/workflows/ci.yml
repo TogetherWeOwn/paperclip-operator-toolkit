@@ -5531,3 +5531,18 @@ jobs:
       # (PAPERCLIP_API_KEY, PAPERCLIP_COMPANY_ID). It is designed for the
       # operator's environment, not for CI. The operator must run it separately
       # on the archive extract per TOG-809 §3.
+      # TOG-3012: the host loads dist/worker.js, not src/. dist/ is TRACKED
+      # here, so a PR that changes src/ without committing the rebuilt bundle
+      # merges green and deploys a no-op. The build step above cannot catch it:
+      # it rebuilds into the working tree and says nothing about whether the
+      # committed bytes match. This does. Build is deterministic (esbuild pinned
+      # in package-lock, relative sourcemap paths), so a diff here is a stale
+      # commit, never machine drift.
+      - name: Fail if the committed dist/ is stale
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- dist; then
+            echo "::error::plugins/model-selection/dist is stale — src/ changed without a rebuild. Run 'npm run build' in plugins/model-selection and commit dist/."
+            exit 1
+          fi
+          echo "dist ok: committed bundle matches src"
