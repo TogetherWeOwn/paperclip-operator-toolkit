@@ -92,3 +92,6 @@ node_modules/
 # sys.path entry, or an operator's stray build). Verified with `git check-ignore`.
 __pycache__/
 *.pyc
+
+# TOG-1014 fork-disclosure audit: runtime parent cache, host-local
+verification/.tog-1014-fork-parents.cache

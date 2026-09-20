@@ -2144,6 +2144,37 @@ jobs:
       - name: filing-strip gate is not vacuous (mutation-gated)
         run: ./verification/tog-1069-filing-strip-mutation-gate.sh
 
+      # TOG-3327. The fork-disclosure audit itself is NOT registered here and
+      # must not be: it needs outbound network to api.github.com, which this
+      # sandbox blocks, so it would fail open on the one signal it exists to
+      # produce. Its own header says so.
+      #
+      # Its author-classifier is a different animal. `OUR_AUTHOR_RE` decides
+      # whether a public ref is checked against the allowlist or skipped
+      # entirely, it is a pure function of a string, and it needs no network.
+      # It was silently wrong -- it missed the container-default bot identity
+      # in /paperclip/.gitconfig, so 11 real undeclared publications across
+      # three public forks were classified "upstream-authored" and never
+      # examined. A gate that skips the finding reports PASS.
+      #
+      # 26 identities, 20 of them negative cases taken from this org's actual
+      # forks plus five adversarial near-misses. The negative half is the
+      # load-bearing half: matching `users.noreply.github.com` broadly would
+      # claim every GitHub user as ours and turn the allowlist into a rubber
+      # stamp. Verified non-vacuous -- reverting to the pre-TOG-3327 regex
+      # reddens it with 4 false negatives, over-widening with 5 false
+      # positives.
+      #
+      # The same step also asserts WHERE the gate puts its GH_TOKEN (TOG-3328
+      # review finding): a bearer in curl's argv is readable by every process
+      # on this shared-uid host via /proc/<pid>/cmdline and is printed verbatim
+      # by `bash -x`. Offline -- `curl` is stubbed on PATH, so nothing is sent.
+      # Non-vacuous: restoring the `-H "Authorization: ..."` form reddens it,
+      # and a positive control requires the token to actually reach curl
+      # through its 0600 config file, so "sent nowhere" cannot pass.
+      - name: fork-disclosure author classifier + token placement (TOG-1014 gate, offline half)
+        run: ./verification/tog-1014-public-fork-disclosure-audit.sh --self-test
+
       # TOG-657. The activation gate for the one procedure in this company that
       # a git revert cannot undo: stopping the live service, restoring a
       # database, and recreating the server container from a Quadlet carrier.
