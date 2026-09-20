@@ -85,6 +85,11 @@ describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersed
       const reviewedModel = byCanonTier.get(key);
       if (!reviewedModel) continue;
       if (legacyModel.enabled === reviewedModel.enabled) continue;
+      // A deliberate disable is explained when the reviewed note carries a
+      // dated DISABLED marker citing the authorizing issue (e.g. TOG-3213).
+      // The note-substring test above separately enforces the legacy note is kept.
+      const note = reviewedModel.note ?? "";
+      if (reviewedModel.enabled === false && /DISABLED \d{4}-\d{2}-\d{2} TOG-\d+/.test(note)) continue;
       unexplained.push(`${key}: legacy=${legacyModel.enabled} reviewed=${reviewedModel.enabled}`);
     }
     expect(unexplained).toEqual([]);

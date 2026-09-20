@@ -133,9 +133,9 @@
       "costPerMTokCacheRead": 0.028,
       "aaIndex": 41,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459) | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $30-tier \u2014 fallbackOnly until Go plan restored",
       "releasedAt": "2026-08-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -212,11 +212,11 @@
       "costPerMTokIn": 1.74,
       "costPerMTokOut": 3.48,
       "costPerMTokCacheRead": 0.145,
-      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459)",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (TOG-1419/1409/1411/1459) | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $15-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": 42,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "2026-08-13",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -242,7 +242,7 @@
     {
       "id": "qwen3.8-max",
       "tier": "T2",
-      "enabled": true,
+      "enabled": false,
       "capabilities": [
         "tools",
         "structured-output",
@@ -252,11 +252,11 @@
       "costPerMTokIn": 2,
       "costPerMTokOut": 6,
       "costPerMTokCacheRead": 0.2,
-      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe",
+      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | DISABLED 2026-09-19 TOG-3213: 44/45 calls failed [data_inspection_failed] Alibaba content inspection; lane falls back to deepseek-v4-* set | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $15-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": 47,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -530,10 +530,10 @@
       "costPerMTokIn": 0.2,
       "costPerMTokOut": 0.4,
       "costPerMTokCacheRead": 0.04,
-      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it | TOG-2429 audit: aaIndex left null, no exact aa.ai v4.3 row distinct from 'Qwen3.8-Flash-Next' (idx 42*); kept existing T3 placement pending eval.",
+      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it | TOG-2429 audit: aaIndex left null, no exact aa.ai v4.3 row distinct from 'Qwen3.8-Flash-Next' (idx 42*); kept existing T3 placement pending eval. | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $30-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": null,
       "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -1295,9 +1295,9 @@
       "costPerMTokOut": 4.5,
       "costPerMTokCacheRead": 0.15,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row for 3.7 Max (3.7 Plus idx 26 is the nearest documented sibling, well below T2 floor \u2014 placed at T2 provisionally pending eval since 'Max' variants typically outperform 'Plus' within a generation; will demote on evidence).",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row for 3.7 Max (3.7 Plus idx 26 is the nearest documented sibling, well below T2 floor \u2014 placed at T2 provisionally pending eval since 'Max' variants typically outperform 'Plus' within a generation; will demote on evidence). | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $30-tier \u2014 fallbackOnly until Go plan restored (also gated by CAP-061)",
       "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -1392,9 +1392,9 @@
       "costPerMTokCacheRead": 0.06,
       "aaIndex": 35,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: DeepSeek V4 Flash Vision (max) idx 35 (just under T2 floor 34... actually 35>=34) -> T2. Experimental vision-capable variant.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: DeepSeek V4 Flash Vision (max) idx 35 (just under T2 floor 34... actually 35>=34) -> T2. Experimental vision-capable variant. | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $15-tier \u2014 fallbackOnly until Go plan restored (also gated by CAP-061)",
       "releasedAt": "2026-06-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -1485,9 +1485,9 @@
       "costPerMTokOut": 0.2,
       "costPerMTokCacheRead": 0.02,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (next-gen preview beyond Hy3, idx 26). T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (next-gen preview beyond Hy3, idx 26). T3 pending eval. | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $30-tier \u2014 fallbackOnly until Go plan restored (also gated by CAP-061)",
       "releasedAt": "1970-01-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
@@ -1596,9 +1596,9 @@
       "costPerMTokCacheRead": 0.01,
       "aaIndex": 26,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (below T2 floor of 34) -> placed T2 provisionally: large 1M context, near-free cost, 'Pro' variant per CLIProxy's own served listing. Distinct from cliproxy/mimo-v2-pro (also added this pass) -- both are genuinely separate served ids.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 CAP-061 blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (below T2 floor of 34) -> placed T2 provisionally: large 1M context, near-free cost, 'Pro' variant per CLIProxy's own served listing. Distinct from cliproxy/mimo-v2-pro (also added this pass) -- both are genuinely separate served ids. | opencode-go fallback-tier policy (TOG-3213, owner directive 2026-09-20 05:25Z, TOG-3433): $15-tier \u2014 fallbackOnly until Go plan restored (also gated by CAP-061)",
       "releasedAt": "2026-05-01",
-      "fallbackOnly": false,
+      "fallbackOnly": true,
       "earnIn": null
     },
     {
