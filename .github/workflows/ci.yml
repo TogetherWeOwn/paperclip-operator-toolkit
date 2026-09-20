@@ -634,6 +634,18 @@ jobs:
       - name: gh-app-token.js regression suite
         run: ./test_gh_app_token.sh
 
+      # TOG-3164. `doctor` is the only command that reports what GitHub actually
+      # GRANTED, and it was dead in every environment shipping
+      # GH_APP_SCOPE_STRICT=1 — the default here. Its "best-effort" git-identity
+      # lookup passed a hardcoded `{}` to token(), so the strict check reported
+      # gaps in that empty object and told the caller to set the two flags they
+      # had just passed; and because die() exits, the catch around it never ran
+      # and the whole permission report died with the optional lookup. Section 11
+      # of the suite pins doctor against scope-check on identical input; this
+      # gate reintroduces the defect three ways and proves section 11 goes red.
+      - name: doctor survives strict mode (mutation-gated)
+        run: ./verification/tog-3164-doctor-strict-mutation-gate.sh
+
       # TOG-222: the credential-source half. test_gh_app_token.sh owns the leak
       # traps and the cache fixtures; this suite owns broker-vs-PEM selection,
       # which needs a stub broker on loopback and is far easier to express here.

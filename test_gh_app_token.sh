@@ -556,5 +556,92 @@ else
   bad "scope-check hid the gap when strict was off: '${OUT:0:120}'"
 fi
 EXTRA_ENV=()
+
+hdr "11. 'doctor' must produce its report under strict mode, and agree with 'scope-check' (TOG-3164)"
+# `doctor` is the only command that reports what GitHub actually GRANTED, and it
+# was dead in every environment shipping GH_APP_SCOPE_STRICT=1 — the default
+# here. Its git-identity lookup called `token({})`; `{}` is truthy, so token()
+# skipped currentScope() and carried that hardcoded empty scope into the strict
+# check. Two failures at once:
+#
+#   1. The whole report died for an optional lookup, because `die()` exits and
+#      the `catch` around it therefore never ran. "A job that produces nothing
+#      must never report success" — this produced nothing and reported a scope
+#      error.
+#   2. The refusal named GH_APP_REPOS and GH_APP_PERMISSIONS as missing when the
+#      caller had passed BOTH. It was reporting gaps in `{}`, not in the caller's
+#      scope, so `doctor` and `scope-check` returned OPPOSITE verdicts on
+#      identical input. That disagreement is the cheapest thing to pin, so it is
+#      what this section pins.
+#
+# Agreement is asserted by COMPARING THE TWO COMMANDS' OUTPUT in the same env,
+# not by hardcoding the expected verdict twice — a shared expectation that both
+# sides can drift away from together is not a cross-check.
+STRICT_BOUNDED=("GH_APP_SCOPE_STRICT=1" "GH_APP_TOKEN_SOURCE=pem"
+                "GH_APP_REPOS=paperclip-ops-tooling" "GH_APP_PERMISSIONS=contents=write,metadata=read")
+STRICT_UNBOUNDED=("GH_APP_SCOPE_STRICT=1" "GH_APP_TOKEN_SOURCE=pem")
+
+# Does `doctor` behave as though the scope is gapped? Covers BOTH shapes the
+# failure can take: a hard abort (no report at all) and a reported refusal.
+doctor_gapped() { # -> "yes" | "no"
+  if [[ -n "$OUT" ]] && grep -q '"permissionCount"' <<<"$OUT"; then
+    grep -q 'GH_APP_SCOPE_STRICT=1 requires' <<<"$OUT" && echo yes || echo no
+  else
+    echo yes   # no report at all: the strict refusal took the command down
+  fi
+}
+
+for label in bounded unbounded; do
+  if [[ "$label" == bounded ]]; then EXTRA_ENV=("${STRICT_BOUNDED[@]}"); else EXTRA_ENV=("${STRICT_UNBOUNDED[@]}"); fi
+
+  run_tool scope-check
+  # `gaps` is the array scope-check prints; empty renders as `"gaps": []`.
+  grep -q '"gaps": \[\]' <<<"$OUT" && sc_gapped=no || sc_gapped=yes
+
+  run_tool doctor
+  doctor_out="$OUT"
+  d_gapped="$(doctor_gapped)"
+
+  if [[ "$d_gapped" == "$sc_gapped" ]]; then
+    ok "strict + $label scope: doctor and scope-check agree (gapped=$sc_gapped)"
+  else
+    bad "strict + $label scope: doctor says gapped=$d_gapped, scope-check says gapped=$sc_gapped — the TOG-3164 disagreement"
+  fi
+
+  # The report itself must exist either way. This is the half that a fix to the
+  # `token({})` argument alone does NOT deliver: with a genuinely unbounded
+  # scope the mint is still correctly refused, and an uncatchable `die()` would
+  # still kill the report it was only ever meant to annotate.
+  if grep -q '"permissionCount"' <<<"$doctor_out"; then
+    ok "strict + $label scope: doctor still emitted its permission report"
+  else
+    bad "strict + $label scope: doctor produced no permission report: out='${doctor_out:0:80}' err='${ERR:0:160}'"
+  fi
+done
+
+# Directional controls. The loop above passes if both commands are wrong in the
+# same direction, so each verdict is also pinned to the right answer once.
+EXTRA_ENV=("${STRICT_BOUNDED[@]}")
+run_tool doctor
+if grep -q '"user.email"' <<<"$OUT"; then
+  ok "strict + bounded scope: doctor resolves the bot git identity (the lookup ran, not just survived)"
+else
+  bad "strict + bounded scope: doctor did not resolve gitIdentity: '${OUT:0:200}'"
+fi
+if grep -q 'GH_APP_REPOS (or --repos)' <<<"$OUT$ERR"; then
+  bad "strict + bounded scope: doctor still blames GH_APP_REPOS, which IS set — reporting on a hardcoded empty scope"
+else
+  ok "strict + bounded scope: doctor does not blame flags the caller already passed"
+fi
+
+EXTRA_ENV=("${STRICT_UNBOUNDED[@]}")
+run_tool doctor
+if grep -q '"error"' <<<"$OUT" && grep -q 'GH_APP_REPOS (or --repos)' <<<"$OUT"; then
+  ok "strict + unbounded scope: doctor degrades to gitIdentity.error carrying the real reason"
+else
+  bad "strict + unbounded scope: doctor did not report WHY the identity lookup was skipped: '${OUT:0:200}'"
+fi
+EXTRA_ENV=()
+
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
