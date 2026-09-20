@@ -2401,494 +2401,6 @@ jobs:
           [ $rc -eq 0 ] && echo "secret scan: clean"
           exit $rc
 
-      # A suite that cannot fail is decoration. Each mutation step below
-      # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
-      # file — and requires the suite to reject it.
-      #
-      # WHY THERE IS A BASELINE ASSERTION IN HERE (TOG-253). Until this commit
-      # these steps copied the suites into a temp directory WITHOUT lib/, which
-      # org_request_queue.sh sources and exits 1 without. The copied suite
-      # therefore failed in that directory no matter what the sed did, and
-      # "the mutated suite failed" was true for a reason that had nothing to do
-      # with the mutation. Both gates passed while proving nothing.
-      #
-      # The fix is not merely `cp -r lib` — it is asserting that a staged,
-      # UNMUTATED copy passes, then cloning those exact bytes before mutation.
-      # That check is what makes a red result attributable to the mutation, and
-      # it is what would have caught the original hole. Every distinct suite
-      # passes that baseline once before any of its mutants are scored.
-      - name: Mutation gates — the suites must reject reintroduced defects
-        timeout-minutes: 55
-        run: |
-          set -uo pipefail
-
-          # stage <dir> — a runnable copy of the tools, lib/ included.
-          stage() {
-            cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
-               test_responsible_leader.sh test_request_record_integrity.sh \
-               test_decision_notify.sh test_leader_notify.sh "$1/"
-            mkdir -p "$1/lib" && cp lib/*.sh lib/*.py "$1/lib/"
-          }
-
-          # mutation_check <label> <suite> <expect-sibling: yes|no|skip> <sed-expr>...
-          #   1. the unmutated copy must PASS      (else the gate is vacuous)
-          #   2. the mutated copy must still PARSE (else it fails for the wrong reason)
-          #   3. the mutated copy must FAIL        (the actual assertion)
-          # Every invocation has an OUTER watchdog independent of the code being
-          # mutated. Exit 124/137 is expected only from a mutant; a baseline that
-          # reaches either is a distinct harness failure, never "the mutant died".
-          mutation_suite() {
-            local dir="$1" suite="$2" limit="${MUTATION_SUITE_TIMEOUT:-150}"
-            local output="${MUTATION_SUITE_OUTPUT:-/dev/null}"
-            # This independent subreaper owns the whole mutation session. A
-            # courier can start a new session of its own; the watchdog still
-            # adopts and terminates it before returning 124 to this gate.
-            python3 "$dir/lib/mutation_watchdog.py" "$dir" "$suite" "$limit" >"$output" 2>&1
-          }
-
-          # A baseline proves the staged bytes, not a particular mutant. Verify
-          # each distinct suite once, then clone those exact passing bytes for
-          # every mutation. Re-running the same baseline before every mutant was
-          # consuming roughly half this step while adding no discrimination.
-          baseline_root="$(mktemp -d)"
-          trap 'rm -rf "$baseline_root"' EXIT
-          baseline_template() {
-            local suite="$1" key="${suite//[^A-Za-z0-9_.-]/_}"
-            local dir="$baseline_root/$key" output="$baseline_root/$key.out"
-            if [[ ! -e "$dir/.baseline-passed" ]]; then
-              mkdir -p "$dir"; stage "$dir"
-              MUTATION_SUITE_OUTPUT="$output" mutation_suite "$dir" "$suite"
-              local base_rc=$?
-              if [[ $base_rc -ne 0 ]]; then
-                if [[ $base_rc -eq 124 || $base_rc -eq 137 ]]; then
-                  echo "::error::$suite BASELINE TIMEOUT — the unmutated suite exceeded the outer ${MUTATION_SUITE_TIMEOUT:-150}s bound" >&2
-                else
-                  echo "::error::the UNMUTATED copy of $suite already fails (rc=$base_rc) — mutation gates prove nothing" >&2
-                fi
-                grep -E 'FAIL|RESULT' "$output" >&2 || true
-                tail -20 "$output" >&2
-                return 1
-              fi
-              : > "$dir/.baseline-passed"
-            fi
-            BASELINE_TEMPLATE="$dir"
-          }
-
-          mutation_check() {
-            local label="$1" suite="$2" sibling="$3"; shift 3
-            baseline_template "$suite" || {
-              echo "::error::$label: no verified baseline for $suite"; return 1; }
-            local baseline="$BASELINE_TEMPLATE"
-            local mut; mut="$(mktemp -d "$baseline_root/mutant.XXXXXX")"
-            cp -a "$baseline/." "$mut/"
-            local assertion_sentinel="" required_assertion="" assertion_armed=""
-            if [[ "$label" == "transport-can-ignore-timeout-term" ]]; then
-              assertion_sentinel="$mut/.assertion-sentinel"
-              required_assertion="transport-ignore-term-courier-gone"
-              assertion_armed="transport-ignore-term-assertion-armed"
-            fi
-
-            # This mutant additionally proves that the baseline reached the
-            # exact TERM-containment assertion before the mutation blocks it.
-            # Keep that one attributable run; all other mutants use the shared
-            # passing template above.
-            if [[ -n "$required_assertion" ]]; then
-              : > "$assertion_sentinel"
-              MUTATION_SUITE_OUTPUT="$mut/.assertion-baseline-output" \
-                TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
-                mutation_suite "$mut" "$suite"
-              local base_rc=$?
-              if [[ $base_rc -ne 0 ]]; then
-                echo "::error::$label: assertion baseline failed in $suite (rc=$base_rc)"
-                tail -20 "$mut/.assertion-baseline-output"
-                rm -rf "$mut"; return 1
-              fi
-              if ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
-                echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
-                rm -rf "$mut"; return 1
-              fi
-            fi
-
-            local e target
-            for e in "$@"; do
-              target="$mut/org_request_queue.sh"
-              if [[ "$e" == lib:* ]]; then
-                target="$mut/lib/reqrecord.sh"
-                e="${e#lib:}"
-              elif [[ "$e" == py:* ]]; then
-                target="$mut/lib/notify_exec.py"
-                e="${e#py:}"
-              fi
-              sed -i "$e" "$target" || {
-                echo "::error::$label: mutation expression failed for $target: $e"
-                rm -rf "$mut"; return 1
-              }
-            done
-            if ! bash -n "$mut/org_request_queue.sh" "$mut/lib/reqrecord.sh" \
-              || ! python3 -m py_compile "$mut/lib/notify_exec.py"; then
-              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
-              rm -rf "$mut"; return 1
-            fi
-            if cmp -s org_request_queue.sh "$mut/org_request_queue.sh" \
-              && cmp -s lib/reqrecord.sh "$mut/lib/reqrecord.sh" \
-              && cmp -s lib/notify_exec.py "$mut/lib/notify_exec.py"; then
-              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
-              rm -rf "$mut"; return 1
-            fi
-
-            [[ -z "$assertion_sentinel" ]] || : > "$assertion_sentinel"
-            local descendant_watch="" mutant_output="$mut/.mutant-output"
-            if [[ -n "$required_assertion" ]]; then
-              descendant_watch="$mut/.descendant-watch"
-            fi
-            MUTATION_SUITE_OUTPUT="$mutant_output" \
-              MUTATION_WATCHDOG_PROCESS_FILE="$descendant_watch" \
-              TEST_LEADER_NOTIFY_DESCENDANT_WATCH="$descendant_watch" \
-              TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
-              mutation_suite "$mut" "$suite"
-            local mut_rc=$?
-            if [[ $mut_rc -eq 0 ]]; then
-              echo "::error::$label: $suite PASSED against the mutation"
-              rm -rf "$mut"; return 1
-            elif [[ -n "$required_assertion" ]]; then
-              if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
-                echo "::error::$label: mutant reached the passing $required_assertion assertion"
-                rm -rf "$mut"; return 1
-              fi
-              if [[ -n "$assertion_armed" ]] \
-                && ! grep -qxF "$assertion_armed" "$assertion_sentinel" 2>/dev/null; then
-                echo "::error::$label: mutant timed out before arming the intended TERM assertion"
-                rm -rf "$mut"; return 1
-              fi
-              if [[ $mut_rc -ne 124 ]] \
-                || ! grep -qxF "MUTATION_WATCHDOG: watched descendant terminated" "$mutant_output"; then
-                echo "::error::$label: mutant did not time out with attributable descendant cleanup (rc=$mut_rc)"
-                tail -20 "$mutant_output"
-                rm -rf "$mut"; return 1
-              fi
-              echo "  ok  $label — TERM assertion armed and blocked; watchdog terminated the escaped descendant"
-            elif [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
-              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
-            fi
-
-            # Cross-check: is this defect visible to the OTHER suite? Pins which
-            # suite is actually carrying the weight, so the two cannot quietly
-            # collapse into one.
-            if [ "$sibling" != "skip" ]; then
-              local other=test_responsible_leader.sh
-              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
-              mutation_suite "$mut" "$other" >/dev/null 2>&1
-              local other_rc=$?
-              if [[ $other_rc -eq 0 ]]; then
-                [ "$sibling" = "yes" ] && {
-                  echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
-              else
-                if [[ $other_rc -eq 124 || $other_rc -eq 137 ]]; then
-                  echo "::error::$label: sibling $other hit the OUTER deadline; this cross-check is not attributable"
-                  rm -rf "$mut"; return 1
-                fi
-                [ "$sibling" = "no" ] && {
-                  echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
-                  rm -rf "$mut"; return 1; }
-              fi
-            fi
-            rm -rf "$mut"
-            [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]] || echo "  ok  $label"
-          }
-
-          rc=0
-
-          # Let a dormant leader be SKIPPED instead of woken. The single most
-          # tempting future "fix" to this design, and it silently turns waiting
-          # into approver-shopping.
-          mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
-            's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
-
-          # TOG-197's two-time validation: the requester's ceiling is checked at
-          # SUBMIT and RE-CHECKED at approval against freshly-read state. Drop
-          # the re-check and a pending request banks the authority its requester
-          # held when it submitted — so a demotion, a transfer or a termination
-          # between submit and approval no longer reaches the decision. This is
-          # the TOCTOU defence TOG-194 says must survive the epic intact, and
-          # until TOG-258 the only coverage of it lived in test_request_queue.sh,
-          # which needs Postgres and podman and never runs here. `no`: the record
-          # suite does not see this one, which is what shows the authorization
-          # suite carries it.
-          mutation_check "banked-stale-authority" test_responsible_leader.sh no \
-            's/^  may_request "$now_tpl"/  true "$now_tpl"/' || rc=1
-
-          # An auditor may not clear an override it took itself. Drop that one
-          # comparison and the open-item list becomes self-service: the bypasser
-          # writes the entry AND retires it, a write-only log in audit clothing.
-          mutation_check "self-clearable-override" test_responsible_leader.sh skip \
-            's/rv_id" == "$a_id"/rv_id" == "never-matches"/' || rc=1
-
-          # TOG-253 defect 4, exactly as found: the reason guard back on the
-          # denial path only, leaving approvals unreasoned. Expected to be
-          # INVISIBLE to the authorization suite — a denial still needs a
-          # reason — which is what shows the record suite earns its place.
-          mutation_check "unreasoned-approval" test_request_record_integrity.sh no \
-            's/\[\[ -n "$reason" \]\] || die "every decision/[[ -n "$reason" || "$decision" == "approved" ]] || die "every decision/' || rc=1
-
-          # TOG-253 defect 3: expiry back to being a side effect of an attempted
-          # review. Both halves go together — the reaper and the derivation in
-          # request_state — because either alone still gives the right answer,
-          # which is the point of having both.
-          mutation_check "never-expires" test_request_record_integrity.sh skip \
-            's/^reap_expired() {/reap_expired() { return 0;/' \
-            's/expired "$exp" \&\& rec=/false \&\& rec=/' || rc=1
-
-          # TOG-253 defect 1: the invariant, not the lock. An ambiguous id gets
-          # resolved by tail -1 again instead of being refused.
-          mutation_check "ambiguous-request-id" test_request_record_integrity.sh skip \
-            'lib:s/\[\[ "$n" -le 1 \]\]/[[ "$n" -le 99 ]]/' || rc=1
-
-          # --- TOG-254: the requester learns ---------------------------------
-          # All four use sibling=skip. The cross-check picks "the other suite"
-          # from a hard-coded pair, so it cannot express a third suite; using it
-          # here would compare against an arbitrary one of the two and prove
-          # nothing. The gates below still assert the full three-step contract.
-
-          # THE headline defect this issue was filed about: "nothing wakes on an
-          # expiry today at all". Expiry is the quietest of the terminal states
-          # because no human action produces it, so it is the one that silently
-          # reverts to notifying nobody.
-          mutation_check "expiry-notifies-nobody" test_decision_notify.sh skip \
-            's/emit_notification "$rid" expired/true "$rid" expired/' || rc=1
-
-          # Expiry re-notifying on EVERY read, because reap_expired runs from
-          # read paths. A notifier that pages on every `list` gets muted, and a
-          # muted notifier is the dead end this issue exists to close, reached
-          # by a different road.
-          #
-          # BOTH halves go together, for the same reason the never-expires gate
-          # above mutates two lines: single-shot delivery is held by the
-          # idempotency guard in emit_notification AND by reap_expired only
-          # reaping requests whose last status is pending. Either alone gives
-          # the right answer, so mutating one proves nothing — the first draft
-          # of this gate mutated only the guard and the suite passed, which is
-          # how the redundancy was found rather than assumed.
-          mutation_check "notification-repeats-forever" test_decision_notify.sh skip \
-            's/^  notify_already "$rid" requester && { NOTIFY_RESULT="already"; return 0; }/  false \&\& { NOTIFY_RESULT="already"; return 0; }/' \
-            's/| map(select(.last == "pending" and .exp != ""))/| map(select(.exp != ""))/' || rc=1
-
-          # Put the notification row back to carrying `status`, so it is shaped
-          # like a decision. This is not hypothetical — it is the regression
-          # this feature actually caused while being written, and it made
-          # notified requests vanish from every filtered listing.
-          mutation_check "notification-shaped-like-a-decision" test_decision_notify.sh skip \
-            's/{event:"notify.queued",requestId:$id,audience:"requester",decision:$s,/{event:"notify.queued",requestId:$id,audience:"requester",status:$s,/' || rc=1
-
-          # The undelivered-notification gate going green. Same failure mode as
-          # a muted alarm: the feature still "works", and nobody learns that
-          # nobody is learning.
-          mutation_check "undelivered-gate-always-green" test_decision_notify.sh skip \
-            's/\[\[ "$bad" -eq 0 \]\] ||/[[ "$bad" -ge 0 ]] ||/' || rc=1
-
-          # The queue-side half of the steering guard. The transport validates
-          # too, so this gate exists to prove the door check is load-bearing on
-          # its own — without it, deleting the submit-time refusal would leave
-          # every suite green and a hostile address sitting in the audit record.
-          mutation_check "notify-issue-unvalidated-at-submit" test_decision_notify.sh skip \
-            's|^  if \[\[ -n "\$notify_issue" && ! "\$notify_issue" =~.*$|  if false; then|' || rc=1
-
-          # TOG-312, and the two directions this one selector can fail in.
-          #
-          # NARROWED — back to matching the role string alone. This is the
-          # tempting revert ("--for takes a ROLE, it always has"), and it is
-          # invisible from a shell, where a role is what anyone types. It is
-          # only visible from the MCP transport, which has no role to type: it
-          # authenticates a session and knows exactly one thing about its
-          # caller, the agent uuid. Narrowed, an agent's own decisions read back
-          # EMPTY through the only door it has — indistinguishable from "not
-          # decided yet", which is the dead end TOG-312 was filed about.
-          mutation_check "inbox-matches-role-only" test_decision_notify.sh skip \
-            's/select(.role==$w or .agent==$w)/select(.role==$w)/' || rc=1
-
-          # WIDENED — the same line failing the other way. An inbox that stops
-          # filtering is not a broken inbox; it is a company-wide read of every
-          # decision, reached from a per-principal tool, and it LOOKS like a
-          # working feature from the caller's side because their own rows are
-          # all still there. Both halves matter: the mutation above proves the
-          # fix does something, this one proves it does not do too much.
-          mutation_check "inbox-matches-everyone" test_decision_notify.sh skip \
-            's/select(.role==$w or .agent==$w)/select(true)/' || rc=1
-
-          # --- TOG-317: the leader learns ------------------------------------
-          # These use sibling=skip because the cross-check only understands the
-          # original two-suite pair. Each still proves baseline, applied mutation,
-          # parse validity, and that the owning suite goes red.
-          mutation_check "leader-never-told" test_leader_notify.sh skip \
-            's/^  if ! build_leader_notification_payloads "$rid" "$submission"; then$/  LEADER_NOTIFY_PAYLOADS=(); if false; then/' || rc=1
-
-          # Standing notices are profile-addressed for the operator but UUID-
-          # addressed through authenticated MCP. Blank the enqueue-time profile
-          # resolution; both shell role pulls still work, so only the UUID
-          # assertions prove this path is actually reachable to agents.
-          mutation_check "standing-authority-agent-id-not-recorded" test_leader_notify.sh skip \
-            's/^        standing_id="$(f 1 "$standing_row")"$/        standing_id=""/' || rc=1
-
-          # A shared operator issue is not proof that every standing recipient is
-          # assigned to it. Restoring the scalar fallback makes both standing rows
-          # report delivered to one P4-only issue; the recipient-specific test must
-          # reject that false success. mutation_check runs the staged baseline first.
-          mutation_check "standing-shared-issue-falsely-delivered" test_leader_notify.sh skip \
-            's/^      addr="$(standing_notify_issue_for "$recip" "$lid" 2>\/dev\/null || true)"$/      addr="$REQUEST_LEADER_NOTIFY_ISSUE"/' || rc=1
-
-          # pull_only is a capability contract, not an adapter basename. Reinsert
-          # the old filename check: the renamed, byte-identical adapter then lands
-          # failed/exit65 and the owning assertion must go red after its baseline.
-          mutation_check "pull-only-depends-on-adapter-filename" test_leader_notify.sh skip \
-            's/^  if \[\[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CAPABILITY" == "issue_addressed" \]\]; then$/  if [[ "$aud" == "leader" \&\& -z "$issue" \&\& "$REQUEST_NOTIFY_CMD" == *"notify_paperclip_issue.sh"* ]]; then/' || rc=1
-
-          # Degrade an unaddressable required role to pull_only again. With no live
-          # UUID there is no authenticated inbox reader, so the named missing-holder
-          # assertions must keep notify and drain red.
-          mutation_check "missing-standing-holder-reads-pull-only" test_leader_notify.sh skip \
-            's/^  if \[\[ "$delivery_capability" == "unaddressable" \]\]; then$/  if false; then/' || rc=1
-
-          mutation_check "leader-notification-swallows-the-requesters" test_leader_notify.sh skip \
-            's/                and (.audience \/\/ "requester")==$aud/                and true/' || rc=1
-
-          mutation_check "leader-address-chosen-by-requester" test_leader_notify.sh skip \
-            's/^      addr="$REQUEST_LEADER_NOTIFY_ISSUE"$/      addr="$(jq -r ".notifyIssue \/\/ \\"\\"" <<<"$sub")"/' || rc=1
-
-          # Collapse reqrecord's separate notification-status lock back onto
-          # QUEUE_LOCK. A >5s honest transport then occupies the queue's ordinary
-          # writer lock and a legitimate overlapping review is refused.
-          mutation_check "transport-holds-queue-lock" test_leader_notify.sh skip \
-            's|^REQRECORD_STATUS_LOCK="${QUEUE}.notify-status.lock"$|REQRECORD_STATUS_LOCK="$QUEUE_LOCK"|' || rc=1
-
-          # Re-open the unbounded fallback when timeout enforcement is missing.
-          # The suite points the explicit timeout seam at an unavailable command
-          # and must prove that the transport is not invoked at all.
-          mutation_check "transport-runs-without-timeout-enforcement" test_leader_notify.sh skip \
-            's|^    out="process-tree timeout enforcement unavailable; transport not invoked"$|    out="transport ran without containment"; bash -c "$REQUEST_NOTIFY_CMD" </dev/null >/dev/null 2>\&1|' \
-            's|^    rc=125$|    rc=$?|' || rc=1
-
-          # Remove only the forced-kill escalation. The TERM-ignoring courier
-          # survives TERM, so its PID assertion must reject this mutant. The
-          # independent mutation_suite watchdog bounds that mutant and reports a
-          # mutant timeout separately from an unmutated baseline timeout.
-          mutation_check "transport-can-ignore-timeout-term" test_leader_notify.sh skip \
-            'py:s/os.killpg(proc.pid, signal.SIGKILL)/os.killpg(proc.pid, signal.SIGTERM)/' \
-            'py:s/signal_children(signal.SIGKILL)/signal_children(signal.SIGTERM)/' \
-            'py:s/proc.kill()/proc.terminate()/' || rc=1
-
-          # Remove descendant cleanup from the supervisor. The retained-stdout
-          # and detached-mutator fixtures exercise descriptor and process-tree
-          # containment; the owning suite must reject the mutation without
-          # letting it hang the CI job.
-          mutation_check "transport-descendants-survive-parent" test_leader_notify.sh skip \
-            'py:s/^        stop_tree(proc, grace)$/        pass/' || rc=1
-
-          # Suppress jq failure again. Malformed JSON then produces partial output
-          # that can compare equal and be credited as a delivered notification.
-          mutation_check "malformed-fingerprint-reads-equal" test_leader_notify.sh skip \
-            'lib:s#^    .select(\$ev\[.event\] // false). .\$QUEUE.$#    '\''select($ev[.event] // false)'\'' "$QUEUE" 2>/dev/null || true#' || rc=1
-
-          # Disable the central mutation verdict. Because the guard lives inside
-          # notify_deliver, this one deletion must expose both hostile submit and
-          # hostile drain cases; a call-site wrapper cannot satisfy the drain case.
-          mutation_check "notifier-mints-a-decision-on-submit-or-drain" test_leader_notify.sh skip \
-            's/^  \[\[ "$fp_before" == "$fp_after" \]\] || tampered="yes"$/  true/' || rc=1
-
-          # The atomic standing-authority intent set must retain both recipients.
-          # Collapsing the builder to its first row strands the second authority
-          # before publication, while a single-leader request still looks healthy.
-          mutation_check "standing-recipient-idempotency-collapsed" test_leader_notify.sh skip \
-            '/while IFS= read -r standing_role; do/,/done < <(jq -r/ s/      LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")$/      [[ ${#LEADER_NOTIFY_PAYLOADS[@]} -gt 0 ]] || LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")/' || rc=1
-
-          # Upgrade compatibility: recipient-aware grouping must still associate
-          # historical requester outcomes that predate recipientRole. Requiring an
-          # exact role match re-queues and redelivers already-delivered decisions.
-          mutation_check "legacy-notification-outcome-orphaned" test_leader_notify.sh skip \
-            's/                             or ($q.audience=="requester" and ((has("recipientRole")|not) or .recipientRole==null))))/                             or false))/' || rc=1
-
-          # Standing authority has two required recipients. Regressing to the old
-          # scalar summary lets P1's later success overwrite P4's earlier failure.
-          mutation_check "standing-mixed-result-collapsed" test_leader_notify.sh skip \
-            's/^    LEADER_NOTIFY_RESULTS+=.*$/    LEADER_NOTIFY_RESULTS=""/' \
-            's/^    NOTIFY_RESULT="failed"$/    NOTIFY_RESULT="$result"/' || rc=1
-
-          # Advisory reachability may never execute without an enforceable outer
-          # deadline. Re-open the direct fallback and the hanging fixture must hit
-          # this mutation gate's independent watchdog rather than hang the job.
-          mutation_check "reachability-runs-without-timeout-enforcement" test_leader_notify.sh skip \
-            's|^    echo "  reachability       : UNKNOWN for .*|    out="$("$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?;|' || rc=1
-
-          # --- the transport's own gates (TOG-198 review) ---------------------
-          # Separate helper because these mutate notify_paperclip_issue.sh, not
-          # org_request_queue.sh, and the suite reaches it through NOTIFY_SH
-          # rather than by cwd. Same three-step contract: the unmutated copy
-          # must pass in the staging dir (or the gate is vacuous), the mutation
-          # must still parse (or it fails for the wrong reason), and the sed
-          # must actually change something (or the code moved and the mutation
-          # silently missed).
-          notify_mutation_check() {
-            local label="$1"; shift
-            local mut; mut="$(mktemp -d "$baseline_root/notify-mutant.XXXXXX")"
-            cp notify_paperclip_issue.sh test_notify_transport.sh "$mut/"
-            chmod +x "$mut/notify_paperclip_issue.sh" "$mut/test_notify_transport.sh"
-
-            if ! NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
-              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
-              NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh 2>&1 | tail -20
-              rm -rf "$mut"; return 1
-            fi
-
-            local e
-            for e in "$@"; do sed -i "$e" "$mut/notify_paperclip_issue.sh"; done
-            if ! bash -n "$mut/notify_paperclip_issue.sh"; then
-              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
-              rm -rf "$mut"; return 1
-            fi
-            if cmp -s notify_paperclip_issue.sh "$mut/notify_paperclip_issue.sh"; then
-              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
-              rm -rf "$mut"; return 1
-            fi
-
-            if NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
-              echo "::error::$label: test_notify_transport.sh PASSED against the mutation"
-              rm -rf "$mut"; return 1
-            fi
-            rm -rf "$mut"
-            echo "  ok  $label"
-          }
-
-          # The credential back on argv. /proc/<pid>/cmdline is world-readable
-          # and this box is shared between companies; gh_token.sh:75-131 made
-          # this a repo-wide rule under TOG-200 and the notifier shipped
-          # breaking it, which is how a rule decays — one new caller at a time.
-          notify_mutation_check "notify-credential-on-argv" \
-            's|^  printf .header = "Authorization: Bearer %s..n. "\$PAPERCLIP_API_KEY"$|  :|' \
-            's|^RESP="\$(curl --config "\$CFG" -o /dev/null -w .%{http_code}. 2>&1)"|RESP="$(curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "$(jq -cn --arg b "$MSG" "{body:\\$b}")" "$BASE/api/issues/$ISSUE/comments" 2>\&1)"|' || rc=1
-
-          # The issue id unvalidated, so the least-privileged party in the flow
-          # picks the route an operator-credentialed POST takes. curl resolves
-          # dot segments client-side, so this is not theoretical: `..` in the
-          # id removed /api/issues/ from url_effective entirely.
-          notify_mutation_check "notify-unvalidated-issue-id" \
-            's|^if \[\[ ! "\$ISSUE" =~ \^\[A-Za-z0-9\]\[A-Za-z0-9_-\]\*\$ \]\]; then|if false; then|' || rc=1
-
-          # A fixed ``` fence, which a body containing ``` closes. These
-          # comments WAKE agents, so the forged block that follows is read by a
-          # machine, not merely displayed to a human.
-          notify_mutation_check "notify-fence-not-measured" \
-            's|^FENCE_LEN=\$(( \$(longest_tick_run "\$BODY") + 1 )).*$|FENCE_LEN=3|' || rc=1
-
-          # Leader rows carry `decision`, deliberately not `status`; reading only
-          # status renders the reference adapter heading as null.
-          notify_mutation_check "notify-renders-status-only" \
-            's/^STATUS=.*$/STATUS="$(jq -r '\''.status'\'' <<<"$PAYLOAD")"/' || rc=1
-
-          # Restore the audience-blind fallback. A leader row whose operator
-          # address is null then gets sent to the requester's fallback issue.
-          notify_mutation_check "notify-leader-uses-requester-fallback" \
-            's/^if \[\[ -z "$ISSUE" && "$AUDIENCE" == "requester" \]\]; then/if [[ -z "$ISSUE" ]]; then/' || rc=1
-
-          exit $rc
-
       - name: Prove the regression suite still detects the bug
         run: |
           set -uo pipefail
@@ -3749,137 +3261,6 @@ jobs:
             'a removed capability is narrowing' || rc=1
           exit $rc
 
-      # TOG-358. The preflight's whole job is to refuse to say "ok" about an
-      # endpoint it could not actually use. Each mutation below reintroduces one
-      # specific way of saying ok anyway. `unreachable-reads-ok` is the one that
-      # matters most: it is the exact shape of the failure this tool was written
-      # for — :20129 answers a TCP reset from inside a container, and a gate that
-      # scores that as a pass green-lights a company-wide outage.
-      #
-      # Baseline first, as everywhere else here: a staged unmutated copy must
-      # pass, then every mutant starts from those exact bytes. Otherwise a red
-      # below is unattributable.
-      - name: Prove the preflight suite still detects a weakened refusal
-        timeout-minutes: 25
-        run: |
-          set -uo pipefail
-          rc=0
-
-          # Verify one staged baseline, then clone those exact passing bytes for
-          # each mutant. The old loop paid for the identical baseline 11 times.
-          # Keep an outer process-tree deadline on both baseline and mutants so
-          # weakening timeout logic cannot consume the whole Offline job.
-          preflight_root="$(mktemp -d)"
-          trap 'rm -rf "$preflight_root"' EXIT
-          baseline="$preflight_root/baseline"
-          mkdir -p "$baseline/lib"
-          cp agent_endpoint_preflight.sh test_agent_endpoint_preflight.sh "$baseline/"
-          cp lib/mutation_watchdog.py "$baseline/lib/"
-
-          preflight_suite() {
-            local dir="$1" limit="${PREFLIGHT_MUTATION_TIMEOUT:-180}"
-            local output="${PREFLIGHT_SUITE_OUTPUT:-/dev/null}"
-            python3 "$dir/lib/mutation_watchdog.py" "$dir" \
-              test_agent_endpoint_preflight.sh "$limit" >"$output" 2>&1
-          }
-
-          PREFLIGHT_SUITE_OUTPUT="$preflight_root/baseline.out" preflight_suite "$baseline"
-          base_rc=$?
-          if [[ $base_rc -ne 0 ]]; then
-            echo "::error::the UNMUTATED preflight copy fails (rc=$base_rc) — this gate proves nothing"
-            tail -25 "$preflight_root/baseline.out"
-            exit 1
-          fi
-
-          preflight_mutation() {
-            local label="$1"; shift
-            local mut; mut="$(mktemp -d "$preflight_root/mutant.XXXXXX")"
-            cp -a "$baseline/." "$mut/"
-
-            local e
-            for e in "$@"; do sed -i "$e" "$mut/agent_endpoint_preflight.sh"; done
-            if cmp -s agent_endpoint_preflight.sh "$mut/agent_endpoint_preflight.sh"; then
-              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
-              rm -rf "$mut"; return 1
-            fi
-            if ! bash -n "$mut/agent_endpoint_preflight.sh"; then
-              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
-              rm -rf "$mut"; return 1
-            fi
-            PREFLIGHT_SUITE_OUTPUT="$mut/.mutant-output" preflight_suite "$mut"
-            local mut_rc=$?
-            if [[ $mut_rc -eq 0 ]]; then
-              echo "::error::$label: the preflight suite PASSED against the mutation"
-              rm -rf "$mut"; return 1
-            fi
-            if [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
-              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
-            else
-              echo "  ok  $label"
-            fi
-            rm -rf "$mut"
-          }
-
-          # A refused connection scored as a pass — the outage green-light.
-          preflight_mutation "unreachable-reads-ok" \
-            's/verdict "unreachable" 5/verdict "unreachable" 0/g' || rc=1
-          # A hung endpoint folded into "reachable enough".
-          preflight_mutation "hang-reads-ok" \
-            's/verdict "timeout" 6/verdict "timeout" 0/' || rc=1
-          # A route can inject both field names as zero and still carry no
-          # accounting. Defeat the positive cache-write gate; the zero-cache
-          # case must then make the suite red.
-          preflight_mutation "cache-creation-check-deleted" \
-            's/"\$CACHE_CREATE" -le 0/"$CACHE_CREATE" -le -1/' || rc=1
-          # A positive write alone is also insufficient. Defeat the identical
-          # replay's positive-read gate; the write-only case must make it red.
-          preflight_mutation "cache-replay-check-deleted" \
-            's/"\$CACHE_REPLAY_READ" -le 0/"$CACHE_REPLAY_READ" -le -1/' || rc=1
-          # Billing per token while the subscriptions idle, reported as fine.
-          preflight_mutation "payg-not-flagged" \
-            's/^\[\[ "\$RESP_ID" == gen-\* \]\]/[[ "$RESP_ID" == nevermatch-* ]]/' \
-            's|^\[\[ "\$RESP_MODEL" == \*/\* \]\]|[[ "$RESP_MODEL" == *@@@* ]]|' || rc=1
-          # An OpenAI-dialect body accepted as an Anthropic envelope.
-          preflight_mutation "wrong-dialect-accepted" \
-            's/^  anthropic) ;;$/  anthropic|openai|error|*) ;;/' || rc=1
-          # The property that keeps CLIProxy from IP-banning the host: one
-          # request, ever. This mutation adds a second probe call.
-          preflight_mutation "retries-on-auth-failure" \
-            's|^CURL_EXIT=0$|curl -sS -o /dev/null -H "@$HDRS" -d "$REQ" --max-time "$TIMEOUT" "$BASE/v1/messages" >/dev/null 2>\&1\nCURL_EXIT=0|' || rc=1
-          # TOG-361. A live endpoint whose model lane is dead, scored as a pass.
-          preflight_mutation "dead-model-lane-reads-ok" \
-            's/verdict "model-unavailable" 8/verdict "model-unavailable" 0/' || rc=1
-          # Collapse the classification back into a generic timeout. Both values
-          # are non-zero, so a merge gate would miss this wrong diagnosis.
-          preflight_mutation "model-lane-reads-as-outage" \
-            's/if \[\[ "\$CCODE" == 200 \]\]; then/if [[ "$CCODE" == 999 ]]; then/' || rc=1
-          # TOG-358. The subscription lane answers Claude Code clients, not a
-          # bare curl. Silently losing the default identity makes a healthy lane
-          # read as a hang.
-          preflight_mutation "client-identity-not-sent" \
-            's/^CLIENT_IDENTITY=1$/CLIENT_IDENTITY=0/' || rc=1
-          # OmniRoute's combo validator manufactures a 502 below 16 output
-          # tokens, before the selected upstream runs. A one-token probe cannot
-          # distinguish that validator from a broken route.
-          preflight_mutation "combo-output-budget-too-small" \
-            's/"max_tokens":16/"max_tokens":1/g' || rc=1
-          exit $rc
-
-      # TOG-425. This watcher answers a question that expires: the evidence for
-      # whether teamclaude rotates off a spent account exists only while the
-      # pacer feed still holds an exhaustion episode. A watcher that quietly
-      # reports the wrong answer is therefore not merely wrong, it is
-      # unfalsifiable later.
-      #
-      # `verdict-from-is_current` is the mutation that matters. TOG-425 as
-      # written asked for exactly that field, and it was MEASURED pointing at
-      # the idle account for an hour on 2026-08-24 while the other account
-      # burned 0.28 -> 0.38. The first version of the suite passed against this
-      # mutation, because in that fixture burn and is_current happened to agree;
-      # the case now pins a feed where they contradict each other. Keep it.
-      #
-      # Baseline first, as everywhere else here: the unmutated copy must pass in
-      # the same staging directory, or a red below is unattributable.
       - name: Prove the rotation watcher still detects a wrong verdict
         run: |
           set -uo pipefail
@@ -4536,6 +3917,639 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./ci_dark_steps.sh report || true
+
+  # TOG-2951. These two steps accounted for ~69.8 minutes of the 102-minute
+  # Offline suites runtime. Keeping them in a separate required job lets the
+  # remaining offline suites finish in roughly 30 minutes and prevents either
+  # long gate from darkening unrelated later suites through job fail-fast.
+  # The branch ruleset must require this exact check name before this split
+  # lands; otherwise moving the steps would silently remove both gates.
+  long-mutation-gates:
+    name: Long mutation gates
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # A suite that cannot fail is decoration. Each mutation step below
+      # reintroduces a REAL past defect into a THROWAWAY COPY — never a tracked
+      # file — and requires the suite to reject it.
+      #
+      # WHY THERE IS A BASELINE ASSERTION IN HERE (TOG-253). Until this commit
+      # these steps copied the suites into a temp directory WITHOUT lib/, which
+      # org_request_queue.sh sources and exits 1 without. The copied suite
+      # therefore failed in that directory no matter what the sed did, and
+      # "the mutated suite failed" was true for a reason that had nothing to do
+      # with the mutation. Both gates passed while proving nothing.
+      #
+      # The fix is not merely `cp -r lib` — it is asserting that a staged,
+      # UNMUTATED copy passes, then cloning those exact bytes before mutation.
+      # That check is what makes a red result attributable to the mutation, and
+      # it is what would have caught the original hole. Every distinct suite
+      # passes that baseline once before any of its mutants are scored.
+      - name: Mutation gates — the suites must reject reintroduced defects
+        timeout-minutes: 55
+        run: |
+          set -uo pipefail
+
+          # stage <dir> — a runnable copy of the tools, lib/ included.
+          stage() {
+            cp org_request_queue.sh org_provisioner.sh org_access_review.sh \
+               test_responsible_leader.sh test_request_record_integrity.sh \
+               test_decision_notify.sh test_leader_notify.sh "$1/"
+            mkdir -p "$1/lib" && cp lib/*.sh lib/*.py "$1/lib/"
+          }
+
+          # mutation_check <label> <suite> <expect-sibling: yes|no|skip> <sed-expr>...
+          #   1. the unmutated copy must PASS      (else the gate is vacuous)
+          #   2. the mutated copy must still PARSE (else it fails for the wrong reason)
+          #   3. the mutated copy must FAIL        (the actual assertion)
+          # Every invocation has an OUTER watchdog independent of the code being
+          # mutated. Exit 124/137 is expected only from a mutant; a baseline that
+          # reaches either is a distinct harness failure, never "the mutant died".
+          mutation_suite() {
+            local dir="$1" suite="$2" limit="${MUTATION_SUITE_TIMEOUT:-150}"
+            local output="${MUTATION_SUITE_OUTPUT:-/dev/null}"
+            # This independent subreaper owns the whole mutation session. A
+            # courier can start a new session of its own; the watchdog still
+            # adopts and terminates it before returning 124 to this gate.
+            python3 "$dir/lib/mutation_watchdog.py" "$dir" "$suite" "$limit" >"$output" 2>&1
+          }
+
+          # A baseline proves the staged bytes, not a particular mutant. Verify
+          # each distinct suite once, then clone those exact passing bytes for
+          # every mutation. Re-running the same baseline before every mutant was
+          # consuming roughly half this step while adding no discrimination.
+          baseline_root="$(mktemp -d)"
+          trap 'rm -rf "$baseline_root"' EXIT
+          baseline_template() {
+            local suite="$1" key="${suite//[^A-Za-z0-9_.-]/_}"
+            local dir="$baseline_root/$key" output="$baseline_root/$key.out"
+            if [[ ! -e "$dir/.baseline-passed" ]]; then
+              mkdir -p "$dir"; stage "$dir"
+              MUTATION_SUITE_OUTPUT="$output" mutation_suite "$dir" "$suite"
+              local base_rc=$?
+              if [[ $base_rc -ne 0 ]]; then
+                if [[ $base_rc -eq 124 || $base_rc -eq 137 ]]; then
+                  echo "::error::$suite BASELINE TIMEOUT — the unmutated suite exceeded the outer ${MUTATION_SUITE_TIMEOUT:-150}s bound" >&2
+                else
+                  echo "::error::the UNMUTATED copy of $suite already fails (rc=$base_rc) — mutation gates prove nothing" >&2
+                fi
+                grep -E 'FAIL|RESULT' "$output" >&2 || true
+                tail -20 "$output" >&2
+                return 1
+              fi
+              : > "$dir/.baseline-passed"
+            fi
+            BASELINE_TEMPLATE="$dir"
+          }
+
+          mutation_check() {
+            local label="$1" suite="$2" sibling="$3"; shift 3
+            baseline_template "$suite" || {
+              echo "::error::$label: no verified baseline for $suite"; return 1; }
+            local baseline="$BASELINE_TEMPLATE"
+            local mut; mut="$(mktemp -d "$baseline_root/mutant.XXXXXX")"
+            cp -a "$baseline/." "$mut/"
+            local assertion_sentinel="" required_assertion="" assertion_armed=""
+            if [[ "$label" == "transport-can-ignore-timeout-term" ]]; then
+              assertion_sentinel="$mut/.assertion-sentinel"
+              required_assertion="transport-ignore-term-courier-gone"
+              assertion_armed="transport-ignore-term-assertion-armed"
+            fi
+
+            # This mutant additionally proves that the baseline reached the
+            # exact TERM-containment assertion before the mutation blocks it.
+            # Keep that one attributable run; all other mutants use the shared
+            # passing template above.
+            if [[ -n "$required_assertion" ]]; then
+              : > "$assertion_sentinel"
+              MUTATION_SUITE_OUTPUT="$mut/.assertion-baseline-output" \
+                TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
+                mutation_suite "$mut" "$suite"
+              local base_rc=$?
+              if [[ $base_rc -ne 0 ]]; then
+                echo "::error::$label: assertion baseline failed in $suite (rc=$base_rc)"
+                tail -20 "$mut/.assertion-baseline-output"
+                rm -rf "$mut"; return 1
+              fi
+              if ! grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: baseline passed without reaching the required $required_assertion assertion"
+                rm -rf "$mut"; return 1
+              fi
+            fi
+
+            local e target
+            for e in "$@"; do
+              target="$mut/org_request_queue.sh"
+              if [[ "$e" == lib:* ]]; then
+                target="$mut/lib/reqrecord.sh"
+                e="${e#lib:}"
+              elif [[ "$e" == py:* ]]; then
+                target="$mut/lib/notify_exec.py"
+                e="${e#py:}"
+              fi
+              sed -i "$e" "$target" || {
+                echo "::error::$label: mutation expression failed for $target: $e"
+                rm -rf "$mut"; return 1
+              }
+            done
+            if ! bash -n "$mut/org_request_queue.sh" "$mut/lib/reqrecord.sh" \
+              || ! python3 -m py_compile "$mut/lib/notify_exec.py"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s org_request_queue.sh "$mut/org_request_queue.sh" \
+              && cmp -s lib/reqrecord.sh "$mut/lib/reqrecord.sh" \
+              && cmp -s lib/notify_exec.py "$mut/lib/notify_exec.py"; then
+              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
+              rm -rf "$mut"; return 1
+            fi
+
+            [[ -z "$assertion_sentinel" ]] || : > "$assertion_sentinel"
+            local descendant_watch="" mutant_output="$mut/.mutant-output"
+            if [[ -n "$required_assertion" ]]; then
+              descendant_watch="$mut/.descendant-watch"
+            fi
+            MUTATION_SUITE_OUTPUT="$mutant_output" \
+              MUTATION_WATCHDOG_PROCESS_FILE="$descendant_watch" \
+              TEST_LEADER_NOTIFY_DESCENDANT_WATCH="$descendant_watch" \
+              TEST_LEADER_NOTIFY_ASSERTION_SENTINEL="$assertion_sentinel" \
+              mutation_suite "$mut" "$suite"
+            local mut_rc=$?
+            if [[ $mut_rc -eq 0 ]]; then
+              echo "::error::$label: $suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            elif [[ -n "$required_assertion" ]]; then
+              if grep -qxF "$required_assertion" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: mutant reached the passing $required_assertion assertion"
+                rm -rf "$mut"; return 1
+              fi
+              if [[ -n "$assertion_armed" ]] \
+                && ! grep -qxF "$assertion_armed" "$assertion_sentinel" 2>/dev/null; then
+                echo "::error::$label: mutant timed out before arming the intended TERM assertion"
+                rm -rf "$mut"; return 1
+              fi
+              if [[ $mut_rc -ne 124 ]] \
+                || ! grep -qxF "MUTATION_WATCHDOG: watched descendant terminated" "$mutant_output"; then
+                echo "::error::$label: mutant did not time out with attributable descendant cleanup (rc=$mut_rc)"
+                tail -20 "$mutant_output"
+                rm -rf "$mut"; return 1
+              fi
+              echo "  ok  $label — TERM assertion armed and blocked; watchdog terminated the escaped descendant"
+            elif [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
+              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
+            fi
+
+            # Cross-check: is this defect visible to the OTHER suite? Pins which
+            # suite is actually carrying the weight, so the two cannot quietly
+            # collapse into one.
+            if [ "$sibling" != "skip" ]; then
+              local other=test_responsible_leader.sh
+              [ "$suite" = "$other" ] && other=test_request_record_integrity.sh
+              mutation_suite "$mut" "$other" >/dev/null 2>&1
+              local other_rc=$?
+              if [[ $other_rc -eq 0 ]]; then
+                [ "$sibling" = "yes" ] && {
+                  echo "::error::$label: expected $other to catch this too, and it did not"; rm -rf "$mut"; return 1; }
+              else
+                if [[ $other_rc -eq 124 || $other_rc -eq 137 ]]; then
+                  echo "::error::$label: sibling $other hit the OUTER deadline; this cross-check is not attributable"
+                  rm -rf "$mut"; return 1
+                fi
+                [ "$sibling" = "no" ] && {
+                  echo "::error::$label: $other also catches this, so it does not show $suite carries its own weight"
+                  rm -rf "$mut"; return 1; }
+              fi
+            fi
+            rm -rf "$mut"
+            [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]] || echo "  ok  $label"
+          }
+
+          rc=0
+
+          # Let a dormant leader be SKIPPED instead of woken. The single most
+          # tempting future "fix" to this design, and it silently turns waiting
+          # into approver-shopping.
+          mutation_check "skipped-dormant-leader" test_responsible_leader.sh skip \
+            's/if \[\[ "$a_status" == "terminated" \]\]; then/if [[ "$a_status" == "terminated" || "$a_status" == "paused" ]]; then/' || rc=1
+
+          # TOG-197's two-time validation: the requester's ceiling is checked at
+          # SUBMIT and RE-CHECKED at approval against freshly-read state. Drop
+          # the re-check and a pending request banks the authority its requester
+          # held when it submitted — so a demotion, a transfer or a termination
+          # between submit and approval no longer reaches the decision. This is
+          # the TOCTOU defence TOG-194 says must survive the epic intact, and
+          # until TOG-258 the only coverage of it lived in test_request_queue.sh,
+          # which needs Postgres and podman and never runs here. `no`: the record
+          # suite does not see this one, which is what shows the authorization
+          # suite carries it.
+          mutation_check "banked-stale-authority" test_responsible_leader.sh no \
+            's/^  may_request "$now_tpl"/  true "$now_tpl"/' || rc=1
+
+          # An auditor may not clear an override it took itself. Drop that one
+          # comparison and the open-item list becomes self-service: the bypasser
+          # writes the entry AND retires it, a write-only log in audit clothing.
+          mutation_check "self-clearable-override" test_responsible_leader.sh skip \
+            's/rv_id" == "$a_id"/rv_id" == "never-matches"/' || rc=1
+
+          # TOG-253 defect 4, exactly as found: the reason guard back on the
+          # denial path only, leaving approvals unreasoned. Expected to be
+          # INVISIBLE to the authorization suite — a denial still needs a
+          # reason — which is what shows the record suite earns its place.
+          mutation_check "unreasoned-approval" test_request_record_integrity.sh no \
+            's/\[\[ -n "$reason" \]\] || die "every decision/[[ -n "$reason" || "$decision" == "approved" ]] || die "every decision/' || rc=1
+
+          # TOG-253 defect 3: expiry back to being a side effect of an attempted
+          # review. Both halves go together — the reaper and the derivation in
+          # request_state — because either alone still gives the right answer,
+          # which is the point of having both.
+          mutation_check "never-expires" test_request_record_integrity.sh skip \
+            's/^reap_expired() {/reap_expired() { return 0;/' \
+            's/expired "$exp" \&\& rec=/false \&\& rec=/' || rc=1
+
+          # TOG-253 defect 1: the invariant, not the lock. An ambiguous id gets
+          # resolved by tail -1 again instead of being refused.
+          mutation_check "ambiguous-request-id" test_request_record_integrity.sh skip \
+            'lib:s/\[\[ "$n" -le 1 \]\]/[[ "$n" -le 99 ]]/' || rc=1
+
+          # --- TOG-254: the requester learns ---------------------------------
+          # All four use sibling=skip. The cross-check picks "the other suite"
+          # from a hard-coded pair, so it cannot express a third suite; using it
+          # here would compare against an arbitrary one of the two and prove
+          # nothing. The gates below still assert the full three-step contract.
+
+          # THE headline defect this issue was filed about: "nothing wakes on an
+          # expiry today at all". Expiry is the quietest of the terminal states
+          # because no human action produces it, so it is the one that silently
+          # reverts to notifying nobody.
+          mutation_check "expiry-notifies-nobody" test_decision_notify.sh skip \
+            's/emit_notification "$rid" expired/true "$rid" expired/' || rc=1
+
+          # Expiry re-notifying on EVERY read, because reap_expired runs from
+          # read paths. A notifier that pages on every `list` gets muted, and a
+          # muted notifier is the dead end this issue exists to close, reached
+          # by a different road.
+          #
+          # BOTH halves go together, for the same reason the never-expires gate
+          # above mutates two lines: single-shot delivery is held by the
+          # idempotency guard in emit_notification AND by reap_expired only
+          # reaping requests whose last status is pending. Either alone gives
+          # the right answer, so mutating one proves nothing — the first draft
+          # of this gate mutated only the guard and the suite passed, which is
+          # how the redundancy was found rather than assumed.
+          mutation_check "notification-repeats-forever" test_decision_notify.sh skip \
+            's/^  notify_already "$rid" requester && { NOTIFY_RESULT="already"; return 0; }/  false \&\& { NOTIFY_RESULT="already"; return 0; }/' \
+            's/| map(select(.last == "pending" and .exp != ""))/| map(select(.exp != ""))/' || rc=1
+
+          # Put the notification row back to carrying `status`, so it is shaped
+          # like a decision. This is not hypothetical — it is the regression
+          # this feature actually caused while being written, and it made
+          # notified requests vanish from every filtered listing.
+          mutation_check "notification-shaped-like-a-decision" test_decision_notify.sh skip \
+            's/{event:"notify.queued",requestId:$id,audience:"requester",decision:$s,/{event:"notify.queued",requestId:$id,audience:"requester",status:$s,/' || rc=1
+
+          # The undelivered-notification gate going green. Same failure mode as
+          # a muted alarm: the feature still "works", and nobody learns that
+          # nobody is learning.
+          mutation_check "undelivered-gate-always-green" test_decision_notify.sh skip \
+            's/\[\[ "$bad" -eq 0 \]\] ||/[[ "$bad" -ge 0 ]] ||/' || rc=1
+
+          # The queue-side half of the steering guard. The transport validates
+          # too, so this gate exists to prove the door check is load-bearing on
+          # its own — without it, deleting the submit-time refusal would leave
+          # every suite green and a hostile address sitting in the audit record.
+          mutation_check "notify-issue-unvalidated-at-submit" test_decision_notify.sh skip \
+            's|^  if \[\[ -n "\$notify_issue" && ! "\$notify_issue" =~.*$|  if false; then|' || rc=1
+
+          # TOG-312, and the two directions this one selector can fail in.
+          #
+          # NARROWED — back to matching the role string alone. This is the
+          # tempting revert ("--for takes a ROLE, it always has"), and it is
+          # invisible from a shell, where a role is what anyone types. It is
+          # only visible from the MCP transport, which has no role to type: it
+          # authenticates a session and knows exactly one thing about its
+          # caller, the agent uuid. Narrowed, an agent's own decisions read back
+          # EMPTY through the only door it has — indistinguishable from "not
+          # decided yet", which is the dead end TOG-312 was filed about.
+          mutation_check "inbox-matches-role-only" test_decision_notify.sh skip \
+            's/select(.role==$w or .agent==$w)/select(.role==$w)/' || rc=1
+
+          # WIDENED — the same line failing the other way. An inbox that stops
+          # filtering is not a broken inbox; it is a company-wide read of every
+          # decision, reached from a per-principal tool, and it LOOKS like a
+          # working feature from the caller's side because their own rows are
+          # all still there. Both halves matter: the mutation above proves the
+          # fix does something, this one proves it does not do too much.
+          mutation_check "inbox-matches-everyone" test_decision_notify.sh skip \
+            's/select(.role==$w or .agent==$w)/select(true)/' || rc=1
+
+          # --- TOG-317: the leader learns ------------------------------------
+          # These use sibling=skip because the cross-check only understands the
+          # original two-suite pair. Each still proves baseline, applied mutation,
+          # parse validity, and that the owning suite goes red.
+          mutation_check "leader-never-told" test_leader_notify.sh skip \
+            's/^  if ! build_leader_notification_payloads "$rid" "$submission"; then$/  LEADER_NOTIFY_PAYLOADS=(); if false; then/' || rc=1
+
+          # Standing notices are profile-addressed for the operator but UUID-
+          # addressed through authenticated MCP. Blank the enqueue-time profile
+          # resolution; both shell role pulls still work, so only the UUID
+          # assertions prove this path is actually reachable to agents.
+          mutation_check "standing-authority-agent-id-not-recorded" test_leader_notify.sh skip \
+            's/^        standing_id="$(f 1 "$standing_row")"$/        standing_id=""/' || rc=1
+
+          # A shared operator issue is not proof that every standing recipient is
+          # assigned to it. Restoring the scalar fallback makes both standing rows
+          # report delivered to one P4-only issue; the recipient-specific test must
+          # reject that false success. mutation_check runs the staged baseline first.
+          mutation_check "standing-shared-issue-falsely-delivered" test_leader_notify.sh skip \
+            's/^      addr="$(standing_notify_issue_for "$recip" "$lid" 2>\/dev\/null || true)"$/      addr="$REQUEST_LEADER_NOTIFY_ISSUE"/' || rc=1
+
+          # pull_only is a capability contract, not an adapter basename. Reinsert
+          # the old filename check: the renamed, byte-identical adapter then lands
+          # failed/exit65 and the owning assertion must go red after its baseline.
+          mutation_check "pull-only-depends-on-adapter-filename" test_leader_notify.sh skip \
+            's/^  if \[\[ "$aud" == "leader" && -z "$issue" && "$REQUEST_NOTIFY_CAPABILITY" == "issue_addressed" \]\]; then$/  if [[ "$aud" == "leader" \&\& -z "$issue" \&\& "$REQUEST_NOTIFY_CMD" == *"notify_paperclip_issue.sh"* ]]; then/' || rc=1
+
+          # Degrade an unaddressable required role to pull_only again. With no live
+          # UUID there is no authenticated inbox reader, so the named missing-holder
+          # assertions must keep notify and drain red.
+          mutation_check "missing-standing-holder-reads-pull-only" test_leader_notify.sh skip \
+            's/^  if \[\[ "$delivery_capability" == "unaddressable" \]\]; then$/  if false; then/' || rc=1
+
+          mutation_check "leader-notification-swallows-the-requesters" test_leader_notify.sh skip \
+            's/                and (.audience \/\/ "requester")==$aud/                and true/' || rc=1
+
+          mutation_check "leader-address-chosen-by-requester" test_leader_notify.sh skip \
+            's/^      addr="$REQUEST_LEADER_NOTIFY_ISSUE"$/      addr="$(jq -r ".notifyIssue \/\/ \\"\\"" <<<"$sub")"/' || rc=1
+
+          # Collapse reqrecord's separate notification-status lock back onto
+          # QUEUE_LOCK. A >5s honest transport then occupies the queue's ordinary
+          # writer lock and a legitimate overlapping review is refused.
+          mutation_check "transport-holds-queue-lock" test_leader_notify.sh skip \
+            's|^REQRECORD_STATUS_LOCK="${QUEUE}.notify-status.lock"$|REQRECORD_STATUS_LOCK="$QUEUE_LOCK"|' || rc=1
+
+          # Re-open the unbounded fallback when timeout enforcement is missing.
+          # The suite points the explicit timeout seam at an unavailable command
+          # and must prove that the transport is not invoked at all.
+          mutation_check "transport-runs-without-timeout-enforcement" test_leader_notify.sh skip \
+            's|^    out="process-tree timeout enforcement unavailable; transport not invoked"$|    out="transport ran without containment"; bash -c "$REQUEST_NOTIFY_CMD" </dev/null >/dev/null 2>\&1|' \
+            's|^    rc=125$|    rc=$?|' || rc=1
+
+          # Remove only the forced-kill escalation. The TERM-ignoring courier
+          # survives TERM, so its PID assertion must reject this mutant. The
+          # independent mutation_suite watchdog bounds that mutant and reports a
+          # mutant timeout separately from an unmutated baseline timeout.
+          mutation_check "transport-can-ignore-timeout-term" test_leader_notify.sh skip \
+            'py:s/os.killpg(proc.pid, signal.SIGKILL)/os.killpg(proc.pid, signal.SIGTERM)/' \
+            'py:s/signal_children(signal.SIGKILL)/signal_children(signal.SIGTERM)/' \
+            'py:s/proc.kill()/proc.terminate()/' || rc=1
+
+          # Remove descendant cleanup from the supervisor. The retained-stdout
+          # and detached-mutator fixtures exercise descriptor and process-tree
+          # containment; the owning suite must reject the mutation without
+          # letting it hang the CI job.
+          mutation_check "transport-descendants-survive-parent" test_leader_notify.sh skip \
+            'py:s/^        stop_tree(proc, grace)$/        pass/' || rc=1
+
+          # Suppress jq failure again. Malformed JSON then produces partial output
+          # that can compare equal and be credited as a delivered notification.
+          mutation_check "malformed-fingerprint-reads-equal" test_leader_notify.sh skip \
+            'lib:s#^    .select(\$ev\[.event\] // false). .\$QUEUE.$#    '\''select($ev[.event] // false)'\'' "$QUEUE" 2>/dev/null || true#' || rc=1
+
+          # Disable the central mutation verdict. Because the guard lives inside
+          # notify_deliver, this one deletion must expose both hostile submit and
+          # hostile drain cases; a call-site wrapper cannot satisfy the drain case.
+          mutation_check "notifier-mints-a-decision-on-submit-or-drain" test_leader_notify.sh skip \
+            's/^  \[\[ "$fp_before" == "$fp_after" \]\] || tampered="yes"$/  true/' || rc=1
+
+          # The atomic standing-authority intent set must retain both recipients.
+          # Collapsing the builder to its first row strands the second authority
+          # before publication, while a single-leader request still looks healthy.
+          mutation_check "standing-recipient-idempotency-collapsed" test_leader_notify.sh skip \
+            '/while IFS= read -r standing_role; do/,/done < <(jq -r/ s/      LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")$/      [[ ${#LEADER_NOTIFY_PAYLOADS[@]} -gt 0 ]] || LEADER_NOTIFY_PAYLOADS+=("$LEADER_NOTIFY_PAYLOAD")/' || rc=1
+
+          # Upgrade compatibility: recipient-aware grouping must still associate
+          # historical requester outcomes that predate recipientRole. Requiring an
+          # exact role match re-queues and redelivers already-delivered decisions.
+          mutation_check "legacy-notification-outcome-orphaned" test_leader_notify.sh skip \
+            's/                             or ($q.audience=="requester" and ((has("recipientRole")|not) or .recipientRole==null))))/                             or false))/' || rc=1
+
+          # Standing authority has two required recipients. Regressing to the old
+          # scalar summary lets P1's later success overwrite P4's earlier failure.
+          mutation_check "standing-mixed-result-collapsed" test_leader_notify.sh skip \
+            's/^    LEADER_NOTIFY_RESULTS+=.*$/    LEADER_NOTIFY_RESULTS=""/' \
+            's/^    NOTIFY_RESULT="failed"$/    NOTIFY_RESULT="$result"/' || rc=1
+
+          # Advisory reachability may never execute without an enforceable outer
+          # deadline. Re-open the direct fallback and the hanging fixture must hit
+          # this mutation gate's independent watchdog rather than hang the job.
+          mutation_check "reachability-runs-without-timeout-enforcement" test_leader_notify.sh skip \
+            's|^    echo "  reachability       : UNKNOWN for .*|    out="$("$probe" probe --agent "$lid" 2>/dev/null)"; rc=$?;|' || rc=1
+
+          # --- the transport's own gates (TOG-198 review) ---------------------
+          # Separate helper because these mutate notify_paperclip_issue.sh, not
+          # org_request_queue.sh, and the suite reaches it through NOTIFY_SH
+          # rather than by cwd. Same three-step contract: the unmutated copy
+          # must pass in the staging dir (or the gate is vacuous), the mutation
+          # must still parse (or it fails for the wrong reason), and the sed
+          # must actually change something (or the code moved and the mutation
+          # silently missed).
+          notify_mutation_check() {
+            local label="$1"; shift
+            local mut; mut="$(mktemp -d "$baseline_root/notify-mutant.XXXXXX")"
+            cp notify_paperclip_issue.sh test_notify_transport.sh "$mut/"
+            chmod +x "$mut/notify_paperclip_issue.sh" "$mut/test_notify_transport.sh"
+
+            if ! NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh 2>&1 | tail -20
+              rm -rf "$mut"; return 1
+            fi
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/notify_paperclip_issue.sh"; done
+            if ! bash -n "$mut/notify_paperclip_issue.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s notify_paperclip_issue.sh "$mut/notify_paperclip_issue.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and the mutation missed"
+              rm -rf "$mut"; return 1
+            fi
+
+            if NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
+              echo "::error::$label: test_notify_transport.sh PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"
+            echo "  ok  $label"
+          }
+
+          # The credential back on argv. /proc/<pid>/cmdline is world-readable
+          # and this box is shared between companies; gh_token.sh:75-131 made
+          # this a repo-wide rule under TOG-200 and the notifier shipped
+          # breaking it, which is how a rule decays — one new caller at a time.
+          notify_mutation_check "notify-credential-on-argv" \
+            's|^  printf .header = "Authorization: Bearer %s..n. "\$PAPERCLIP_API_KEY"$|  :|' \
+            's|^RESP="\$(curl --config "\$CFG" -o /dev/null -w .%{http_code}. 2>&1)"|RESP="$(curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -d "$(jq -cn --arg b "$MSG" "{body:\\$b}")" "$BASE/api/issues/$ISSUE/comments" 2>\&1)"|' || rc=1
+
+          # The issue id unvalidated, so the least-privileged party in the flow
+          # picks the route an operator-credentialed POST takes. curl resolves
+          # dot segments client-side, so this is not theoretical: `..` in the
+          # id removed /api/issues/ from url_effective entirely.
+          notify_mutation_check "notify-unvalidated-issue-id" \
+            's|^if \[\[ ! "\$ISSUE" =~ \^\[A-Za-z0-9\]\[A-Za-z0-9_-\]\*\$ \]\]; then|if false; then|' || rc=1
+
+          # A fixed ``` fence, which a body containing ``` closes. These
+          # comments WAKE agents, so the forged block that follows is read by a
+          # machine, not merely displayed to a human.
+          notify_mutation_check "notify-fence-not-measured" \
+            's|^FENCE_LEN=\$(( \$(longest_tick_run "\$BODY") + 1 )).*$|FENCE_LEN=3|' || rc=1
+
+          # Leader rows carry `decision`, deliberately not `status`; reading only
+          # status renders the reference adapter heading as null.
+          notify_mutation_check "notify-renders-status-only" \
+            's/^STATUS=.*$/STATUS="$(jq -r '\''.status'\'' <<<"$PAYLOAD")"/' || rc=1
+
+          # Restore the audience-blind fallback. A leader row whose operator
+          # address is null then gets sent to the requester's fallback issue.
+          notify_mutation_check "notify-leader-uses-requester-fallback" \
+            's/^if \[\[ -z "$ISSUE" && "$AUDIENCE" == "requester" \]\]; then/if [[ -z "$ISSUE" ]]; then/' || rc=1
+
+          exit $rc
+
+      # TOG-358. The preflight's whole job is to refuse to say "ok" about an
+      # endpoint it could not actually use. Each mutation below reintroduces one
+      # specific way of saying ok anyway. `unreachable-reads-ok` is the one that
+      # matters most: it is the exact shape of the failure this tool was written
+      # for — :20129 answers a TCP reset from inside a container, and a gate that
+      # scores that as a pass green-lights a company-wide outage.
+      #
+      # Baseline first, as everywhere else here: a staged unmutated copy must
+      # pass, then every mutant starts from those exact bytes. Otherwise a red
+      # below is unattributable.
+      - name: Prove the preflight suite still detects a weakened refusal
+        timeout-minutes: 25
+        run: |
+          set -uo pipefail
+          rc=0
+
+          # Verify one staged baseline, then clone those exact passing bytes for
+          # each mutant. The old loop paid for the identical baseline 11 times.
+          # Keep an outer process-tree deadline on both baseline and mutants so
+          # weakening timeout logic cannot consume the whole Offline job.
+          preflight_root="$(mktemp -d)"
+          trap 'rm -rf "$preflight_root"' EXIT
+          baseline="$preflight_root/baseline"
+          mkdir -p "$baseline/lib"
+          cp agent_endpoint_preflight.sh test_agent_endpoint_preflight.sh "$baseline/"
+          cp lib/mutation_watchdog.py "$baseline/lib/"
+
+          preflight_suite() {
+            local dir="$1" limit="${PREFLIGHT_MUTATION_TIMEOUT:-180}"
+            local output="${PREFLIGHT_SUITE_OUTPUT:-/dev/null}"
+            python3 "$dir/lib/mutation_watchdog.py" "$dir" \
+              test_agent_endpoint_preflight.sh "$limit" >"$output" 2>&1
+          }
+
+          PREFLIGHT_SUITE_OUTPUT="$preflight_root/baseline.out" preflight_suite "$baseline"
+          base_rc=$?
+          if [[ $base_rc -ne 0 ]]; then
+            echo "::error::the UNMUTATED preflight copy fails (rc=$base_rc) — this gate proves nothing"
+            tail -25 "$preflight_root/baseline.out"
+            exit 1
+          fi
+
+          preflight_mutation() {
+            local label="$1"; shift
+            local mut; mut="$(mktemp -d "$preflight_root/mutant.XXXXXX")"
+            cp -a "$baseline/." "$mut/"
+
+            local e
+            for e in "$@"; do sed -i "$e" "$mut/agent_endpoint_preflight.sh"; done
+            if cmp -s agent_endpoint_preflight.sh "$mut/agent_endpoint_preflight.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            if ! bash -n "$mut/agent_endpoint_preflight.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            PREFLIGHT_SUITE_OUTPUT="$mut/.mutant-output" preflight_suite "$mut"
+            local mut_rc=$?
+            if [[ $mut_rc -eq 0 ]]; then
+              echo "::error::$label: the preflight suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if [[ $mut_rc -eq 124 || $mut_rc -eq 137 ]]; then
+              echo "  ok  $label — mutant hit the outer deadline (rc=$mut_rc)"
+            else
+              echo "  ok  $label"
+            fi
+            rm -rf "$mut"
+          }
+
+          # A refused connection scored as a pass — the outage green-light.
+          preflight_mutation "unreachable-reads-ok" \
+            's/verdict "unreachable" 5/verdict "unreachable" 0/g' || rc=1
+          # A hung endpoint folded into "reachable enough".
+          preflight_mutation "hang-reads-ok" \
+            's/verdict "timeout" 6/verdict "timeout" 0/' || rc=1
+          # A route can inject both field names as zero and still carry no
+          # accounting. Defeat the positive cache-write gate; the zero-cache
+          # case must then make the suite red.
+          preflight_mutation "cache-creation-check-deleted" \
+            's/"\$CACHE_CREATE" -le 0/"$CACHE_CREATE" -le -1/' || rc=1
+          # A positive write alone is also insufficient. Defeat the identical
+          # replay's positive-read gate; the write-only case must make it red.
+          preflight_mutation "cache-replay-check-deleted" \
+            's/"\$CACHE_REPLAY_READ" -le 0/"$CACHE_REPLAY_READ" -le -1/' || rc=1
+          # Billing per token while the subscriptions idle, reported as fine.
+          preflight_mutation "payg-not-flagged" \
+            's/^\[\[ "\$RESP_ID" == gen-\* \]\]/[[ "$RESP_ID" == nevermatch-* ]]/' \
+            's|^\[\[ "\$RESP_MODEL" == \*/\* \]\]|[[ "$RESP_MODEL" == *@@@* ]]|' || rc=1
+          # An OpenAI-dialect body accepted as an Anthropic envelope.
+          preflight_mutation "wrong-dialect-accepted" \
+            's/^  anthropic) ;;$/  anthropic|openai|error|*) ;;/' || rc=1
+          # The property that keeps CLIProxy from IP-banning the host: one
+          # request, ever. This mutation adds a second probe call.
+          preflight_mutation "retries-on-auth-failure" \
+            's|^CURL_EXIT=0$|curl -sS -o /dev/null -H "@$HDRS" -d "$REQ" --max-time "$TIMEOUT" "$BASE/v1/messages" >/dev/null 2>\&1\nCURL_EXIT=0|' || rc=1
+          # TOG-361. A live endpoint whose model lane is dead, scored as a pass.
+          preflight_mutation "dead-model-lane-reads-ok" \
+            's/verdict "model-unavailable" 8/verdict "model-unavailable" 0/' || rc=1
+          # Collapse the classification back into a generic timeout. Both values
+          # are non-zero, so a merge gate would miss this wrong diagnosis.
+          preflight_mutation "model-lane-reads-as-outage" \
+            's/if \[\[ "\$CCODE" == 200 \]\]; then/if [[ "$CCODE" == 999 ]]; then/' || rc=1
+          # TOG-358. The subscription lane answers Claude Code clients, not a
+          # bare curl. Silently losing the default identity makes a healthy lane
+          # read as a hang.
+          preflight_mutation "client-identity-not-sent" \
+            's/^CLIENT_IDENTITY=1$/CLIENT_IDENTITY=0/' || rc=1
+          # OmniRoute's combo validator manufactures a 502 below 16 output
+          # tokens, before the selected upstream runs. A one-token probe cannot
+          # distinguish that validator from a broken route.
+          preflight_mutation "combo-output-budget-too-small" \
+            's/"max_tokens":16/"max_tokens":1/g' || rc=1
+          exit $rc
+
+      # TOG-425. This watcher answers a question that expires: the evidence for
+      # whether teamclaude rotates off a spent account exists only while the
+      # pacer feed still holds an exhaustion episode. A watcher that quietly
+      # reports the wrong answer is therefore not merely wrong, it is
+      # unfalsifiable later.
+      #
+      # `verdict-from-is_current` is the mutation that matters. TOG-425 as
+      # written asked for exactly that field, and it was MEASURED pointing at
+      # the idle account for an hour on 2026-08-24 while the other account
+      # burned 0.28 -> 0.38. The first version of the suite passed against this
+      # mutation, because in that fixture burn and is_current happened to agree;
+      # the case now pins a feed where they contradict each other. Keep it.
+      #
+      # Baseline first, as everywhere else here: the unmutated copy must pass in
+      # the same staging directory, or a red below is unattributable.
 
   # ---------------------------------------------------------------------------
   # The operator runbook gates (TOG-1141).
