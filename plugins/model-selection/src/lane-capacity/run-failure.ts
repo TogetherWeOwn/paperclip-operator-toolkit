@@ -43,6 +43,27 @@ import type { ModelEntry } from "../engine/types.js";
  *  - `All credentials ... are cooling down` without a model id, and
  *    `all upstream accounts` — older CLIProxy phrasings kept for the same
  *    class.
+ *  - `no healthy managed <lane> capacity remains` — TOG-3652 (ported from
+ *    TOG-3025/PR #331). CLIProxy emits it when its pool of managed upstream
+ *    accounts for a lane has no healthy member left. The cause may be
+ *    allowance exhaustion or a provider-side outage — the message even says
+ *    "usually temporary". It belongs here because the list's real question
+ *    is not "whose fault is it?" but "can this lane serve the next run?",
+ *    and for the whole time this string is returned the answer is no.
+ *
+ *    Measured before adding it (`heartbeat_runs`, 14 days to 2026-09-17):
+ *    2,193 failed runs, 623 matched by the five phrases above, 56 carrying
+ *    this family with ZERO overlap — three episodes, two sustained (23 min /
+ *    16 runs on Z.ai, 63 min / 39 runs on OpenCode Go). Sustained and
+ *    lane-scoped, not the per-minute throttling the bare-429 exclusion
+ *    guards against. The 15-minute `AUTO_QUARANTINE_SECONDS` TTL pairs with
+ *    "usually temporary": shorter than both observed episodes, so the lane
+ *    is re-probed while still out, and a false positive costs at most one
+ *    quarter-hour of traffic pushed up.
+ *
+ *    No model id is embedded — CLIProxy names the lane in its own words
+ *    ("OpenCode Go", "Z.ai"), not roster ids — so attribution runs through
+ *    the `fallbackModelId` path: the model the failed run was going to use.
  */
 const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   /all credentials for model\s+\S+\s+are cooling down/i,
@@ -50,6 +71,10 @@ const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   /usage[_ ]limit[_ ]reached/i,
   /all upstream accounts .{0,40}(exhausted|unavailable|cooling)/i,
   /weekly (quota|limit) (exhausted|reached)/i,
+  // Bounded rather than `.*`: verified identical on the 14-day corpus (56 of
+  // 2,193 either way, zero disagreements), and a bound keeps a future
+  // multi-sentence error from matching across an unrelated clause.
+  /no healthy managed .{0,60}capacity remains/i,
 ];
 
 /**

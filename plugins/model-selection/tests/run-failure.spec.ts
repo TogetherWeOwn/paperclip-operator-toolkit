@@ -45,6 +45,74 @@ const LIVE_429 =
   "API Error: Request rejected (429) · All credentials for model gpt-5.6-sol are cooling down "
   + "(last error: usage_limit_reached: The usage limit has been reached)";
 
+/**
+ * TOG-3652 (ported from TOG-3025/PR #331). The managed-capacity family,
+ * verbatim from `heartbeat_runs.error`.
+ *
+ * Measured over the 14 days to 2026-09-17: 56 failed runs carried this family,
+ * with ZERO overlap with the 623 matched by the original five phrases — so
+ * before this was added, the quarantine could see none of them. The 63-minute
+ * OpenCode Go episode these come from is what blocked TOG-3025 itself three
+ * times.
+ */
+const LIVE_MANAGED_OPENCODE =
+  "Internal error: API Error: 500 no healthy managed OpenCode Go capacity remains. "
+  + "This is a server-side issue, usually temporary — try again in a moment. "
+  + "If it persists, check your inference gateway (cliproxy:8317).";
+
+const LIVE_MANAGED_ZAI =
+  "Internal error: API Error: 500 no healthy managed Z.ai capacity remains. "
+  + "This is a server-side issue, usually temporary — try again in a moment.";
+
+describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", () => {
+  it("attributes the live OpenCode Go rejection to the failed run's own lane", () => {
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_MANAGED_OPENCODE,
+      models: ROSTER,
+      fallbackModelId: "gpt-5.6-sol",
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict!.laneId).toBe("cliproxy-codex");
+    // CLIProxy names the lane in its own words ("OpenCode Go"), which is not a
+    // roster id — so attribution MUST come from the fallback, not the text.
+    expect(verdict!.modelFromErrorText).toBe(false);
+  });
+
+  it("attributes the Z.ai variant of the same phrasing", () => {
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_MANAGED_ZAI,
+      models: ROSTER,
+      fallbackModelId: "glm-5.3",
+    });
+    expect(verdict?.laneId).toBe("cliproxy-zai");
+  });
+
+  /**
+   * The discriminator. Every string below is a 500/503 from the same gateway,
+   * two of them mentioning capacity; only the real phrase says the managed pool
+   * is empty. If this test ever fails, the phrase has been loosened into
+   * matching ordinary server errors and the quarantine will start evacuating
+   * healthy lanes — the exact failure the bare-429 exclusion exists to prevent.
+   */
+  it("does NOT quarantine on a transient 500 that lacks the phrase", () => {
+    for (const error of [
+      "Internal error: API Error: 500 upstream request failed. Check your inference gateway (cliproxy:8317).",
+      "Internal error: API Error: 500 internal server error",
+      "API Error: 503 capacity temporarily degraded, retry shortly",
+    ]) {
+      expect(
+        laneExhaustionFromRunFailure({ error, models: ROSTER, fallbackModelId: "gpt-5.6-sol" }),
+      ).toBeNull();
+    }
+  });
+
+  it("refuses to guess a lane when nothing resolves — the phrase alone is not attribution", () => {
+    expect(
+      laneExhaustionFromRunFailure({ error: LIVE_MANAGED_OPENCODE, models: ROSTER }),
+    ).toBeNull();
+  });
+});
+
 describe("laneExhaustionFromRunFailure", () => {
   it("attributes the live 2026-09-16 rejection to the codex lane, from the error text alone", () => {
     const verdict = laneExhaustionFromRunFailure({ error: LIVE_429, models: ROSTER });

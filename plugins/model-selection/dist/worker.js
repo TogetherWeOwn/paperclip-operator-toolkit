@@ -3519,7 +3519,11 @@ var LANE_EXHAUSTION_PHRASES = [
   /all credentials .{0,40}cooling down/i,
   /usage[_ ]limit[_ ]reached/i,
   /all upstream accounts .{0,40}(exhausted|unavailable|cooling)/i,
-  /weekly (quota|limit) (exhausted|reached)/i
+  /weekly (quota|limit) (exhausted|reached)/i,
+  // Bounded rather than `.*`: verified identical on the 14-day corpus (56 of
+  // 2,193 either way, zero disagreements), and a bound keeps a future
+  // multi-sentence error from matching across an unrelated clause.
+  /no healthy managed .{0,60}capacity remains/i
 ];
 var MODEL_IN_COOLDOWN_RE = /all credentials for model\s+([^\s,)]+)\s+are cooling down/i;
 function laneExhaustionFromRunFailure(input) {
