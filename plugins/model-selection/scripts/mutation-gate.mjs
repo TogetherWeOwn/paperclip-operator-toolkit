@@ -4,8 +4,22 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  MUTATION_GATE_CI_MESSAGE,
+  copyMutationTree,
+  mutationGateAllowed,
+  mutationGateVitestInvocation,
+  runSequentially,
+  stageRepoFixtures,
+} from "./mutation-gate-runtime.mjs";
+
+if (!mutationGateAllowed()) {
+  process.stderr.write(`${MUTATION_GATE_CI_MESSAGE}\n`);
+  process.exit(2);
+}
 
 const root = resolve(new URL("..", import.meta.url).pathname);
+const repoRoot = resolve(root, "../..");
 
 const mutants = [
   {
@@ -1243,10 +1257,18 @@ if (mutantFilter.length > 0) {
   }
 }
 
-function runTests() {
-  return spawnSync(process.execPath, ["node_modules/vitest/vitest.mjs", "run"], {
-    cwd: root,
+function runTests(cwd = root) {
+  const { args, env, timeout, killSignal } = mutationGateVitestInvocation();
+  return spawnSync(process.execPath, args, {
+    cwd,
     encoding: "utf8",
+    env,
+    // TOG-3129: bound each run individually. Without this one wedged mutant
+    // spends the job's whole `timeout-minutes` and the job dies with no mutant
+    // name; `completed()` below turns the timeout kill into a BROKEN GATE that
+    // says which one.
+    timeout,
+    killSignal,
   });
 }
 
@@ -1280,38 +1302,70 @@ if (baseline.status !== 0) {
 }
 
 const scratch = await mkdtemp(join(tmpdir(), "model-selection-mutants-"));
+const mutationRoot = join(scratch, "plugins", "model-selection");
 let failures = 0;
+let brokenGate = false;
 try {
-  for (const mutant of selected) {
-    const path = join(root, mutant.file);
-    const original = await readFile(path, "utf8");
-    const occurrences = original.split(mutant.from).length - 1;
-    if (occurrences !== 1) {
-      console.error(`BROKEN GATE: ${mutant.name} matched ${occurrences} times in ${mutant.file}`);
-      failures += 1;
-      continue;
-    }
+  await copyMutationTree(root, mutationRoot);
+  await stageRepoFixtures(repoRoot, scratch);
 
-    await writeFile(join(scratch, mutant.name), original);
-    await writeFile(path, original.replace(mutant.from, mutant.to));
-    const result = runTests();
-    await writeFile(path, original);
+  // Positive control (TOG-2980). The loop below scores EVERY nonzero exit as a
+  // kill, so a suite that cannot run from the copy at all reports a clean sweep
+  // while proving nothing — which is exactly what shipped: a spec reading
+  // ../../../.github/workflows/ci.yml threw ENOENT here, and `18/18 killed`
+  // was measuring that, not the mutations. The green baseline above ran in the
+  // SOURCE tree and could not see it.
+  //
+  // Re-run the UNMUTATED suite from mutationRoot, after the fixtures are staged
+  // and before the first mutant is applied. Every kill below is only meaningful
+  // relative to this being green. Keep it permanently: it is what turns a new
+  // out-of-copy dependency into a failure instead of a false sweep.
+  const isolatedBaseline = runTests(mutationRoot);
+  if (isolatedBaseline.status !== 0) {
+    process.stderr.write(
+      "BROKEN GATE: the unmutated suite is red from the mutation copy, so every mutant would score as killed.\n" +
+        "A spec most likely reads a repo file outside the plugin; stage it in MUTATION_TREE_REPO_FIXTURES.\n",
+    );
+    process.stderr.write(isolatedBaseline.stdout ?? "");
+    process.stderr.write(isolatedBaseline.stderr ?? "");
+    brokenGate = true;
+  }
 
-    if (!completed(result)) {
-      console.error(`BROKEN GATE: ${mutant.name} run did not complete (status ${result.status}, signal ${result.signal})`);
-      failures += 1;
-    } else if (result.status === 0) {
-      console.error(`SURVIVED: ${mutant.name}`);
-      failures += 1;
-    } else {
-      console.log(`KILLED: ${mutant.name}`);
-    }
+  if (!brokenGate) {
+    await runSequentially(selected, async (mutant) => {
+      const path = join(mutationRoot, mutant.file);
+      const original = await readFile(path, "utf8");
+      const occurrences = original.split(mutant.from).length - 1;
+      if (occurrences !== 1) {
+        console.error(`BROKEN GATE: ${mutant.name} matched ${occurrences} times in ${mutant.file}`);
+        failures += 1;
+        return;
+      }
+
+      let result;
+      try {
+        await writeFile(path, original.replace(mutant.from, mutant.to));
+        result = runTests(mutationRoot);
+      } finally {
+        await writeFile(path, original);
+      }
+
+      if (!completed(result)) {
+        console.error(`BROKEN GATE: ${mutant.name} run did not complete (status ${result.status}, signal ${result.signal})`);
+        failures += 1;
+      } else if (result.status === 0) {
+        console.error(`SURVIVED: ${mutant.name}`);
+        failures += 1;
+      } else {
+        console.log(`KILLED: ${mutant.name}`);
+      }
+    });
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
 }
 
-if (failures > 0) process.exit(1);
+if (brokenGate || failures > 0) process.exit(1);
 if (selected.length !== mutants.length) {
   console.log(`mutation gate PARTIAL: ${selected.length}/${mutants.length} mutants run, all killed — NOT a passing gate`);
   process.exit(0);

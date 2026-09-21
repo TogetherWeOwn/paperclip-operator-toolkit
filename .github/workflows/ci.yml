@@ -5482,13 +5482,35 @@ jobs:
   model-selection-suite:
     name: model-selection suite
     runs-on: [self-hosted, two-selfhosted]
-    # TOG-3132: the named mutation gate (scripts/mutation-gate.mjs) grew from 55
-    # to 115 mutants over this card's life; each mutant re-runs the full Vitest
-    # suite, so under self-hosted fleet load the job exceeded the old 20m cap and
-    # was cancelled (not a red test — a timeout). A rerun could never fix that.
-    # 45m gives >2x headroom and is still well under the 150m Offline job.
-    # Longer-term the gate should be sharded; tracked separately.
-    timeout-minutes: 45
+    # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
+    # gate runs (the gate refuses outside CI), and each mutant re-runs the full
+    # Vitest suite capped at 2 forks. The named gate grew from 55 to 115 mutants
+    # over these cards' lives, so the sweep is bounded but serialized: 117 runs
+    # (baseline + isolated baseline + 115 mutants). Under self-hosted fleet load
+    # this exceeded the old 20m cap and was CANCELLED (a timeout, not a red
+    # test) — a rerun could never fix that.
+    #
+    # This ceiling is a hang-catcher, not a performance budget: each run is
+    # separately bounded by MUTATION_GATE_RUN_TIMEOUT_MS, which fails loudly and
+    # NAMES the mutant, so a genuine wedge is caught with a useful signal well
+    # before this fires. The danger a MIS-SIZED ceiling introduces is the
+    # inverse of a wedge: it converts an honest-but-slow sweep into a silent
+    # "cancelled" with no mutant named — the exact failure mode these cards are
+    # about.
+    #
+    # TOG-3649: 45m was itself too tight for the fully-grown 115-mutant sweep.
+    # On the #300 merge-forward (run 35548289466, job 106178148853) the honest
+    # sweep reached only 93/115 named mutants at the 45m ceiling — 22 never ran,
+    # and the job cancelled with no mutant named: precisely the silent-cancel
+    # this comment warns against. Measured ~28s/run under that load puts the
+    # full sweep near ~54m for the step alone, so 45m had negative headroom.
+    # The ceiling is now 90m — the same value already carried by the sibling
+    # `long-mutation-gates` job, and still well under the 150m Offline job. The
+    # per-mutant deadline is unchanged, so this does not weaken the gate; it
+    # lets every mutant actually run. Longer-term the sweep should be sharded
+    # into independently required jobs (owned by the CI restructure, TOG-3553);
+    # this raise is the bounded fix, not that restructure.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: plugins/model-selection

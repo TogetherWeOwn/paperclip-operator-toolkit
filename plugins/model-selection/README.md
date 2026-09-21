@@ -440,19 +440,29 @@ root: `ctx.issues`, `ctx.agents`, `ctx.companies`, `ctx.db`, `ctx.state`, ….
 ## Verification
 
 ```
-npm run verify     # typecheck + tests + named mutants + build
-npm test           # unit + reviewed live-config fixture
-npm run test:mutants  # 26 named mutants, one per acceptance-criterion trap:
+npm test -- tests/<changed>.spec.ts --pool=forks --maxWorkers=2  # local review: one spec only
+npm run verify        # CI/private runner only: typecheck + tests + named mutants + build
+npm test              # unit + reviewed live-config fixture
+npm run test:mutants  # CI/private runner only: 115 named mutants, one per acceptance-criterion trap, including:
                        # tier order, fallback revival, releasedAt removal,
                        # rework-as-n, 14-day censor, missing-acceptance default,
                        # cohort randomization, run/card conflation, rolling-clock
                        # injection, lane-posture bypass, per-tier lane collapse,
                        # disallowed activity_log read, shadow-pair wiring, earn-in
                        # guards, TOG-3111 creation-pin wiring/guards/notice throttle
-npm run build      # esbuild → dist/manifest.js, dist/worker.js
+npm run build         # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce
 ```
+
+`verify` and `test:mutants` refuse outside `CI=true` unless
+`MUTATION_GATE_LOCAL=1` is deliberately set. Reviewers run only the changed spec
+locally; mutation evidence links the PR's **model-selection suite** job, step
+**Kill named selection mutants** — and only that. Do **not** cite **Offline
+suites**: it runs the repo-level `verification/*-mutation-gate.sh` set and never
+invokes this plugin's gate, so it cannot carry this evidence whichever way it
+lands. The local override runs with Vitest forks and threads defaulting to 2. See
+[`docs/model-selection-review-runbook.md`](../../docs/model-selection-review-runbook.md).
 
 `gate:stage2` is the shipping constraint expressed as code rather than as a
 sentence somebody re-reads. It counts issues actually carrying a `tier:*` label
