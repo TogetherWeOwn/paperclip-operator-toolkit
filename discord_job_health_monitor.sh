@@ -17,7 +17,7 @@
 # This wrapper does the other half of the loop in one command:
 #
 #   1. run the detector against this installation;
-#   2. post the measured verdict to the dedicated monitor issue;
+#   2. post the measured verdict when its state changes;
 #   3. re-arm that issue's native monitor for the next cycle.
 #
 # Run this from the monitor issue's heartbeat:
@@ -37,10 +37,11 @@
 # an unattended alarm — and so that silencing it requires deleting the monitor
 # rather than letting it quietly go green.
 #
-# This script writes only to the dedicated monitor issue: one comment plus its
-# next monitor timestamp. The existing execution policy is preserved; only
-# `.monitor` is replaced. The Paperclip bearer travels in a 0600 curl config,
-# never argv.
+# This script writes only to the dedicated monitor issue. It always advances the
+# next monitor timestamp, but comments only when the measured state changes so a
+# standing clock cannot grow its own wake payload until Linux rejects it with
+# E2BIG. The existing execution policy is preserved; only `.monitor` is replaced.
+# The Paperclip bearer travels in a 0600 curl config, never argv.
 #
 # Exit status is the detector's status after the monitor has been re-armed:
 #   0 every job healthy and every gated job proved a delivery
@@ -65,8 +66,8 @@ usage: discord_job_health_monitor.sh [--issue ISSUE_ID]
                                      [--error-retry-hours N]
                                      [--window-hours N]
 
-Runs scripts/discord_job_health.js --json, comments the result on the monitor
-issue, and re-arms its native Paperclip monitor. Defaults to $PAPERCLIP_TASK_ID.
+Runs scripts/discord_job_health.js --json, comments when the measured state
+changes, and re-arms the native monitor. Defaults to $PAPERCLIP_TASK_ID.
 EOF
 }
 
@@ -88,7 +89,7 @@ done
 for n in "$INTERVAL_HOURS" "$ERROR_RETRY_HOURS" "$WINDOW_HOURS"; do
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: intervals must be positive whole hours" >&2; exit 2; }
 done
-for tool in curl jq date; do
+for tool in curl jq date sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: $tool is required" >&2; exit 2; }
 done
 command -v "$NODE_BIN" >/dev/null 2>&1 || { echo "ERROR: node is required" >&2; exit 2; }
@@ -204,6 +205,38 @@ else
   } > "$COMMENT"
 fi
 
+# Counts slide on every 48h window, so they are not state. Fingerprint the job
+# verdicts, failure classes, delivery evidence, and latest error instead. The
+# short hash is stored in monitor notes, which are readable on the next cycle;
+# externalRef cannot carry it because Paperclip deliberately redacts that field.
+STATE_JSON="$WORK/state.json"
+if [[ "$MEASURED" == yes ]]; then
+  jq -cS '{
+    measured: true,
+    jobs: ([.jobs[] | {
+      jobKey,
+      verdict,
+      scopeDenied: ((.scopeDenied // 0) > 0),
+      otherFailures: ((.otherFailures // 0) > 0),
+      deliveryMetric: (.deliveryMetric // null),
+      delivery: (if .deliveryMetric then {
+        delivered: (.delivered // 0),
+        opportunities: (.sendOpportunities // 0)
+      } else null end),
+      latestError: (.latestError // null)
+    }] | sort_by(.jobKey))
+  }' "$RESULT" > "$STATE_JSON" \
+    || { echo "ERROR: could not fingerprint detector result" >&2; exit 2; }
+else
+  jq -cn --argjson rc "$DETECTOR_RC" --rawfile stderr "$DETECTOR_ERR" \
+    '{measured:false, detectorExit:$rc, stderr:$stderr}' > "$STATE_JSON" \
+    || { echo "ERROR: could not fingerprint detector failure" >&2; exit 2; }
+fi
+STATE_HASH="$(sha256sum "$STATE_JSON")" \
+  || { echo "ERROR: could not hash detector state" >&2; exit 2; }
+STATE_HASH="${STATE_HASH%% *}"
+STATE_KEY="${STATE_HASH:0:16}"
+
 ISSUE_JSON="$WORK/issue.json"
 GET_STATUS="$(request GET "$BASE/api/issues/$ISSUE_ID" "$ISSUE_JSON")" \
   || { echo "ERROR: could not read monitor issue" >&2; exit 2; }
@@ -213,6 +246,13 @@ case "$GET_STATUS" in
 esac
 jq -e 'type == "object" and (.id | type == "string")' "$ISSUE_JSON" >/dev/null 2>&1 \
   || { echo "ERROR: monitor issue response was not an issue" >&2; exit 2; }
+PREVIOUS_STATE_KEY="$(jq -r '
+  try (.executionPolicy.monitor.notes // "" | capture("state=(?<key>[0-9a-f]{16})").key)
+  catch ""
+' "$ISSUE_JSON")" \
+  || { echo "ERROR: could not read prior monitor state" >&2; exit 2; }
+COMMENT_CHANGED=yes
+[[ "$PREVIOUS_STATE_KEY" == "$STATE_KEY" ]] && COMMENT_CHANGED=no
 
 PATCH_BODY="$WORK/patch.json"
 jq -n \
@@ -220,14 +260,15 @@ jq -n \
   --rawfile comment "$COMMENT" \
   --arg next "$NEXT_CHECK" \
   --arg interval "$INTERVAL_HOURS" \
-  --arg retry "$ERROR_RETRY_HOURS" '
+  --arg retry "$ERROR_RETRY_HOURS" \
+  --arg state "$STATE_KEY" \
+  --arg commentChanged "$COMMENT_CHANGED" '
   ($issue[0].executionPolicy // {}) as $policy
   | {
-      comment: $comment,
       executionPolicy: ($policy + {
         monitor: {
           nextCheckAt: $next,
-          notes: ("Do NOT run ./discord_job_health_monitor.sh directly: the shared workspace sits on whatever branch the last run left, the script is absent there, and the exit 127 never re-arms this clock. Run the git-show block in this card description verbatim (reads origin/main into scratch; no network, no token). Normal interval " + $interval + "h, detector/API failure " + $retry + "h. Exit 1 every cycle is the EXPECTED steady state until the vendor fixes TOG-676. A succeeded job row is never a post; only discord_digest_sent is."),
+          notes: ("Run the card description git-show block; never run ./discord_job_health_monitor.sh from the shared checkout (exit 127 does not re-arm). Normal " + $interval + "h; detector/API errors " + $retry + "h. Exit 1 is expected until TOG-676 is fixed. A succeeded row is not delivery; only discord_digest_sent is. state=" + $state),
           scheduledBy: "assignee",
           kind: "external_service",
           serviceName: "Discord scheduled-job delivery",
@@ -235,6 +276,7 @@ jq -n \
         }
       })
     }
+  | if $commentChanged == "yes" then . + {comment: $comment} else . end
   ' > "$PATCH_BODY" \
   || { echo "ERROR: could not build monitor update" >&2; exit 2; }
 
@@ -276,5 +318,5 @@ if [[ "$STORED_EPOCH" != "$NEXT_EPOCH" ]]; then
   exit 2
 fi
 
-echo "discord job health monitor: result=$DETECTOR_RC next=$NEXT_CHECK issue=$ISSUE_ID"
+echo "discord job health monitor: result=$DETECTOR_RC next=$NEXT_CHECK comment=$COMMENT_CHANGED issue=$ISSUE_ID"
 exit "$DETECTOR_RC"

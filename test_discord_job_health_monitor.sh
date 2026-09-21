@@ -234,5 +234,38 @@ grep -qF 'discord_digest_sent' <<<"$notes" \
 grep -qiF 'expected' <<<"$notes" \
   && ok "re-arm notes keep the expected-steady-state fact" || bad "re-arm notes dropped the steady-state fact"
 
+# --- TOG-3775: a standing monitor must not grow until wakes hit E2BIG --------
+# Counts naturally slide inside the 48h window; they are evidence in a posted
+# verdict, but not a reason to add another verdict. The notes carry a short hash
+# of the qualitative state so unchanged cycles can re-arm without commenting.
+
+hdr "14. Unchanged state re-arms without another comment"
+run_case "$FAILING_JSON" 1
+jq --slurpfile patch "$WORK/patch.json" \
+  '.executionPolicy = $patch[0].executionPolicy' \
+  "$WORK/issue.json" > "$WORK/issue.next.json"
+mv "$WORK/issue.next.json" "$WORK/issue.json"
+shifted_json="$(jq -c '.jobs[0].runs = 500 | .jobs[0].succeeded = 500 | .jobs[1].runs = 41' <<<"$FAILING_JSON")"
+run_case "$shifted_json" 1
+jq -e 'has("comment") | not' "$WORK/patch.json" >/dev/null \
+  && ok "sliding run counts do not append a duplicate status comment" \
+  || bad "unchanged verdict appended another status comment"
+grep -qF 'comment=no' "$WORK/out.txt" \
+  && ok "stdout reports that the unchanged comment was suppressed" \
+  || bad "stdout did not report comment suppression"
+[[ "$(jq -r '.executionPolicy.monitor.nextCheckAt' "$WORK/patch.json")" == "2026-08-30T06:00:00Z" ]] \
+  && ok "suppressed-comment cycle still re-arms the monitor" \
+  || bad "suppressed-comment cycle did not re-arm"
+
+hdr "15. A qualitative state change posts a fresh verdict"
+changed_json="$(jq -c '.jobs[1].latestError = "different failure class"' <<<"$FAILING_JSON")"
+run_case "$changed_json" 1
+jq -e 'has("comment") and (.comment | contains("Discord scheduled-job delivery monitor"))' "$WORK/patch.json" >/dev/null \
+  && ok "changed error signature posts a new status comment" \
+  || bad "changed error signature was silently suppressed"
+grep -qF 'comment=yes' "$WORK/out.txt" \
+  && ok "stdout reports that the changed comment was posted" \
+  || bad "stdout did not report the changed comment"
+
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

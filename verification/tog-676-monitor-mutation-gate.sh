@@ -17,6 +17,9 @@
 #   * replace the issue's execution policy instead of merging into it
 #   * leak the Paperclip bearer into argv
 #   * swallow the detector's exit status
+#   * append a duplicate comment for every unchanged monitor cycle
+#   * treat sliding 48h run counts as a state change
+#   * ignore a changed failure signature
 #
 # A mutation that does not change the file is a FAILED gate, not a passing
 # one: a sed that silently matched nothing would otherwise score as a kill.
@@ -152,6 +155,22 @@ mutate "arming verified by string, so a normalised instant reads as a failure" \
 mutate "the nested policy echo accepted as proof the column was written" \
   ".monitorNextCheckAt // empty" \
   ".monitorNextCheckAt // .executionPolicy.monitor.nextCheckAt // empty"
+
+# TOG-3775: unchanged cycles are the dominant path for this standing monitor.
+# These three mutants isolate suppression, count-insensitivity, and attribution
+# to the actual failure signature rather than merely to any changing JSON.
+
+mutate "an unchanged cycle appends another comment" \
+  '[[ "$PREVIOUS_STATE_KEY" == "$STATE_KEY" ]] && COMMENT_CHANGED=no' \
+  '[[ "$PREVIOUS_STATE_KEY" == "$STATE_KEY" ]] && COMMENT_CHANGED=yes'
+
+mutate "sliding 48h run counts are mistaken for a state change" \
+  'jobKey,' \
+  'jobKey, runs,'
+
+mutate "a changed failure signature is silently suppressed" \
+  'latestError: (.latestError // null)' \
+  'latestError: null'
 
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
