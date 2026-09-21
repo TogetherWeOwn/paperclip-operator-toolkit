@@ -14,7 +14,8 @@
 #                          baseline (company_default since TOG-984, 2026-09-05),
 #                          and every agent must hold the company-wide
 #                          `tasks:assign` grant that makes it effective
-#   5. LEGACY FLAGS      — canCreateAgents must not widen authority
+#   5. LEGACY FLAGS      — canCreateAgents must not widen authority, except the
+#                          CEO seat's dated carve-out (TOG-993, until 2026-12-31)
 #   6. DORMANCY          — heartbeat enabled/wakeOnDemand vs. expectation
 #   7. ORPHAN GRANTS     — grants or memberships for agents that no longer exist
 #   8. SUBTREE SANITY    — reporting chain is acyclic and rooted
@@ -52,6 +53,13 @@ FINDINGS=0
 SQL_FAILED=0
 note()  { printf '  \033[33mFINDING\033[0m  %s\n' "$1"; FINDINGS=$((FINDINGS+1)); }
 good()  { printf '  \033[32mOK\033[0m       %s\n' "$1"; }
+# A documented, dated exception: a state a human with authority has decided to
+# accept, on the record, until a stated date. It is NOT a finding (does not
+# increment FINDINGS), but it is printed loudly so the review still SHOWS it —
+# an accepted exception a reader cannot see is indistinguishable from a control
+# that stopped looking. Every exception() must carry its owner decision and its
+# expiry, and the caller must re-raise it as note() once the expiry passes.
+except() { printf '  \033[36mEXCEPTION\033[0m %s\n' "$1"; }
 hdr()   { printf '\n\033[1m%s\033[0m\n' "$1"; }
 unknown() {
   echo "ERROR: org_access_review.sh could not complete every database query, so it produced no verdict." >&2
@@ -276,12 +284,46 @@ if [[ -n "$ASSIGNMENT_BASELINE_KEY" ]]; then
     || while read -r l; do [[ -n "$l" ]] && note "missing company-wide $ASSIGNMENT_BASELINE_KEY grant: $l"; done <<<"$nokey"
 fi
 
+# DOCUMENTED EXCEPTION — the CEO seat's legacy canCreateAgents=true (TOG-993).
+# Owner decision 2026-09-20 03:20Z (delegated to the operator): KEEP the flag as
+# a documented exception through 2026-12-31. Rationale on the record: the CEO
+# seat is the only agent that hires (owner-approved CEO norms 2026-09-05); the
+# owner's 2026-09-05 permissions decision set every agent to company_default +
+# canAssignTasks WITHOUT touching creator authority; and routes/agents.ts already
+# grants effectiveCanAssignTasks from role=='ceo' alone, so clearing the flag
+# gains nothing (the role check already grants assign) while risking the hire
+# path. Re-review at the first access review after the expiry.
+#
+# Scope of the carve-out is deliberately narrow and self-expiring:
+#   * ONLY the ceo seat is excepted, and ONLY until LEGACY_CREATOR_EXCEPTION_UNTIL.
+#     Any NON-ceo agent that holds canCreateAgents=true is STILL a finding — that
+#     is real drift against provisioner invariant 11 (all provisioned agents
+#     canCreateAgents=false), and this block never suppresses it.
+#   * Past the expiry the ceo line re-raises AUTOMATICALLY as a finding, so a
+#     lapsed exception can never read as a clean review. Renewing it requires a
+#     NEW dated owner decision and a new expiry here — not a silent edit.
+LEGACY_CREATOR_EXCEPTION_UNTIL="2026-12-31"
 legacy="$(sql "
 SELECT COALESCE(metadata->>'orgRoleId', title) || ' (role=' || role || ', canCreateAgents=' || COALESCE(permissions->>'canCreateAgents','null') || ')'
 FROM agents WHERE company_id = :'cid'::uuid AND status <> 'terminated'
   AND (role = 'ceo' OR (permissions->>'canCreateAgents')::boolean IS TRUE);")"
-[[ -z "$legacy" ]] && good "no agent holds legacy creator authority (role=ceo or canCreateAgents)" \
-  || while read -r l; do [[ -n "$l" ]] && note "legacy creator authority: $l"; done <<<"$legacy"
+if [[ -z "$legacy" ]]; then
+  good "no agent holds legacy creator authority (role=ceo or canCreateAgents)"
+else
+  today="$(date -u +%F)"
+  while read -r l; do
+    [[ -n "$l" ]] || continue
+    if [[ "$l" == *"role=ceo"* ]]; then
+      if [[ "$today" > "$LEGACY_CREATOR_EXCEPTION_UNTIL" ]]; then
+        note "legacy creator authority — documented exception LAPSED (expired $LEGACY_CREATOR_EXCEPTION_UNTIL, owner decision 2026-09-20/TOG-993): re-review or renew: $l"
+      else
+        except "legacy creator authority ACCEPTED through $LEGACY_CREATOR_EXCEPTION_UNTIL — CEO is the sole hiring seat; role check alone already grants assign (owner decision 2026-09-20 03:20Z, TOG-993): $l"
+      fi
+    else
+      note "legacy creator authority: $l"
+    fi
+  done <<<"$legacy"
+fi
 
 # --------------------------------------------------------------------------
 hdr "6. Autonomy state"
