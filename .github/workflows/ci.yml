@@ -1868,6 +1868,13 @@ jobs:
       - name: stale unblock-descriptor sweep suite
         run: ./test_stale_descriptor_sweep.sh
 
+      # TOG-3728: detector-only; these fixtures never patch live cards or prove
+      # caller integration. Generic notes cannot erase documented park signals.
+      - name: parked backlog detector suite
+        run: bash ./test_parked_backlog_guard.sh
+      - name: parked backlog detector is not vacuous (isolated mutation gate)
+        run: node ./verification/tog-3728-mutation-gate.cjs
+
       # TOG-831. The scheduler that takes the nightly database backup can wedge:
       # it marks a backup in flight and, if that run dies without clearing the
       # flag, every later tick sees "already running" and returns. No backup is
