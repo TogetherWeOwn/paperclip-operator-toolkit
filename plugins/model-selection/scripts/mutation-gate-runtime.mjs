@@ -43,10 +43,15 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // need an entry whenever main adds an out-of-plugin read; the
 // "stages every repo file the suite reads from outside the plugin" spec names
 // the missing path, so the fix is mechanical.
+// TOG-3049: `CONTRIBUTING.md` is read by tests/fixture-scan-control/
+// nested-out-of-plugin-read.spec.ts, a spec deliberately nested one directory
+// under tests/ so the scan test proves it walks subdirectories and resolves
+// `../` depth relative to each spec's own location, not a fixed count.
 export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
   "ops/tog-2138/gate_harness.py",
   ".github/workflows/ci.yml",
   "test/fixtures/orgdb/schema.sql",
+  "CONTRIBUTING.md",
 ]);
 
 export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATION_TREE_REPO_FIXTURES) {

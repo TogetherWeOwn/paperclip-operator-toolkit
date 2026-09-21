@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -335,28 +335,51 @@ describe("mutation gate runtime controls", () => {
     expect(refusal).toContain(ciStep);
   });
 
-  // TOG-2980. Mutants run from a scratch copy of the plugin, so a spec that
-  // reads a repo file through `../../../` finds nothing there unless the gate
-  // stages it. That is not a benign skip: the mutant loop reads any nonzero
-  // exit as a kill, so one ENOENT turns the whole sweep green while testing
-  // nothing -- which is what `18/18 killed` was actually reporting.
+  // TOG-2980 / TOG-3049. Mutants run from a scratch copy of the plugin, so a
+  // spec that reads a repo file through one or more `../` segments finds
+  // nothing there unless the gate stages it. That is not a benign skip: the
+  // mutant loop reads any nonzero exit as a kill, so one ENOENT turns the
+  // whole sweep green while testing nothing -- which is what `18/18 killed`
+  // was actually reporting.
   //
   // Derive the dependencies from the specs rather than restating them, so a
   // NEW out-of-copy read fails here instead of silently inflating the score.
+  // The walk is recursive -- matching vitest's own `tests/**/*.spec.ts`
+  // include, which is not flat -- and each match is resolved against its own
+  // spec file's directory rather than pinned to a fixed `../` count, so a
+  // spec nested under a tests/ subdirectory needs no special-casing.
   it("stages every repo file the suite reads from outside the plugin", () => {
-    const testsDir = join(realpathSync(root), "tests");
+    const pluginRoot = realpathSync(root);
+    const repoRoot = resolve(pluginRoot, "..", "..");
+    const testsDir = join(pluginRoot, "tests");
     const referenced = new Set<string>();
 
-    for (const entry of readdirSync(testsDir)) {
-      if (!entry.endsWith(".spec.ts")) continue;
-      const source = readFileSync(join(testsDir, entry), "utf8");
-      for (const [, path] of source.matchAll(/["'`]\.\.\/\.\.\/\.\.\/([^"'`]+)["'`]/g)) {
-        if (path !== undefined) referenced.add(path);
+    const specFiles = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return specFiles(full);
+        return entry.isFile() && entry.name.endsWith(".spec.ts") ? [full] : [];
+      });
+
+    for (const specFile of specFiles(testsDir)) {
+      const source = readFileSync(specFile, "utf8");
+      for (const [, path] of source.matchAll(/["'`](\.\.\/[^"'`]+)["'`]/g)) {
+        if (path === undefined) continue;
+        const resolved = resolve(dirname(specFile), path);
+        if (resolved === pluginRoot || resolved.startsWith(pluginRoot + sep)) continue;
+
+        const repoRelative = relative(repoRoot, resolved);
+        // A prose `../../../`-shaped code span with no file segment after it
+        // resolves to repoRoot itself, not a real read -- drop it rather than
+        // stage an empty path.
+        if (repoRelative === "") continue;
+        referenced.add(repoRelative);
       }
     }
 
-    // A bad regex that matched nothing would make this test vacuously green.
-    expect(referenced, "found no ../../../ references -- the scan is broken").not.toEqual(new Set());
+    // A bad regex or a walk that found nothing would make this test vacuously
+    // green.
+    expect(referenced, "found no out-of-plugin ../ references -- the scan is broken").not.toEqual(new Set());
 
     const staged = probe(`
       import { MUTATION_TREE_REPO_FIXTURES } from ${JSON.stringify(runtime)};
