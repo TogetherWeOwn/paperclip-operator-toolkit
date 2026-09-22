@@ -50,10 +50,24 @@ PY
 }
 
 expect_pass baseline "$WORKFLOW"
-mutate wrong-label 'runs-on: [self-hosted, two-selfhosted]' 'runs-on: [self-hosted, other-runner]'
+mutate wrong-label 'runs-on: [self-hosted, isolated]' 'runs-on: [self-hosted, other-runner]'
 expect_fail wrong-label "$MUTANT_FILE"
-mutate paid-fallback 'runs-on: [self-hosted, two-selfhosted]' 'runs-on: ubuntu-latest'
+mutate paid-fallback 'runs-on: [self-hosted, isolated]' 'runs-on: ubuntu-latest'
 expect_fail paid-fallback "$MUTANT_FILE"
+# TOG-3051. The label now carries the isolation property: isolated runners
+# have no DOCKER_HOST in their .env, two-selfhosted ones do. Quietly moving a job
+# back onto the Docker pool would hand it the host socket again, which is exactly
+# what TOG-2677 forbids, so that must turn this job red.
+mutate docker-creep 'runs-on: [self-hosted, isolated]' 'runs-on: [self-hosted, two-selfhosted]'
+expect_fail docker-creep "$MUTANT_FILE"
+# A service container is the quiet way back to needing a daemon: adding one would
+# re-create the hole that privilege-suites' ephemeral PostgreSQL cluster closed,
+# without any runs-on line changing. That must turn this job red too.
+mutate service-container-creep '    timeout-minutes: 20' '    services:
+      db:
+        image: postgres:16
+    timeout-minutes: 20'
+expect_fail service-container-creep "$MUTANT_FILE"
 mutate no-positive-control '[[ "${RUNNER_NAME:-}" == coolify-vps-* ]]' 'true # runner identity proof deleted'
 expect_fail no-positive-control "$MUTANT_FILE"
 mutate dirty-checkout 'clean: true' 'clean: false'

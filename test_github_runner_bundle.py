@@ -98,7 +98,7 @@ class RunnerBundleContract(unittest.TestCase):
         self.assertIn("--disableupdate", source)
         self.assertIn('[[ $ALLOW_REPLACE -eq 0 ]] || CONFIG_ARGS+=(--replace)', source)
         self.assertNotIn("--replace\n", source)
-        self.assertIn('[[ "$RUNNER_LABEL" == two-selfhosted ]]', source)
+        self.assertIn('two-selfhosted || "$RUNNER_LABEL" == isolated', source)
 
     def test_verifier_rejects_host_docker_socket_and_checks_service(self):
         source = VERIFY.read_text()
@@ -178,7 +178,8 @@ class RunnerBundleContract(unittest.TestCase):
         for required in (
             "seven** organization-scoped runners",
             "per-runner concurrency 1 and total concurrency 7",
-            "runs-on: [self-hosted, two-selfhosted]",
+            "runs-on: [self-hosted, isolated]",
+            "Two runner roles",
             "untrusted fork pull-request code",
             "pinned to a full commit SHA",
             "dynamically mapped service-container ports",

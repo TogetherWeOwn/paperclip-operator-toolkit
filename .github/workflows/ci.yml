@@ -339,22 +339,12 @@ concurrency:
 jobs:
   privilege-suites:
     name: Privilege ceiling suites
-    runs-on: [self-hosted, two-selfhosted]
+    # TOG-3051: this job used to be the one exception that needed a container
+    # daemon, because it declared a `postgres` service container. It now starts
+    # its own ephemeral PostgreSQL cluster instead, so NO job in this workflow
+    # needs Docker and every one of them runs on the isolated pool.
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: org_fixture
-        ports:
-          - 5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d org_fixture"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     env:
       PGHOST: 127.0.0.1
       PGUSER: postgres
@@ -367,8 +357,37 @@ jobs:
       PAPERCLIP_STUB_LOG: ${{ github.workspace }}/paperclip-stub.jsonl
       GRANT_LOG: ${{ github.workspace }}/provisioner-grant-log.jsonl
     steps:
-      - name: Resolve the postgres service port
-        run: echo "PGPORT=${{ job.services.postgres.ports[5432] }}" >> "$GITHUB_ENV"
+      # An ephemeral, per-job PostgreSQL cluster in $RUNNER_TEMP. This replaces a
+      # service container (TOG-3051) for three reasons: it needs no container
+      # daemon, so this job stops being the one hole in the isolation boundary;
+      # each job gets its own cluster on its own port, so concurrent runs cannot
+      # collide on the shared `org_fixture` database the way they would against a
+      # single host instance; and it sidesteps the RootlessKit host-port race that
+      # intermittently fails service containers on this fleet (TOG-2895).
+      # Auth is scram-sha-256, matching the postgres:16 image this replaces, so
+      # the suites still exercise real password authentication.
+      - name: Start an ephemeral PostgreSQL cluster
+        run: |
+          set -euo pipefail
+          PGBIN=/usr/lib/postgresql/16/bin
+          PGDATA="$RUNNER_TEMP/orgdb-pgdata"
+          # Ask the kernel for a free port rather than picking one: two jobs on
+          # the same host must never choose the same number.
+          PGPORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+          rm -rf "$PGDATA"
+          install -d -m 700 "$PGDATA"
+          printf '%s' "$PGPASSWORD" > "$RUNNER_TEMP/orgdb-pw"
+          "$PGBIN/initdb" -D "$PGDATA" -U "$PGUSER" \
+            --auth-host=scram-sha-256 --auth-local=scram-sha-256 \
+            --pwfile="$RUNNER_TEMP/orgdb-pw" >/dev/null
+          rm -f "$RUNNER_TEMP/orgdb-pw"
+          # -k keeps the unix socket inside $PGDATA: the runner account cannot
+          # write the system socket directory, and nothing here should need it.
+          "$PGBIN/pg_ctl" -D "$PGDATA" -w -l "$RUNNER_TEMP/orgdb-pg.log" \
+            -o "-p $PGPORT -h 127.0.0.1 -k $PGDATA" start >/dev/null
+          "$PGBIN/createdb" -h 127.0.0.1 -p "$PGPORT" -U "$PGUSER" "$PGDATABASE"
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          echo "ORGDB_PGDATA=$PGDATA" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Install Postgres client and jq
         uses: awalsh128/cache-apt-pkgs-action@latest
@@ -499,6 +518,15 @@ jobs:
             echo "::error title=Privilege mutation gate failed::$summary"
             exit "$rc"
           fi
+      # Always reclaim the cluster: a leaked postmaster would hold its port and
+      # its $RUNNER_TEMP data directory on a long-lived self-hosted runner.
+      - name: Stop the ephemeral PostgreSQL cluster
+        if: always()
+        run: |
+          set -u
+          [[ -n "${ORGDB_PGDATA:-}" ]] || exit 0
+          /usr/lib/postgresql/16/bin/pg_ctl -D "$ORGDB_PGDATA" -m immediate stop || true
+          rm -rf "$ORGDB_PGDATA"
       # CI verifies policy through the dumb stub. It deliberately cannot prove
       # what the real API now does with reportsTo, permissions, or termination;
       # the operator's VPS pre-release pass remains the API-contract coverage.
@@ -515,7 +543,7 @@ jobs:
     # measured on PR #306 was a clean-tree SUCCESS, not a worst case, so it is
     # a floor for the ceiling and not a target. Lower it only against a
     # post-merge duration measured with the step bounds actually in effect.
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 150
     steps:
       - name: Prove the private runner selected this job
@@ -3950,7 +3978,7 @@ jobs:
   # lands; otherwise moving the steps would silently remove both gates.
   long-mutation-gates:
     name: Long mutation gates
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -4601,7 +4629,7 @@ jobs:
   # isolation IS the fix.
   runbook-gates:
     name: Operator runbook gates
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4700,7 +4728,7 @@ jobs:
   # test count. See the header.
   broker-suite:
     name: gh-token-broker suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     defaults:
       run:
@@ -4798,7 +4826,7 @@ jobs:
   # check stays operator-run because a fixture certifies only the fixture.
   omniroute-broker-suite:
     name: omniroute-broker suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4857,7 +4885,7 @@ jobs:
   # covers the wiring.
   dispatch-suite:
     name: dispatch suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     defaults:
       run:
@@ -5003,7 +5031,7 @@ jobs:
   # Gated on EXIT STATUS, never on a test count. See the header.
   capture-suite:
     name: gh-event-capture suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     defaults:
       run:
@@ -5189,7 +5217,7 @@ jobs:
   # Gated on EXIT STATUS, never a test count. See the header.
   mcp-suite:
     name: org-request-mcp suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -5496,7 +5524,7 @@ jobs:
   # Offline: no credential, no network, no host. Tests are written for Vitest.
   model-selection-suite:
     name: model-selection suite
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: [self-hosted, isolated]
     # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
     # gate runs (the gate refuses outside CI), and each mutant re-runs the full
     # Vitest suite capped at 2 forks. The named gate grew from 55 to 115 mutants
