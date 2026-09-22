@@ -34,7 +34,28 @@ EXPECTED_READ_EXECUTORS = {
     "tooling.fingerprint": "fingerprint",
     "paperclip.stat-chain": "stat_chain",
 }
-EXPECTED_WRITE_VERBS = {"paperclip.deploy", "paperclip.restart"}
+EXPECTED_WRITE_VERBS = {
+    "paperclip.deploy", "paperclip.restart",
+    "plugin.install", "plugin.restart", "unit.install",
+    "cliproxy.apply", "coolify.env.set", "script.run",
+}
+# TOG-3555 Phase-1 write verbs take names and SHAs only -- never host paths,
+# commands, URLs, or secrets. Each entry here is the valid argument set used by
+# the dry-run and refusal tests.
+WRITE_ARGUMENTS = {
+    "paperclip.deploy": {"commit": "1" * 40},
+    "paperclip.restart": {},
+    "plugin.install": {"package": "dispatch-src", "sha": "1" * 40},
+    "plugin.restart": {"package": "dispatch-src"},
+    "unit.install": {"name": "paperclip-host-ops-broker", "sha": "2" * 40},
+    "cliproxy.apply": {"sha": "3" * 40},
+    "coolify.env.set": {"app": "paperclip", "keys": "FOO,BAR"},
+    "script.run": {"script": "quota_brake", "sha": "4" * 40},
+}
+PHASE1_WRITE_VERBS = {
+    "plugin.install", "plugin.restart", "unit.install",
+    "cliproxy.apply", "coolify.env.set", "script.run",
+}
 EXPECTED_RESULT_KEYS = {
     "health.inspect": {"status", "commit"},
     "service.inspect": {"ActiveState", "SubState", "MainPID", "ExecMainStartTimestampMonotonic"},
@@ -87,6 +108,7 @@ class BrokerTest(unittest.TestCase):
             "toolingMarkers": ["probe.sh", "tool_drift.sh"],
             "pollSeconds": 2,
             "testMode": True,
+            "writesEnabled": False,
         }
         self.config_path = self.temp / "config.json"
         self.config_path.write_text(json.dumps(self.config))
@@ -429,13 +451,61 @@ class BrokerTest(unittest.TestCase):
                 self.assertTrue(spec["preImage"])
                 self.assertTrue(spec["postconditions"])
                 self.assertGreater(spec["timeoutSeconds"], 0)
+        for name in PHASE1_WRITE_VERBS:
+            with self.subTest(verb=name):
+                spec = payload["writeVerbSpecifications"][name]
+                self.assertIn("O4", spec["authorization"]["blockedBy"])
+                self.assertTrue(spec["plannedWrites"])
+                self.assertTrue(spec["allowList"])
+                self.assertIn("summary", spec)
+        # Phase-1 writes render a signed dry-run preview, then the O4 gate
+        # refuses: no executor runs, no host write happens.
         for index, verb in enumerate(sorted(EXPECTED_WRITE_VERBS), 1):
-            self.enqueue(self.make_request(verb, f"HRQ-WRITE{index:02d}"), f"write-{index}")
+            request = self.make_request(verb, f"HRQ-WRITE{index:02d}", arguments=WRITE_ARGUMENTS[verb])
+            self.enqueue(request, f"write-{index}")
+        self.run_once()
+        responses = [self.verify_signed(path) for path in self.outputs("responses")]
+        self.assertEqual({response["verb"] for response in responses}, EXPECTED_WRITE_VERBS)
+        self.assertTrue(all(response["status"] == "refused" for response in responses))
+        self.assertTrue(all(response["code"] == "write_execution_disabled" for response in responses))
+        previews = [self.verify_signed(path) for path in self.outputs("previews")]
+        self.assertEqual({item["verb"] for item in previews}, PHASE1_WRITE_VERBS)
+        for item in previews:
+            with self.subTest(preview=item["verb"]):
+                self.assertEqual(item["effectClass"], "write_dry_run")
+                self.assertTrue(item["executorRendered"])
+                self.assertTrue(item["dryRun"])
+                self.assertFalse(item["executed"])
+                self.assertTrue(item["writes"])
+                self.assertFalse(item["credentialsExposedToRequester"])
+
+    def test_write_requests_with_bad_arguments_are_refused_before_preview(self):
+        bad_shapes = [
+            ("plugin.install", {}),
+            ("plugin.install", {"package": "dispatch-src", "sha": "not-a-sha"}),
+            ("plugin.install", {"package": "../escape", "sha": "1" * 40}),
+            ("coolify.env.set", {"app": "paperclip", "keys": "FOO", "secret": "must-not-transit"}),
+            ("script.run", {"script": "quota_brake", "sha": "1" * 40, "command": "rm -rf /"}),
+        ]
+        for index, (verb, arguments) in enumerate(bad_shapes, 1):
+            self.enqueue(self.make_request(verb, f"HRQ-BADW{index:02d}", arguments=arguments), f"bad-{index}")
         self.run_once()
         responses = [self.read_json(path) for path in self.outputs("responses")]
-        self.assertEqual({response["verb"] for response in responses}, EXPECTED_WRITE_VERBS)
-        self.assertTrue(all(response["code"] == "write_execution_disabled" for response in responses))
+        self.assertEqual({response["code"] for response in responses}, {"invalid_arguments"})
         self.assertEqual(self.outputs("previews"), [])
+
+    def test_writes_enabled_defaults_false_and_must_be_boolean(self):
+        config = dict(self.config)
+        del config["writesEnabled"]
+        minimal = self.temp / "minimal-config.json"
+        minimal.write_text(json.dumps(config))
+        loaded = broker.load_config(minimal)
+        self.assertFalse(loaded["writesEnabled"])
+        config["writesEnabled"] = "yes"
+        minimal.write_text(json.dumps(config))
+        with self.assertRaises(broker.Refusal) as raised:
+            broker.load_config(minimal)
+        self.assertEqual(raised.exception.code, "unsafe_config")
 
     def test_concurrent_run_once_processes_serialize_audit_and_process_each_request_once(self):
         total = 80
@@ -995,7 +1065,7 @@ class BrokerTest(unittest.TestCase):
 
     def test_request_cli_accepts_no_path_shell_or_auth_arguments(self):
         help_text = subprocess.run([sys.executable, str(BROKER), "request", "--help"], check=True, text=True, capture_output=True).stdout
-        for forbidden in ("--path", "--command", "--shell", "--token", "--approval", "--url"):
+        for forbidden in ("--path", "--command", "--shell", "--token", "--approval", "--url", "--package", "--sha", "--script", "--unit", "--app", "--keys"):
             self.assertNotIn(forbidden, help_text)
         request_id = "HRQ-CLI0001"
         completed = subprocess.run([
@@ -1008,6 +1078,28 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(request["arguments"], {})
         self.assertEqual(broker.validate_request(request)[0]["requestId"], request_id)
 
+    def test_request_cli_write_arguments_are_one_json_object(self):
+        completed = subprocess.run([
+            sys.executable, str(BROKER), "request", "--spool", str(self.spool), "--verb", "plugin.install",
+            "--arguments-json", json.dumps(WRITE_ARGUMENTS["plugin.install"]),
+            "--request-id", "HRQ-CLIW001", "--agent-id", AGENT, "--run-id", RUN, "--issue-id", ISSUE,
+        ], text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        request = self.read_json(Path(json.loads(completed.stdout)["requestPath"]))
+        self.assertEqual(request["arguments"], WRITE_ARGUMENTS["plugin.install"])
+        refused = subprocess.run([
+            sys.executable, str(BROKER), "request", "--spool", str(self.spool), "--verb", "plugin.install",
+            "--arguments-json", json.dumps({"package": "dispatch-src"}),
+            "--request-id", "HRQ-CLIW002", "--agent-id", AGENT, "--run-id", RUN, "--issue-id", ISSUE,
+        ], text=True, capture_output=True)
+        self.assertEqual(refused.returncode, 2)
+        extra = subprocess.run([
+            sys.executable, str(BROKER), "request", "--spool", str(self.spool), "--verb", "health.inspect",
+            "--arguments-json", json.dumps({"url": "http://evil"}),
+            "--request-id", "HRQ-CLIW003", "--agent-id", AGENT, "--run-id", RUN, "--issue-id", ISSUE,
+        ], text=True, capture_output=True)
+        self.assertEqual(extra.returncode, 2)
+
     def test_runbook_documents_atomic_bundle_paths(self):
         runbook = (ROOT / "host-ops" / "RUNBOOK.md").read_text()
         self.assertIn("bundle=/path/to/previews/HRQ-....bundle", runbook)
@@ -1017,6 +1109,14 @@ class BrokerTest(unittest.TestCase):
         self.assertIn("atomic publication unit", runbook)
         for stale in ("previews/*.json", "responses/*.json", "/previews/HRQ-....json"):
             self.assertNotIn(stale, runbook)
+
+    def test_runbook_documents_phase1_dry_run_gate(self):
+        runbook = (ROOT / "host-ops" / "RUNBOOK.md").read_text()
+        self.assertIn("--arguments-json", runbook)
+        self.assertIn("write_dry_run", runbook)
+        self.assertIn("writesEnabled: false", runbook)
+        self.assertIn("OWNER decision O4", runbook)
+        self.assertIn("no executor runs and no host write happens", runbook)
 
     def test_runbook_requires_live_host_evidence_for_rootless_podman_compatibility(self):
         runbook = (ROOT / "host-ops" / "RUNBOOK.md").read_text()
