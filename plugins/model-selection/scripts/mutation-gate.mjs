@@ -22,6 +22,62 @@ const root = resolve(new URL("..", import.meta.url).pathname);
 const repoRoot = resolve(root, "../..");
 
 const mutants = [
+  // TOG-3930: the re-landed serviceability stop must survive neither a healthy
+  // peer nor an indeterminate roll-up, and account verdicts must agree with it.
+  {
+    name: "serviceability-ignore-margin",
+    file: "src/lane-capacity/pace.ts",
+    from: "  const tripCeilingMilli = SCALE - marginMilli;",
+    to: "  const tripCeilingMilli = SCALE;",
+  },
+  {
+    name: "serviceability-exclusive-trip-ceiling",
+    file: "src/lane-capacity/pace.ts",
+    from: "      toMilli(window.utilization) >= tripCeilingMilli,",
+    to: "      toMilli(window.utilization) > tripCeilingMilli,",
+  },
+  {
+    name: "serviceability-account-ignores-margin-trip",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (trippedServiceabilityWindows(windows, tripCeilingMilli).length > 0) return false;\n",
+    to: "",
+  },
+  {
+    name: "serviceability-uncomputable-account-ignores-trip",
+    file: "src/lane-capacity/pace.ts",
+    from: '      const exhausted = account.health === "exhausted" || account.health === "unavailable" || tripped.length > 0;',
+    to: '      const exhausted = account.health === "exhausted" || account.health === "unavailable";',
+  },
+  {
+    name: "serviceability-healthy-peer-rescues-lane",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (internal.some((entry) => entry.tripped)) {",
+    to: "  if (internal.every((entry) => entry.tripped)) {",
+  },
+  {
+    name: "serviceability-indeterminate-peer-masks-trip",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (internal.some((entry) => entry.tripped)) {",
+    to: "  if (internal.some((entry) => entry.tripped) && !internal.some((entry) => entry.indeterminateWeight || entry.indeterminateGovernor)) {",
+  },
+  {
+    name: "serviceability-latest-reset-instead-of-earliest",
+    file: "src/lane-capacity/pace.ts",
+    from: "      .sort((left, right) => left.ms - right.ms);",
+    to: "      .sort((left, right) => right.ms - left.ms);",
+  },
+  {
+    name: "serviceability-drop-tripped-reset",
+    file: "src/lane-capacity/pace.ts",
+    from: "urgentResetAt: trippedResets[0]?.resetsAt ?? null",
+    to: "urgentResetAt: null",
+  },
+  {
+    name: "serviceability-remove-lane-hard-stop",
+    file: "src/lane-capacity/pace.ts",
+    from: "  if (internal.some((entry) => entry.tripped)) {",
+    to: "  if (false) {",
+  },
   {
     name: "old-inverted-tier-order",
     file: "src/constants.ts",

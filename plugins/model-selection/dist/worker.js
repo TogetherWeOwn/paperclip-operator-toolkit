@@ -3159,9 +3159,15 @@ function governingWindow(account, windows) {
   if (account.governingWindow !== null) return null;
   return windows.filter((window) => window.role === "serviceability" && window.utilization !== null).sort((left, right) => right.windowSeconds - left.windowSeconds || left.name.localeCompare(right.name))[0] ?? null;
 }
-function serviceable(account, windows) {
+function serviceable(account, windows, tripCeilingMilli) {
   if (account.health === "exhausted" || account.health === "unavailable") return false;
+  if (trippedServiceabilityWindows(windows, tripCeilingMilli).length > 0) return false;
   return windows.every((window) => window.utilization === null || window.utilization < 1);
+}
+function trippedServiceabilityWindows(windows, tripCeilingMilli) {
+  return windows.filter(
+    (window) => window.role === "serviceability" && window.utilization !== null && toMilli(window.utilization) >= tripCeilingMilli
+  );
 }
 function stateFor(deviationMilli, marginMilli) {
   if (deviationMilli > marginMilli) return "ahead";
@@ -3170,6 +3176,7 @@ function stateFor(deviationMilli, marginMilli) {
 }
 function evaluateLanePace(input) {
   const marginMilli = toMilli(input.policy?.margin ?? DEFAULT_MARGIN);
+  const tripCeilingMilli = SCALE - marginMilli;
   const urgentResetSeconds = input.policy?.urgentResetSeconds ?? DEFAULT_URGENT_RESET_SECONDS;
   const maxSnapshotAgeSeconds = input.policy?.maxSnapshotAgeSeconds ?? DEFAULT_MAX_SNAPSHOT_AGE_SECONDS;
   const asOf = timestamp(input.asOf ?? input.observation.observedAt);
@@ -3196,12 +3203,14 @@ function evaluateLanePace(input) {
     const binding = bindingWindow(windows, account.governingWindow);
     const governing = governingWindow(account, windows);
     const accountStale = account.staleAfterSeconds != null && (asOfMs - observedAtMs) / 1e3 > account.staleAfterSeconds;
-    const accountServiceable = !accountStale && serviceable(account, windows);
+    const accountServiceable = !accountStale && serviceable(account, windows, tripCeilingMilli);
+    const tripped = trippedServiceabilityWindows(windows, tripCeilingMilli);
+    const trippedResetsAt = tripped.flatMap((window) => window.resetsAt === null ? [] : [{ ms: Date.parse(window.resetsAt), resetsAt: window.resetsAt }]).filter((entry) => !Number.isNaN(entry.ms));
     const unknownAllowanceWeight = windows.some(
       (window) => window.role === "allowance" && window.utilization !== null && window.resetsAt !== null && window.windowSeconds !== null && window.allowanceWeight === null
     );
     if (!governing) {
-      const exhausted2 = account.health === "exhausted" || account.health === "unavailable";
+      const exhausted2 = account.health === "exhausted" || account.health === "unavailable" || tripped.length > 0;
       const indeterminateGovernor = accountServiceable && account.governingWindow !== null;
       return {
         verdict: {
@@ -3234,7 +3243,9 @@ function evaluateLanePace(input) {
         resetAtMs: null,
         aggregateWeight: null,
         indeterminateWeight: accountServiceable && unknownAllowanceWeight,
-        indeterminateGovernor
+        indeterminateGovernor,
+        tripped: tripped.length > 0,
+        trippedResetsAt
       };
     }
     const utilizationMilli2 = toMilli(governing.utilization);
@@ -3286,7 +3297,9 @@ function evaluateLanePace(input) {
       resetAtMs: Date.parse(urgentResetAt ?? resetAt),
       aggregateWeight: governing.allowanceWeight ?? account.weight,
       indeterminateWeight: accountServiceable && (governing.allowanceWeight ?? account.weight) === null,
-      indeterminateGovernor: false
+      indeterminateGovernor: false,
+      tripped: tripped.length > 0,
+      trippedResetsAt
     };
   });
   const serviceableAccountCount = internal.filter((entry) => entry.verdict.serviceable).length;
@@ -3298,6 +3311,11 @@ function evaluateLanePace(input) {
     ...entry.verdict,
     recommendedShare: !entry.verdict.serviceable || entry.verdict.targetBurnRate == null || shareDenominator <= 0 ? 0 : rawShare(entry) / shareDenominator
   }));
+  if (internal.some((entry) => entry.tripped)) {
+    const trippedResets = internal.flatMap((entry) => entry.trippedResetsAt).sort((left, right) => left.ms - right.ms);
+    const known2 = internal.filter((entry) => entry.utilizationMilli !== null);
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "exhausted", serviceable: false, score: null, targetBurnRate: 0, observedBurnRate: 0, deficit: 0, accounts, knownAccountCount: known2.length, knownWeight: known2.reduce((sum, entry) => sum + (entry.aggregateWeight ?? 0), 0), serviceableAccountCount, urgentResetAt: trippedResets[0]?.resetsAt ?? null, reason: "serviceability-window-exhausted" };
+  }
   if (internal.some((entry) => entry.indeterminateWeight)) {
     const weighted = internal.filter((entry) => entry.verdict.serviceable && entry.aggregateWeight !== null);
     return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts, knownAccountCount: weighted.length, knownWeight: weighted.reduce((sum, entry) => sum + entry.aggregateWeight, 0), serviceableAccountCount, urgentResetAt: null, reason: "indeterminate-account-weight" };

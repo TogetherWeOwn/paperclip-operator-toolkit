@@ -124,7 +124,7 @@ export interface LanePaceVerdict {
   knownWeight: number;
   serviceableAccountCount: number;
   urgentResetAt: string | null;
-  reason: "ok" | "free-lane" | "document-unavailable" | "invalid-account-identity" | "snapshot-stale" | "no-records" | "indeterminate-account-weight" | "invalid-configured-governing-window" | "no-computable-governing-window" | "all-accounts-unserviceable";
+  reason: "ok" | "free-lane" | "document-unavailable" | "invalid-account-identity" | "snapshot-stale" | "no-records" | "indeterminate-account-weight" | "invalid-configured-governing-window" | "no-computable-governing-window" | "all-accounts-unserviceable" | "serviceability-window-exhausted";
 }
 
 export interface PacePolicy {
@@ -441,9 +441,37 @@ function governingWindow(account: PaceAccountObservation, windows: PaceWindowVer
     .sort((left, right) => right.windowSeconds! - left.windowSeconds! || left.name.localeCompare(right.name))[0] ?? null;
 }
 
-function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict[]): boolean {
+function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict[], tripCeilingMilli: number): boolean {
   if (account.health === "exhausted" || account.health === "unavailable") return false;
+  if (trippedServiceabilityWindows(windows, tripCeilingMilli).length > 0) return false;
   return windows.every((window) => window.utilization === null || window.utilization < 1);
+}
+
+/**
+ * TOG-3107. The serviceability windows this account holds at (or within the
+ * pace margin of) 1.0 — i.e. the windows whose `resetsAt` is the earliest
+ * relief this account can offer.
+ *
+ * Measured 2026-09-16 22:29-22:52Z: a Claude lane document with one account at
+ * five_hour 1.0 and a healthy second account at 0.05 still served 429s for 52
+ * runs, because cliproxy does not fail over within a lane — it kept routing to
+ * the blown account for the whole storm. An any-account-serviceable roll-up
+ * therefore overstates a lane whose provider behaves that way, so a tripped
+ * serviceability window on ANY account poisons the lane (see
+ * `evaluateLanePace`), and the account itself reads `exhausted` until reset.
+ *
+ * Note this is strictly wider than the per-window `serviceable` flag set in
+ * `scoredWindow`, which trips only at a hard `utilization >= 1`: the margin
+ * makes a window at 0.9 (default margin 0.1) trip too, because the storm
+ * showed 429s arriving before the reported utilization reached exactly 1.
+ */
+function trippedServiceabilityWindows(windows: PaceWindowVerdict[], tripCeilingMilli: number): PaceWindowVerdict[] {
+  return windows.filter(
+    (window) =>
+      window.role === "serviceability" &&
+      window.utilization !== null &&
+      toMilli(window.utilization) >= tripCeilingMilli,
+  );
 }
 
 function stateFor(deviationMilli: number, marginMilli: number): "ahead" | "behind" | "on" {
@@ -458,6 +486,9 @@ export function evaluateLanePace(input: {
   policy?: PacePolicy;
 }): LanePaceVerdict {
   const marginMilli = toMilli(input.policy?.margin ?? DEFAULT_MARGIN);
+  // TOG-3107: a serviceability window at (or within the margin of) 1.0 trips.
+  // Default margin 0.1 → trip at >= 0.9; a lane-configured margin widens it.
+  const tripCeilingMilli = SCALE - marginMilli;
   const urgentResetSeconds = input.policy?.urgentResetSeconds ?? DEFAULT_URGENT_RESET_SECONDS;
   const maxSnapshotAgeSeconds = input.policy?.maxSnapshotAgeSeconds ?? DEFAULT_MAX_SNAPSHOT_AGE_SECONDS;
   const asOf = timestamp(input.asOf ?? input.observation.observedAt);
@@ -487,7 +518,13 @@ export function evaluateLanePace(input: {
     const governing = governingWindow(account, windows);
     const accountStale = account.staleAfterSeconds != null &&
       (asOfMs - observedAtMs) / 1_000 > account.staleAfterSeconds;
-    const accountServiceable = !accountStale && serviceable(account, windows);
+    const accountServiceable = !accountStale && serviceable(account, windows, tripCeilingMilli);
+    // TOG-3107. Collected per account so the lane roll-up below can both detect
+    // the trip and name the earliest relief it can offer.
+    const tripped = trippedServiceabilityWindows(windows, tripCeilingMilli);
+    const trippedResetsAt = tripped
+      .flatMap((window) => (window.resetsAt === null ? [] : [{ ms: Date.parse(window.resetsAt), resetsAt: window.resetsAt }]))
+      .filter((entry) => !Number.isNaN(entry.ms));
     const unknownAllowanceWeight = windows.some((window) =>
       window.role === "allowance" &&
       window.utilization !== null &&
@@ -496,7 +533,9 @@ export function evaluateLanePace(input: {
       window.allowanceWeight === null
     );
     if (!governing) {
-      const exhausted = account.health === "exhausted" || account.health === "unavailable";
+      // TOG-3107: a tripped serviceability window reads `exhausted` here too,
+      // so the per-account output agrees with the lane roll-up below.
+      const exhausted = account.health === "exhausted" || account.health === "unavailable" || tripped.length > 0;
       // The account declared a governing window that this snapshot cannot
       // resolve (absent, wrong role, or missing utilization/reset/weight). It
       // has no computable allowance, so it must not be dispatched to on some
@@ -534,6 +573,8 @@ export function evaluateLanePace(input: {
         aggregateWeight: null,
         indeterminateWeight: accountServiceable && unknownAllowanceWeight,
         indeterminateGovernor,
+        tripped: tripped.length > 0,
+        trippedResetsAt,
       };
     }
     const utilizationMilli = toMilli(governing.utilization!);
@@ -608,6 +649,8 @@ export function evaluateLanePace(input: {
       aggregateWeight: governing.allowanceWeight ?? account.weight,
       indeterminateWeight: accountServiceable && (governing.allowanceWeight ?? account.weight) === null,
       indeterminateGovernor: false,
+      tripped: tripped.length > 0,
+      trippedResetsAt,
     };
   });
 
@@ -633,6 +676,15 @@ export function evaluateLanePace(input: {
       ? 0
       : rawShare(entry) / shareDenominator,
   }));
+  // A tripped serviceability window blocks the lane even when another account
+  // is healthy or has indeterminate capacity. Keep its reset ahead of all other
+  // account roll-up exits; it is the earliest possible relief, not a reopen time.
+  if (internal.some((entry) => entry.tripped)) {
+    const trippedResets = internal.flatMap((entry) => entry.trippedResetsAt)
+      .sort((left, right) => left.ms - right.ms);
+    const known = internal.filter((entry) => entry.utilizationMilli !== null);
+    return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "exhausted", serviceable: false, score: null, targetBurnRate: 0, observedBurnRate: 0, deficit: 0, accounts, knownAccountCount: known.length, knownWeight: known.reduce((sum, entry) => sum + (entry.aggregateWeight ?? 0), 0), serviceableAccountCount, urgentResetAt: trippedResets[0]?.resetsAt ?? null, reason: "serviceability-window-exhausted" };
+  }
   if (internal.some((entry) => entry.indeterminateWeight)) {
     const weighted = internal.filter((entry) => entry.verdict.serviceable && entry.aggregateWeight !== null);
     return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts, knownAccountCount: weighted.length, knownWeight: weighted.reduce((sum, entry) => sum + entry.aggregateWeight!, 0), serviceableAccountCount, urgentResetAt: null, reason: "indeterminate-account-weight" };
