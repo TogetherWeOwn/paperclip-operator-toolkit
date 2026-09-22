@@ -1835,6 +1835,23 @@ jobs:
       - name: check 9 filters both sides of its join (TOG-994)
         run: ./test_tog994_check9_symmetry.sh
 
+      # TOG-3443. Check 12 of org_access_review.sh diffed each live agent's
+      # GitHub tool-gateway ceiling against tool_grant_expectations.json and
+      # emitted 18 standing OVER-GRANT findings — every granted agent holds
+      # the same uniform 45-entry native bundle including delete_file. But
+      # the gateway tier is only layer 1; layer 2 (the per-project GitHub App
+      # installation-token scope) is the real capability boundary. The check
+      # now reconciles a covered over-grant as ACCEPTED-RISK only while
+      # layer 2 re-verifies intact on the same run, and fails closed (raw
+      # findings return) on anything unverifiable. The suite is static plus
+      # an offline behavioral harness: layer 2 is pure bash+jq behind a
+      # CHECK12_PROJECTS_JSON fixture override, so the real block runs with a
+      # stubbed sql(). §3 is the load-bearing part, as in the TOG-994 suite:
+      # it applies the exact weakening the wake forbade (unconditional
+      # accepted-risk) and requires the guard to go RED on it.
+      - name: check 12 measures the two-layer boundary (TOG-3443)
+        run: ./test_tog3443_check12_reconcile.sh
+
       # TOG-994, the destructive half. org_orphan_retire.sh DELETEs permission
       # grants and secret bindings, so the assertions that matter are the
       # refusals: dry-run is the default, the kill switch stops a write, an

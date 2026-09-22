@@ -34,7 +34,11 @@
 #                          both over-grants and under-grants; checks 1-2 above
 #                          diff Paperclip PERMISSION KEYS only, which by
 #                          org_provisioner.sh's own disclaimer say nothing about
-#                          external tool access.
+#                          external tool access. Reconciled TOG-3443: over-grants
+#                          covered by the accepted-risk record read as
+#                          ACCEPTED-RISK only while the per-project token-scope
+#                          layer re-verifies intact on the same run; otherwise
+#                          they stand as findings.
 #
 # Read-only. Exits non-zero when findings exist, so it can be wired to CI,
 # a cron, or a routine.
@@ -89,7 +93,11 @@ fi
 # is fail-fast, and a failure writes a sentinel that survives command/process
 # substitution so the script cannot mistake an empty result for zero findings.
 SQL_FAILURE_FILE="$(mktemp)"
-trap 'rm -f "$SQL_FAILURE_FILE"' EXIT
+# TOG-3443 check-12 layer-2 scratch: live project list + evaluated lines.
+# Created up here so the EXIT trap always knows them (set -u safe).
+LAYER2_JSON="$(mktemp)"
+LAYER2_LINES="$(mktemp)"
+trap 'rm -f "$SQL_FAILURE_FILE" "$LAYER2_JSON" "$LAYER2_LINES"' EXIT
 sql() {
   local out rc
   out="$(PGV_COMPANY_ID="$COMPANY_ID" pcsql_run -Atq -v ON_ERROR_STOP=1 -F"|" <<<"$1")"; rc=$?
@@ -579,12 +587,151 @@ hdr "12. Tool-gateway grant ceiling drift (role vs. actual GitHub risk ceiling)"
 # invented. Per the mapping file's own header, no role's expected ceiling is
 # ever "destructive" — so any agent actually holding a destructive-tier grant
 # is always an over-grant finding here, independent of role.
+#
+# TOG-3443 reconciliation: the gateway tier above is layer 1. Layer 2 is the
+# per-project GitHub App installation-token scope (GH_APP_SCOPE_STRICT=1 +
+# fixed GH_APP_REPOS + capped GH_APP_PERMISSIONS), which is the real
+# capability boundary — it is what keeps a destructive-tier gateway grant to
+# recoverable file deletes. An over-grant against layer 1 reads as
+# ACCEPTED-RISK only while layer 2 re-verifies intact on the SAME run (every
+# project pinned, Fleet exception by id with its live shape). Anything
+# unverifiable fails closed: the raw over-grant findings return. UNDER-GRANTs
+# are untouched by this — a missing grant is never accepted risk.
 TOOL_MAP="${TOOL_MAP:-$HERE/tool_grant_expectations.json}"
 if [[ ! -r "$TOOL_MAP" ]]; then
   note "tool_grant_expectations.json not found next to this script — tool-gateway grant ceiling drift went UNREVIEWED"
 elif ! jq -e . "$TOOL_MAP" >/dev/null 2>&1; then
   note "tool_grant_expectations.json does not parse as JSON — tool-gateway grant ceiling drift went UNREVIEWED"
 else
+  # --- TOG-3443 layer 2: the token-scope boundary ---------------------------
+  # Layer 1 (the gateway tier diffed below) says what tools an agent COULD
+  # reach. Layer 2 — the per-project GitHub App installation-token scope
+  # (GH_APP_SCOPE_STRICT=1 + fixed GH_APP_REPOS + capped GH_APP_PERMISSIONS)
+  # — is what keeps a destructive-tier gateway grant to recoverable file
+  # deletes. Enforcement lives in two places, cited so a refactor that moves
+  # them breaks this comment loudly: gh-app-token.js strictGaps() +
+  # assertStrictForPem() (PEM path; strict requires BOTH repos and
+  # permissions since TOG-238) and plugins/gh-token-broker/dist/scope.js
+  # resolveRepositories() (broker path; an unscoped mint is refused with
+  # 409, never defaulted).
+  #
+  # Source: the live project list (same shape gh_permission_pin_audit.sh
+  # reads). CHECK12_PROJECTS_JSON overrides with a fixture file for
+  # offline/CI use. No credential ever touches argv: the API key travels in
+  # a 0600 curl --config file, exactly as gh_permission_pin_audit.sh does.
+  # Anything unverifiable fails closed (RECONCILE stays 0) and the raw
+  # layer-1 over-grant findings below return.
+  ACCEPTED_RISK_DOC="40405f9b-5f44-4925-8589-51e9f1b32302"
+  ACCEPTED_RISK_REV="1"
+  RECONCILE=0
+  map_doc="$(jq -r '._acceptedRiskTOG3443.docId // empty' "$TOOL_MAP")"
+  map_rev="$(jq -r '._acceptedRiskTOG3443.rev // empty' "$TOOL_MAP")"
+  FLEET_PROJECT_ID="$(jq -r '._acceptedRiskTOG3443.fleetProjectId // empty' "$TOOL_MAP")"
+  if [[ "$map_doc" != "$ACCEPTED_RISK_DOC" || "$map_rev" != "$ACCEPTED_RISK_REV" || -z "$FLEET_PROJECT_ID" ]]; then
+    note "tool_grant_expectations.json accepted-risk record drifted (want doc $ACCEPTED_RISK_DOC rev $ACCEPTED_RISK_REV with fleetProjectId) — refusing reconciliation, all layer-1 over-grants stand"
+  else
+    PARSE_SRC=""
+    if [[ -n "${CHECK12_PROJECTS_JSON:-}" ]]; then
+      if [[ -r "$CHECK12_PROJECTS_JSON" ]]; then
+        PARSE_SRC="$CHECK12_PROJECTS_JSON"
+      else
+        note "CHECK12_PROJECTS_JSON points at an unreadable file ($CHECK12_PROJECTS_JSON) — token-scope layer UNVERIFIABLE, all layer-1 over-grants stand"
+      fi
+    elif [[ -n "${PAPERCLIP_API_KEY:-}" && -n "${PAPERCLIP_API_URL:-}" ]]; then
+      LAYER2_CFG="$(umask 077; mktemp "${TMPDIR:-/tmp}/org_access_review.XXXXXXXX")" || LAYER2_CFG=""
+      if [[ -z "$LAYER2_CFG" ]]; then
+        note "could not create a private curl config — token-scope layer UNVERIFIABLE, all layer-1 over-grants stand"
+      else
+        chmod 0600 "$LAYER2_CFG"
+        _api_base="${PAPERCLIP_API_URL%/}"; _api_base="${_api_base%/api}"
+        {
+          printf 'url = "%s"\n' "${_api_base}/api/companies/${COMPANY_ID}/projects"
+          printf 'request = "GET"\n'
+          printf 'header = "Authorization: Bearer %s"\n' "$PAPERCLIP_API_KEY"
+          printf 'silent\nshow-error\nfail\n'
+        } > "$LAYER2_CFG"
+        if curl --config "$LAYER2_CFG" > "$LAYER2_JSON"; then
+          PARSE_SRC="$LAYER2_JSON"
+        else
+          note "could not read the project list — token-scope layer UNVERIFIABLE, all layer-1 over-grants stand"
+        fi
+        rm -f "$LAYER2_CFG"
+      fi
+    else
+      note "no CHECK12_PROJECTS_JSON fixture and no PAPERCLIP_API_KEY/API_URL in env — token-scope layer UNVERIFIABLE, all layer-1 over-grants stand"
+    fi
+    if [[ -n "$PARSE_SRC" ]]; then
+      LAYER2_JQ_RC=0
+      # lit() mirrors scope.js literal() exactly: a bare string, or
+      # {type:"plain",value:<string>}, participates; EVERYTHING else —
+      # secret_ref/user_secret_ref, bare objects, arrays, numbers — reads as
+      # absent. Anything looser would count a project as pinned that the
+      # broker treats as unscoped (and 409-refuses).
+      jq -r --arg fleet "$FLEET_PROJECT_ID" '
+        def lit($k):
+          (.env[$k]
+           | if type == "string" then .
+             elif type == "object" and .type == "plain"
+                  and ((.value | type) == "string") then .value
+             else "" end);
+        (if type == "array" then . else (.projects // .issues // .data // []) end)
+        | .[]
+        | [((.id // "") | tostring),
+           lit("GH_APP_SCOPE_STRICT"),
+           lit("GH_APP_REPOS"),
+           lit("GH_APP_PERMISSIONS"),
+           ((.repoUrl // "") | tostring),
+           ((((.id // "") | tostring) == $fleet) | tostring)]
+        | join("|")' "$PARSE_SRC" > "$LAYER2_LINES" 2>/dev/null || LAYER2_JQ_RC=$?
+      # Pipe, not TSV: tab is IFS whitespace, so IFS=$'\t' read collapses
+      # consecutive tabs and the empty middle fields (unpinned STRICT/REPOS/
+      # PERMISSIONS — the EXPOSED signal) vanish into the wrong columns.
+      # None of the six values can contain a pipe (uuids, "1", repo slugs,
+      # permission specs, https URLs, true/false), same convention as the
+      # sql() -F"|" rows the verdict loop below already reads.
+      if [[ "$LAYER2_JQ_RC" -ne 0 ]]; then
+        note "project list does not parse — token-scope layer UNVERIFIABLE, all layer-1 over-grants stand"
+      elif [[ ! -s "$LAYER2_LINES" ]]; then
+        note "project list is empty — token-scope layer has nothing to verify against, all layer-1 over-grants stand"
+      else
+        PINNED_COUNT=0
+        EXPOSED_COUNT=0
+        FLEET_RESIDUAL=0
+        while IFS='|' read -r pid pstrict prepos pperms prepo isfleet; do
+          [[ -n "$pid" ]] || continue
+          # The recorded Fleet shape (no pins, no repo: broker 409-denies
+          # every mint, fail closed) is a standing residual, not a pass and
+          # not a generic EXPOSED. Any OTHER Fleet shape is judged as a
+          # normal project below — the exception never widens.
+          if [[ "$isfleet" == "true" && -z "$pstrict" && -z "$prepos" && -z "$pperms" && -z "$prepo" ]]; then
+            FLEET_RESIDUAL=1
+            continue
+          fi
+          reason=""
+          [[ "$pstrict" == "1" ]] || reason="${reason:+$reason; }STRICT!=1"
+          [[ -n "$prepos" ]] || reason="${reason:+$reason; }REPOS unpinned"
+          if [[ -z "$pperms" ]]; then
+            reason="${reason:+$reason; }PERMISSIONS unpinned"
+          elif [[ "$pperms" =~ (^|[,[:space:]])[A-Za-z_.-]*=admin([,[:space:]]|$) ]]; then
+            reason="${reason:+$reason; }PERMISSIONS exceed write cap (=admin)"
+          fi
+          if [[ -z "$reason" ]]; then
+            PINNED_COUNT=$((PINNED_COUNT+1))
+          else
+            EXPOSED_COUNT=$((EXPOSED_COUNT+1))
+            note "project $pid token scope EXPOSED ($reason) — token-scope layer broken, all layer-1 over-grants stand"
+          fi
+        done < "$LAYER2_LINES"
+        if [[ "$FLEET_RESIDUAL" == "1" ]]; then
+          note "Fleet Intelligence & Evaluation [$FLEET_PROJECT_ID] pins no token scope and attaches no repo — broker 409-denies every mint (fail closed). Standing residual under accepted-risk $ACCEPTED_RISK_DOC rev $ACCEPTED_RISK_REV until it pins or is retired"
+        fi
+        if [[ "$EXPOSED_COUNT" -eq 0 && "$PINNED_COUNT" -gt 0 ]]; then
+          RECONCILE=1
+          good "token-scope layer intact: $PINNED_COUNT non-fleet project(s) STRICT=1 + fixed REPOS + capped PERMISSIONS (accepted-risk $ACCEPTED_RISK_DOC rev $ACCEPTED_RISK_REV)"
+        fi
+      fi
+    fi
+  fi
   ceiling_rank() {
     case "$1" in
       none) echo 0 ;; read) echo 1 ;; write) echo 2 ;; destructive) echo 3 ;; *) echo -1 ;;
@@ -615,7 +762,15 @@ else
     if [[ "$actual_rank" -eq "$exp_rank" ]]; then
       good "$label [$tpl] — tool-gateway ceiling matches expectation ($exp)"
     elif [[ "$actual_rank" -gt "$exp_rank" ]]; then
-      note "$label [$tpl] — TOOL-GATEWAY OVER-GRANT: actual ceiling '${actual:-none}' exceeds expected '$exp'"
+      # TOG-3443 effective ceiling: a layer-1 over-grant reads as
+      # ACCEPTED-RISK only while layer 2 re-verified intact on this same run
+      # (RECONCILE=1). UNDER-GRANTs never reconcile — a missing grant is not
+      # accepted risk — and unverifiable/broken layer 2 keeps the raw finding.
+      if [[ "$RECONCILE" == "1" ]]; then
+        good "$label [$tpl] — gateway ceiling '${actual:-none}' exceeds expected '$exp' but ACCEPTED-RISK (doc $ACCEPTED_RISK_DOC rev $ACCEPTED_RISK_REV): token-scope layer re-verified intact this run"
+      else
+        note "$label [$tpl] — TOOL-GATEWAY OVER-GRANT: actual ceiling '${actual:-none}' exceeds expected '$exp'"
+      fi
     else
       note "$label [$tpl] — TOOL-GATEWAY UNDER-GRANT: actual ceiling '${actual:-none}' is below expected '$exp'"
     fi
