@@ -8,6 +8,9 @@ name: CI
 #
 #   RUNS HERE (offline, no credentials, no database):
 #     test_gh_app_token.sh              the credential-minter regression suite
+#     test_gh_shim.sh                   gh-shim: mint without a bound PEM, preserve
+#                                       an explicit token, and fall through on a
+#                                       failed mint — TOG-1448/3412
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     test_gh_token_dispatch.sh         gh_token.sh: refuses unknown subcommands
 #     test_gh_token_api_body.sh         gh_token.sh: the request body reaches the
@@ -633,6 +636,11 @@ jobs:
       # generated throwaway RSA key, and fabricated token-shaped canaries.
       - name: gh-app-token.js regression suite
         run: ./test_gh_app_token.sh
+
+      # TOG-1448/3412: a staged shim with stubbed node and gh proves token
+      # minting needs no bound PEM. Offline; no real credential or API call.
+      - name: gh-shim regression suite
+        run: ./test_gh_shim.sh
 
       # TOG-3164. `doctor` is the only command that reports what GitHub actually
       # GRANTED, and it was dead in every environment shipping
