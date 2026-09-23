@@ -2439,6 +2439,19 @@ jobs:
       - name: live-path acceptance self-test (mutation-gated)
         run: ./mcp/deploy/acceptance_live_selftest.sh
 
+      # The TOG-3554 host-cron wrappers post security findings unattended with
+      # a long-lived agent key. Until TOG-4003 nothing here executed them --
+      # only "Syntax check every script" touched them -- and a dead findings
+      # path (rc read after an unguarded command substitution under set -e)
+      # shipped through review: a real finding produced ZERO API calls. This
+      # suite runs the wrappers against stub detectors and a loopback stub API
+      # and pins findings-only, fail-closed, coalescing, and the rule that
+      # neither the key nor the card body reaches curl's argv. Each contract
+      # carries a positive control, including a rebuild of the exact TOG-4003
+      # bug, so the suite cannot go quietly vacuous.
+      - name: TOG-3554 host-check contracts (mutation-gated)
+        run: ./test_tog3554_host_checks.sh
+
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
       # .gitignore covers is by definition not in the repo, and scanning the
