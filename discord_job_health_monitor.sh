@@ -179,9 +179,9 @@ if [[ "$MEASURED" == yes ]]; then
       echo "**All Discord scheduled jobs healthy, and every time-gated job proved a delivery.**"
     fi
     echo
-    echo '| Job | Schedule | Verdict | Runs | Succeeded | Scope-denied | Delivered |'
-    echo '|---|---|---|---|---|---|---|'
-    jq -r '.jobs[] | "| `\(.jobKey)` | `\(.schedule // "—")` | \(.verdict) | \(.runs) | \(.succeeded) | \(.scopeDenied) | \(if .deliveryMetric then "\(.delivered) / \(.sendOpportunities) opportunities" else "n/a" end) |"' "$RESULT"
+    echo '| Job | Schedule | Enabled | Verdict | Runs | Succeeded | Scope-denied | Delivered |'
+    echo '|---|---|---|---|---|---|---|---|'
+    jq -r '.jobs[] | "| `\(.jobKey)` | `\(.schedule // "—")` | \(.enabled) | \(.verdict) | \(.runs) | \(.succeeded) | \(.scopeDenied) | \(if .deliveryMetric then "\(.delivered) / \(.sendOpportunities) opportunities" else "n/a" end) |"' "$RESULT"
     echo
     echo "- Detector: \`node scripts/discord_job_health.js --json\` (exit $DETECTOR_RC), window **${WINDOW_HOURS}h**"
     echo "- Next check: **$NEXT_CHECK**"
@@ -206,7 +206,7 @@ else
 fi
 
 # Counts slide on every 48h window, so they are not state. Fingerprint the job
-# verdicts, failure classes, delivery evidence, and latest error instead. The
+# enabled states, verdicts, failure classes, delivery evidence, and errors. The
 # short hash is stored in monitor notes, which are readable on the next cycle;
 # externalRef cannot carry it because Paperclip deliberately redacts that field.
 STATE_JSON="$WORK/state.json"
@@ -215,6 +215,7 @@ if [[ "$MEASURED" == yes ]]; then
     measured: true,
     jobs: ([.jobs[] | {
       jobKey,
+      enabled,
       verdict,
       scopeDenied: ((.scopeDenied // 0) > 0),
       otherFailures: ((.otherFailures // 0) > 0),
@@ -247,7 +248,7 @@ esac
 jq -e 'type == "object" and (.id | type == "string")' "$ISSUE_JSON" >/dev/null 2>&1 \
   || { echo "ERROR: monitor issue response was not an issue" >&2; exit 2; }
 PREVIOUS_STATE_KEY="$(jq -r '
-  try (.executionPolicy.monitor.notes // "" | capture("state=(?<key>[0-9a-f]{16})").key)
+  try (.executionState.monitor.notes // .executionPolicy.monitor.notes // "" | capture("state=(?<key>[0-9a-f]{16})").key)
   catch ""
 ' "$ISSUE_JSON")" \
   || { echo "ERROR: could not read prior monitor state" >&2; exit 2; }

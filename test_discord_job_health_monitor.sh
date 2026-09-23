@@ -267,5 +267,49 @@ grep -qF 'comment=yes' "$WORK/out.txt" \
   && ok "stdout reports that the changed comment was posted" \
   || bad "stdout did not report the changed comment"
 
+# The live API stores monitor state separately from the write-side policy.
+remember_live_state() {
+  jq --slurpfile patch "$WORK/patch.json" \
+    '.executionPolicy = null | .executionState.monitor = $patch[0].executionPolicy.monitor' \
+    "$WORK/issue.json" > "$WORK/issue.next.json"
+  mv "$WORK/issue.next.json" "$WORK/issue.json"
+}
+
+hdr "16. Live executionState suppresses an unchanged cycle with a null policy"
+run_case "$FAILING_JSON" 1
+remember_live_state
+run_case "$shifted_json" 1
+[[ "$CASE_RC" -eq 1 ]] && ok "live-state cycle preserves detector exit 1" || bad "live-state cycle returned $CASE_RC"
+jq -e 'has("comment") | not' "$WORK/patch.json" >/dev/null \
+  && ok "live-state notes suppress an unchanged comment" || bad "live-state notes were ignored"
+[[ "$(jq -r '.executionPolicy.monitor.nextCheckAt' "$WORK/patch.json")" == "2026-08-30T06:00:00Z" ]] \
+  && ok "live-state cycle still re-arms" || bad "live-state cycle did not re-arm"
+
+hdr "17. Current executionState takes precedence over a stale policy"
+jq '.executionPolicy = {monitor:{notes:"state=0000000000000000"}}' \
+  "$WORK/issue.json" > "$WORK/issue.next.json"
+mv "$WORK/issue.next.json" "$WORK/issue.json"
+run_case "$FAILING_JSON" 1
+jq -e 'has("comment") | not' "$WORK/patch.json" >/dev/null \
+  && ok "current state wins over stale write-side notes" || bad "stale policy overrode current state"
+
+hdr "18. Enabled-state changes are reported even with identical verdicts and counts"
+for transition in '"paused" "failed"' 'true false' 'false null'; do
+  read -r before after <<<"$transition"
+  before_json="$(jq -c --argjson enabled "$before" '.jobs[1].enabled = $enabled' <<<"$FAILING_JSON")"
+  after_json="$(jq -c --argjson enabled "$after" '.jobs[1].enabled = $enabled' <<<"$FAILING_JSON")"
+  run_case "$before_json" 1
+  remember_live_state
+  run_case "$before_json" 1
+  jq -e 'has("comment") | not' "$WORK/patch.json" >/dev/null \
+    && ok "unchanged enabled=$before is suppressed" || bad "unchanged enabled=$before posted again"
+  run_case "$after_json" 1
+  [[ "$CASE_RC" -eq 1 ]] && ok "$before -> $after preserves detector verdict" || bad "enabled transition returned $CASE_RC"
+  jq -e 'has("comment")' "$WORK/patch.json" >/dev/null \
+    && ok "$before -> $after posts the state change" || bad "$before -> $after was silently suppressed"
+  jq -e --argjson state "$after" '.comment | contains("| " + ($state | tostring) + " |")' "$WORK/patch.json" >/dev/null \
+    && ok "comment includes enabled=$after" || bad "comment omitted enabled=$after"
+done
+
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

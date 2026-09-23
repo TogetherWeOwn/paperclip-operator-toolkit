@@ -172,5 +172,25 @@ mutate "a changed failure signature is silently suppressed" \
   'latestError: (.latestError // null)' \
   'latestError: null'
 
+mutate "live executionState notes ignored when the policy is null" \
+  '.executionState.monitor.notes // .executionPolicy.monitor.notes // ""' \
+  '.executionPolicy.monitor.notes // ""'
+
+mutate "stale policy notes override the current executionState" \
+  '.executionState.monitor.notes // .executionPolicy.monitor.notes // ""' \
+  '.executionPolicy.monitor.notes // .executionState.monitor.notes // ""'
+
+mutate "enabled-state changes omitted from the fingerprint" \
+  '      enabled,' \
+  ''
+
+mutate "false enabled state collapsed into null" \
+  '      enabled,' \
+  '      enabled: (.enabled // null),'
+
+mutate "the report omits the changed enabled state" \
+  '\(.enabled)' \
+  'unknown'
+
 printf '\npassed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
