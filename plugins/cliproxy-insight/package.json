@@ -1,0 +1,36 @@
+{
+  "name": "@togetherweown/paperclip-cliproxy-insight",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Paperclip plugin: durable per-upstream-provider usage/cooldown telemetry from the sanitized CLIProxy telemetry lane, polled read-only and persisted so a container restart doesn't lose it.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.824.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
