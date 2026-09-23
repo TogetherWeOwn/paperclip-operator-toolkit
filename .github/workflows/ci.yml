@@ -576,6 +576,15 @@ jobs:
       - name: self-hosted runner migration contract
         run: ./test_tog2677_selfhosted_runner.sh
 
+      # TOG-3884. Dedicated-UID offline fixtures: the isolated-UID migration
+      # and probe scripts are exercised entirely against fabricated fixtures
+      # (fake passwd/group, stub systemctl, mktemp trees). No host, systemd,
+      # PostgreSQL, network, credential, or root privilege is used, so this
+      # suite runs on the same self-hosted isolated runner as every other
+      # offline suite without altering runner targeting.
+      - name: dedicated-UID offline fixture suite
+        run: python3 -m unittest discover -s github-runner -p 'test_isolated_*.py'
+
       # Every tool here is a script; there is no build. A parse error is the
       # most common regression and the cheapest to catch, so catch it first —
       # including in the two suites CI cannot execute.
