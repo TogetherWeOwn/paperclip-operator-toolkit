@@ -693,7 +693,8 @@ function resolveConfig(raw) {
         fallbackOnly: bool(model.fallbackOnly, false),
         note: string(model.note, ""),
         earnIn: nullableRecord(model.earnIn),
-        laneId: typeof model.laneId === "string" && model.laneId.length > 0 ? model.laneId : null
+        laneId: typeof model.laneId === "string" && model.laneId.length > 0 ? model.laneId : null,
+        effort: typeof model.effort === "string" && model.effort.length > 0 ? model.effort : null
       }
     ];
   }) : [];
@@ -2535,6 +2536,187 @@ function ancillaryDriftForAgent(agent, recommendedModelId, models = []) {
   }));
 }
 
+// src/engine/effort.ts
+var EFFORT_LADDER = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+];
+var CLAUDE_LOCAL_EFFORTS = ["low", "medium", "high"];
+var OPENCODE_LOCAL_EFFORTS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
+var CODEX_LOCAL_DEFAULT_EFFORTS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh"
+];
+var CODEX_LOCAL_ASTRA_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+];
+var CODEX_LOCAL_ASTRA_MODEL = "gpt-6-astra";
+function effortConfigKeyFor(adapterType) {
+  switch (adapterType) {
+    case "claude_local":
+      return "effort";
+    case "codex_local":
+      return "modelReasoningEffort";
+    case "opencode_local":
+      return "variant";
+    default:
+      return null;
+  }
+}
+function inheritedEffortFrom(adapterType, adapterConfig) {
+  if (!adapterConfig) return null;
+  const key = effortConfigKeyFor(adapterType);
+  if (key === null) return null;
+  const primary = adapterConfig[key];
+  if (typeof primary === "string" && primary.trim().length > 0) return primary;
+  if (adapterType === "codex_local") {
+    const legacy = adapterConfig.reasoningEffort;
+    if (typeof legacy === "string" && legacy.trim().length > 0) return legacy;
+  }
+  return null;
+}
+function effortVocabularyFor(adapterType, modelId) {
+  switch (adapterType) {
+    case "claude_local":
+      return CLAUDE_LOCAL_EFFORTS;
+    case "opencode_local":
+      return OPENCODE_LOCAL_EFFORTS;
+    case "codex_local":
+      return normalizeCodexModel(modelId) === CODEX_LOCAL_ASTRA_MODEL ? CODEX_LOCAL_ASTRA_EFFORTS : CODEX_LOCAL_DEFAULT_EFFORTS;
+    default:
+      return null;
+  }
+}
+var CODEX_LOCAL_MODEL_ALIASES = {
+  "gpt-5.6": "gpt-5.6-sol"
+};
+function normalizeCodexModel(modelId) {
+  const trimmed = typeof modelId === "string" ? modelId.trim() : "";
+  return CODEX_LOCAL_MODEL_ALIASES[trimmed] ?? trimmed;
+}
+function ladderIndex(value) {
+  return EFFORT_LADDER.indexOf(value);
+}
+function normalizeEffort(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+function clampToVocabulary(requestedIndex, vocabulary) {
+  let best = null;
+  let bestIndex = -1;
+  let coolest = null;
+  let coolestIndex = Number.POSITIVE_INFINITY;
+  for (const candidate of vocabulary) {
+    const index = ladderIndex(candidate);
+    if (index < 0) continue;
+    if (index < coolestIndex) {
+      coolestIndex = index;
+      coolest = candidate;
+    }
+    if (index <= requestedIndex && index > bestIndex) {
+      bestIndex = index;
+      best = candidate;
+    }
+  }
+  return best ?? coolest;
+}
+function clearWritesFor(adapterType, key) {
+  const writes = { [key]: "" };
+  if (adapterType === "codex_local") writes.reasoningEffort = "";
+  return writes;
+}
+function resolveEffortPin(input) {
+  const key = effortConfigKeyFor(input.adapterType);
+  const vocabulary = effortVocabularyFor(input.adapterType, input.modelId);
+  const nothing = (outcome, reason) => ({
+    writes: {},
+    outcome,
+    reason
+  });
+  if (key === null || vocabulary === null) {
+    return nothing(
+      "adapter-unsupported",
+      `adapter ${input.adapterType ?? "unknown"} has no issue-level effort surface; leaving effort untouched`
+    );
+  }
+  const legal = new Set(vocabulary);
+  const rosterEffort = normalizeEffort(input.rosterEffort);
+  if (rosterEffort) {
+    if (legal.has(rosterEffort)) {
+      return {
+        writes: { [key]: rosterEffort },
+        outcome: "pinned",
+        reason: `roster effort ${rosterEffort} is legal for ${input.modelId} on ${input.adapterType}`
+      };
+    }
+    const requestedIndex = ladderIndex(rosterEffort);
+    if (requestedIndex < 0) {
+      return nothing(
+        "rejected",
+        `roster effort "${rosterEffort}" is not a recognised level; refusing to write an unverifiable pair for ${input.modelId}`
+      );
+    }
+    const clamped2 = clampToVocabulary(requestedIndex, vocabulary);
+    if (clamped2 === null) {
+      return nothing(
+        "rejected",
+        `no legal effort level for ${input.modelId} on ${input.adapterType}; refusing to write`
+      );
+    }
+    return {
+      writes: { [key]: clamped2 },
+      outcome: "clamped",
+      reason: `roster effort ${rosterEffort} is not offered by ${input.modelId} on ${input.adapterType} (${vocabulary.join("|")}); clamped to ${clamped2}`
+    };
+  }
+  const inherited = normalizeEffort(input.inheritedEffort);
+  if (!inherited) {
+    return nothing(
+      "none",
+      `no roster effort for ${input.modelId} and nothing inherited; leaving effort unset`
+    );
+  }
+  if (legal.has(inherited)) {
+    return nothing(
+      "inherited-ok",
+      `no roster effort for ${input.modelId}; inherited ${inherited} is legal on ${input.adapterType}; left alone`
+    );
+  }
+  const inheritedIndex = ladderIndex(inherited);
+  const clamped = inheritedIndex < 0 ? null : clampToVocabulary(inheritedIndex, vocabulary);
+  if (clamped === null) {
+    return {
+      writes: clearWritesFor(input.adapterType, key),
+      outcome: "neutralized-cleared",
+      reason: `inherited effort "${inherited}" is illegal for ${input.modelId} on ${input.adapterType} and has no clamp target; emptying ${Object.keys(clearWritesFor(input.adapterType, key)).join(" and ")} so the adapter falls back to its own default`
+    };
+  }
+  return {
+    writes: { [key]: clamped },
+    outcome: "neutralized-clamped",
+    reason: `inherited effort ${inherited} is illegal for ${input.modelId} on ${input.adapterType} (${vocabulary.join("|")}); clamped to ${clamped}`
+  };
+}
+
 // src/engine/context.ts
 var CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 function positiveInteger(value) {
@@ -2604,14 +2786,24 @@ function modelOverrideForContext(input) {
     }
   }
   const mustWriteEnv = Object.keys(env).length > 0 || CONTEXT_LIMIT_ENV_KEY in agentEnv || CONTEXT_LIMIT_ENV_KEY in overrideEnv;
+  const effortPin = effortPinForOverride(input);
   return {
     assigneeAdapterOverrides: {
       adapterConfig: {
         model: input.model.id,
+        ...effortPin.writes,
         ...mustWriteEnv ? { env } : {}
       }
     }
   };
+}
+function effortPinForOverride(input) {
+  return resolveEffortPin({
+    adapterType: input.agentAdapterType,
+    modelId: input.model.id,
+    rosterEffort: input.model.effort,
+    inheritedEffort: inheritedEffortFrom(input.agentAdapterType, input.agentAdapterConfig)
+  });
 }
 
 // src/engine/cost-attribution.ts
@@ -4837,6 +5029,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         let agentFloorModelId = null;
         let agentName = null;
         let agentEnv = null;
+        let agentAdapterType = null;
+        let agentAdapterConfig = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -4845,6 +5039,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const config = asRecord2(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
             agentEnv = asRecord2(config.env);
+            agentAdapterConfig = config;
+            if (typeof agentRecord.adapterType === "string") agentAdapterType = agentRecord.adapterType;
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
           }
@@ -4890,6 +5086,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
           description: String(issue.description ?? ""),
           agentEnv,
+          agentAdapterType,
+          agentAdapterConfig,
           existingOverrideEnv,
           contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache)
         };
@@ -5040,6 +5238,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
           pinnedModelId: described.descriptor.pinnedModelId ?? null,
           agentEnv: described.agentEnv,
+          agentAdapterType: described.agentAdapterType,
+          agentAdapterConfig: described.agentAdapterConfig,
           existingOverrideEnv: described.existingOverrideEnv
         };
       };
@@ -5140,6 +5340,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             fleetCeilingTokens: result.config.selection.fleetContextCeilingTokens,
             compactionRatio: result.config.selection.compactionRatio,
             agentEnv: result.agentEnv,
+            agentAdapterType: result.agentAdapterType,
+            agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv
           });
           let labelNote = "";
@@ -5476,6 +5678,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
             compactionRatio: config.selection.compactionRatio,
             agentEnv: result.agentEnv,
+            agentAdapterType: result.agentAdapterType,
+            agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv
           }),
           companyId
@@ -6434,6 +6638,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                   compactionRatio: config.selection.compactionRatio,
                   agentEnv: described.agentEnv,
+                  agentAdapterType: described.agentAdapterType,
+                  agentAdapterConfig: described.agentAdapterConfig,
                   existingOverrideEnv: described.existingOverrideEnv
                 }),
                 company.id
@@ -6565,6 +6771,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                   compactionRatio: config.selection.compactionRatio,
                   agentEnv: described.agentEnv,
+                  agentAdapterType: described.agentAdapterType,
+                  agentAdapterConfig: described.agentAdapterConfig,
                   existingOverrideEnv: described.existingOverrideEnv
                 }),
                 company.id
@@ -6836,6 +7044,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
                     agentEnv: result.agentEnv,
+                    agentAdapterType: result.agentAdapterType,
+                    agentAdapterConfig: result.agentAdapterConfig,
                     existingOverrideEnv: result.existingOverrideEnv
                   }),
                   company.id
@@ -6878,6 +7088,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
                     agentEnv: result.agentEnv,
+                    agentAdapterType: result.agentAdapterType,
+                    agentAdapterConfig: result.agentAdapterConfig,
                     existingOverrideEnv: result.existingOverrideEnv
                   }),
                   company.id

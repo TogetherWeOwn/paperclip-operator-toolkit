@@ -1283,6 +1283,84 @@ const mutants = [
     from: "      if (isSecretBinding(env[key])) continue;\n",
     to: "",
   },
+  // TOG-3995: the effort half of a pin. Each of these is a way to emit a
+  // model/effort pair the model cannot honour — the 2026-09-22 failure — and
+  // each must be visibly fatal, or `effort.ts` is decoration.
+  {
+    // Trust the roster and skip the model's own vocabulary.
+    name: "effort-roster-bypasses-vocabulary",
+    file: "src/engine/effort.ts",
+    from: "    if (legal.has(rosterEffort)) {",
+    to: "    if (rosterEffort) {",
+  },
+  {
+    // Clamp to the hottest legal level regardless of what was asked for. Looks
+    // right for a down-clamp and is wrong for every request below the floor.
+    name: "effort-clamp-ignores-the-request",
+    file: "src/engine/effort.ts",
+    from: "    if (index <= requestedIndex && index > bestIndex) {",
+    to: "    if (index > bestIndex) {",
+  },
+  {
+    // Treat any inherited value as acceptable. This is the exact pre-TOG-3995
+    // behaviour: the key is omitted, and the host's per-key merge then carries
+    // the agent's illegal effort onto the new model.
+    name: "effort-inherited-illegal-passes-through",
+    file: "src/engine/effort.ts",
+    from: "  if (legal.has(inherited)) {",
+    to: "  if (inherited) {",
+  },
+  {
+    // Read the vocabulary off something other than the adapter. `claude_local`
+    // must not inherit a vocabulary that reaches xhigh/max.
+    name: "effort-vocabulary-ignores-the-adapter",
+    file: "src/engine/effort.ts",
+    from: '    case "claude_local":\n      return CLAUDE_LOCAL_EFFORTS;',
+    to: '    case "claude_local":\n      return OPENCODE_LOCAL_EFFORTS;',
+  },
+  {
+    // codex's legacy fallback key. Ignoring it leaves the clamp blind to a
+    // value `codex-args.ts` will still honour.
+    name: "effort-codex-legacy-key-ignored",
+    file: "src/engine/effort.ts",
+    from: "    const legacy = adapterConfig.reasoningEffort;",
+    to: "    const legacy = undefined;",
+  },
+  {
+    // TOG-3999 finding 1. Normalize MORE than the adapter does, and every
+    // namespaced roster id (`cliproxy/gpt-6-astra`) reads as astra here while
+    // the CLI still caps it at xhigh — over-authorizing max/ultra on a pair the
+    // adapter cannot honour.
+    name: "effort-codex-namespace-stripped",
+    file: "src/engine/effort.ts",
+    from: "  return CODEX_LOCAL_MODEL_ALIASES[trimmed] ?? trimmed;",
+    to: '  const bare = trimmed.slice(trimmed.lastIndexOf("/") + 1);\n  return CODEX_LOCAL_MODEL_ALIASES[bare] ?? bare;',
+  },
+  {
+    // The same over-authorization by case instead of by namespace.
+    name: "effort-codex-model-lowercased",
+    file: "src/engine/effort.ts",
+    from: '  const trimmed = typeof modelId === "string" ? modelId.trim() : "";',
+    to: '  const trimmed = typeof modelId === "string" ? modelId.trim().toLowerCase() : "";',
+  },
+  {
+    // TOG-3999 finding 2. Clear only the modern key. codex resolves
+    // `asString(modelReasoningEffort, asString(reasoningEffort, ""))` and
+    // `asString` reads "" as absent, so this silently restores the illegal
+    // inherited value it claims to have cleared.
+    name: "effort-codex-clear-misses-legacy-key",
+    file: "src/engine/effort.ts",
+    from: '  if (adapterType === "codex_local") writes.reasoningEffort = "";',
+    to: '  if (adapterType === "no_such_adapter") writes.reasoningEffort = "";',
+  },
+  {
+    // Sever the plumbing rather than the policy: the decision stays correct and
+    // the pin stops seeing what it is overriding.
+    name: "effort-pin-blind-to-inherited-value",
+    file: "src/engine/context.ts",
+    from: "    inheritedEffort: inheritedEffortFrom(input.agentAdapterType, input.agentAdapterConfig),",
+    to: "    inheritedEffort: null,",
+  },
 
   // TOG-4022: the cost-attribution guard has two ways to fail silently, and
   // both of them end at routing order rather than at a red test. Either it

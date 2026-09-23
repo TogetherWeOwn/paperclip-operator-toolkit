@@ -75,6 +75,23 @@ export interface ModelEntry {
    * degrades to "unknown", the same as an unpolled lane).
    */
   laneId?: string | null;
+  /**
+   * TOG-3995: the reasoning effort to pin ALONGSIDE this model.
+   *
+   * Optional. When present, the pin writes the adapter's effort key in the same
+   * update as `adapterConfig.model`, clamped to what this model actually offers
+   * (`engine/effort.ts`). When absent, the pin still corrects an inherited
+   * agent-level effort the chosen model cannot honour, but pins nothing new.
+   *
+   * Per ROW, not per tier: a roster row already carries exactly one `tier`, so
+   * the same model at T1 and at T3 is already two rows and can already carry two
+   * efforts. An `effortByTier` map would be a second, redundant way to say it.
+   *
+   * Distinct from `aaEffort`, which is descriptive — the effort suffix of the
+   * aa.ai leaderboard slug this row's index was read from. This one is
+   * prescriptive: what we will actually run.
+   */
+  effort?: string | null;
 }
 
 /**

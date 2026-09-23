@@ -4,6 +4,7 @@ import {
   PACING_MODES,
   TIERS,
 } from "../constants.js";
+import { EFFORT_LADDER } from "../engine/effort.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
@@ -102,6 +103,17 @@ export const SELECTION_CONFIG_SCHEMA = {
           earnIn: { type: ["object", "null"], default: null },
           /** TOG-2137: which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
           laneId: { type: "string", minLength: 1 },
+          /**
+           * TOG-3995: reasoning effort to pin alongside this model. Omit to
+           * leave effort to the agent row.
+           *
+           * The enum is the UNION of every adapter's vocabulary, so it rejects
+           * a typo here rather than at the CLI. It deliberately does not prove
+           * the value is legal for this model — that depends on the assignee's
+           * adapter, which config validation cannot see. `resolveEffortPin`
+           * clamps at write time (`engine/effort.ts`).
+           */
+          effort: { type: "string", enum: [...EFFORT_LADDER] },
         },
       },
       default: [],

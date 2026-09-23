@@ -1,3 +1,4 @@
+import { inheritedEffortFrom, resolveEffortPin, type EffortPin } from "./effort.js";
 import type { ModelEntry } from "./types.js";
 
 export const CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
@@ -100,9 +101,24 @@ function isSecretBinding(binding: unknown): boolean {
 }
 
 export interface ModelOverrideInput {
-  model: Pick<ModelEntry, "id" | "contextWindow">;
+  model: Pick<ModelEntry, "id" | "contextWindow"> & Partial<Pick<ModelEntry, "effort">>;
   fleetCeilingTokens: number;
   compactionRatio: number;
+  /**
+   * TOG-3995. The assignee agent's `adapterType`, or `null`/absent when UNKNOWN.
+   *
+   * Decides both which `adapterConfig` key carries effort and which values are
+   * legal, so without it we write no effort at all — the same
+   * unknown-suppresses-the-write rule `agentEnv` follows below.
+   */
+  agentAdapterType?: string | null;
+  /**
+   * TOG-3995. The assignee agent's whole `adapterConfig`, or `null`/absent when
+   * UNKNOWN. Only its effort key is read, under whichever name this adapter
+   * uses; the pin needs it because the host merges per key, so an effort we do
+   * not overwrite is an effort we have silently endorsed.
+   */
+  agentAdapterConfig?: AdapterEnv | null;
   /**
    * The assignee agent's `adapterConfig.env`, or `null`/absent when it is
    * UNKNOWN — no assignee, or the agent read failed.
@@ -148,9 +164,32 @@ const PLUGIN_OWNED_ENV_KEYS: readonly string[] = [CONTEXT_LIMIT_ENV_KEY];
  * of truth, and never needed the snapshot. When the assignee env is UNKNOWN we
  * cannot rebuild, so we fall back to preserving the existing override rather than
  * clobber bindings we cannot see.
+ *
+ * TOG-3995: the same per-key merge is why effort is decided HERE rather than at
+ * the six call sites. `model` and its effort have to leave as one patch, or the
+ * steady state is a pinned model paired with an effort it never offered.
+ * `effortPinForOverride` exposes the decision for a trace; the value itself is
+ * already in the patch.
  */
 export function modelOverrideForContext(input: ModelOverrideInput): {
-  assigneeAdapterOverrides: { adapterConfig: { model: string; env?: AdapterEnv } };
+  assigneeAdapterOverrides: {
+    adapterConfig: {
+      model: string;
+      env?: AdapterEnv;
+      /** `claude_local`. Present only when this pass decided an effort. */
+      effort?: string;
+      /** `codex_local`. */
+      modelReasoningEffort?: string;
+      /**
+       * `codex_local`'s legacy effort key. Written ONLY to empty it alongside
+       * `modelReasoningEffort`, because codex resolves one from the other and
+       * `asString` treats `""` as absent — see `EffortPin.writes`.
+       */
+      reasoningEffort?: string;
+      /** `opencode_local`. */
+      variant?: string;
+    };
+  };
 } {
   const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== undefined;
   const agentEnv = input.agentEnv ?? {};
@@ -202,12 +241,32 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
     CONTEXT_LIMIT_ENV_KEY in agentEnv ||
     CONTEXT_LIMIT_ENV_KEY in overrideEnv;
 
+  const effortPin = effortPinForOverride(input);
+
   return {
     assigneeAdapterOverrides: {
       adapterConfig: {
         model: input.model.id,
+        ...effortPin.writes,
         ...(mustWriteEnv ? { env } : {}),
       },
     },
   };
+}
+
+/**
+ * The effort half of the pin `modelOverrideForContext` is about to write.
+ *
+ * Exported so a caller can put the outcome in a decision trace without
+ * rebuilding the inputs, and so the eval that judges a model change can tell a
+ * clamp from a request. Calling it twice is free — it is pure, and it reads the
+ * same `input`, so it cannot disagree with the patch.
+ */
+export function effortPinForOverride(input: ModelOverrideInput): EffortPin {
+  return resolveEffortPin({
+    adapterType: input.agentAdapterType,
+    modelId: input.model.id,
+    rosterEffort: input.model.effort,
+    inheritedEffort: inheritedEffortFrom(input.agentAdapterType, input.agentAdapterConfig),
+  });
 }

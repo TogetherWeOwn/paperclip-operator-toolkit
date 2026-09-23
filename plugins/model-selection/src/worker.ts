@@ -854,6 +854,10 @@ export function createPlugin() {
         identifier: string | null;
         /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
         agentEnv: Record<string, unknown> | null;
+        /** TOG-3995. `null` = UNKNOWN; decides the effort key and vocabulary. */
+        agentAdapterType: string | null;
+        /** TOG-3995. `null` = UNKNOWN; read only for the effort it already carries. */
+        agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
         contextUsage: () => Promise<ContextUsage>;
@@ -890,6 +894,11 @@ export function createPlugin() {
         // the override write replaces the whole env object, so that conflation
         // would wipe the agent's real bindings for the run (TOG-3045).
         let agentEnv: Record<string, unknown> | null = null;
+        // TOG-3995. Same UNKNOWN discipline: the effort a pin may legally write
+        // depends on the assignee's adapter, so an unreadable agent means we
+        // write no effort rather than guess one.
+        let agentAdapterType: string | null = null;
+        let agentAdapterConfig: Record<string, unknown> | null = null;
         const assigneeAgentId = issue.assigneeAgentId;
         if (typeof assigneeAgentId === "string") {
           try {
@@ -898,6 +907,8 @@ export function createPlugin() {
             const config = asRecord(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
             agentEnv = asRecord(config.env);
+            agentAdapterConfig = config;
+            if (typeof agentRecord.adapterType === "string") agentAdapterType = agentRecord.adapterType;
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
             // An agent we cannot read simply has no known floor; resolveTier
@@ -959,6 +970,8 @@ export function createPlugin() {
           assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
           description: String(issue.description ?? ""),
           agentEnv,
+          agentAdapterType,
+          agentAdapterConfig,
           existingOverrideEnv,
           contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache),
         };
@@ -1026,6 +1039,10 @@ export function createPlugin() {
         pinnedModelId: string | null;
         /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
         agentEnv: Record<string, unknown> | null;
+        /** TOG-3995. `null` = UNKNOWN; decides the effort key and vocabulary. */
+        agentAdapterType: string | null;
+        /** TOG-3995. `null` = UNKNOWN; read only for the effort it already carries. */
+        agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
@@ -1196,6 +1213,8 @@ export function createPlugin() {
           agentFloorModelId: described.descriptor.agentFloorModelId ?? null,
           pinnedModelId: described.descriptor.pinnedModelId ?? null,
           agentEnv: described.agentEnv,
+          agentAdapterType: described.agentAdapterType,
+          agentAdapterConfig: described.agentAdapterConfig,
           existingOverrideEnv: described.existingOverrideEnv,
         };
       };
@@ -1311,6 +1330,8 @@ export function createPlugin() {
             fleetCeilingTokens: result.config.selection.fleetContextCeilingTokens,
             compactionRatio: result.config.selection.compactionRatio,
             agentEnv: result.agentEnv,
+            agentAdapterType: result.agentAdapterType,
+            agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
           });
           let labelNote = "";
@@ -1777,6 +1798,8 @@ export function createPlugin() {
             fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
             compactionRatio: config.selection.compactionRatio,
             agentEnv: result.agentEnv,
+            agentAdapterType: result.agentAdapterType,
+            agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
           }) as Parameters<typeof ctx.issues.update>[1],
           companyId,
@@ -3135,6 +3158,8 @@ export function createPlugin() {
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                   compactionRatio: config.selection.compactionRatio,
                   agentEnv: described.agentEnv,
+                  agentAdapterType: described.agentAdapterType,
+                  agentAdapterConfig: described.agentAdapterConfig,
                   existingOverrideEnv: described.existingOverrideEnv,
                 }) as Parameters<typeof ctx.issues.update>[1],
                 company.id,
@@ -3318,6 +3343,8 @@ export function createPlugin() {
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                   compactionRatio: config.selection.compactionRatio,
                   agentEnv: described.agentEnv,
+                  agentAdapterType: described.agentAdapterType,
+                  agentAdapterConfig: described.agentAdapterConfig,
                   existingOverrideEnv: described.existingOverrideEnv,
                 }) as Parameters<typeof ctx.issues.update>[1],
                 company.id,
@@ -3727,6 +3754,8 @@ export function createPlugin() {
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
                     agentEnv: result.agentEnv,
+                    agentAdapterType: result.agentAdapterType,
+                    agentAdapterConfig: result.agentAdapterConfig,
                     existingOverrideEnv: result.existingOverrideEnv,
                   }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,
@@ -3786,6 +3815,8 @@ export function createPlugin() {
                     fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                     compactionRatio: config.selection.compactionRatio,
                     agentEnv: result.agentEnv,
+                    agentAdapterType: result.agentAdapterType,
+                    agentAdapterConfig: result.agentAdapterConfig,
                     existingOverrideEnv: result.existingOverrideEnv,
                   }) as Parameters<typeof ctx.issues.update>[1],
                   company.id,

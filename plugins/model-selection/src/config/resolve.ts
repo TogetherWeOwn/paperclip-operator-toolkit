@@ -232,6 +232,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             note: string(model.note, ""),
             earnIn: nullableRecord(model.earnIn),
             laneId: typeof model.laneId === "string" && model.laneId.length > 0 ? model.laneId : null,
+            effort: typeof model.effort === "string" && model.effort.length > 0 ? model.effort : null,
           } satisfies ModelEntry,
         ];
       })

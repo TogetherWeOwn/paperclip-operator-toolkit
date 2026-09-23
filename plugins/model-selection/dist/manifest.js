@@ -94,6 +94,17 @@ var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
 var CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1e3;
 var BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1e3;
 
+// src/engine/effort.ts
+var EFFORT_LADDER = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+];
+
 // src/config/schema.ts
 var MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 var SECRET_REF_SCHEMA = {
@@ -182,7 +193,18 @@ var SELECTION_CONFIG_SCHEMA = {
            */
           earnIn: { type: ["object", "null"], default: null },
           /** TOG-2137: which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
-          laneId: { type: "string", minLength: 1 }
+          laneId: { type: "string", minLength: 1 },
+          /**
+           * TOG-3995: reasoning effort to pin alongside this model. Omit to
+           * leave effort to the agent row.
+           *
+           * The enum is the UNION of every adapter's vocabulary, so it rejects
+           * a typo here rather than at the CLI. It deliberately does not prove
+           * the value is legal for this model — that depends on the assignee's
+           * adapter, which config validation cannot see. `resolveEffortPin`
+           * clamps at write time (`engine/effort.ts`).
+           */
+          effort: { type: "string", enum: [...EFFORT_LADDER] }
         }
       },
       default: []

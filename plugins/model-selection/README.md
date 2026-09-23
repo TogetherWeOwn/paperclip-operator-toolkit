@@ -110,6 +110,74 @@ Related: we pin `adapterConfig.model` directly and never use
 first in the merge (`heartbeat.ts:3523-3525`) — the known ACP `effort` outage
 path.
 
+### Effort travels with the model
+
+A roster row may carry an optional `effort`. When it does, the pin writes it in
+the **same** update as `adapterConfig.model`, under the key that adapter
+actually reads — `effort` for `claude_local`, `modelReasoningEffort` for
+`codex_local`, `variant` for `opencode_local` (`engine/effort.ts`). Those three
+are the only adapters an issue-level override reaches at all.
+
+Two rules make the pair trustworthy:
+
+- **The value is validated against the chosen model, not against the schema
+  alone.** The config enum catches a typo; it cannot know the assignee's
+  adapter. `resolveEffortPin` clamps at write time to the hottest level that
+  model genuinely offers — `max` on a `claude_local` row becomes `high` — and
+  reports the clamp rather than performing it silently. A value that is not a
+  reasoning level at all is refused, not guessed at.
+- **Omitting the key is not neutral.** The host merges
+  `issueOverrides.adapterConfig` over the agent's *per key*
+  (`heartbeat.ts:20838-20841`), so an effort we do not write is an effort we
+  have endorsed. When the agent row carries one the chosen model cannot honour,
+  the pin overwrites it — clamped, or emptied when there is no clamp target. It
+  is not the forbidden `modelProfile: "cheap"` mechanism above, which we still
+  never touch.
+- **Emptying `codex_local` takes two keys, not one.** `asString(value, fallback)`
+  returns its fallback for an empty string (`adapter-utils/src/server-utils.ts:437`),
+  and codex's fallback is not `""` but *another key*:
+  `asString(modelReasoningEffort, asString(reasoningEffort, ""))`
+  (`codex-local/src/server/codex-args.ts:44-47`). So `modelReasoningEffort: ""`
+  alone clears nothing — it hands the decision to the legacy `reasoningEffort`
+  and resurrects the inherited value it claimed to neutralize. The clear writes
+  both. `claude_local` (`asString(config.effort, "")`) and `opencode_local`
+  (`asString(config.variant, "")`) do bottom out at `""`, so one write suffices
+  there. This is why `EffortPin` carries a `writes` **map** rather than one
+  key/value pair.
+
+`effort` is per roster **row**, not per tier: a row already carries exactly one
+`tier`, so the same model at two tiers is already two rows.
+
+Vocabularies, all measured in `/app` at v2026.916.0:
+
+| adapter | model | legal values |
+| --- | --- | --- |
+| `claude_local` | any | `low` `medium` `high` |
+| `codex_local` | `gpt-6-astra` | `low` `medium` `high` `xhigh` `max` `ultra` |
+| `codex_local` | anything else | `minimal` `low` `medium` `high` `xhigh` |
+| `opencode_local` | any | `minimal` `low` `medium` `high` `xhigh` `max` |
+
+The table keys on the **adapter** first. This fleet routes `gpt-*` and `glm-*`
+ids through `claude_local` proxy lanes, so a `gpt-6-astra` pin on a
+`claude_local` agent is still driven by `claude --effort` and still caps at
+`high`. Reading the vocabulary off the model id alone would authorize an
+illegal `xhigh` there.
+
+The `gpt-6-astra` row matches **exactly what the adapter matches, and nothing
+more**. codex's `normalizeModelId` is `trim()` — no lowercase, no namespace
+strip (`codex-local/src/index.ts:24-26`) — then one alias map, and the astra
+test is a string equality on that result (`:58-65`). `engine/effort.ts` mirrors
+that function verbatim, so `cliproxy/gpt-6-astra`, `devin/gpt-6-astra` and
+`GPT-6-Astra` all fall in the **anything else** row and cap at `xhigh`, exactly
+as the CLI treats them. Normalizing more eagerly here is a bug, not a kindness:
+the pin writes `adapterConfig.model` verbatim, so a stripped namespace would
+authorize `max`/`ultra` on an id the adapter will still cap — the vocabulary
+that allowed the value and the vocabulary that has to honour it would disagree,
+which is the failure this file exists to prevent.
+
+An unreadable assignee means UNKNOWN, not "no effort": the pin writes no effort
+key at all, the same discipline `agentEnv` follows for the ancillary writes.
+
 ### Context fit and compaction ceiling
 
 Every model pin is paired with a context-safe runtime envelope:
