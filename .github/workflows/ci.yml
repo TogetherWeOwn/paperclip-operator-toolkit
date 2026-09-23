@@ -81,6 +81,13 @@ name: CI
 #                                       pointed at can serve them — TOG-358, and
 #                                       whether it tells a dead endpoint apart
 #                                       from a dead model lane — TOG-361
+#     test_cliproxy_release_preflight.sh
+#                                       cliproxy_release_preflight.sh: whether the
+#                                       CLIProxy quota-controller release handoff
+#                                       still refuses to move session affinity off
+#                                       the owner's 15m, and refuses an unsupported
+#                                       CLIProxy build or an unbuildable source
+#                                       ref — TOG-4054
 #     test_quota_rotation_watch.sh      quota_rotation_watch.py: whether teamclaude
 #                                       stops sending traffic to a quota-spent
 #                                       account, and whether a watcher that
@@ -2401,6 +2408,20 @@ jobs:
       # needs no credential, no network and no quota.
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
+
+      # TOG-4054. The CLIProxy quota-controller release handoff: the gate that
+      # refuses to move session affinity off the owner's 15m, to build an
+      # unsupported CLIProxy version, or to build a source ref that is not on
+      # the trusted line. Offline: the suite mutates copies of the shipped
+      # runbook in mktemp and passes the measured values as arguments, so it
+      # touches no host, no credential and no CLIProxy.
+      #
+      # On a shallow clone the reviewed TOG-2693 commit is not an object here,
+      # so the apply-mode positive control reports SKIPPED and the apply path
+      # is asserted to fail closed instead. The rollback-mode positive control
+      # always runs, so the suite can never go vacuous unnoticed.
+      - name: CLIProxy release preflight suite
+        run: ./test_cliproxy_release_preflight.sh
 
       # TOG-526. The offline stub proves its argv/environment detectors can
       # catch exposed credentials, then requires private transport and rejects
