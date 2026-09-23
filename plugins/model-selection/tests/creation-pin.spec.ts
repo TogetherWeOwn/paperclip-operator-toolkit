@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import manifest from "../src/manifest.js";
 import { PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
+import { buildCardLedger } from "../src/engine/scores.js";
 import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
 
 const COMPANY = "co-1";
@@ -327,6 +328,34 @@ describe("TOG-3111 unpinnable-card visibility", () => {
     expect(notices[0]?.message).toContain("lane-all");
     expect(notices[0]?.message).toMatch(/no-eligible-model|tier-exhausted/);
     expect(notices[0]?.entityId).toBe("i1");
+  });
+
+  it("reports quality exclusions and expiry instead of asking for lane recovery", async () => {
+    const models = MODELS.filter((m) => m.tier === "T1");
+    expect(models.length).toBeGreaterThan(0);
+    const card = issue("quality", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+    const harness = await boot(baseConfig({ models }), [card]);
+    const now = Date.now();
+    const cardLedger = buildCardLedger(models.flatMap((model) => Array.from({ length: 8 }, () => ({
+      modelId: model.id, tier: "T1" as const, closedAtMs: now - 15 * 24 * 60 * 60 * 1000,
+      rejected: true, costUsd: 1, runCount: 1, foreignRun: false,
+    }))), now, {}, {});
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
+      { cardLedger, modelScores: [], computedAt: new Date(now).toISOString() },
+    );
+    harness.ctx.db.query = (async (query: string) => query.includes("from issues i")
+      ? [{ id: "quality", identifier: "quality", status: "todo" }] : []) as typeof harness.ctx.db.query;
+    await harness.runJob("labelOnlyPass");
+    const notices = harness.activity.filter((entry) => entry.message.includes("cannot pin this card"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain("no-eligible-model");
+    expect(notices[0]?.message).toContain("[card-accept-rate]");
+    expect(notices[0]?.message).toContain("0 of 8 mature T1 cards");
+    expect(notices[0]?.message).toContain("evidence expires");
+    expect(notices[0]?.message).toContain("eligibility evidence changes or expires");
+    expect(notices[0]?.message).not.toContain("until a lane recovers");
+    expect(notices[0]?.metadata?.rejections).toHaveLength(models.length);
   });
 
   it("throttles the repeat notice within NO_ELIGIBLE_NOTICE_THROTTLE_MS", async () => {

@@ -359,6 +359,58 @@ describe("buildCardLedger — TOG-1917 §2.2 censor", () => {
     expect(entry.pending).toBe(false); // some rows resolved
     expect(entry.acceptRate).toBe(0.5); // 1 accepted / 2 resolved, pending row excluded
   });
+
+  // TOG-3997. `cardsClosed` is not the `acceptRate` denominator, and reading it
+  // as one is how `gpt-6-astra:T1` looked like "0 accepted out of 25" on
+  // 2026-09-22 when the truth was 0-of-ONE resolved. These publish the two
+  // counts that make the difference readable to a consumer.
+  it("publishes cardsResolved/cardsAccepted separately from cardsClosed", () => {
+    const cards: CardRow[] = [
+      { modelId: "m1", tier: "T1", closedAtMs: nowMs - 20 * dayMs, rejected: false, costUsd: 2, runCount: 1, foreignRun: false },
+      { modelId: "m1", tier: "T1", closedAtMs: nowMs - 20 * dayMs, rejected: true, costUsd: 2, runCount: 1, foreignRun: false },
+      { modelId: "m1", tier: "T1", closedAtMs: nowMs - 2 * dayMs, rejected: false, costUsd: 2, runCount: 1, foreignRun: false },
+      { modelId: "m1", tier: "T1", closedAtMs: nowMs - 1 * dayMs, rejected: false, costUsd: 2, runCount: 1, foreignRun: false },
+    ];
+    const entry = buildCardLedger(cards, nowMs, { m1: 0.8 }, { m1: 2 })["m1:T1"];
+    if (!entry) throw new Error("missing ledger entry m1:T1");
+    expect(entry.cardsClosed).toBe(4); // includes the 2 censored rows
+    expect(entry.cardsResolved).toBe(2);
+    expect(entry.cardsAccepted).toBe(1);
+    expect(entry.acceptRate).toBe(entry.cardsAccepted / entry.cardsResolved);
+  });
+
+  it("reports astra's real shape — 0 of 1 resolved, not 0 of 25 closed", () => {
+    const cards: CardRow[] = [
+      { modelId: "astra", tier: "T1", closedAtMs: nowMs - 20 * dayMs, rejected: true, costUsd: 2, runCount: 1, foreignRun: false },
+      ...Array.from({ length: 24 }, () => ({
+        modelId: "astra",
+        tier: "T1" as const,
+        closedAtMs: nowMs - 1 * dayMs,
+        rejected: false,
+        costUsd: 2,
+        runCount: 1,
+        foreignRun: false,
+      })),
+    ];
+    const entry = buildCardLedger(cards, nowMs, { astra: 0.8 }, { astra: 2 })["astra:T1"];
+    if (!entry) throw new Error("missing ledger entry astra:T1");
+    expect(entry.cardsClosed).toBe(25);
+    expect(entry.cardsResolved).toBe(1);
+    expect(entry.cardsAccepted).toBe(0);
+    expect(entry.acceptRate).toBe(0);
+  });
+
+  it("reports zero resolved cards on a fully censored row", () => {
+    const cards: CardRow[] = [
+      { modelId: "m1", tier: "T1", closedAtMs: nowMs - 2 * dayMs, rejected: false, costUsd: 2, runCount: 1, foreignRun: false },
+    ];
+    const entry = buildCardLedger(cards, nowMs, { m1: 0.8 }, { m1: 2 })["m1:T1"];
+    if (!entry) throw new Error("missing ledger entry m1:T1");
+    expect(entry.pending).toBe(true);
+    expect(entry.cardsResolved).toBe(0);
+    expect(entry.cardsAccepted).toBe(0);
+    expect(entry.acceptRate).toBe(0.8); // the prior, not 0/0
+  });
 });
 
 describe("foldReworkIntoStats — rework is soft evidence, never a raw observation (count-rework-as-n)", () => {

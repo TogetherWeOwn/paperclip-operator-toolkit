@@ -3,6 +3,7 @@ import type { SelectionObjective } from "../config/resolve.js";
 import { costOf, resolveProfile, tierAbove, tierIndex } from "./cost.js";
 import { resolveConfiguredModelId } from "./model-id.js";
 import { computeShadowDiff, orderByObjective } from "./objective.js";
+import { zeroAcceptEvidence } from "./scores.js";
 import { resolveTier } from "./tier.js";
 import type {
   AvailabilityNote,
@@ -586,6 +587,12 @@ export function selectModel(input: SelectInput): SelectionDecision {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
   }
 
+  // TOG-3997. Read once, here, because the ledger now feeds two consumers with
+  // opposite standing: the `card-accept-rate` GATE in the loop below (live on
+  // shipped config) and the shadow-diff/objective ordering far downstream
+  // (inert unless `objective` is switched off its default).
+  const cardLedger = input.cardLedger ?? {};
+
   // Gate every model. A gate is a filter, never a score adjustment — a model
   // that cannot do the work is out, however cheap it is.
   const qualified: ModelEntry[] = [];
@@ -627,6 +634,35 @@ export function selectModel(input: SelectInput): SelectionDecision {
         stage: "capability-score",
         reason: `measured ${requiredTier} success rate (p=${score.p}) is below the capability threshold`,
         operand: { kind: "capability-score", tier: requiredTier, p: score.p },
+      });
+      continue;
+    }
+    // TOG-3997. `capability-score` above measures whether RUNS succeed; this
+    // measures whether the CARDS those runs closed stayed closed. A model can
+    // pass the first and fail this one: `gpt-6-astra` read a 98.0% run success
+    // rate over 296 runs on 2026-09-22 while every resolved T1 card attributed
+    // to it had been reopened or rejected.
+    //
+    // Deliberately an exclusion and not a rank penalty. A down-rank still
+    // routes the card the moment the cheaper rows are busy, which is exactly
+    // when a rework loop is most expensive; and the objective that would carry
+    // the penalty (`cost-per-accepted-card`) is not the shipped one, so a
+    // penalty would have no live effect at all.
+    //
+    // Require a valid, mature cohort and recheck its expiry on this decision's
+    // clock. An old cache must not turn a bounded exclusion into a sticky ban.
+    const zeroAccept = zeroAcceptEvidence(model.id, requiredTier, cardLedger, now);
+    if (zeroAccept) {
+      rejections.push({
+        modelId: model.id,
+        stage: "card-accept-rate",
+        reason: `0 of ${zeroAccept.cardsResolved} mature ${requiredTier} cards were accepted (all reopened or rejected); evidence expires ${new Date(zeroAccept.expiresAtMs).toISOString()}`,
+        operand: {
+          kind: "card-accept-rate",
+          tier: requiredTier,
+          cardsResolved: zeroAccept.cardsResolved,
+          cardsAccepted: zeroAccept.cardsAccepted,
+        },
       });
       continue;
     }
@@ -1122,7 +1158,6 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const earnInWinner = earnInPick && !earnInOverridden ? earnInPick.candidate : null;
 
   const listPriceWinner = candidates[0]!;
-  const cardLedger = input.cardLedger ?? {};
   const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
 
   // `objective` never affects `candidates`/`winner` unless explicitly switched

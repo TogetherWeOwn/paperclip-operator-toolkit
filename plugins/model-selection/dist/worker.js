@@ -236,6 +236,8 @@ var SCORE_THRESHOLDS = { T1: 0.85, T2: 0.8, T3: 0.75 };
 var SCORE_PRIOR_K = 6;
 var SCORE_PROVEN_N = 8;
 var CARD_CENSOR_DAYS = 14;
+var CARD_ZERO_ACCEPT_MIN_RESOLVED = 8;
+var CARD_ZERO_ACCEPT_WINDOW_DAYS = 7;
 var SCORE_WINDOW_DAYS = 14;
 var CARD_LEDGER_WINDOW_DAYS = 60;
 var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
@@ -1316,6 +1318,32 @@ function findClosingRun(issueId, atMs, windowMs, closingRuns, excludeAgentId) {
   }
   return best;
 }
+function zeroAcceptEvidence(modelId, tier2, ledger, nowMs) {
+  const entry = ledger[`${modelId}:${tier2}`];
+  if (!entry) return null;
+  if (entry.modelId !== modelId || entry.tier !== tier2) return null;
+  if (entry.pending !== false) return null;
+  if (![entry.cardsClosed, entry.cardsResolved, entry.cardsAccepted].every(validCount)) return null;
+  if (entry.cardsResolved > entry.cardsClosed || entry.cardsAccepted > entry.cardsResolved) return null;
+  if (entry.cardsAccepted !== 0 || entry.acceptRate !== 0) return null;
+  const cohort = entry.qualityCohort;
+  if (!cohort) return null;
+  if (![cohort.cardsResolved, cohort.cardsAccepted].every(validCount)) return null;
+  if (cohort.cardsResolved > entry.cardsResolved || cohort.cardsAccepted > cohort.cardsResolved) return null;
+  if (cohort.cardsResolved < CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;
+  if (cohort.cardsAccepted !== 0) return null;
+  if (![nowMs, cohort.observedAtMs, cohort.oldestClosedAtMs, cohort.newestClosedAtMs].every(validCount)) return null;
+  const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1e3;
+  const windowMs = CARD_ZERO_ACCEPT_WINDOW_DAYS * 24 * 60 * 60 * 1e3;
+  if (cohort.observedAtMs > nowMs || cohort.oldestClosedAtMs > cohort.newestClosedAtMs) return null;
+  if (cohort.newestClosedAtMs > cohort.observedAtMs - censorMs) return null;
+  const expiresAtMs = cohort.oldestClosedAtMs + censorMs + windowMs;
+  if (nowMs >= expiresAtMs) return null;
+  return { cardsResolved: cohort.cardsResolved, cardsAccepted: cohort.cardsAccepted, expiresAtMs };
+}
+function validCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
 function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
   const byKey = /* @__PURE__ */ new Map();
   for (const card of cards) {
@@ -1330,6 +1358,18 @@ function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
     const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1e3;
     const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
     const accepted = resolved.filter((r) => !r.rejected);
+    const qualityWindowMs = CARD_ZERO_ACCEPT_WINDOW_DAYS * 24 * 60 * 60 * 1e3;
+    const mature = rows.filter((r) => {
+      const age = nowMs - r.closedAtMs;
+      return age >= censorMs && age < censorMs + qualityWindowMs;
+    });
+    const qualityCohort = mature.length ? {
+      cardsResolved: mature.length,
+      cardsAccepted: mature.filter((r) => !r.rejected).length,
+      oldestClosedAtMs: mature.reduce((oldest, r) => Math.min(oldest, r.closedAtMs), Infinity),
+      newestClosedAtMs: mature.reduce((newest, r) => Math.max(newest, r.closedAtMs), -Infinity),
+      observedAtMs: nowMs
+    } : void 0;
     const costs = resolved.map((r) => r.costUsd).filter((c) => c !== null);
     const runs = resolved.map((r) => r.runCount);
     const foreignCount = resolved.filter((r) => r.foreignRun).length;
@@ -1340,12 +1380,18 @@ function buildCardLedger(cards, nowMs, priorPByModel, blendedListPriceByModel) {
       modelId,
       tier: tier2,
       cardsClosed: rows.length,
+      // TOG-3997. Published so a consumer can tell "never accepted" from
+      // "not resolved yet". `cardsClosed` alone cannot: it counts the
+      // censored rows, so a brand-new entrant reads as a long losing streak.
+      cardsResolved: resolved.length,
+      cardsAccepted: accepted.length,
       acceptRate,
       costPerCard,
       runsPerCard: runs.length ? runs.reduce((a, b) => a + b, 0) / runs.length : null,
       foreignRunShare: resolved.length ? foreignCount / resolved.length : null,
       costPerAcceptedCard: costPerCard !== null && acceptRate > 0 ? costPerCard / acceptRate : null,
-      pending: !measured
+      pending: !measured,
+      qualityCohort
     };
   }
   return out;
@@ -1598,12 +1644,21 @@ function resolveConfiguredModelId(modelId, models) {
 function costPerAcceptedCardFor(modelId, tier2, ledger) {
   return ledger[`${modelId}:${tier2}`]?.costPerAcceptedCard ?? null;
 }
+function hasCostPerAcceptedCard(candidate, ledger) {
+  return costPerAcceptedCardFor(candidate.modelId, candidate.tier, ledger) !== null;
+}
 function orderByCostPerAcceptedCard(candidates, ledger) {
-  return candidates.map((candidate) => ({ candidate, cost: costPerAcceptedCardFor(candidate.modelId, candidate.tier, ledger) })).filter((row) => row.cost !== null).sort((a, b) => a.cost - b.cost || a.candidate.modelId.localeCompare(b.candidate.modelId)).map((row) => row.candidate);
+  return candidates.map((candidate) => ({ candidate, cost: costPerAcceptedCardFor(candidate.modelId, candidate.tier, ledger) })).sort((a, b) => {
+    if (a.cost === null && b.cost === null) return 0;
+    if (a.cost === null) return 1;
+    if (b.cost === null) return -1;
+    return a.cost - b.cost || a.candidate.modelId.localeCompare(b.candidate.modelId);
+  }).map((row) => row.candidate);
 }
 function computeShadowDiff(issueId, tier2, candidates, listPriceWinnerId, ledger) {
   if (listPriceWinnerId === null) return null;
-  const byCard = orderByCostPerAcceptedCard(candidates, ledger);
+  const costable = candidates.filter((candidate) => hasCostPerAcceptedCard(candidate, ledger));
+  const byCard = orderByCostPerAcceptedCard(costable, ledger);
   const costPerAcceptedCardWinner = byCard[0]?.modelId ?? null;
   if (costPerAcceptedCardWinner === null) return null;
   return {
@@ -1616,8 +1671,7 @@ function computeShadowDiff(issueId, tier2, candidates, listPriceWinnerId, ledger
 }
 function orderByObjective(candidates, objective, ledger) {
   if (objective === "list-price") return [...candidates];
-  const reordered = orderByCostPerAcceptedCard(candidates, ledger);
-  return reordered.length > 0 ? reordered : [...candidates];
+  return orderByCostPerAcceptedCard(candidates, ledger);
 }
 
 // src/engine/tier.ts
@@ -2096,6 +2150,7 @@ function selectModel(input) {
   if (required.size > 0) {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
   }
+  const cardLedger = input.cardLedger ?? {};
   const qualified = [];
   for (const model of config.models) {
     if (!model.enabled) {
@@ -2128,6 +2183,21 @@ function selectModel(input) {
         stage: "capability-score",
         reason: `measured ${requiredTier} success rate (p=${score2.p}) is below the capability threshold`,
         operand: { kind: "capability-score", tier: requiredTier, p: score2.p }
+      });
+      continue;
+    }
+    const zeroAccept = zeroAcceptEvidence(model.id, requiredTier, cardLedger, now);
+    if (zeroAccept) {
+      rejections.push({
+        modelId: model.id,
+        stage: "card-accept-rate",
+        reason: `0 of ${zeroAccept.cardsResolved} mature ${requiredTier} cards were accepted (all reopened or rejected); evidence expires ${new Date(zeroAccept.expiresAtMs).toISOString()}`,
+        operand: {
+          kind: "card-accept-rate",
+          tier: requiredTier,
+          cardsResolved: zeroAccept.cardsResolved,
+          cardsAccepted: zeroAccept.cardsAccepted
+        }
       });
       continue;
     }
@@ -2404,7 +2474,6 @@ function selectModel(input) {
   }
   const earnInWinner = earnInPick && !earnInOverridden ? earnInPick.candidate : null;
   const listPriceWinner = candidates[0];
-  const cardLedger = input.cardLedger ?? {};
   const shadowDiff = computeShadowDiff(descriptor.issueId, landingTier, candidates, listPriceWinner.modelId, cardLedger);
   const objective = config.objective ?? "list-price";
   let winner = earnInWinner ?? paceOnlyWinner;
@@ -5552,14 +5621,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           if (typeof at === "string" && Date.now() - Date.parse(at) < 7 * 24 * 60 * 60 * 1e3) pruned[id] = at;
         }
         await ctx.state.set(key, { ...pruned, [issueId]: (/* @__PURE__ */ new Date()).toISOString() });
+        const rejectionSummary = decision.rejections.slice(0, 8).map((entry) => `${entry.modelId} [${entry.stage}]: ${entry.reason}`).join("; ");
+        const nextAction = decision.outcome === "tier-exhausted" ? "The router can retry when lane capacity recovers." : "The router can retry when eligibility evidence changes or expires; lane recovery alone may not resolve this.";
         await ctx.activity.log({
           companyId,
-          message: `Model Selection cannot pin this card: ${decision.outcome}. Lane states: ${laneStates || "no lane data"}. It stays on its current model until a lane recovers or an operator pins one (TOG-3111).`,
+          message: `Model Selection cannot pin this card: ${decision.outcome}. Rejections: ${rejectionSummary || "see decision trace"}. Lane states: ${laneStates || "no lane data"}. ${nextAction}`,
           entityType: "issue",
           entityId: issueId,
           metadata: {
             outcome: decision.outcome,
             identifier,
+            rejections: decision.rejections,
             lanes: Object.values(laneLedger).map((entry) => ({
               laneId: entry.laneId,
               verdict: entry.verdict,

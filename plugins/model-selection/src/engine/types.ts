@@ -240,6 +240,7 @@ export type RejectionOperand =
   | { kind: "disabled" }
   | { kind: "capability"; missing: string[] }
   | { kind: "capability-score"; tier: Tier; p: number | null }
+  | { kind: "card-accept-rate"; tier: Tier; cardsResolved: number; cardsAccepted: number }
   | { kind: "context-window"; contextWindow: number; requiredContextTokens: number }
   | { kind: "tier-floor"; tier: Tier; requiredTier: Tier }
   | { kind: "no-profile"; tier: Tier }
@@ -272,11 +273,20 @@ export interface Rejection {
    * verdict has no field for — the `subscription-pool` cooldown, the
    * serviceable account COUNT, and an explicit staleness UNKNOWN. Both are
    * capacity, so both count toward `tier-exhausted`.
+   *
+   * `card-accept-rate` (TOG-3997) is a QUALITY stage, a sibling of
+   * `capability-score` rather than of the lane stages: it fires when a
+   * (model, tier) has had zero cards ACCEPTED across
+   * `CARD_ZERO_ACCEPT_MIN_RESOLVED` mature, unexpired ones. It must stay out of
+   * `CAPACITY_STAGES` — a tier where every row is excluded for quality is
+   * `no-eligible-model`, not `tier-exhausted`; calling it exhausted would tell
+   * the operator to buy capacity that already exists.
    */
   stage:
     | "disabled"
     | "capability"
     | "capability-score"
+    | "card-accept-rate"
     | "context-window"
     | "tier-floor"
     | "no-profile"
@@ -466,8 +476,24 @@ export interface ModelScore {
 export interface CardLedgerEntry {
   modelId: string;
   tier: Tier;
+  /**
+   * EVERY closed card attributed to this (model, tier) inside
+   * `CARD_LEDGER_WINDOW_DAYS` — right-censored ones included. This is NOT the
+   * denominator of `acceptRate`; `cardsResolved` is. TOG-3997: reading it as
+   * one is how `gpt-6-astra:T1` looked like "25 cards closed, none accepted"
+   * on 2026-09-22 when the truth was 0-of-ONE resolved card and 24 still
+   * inside the censor window.
+   */
   cardsClosed: number;
-  /** Fraction of closed, non-pending cards with no reopen/rejection signal. */
+  /**
+   * Closed cards that are no longer right-censored — rejected, or aged past
+   * `CARD_CENSOR_DAYS`. The reporting `acceptRate` denominator. Hard quality
+   * exclusions use the symmetric, expiring `qualityCohort` instead.
+   */
+  cardsResolved: number;
+  /** Resolved cards carrying no reopen/rejection signal. The `acceptRate` numerator. */
+  cardsAccepted: number;
+  /** `cardsAccepted / cardsResolved`; the model's prior when `cardsResolved` is 0 (`pending`). */
   acceptRate: number;
   costPerCard: number | null;
   runsPerCard: number | null;
@@ -476,6 +502,18 @@ export interface CardLedgerEntry {
   costPerAcceptedCard: number | null;
   /** True when acceptRate/costPerCard are unproven-model fallbacks (priorP / blended list price), not measured. */
   pending: boolean;
+  /**
+   * Closures aged [14, 21) days at observedAtMs, independent of outcome.
+   * Missing on legacy rows or when there is no mature cohort: never excludes.
+   * The oldest closure bounds cache validity; selection rechecks the clock.
+   */
+  qualityCohort?: {
+    cardsResolved: number;
+    cardsAccepted: number;
+    oldestClosedAtMs: number;
+    newestClosedAtMs: number;
+    observedAtMs: number;
+  };
 }
 
 /** Per-model bookkeeping for the Slice-4 bounded T1 earn-in policy (default off). */

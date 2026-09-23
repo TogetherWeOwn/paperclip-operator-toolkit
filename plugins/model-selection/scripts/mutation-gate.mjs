@@ -1283,6 +1283,128 @@ const mutants = [
     from: "      if (isSecretBinding(env[key])) continue;\n",
     to: "",
   },
+
+  // TOG-3997: the card-accept-rate exclusion. Both halves have to hold — the
+  // gate has to FIRE on a proven-bad row, and it has to stay silent on every
+  // row we cannot read as proven-bad. The costly mistake is the second one: a
+  // wrong exclusion cuts off ordinary traffic; maturity and bounded expiry
+  // must protect the candidate even when the ledger cache stops refreshing.
+  {
+    // Neutralize the gate entirely. The cheap zero-accept row then wins on
+    // list price, which is the state the card was filed against.
+    name: "card-accept-gate-never-fires",
+    file: "src/engine/select.ts",
+    from: "    const zeroAccept = zeroAcceptEvidence(model.id, requiredTier, cardLedger, now);",
+    to: "    const zeroAccept = null;",
+  },
+  {
+    // Threshold `cardsClosed` instead of `cardsResolved` — the defect as
+    // originally specified. `cardsClosed` counts the right-censored cards, so
+    // astra's 25-closed/1-resolved row would ban T1 on a single rejection.
+    name: "card-accept-gate-counts-closed-not-resolved",
+    file: "src/engine/scores.ts",
+    from: "  if (cohort.cardsResolved < CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;",
+    to: "  if (entry.cardsClosed < CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;",
+  },
+  {
+    // Move the floor by one. `N` is the whole argument of this change, so the
+    // boundary has to be pinned on the exact card, not approximately.
+    name: "card-accept-gate-floor-off-by-one",
+    file: "src/engine/scores.ts",
+    from: "  if (cohort.cardsResolved < CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;",
+    to: "  if (cohort.cardsResolved <= CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;",
+  },
+  {
+    // Let a `pending` row through. A pending row's acceptRate is a prior, not
+    // a measurement; it needs MORE traffic, which is the opposite of this.
+    name: "card-accept-gate-fires-on-a-pending-row",
+    file: "src/engine/scores.ts",
+    from: "  if (entry.pending !== false) return null;\n",
+    to: "",
+  },
+  {
+    // Drop the shape check and a pre-TOG-3997 row — `cardsResolved`
+    // undefined — excludes, because `undefined < 8` is false.
+    name: "card-accept-gate-excludes-a-legacy-row",
+    file: "src/engine/scores.ts",
+    from: "  if (![entry.cardsClosed, entry.cardsResolved, entry.cardsAccepted].every(validCount)) return null;\n",
+    to: "",
+  },
+  {
+    name: "card-accept-gate-trusts-wrong-identity",
+    file: "src/engine/scores.ts",
+    from: "  if (entry.modelId !== modelId || entry.tier !== tier) return null;\n",
+    to: "",
+  },
+  {
+    name: "card-accept-gate-trusts-inconsistent-counts",
+    file: "src/engine/scores.ts",
+    from: "  if (entry.cardsResolved > entry.cardsClosed || entry.cardsAccepted > entry.cardsResolved) return null;\n",
+    to: "",
+  },
+  {
+    name: "card-accept-gate-trusts-contradictory-rate",
+    file: "src/engine/scores.ts",
+    from: "  if (entry.cardsAccepted !== 0 || entry.acceptRate !== 0) return null;",
+    to: "  if (entry.cardsAccepted !== 0) return null;",
+  },
+  {
+    name: "card-accept-gate-resolves-rejects-early",
+    file: "src/engine/scores.ts",
+    from: "      return age >= censorMs && age < censorMs + qualityWindowMs;",
+    to: "      return r.rejected || (age >= censorMs && age < censorMs + qualityWindowMs);",
+  },
+  {
+    name: "card-accept-gate-never-expires-cache",
+    file: "src/engine/scores.ts",
+    from: "  if (nowMs >= expiresAtMs) return null;\n",
+    to: "",
+  },
+  {
+    name: "card-accept-gate-expires-from-newest-card",
+    file: "src/engine/scores.ts",
+    from: "  const expiresAtMs = cohort.oldestClosedAtMs + censorMs + windowMs;",
+    to: "  const expiresAtMs = cohort.newestClosedAtMs + censorMs + windowMs;",
+  },
+  {
+    name: "card-accept-gate-refresh-restarts-ban",
+    file: "src/engine/scores.ts",
+    from: "  const expiresAtMs = cohort.oldestClosedAtMs + censorMs + windowMs;",
+    to: "  const expiresAtMs = cohort.observedAtMs + windowMs;",
+  },
+  {
+    name: "card-accept-gate-trusts-immature-cache",
+    file: "src/engine/scores.ts",
+    from: "  if (cohort.newestClosedAtMs > cohort.observedAtMs - censorMs) return null;\n",
+    to: "",
+  },
+  {
+    // Classify the quality exclusion as capacity. A tier where every row is a
+    // proven reject is `no-eligible-model`; calling it `tier-exhausted` sends
+    // an operator to buy capacity that is already there.
+    name: "card-accept-gate-counted-as-capacity",
+    file: "src/engine/select.ts",
+    from: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence"]);',
+    to: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "card-accept-rate"]);',
+  },
+  {
+    // Sort a null costPerAcceptedCard FIRST — the card's stated defect, made
+    // real. A missing denominator is absence of evidence, not cheapness.
+    name: "null-cost-per-accepted-card-sorts-first",
+    file: "src/engine/objective.ts",
+    from: "      if (a.cost === null) return 1;\n      if (b.cost === null) return -1;",
+    to: "      if (a.cost === null) return -1;\n      if (b.cost === null) return 1;",
+  },
+  {
+    // Order the raw candidate set instead of the costable subset. Now that
+    // nulls rank last rather than being dropped, that ordering always has a
+    // head, so the diff names a winner against a cost nobody measured.
+    name: "shadow-diff-names-an-uncostable-winner",
+    file: "src/engine/objective.ts",
+    from: "  const byCard = orderByCostPerAcceptedCard(costable, ledger);",
+    to: "  const byCard = orderByCostPerAcceptedCard(candidates, ledger);",
+  },
+
   // TOG-3995: the effort half of a pin. Each of these is a way to emit a
   // model/effort pair the model cannot honour — the 2026-09-22 failure — and
   // each must be visibly fatal, or `effort.ts` is decoration.

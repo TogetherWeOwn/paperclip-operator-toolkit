@@ -465,7 +465,40 @@ unpinned branch, all of which used to `continue` silently — one activity notic
 per hour (`NO_ELIGIBLE_NOTICE_THROTTLE_MS`) lands **on that card**, naming the
 outcome and every lane's state (`lane=verdict@util%`), so a sustained outage
 reads as "cannot pin, here is why" instead of "no news". The throttle state
-(`noEligibleNotices`) prunes entries older than 7 days on write.
+(`noEligibleNotices`) prunes entries older than 7 days on write. The notice also
+includes up to eight named rejection reasons (all are stored in metadata).
+Quality exclusions explain their evidence expiry, not a request for more lane
+capacity or an operator hand-pin.
+
+### Zero-accept evidence and re-entry
+
+`card-accept-rate` is a quality exclusion, not a cost penalty or capacity outage.
+It needs **eight mature cards with zero accepts**, at the same model and tier,
+and a consistent reporting row with zero accepted cards. `cardsClosed` includes
+censored cards and is never its denominator. The reporting `acceptRate` still
+resolves rejections early for visibility; that biased sample does not by itself
+justify exclusion.
+
+`buildCardLedger` publishes `qualityCohort` from closures aged **[14, 21) days**:
+accepts and rejects both wait 14 days, then provide exclusion evidence for seven.
+N=8 matches the existing proven-evidence floor; independence-based probabilities
+are illustrative, not protection against correlated failures. The observation
+window and short evidence lifetime are the actual safeguards.
+
+The selector validates JSON identity, explicit `pending: false`, safe integer
+counts, subset relationships, zero rates and cohort timestamps. Missing legacy
+fields or contradictory evidence fail open. A 0/8 reporting row with 100 young
+censored successes cannot exclude: at day 3 it has no mature cohort; at day 14
+it has 100/108 accepts. A genuine eight-rejection cohort excludes at day 14.
+
+**Bounded recovery without a probe scheduler:** selection checks expiry at the
+oldest cohort closure + 21 days, even if the cache never refreshes. Refresh can
+replace the cohort but cannot restart old failures' clocks. With no new closures,
+quality eligibility returns no later than 21 days after the final closure (at
+most seven days after that closure matures). This restores ordinary eligibility,
+not guaranteed traffic: capability, lane and other safety gates still apply.
+The policy does not override pins, force probes, or enable the dormant earn-in
+scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ---
 

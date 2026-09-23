@@ -329,8 +329,24 @@ export const SCORE_THRESHOLDS: Record<Tier, number> = { T1: 0.85, T2: 0.8, T3: 0
 export const SCORE_PRIOR_K = 6;
 /** Minimum weighted-outcome count before a (model, tier) verdict is "proven". */
 export const SCORE_PROVEN_N = 8;
-/** A card closed less than this many days ago is right-censored: never accepted, never rejected. */
+/** Acceptance observation window; the reporting metric may record rejections earlier. */
 export const CARD_CENSOR_DAYS = 14;
+/**
+ * TOG-3997. Eight MATURE cards, not eight early rejections, before a hard
+ * zero-accept exclusion. This matches SCORE_PROVEN_N. Under independent
+ * outcomes with p(accept)=0.60, eight rejects have probability 0.4^8=6.6e-4;
+ * correlated fleet failures invalidate that illustration, so N alone is not
+ * a safety argument. A symmetric observation window and expiry are required.
+ */
+export const CARD_ZERO_ACCEPT_MIN_RESOLVED = 8;
+/**
+ * Mature cards can support exclusion for only seven days after their 14-day
+ * observation window. Rolling refreshes never extend a card's lifetime. With
+ * no new closures, ordinary eligibility returns within 21 days of the last
+ * closure, even if the cached ledger never refreshes. Other safety gates still
+ * apply; this is re-entry eligibility, not a forced probe or a hand-pin.
+ */
+export const CARD_ZERO_ACCEPT_WINDOW_DAYS = 7;
 /** `refreshScores` reads this many days of `heartbeat_runs` (model_scores.py WINDOW default). */
 export const SCORE_WINDOW_DAYS = 14;
 /** `refreshScores` reads this many days of closed `issues` for the card-level acceptance ledger. */

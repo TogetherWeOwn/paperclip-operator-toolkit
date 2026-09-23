@@ -1627,16 +1627,22 @@ export function createPlugin() {
           if (typeof at === "string" && Date.now() - Date.parse(at) < 7 * 24 * 60 * 60 * 1000) pruned[id] = at;
         }
         await ctx.state.set(key, { ...pruned, [issueId]: new Date().toISOString() });
+        const rejectionSummary = decision.rejections.slice(0, 8)
+          .map((entry) => `${entry.modelId} [${entry.stage}]: ${entry.reason}`).join("; ");
+        const nextAction = decision.outcome === "tier-exhausted"
+          ? "The router can retry when lane capacity recovers."
+          : "The router can retry when eligibility evidence changes or expires; lane recovery alone may not resolve this.";
         await ctx.activity.log({
           companyId,
-          message: `Model Selection cannot pin this card: ${decision.outcome}. Lane states: ${
+          message: `Model Selection cannot pin this card: ${decision.outcome}. Rejections: ${rejectionSummary || "see decision trace"}. Lane states: ${
             laneStates || "no lane data"
-          }. It stays on its current model until a lane recovers or an operator pins one (TOG-3111).`,
+          }. ${nextAction}`,
           entityType: "issue",
           entityId: issueId,
           metadata: {
             outcome: decision.outcome,
             identifier,
+            rejections: decision.rejections,
             lanes: Object.values(laneLedger).map((entry) => ({
               laneId: entry.laneId,
               verdict: entry.verdict,

@@ -1,5 +1,7 @@
 import {
   CARD_CENSOR_DAYS,
+  CARD_ZERO_ACCEPT_MIN_RESOLVED,
+  CARD_ZERO_ACCEPT_WINDOW_DAYS,
   REWORK_WEIGHT_REJECTED,
   REWORK_WEIGHT_REOPEN,
   SCORE_PRIOR_K,
@@ -523,6 +525,50 @@ export interface CardRow {
 }
 
 /**
+ * TOG-3997. Hard exclusions require outcome-independent observation: rejects
+ * and accepts must both age 14 days. The reporting metric resolves rejects
+ * early and is therefore insufficient, even when its denominator reaches 8.
+ *
+ * Only a recent mature cohort can exclude. Its oldest card expires seven days
+ * after maturity; recheck at selection time so a stale cache cannot prolong a
+ * ban. Refresh may replace the cohort, but never restarts a card's clock.
+ * Untyped plugin_state (legacy, malformed, contradictory, pending) fails open.
+ */
+export function zeroAcceptEvidence(
+  modelId: string,
+  tier: Tier,
+  ledger: Readonly<Record<string, CardLedgerEntry>>,
+  nowMs: number,
+): { cardsResolved: number; cardsAccepted: number; expiresAtMs: number } | null {
+  const entry = ledger[`${modelId}:${tier}`];
+  if (!entry) return null;
+  if (entry.modelId !== modelId || entry.tier !== tier) return null;
+  if (entry.pending !== false) return null;
+  if (![entry.cardsClosed, entry.cardsResolved, entry.cardsAccepted].every(validCount)) return null;
+  if (entry.cardsResolved > entry.cardsClosed || entry.cardsAccepted > entry.cardsResolved) return null;
+  if (entry.cardsAccepted !== 0 || entry.acceptRate !== 0) return null;
+
+  const cohort = entry.qualityCohort;
+  if (!cohort) return null;
+  if (![cohort.cardsResolved, cohort.cardsAccepted].every(validCount)) return null;
+  if (cohort.cardsResolved > entry.cardsResolved || cohort.cardsAccepted > cohort.cardsResolved) return null;
+  if (cohort.cardsResolved < CARD_ZERO_ACCEPT_MIN_RESOLVED) return null;
+  if (cohort.cardsAccepted !== 0) return null;
+  if (![nowMs, cohort.observedAtMs, cohort.oldestClosedAtMs, cohort.newestClosedAtMs].every(validCount)) return null;
+  const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1000;
+  const windowMs = CARD_ZERO_ACCEPT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  if (cohort.observedAtMs > nowMs || cohort.oldestClosedAtMs > cohort.newestClosedAtMs) return null;
+  if (cohort.newestClosedAtMs > cohort.observedAtMs - censorMs) return null;
+  const expiresAtMs = cohort.oldestClosedAtMs + censorMs + windowMs;
+  if (nowMs >= expiresAtMs) return null;
+  return { cardsResolved: cohort.cardsResolved, cardsAccepted: cohort.cardsAccepted, expiresAtMs };
+}
+
+function validCount(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
  * TOG-1917 §2.2 card-level acceptance ledger. A card closed less than
  * `CARD_CENSOR_DAYS` ago and not yet rejected is `pending` — right-censored,
  * excluded from both the accepted and rejected counts (never assumed 1.0).
@@ -547,6 +593,18 @@ export function buildCardLedger(
     const censorMs = CARD_CENSOR_DAYS * 24 * 60 * 60 * 1000;
     const resolved = rows.filter((r) => r.rejected || nowMs - r.closedAtMs >= censorMs);
     const accepted = resolved.filter((r) => !r.rejected);
+    const qualityWindowMs = CARD_ZERO_ACCEPT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const mature = rows.filter((r) => {
+      const age = nowMs - r.closedAtMs;
+      return age >= censorMs && age < censorMs + qualityWindowMs;
+    });
+    const qualityCohort: CardLedgerEntry["qualityCohort"] = mature.length ? {
+      cardsResolved: mature.length,
+      cardsAccepted: mature.filter((r) => !r.rejected).length,
+      oldestClosedAtMs: mature.reduce((oldest, r) => Math.min(oldest, r.closedAtMs), Infinity),
+      newestClosedAtMs: mature.reduce((newest, r) => Math.max(newest, r.closedAtMs), -Infinity),
+      observedAtMs: nowMs,
+    } : undefined;
 
     const costs = resolved.map((r) => r.costUsd).filter((c): c is number => c !== null);
     const runs = resolved.map((r) => r.runCount);
@@ -562,12 +620,18 @@ export function buildCardLedger(
       modelId,
       tier,
       cardsClosed: rows.length,
+      // TOG-3997. Published so a consumer can tell "never accepted" from
+      // "not resolved yet". `cardsClosed` alone cannot: it counts the
+      // censored rows, so a brand-new entrant reads as a long losing streak.
+      cardsResolved: resolved.length,
+      cardsAccepted: accepted.length,
       acceptRate,
       costPerCard,
       runsPerCard: runs.length ? runs.reduce((a, b) => a + b, 0) / runs.length : null,
       foreignRunShare: resolved.length ? foreignCount / resolved.length : null,
       costPerAcceptedCard: costPerCard !== null && acceptRate > 0 ? costPerCard / acceptRate : null,
       pending: !measured,
+      qualityCohort,
     };
   }
   return out;
