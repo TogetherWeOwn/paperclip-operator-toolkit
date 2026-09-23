@@ -46,6 +46,7 @@ import { parseAaLeaderboardHtml, type AaModelRecord } from "./aa-index/parse.js"
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
 import { estimateIssueContext, modelOverrideForContext } from "./engine/context.js";
 import { resolveConfiguredModelId } from "./engine/model-id.js";
+import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
@@ -2290,6 +2291,28 @@ export function createPlugin() {
               return null;
             };
 
+            // TOG-4022: `usage_json.costUsd` is the serving CLI's own figure,
+            // and the Claude CLI lane stamps provider=anthropic for every
+            // model it serves — so a CLIProxy-served Meta/Devin model lands an
+            // Anthropic-priced cost. Drop those observations instead of
+            // averaging them into the ledger. Counted so a refresh log shows
+            // how much evidence the upstream bug is costing us.
+            let unattributableCostRuns = 0;
+            const attributableCost = (
+              modelId: string,
+              provider: unknown,
+              costUsd: number | null,
+            ): number | null => {
+              if (costUsd === null) return null;
+              const verdict = classifyCostAttribution(
+                modelId,
+                typeof provider === "string" ? provider : null,
+              );
+              if (verdict.attributable) return costUsd;
+              unattributableCostRuns += 1;
+              return null;
+            };
+
             const runOutcomeRows: RunOutcomeRow[] = scoreRunRows.flatMap((row) => {
               const r = asRecord(row);
               const modelId = resolveConfiguredModelId(
@@ -2304,7 +2327,7 @@ export function createPlugin() {
                 status: r.status as RunOutcomeRow["status"],
                 errorCode: typeof r.error_code === "string" && r.error_code ? r.error_code : null,
                 error: typeof r.error === "string" && r.error ? r.error : null,
-                costUsd: toNumber(r.cost_usd),
+                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd)),
                 mins: toNumber(r.mins),
                 ageDays: toNumber(r.age_days) ?? 0,
               }];
@@ -2328,7 +2351,7 @@ export function createPlugin() {
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 finishedAtMs: toNumber(r.finished_at_ms) ?? 0,
                 agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null,
-                costUsd: toNumber(r.cost_usd),
+                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd)),
               }];
             });
 
@@ -2461,6 +2484,11 @@ export function createPlugin() {
               companyId: company.id,
               models: modelScores.length,
               cardsInLedger: cardRows.length,
+              // TOG-4022: runs whose recorded cost was priced against the
+              // wrong provider's table and therefore excluded. Non-zero means
+              // the upstream claude-local `provider: "anthropic"` literal is
+              // still live; zero means it was fixed or no such runs landed.
+              unattributableCostRuns,
               tierSpecVersion: BENCHMARK_SPEC_VERSION,
               computedAt,
               retiered: retierings.length,

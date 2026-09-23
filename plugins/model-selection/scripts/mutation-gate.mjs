@@ -1283,6 +1283,61 @@ const mutants = [
     from: "      if (isSecretBinding(env[key])) continue;\n",
     to: "",
   },
+
+  // TOG-4022: the cost-attribution guard has two ways to fail silently, and
+  // both of them end at routing order rather than at a red test. Either it
+  // stops rejecting (and `costPerAcceptedCard` goes back to averaging an
+  // Anthropic-priced cost for a Meta model), or it over-rejects (and it
+  // discards real evidence from the adapters that price correctly). One
+  // mutant per direction, plus the substring trap in the id predicate.
+  {
+    name: "attribute-every-anthropic-priced-run",
+    file: "src/engine/cost-attribution.ts",
+    from: "  if (isAnthropicModelId(modelId)) {",
+    to: "  if (true) {",
+  },
+  {
+    // The whole point of keying on the recorded provider is that codex, zai,
+    // openrouter and opencode-go price with their own tables. Dropping the
+    // passthrough throws away every cost we actually trust.
+    name: "reject-costs-from-correctly-pricing-providers",
+    file: "src/engine/cost-attribution.ts",
+    from: "  if (provider !== ANTHROPIC_PROVIDER) {",
+    to: "  if (false) {",
+  },
+  {
+    // Absence of a provider is not evidence of misattribution. Treating it as
+    // one silently invalidates the history recorded before provider capture.
+    name: "treat-a-missing-provider-as-misattributed",
+    file: "src/engine/cost-attribution.ts",
+    from: '    return { attributable: true, reason: "no provider recorded on the run" };',
+    to: '    return { attributable: false, reason: "no provider recorded on the run" };',
+  },
+  {
+    // A model named `muse-spark-claude-compat` must not be read as Anthropic's
+    // just for containing "claude" — that reopens the misattribution.
+    name: "match-anthropic-model-ids-by-substring",
+    file: "src/engine/cost-attribution.ts",
+    from: "const ANTHROPIC_MODEL_ID_RE = /^(?:anthropic\\/)?claude(?:[-.][a-z0-9.-]*)?$/i;",
+    to: "const ANTHROPIC_MODEL_ID_RE = /claude/i;",
+  },
+  {
+    // A zero cost is a measurement (a free lane), not an unknown. Collapsing
+    // it would let a free model fall out of the cost ordering entirely.
+    name: "collapse-a-zero-cost-into-unknown",
+    file: "src/engine/cost-attribution.ts",
+    from: "  if (costUsd === null) return null;\n  return classifyCostAttribution",
+    to: "  if (!costUsd) return null;\n  return classifyCostAttribution",
+  },
+  {
+    // The predicate is inert unless the closing-run mapping actually calls it:
+    // `buildCardLedger` averages `costUsd` from THESE rows into `costPerCard`,
+    // which is what `orderByCostPerAcceptedCard` ranks on.
+    name: "bypass-the-cost-guard-on-closing-runs",
+    file: "src/worker.ts",
+    from: "                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd)),\n              }];",
+    to: "                costUsd: toNumber(r.cost_usd),\n              }];",
+  },
 ];
 
 /**

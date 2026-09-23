@@ -720,6 +720,79 @@ describe("worker", () => {
     expect(stored?.cardLedger["claude-opus-5:T1"]?.foreignRunShare).toBe(1);
   });
 
+  // TOG-4022. `usage_json.costUsd` is the serving CLI's own figure and the
+  // claude-local adapter stamps `provider: "anthropic"` unconditionally
+  // (execute.ts:1235-1236), so a CLIProxy lane serving somebody else's model
+  // records an Anthropic-priced cost — measured 93.7x over for
+  // muse-spark-1.3-contributor. These two drive the whole refreshScores path,
+  // because the guard lives in the worker's row mapping and a unit test of the
+  // predicate alone would still pass if the call site were removed.
+  describe("TOG-4022: provider-misattributed closing-run costs", () => {
+    const MUSE = "muse-spark-1.3-contributor";
+    const rosterWithMuse = [
+      ...MODELS,
+      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "TOG-4022 fixture" },
+    ];
+
+    async function ledgerForProvider(provider: string) {
+      const closed = issue({
+        status: "done",
+        assigneeAdapterOverrides: { adapterConfig: { model: MUSE } },
+      } as unknown as Partial<Issue>);
+      const scoring = await boot(baseConfig({ models: rosterWithMuse }), closed);
+      scoring.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+
+      let queryIndex = 0;
+      scoring.ctx.db.query = async () => {
+        queryIndex += 1;
+        if (queryIndex === 2) {
+          return [{
+            issue_id: ISSUE,
+            model: MUSE,
+            agent_id: AGENT,
+            cost_usd: "2.867",
+            provider,
+            finished_at_ms: "1",
+          }] as never;
+        }
+        if (queryIndex === 3) {
+          return [{ id: ISSUE, closed_at_ms: "1", pinned_model: MUSE }] as never;
+        }
+        return [] as never;
+      };
+
+      await scoring.runJob("refreshScores");
+      const stored = (await scoring.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.modelScores,
+      })) as {
+        cardLedger: Record<string, { costPerCard: number | null; costPerAcceptedCard: number | null; cardsClosed: number }>;
+      } | undefined;
+      const entry = stored?.cardLedger[`${MUSE}:T1`];
+      if (!entry) throw new Error(`missing ledger entry ${MUSE}:T1`);
+      return entry;
+    }
+
+    it("records no cost for a run the harness priced against Anthropic's table", async () => {
+      const entry = await ledgerForProvider("anthropic");
+      expect(entry.costPerCard).toBeNull();
+      // Null is the ledger's existing "unknown", and orderByCostPerAcceptedCard
+      // drops a null-cost candidate rather than ranking it — so the model falls
+      // back to list-price ordering instead of being ranked as cheap.
+      expect(entry.costPerAcceptedCard).toBeNull();
+      // Only the cost term is invalidated; the card still counts as evidence.
+      expect(entry.cardsClosed).toBe(1);
+    });
+
+    it("keeps the recorded cost when the run carries no provider at all", async () => {
+      // The control. Absence is not evidence of misattribution, and rejecting
+      // it would silently discard every run recorded before provider capture.
+      const entry = await ledgerForProvider("");
+      expect(entry.costPerCard).toBeCloseTo(2.867);
+    });
+  });
+
   it("canonicalizes a legacy-wrapped operator override before storing it", async () => {
     const result = await harness.executeTool(
       TOOL_NAMES.setOperatorOverride,

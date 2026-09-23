@@ -4,6 +4,9 @@ export const REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
        coalesce(error_code,'') as error_code,
        left(coalesce(error,''),200) as error,
        coalesce(usage_json->>'costUsd','') as cost_usd,
+       -- TOG-4022: see REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
+       -- the score rows' okCost sample.
+       coalesce(usage_json->>'provider','') as provider,
        extract(epoch from (finished_at - started_at))/60.0 as mins,
        extract(epoch from (now() - created_at))/86400.0 as age_days
   from heartbeat_runs
@@ -96,6 +99,12 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
        usage_json->>'model' as model,
        coalesce(agent_id::text,'') as agent_id,
        coalesce(usage_json->>'costUsd','') as cost_usd,
+       -- TOG-4022: which provider's price table produced cost_usd. The Claude
+       -- CLI lane stamps 'anthropic' for every model it serves, including the
+       -- CLIProxy lanes serving Meta/Devin models, so cost_usd is only
+       -- evidence once this column agrees with the model. See
+       -- engine/cost-attribution.ts.
+       coalesce(usage_json->>'provider','') as provider,
        extract(epoch from finished_at) * 1000 as finished_at_ms
   from heartbeat_runs
  where company_id = $1

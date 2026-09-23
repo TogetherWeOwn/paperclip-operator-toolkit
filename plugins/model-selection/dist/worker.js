@@ -2614,6 +2614,32 @@ function modelOverrideForContext(input) {
   };
 }
 
+// src/engine/cost-attribution.ts
+var ANTHROPIC_PROVIDER = "anthropic";
+var OMNIROUTE_PROVIDER_PREFIX2 = "cliproxy/";
+var ANTHROPIC_MODEL_ID_RE = /^(?:anthropic\/)?claude(?:[-.][a-z0-9.-]*)?$/i;
+function isAnthropicModelId(modelId) {
+  const trimmed = modelId.trim();
+  const bare = trimmed.toLowerCase().startsWith(OMNIROUTE_PROVIDER_PREFIX2) ? trimmed.slice(OMNIROUTE_PROVIDER_PREFIX2.length) : trimmed;
+  return ANTHROPIC_MODEL_ID_RE.test(bare);
+}
+function classifyCostAttribution(modelId, recordedProvider) {
+  const provider = (recordedProvider ?? "").trim().toLowerCase();
+  if (!provider) {
+    return { attributable: true, reason: "no provider recorded on the run" };
+  }
+  if (provider !== ANTHROPIC_PROVIDER) {
+    return { attributable: true, reason: `run priced by ${provider}` };
+  }
+  if (isAnthropicModelId(modelId)) {
+    return { attributable: true, reason: "anthropic-priced run on an anthropic model" };
+  }
+  return {
+    attributable: false,
+    reason: `run recorded provider=anthropic for non-anthropic model ${modelId}; cost priced against the wrong table (TOG-4022)`
+  };
+}
+
 // src/engine/profiles.ts
 function buildVolumeProfiles(rows, models, computedAt) {
   const tiersOf = /* @__PURE__ */ new Map();
@@ -3780,6 +3806,9 @@ var REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
        coalesce(error_code,'') as error_code,
        left(coalesce(error,''),200) as error,
        coalesce(usage_json->>'costUsd','') as cost_usd,
+       -- TOG-4022: see REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
+       -- the score rows' okCost sample.
+       coalesce(usage_json->>'provider','') as provider,
        extract(epoch from (finished_at - started_at))/60.0 as mins,
        extract(epoch from (now() - created_at))/86400.0 as age_days
   from heartbeat_runs
@@ -3816,6 +3845,12 @@ var REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot->>'issueI
        usage_json->>'model' as model,
        coalesce(agent_id::text,'') as agent_id,
        coalesce(usage_json->>'costUsd','') as cost_usd,
+       -- TOG-4022: which provider's price table produced cost_usd. The Claude
+       -- CLI lane stamps 'anthropic' for every model it serves, including the
+       -- CLIProxy lanes serving Meta/Devin models, so cost_usd is only
+       -- evidence once this column agrees with the model. See
+       -- engine/cost-attribution.ts.
+       coalesce(usage_json->>'provider','') as provider,
        extract(epoch from finished_at) * 1000 as finished_at_ms
   from heartbeat_runs
  where company_id = $1
@@ -5862,6 +5897,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               }
               return null;
             };
+            let unattributableCostRuns = 0;
+            const attributableCost = (modelId, provider, costUsd) => {
+              if (costUsd === null) return null;
+              const verdict = classifyCostAttribution(
+                modelId,
+                typeof provider === "string" ? provider : null
+              );
+              if (verdict.attributable) return costUsd;
+              unattributableCostRuns += 1;
+              return null;
+            };
             const runOutcomeRows = scoreRunRows.flatMap((row) => {
               const r = asRecord2(row);
               const modelId = resolveConfiguredModelId(
@@ -5876,7 +5922,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 status: r.status,
                 errorCode: typeof r.error_code === "string" && r.error_code ? r.error_code : null,
                 error: typeof r.error === "string" && r.error ? r.error : null,
-                costUsd: toNumber(r.cost_usd),
+                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd)),
                 mins: toNumber(r.mins),
                 ageDays: toNumber(r.age_days) ?? 0
               }];
@@ -5896,7 +5942,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 tier: issueId ? tierByIssue.get(issueId) ?? null : null,
                 finishedAtMs: toNumber(r.finished_at_ms) ?? 0,
                 agentId: typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null,
-                costUsd: toNumber(r.cost_usd)
+                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd))
               }];
             });
             const reworkSignals = await readReworkSignals(company.id);
@@ -5992,6 +6038,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               companyId: company.id,
               models: modelScores.length,
               cardsInLedger: cardRows.length,
+              // TOG-4022: runs whose recorded cost was priced against the
+              // wrong provider's table and therefore excluded. Non-zero means
+              // the upstream claude-local `provider: "anthropic"` literal is
+              // still live; zero means it was fixed or no such runs landed.
+              unattributableCostRuns,
               tierSpecVersion: BENCHMARK_SPEC_VERSION,
               computedAt,
               retiered: retierings.length,
