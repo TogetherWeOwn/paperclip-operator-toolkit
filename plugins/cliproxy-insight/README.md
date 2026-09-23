@@ -8,14 +8,47 @@ Built per TOG-811 against dispatch (`wakeEnabled`) and model-selection
 
 | | |
 |---|---|
-| Version | **0.3.0** — reads the per-lane documents the lane serves today, and surfaces **cooldown as first-class lane state** |
+| Version | **0.3.1** — bounded single-company scheduled polling; retains per-lane cooldown state |
 | Code | manifest, config schema, secret-ref guard, worker (poll job, one agent tool, one API route) |
-| Tests | 82 vitest + 9 process-harness checks, no network and no host. Twenty-two mutants introduced against the load-bearing assertions; all twenty-two caught, three of them only after the tests were strengthened to catch them |
+| Tests | 95 vitest (all 82 existing + 13 scope cases; `it.each` rows count separately), 9 rebuilt-worker checks, 9 stock-runtime integration scenario groups. Two pre-repair scenarios reproduce the exact operator rejection. No live DB, credentials or lane requests. See [contract evidence](deploy/COMPANY-SCOPE-CONTRACT.md). |
 | Manifest | validated against the **host's own** `pluginManifestV1Schema` — PASS, `pluginId: "togetherweown.cliproxy-insight"`. `validateManifestCapabilities` could not be run standalone here — it lives at `/app/server/dist/services/plugin-capability-validator.js` and resolves internal `@paperclipai/shared` source paths that only exist inside the live server process. Every declared feature was hand-checked against the capabilities list instead, and that check caught one real gap (`activity.log.write`) |
-| Installed | **no** — install needs an operator |
+| Installed | **0.3.1: no**. Operator installed 0.3.0 on 2026-09-23, then disabled it after the scheduled scope failure. Keep it disabled pending reviewed replacement through TOG-3152. |
 | Polling | **off** by default; installing is not enabling |
 
 ---
+
+## What changed in 0.3.1
+
+The stock scheduler sends `runJob` without a company scope. The host permits
+explicit company calls only for this plugin's configured companies, not every
+company returned by `companies.list()`. The old enumeration could therefore
+throw `config.get: company context is required` before even checking whether
+polling was disabled.
+
+The worker now learns company identity only from host `configChanged` delivery
+(startup replay and config saves), never from bootstrap config or enumeration.
+Zero companies is inert. Exactly one company gets a fresh scoped config read
+per firing. Receiving a second distinct company latches all polling off until
+an operator fixes the duplicate configuration and restarts the worker. Even
+identical duplicate configs are refused. `multiCompanyConfig: true` opts into
+receiving all deliveries so the plugin can enforce this stricter rule itself;
+it does **not** authorize multi-company polling. No company-discovery list or
+secret value is persisted; job payloads cannot select the company.
+
+A delivery with no company identity also latches the worker inert, but returns
+without throwing. Refusals emit `cliproxy_insight.company_scope_refused` with
+bounded reasons `missing_company_id` or `multiple_companies`. Neither latch can
+be cleared by another config save. Tool and API reads re-check the binding after
+the scoped config await, before reading stored state.
+
+Capabilities: remove `companies.read`; add none. No migrations, no new state
+shape, no secret grant changes. The six lane defaults and no-retry bounds stay
+unchanged. The old nine-check wire harness is retained but is not authorization
+evidence: [stock contract harness](deploy/stock_contract_harness.mjs) additionally
+runs the actual installed scheduler, worker manager and SDK authorization gate.
+See [contract and limits](deploy/COMPANY-SCOPE-CONTRACT.md) and
+[upgrade/rollback packet](deploy/UPGRADE-0.3.1.md). Local tests do not establish a
+successful live canary or the seven-day acceptance metric.
 
 ## What changed in 0.3.0, and why it matters
 
@@ -106,7 +139,7 @@ so the removed surface cannot be re-introduced by configuration.
 
 ## What it does
 
-Per company, every 5 minutes (the collector republishes every 2), one GET per
+For exactly one configured company, every 5 minutes (the collector republishes every 2), one GET per
 configured lane document against the sanitized lane:
 
 1. resolve `laneApiKeySecretRef` at call time — never cached, never logged,
@@ -136,8 +169,8 @@ Optionally, with `legacyAggregateFiles`, the v0.2.0 aggregates
 (`request-rates.json`, `model-usage-v1.json`) are polled too.
 
 Every file is independent: one failing never discards another's data, and one
-unserved lane is not a failed poll. One company's failure never aborts the
-sweep over the rest (dispatch precedent). `get_provider_usage` and
+unserved lane is not a failed poll. Scoped config/secret failures are caught and
+recorded with bounded reason codes, never raw error text. `get_provider_usage` and
 `GET /usage-summary` read back what was persisted — lanes, per-account
 cooldown, and the legacy provider records when present — flagged stale against
 `staleAfterSeconds` (the payload's own value wins when present). Neither ever
@@ -165,19 +198,16 @@ embed URLs and connection IDs.
 
 ## Rollout
 
-1. Publish to `paperclip-ops-tooling/plugins/cliproxy-insight` with a pinned
-   digest table (TOG-809 precedent) — **before** any operator install.
-2. Operator creates the `cliproxy-usage-lane-key` Paperclip secret (the lane
-   bearer, **not** the CLIProxy management key).
-3. Operator installs; defaults leave it inert.
-4. Operator sets `laneApiKeySecretRef` + `pollingEnabled: true` on **one**
-   company, watches `poll_ok` / `poll_errors` for a firing or two.
-5. Roll out to remaining companies.
+For 0.3.1, follow the [immutable replacement packet](deploy/UPGRADE-0.3.1.md)
+through TOG-4170 → TOG-811 → the existing TOG-3152 host card. Require independent
+exact-head review, green CI and non-author merge before operator authorization.
+Keep the installed plugin disabled until that replacement is authorized.
 
-No CISO containment review and no owner secret-placement decision remain in
-this path — see "the gate is dissolved" above. The containment review that
-does remain live is TOG-817, and it is about the lane itself, not this
-consumer.
+Reuse the existing telemetry secret reference and reviewed scoped binding;
+create no secret or grant. Configure exactly **one** company. Multi-company
+rollout is unsupported and deliberately stops polling. No management credentials,
+Caddy changes or collector installation are part of this repair. The historical
+lane design above does not authorize new host work.
 
 ---
 
@@ -185,7 +215,7 @@ consumer.
 
 ```
 npm run verify                        # typecheck + tests + build
-npm test                              # 81 tests across 3 files
+npm test                              # 95 cases across 4 files; includes it.each rows
 npm run build                         # esbuild → dist/manifest.js, dist/worker.js
 node deploy/worker_host_harness.mjs   # 9 checks against the BUILT worker
 ```
@@ -251,13 +281,15 @@ as literals.
 
 ### What has NOT been verified
 
-- The plugin has never been installed; there is no live host here.
+- Version 0.3.1 has not been installed. The operator installed 0.3.0, observed
+  scheduled company-scope failures, then disabled it on 2026-09-23.
 - `validateManifestCapabilities` could not be run standalone — see the status
   table.
-- **No enabled poll has ever run.** The plugin has not been installed, so the
-  end-to-end path — scheduled job → real host `ctx.http.fetch` → lane → state —
-  is exercised only by the two harnesses. `poll_ok` with `null` counters is the
-  signal that a field alias is missing.
+- **No successful live scheduled poll is verified.** The repaired scheduled
+  path is exercised by the stock-runtime harness using fixture service adapters,
+  not the live lane or database. Host activation, canary, rollback and seven-day
+  acceptance remain outstanding. `poll_ok` with `null` counters is the signal
+  that a field alias is missing.
 - **No lane has been observed cooling through this plugin.** The cooldown
   fixtures set `exhausted_until` by hand on a real record shape; they are not a
   capture of a live cooldown, because catching one requires being polling while

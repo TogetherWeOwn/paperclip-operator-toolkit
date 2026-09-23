@@ -181,7 +181,8 @@ async function runWorker({ config, httpHandler, secretValue = LANE_KEY }) {
     ]);
 
   try {
-    await guard("initialize", call("initialize", { manifest, config, databaseNamespace: null }));
+    await guard("initialize", call("initialize", { manifest, config: {}, databaseNamespace: null }));
+    await guard("configChanged", call("configChanged", { config, companyId: COMPANY_ID }));
     // `runJob` nests the job under `params.job` — the SDK reads
     // `params.job.jobKey` (worker-rpc-host.js:1403), not `params.jobKey`.
     await guard(

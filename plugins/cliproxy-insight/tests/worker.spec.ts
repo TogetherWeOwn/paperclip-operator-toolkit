@@ -96,6 +96,9 @@ async function harnessFor(config: Record<string, unknown>) {
   const { definition } = createPlugin();
   if (!definition.setup) throw new Error("plugin definition has no setup handler");
   await definition.setup(harness.ctx);
+  // Stock loader sends an empty initialize config, then scoped configChanged.
+  if (!definition.onConfigChanged) throw new Error("missing company config handler");
+  await definition.onConfigChanged(config, { companyId: COMPANY });
   return { harness, plugin: definition };
 }
 

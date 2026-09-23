@@ -6,7 +6,41 @@ listed here for the version they were asked to install, and nothing else. A
 mismatch is a stop, not a warning — the point of the pin is that the reviewed
 bytes and the installed bytes are the same bytes.
 
-## v0.3.0 — commit `890c8b7fe62a5d8fa0c51bcf721d7e1e8f0ee534`
+## v0.3.1 — payload commit `273b84b75e924c7339c8c436de9d51f5dbacdb3d`
+
+The final reviewed PR head also contains this digest table and the operator
+packet; their later documentation commit does not alter these payload bytes.
+Install only after independent exact-head review, green CI and non-author merge.
+The archive must be pinned to the actual merged SHA recorded on TOG-4170, never
+a moving branch. See `deploy/UPGRADE-0.3.1.md`.
+
+| sha256 | file | bytes |
+|---|---|---|
+| `a3d24d1660b5815147de5c7238668cb6e42862c95b145f538df372ed25c2f173` | `dist/manifest.js` | 7238 |
+| `a2146476cc1125ba2bda270ba14d58c3b7001e7611c89f7986e40ce47567e7e1` | `dist/worker.js` | 29970 |
+| `eca1e5ec18787242435ba1338b3e0a84ac1476da8b9022c46d7d70d3e244c081` | `src/manifest.ts` | 5307 |
+| `abe2bf55ceb60ee8352b333357d3208e435f2ecefa968bce9afa912532e8648b` | `src/worker.ts` | 39411 |
+| `0140a151722b86d0b5e0d014d45c0fc89aea7fea43e4ca3f631154d33382d3a7` | `src/constants.ts` | 5694 |
+| `acc684a391a5f3c7b31cc0b29b3914939e95e43ddf6c4f27853741a1d71c1bb0` | `src/config/schema.ts` | 4961 |
+
+All four distribution files reproduced from a fresh locked install:
+
+| sha256 | file | bytes |
+|---|---|---|
+| `6d74e927c55ed0ec819b508beb1fd6de64bb7eb0f4d198f5a596a542b045f5f2` | `dist/manifest.js.map` | 19055 |
+| `054d19c081aa57f16993310e28adfea02a7ac09add79374ec89cd112362c7bb5` | `dist/worker.js.map` | 68075 |
+| `d4e24899f11c995eafb18eca909ee451008b51d01a66632ad6b3b41f48712715` | `package-lock.json` | 56081 |
+
+Clean verification: locked install, typecheck, **95/95** cases across four files
+(82 original + 13 scope cases, counting each `it.each` row separately), build,
+**9/9** rebuilt-worker checks, **9/9** stock-runtime contract scenario groups.
+Two old-worker reproduction scenarios fail with the exact expected scope error.
+The earlier second-company-refusal mutant and four review-revision mutants
+(tool/API post-await guards, missing-ID throw, refusal metric) are killed.
+See `deploy/COMPANY-SCOPE-CONTRACT.md` for exact case-count arithmetic.
+None of this is live deployment acceptance; keep the installed 0.3.0 disabled.
+
+## v0.3.0 — historical, disabled after failed canary — commit `890c8b7fe62a5d8fa0c51bcf721d7e1e8f0ee534`
 
 Branch `tog811-lane-consumer`, pushed and confirmed on the remote.
 `dist/` is committed and is built from exactly the `src/` listed below

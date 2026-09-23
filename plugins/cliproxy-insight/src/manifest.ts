@@ -46,9 +46,6 @@ export const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     // The substrate. Every poll runs from here.
     "jobs.schedule",
-    // Which company's config/state to poll under. A job context carries no
-    // companyId (dispatch precedent).
-    "companies.read",
     // Outbound GET to the public HTTPS telemetry lane.
     "http.outbound",
     // Resolve the lane bearer at call time only — never cached, logged, or

@@ -6,9 +6,9 @@
  * resets on container restart; the lane's static files are overwritten every 2
  * minutes and keep no history either. Persisting them here is the deliverable.
  *
- * Everything company-specific arrives through `ctx.config.get(companyId)`. A
- * job context carries no `companyId` (dispatch precedent), so the scheduled
- * poll enumerates companies and polls each with polling enabled.
+ * A job context carries no `companyId`. Only host `configChanged` delivery
+ * establishes the single configured identity; each firing reads its current
+ * scoped config. Missing or conflicting identities leave polling inert.
  */
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
@@ -421,8 +421,36 @@ async function laneSummary(
 
 export function createPlugin() {
   let context: PluginContext | null = null;
+  // The stock loader replays configured-company IDs via configChanged. A job
+  // carries no company scope: enumerating companies includes unauthorized rows.
+  // Receiving multiple configs is supported only so we can refuse ALL polling,
+  // including byte-identical configs the SDK's default tenant guard permits.
+  const configuredCompanies = new Set<string>();
+  let missingCompanyIdentity = false;
+  const isConfiguredCompany = (companyId: string) =>
+    !missingCompanyIdentity && configuredCompanies.size === 1 && configuredCompanies.has(companyId);
 
   return definePlugin({
+    multiCompanyConfig: true,
+
+    async onConfigChanged(_config, change) {
+      if (!change?.companyId?.trim()) {
+        // An unattributed delivery cannot safely update an existing binding.
+        // Stay inert until corrected/restarted, without failing config delivery.
+        missingCompanyIdentity = true;
+        await context?.metrics.write("cliproxy_insight.company_scope_refused", 1, {
+          reason: "missing_company_id",
+        });
+        return;
+      }
+      configuredCompanies.add(change.companyId);
+      if (configuredCompanies.size !== 1) {
+        await context?.metrics.write("cliproxy_insight.company_scope_refused", 1, {
+          reason: "multiple_companies",
+        });
+        throw new Error("cliproxy-insight requires exactly one configured company; polling stopped");
+      }
+    },
     async setup(ctx) {
       context = ctx;
 
@@ -462,10 +490,10 @@ export function createPlugin() {
             companyId,
             configPath: "laneApiKeySecretRef",
           });
-        } catch (error) {
+        } catch {
           ctx.logger.warn("cliproxy-insight: could not resolve the lane bearer", {
             companyId,
-            error: error instanceof Error ? error.message : String(error),
+            reason: "secret_resolve_failed",
           });
           await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
             companyId,
@@ -474,6 +502,9 @@ export function createPlugin() {
           return;
         }
 
+        // A second company's config can arrive while the secret read awaits.
+        // Never send the bearer after that single-company binding is invalidated.
+        if (!isConfiguredCompany(companyId)) return;
         const polledAt = new Date().toISOString();
         const nowMs = Date.parse(polledAt);
 
@@ -725,8 +756,10 @@ export function createPlugin() {
           const input = asRecord(params);
           const companyId = typeof input.companyId === "string" ? input.companyId : "";
           if (!companyId) return { error: "companyId is required" };
+          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
 
           const config = resolveConfig(await ctx.config.get(companyId));
+          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
           const nowMs = Date.now();
           const requested = typeof input.provider === "string" ? input.provider : null;
           const providers = requested ? [requested] : await readProviderIndex(companyId);
@@ -776,23 +809,27 @@ export function createPlugin() {
 
       // ---- scheduled poll ----------------------------------------------
       ctx.jobs.register(JOB_KEYS.poll, async (_job: PluginJobContext) => {
-        const companies = await ctx.companies.list();
-        for (const company of companies) {
-          const raw = await ctx.config.get(company.id);
-          const config = resolveConfig(raw);
-          try {
-            await pollOneCompany(company.id, config);
-          } catch (error) {
-            // One company's failure never aborts the sweep (dispatch precedent).
-            ctx.logger.warn("cliproxy-insight: poll failed for company", {
-              companyId: company.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
-              companyId: company.id,
-              reason: "unhandled",
-            });
-          }
+        if (missingCompanyIdentity || configuredCompanies.size !== 1) {
+          await ctx.metrics.write("cliproxy_insight.poll_skipped_company_scope", 1);
+          return;
+        }
+        const companyId = [...configuredCompanies][0];
+        if (!companyId) return;
+        try {
+          // Keep this a real scoped read on each firing, not a cached config or
+          // invented invocation: the host can revoke proactive company access.
+          const config = resolveConfig(await ctx.config.get(companyId));
+          if (!isConfiguredCompany(companyId)) return;
+          await pollOneCompany(companyId, config);
+        } catch {
+          ctx.logger.warn("cliproxy-insight: poll failed for company", {
+            companyId,
+            reason: "unhandled",
+          });
+          await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
+            companyId,
+            reason: "unhandled",
+          });
         }
       });
 
@@ -870,7 +907,13 @@ export function createPlugin() {
       }
 
       const companyId = input.companyId;
+      if (!isConfiguredCompany(companyId)) {
+        return { status: 403, body: { error: "company is not configured" } };
+      }
       const config = resolveConfig(await context.config.get(companyId));
+      if (!isConfiguredCompany(companyId)) {
+        return { status: 403, body: { error: "company is not configured" } };
+      }
       const nowMs = Date.now();
       const scope = (stateKey: string) => ({
         scopeKind: "company" as const,

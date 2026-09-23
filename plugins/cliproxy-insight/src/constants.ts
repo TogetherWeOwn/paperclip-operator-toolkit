@@ -1,7 +1,7 @@
 export const PLUGIN_ID = "togetherweown.cliproxy-insight";
 /** Literal 1, not "1": `PaperclipPluginManifestV1.apiVersion` is typed `1`. */
 export const PLUGIN_API_VERSION = 1 as const;
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.3.1";
 
 /**
  * Display/seed ordering only — NOT an allowlist.

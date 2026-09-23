@@ -1,6 +1,6 @@
 {
   "name": "@togetherweown/paperclip-cliproxy-insight",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Paperclip plugin: durable per-upstream-provider usage/cooldown telemetry from the sanitized CLIProxy telemetry lane, polled read-only and persisted so a container restart doesn't lose it.",
   "license": "UNLICENSED",

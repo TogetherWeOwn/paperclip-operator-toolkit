@@ -38,7 +38,7 @@ function validateSecretRefShape(value, path) {
 }
 
 // src/constants.ts
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var SEED_PROVIDER_ORDER = [
   "claude",
   "codex",
@@ -282,7 +282,27 @@ async function laneSummary(read, config, nowMs) {
 }
 function createPlugin() {
   let context = null;
+  const configuredCompanies = /* @__PURE__ */ new Set();
+  let missingCompanyIdentity = false;
+  const isConfiguredCompany = (companyId) => !missingCompanyIdentity && configuredCompanies.size === 1 && configuredCompanies.has(companyId);
   return definePlugin({
+    multiCompanyConfig: true,
+    async onConfigChanged(_config, change) {
+      if (!change?.companyId?.trim()) {
+        missingCompanyIdentity = true;
+        await context?.metrics.write("cliproxy_insight.company_scope_refused", 1, {
+          reason: "missing_company_id"
+        });
+        return;
+      }
+      configuredCompanies.add(change.companyId);
+      if (configuredCompanies.size !== 1) {
+        await context?.metrics.write("cliproxy_insight.company_scope_refused", 1, {
+          reason: "multiple_companies"
+        });
+        throw new Error("cliproxy-insight requires exactly one configured company; polling stopped");
+      }
+    },
     async setup(ctx) {
       context = ctx;
       const key = (companyId, stateKey) => ({
@@ -316,10 +336,10 @@ function createPlugin() {
             companyId,
             configPath: "laneApiKeySecretRef"
           });
-        } catch (error) {
+        } catch {
           ctx.logger.warn("cliproxy-insight: could not resolve the lane bearer", {
             companyId,
-            error: error instanceof Error ? error.message : String(error)
+            reason: "secret_resolve_failed"
           });
           await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
             companyId,
@@ -327,6 +347,7 @@ function createPlugin() {
           });
           return;
         }
+        if (!isConfiguredCompany(companyId)) return;
         const polledAt = (/* @__PURE__ */ new Date()).toISOString();
         const nowMs = Date.parse(polledAt);
         const [laneResults, rates, modelUsage] = await Promise.all([
@@ -512,7 +533,9 @@ function createPlugin() {
           const input = asRecord(params);
           const companyId = typeof input.companyId === "string" ? input.companyId : "";
           if (!companyId) return { error: "companyId is required" };
+          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
           const config = resolveConfig(await ctx.config.get(companyId));
+          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
           const nowMs = Date.now();
           const requested = typeof input.provider === "string" ? input.provider : null;
           const providers = requested ? [requested] : await readProviderIndex(companyId);
@@ -551,22 +574,25 @@ function createPlugin() {
         }
       );
       ctx.jobs.register(JOB_KEYS.poll, async (_job) => {
-        const companies = await ctx.companies.list();
-        for (const company of companies) {
-          const raw = await ctx.config.get(company.id);
-          const config = resolveConfig(raw);
-          try {
-            await pollOneCompany(company.id, config);
-          } catch (error) {
-            ctx.logger.warn("cliproxy-insight: poll failed for company", {
-              companyId: company.id,
-              error: error instanceof Error ? error.message : String(error)
-            });
-            await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
-              companyId: company.id,
-              reason: "unhandled"
-            });
-          }
+        if (missingCompanyIdentity || configuredCompanies.size !== 1) {
+          await ctx.metrics.write("cliproxy_insight.poll_skipped_company_scope", 1);
+          return;
+        }
+        const companyId = [...configuredCompanies][0];
+        if (!companyId) return;
+        try {
+          const config = resolveConfig(await ctx.config.get(companyId));
+          if (!isConfiguredCompany(companyId)) return;
+          await pollOneCompany(companyId, config);
+        } catch {
+          ctx.logger.warn("cliproxy-insight: poll failed for company", {
+            companyId,
+            reason: "unhandled"
+          });
+          await ctx.metrics.write("cliproxy_insight.poll_errors", 1, {
+            companyId,
+            reason: "unhandled"
+          });
         }
       });
       ctx.logger.info("CLIProxy Insight worker ready", { version: PLUGIN_VERSION });
@@ -626,7 +652,13 @@ function createPlugin() {
         return { status: 404, body: { error: `unknown route ${input.routeKey}` } };
       }
       const companyId = input.companyId;
+      if (!isConfiguredCompany(companyId)) {
+        return { status: 403, body: { error: "company is not configured" } };
+      }
       const config = resolveConfig(await context.config.get(companyId));
+      if (!isConfiguredCompany(companyId)) {
+        return { status: 403, body: { error: "company is not configured" } };
+      }
       const nowMs = Date.now();
       const scope = (stateKey) => ({
         scopeKind: "company",

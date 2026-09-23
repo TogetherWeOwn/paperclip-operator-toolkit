@@ -1,7 +1,7 @@
 // src/constants.ts
 var PLUGIN_ID = "togetherweown.cliproxy-insight";
 var PLUGIN_API_VERSION = 1;
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var TOOL_NAMES = {
   /** Read-only: current usage/cooldown state for one or all providers. */
   getProviderUsage: "get_provider_usage"
@@ -100,9 +100,6 @@ var manifest = {
   capabilities: [
     // The substrate. Every poll runs from here.
     "jobs.schedule",
-    // Which company's config/state to poll under. A job context carries no
-    // companyId (dispatch precedent).
-    "companies.read",
     // Outbound GET to the public HTTPS telemetry lane.
     "http.outbound",
     // Resolve the lane bearer at call time only — never cached, logged, or
