@@ -427,6 +427,54 @@ if [[ -f "$REAL" ]]; then
   [[ -z "$thin" ]] && ok "every retired line carries an outcome and its evidence" \
     || bad "retired lines missing outcome/evidence: $(tr '\n' ' ' <<<"$thin")"
   "$TOOL" render </dev/null >/dev/null 2>&1 && ok "shipped classification renders" || bad "shipped classification fails to render"
+
+  # TOG-1164. `withdrawn` is a SOURCE field (TOG-1140/#254): the 🛑 banner only
+  # renders because this field exists. Nothing before this asserted the field
+  # itself survives a regeneration — `del(.. | .withdrawn?)` on this file once
+  # rendered 0 banners and left every other section 7 check, and the whole
+  # render-drift gate in test_omniroute_rehearsal.sh, green. Section 9 now covers
+  # the # WITHDRAWN header and deletion control; these checks also cover other
+  # command wording and banners on items without that header.
+  #
+  # Any item whose `commands` contains the literal string "WITHDRAWN" is
+  # asserting, in its own data, that it has been withdrawn — so it MUST also
+  # carry a `withdrawn` object with a non-empty `body`. That is the general
+  # form the issue asked for: the next withdrawn line is covered by what it
+  # says about itself, not by naming TOG-516.
+  unmarked_withdrawn="$(jq -r '
+    .items | to_entries[]
+    | select((.value.commands // "") | test("WITHDRAWN"))
+    | select((.value.withdrawn.body // "") | length == 0)
+    | .key' "$REAL")"
+  [[ -z "$unmarked_withdrawn" ]] \
+    && ok "every item whose commands say WITHDRAWN carries a withdrawn.body" \
+    || bad "WITHDRAWN in commands with no withdrawn.body: $(tr '\n' ' ' <<<"$unmarked_withdrawn")"
+
+  # At least one shipped item must actually exercise this path, or the check
+  # above is vacuously true. TOG-516/TOG-847's NO-FORK ruling is that item.
+  n_withdrawn="$(jq -r '[.items[] | select((.withdrawn.body // "") | length > 0)] | length' "$REAL")"
+  [[ "$n_withdrawn" -ge 1 ]] && ok "the shipped classification carries at least one withdrawn item" \
+    || bad "no shipped item carries a withdrawn object — this suite would not have caught TOG-1164"
+
+  # The render itself must still show the banner for every withdrawn item, and
+  # the banner must sit ABOVE the blast-radius line — it is a stop sign, and a
+  # stop sign read second is read as a footnote. This is the render-side half
+  # the issue asked to pair with the source-level assertion above.
+  doc_real="$("$TOOL" render --classification "$REAL" </dev/null 2>&1)"
+  bad_order=""
+  while IFS= read -r wid; do
+    [[ -n "$wid" ]] || continue
+    section_ok="$(awk -v id="$wid" '
+      $0 ~ ("^### [0-9]+\\. " id " ") { infound=1 }
+      infound && /^### [0-9]+\./ && $0 !~ ("^### [0-9]+\\. " id " ") { exit }
+      infound && /🛑/            { print "banner"; exit }
+      infound && /\*\*Blast radius/ { print "blast"; exit }
+    ' <<<"$doc_real")"
+    [[ "$section_ok" == "banner" ]] || bad_order+="$wid "
+  done < <(jq -r '.items | to_entries[] | select((.value.withdrawn.body // "") | length > 0) | .key' "$REAL")
+  [[ -z "$bad_order" ]] \
+    && ok "every withdrawn item renders its 🛑 banner above its blast-radius line" \
+    || bad "withdrawn item(s) missing the banner or rendered it below blast radius: $bad_order"
 else
   bad "shipped classification file not found at $REAL"
 fi
