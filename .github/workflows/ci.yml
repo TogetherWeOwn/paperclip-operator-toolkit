@@ -1289,6 +1289,15 @@ jobs:
       - name: quota pacing verdict hostile suite
         run: python3 ./test_pacing_verdict.py
 
+      # TOG-4062: offline, recorded-model auth evidence. The real incident is
+      # INSUFFICIENT; cross-model successes and pre-inference aborts are not
+      # controls. Mutation kills require two named assertions, never errors.
+      - name: auth denial discriminator hostile suite
+        run: python3 ./test_auth_denial_discriminator.py
+
+      - name: auth denial discriminator mutation gate
+        run: python3 ./verification/auth-denial-mutation-gate.py
+
       # TOG-440. The offline derivation tool, and — §5 — the cross-check that
       # keeps it in step with the jq copy inside quota_brake.sh. Two
       # implementations of one formula is the price of the production path
