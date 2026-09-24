@@ -2432,6 +2432,12 @@ jobs:
       - name: CLIProxy release preflight suite
         run: ./test_cliproxy_release_preflight.sh
 
+      # TOG-4338. The CLIProxy quota-controller unit suite: planning and
+      # apply decisions over synthetic telemetry. Offline: pure fixtures
+      # in-process, no host, credential, network, or CLIProxy.
+      - name: CLIProxy quota controller suite
+        run: python3 -m unittest -v test_cliproxy_quota_controller.py
+
       # TOG-526. The offline stub proves its argv/environment detectors can
       # catch exposed credentials, then requires private transport and rejects
       # incomplete or malformed OmniRoute responses.
