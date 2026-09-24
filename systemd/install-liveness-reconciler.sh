@@ -43,9 +43,19 @@ fi
 /usr/bin/install -d -o root -g root -m 0755 "$RELEASE_DIR" /etc/systemd/user
 /usr/bin/install -o root -g root -m 0555 "$WORK_DIR/liveness_reconciler.py" "$RELEASE_DIR/liveness_reconciler.py"
 /usr/bin/install -o root -g root -m 0444 "$WORK_DIR/liveness_reconciler_source.js" "$RELEASE_DIR/liveness_reconciler_source.js"
-/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$WORK_DIR/SHA256SUMS" "$RELEASE_DIR/"
+/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$RELEASE_DIR/REVISION"
+# TOG-4453: the bundle manifest covers bundle-scope paths (systemd/*) that are
+# verified in WORK_DIR above but never installed. Copying it into the release
+# directory made the unit's ExecStartPre `sha256sum --check` fail on every
+# start with FAILED-open-or-read. The release manifest must cover exactly the
+# installed byte set, so regenerate it here from the verified bytes.
+(cd "$RELEASE_DIR" && /usr/bin/sha256sum liveness_reconciler.py liveness_reconciler_source.js REVISION > "$WORK_DIR/SHA256SUMS.release")
+/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/SHA256SUMS.release" "$RELEASE_DIR/SHA256SUMS"
 /usr/bin/python3 -m py_compile "$RELEASE_DIR/liveness_reconciler.py"
 rm -rf "$RELEASE_DIR/__pycache__"
+# The unit runs this exact check before every start; prove it passes now,
+# before claiming INSTALLED, rather than at the first timer tick.
+(cd "$RELEASE_DIR" && /usr/bin/sha256sum --check --strict SHA256SUMS)
 
 /usr/bin/python3 - "$WORK_DIR/systemd/paperclip-liveness-reconciler.service" "$SOURCE_REF" > "$WORK_DIR/rendered.service" <<'PY'
 import pathlib, sys
