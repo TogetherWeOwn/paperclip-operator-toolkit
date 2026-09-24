@@ -40,7 +40,7 @@ set -uo pipefail
 # It is read-only over this checkout plus the values you hand it.
 # ===========================================================================
 
-readonly REVIEWED_SOURCE_REF="e64c8a83b491cae9b463e05487fa598db99f0dcf"
+readonly REVIEWED_SOURCE_REF="f4f478342dbf62136729e151f55871e4cb9c8da8"
 
 # Measured live on 2026-09-22 and recorded on TOG-3790: v7.3.9, commit
 # 61fdfc3, pinned by digest. v7.3.13 was assessed at source level only and is

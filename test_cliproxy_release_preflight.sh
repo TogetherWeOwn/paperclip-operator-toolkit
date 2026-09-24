@@ -16,17 +16,17 @@ set -uo pipefail
 #   * apply mode, which additionally exercises check 8 (the ancestor rule).
 #
 # The apply-mode GREEN needs the reviewed controller commit to be present as
-# an object in this checkout. On a shallow CI clone it is not, because the
-# TOG-2693 branch has never been merged to main. That case is reported as
-# SKIPPED with its reason, and the apply path is then asserted to refuse with
-# the missing-object message instead — still fail-closed, just for the other
-# reason. Nothing here fetches from the network.
+# an object in this checkout. On a shallow CI clone it may not be, because the
+# fetch depth can exclude it even though PR #404 landed it on main. That case
+# is reported as SKIPPED with its reason, and the apply path is then asserted
+# to refuse with the missing-object message instead — still fail-closed, just
+# for the other reason. Nothing here fetches from the network.
 # ===========================================================================
 
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 readonly GATE="./cliproxy_release_preflight.sh"
-readonly REF="e64c8a83b491cae9b463e05487fa598db99f0dcf"
+readonly REF="f4f478342dbf62136729e151f55871e4cb9c8da8"
 readonly HANDOFF="docs/runbooks/cliproxy-quota-controller-release.md"
 
 [[ -x "$GATE" ]] || { printf 'FATAL: %s is missing or not executable\n' "$GATE" >&2; exit 1; }
@@ -116,9 +116,28 @@ if [[ $HAVE_REF -eq 1 ]]; then
   green "apply with the reviewed commit on the trusted line" \
     --mode apply "${OK_VALUES[@]}" --trusted-line "$REF" --rollback-state "$STATE_ABSENT"
 
-  red "apply refuses when the ref is not an ancestor of the trusted line" \
+  # Keep ancestry fixtures independent of checkout depth. Copy only the reviewed
+  # commit object and mark it shallow; its parent is deliberately unavailable.
+  # An unrelated root is a resolvable non-ancestor, unlike $REF~1 in shallow CI.
+  ANCESTRY_GIT="$TMP/ancestry.git"
+  git init --bare -q "$ANCESTRY_GIT" || exit 1
+  COPIED_REF="$(git --no-replace-objects cat-file commit "$REF" |
+    git --git-dir="$ANCESTRY_GIT" hash-object -t commit -w --stdin)" || exit 1
+  [[ "$COPIED_REF" == "$REF" ]] || exit 1
+  printf '%s\n' "$REF" >"$ANCESTRY_GIT/shallow"
+  EMPTY_TREE="$(git --git-dir="$ANCESTRY_GIT" mktree </dev/null)" || exit 1
+  NON_ANCESTOR="$(git --git-dir="$ANCESTRY_GIT" \
+    -c user.name='Preflight fixture' -c user.email='fixture@example.invalid' \
+    commit-tree "$EMPTY_TREE" -m 'Unrelated ancestry fixture')" || exit 1
+  if git --git-dir="$ANCESTRY_GIT" rev-parse -q --verify "$REF~1^{commit}" >/dev/null 2>&1; then
+    printf 'FATAL: ancestry fixture unexpectedly contains the reviewed parent\n' >&2
+    exit 1
+  fi
+  GIT_DIR="$ANCESTRY_GIT" green "apply with the reviewed commit but no parent history" \
+    --mode apply "${OK_VALUES[@]}" --trusted-line "$REF" --rollback-state "$STATE_ABSENT"
+  GIT_DIR="$ANCESTRY_GIT" red "apply refuses when the ref is not an ancestor of the trusted line" \
     "is not an ancestor of" \
-    --mode apply "${OK_VALUES[@]}" --trusted-line HEAD --rollback-state "$STATE_ABSENT"
+    --mode apply "${OK_VALUES[@]}" --trusted-line "$NON_ANCESTOR" --rollback-state "$STATE_ABSENT"
 
   red "apply refuses when an earlier rollback state was never cleared" \
     "rollback state already exists" \
@@ -130,7 +149,7 @@ if [[ $HAVE_REF -eq 1 ]]; then
     --mode apply "${OK_VALUES[@]}" --trusted-line no/such/ref --rollback-state "$STATE_ABSENT"
 else
   skip "apply-mode positive control" \
-    "reviewed commit $REF is not an object in this checkout (the TOG-2693 bundle is unmerged); apply is asserted to fail closed instead"
+    "reviewed commit $REF is not an object in this checkout (it may be outside the shallow history); apply is asserted to fail closed instead"
   red "apply refuses when the reviewed commit is not fetched" \
     "is not an available commit object" \
     --mode apply "${OK_VALUES[@]}" --rollback-state "$STATE_ABSENT"
@@ -216,7 +235,7 @@ red "version prefix is not a match" "is not a version this bundle has been verif
 # Check 7 -- the reviewed commit.
 # ---------------------------------------------------------------------------
 red "short source ref" "--source-ref must be a 40-hex commit" \
-  --mode rollback "${OK_VALUES[@]}" --source-ref e64c8a83b --rollback-state "$STATE_PRESENT"
+  --mode rollback "${OK_VALUES[@]}" --source-ref f4f4783 --rollback-state "$STATE_PRESENT"
 red "uppercase source ref" "--source-ref must be a 40-hex commit" \
   --mode rollback "${OK_VALUES[@]}" --source-ref "${REF^^}" --rollback-state "$STATE_PRESENT"
 red "a different 40-hex commit" "is not the reviewed controller commit" \

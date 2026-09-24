@@ -1,7 +1,7 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { ScopeKey } from "@paperclipai/plugin-sdk";
 import type { Issue } from "@paperclipai/shared";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
 import {
@@ -11,10 +11,23 @@ import {
   PLUGIN_STATE_KEYS,
 } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
-import { MODELS, NO_ESCALATION, PROFILES, subCallPins } from "./fixtures.js";
+import { MODELS, NO_ESCALATION, NOW, PROFILES, subCallPins } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const AGENT = "agent-1";
+
+// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// (computedAt = NOW - 1h) stay inside the production 14-day guard
+// (src/engine/cost.ts). Date-only: async timers keep running, and the
+// budget-exhaustion test below still owns Date.now via its own spy.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function agentRow(overrides: Record<string, unknown> = {}) {
   return {

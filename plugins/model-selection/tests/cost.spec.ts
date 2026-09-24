@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MIN_PROFILE_SAMPLES,
+  PROFILE_MAX_AGE_MS,
   costOf,
   escalationRisk,
   resolveProfile,
@@ -57,6 +58,27 @@ describe("profile trust", () => {
       { ...t1, computedAt: new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString() },
     ];
     const verdict = resolveProfile("T1", stale, NOW);
+    expect(verdict.trusted).toBe(false);
+    expect(verdict.reason).toContain("days old");
+  });
+
+  it("trusts a profile exactly at the 14-day threshold", () => {
+    // TOG-4384: the guard is `age > PROFILE_MAX_AGE_MS`, so a profile aged
+    // exactly 14 days is still trusted — the fail-closed edge, not past it.
+    const atThreshold: VolumeProfile[] = [
+      { ...t1, computedAt: new Date(NOW - PROFILE_MAX_AGE_MS).toISOString() },
+    ];
+    expect(resolveProfile("T1", atThreshold, NOW).trusted).toBe(true);
+  });
+
+  it("fails closed one millisecond past the 14-day threshold", () => {
+    // TOG-4384: `age > PROFILE_MAX_AGE_MS` rejects anything older, so the
+    // seeded PROFILES (computedAt = NOW - 1h) only stay trusted while `now`
+    // stays near NOW — the regression this freeze exists to pin.
+    const justStale: VolumeProfile[] = [
+      { ...t1, computedAt: new Date(NOW - PROFILE_MAX_AGE_MS - 1).toISOString() },
+    ];
+    const verdict = resolveProfile("T1", justStale, NOW);
     expect(verdict.trusted).toBe(false);
     expect(verdict.reason).toContain("days old");
   });

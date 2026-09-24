@@ -1,7 +1,7 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { pluginManifestV1Schema } from "@paperclipai/shared/validators/plugin";
 import type { Issue } from "@paperclipai/shared";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
 import { LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TIERS, TOOL_NAMES } from "../src/constants.js";
@@ -12,13 +12,27 @@ import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
-import { LANED_MODELS, MODELS, NO_ESCALATION, PROFILES, account, laneDoc, subCallPins } from "./fixtures.js";
+import { LANED_MODELS, MODELS, NO_ESCALATION, NOW, PROFILES, account, laneDoc, subCallPins } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
 const AGENT = "agent-1";
 const TIER_LABEL_ID = "lbl-t1";
 const OTHER_LABEL_ID = "lbl-other";
+
+// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// (computedAt = NOW - 1h) stay inside the production 14-day guard
+// (src/engine/cost.ts). Date-only: async timers keep running. The two lane
+// tests below that stamp `new Date()` explicitly stay consistent — the stamp
+// and the worker's `Date.now()` read the same frozen clock.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function issue(overrides: Partial<Issue> = {}): Issue {
   return {

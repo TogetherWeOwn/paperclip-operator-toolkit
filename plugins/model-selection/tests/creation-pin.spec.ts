@@ -1,15 +1,29 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Issue } from "@paperclipai/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
 import { PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
 import { buildCardLedger } from "../src/engine/scores.js";
-import { MODELS, NO_ESCALATION, PROFILES } from "./fixtures.js";
+import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
 const COMPANY = "co-1";
 const AGENT = "agent-1";
+
+// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// (computedAt = NOW - 1h) stay inside the production 14-day guard
+// (src/engine/cost.ts). Date-only: async timers keep running. The quality
+// test below builds its cards relative to `Date.now()`, so it stays
+// consistent under the freeze.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function agentRow(overrides: Record<string, unknown> = {}) {
   return {
