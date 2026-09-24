@@ -27,6 +27,10 @@ var TOOL_NAMES = {
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
   refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-3996: the last models.dev price reconciliation, as an operator-approvable diff. Read-only. */
+  priceDriftReport: "model_selection_price_drift_report",
+  /** TOG-3996: run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
+  reconcilePricesNow: "model_selection_reconcile_prices_now",
   /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
@@ -57,6 +61,8 @@ var JOB_KEYS = {
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
   refreshAaIndex: "refreshAaIndex",
+  /** TOG-3996: reconcile roster prices against models.dev and report drift (never auto-applies). */
+  reconcilePrices: "reconcilePrices",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
   /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
@@ -549,6 +555,25 @@ var SELECTION_CONFIG_SCHEMA = {
       default: {}
     },
     /**
+     * TOG-3996: models.dev price reconciliation. A kill switch and nothing
+     * else, for the same reason `aaSync` is — the feed URL and the
+     * lane-to-provider map are code constants, because a wrong provider
+     * produces a confidently wrong price and that is a code review's
+     * question, not a config field's.
+     *
+     * There is deliberately no `autoApply` option. A price change reorders
+     * the whole fleet's routing; this job reports and an operator applies.
+     */
+    priceSync: {
+      type: "object",
+      title: "models.dev price reconciliation",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true }
+      },
+      default: {}
+    },
+    /**
      * TOG-2481: absorbs the standalone `dispatch` plugin (TOG-747, design
      * TOG-706) so the `plugins` table shows one dispatcher, not two. Mirrors
      * that plugin's `instanceConfigSchema` field-for-field, including its
@@ -793,6 +818,12 @@ var manifest = {
       schedule: "53 */6 * * *"
     },
     {
+      jobKey: JOB_KEYS.reconcilePrices,
+      displayName: "Reconcile roster prices against models.dev",
+      description: "Fetch models.dev's catalogue and compare every roster row's $/Mtok against the list price its LANE's provider publishes. Reports drift to the activity log and stores the diff for an operator to approve \u2014 it never writes a price. A 2026-09-22 hand audit found 26 of 117 rows wrong, five of them priced 0/0/0, so this exists to make the next drift visible within a day instead of at the next audit. Daily, not 6-hourly: vendor list prices change on the order of months, and the feed is 4.8 MB.",
+      schedule: "41 5 * * *"
+    },
+    {
       jobKey: JOB_KEYS.classifyIssues,
       displayName: "Classify unlabeled issues",
       description: "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) \u2014 the AC3 kill switch for TOG-2481.",
@@ -866,6 +897,18 @@ var manifest = {
       name: TOOL_NAMES.refreshAaIndexNow,
       displayName: "Refresh aa.ai Intelligence Index now",
       description: "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.priceDriftReport,
+      displayName: "models.dev price drift report",
+      description: "The latest roster-vs-models.dev price reconciliation: which rows are mispriced, by how much, and the exact note clause to record if the correction is approved. Read-only; writes nothing. List prices \u2014 correct for relative cost ordering, not what the company actually pays on a flat plan.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.reconcilePricesNow,
+      displayName: "Reconcile roster prices against models.dev now",
+      description: "Run the models.dev fetch + price reconciliation immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a roster price.",
       parametersSchema: { type: "object" }
     },
     {

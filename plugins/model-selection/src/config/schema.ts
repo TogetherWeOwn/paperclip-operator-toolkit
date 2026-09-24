@@ -458,6 +458,25 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
+     * TOG-3996: models.dev price reconciliation. A kill switch and nothing
+     * else, for the same reason `aaSync` is — the feed URL and the
+     * lane-to-provider map are code constants, because a wrong provider
+     * produces a confidently wrong price and that is a code review's
+     * question, not a config field's.
+     *
+     * There is deliberately no `autoApply` option. A price change reorders
+     * the whole fleet's routing; this job reports and an operator applies.
+     */
+    priceSync: {
+      type: "object",
+      title: "models.dev price reconciliation",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true },
+      },
+      default: {},
+    },
+    /**
      * TOG-2481: absorbs the standalone `dispatch` plugin (TOG-747, design
      * TOG-706) so the `plugins` table shows one dispatcher, not two. Mirrors
      * that plugin's `instanceConfigSchema` field-for-field, including its

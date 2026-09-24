@@ -1283,6 +1283,37 @@ const mutants = [
     from: "      if (isSecretBinding(env[key])) continue;\n",
     to: "",
   },
+  // TOG-3996: price-reconciliation invariants whose failure mode is
+  // a confidently-wrong number rather than an error. Each one, broken, still
+  // produces a plausible-looking report.
+  {
+    // The provider must come from the lane. `kimi-k2.6`, `glm-5.x` and the
+    // `muse-spark-*-contributor` rows all sit under two providers at two
+    // prices, so a first-match-wins search returns the wrong one about as
+    // often as the right one — and never says so.
+    name: "price-provider-by-id-search-instead-of-lane",
+    file: "src/price-sync/match.ts",
+    from: "  const providerId = LANE_PRICE_PROVIDERS[row.laneId];",
+    to: "  const providerId = LANE_PRICE_PROVIDERS[row.laneId] ?? [...catalog.keys()].find((p) => catalog.get(p)?.has(bareModelId(row.modelId)));",
+  },
+  {
+    // Exclusions are checked before any feed lookup. Checking after lets a
+    // feed id that merely looks like an excluded row produce a finding
+    // against a row the audit already settled by hand.
+    name: "price-exclusions-checked-after-the-feed-lookup",
+    file: "src/price-sync/match.ts",
+    from: "  const excluded = priceExclusionReason(row.modelId, row.note);\n  if (excluded) return { kind: \"excluded\", reason: excluded };\n\n  if (!row.laneId) return { kind: \"no-lane\" };",
+    to: "  if (!row.laneId) return { kind: \"no-lane\" };",
+  },
+  {
+    // A field the provider does not publish is not a zero. Reading it as 0
+    // manufactures a drift row against every correctly-priced roster row
+    // whose provider has no cache rate (`zhipuai/glm-4.5v` today).
+    name: "price-unpublished-cache-read-as-zero",
+    file: "src/price-sync/parse.ts",
+    from: "        cacheRead: finiteNumber(cost.cache_read),",
+    to: "        cacheRead: finiteNumber(cost.cache_read) ?? 0,",
+  },
 
   // TOG-3997: the card-accept-rate exclusion. Both halves have to hold — the
   // gate has to FIRE on a proven-bad row, and it has to stay silent on every
@@ -1537,6 +1568,20 @@ const mutants = [
     file: "src/worker.ts",
     from: "                costUsd: attributableCost(modelId, r.provider, toNumber(r.cost_usd)),\n              }];",
     to: "                costUsd: toNumber(r.cost_usd),\n              }];",
+  },
+  {
+    // A correctly-free big-pickle row has no -free suffix.
+    name: "price-ignore-free-offer-note",
+    file: "src/price-sync/match.ts",
+    from: '  const excluded = priceExclusionReason(row.modelId, row.note);',
+    to: '  const excluded = priceExclusionReason(row.modelId);',
+  },
+  {
+    // Pure matcher tests alone cannot catch the worker dropping the note.
+    name: "price-worker-drops-free-offer-note",
+    file: "src/worker.ts",
+    from: "              note: model.note,\n",
+    to: "",
   },
 ];
 

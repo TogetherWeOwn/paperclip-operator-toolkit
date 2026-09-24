@@ -28,6 +28,10 @@ var TOOL_NAMES = {
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
   refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-3996: the last models.dev price reconciliation, as an operator-approvable diff. Read-only. */
+  priceDriftReport: "model_selection_price_drift_report",
+  /** TOG-3996: run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
+  reconcilePricesNow: "model_selection_reconcile_prices_now",
   /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
@@ -62,6 +66,8 @@ var JOB_KEYS = {
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
   refreshAaIndex: "refreshAaIndex",
+  /** TOG-3996: reconcile roster prices against models.dev and report drift (never auto-applies). */
+  reconcilePrices: "reconcilePrices",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
   /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
@@ -140,6 +146,21 @@ var PLUGIN_STATE_KEYS = {
   /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
   aaDriftSurfaced: "aaDriftSurfaced",
   /**
+   * TOG-3996, per-company: the most recent models.dev price reconciliation
+   * report (`{report, ranAt, error}`), so `priceDriftReport` can answer
+   * without re-fetching a 4.8 MB catalogue on every read. The report is the
+   * artifact — this job writes no price anywhere.
+   */
+  priceReconcileReport: "priceReconcileReport",
+  /**
+   * TOG-3996, per-company: which `(modelId, field, feedPrice)` drift findings
+   * have already been surfaced to the activity log, so a misprice nobody has
+   * applied yet does not re-alarm on every daily tick. Same dedup shape and
+   * rationale as `aaDriftSurfaced`; keyed on the FEED price so a second,
+   * different price change on the same row does surface again.
+   */
+  priceDriftSurfaced: "priceDriftSurfaced",
+  /**
    * Per-issue capability-exclusion flag recorded by `classifyIssues`
    * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
    * LABEL always records the confidence-demoted tier regardless of
@@ -215,6 +236,10 @@ var AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/models";
 var AA_FETCH_TIMEOUT_MS = 1e4;
 var AA_MAX_RESPONSE_BYTES = 8e6;
 var AA_SNAPSHOT_HISTORY_LIMIT = 28;
+var MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
+var MODELS_DEV_USER_AGENT = "TogetherWeOwn-model-selection/1.0 (+https://github.com/TogetherWeOwn/paperclip-ops-tooling)";
+var MODELS_DEV_MAX_RESPONSE_BYTES = 16e6;
+var MODELS_DEV_FETCH_TIMEOUT_MS = 2e4;
 var PACING_MODES = ["off", "shadow", "enforce"];
 var LOCAL_FOLDER_KEYS = {
   /**
@@ -673,6 +698,7 @@ function resolveConfig(raw) {
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
+  const priceSync = record(root.priceSync);
   const dispatch = record(root.dispatch);
   const wakeScopedFloor = record(root.wakeScopedFloor);
   const models = Array.isArray(root.models) ? root.models.flatMap((entry) => {
@@ -851,6 +877,9 @@ function resolveConfig(raw) {
     },
     aaSync: {
       enabled: bool(aaSync.enabled, true)
+    },
+    priceSync: {
+      enabled: bool(priceSync.enabled, true)
     },
     dispatch: {
       wakeEnabled: bool(dispatch.wakeEnabled, false),
@@ -1628,6 +1657,269 @@ async function fetchAaSnapshot(input) {
     return fail("aa-response-too-large");
   }
   return { ok: true, html: text2, error: null };
+}
+
+// src/price-sync/match.ts
+var LANE_PRICE_PROVIDERS = {
+  "cliproxy-claude": "anthropic",
+  "cliproxy-codex": "openai",
+  "cliproxy-meta": "meta",
+  "cliproxy-zai": "zhipuai",
+  "cliproxy-kimi": "moonshotai",
+  "cliproxy-opencode-go": "opencode-go"
+};
+var DEVIN_PREFIX = "devin/";
+var RETIRED_VERIFIED_IDS = /* @__PURE__ */ new Set([
+  "claude-3-5-haiku-20241022",
+  "claude-3-7-sonnet-20250219",
+  "claude-opus-4-1-20250805",
+  "claude-opus-4-20250514",
+  "claude-sonnet-4-20250514",
+  "claude-opus-4-6-thinking"
+]);
+var PER_IMAGE_IDS = /* @__PURE__ */ new Set(["gpt-image-1.5", "gpt-image-2"]);
+function bareModelId(modelId) {
+  const slash = modelId.lastIndexOf("/");
+  return slash === -1 ? modelId : modelId.slice(slash + 1);
+}
+function priceExclusionReason(modelId, note) {
+  if (modelId.startsWith(DEVIN_PREFIX)) return "metered-not-per-token";
+  const bare = bareModelId(modelId);
+  if (bare.endsWith("-free") || /(?:free Zen model|no Go quota)/i.test(note ?? "")) return "free-tier";
+  if (RETIRED_VERIFIED_IDS.has(bare)) return "retired-verified";
+  if (PER_IMAGE_IDS.has(bare)) return "per-image";
+  return null;
+}
+function matchRosterRow(row, catalog) {
+  const excluded = priceExclusionReason(row.modelId, row.note);
+  if (excluded) return { kind: "excluded", reason: excluded };
+  if (!row.laneId) return { kind: "no-lane" };
+  const providerId = LANE_PRICE_PROVIDERS[row.laneId];
+  if (!providerId) return { kind: "unmapped-lane", laneId: row.laneId };
+  const bareId = bareModelId(row.modelId);
+  const models = catalog.get(providerId);
+  if (!models || !models.has(bareId)) return { kind: "absent-from-feed", providerId, bareId };
+  return { kind: "matched", providerId, bareId };
+}
+
+// src/price-sync/diff.ts
+var PRICE_FIELDS = ["costPerMTokIn", "costPerMTokOut", "costPerMTokCacheRead"];
+var FEED_FIELD_OF = {
+  costPerMTokIn: "input",
+  costPerMTokOut: "output",
+  costPerMTokCacheRead: "cacheRead"
+};
+var PRICE_EPSILON_RELATIVE = 1e-9;
+function samePrice(a, b) {
+  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
+  return Math.abs(a - b) <= PRICE_EPSILON_RELATIVE * scale;
+}
+function buildNote(row, fetchDate) {
+  const parts = row.fields.map((f) => {
+    const label = f.field === "costPerMTokIn" ? "in" : f.field === "costPerMTokOut" ? "out" : "cache read";
+    return `${label} ${f.roster} \u2192 ${f.feed}`;
+  });
+  return `${fetchDate} models.dev price reconciliation (source: https://models.dev/api.json, provider ${row.providerId}): ${parts.join(", ")}. List price \u2014 correct for relative cost ordering, not what we actually pay on a flat plan.`;
+}
+function severityOf(fields) {
+  if (fields.some((f) => f.roster === 0)) return "zero-priced";
+  return fields.some((f) => f.ratio !== null && f.ratio > 1) ? "understated" : "overstated";
+}
+var SEVERITY_ORDER = {
+  "zero-priced": 0,
+  understated: 1,
+  overstated: 2
+};
+function reconcilePrices(input) {
+  const fetchDate = input.fetchedAt.slice(0, 10);
+  const report = {
+    fetchedAt: input.fetchedAt,
+    checked: 0,
+    unchanged: 0,
+    drift: [],
+    excluded: [],
+    unresolved: []
+  };
+  for (const row of input.rows) {
+    const outcome = matchRosterRow({ modelId: row.id, laneId: row.laneId, note: row.note }, input.catalog);
+    if (outcome.kind === "excluded") {
+      report.excluded.push({ modelId: row.id, reason: outcome.reason });
+      continue;
+    }
+    if (outcome.kind === "no-lane") {
+      report.unresolved.push({
+        modelId: row.id,
+        kind: "no-lane",
+        detail: "row carries no laneId, so no provider can be resolved without guessing"
+      });
+      continue;
+    }
+    if (outcome.kind === "unmapped-lane") {
+      report.unresolved.push({
+        modelId: row.id,
+        kind: "unmapped-lane",
+        detail: `lane ${outcome.laneId} has no models.dev provider in LANE_PRICE_PROVIDERS`
+      });
+      continue;
+    }
+    if (outcome.kind === "absent-from-feed") {
+      report.unresolved.push({
+        modelId: row.id,
+        kind: "absent-from-feed",
+        detail: `${outcome.providerId} publishes no model ${outcome.bareId}; absence is not evidence of a wrong price`
+      });
+      continue;
+    }
+    const record2 = input.catalog.get(outcome.providerId)?.get(outcome.bareId);
+    if (!record2) {
+      report.unresolved.push({
+        modelId: row.id,
+        kind: "absent-from-feed",
+        detail: `${outcome.providerId}/${outcome.bareId} vanished between match and read`
+      });
+      continue;
+    }
+    const fields = [];
+    let anyComparable = false;
+    for (const field of PRICE_FIELDS) {
+      const feed = record2[FEED_FIELD_OF[field]];
+      if (feed === null) continue;
+      anyComparable = true;
+      const roster = row[field];
+      if (samePrice(roster, feed)) continue;
+      fields.push({ field, roster, feed, ratio: roster === 0 ? null : feed / roster });
+    }
+    if (!anyComparable) {
+      report.unresolved.push({
+        modelId: row.id,
+        kind: "unpriced-in-feed",
+        detail: `${outcome.providerId}/${outcome.bareId} is in the feed but publishes no cost block`
+      });
+      continue;
+    }
+    report.checked += 1;
+    if (fields.length === 0) {
+      report.unchanged += 1;
+      continue;
+    }
+    const severity = severityOf(fields);
+    const ratios = fields.map((f) => f.ratio).filter((r) => r !== null);
+    const maxRatio = Math.max(...ratios.map((r) => Math.max(r, 1 / r)));
+    const driftRow = {
+      modelId: row.id,
+      providerId: outcome.providerId,
+      bareId: outcome.bareId,
+      enabled: row.enabled,
+      fields,
+      severity,
+      maxRatio: severity === "zero-priced" || !Number.isFinite(maxRatio) ? null : maxRatio,
+      suggestedNote: ""
+    };
+    driftRow.suggestedNote = buildNote(driftRow, fetchDate);
+    report.drift.push(driftRow);
+  }
+  report.drift.sort((left, right) => {
+    const bySeverity = SEVERITY_ORDER[left.severity] - SEVERITY_ORDER[right.severity];
+    if (bySeverity !== 0) return bySeverity;
+    if (left.enabled !== right.enabled) return left.enabled ? -1 : 1;
+    if (left.maxRatio !== right.maxRatio) {
+      if (left.maxRatio === null) return -1;
+      if (right.maxRatio === null) return 1;
+      return right.maxRatio - left.maxRatio;
+    }
+    return left.modelId.localeCompare(right.modelId);
+  });
+  return report;
+}
+
+// src/price-sync/fetch.ts
+async function fetchPriceCatalog(input) {
+  const fail = (error) => ({ ok: false, json: null, error });
+  let parsed;
+  try {
+    parsed = new URL(input.url);
+  } catch {
+    return fail("price-url-rejected");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    return fail("price-url-rejected");
+  }
+  let response;
+  try {
+    let timer;
+    response = await Promise.race([
+      input.http.fetch(input.url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "identity",
+          "User-Agent": input.userAgent
+        },
+        redirect: "manual"
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("price-request-timeout")), input.timeoutMs);
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  } catch {
+    return fail("price-request-failed");
+  }
+  if (response.redirected || response.status >= 300 && response.status < 400) {
+    return fail("price-redirect-refused");
+  }
+  if (response.status === 403) {
+    return fail("price-http-forbidden");
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return fail("price-http-failed");
+  }
+  let text2;
+  try {
+    text2 = await response.text();
+  } catch {
+    return fail("price-request-failed");
+  }
+  if (new TextEncoder().encode(text2).byteLength > input.maxResponseBytes) {
+    return fail("price-response-too-large");
+  }
+  return { ok: true, json: text2, error: null };
+}
+
+// src/price-sync/parse.ts
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function parsePriceCatalog(json) {
+  let root;
+  try {
+    root = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const catalog = /* @__PURE__ */ new Map();
+  for (const [providerId, providerValue] of Object.entries(root)) {
+    const models = asRecord(asRecord(providerValue).models);
+    if (Object.keys(models).length === 0) continue;
+    const byModel = /* @__PURE__ */ new Map();
+    for (const [modelId, modelValue] of Object.entries(models)) {
+      const cost = asRecord(asRecord(modelValue).cost);
+      byModel.set(modelId, {
+        providerId,
+        modelId,
+        input: finiteNumber(cost.input),
+        output: finiteNumber(cost.output),
+        cacheRead: finiteNumber(cost.cache_read)
+      });
+    }
+    catalog.set(providerId, byModel);
+  }
+  return catalog.size === 0 ? null : catalog;
 }
 
 // src/engine/model-id.ts
@@ -2949,7 +3241,7 @@ function buildQualitySignals(rows, computedAt) {
 // src/engine/availability.ts
 var MAX_AGE_MINUTES = 120;
 var FUTURE_TOLERANCE_MS = 6e4;
-function asRecord(value) {
+function asRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 function parseTs(value) {
@@ -2996,7 +3288,7 @@ function evaluateRecord(raw, observedAtMs, nowMs) {
       reason: `${key}: sample age ${Math.round(ageMs / 6e4)}min exceeds the ${Math.round(cutoffMs / 6e4)}min cutoff`
     };
   }
-  const cooldown = asRecord(raw.cooldown);
+  const cooldown = asRecord2(raw.cooldown);
   if (cooldown) {
     const until = parseTs(cooldown.until);
     const why = typeof cooldown.reason === "string" ? `: ${cooldown.reason}` : "";
@@ -3024,7 +3316,7 @@ function evaluateRecord(raw, observedAtMs, nowMs) {
     return { state: "unavailable", term, reason: `${key}: health ${health}` };
   }
   const windows = Array.isArray(raw.windows) ? raw.windows.flatMap((w) => {
-    const rec = asRecord(w);
+    const rec = asRecord2(w);
     return rec ? [rec] : [];
   }) : [];
   if (windows.length === 0) {
@@ -3086,7 +3378,7 @@ function rollUp(laneId, verdicts, ageMinutes) {
   };
 }
 function normalizeAvailability(raw, nowMs, options = {}) {
-  const document = asRecord(raw);
+  const document = asRecord2(raw);
   if (!document) {
     return { lanes: [], unreadableReason: "availability document is not an object" };
   }
@@ -3095,7 +3387,7 @@ function normalizeAvailability(raw, nowMs, options = {}) {
     return { lanes: [], unreadableReason: "availability document has no readable observedAt" };
   }
   const records = Array.isArray(document.records) ? document.records.flatMap((r) => {
-    const rec = asRecord(r);
+    const rec = asRecord2(r);
     return rec ? [rec] : [];
   }) : [];
   if (records.length === 0) {
@@ -3265,12 +3557,12 @@ function positiveNumber(value) {
 function nonNegativeNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
-function finiteNumber(value) {
+function finiteNumber2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 function firstNumber(record2, fields, mode = "finite") {
   const value = firstValue(record2, fields)?.value;
-  return mode === "non-negative" ? nonNegativeNumber(value) : finiteNumber(value);
+  return mode === "non-negative" ? nonNegativeNumber(value) : finiteNumber2(value);
 }
 function text(record2, fields) {
   const value = firstValue(record2, fields)?.value;
@@ -4711,7 +5003,7 @@ async function logStateChange(ctx, input) {
 }
 
 // src/worker.ts
-function asRecord2(value) {
+function asRecord3(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function summary(decision) {
@@ -4747,7 +5039,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.volumeProfiles
       });
       const readProfiles = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(profilesKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(profilesKey(companyId)));
         return {
           profiles: Array.isArray(stored.profiles) ? stored.profiles : [],
           signals: Array.isArray(stored.signals) ? stored.signals : []
@@ -4784,7 +5076,7 @@ function createPlugin() {
           ]);
           const byLane = /* @__PURE__ */ new Map();
           for (const row of rows) {
-            const record2 = asRecord2(row);
+            const record2 = asRecord3(row);
             const modelId = typeof record2.model === "string" ? record2.model : null;
             if (!modelId) continue;
             const laneId = models.find((entry) => entry.id === modelId)?.laneId ?? null;
@@ -4854,7 +5146,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.paceRepinHistory
       });
       const readPaceRepinHistory = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(paceRepinHistoryKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(paceRepinHistoryKey(companyId)));
         const history = {};
         for (const [issueId, at] of Object.entries(stored)) {
           if (typeof at === "string") history[issueId] = at;
@@ -4867,7 +5159,7 @@ function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.tierExhaustedAlarms
       });
       const readTierExhaustedAlarms = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(tierExhaustedAlarmsKey(companyId)));
         const alarms = {};
         for (const [issueId, at] of Object.entries(stored)) {
           if (typeof at === "string") alarms[issueId] = at;
@@ -4950,7 +5242,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.reworkSignals
       });
       const readReworkSignals = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(reworkSignalsKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(reworkSignalsKey(companyId)));
         return Array.isArray(stored.signals) ? stored.signals : [];
       };
       const scoresKey = (companyId) => ({
@@ -4967,7 +5259,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.classificationExclusions
       });
       const readClassificationExclusions = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(classificationExclusionsKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(classificationExclusionsKey(companyId)));
         const out = {};
         for (const [issueId, excluded] of Object.entries(stored)) {
           if (excluded === true) out[issueId] = true;
@@ -4980,7 +5272,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.classifierLabeledIssues
       });
       const readClassifierLabeled = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(classifierLabeledKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(classifierLabeledKey(companyId)));
         const out = {};
         for (const [issueId, tier2] of Object.entries(stored)) {
           if (typeof tier2 === "string" && TIERS.includes(tier2)) out[issueId] = tier2;
@@ -4988,12 +5280,12 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         return out;
       };
       const readCardLedger = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(scoresKey(companyId)));
-        const ledger = asRecord2(stored.cardLedger);
+        const stored = asRecord3(await ctx.state.get(scoresKey(companyId)));
+        const ledger = asRecord3(stored.cardLedger);
         return ledger;
       };
       const readModelScores = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(scoresKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(scoresKey(companyId)));
         const scores = Array.isArray(stored.modelScores) ? stored.modelScores : [];
         const byModelId = {};
         for (const score2 of scores) byModelId[score2.modelId] = score2;
@@ -5020,7 +5312,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         );
         const weightByLane = {};
         for (const row of rows) {
-          const r = asRecord2(row);
+          const r = asRecord3(row);
           const rawModelId = typeof r.pinned_model === "string" ? r.pinned_model : null;
           const modelId = resolveConfiguredModelId(rawModelId, models);
           const model = models.find((m) => m.id === modelId);
@@ -5039,16 +5331,16 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.aaSnapshotHistory
       });
       const readAaSnapshot = async () => {
-        const stored = asRecord2(await ctx.state.get(aaSnapshotKey()));
+        const stored = asRecord3(await ctx.state.get(aaSnapshotKey()));
         return {
           fetchedAt: typeof stored.fetchedAt === "string" ? stored.fetchedAt : null,
-          bySlug: asRecord2(stored.bySlug),
+          bySlug: asRecord3(stored.bySlug),
           lastAttemptAt: typeof stored.lastAttemptAt === "string" ? stored.lastAttemptAt : null,
           lastError: typeof stored.lastError === "string" ? stored.lastError : null
         };
       };
       const appendAaSnapshotHistory = async (entry) => {
-        const stored = asRecord2(await ctx.state.get(aaSnapshotHistoryKey()));
+        const stored = asRecord3(await ctx.state.get(aaSnapshotHistoryKey()));
         const existing = Array.isArray(stored.entries) ? stored.entries : [];
         const next = [...existing, entry].slice(-AA_SNAPSHOT_HISTORY_LIMIT);
         await ctx.state.set(aaSnapshotHistoryKey(), { entries: next });
@@ -5059,7 +5351,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         stateKey: PLUGIN_STATE_KEYS.aaDriftSurfaced
       });
       const readAaDriftSurfaced = async (companyId) => {
-        const stored = asRecord2(await ctx.state.get(aaDriftSurfacedKey(companyId)));
+        const stored = asRecord3(await ctx.state.get(aaDriftSurfacedKey(companyId)));
         return new Set(Array.isArray(stored.keys) ? stored.keys : []);
       };
       const aaHttp = {
@@ -5067,7 +5359,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       };
       const readLastRunContextUsage = async (companyId, issueId) => {
         const contextRows = await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId]);
-        const contextRow = asRecord2(contextRows[0]);
+        const contextRow = asRecord3(contextRows[0]);
         const rawInput = Number(contextRow.input_tokens);
         const rawCached = Number(contextRow.cached_input_tokens);
         return {
@@ -5087,9 +5379,9 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       const describeIssue = async (companyId, issueId, supplied, contextUsageCache) => {
         const issue = await ctx.issues.get(issueId, companyId);
         if (!issue) return null;
-        const overrides = asRecord2(issue.assigneeAdapterOverrides);
-        const adapterConfig = asRecord2(overrides.adapterConfig);
-        const existingOverrideEnv = asRecord2(adapterConfig.env);
+        const overrides = asRecord3(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord3(overrides.adapterConfig);
+        const existingOverrideEnv = asRecord3(adapterConfig.env);
         const pinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const labels = issue.labels ?? [];
         const labelNames = labels.map((label) => label.name).filter((name) => typeof name === "string");
@@ -5104,17 +5396,17 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         if (typeof assigneeAgentId === "string") {
           try {
             const agent = await ctx.agents.get(assigneeAgentId, companyId);
-            const agentRecord = asRecord2(agent);
-            const config = asRecord2(agentRecord.adapterConfig);
+            const agentRecord = asRecord3(agent);
+            const config = asRecord3(agentRecord.adapterConfig);
             if (typeof config.model === "string") agentFloorModelId = config.model;
-            agentEnv = asRecord2(config.env);
+            agentEnv = asRecord3(config.env);
             agentAdapterConfig = config;
             if (typeof agentRecord.adapterType === "string") agentAdapterType = agentRecord.adapterType;
             if (typeof agentRecord.name === "string") agentName = agentRecord.name;
           } catch {
           }
         }
-        const exclusionRaw = asRecord2(supplied.exclusion);
+        const exclusionRaw = asRecord3(supplied.exclusion);
         const descriptor = {
           issueId,
           labelNames,
@@ -5259,7 +5551,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           await ctx.metrics.write("model_selection.lane_unknown_selected", 1);
         }
         if (decision.shadowDiff) {
-          const stored = asRecord2(await ctx.state.get(shadowDiffsKey(companyId)));
+          const stored = asRecord3(await ctx.state.get(shadowDiffsKey(companyId)));
           const existing = Array.isArray(stored.records) ? stored.records : [];
           const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1e3;
           const records = [
@@ -5329,7 +5621,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const result = await advise(runCtx.companyId, asRecord2(params));
+          const result = await advise(runCtx.companyId, asRecord3(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
@@ -5359,7 +5651,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const result = await advise(runCtx.companyId, asRecord2(params));
+          const result = await advise(runCtx.companyId, asRecord3(params));
           if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
@@ -5465,7 +5757,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord2(params);
+          const supplied = asRecord3(params);
           const issueId = typeof supplied.issueId === "string" ? supplied.issueId : null;
           const modelId = typeof supplied.modelId === "string" ? supplied.modelId : null;
           if (!issueId || !modelId) {
@@ -5508,7 +5800,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord2(params);
+          const supplied = asRecord3(params);
           const lanes = Array.isArray(supplied.lanes) ? supplied.lanes.filter((l) => typeof l === "string") : [];
           const models = Array.isArray(supplied.models) ? supplied.models.filter((m) => typeof m === "string") : [];
           const until = typeof supplied.until === "string" ? supplied.until : null;
@@ -5538,7 +5830,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         },
         async (params, runCtx) => {
-          const supplied = asRecord2(params);
+          const supplied = asRecord3(params);
           const until = typeof supplied.until === "string" ? supplied.until : null;
           if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
           if (typeof supplied.margin !== "number") {
@@ -5557,10 +5849,10 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         await ctx.state.set(reworkSignalsKey(companyId), { signals: [...pruned, signal] });
       };
       ctx.events.on("issue.updated", async (event) => {
-        const payload = asRecord2(event.payload);
-        const changes = asRecord2(payload.changes);
+        const payload = asRecord3(event.payload);
+        const changes = asRecord3(payload.changes);
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
-        const assignment = asRecord2(changes.assigneeAgentId);
+        const assignment = asRecord3(changes.assigneeAgentId);
         const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
         if (issueId && assignedTo && assignment.from == null) {
           try {
@@ -5573,7 +5865,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
           }
         }
-        const status = asRecord2(changes.status);
+        const status = asRecord3(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
         if (!issueId || from !== "done" || to === "done" || to === "cancelled" || !to) return;
@@ -5586,7 +5878,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       });
       const REJECTION_RE = /request(ed)? changes|^## *(rejected|fail|blocked by review)|not accepted|changes requested|re-?do this|does not pass review/i;
       ctx.events.on("issue.comment.created", async (event) => {
-        const payload = asRecord2(event.payload);
+        const payload = asRecord3(event.payload);
         const snippet = typeof payload.bodySnippet === "string" ? payload.bodySnippet : "";
         if (!REJECTION_RE.test(snippet)) return;
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
@@ -5606,7 +5898,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           scopeId: companyId,
           stateKey: PLUGIN_STATE_KEYS.noEligibleNotices
         };
-        const stored = asRecord2(await ctx.state.get(key));
+        const stored = asRecord3(await ctx.state.get(key));
         const rawLast = stored[issueId];
         if (typeof rawLast === "string") {
           const lastAtMs = Date.parse(rawLast);
@@ -5826,7 +6118,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                   {
                     id: agent.id,
                     name: agent.name,
-                    adapterConfig: asRecord2(agent.adapterConfig)
+                    adapterConfig: asRecord3(agent.adapterConfig)
                   },
                   recommendedModelId,
                   config.models
@@ -5908,7 +6200,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               [company.id, String(config.profiles.windowDays)]
             );
             const runRows = (Array.isArray(rows) ? rows : []).map((row) => {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               return {
                 model: typeof r.model === "string" ? r.model : null,
                 inputTokens: Number(r.input_tokens ?? 0),
@@ -6127,6 +6419,161 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           };
         }
       );
+      const priceReconcileReportKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.priceReconcileReport
+      });
+      const priceDriftSurfacedKey = (companyId) => ({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.priceDriftSurfaced
+      });
+      const readPriceDriftSurfaced = async (companyId) => {
+        const stored = asRecord3(await ctx.state.get(priceDriftSurfacedKey(companyId)));
+        return new Set(Array.isArray(stored.keys) ? stored.keys : []);
+      };
+      const priceHttp = {
+        fetch: (url, init) => ctx.http.fetch(url, init)
+      };
+      const runPriceReconcile = async () => {
+        const ranAt = (/* @__PURE__ */ new Date()).toISOString();
+        const fetched = await fetchPriceCatalog({
+          url: MODELS_DEV_CATALOG_URL,
+          userAgent: MODELS_DEV_USER_AGENT,
+          http: priceHttp,
+          timeoutMs: MODELS_DEV_FETCH_TIMEOUT_MS,
+          maxResponseBytes: MODELS_DEV_MAX_RESPONSE_BYTES
+        });
+        if (!fetched.ok || !fetched.json) {
+          const error = fetched.error ?? "price-fetch-failed";
+          ctx.logger.error("models.dev fetch failed; keeping the prior price report", { error });
+          return { ranAt, error, companies: [] };
+        }
+        const catalog = parsePriceCatalog(fetched.json);
+        if (!catalog) {
+          ctx.logger.error("models.dev parse failed; keeping the prior price report", { bytes: fetched.json.length });
+          return { ranAt, error: "price-parse-failed", companies: [] };
+        }
+        const outcome = { ranAt, error: null, companies: [] };
+        for (const company of listKnownCompanies()) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.priceSync.enabled || config.models.length === 0) continue;
+            const rows = config.models.map((model) => ({
+              id: model.id,
+              laneId: model.laneId ?? null,
+              enabled: model.enabled,
+              costPerMTokIn: model.costPerMTokIn,
+              costPerMTokOut: model.costPerMTokOut,
+              costPerMTokCacheRead: model.costPerMTokCacheRead,
+              note: model.note
+            }));
+            const report = reconcilePrices({ rows, catalog, fetchedAt: ranAt });
+            await ctx.state.set(priceReconcileReportKey(company.id), { ranAt, report });
+            outcome.companies.push({ companyId: company.id, drifted: report.drift.length, checked: report.checked });
+            ctx.logger.info("models.dev price reconciliation complete", {
+              companyId: company.id,
+              checked: report.checked,
+              unchanged: report.unchanged,
+              drifted: report.drift.length,
+              excluded: report.excluded.length,
+              unresolved: report.unresolved.length
+            });
+            const surfaced = await readPriceDriftSurfaced(company.id);
+            let surfacedChanged = false;
+            for (const row of report.drift) {
+              const dedupeKey = `${row.modelId}::${row.fields.map((f) => `${f.field}=${f.feed}`).join(",")}`;
+              if (surfaced.has(dedupeKey)) continue;
+              await ctx.activity.log({
+                companyId: company.id,
+                message: `models.dev list price disagrees with the roster for ${row.modelId} (${row.severity}) \u2014 review and apply by hand, this job never writes a price`,
+                entityType: "model",
+                entityId: row.modelId,
+                metadata: {
+                  modelId: row.modelId,
+                  providerId: row.providerId,
+                  enabled: row.enabled,
+                  severity: row.severity,
+                  maxRatio: row.maxRatio,
+                  fields: row.fields,
+                  suggestedNote: row.suggestedNote,
+                  source: MODELS_DEV_CATALOG_URL,
+                  fetchedAt: ranAt,
+                  // Stated on every record, because the number itself does not
+                  // carry the caveat and somebody will eventually quote it.
+                  priceBasis: "vendor list price; not this company's marginal cost under a flat subscription"
+                }
+              });
+              surfaced.add(dedupeKey);
+              surfacedChanged = true;
+            }
+            if (surfacedChanged) {
+              await ctx.state.set(priceDriftSurfacedKey(company.id), { keys: [...surfaced] });
+            }
+          } catch (cause) {
+            ctx.logger.error("price reconciliation failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+        return outcome;
+      };
+      ctx.jobs.register(JOB_KEYS.reconcilePrices, async () => {
+        await runPriceReconcile();
+      });
+      ctx.tools.register(
+        TOOL_NAMES.reconcilePricesNow,
+        {
+          displayName: "Reconcile roster prices against models.dev now",
+          description: "Run the models.dev fetch + price reconciliation immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a roster price.",
+          parametersSchema: { type: "object" }
+        },
+        async () => {
+          const result = await runPriceReconcile();
+          if (result.error) {
+            return { content: `models.dev reconciliation failed: ${result.error}`, data: result };
+          }
+          const drifted = result.companies.reduce((sum, c) => sum + c.drifted, 0);
+          const checked = result.companies.reduce((sum, c) => sum + c.checked, 0);
+          return {
+            content: `models.dev reconciliation complete: ${drifted} of ${checked} priced rows drifted. Reported only \u2014 no price was written.`,
+            data: result
+          };
+        }
+      );
+      ctx.tools.register(
+        TOOL_NAMES.priceDriftReport,
+        {
+          displayName: "models.dev price drift report",
+          description: "The latest roster-vs-models.dev price reconciliation: which rows are mispriced, by how much, and the exact note clause to record if the correction is approved. Read-only; writes nothing.",
+          parametersSchema: { type: "object" }
+        },
+        async (_args, toolCtx) => {
+          const companyId = toolCtx?.companyId;
+          if (!companyId) {
+            return { content: "No company scope on this call; cannot read a per-company price report." };
+          }
+          const stored = asRecord3(await ctx.state.get(priceReconcileReportKey(companyId)));
+          const report = stored.report;
+          if (!report) {
+            return {
+              content: `No models.dev price reconciliation has completed for this company yet. Run ${TOOL_NAMES.reconcilePricesNow} or wait for the daily job.`
+            };
+          }
+          const lines = report.drift.map((row) => {
+            const fields = row.fields.map((f) => `${f.field}: ${f.roster} -> ${f.feed}${f.ratio === null ? "" : ` (x${f.ratio.toFixed(2)})`}`).join("; ");
+            return `- ${row.modelId} [${row.severity}${row.enabled ? ", enabled" : ", disabled"}] ${fields}`;
+          });
+          return {
+            content: `models.dev reconciliation as of ${report.fetchedAt}: ${report.drift.length} of ${report.checked} priced rows drift (${report.unchanged} correct, ${report.excluded.length} out of scope by policy, ${report.unresolved.length} unresolved).
+${lines.join("\n") || "No drift."}
+List prices from models.dev \u2014 correct for the selector's relative cost ordering, NOT what this company pays on a flat subscription.`,
+            data: { ranAt: stored.ranAt ?? null, report }
+          };
+        }
+      );
       ctx.jobs.register(JOB_KEYS.refreshScores, async () => {
         const companies = listKnownCompanies();
         for (const company of companies) {
@@ -6143,11 +6590,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             );
             const issueIds = /* @__PURE__ */ new Set();
             for (const row of scoreRunRows) {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
             }
             for (const row of closingRunRows) {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               if (typeof r.issue_id === "string" && r.issue_id) issueIds.add(r.issue_id);
             }
             const tierByIssue = /* @__PURE__ */ new Map();
@@ -6185,7 +6632,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               return null;
             };
             const runOutcomeRows = scoreRunRows.flatMap((row) => {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const modelId = resolveConfiguredModelId(
                 typeof r.model === "string" ? r.model : null,
                 config.models
@@ -6205,7 +6652,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             });
             let statsByModel = accumulateRunStats(runOutcomeRows);
             const closingRuns = closingRunRows.flatMap((row) => {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const modelId = resolveConfiguredModelId(
                 typeof r.model === "string" ? r.model : null,
                 config.models
@@ -6276,7 +6723,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             }
             const cardRows = [];
             for (const row of cardIssueRows) {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               if (!issueId) continue;
               const closingRun = latestClosingRunByIssue.get(issueId);
@@ -6403,7 +6850,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const examinedRows = [];
             let brokeEarly = false;
             for (const row of candidateRows) {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) {
@@ -6537,11 +6984,11 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           [companyId]
         );
         return new Set(
-          rows.map((row) => asRecord2(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
+          rows.map((row) => asRecord3(row).issue_id).filter((issueId) => typeof issueId === "string" && issueId.length > 0)
         );
       };
       const readScanMark = async (companyId, stateKey) => {
-        const stored = asRecord2(await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey }));
+        const stored = asRecord3(await ctx.state.get({ scopeKind: "company", scopeId: companyId, stateKey }));
         const at = typeof stored.at === "string" ? Date.parse(stored.at) : Number.NaN;
         return Number.isFinite(at) ? at : 0;
       };
@@ -6554,7 +7001,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
       const oldestUpdatedAtMs = (rows) => {
         let oldest = null;
         for (const row of rows) {
-          const raw = asRecord2(row).updated_at;
+          const raw = asRecord3(row).updated_at;
           const ms = raw instanceof Date ? raw.getTime() : typeof raw === "string" ? Date.parse(raw) : Number.NaN;
           if (!Number.isFinite(ms)) continue;
           if (oldest === null || ms < oldest) oldest = ms;
@@ -6577,8 +7024,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           return false;
         }
         if ((issue.labels ?? []).some((label) => label.name === OPERATOR_PIN_LABEL)) return false;
-        const overrides = asRecord2(issue.assigneeAdapterOverrides);
-        const adapterConfig = asRecord2(overrides.adapterConfig);
+        const overrides = asRecord3(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord3(overrides.adapterConfig);
         const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
         const currentPinnedModelId = resolveConfiguredModelId(rawPinnedModelId, models);
         if (rawPinnedModelId && !currentPinnedModelId) return false;
@@ -6592,7 +7039,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             limit 1`,
           [companyId, issueId]
         );
-        return !activeRows.some((row) => asRecord2(row).issue_id === issueId);
+        return !activeRows.some((row) => asRecord3(row).issue_id === issueId);
       };
       const isUsableAndCapable = (modelId, tier2, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso) => {
         if (!modelId) return false;
@@ -6616,7 +7063,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               and i.assignee_adapter_overrides->'adapterConfig'->>'model' = $2`,
           [companyId, modelId]
         );
-        const r = asRecord2(rows[0]);
+        const r = asRecord3(rows[0]);
         return typeof r.n === "number" ? r.n : 0;
       };
       const tierWithFallback = (descriptor, models, defaultTier) => tierFromLabels(descriptor.labelNames) ?? tierOfModel(descriptor.pinnedModelId, models) ?? tierOfModel(descriptor.agentFloorModelId, models) ?? defaultTier;
@@ -6668,7 +7115,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
             const contextUsageCache = /* @__PURE__ */ new Map();
             let pinned = 0;
             for (const row of candidateRows) {
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -6791,7 +7238,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 break;
               }
               examinedRows.push(row);
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -6887,7 +7334,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
         }
       });
       ctx.events.on("agent.run.failed", async (event) => {
-        const payload = asRecord2(event.payload);
+        const payload = asRecord3(event.payload);
         const companyId = event.companyId;
         const issueId = typeof payload.issueId === "string" ? payload.issueId : null;
         let config;
@@ -6975,7 +7422,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                       and status in ('todo','in_progress','blocked','in_review')`,
                   [company.id]
                 );
-                const rawMax = asRecord2(maxRows[0]).max_updated;
+                const rawMax = asRecord3(maxRows[0]).max_updated;
                 if (rawMax instanceof Date) return rawMax.getTime();
                 if (typeof rawMax === "string") {
                   const ms = Date.parse(rawMax);
@@ -6999,7 +7446,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               scopeId: company.id,
               stateKey: PLUGIN_STATE_KEYS.balancePassCursor
             };
-            const storedCursor = asRecord2(await ctx.state.get(cursorKey));
+            const storedCursor = asRecord3(await ctx.state.get(cursorKey));
             const afterId = typeof storedCursor.afterId === "string" ? storedCursor.afterId : "";
             const candidateRows = await ctx.db.query(
               `select i.id::text as id,
@@ -7031,7 +7478,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 budgetExhausted = true;
                 break;
               }
-              const r = asRecord2(row);
+              const r = asRecord3(row);
               const issueId = typeof r.id === "string" ? r.id : null;
               const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
               if (!issueId) continue;
@@ -7309,7 +7756,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
                 [company.id]
               );
               for (const row of busyRows) {
-                const agentId = asRecord2(row).agent_id;
+                const agentId = asRecord3(row).agent_id;
                 if (typeof agentId === "string" && agentId.length > 0) busyAssignees.add(agentId);
               }
             } catch (cause) {
@@ -7351,7 +7798,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               let lane = null;
               try {
                 const agent = await ctx.agents.get(assigneeAgentId, company.id);
-                const adapterConfig = asRecord2(asRecord2(agent).adapterConfig);
+                const adapterConfig = asRecord3(asRecord3(agent).adapterConfig);
                 const floorModel = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
                 lane = laneOfModel(floorModel);
               } catch {
@@ -7365,8 +7812,8 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
               const assignee = entry.issue.assigneeAgentId;
               if (!assignee) continue;
               const row = entry.issue;
-              const overrides = asRecord2(row.assigneeAdapterOverrides ?? row.assignee_adapter_overrides);
-              const pinned = asRecord2(overrides.adapterConfig).model;
+              const overrides = asRecord3(row.assigneeAdapterOverrides ?? row.assignee_adapter_overrides);
+              const pinned = asRecord3(overrides.adapterConfig).model;
               const pinnedLane = laneOfModel(typeof pinned === "string" ? pinned : null);
               laneByIssueId.set(
                 entry.issue.id,
@@ -7453,7 +7900,7 @@ Intervene to unblock: add lane capacity, adjust pacing, or set an operator overr
           }
         }
       });
-      const persistedCompanies = asRecord2(await ctx.state.get(knownCompaniesKey()));
+      const persistedCompanies = asRecord3(await ctx.state.get(knownCompaniesKey()));
       if (Array.isArray(persistedCompanies.ids)) {
         for (const id of persistedCompanies.ids) {
           if (typeof id === "string") knownCompanyIds.add(id);

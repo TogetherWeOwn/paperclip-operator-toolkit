@@ -7,6 +7,10 @@ import {
   AA_LEADERBOARD_URL,
   AA_MAX_RESPONSE_BYTES,
   AA_SNAPSHOT_HISTORY_LIMIT,
+  MODELS_DEV_CATALOG_URL,
+  MODELS_DEV_FETCH_TIMEOUT_MS,
+  MODELS_DEV_MAX_RESPONSE_BYTES,
+  MODELS_DEV_USER_AGENT,
   BALANCE_PASS_BUSIER_UTILIZATION_DELTA,
   BALANCE_PASS_COST_DOWN_MULTIPLIER,
   BALANCE_PASS_FETCH_LIMIT,
@@ -43,6 +47,9 @@ import { diffSnapshot, type AaDiffModelInput } from "./aa-index/diff.js";
 import { fetchAaSnapshot, type AaHttpClient } from "./aa-index/fetch.js";
 import { effortSuffixOf, resolveAaSlug, tierImpliedByIndex } from "./aa-index/match.js";
 import { parseAaLeaderboardHtml, type AaModelRecord } from "./aa-index/parse.js";
+import { reconcilePrices, type PriceReconcileReport, type PriceRosterRow } from "./price-sync/diff.js";
+import { fetchPriceCatalog, type PriceHttpClient } from "./price-sync/fetch.js";
+import { parsePriceCatalog } from "./price-sync/parse.js";
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
 import { estimateIssueContext, modelOverrideForContext } from "./engine/context.js";
 import { resolveConfiguredModelId } from "./engine/model-id.js";
@@ -2252,6 +2259,225 @@ export function createPlugin() {
           return {
             content: `aa.ai snapshot refreshed: ${result.modelsFetched} models, fetched at ${result.fetchedAt}`,
             data: result,
+          };
+        },
+      );
+
+      // --- scheduled models.dev price reconciliation (TOG-3996) ------------
+      //
+      // ADR-0001's cost term is a sorter, and it reads `costPerMTokIn` /
+      // `costPerMTokOut` / `costPerMTokCacheRead` straight off hand-entered
+      // roster rows. A 2026-09-22 audit against models.dev found 26 of 117
+      // rows wrong, including rows the selector was actively choosing, and
+      // all five `muse-spark-*` rows priced 0/0/0 — which does not make the
+      // cost term slightly wrong for those models, it makes it meaningless.
+      // Drift in a sorter's input is silent: nothing errors, the fleet just
+      // routes to the wrong model.
+      //
+      // This job closes the detection gap and nothing else. It REPORTS. A
+      // price change reorders the entire fleet's routing, so the output is a
+      // diff an operator approves — deliberately the same posture as the
+      // thirteen CAP-061-marked rows shipped disabled rather than let an
+      // estimated price silently win cost-sort over a proven model.
+      //
+      // Structured like `runAaIndexRefresh` above and for the same reasons:
+      // fetched once at instance scope (models.dev is not company-specific),
+      // diffed per company against that company's own roster, fail-neutral on
+      // a bad fetch, and extracted to a plain function so the manual tool runs
+      // the identical path.
+      const priceReconcileReportKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.priceReconcileReport,
+      });
+
+      const priceDriftSurfacedKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.priceDriftSurfaced,
+      });
+
+      const readPriceDriftSurfaced = async (companyId: string): Promise<Set<string>> => {
+        const stored = asRecord(await ctx.state.get(priceDriftSurfacedKey(companyId)));
+        return new Set(Array.isArray(stored.keys) ? (stored.keys as string[]) : []);
+      };
+
+      const priceHttp: PriceHttpClient = {
+        fetch: (url, init) => ctx.http.fetch(url, init),
+      };
+
+      interface PriceReconcileOutcome {
+        ranAt: string;
+        error: string | null;
+        /** Per company: how many rows drifted. Empty when the fetch failed. */
+        companies: Array<{ companyId: string; drifted: number; checked: number }>;
+      }
+
+      const runPriceReconcile = async (): Promise<PriceReconcileOutcome> => {
+        const ranAt = new Date().toISOString();
+
+        const fetched = await fetchPriceCatalog({
+          url: MODELS_DEV_CATALOG_URL,
+          userAgent: MODELS_DEV_USER_AGENT,
+          http: priceHttp,
+          timeoutMs: MODELS_DEV_FETCH_TIMEOUT_MS,
+          maxResponseBytes: MODELS_DEV_MAX_RESPONSE_BYTES,
+        });
+
+        // Fail-neutral, same rule as the aa.ai sweep: a failed fetch leaves
+        // the last good report in place and records the attempt. The stored
+        // report is dated, so a stale one is legible as stale; an empty one
+        // would read as "nothing is mispriced", which is a lie.
+        if (!fetched.ok || !fetched.json) {
+          const error = fetched.error ?? "price-fetch-failed";
+          ctx.logger.error("models.dev fetch failed; keeping the prior price report", { error });
+          return { ranAt, error, companies: [] };
+        }
+
+        const catalog = parsePriceCatalog(fetched.json);
+        if (!catalog) {
+          ctx.logger.error("models.dev parse failed; keeping the prior price report", { bytes: fetched.json.length });
+          return { ranAt, error: "price-parse-failed", companies: [] };
+        }
+
+        const outcome: PriceReconcileOutcome = { ranAt, error: null, companies: [] };
+        for (const company of listKnownCompanies()) {
+          try {
+            const config = await companyConfig(company.id);
+            if (!config.priceSync.enabled || config.models.length === 0) continue;
+
+            const rows: PriceRosterRow[] = config.models.map((model) => ({
+              id: model.id,
+              laneId: model.laneId ?? null,
+              enabled: model.enabled,
+              costPerMTokIn: model.costPerMTokIn,
+              costPerMTokOut: model.costPerMTokOut,
+              costPerMTokCacheRead: model.costPerMTokCacheRead,
+              note: model.note,
+            }));
+
+            const report = reconcilePrices({ rows, catalog, fetchedAt: ranAt });
+            await ctx.state.set(priceReconcileReportKey(company.id), { ranAt, report });
+            outcome.companies.push({ companyId: company.id, drifted: report.drift.length, checked: report.checked });
+
+            ctx.logger.info("models.dev price reconciliation complete", {
+              companyId: company.id,
+              checked: report.checked,
+              unchanged: report.unchanged,
+              drifted: report.drift.length,
+              excluded: report.excluded.length,
+              unresolved: report.unresolved.length,
+            });
+
+            // Dedupe on the FEED price, not just the model id: a row that
+            // stays mispriced because nobody has applied the correction yet
+            // must not re-alarm daily, but a SECOND, different price change
+            // on the same row is new news and has to surface again.
+            const surfaced = await readPriceDriftSurfaced(company.id);
+            let surfacedChanged = false;
+            for (const row of report.drift) {
+              const dedupeKey = `${row.modelId}::${row.fields.map((f) => `${f.field}=${f.feed}`).join(",")}`;
+              if (surfaced.has(dedupeKey)) continue;
+              await ctx.activity.log({
+                companyId: company.id,
+                message:
+                  `models.dev list price disagrees with the roster for ${row.modelId} (${row.severity}) — ` +
+                  `review and apply by hand, this job never writes a price`,
+                entityType: "model",
+                entityId: row.modelId,
+                metadata: {
+                  modelId: row.modelId,
+                  providerId: row.providerId,
+                  enabled: row.enabled,
+                  severity: row.severity,
+                  maxRatio: row.maxRatio,
+                  fields: row.fields,
+                  suggestedNote: row.suggestedNote,
+                  source: MODELS_DEV_CATALOG_URL,
+                  fetchedAt: ranAt,
+                  // Stated on every record, because the number itself does not
+                  // carry the caveat and somebody will eventually quote it.
+                  priceBasis: "vendor list price; not this company's marginal cost under a flat subscription",
+                },
+              });
+              surfaced.add(dedupeKey);
+              surfacedChanged = true;
+            }
+            if (surfacedChanged) {
+              await ctx.state.set(priceDriftSurfacedKey(company.id), { keys: [...surfaced] });
+            }
+          } catch (cause) {
+            ctx.logger.error("price reconciliation failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+
+        return outcome;
+      };
+
+      ctx.jobs.register(JOB_KEYS.reconcilePrices, async () => {
+        await runPriceReconcile();
+      });
+
+      ctx.tools.register(
+        TOOL_NAMES.reconcilePricesNow,
+        {
+          displayName: "Reconcile roster prices against models.dev now",
+          description:
+            "Run the models.dev fetch + price reconciliation immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a roster price.",
+          parametersSchema: { type: "object" },
+        },
+        async (): Promise<ToolResult> => {
+          const result = await runPriceReconcile();
+          if (result.error) {
+            return { content: `models.dev reconciliation failed: ${result.error}`, data: result };
+          }
+          const drifted = result.companies.reduce((sum, c) => sum + c.drifted, 0);
+          const checked = result.companies.reduce((sum, c) => sum + c.checked, 0);
+          return {
+            content: `models.dev reconciliation complete: ${drifted} of ${checked} priced rows drifted. Reported only — no price was written.`,
+            data: result,
+          };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.priceDriftReport,
+        {
+          displayName: "models.dev price drift report",
+          description:
+            "The latest roster-vs-models.dev price reconciliation: which rows are mispriced, by how much, and the exact note clause to record if the correction is approved. Read-only; writes nothing.",
+          parametersSchema: { type: "object" },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          const companyId = toolCtx?.companyId;
+          if (!companyId) {
+            return { content: "No company scope on this call; cannot read a per-company price report." };
+          }
+          const stored = asRecord(await ctx.state.get(priceReconcileReportKey(companyId)));
+          const report = stored.report as PriceReconcileReport | undefined;
+          if (!report) {
+            return {
+              content:
+                "No models.dev price reconciliation has completed for this company yet. Run " +
+                `${TOOL_NAMES.reconcilePricesNow} or wait for the daily job.`,
+            };
+          }
+          const lines = report.drift.map((row) => {
+            const fields = row.fields
+              .map((f) => `${f.field}: ${f.roster} -> ${f.feed}${f.ratio === null ? "" : ` (x${f.ratio.toFixed(2)})`}`)
+              .join("; ");
+            return `- ${row.modelId} [${row.severity}${row.enabled ? ", enabled" : ", disabled"}] ${fields}`;
+          });
+          return {
+            content:
+              `models.dev reconciliation as of ${report.fetchedAt}: ${report.drift.length} of ${report.checked} priced rows drift ` +
+              `(${report.unchanged} correct, ${report.excluded.length} out of scope by policy, ${report.unresolved.length} unresolved).\n` +
+              `${lines.join("\n") || "No drift."}\n` +
+              "List prices from models.dev — correct for the selector's relative cost ordering, NOT what this company pays on a flat subscription.",
+            data: { ranAt: stored.ranAt ?? null, report },
           };
         },
       );

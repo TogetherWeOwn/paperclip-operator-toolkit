@@ -95,6 +95,30 @@ async function boot(config: Record<string, unknown>, seedIssues: Issue[] = [], a
   return harness;
 }
 
+describe("price reconciliation", () => {
+  it("carries free-model notes from config through the scheduled job", async () => {
+    const harness = await boot(baseConfig({
+      priceSync: { enabled: true },
+      models: [{
+        ...MODELS[0], id: "big-pickle", laneId: "cliproxy-zen",
+        costPerMTokIn: 0, costPerMTokOut: 0, costPerMTokCacheRead: 0,
+        note: "free Zen model; no Go quota",
+      }],
+    }));
+    harness.ctx.http.fetch = async () => new Response(JSON.stringify({ meta: { models: {
+      "muse-spark-1.3": { cost: { input: 1.25, output: 4.25 } },
+    } } }));
+    await harness.runJob("reconcilePrices");
+    const stored = await harness.ctx.state.get({
+      scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.priceReconcileReport,
+    });
+    expect(stored).toMatchObject({ report: {
+      excluded: [{ modelId: "big-pickle", reason: "free-tier" }],
+      drift: [], unresolved: [], checked: 0,
+    } });
+  });
+});
+
 function idleRow(id: string, status = "in_progress", extra: Record<string, unknown> = {}) {
   return { id, identifier: id, status, ...extra };
 }

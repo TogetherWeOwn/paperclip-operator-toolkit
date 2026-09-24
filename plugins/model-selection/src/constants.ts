@@ -28,6 +28,10 @@ export const TOOL_NAMES = {
   aaDriftReport: "model_selection_aa_drift_report",
   /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence (TOG-2438 reopen AC4). */
   refreshAaIndexNow: "model_selection_refresh_aa_index_now",
+  /** TOG-3996: the last models.dev price reconciliation, as an operator-approvable diff. Read-only. */
+  priceDriftReport: "model_selection_price_drift_report",
+  /** TOG-3996: run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
+  reconcilePricesNow: "model_selection_reconcile_prices_now",
   /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
@@ -104,6 +108,8 @@ export const JOB_KEYS = {
   refreshScores: "refreshScores",
   /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (TOG-2438). */
   refreshAaIndex: "refreshAaIndex",
+  /** TOG-3996: reconcile roster prices against models.dev and report drift (never auto-applies). */
+  reconcilePrices: "reconcilePrices",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
   /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
@@ -200,6 +206,21 @@ export const PLUGIN_STATE_KEYS = {
   /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (TOG-2438). */
   aaDriftSurfaced: "aaDriftSurfaced",
   /**
+   * TOG-3996, per-company: the most recent models.dev price reconciliation
+   * report (`{report, ranAt, error}`), so `priceDriftReport` can answer
+   * without re-fetching a 4.8 MB catalogue on every read. The report is the
+   * artifact — this job writes no price anywhere.
+   */
+  priceReconcileReport: "priceReconcileReport",
+  /**
+   * TOG-3996, per-company: which `(modelId, field, feedPrice)` drift findings
+   * have already been surfaced to the activity log, so a misprice nobody has
+   * applied yet does not re-alarm on every daily tick. Same dedup shape and
+   * rationale as `aaDriftSurfaced`; keyed on the FEED price so a second,
+   * different price change on the same row does surface again.
+   */
+  priceDriftSurfaced: "priceDriftSurfaced",
+  /**
    * Per-issue capability-exclusion flag recorded by `classifyIssues`
    * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
    * LABEL always records the confidence-demoted tier regardless of
@@ -286,6 +307,32 @@ export const AA_FETCH_TIMEOUT_MS = 10_000;
 export const AA_MAX_RESPONSE_BYTES = 8_000_000;
 /** How many past full-detail fetches `aaSnapshotHistory` retains (TOG-2438 scope expansion). At the 6h cadence this is 7 days. */
 export const AA_SNAPSHOT_HISTORY_LIMIT = 28;
+
+/**
+ * TOG-3996. models.dev's public catalogue — the reference the 2026-09-22
+ * manual audit used to find 26 mispriced rows out of 117.
+ *
+ * These are LIST prices. Where this company is on a flat subscription (Meta
+ * Muse Power at $50/mo, Codex Pro, Claude Max) the marginal cost of a token
+ * is not the list price and is usually far below it. List prices are still
+ * the right input here because ADR-0001's cost term is a comparator: it needs
+ * the correct RELATIVE ordering between candidates, which list prices give and
+ * a flat subscription does not. Nothing derived from this feed may be
+ * presented as what the company actually pays — that is the cost-ledger's
+ * question, sourced from `cost_events`.
+ */
+export const MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
+/**
+ * Cloudflare fronts models.dev and 403s default library agents at the edge
+ * (`Python-urllib` is the one the manual audit tripped over). A real
+ * `User-Agent` is a correctness requirement, not politeness — and naming
+ * ourselves is what lets models.dev's operators identify our traffic.
+ */
+export const MODELS_DEV_USER_AGENT =
+  "TogetherWeOwn-model-selection/1.0 (+https://github.com/TogetherWeOwn/paperclip-ops-tooling)";
+/** The catalogue measured 4.8 MB on 2026-09-22; this leaves room to roughly triple. */
+export const MODELS_DEV_MAX_RESPONSE_BYTES = 16_000_000;
+export const MODELS_DEV_FETCH_TIMEOUT_MS = 20_000;
 
 export const PACING_MODES = ["off", "shadow", "enforce"] as const;
 export type PacingMode = (typeof PACING_MODES)[number];

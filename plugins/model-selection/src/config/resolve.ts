@@ -124,6 +124,8 @@ export interface ResolvedConfig {
   };
   shadowEmit: { enabled: boolean; maxRecords: number };
   aaSync: { enabled: boolean };
+  /** TOG-3996 models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
+  priceSync: { enabled: boolean };
   /** TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706). */
   dispatch: {
     wakeEnabled: boolean;
@@ -205,6 +207,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
   const aaSync = record(root.aaSync);
+  const priceSync = record(root.priceSync);
   const dispatch = record(root.dispatch);
   const wakeScopedFloor = record(root.wakeScopedFloor);
 
@@ -420,6 +423,9 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
     },
     aaSync: {
       enabled: bool(aaSync.enabled, true),
+    },
+    priceSync: {
+      enabled: bool(priceSync.enabled, true),
     },
     dispatch: {
       wakeEnabled: bool(dispatch.wakeEnabled, false),

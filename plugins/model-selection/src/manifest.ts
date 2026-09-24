@@ -174,6 +174,13 @@ const manifest: PaperclipPluginManifestV1 = {
       schedule: "53 */6 * * *",
     },
     {
+      jobKey: JOB_KEYS.reconcilePrices,
+      displayName: "Reconcile roster prices against models.dev",
+      description:
+        "Fetch models.dev's catalogue and compare every roster row's $/Mtok against the list price its LANE's provider publishes. Reports drift to the activity log and stores the diff for an operator to approve — it never writes a price. A 2026-09-22 hand audit found 26 of 117 rows wrong, five of them priced 0/0/0, so this exists to make the next drift visible within a day instead of at the next audit. Daily, not 6-hourly: vendor list prices change on the order of months, and the feed is 4.8 MB.",
+      schedule: "41 5 * * *",
+    },
+    {
       jobKey: JOB_KEYS.classifyIssues,
       displayName: "Classify unlabeled issues",
       description:
@@ -264,6 +271,20 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Refresh aa.ai Intelligence Index now",
       description:
         "Manually run the aa.ai leaderboard fetch + drift-surfacing sweep instead of waiting for the next scheduled tick. Same logic as the cron job: never writes tier/enabled, only updates the snapshot and logs drift.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.priceDriftReport,
+      displayName: "models.dev price drift report",
+      description:
+        "The latest roster-vs-models.dev price reconciliation: which rows are mispriced, by how much, and the exact note clause to record if the correction is approved. Read-only; writes nothing. List prices — correct for relative cost ordering, not what the company actually pays on a flat plan.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.reconcilePricesNow,
+      displayName: "Reconcile roster prices against models.dev now",
+      description:
+        "Run the models.dev fetch + price reconciliation immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a roster price.",
       parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
     },
     {
