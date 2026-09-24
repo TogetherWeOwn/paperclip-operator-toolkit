@@ -193,6 +193,44 @@ mutate installer-requires-uninvoked-binary systemd/install-liveness-reconciler.s
   'for executable in /usr/bin/install ' 'for executable in /usr/sbin/runuser /usr/bin/install ' \
   test_installer_only_requires_executables_it_actually_runs
 
+# TOG-4453: the bundle manifest is bundle-scoped but the pre-fix installer
+# copied it verbatim into the 4-file release dir, so the unit's ExecStartPre
+# failed every start. Each new contract test gets at least one mutant below.
+mutate installer-bundle-check-deleted systemd/install-liveness-reconciler.sh \
+  '(cd "$WORK_DIR" && /usr/bin/sha256sum --check --strict SHA256SUMS)' \
+  ': bundle-scope check removed' \
+  test_installer_verifies_bundle_manifest_before_installing
+# Reintroduces the exact pre-fix defect line the test forbids.
+mutate installer-copies-bundle-manifest systemd/install-liveness-reconciler.sh \
+  '/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$RELEASE_DIR/REVISION"' \
+  '/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$WORK_DIR/SHA256SUMS" "$RELEASE_DIR/"' \
+  test_installer_does_not_copy_bundle_manifest_into_release
+mutate installer-release-manifest-covers-unit systemd/install-liveness-reconciler.sh \
+  '/usr/bin/sha256sum liveness_reconciler.py liveness_reconciler_source.js REVISION' \
+  '/usr/bin/sha256sum liveness_reconciler.py liveness_reconciler_source.js systemd/paperclip-liveness-reconciler.service' \
+  test_installer_regenerates_release_scoped_manifest
+mutate installer-release-check-deleted systemd/install-liveness-reconciler.sh \
+  '(cd "$RELEASE_DIR" && /usr/bin/sha256sum --check --strict SHA256SUMS)' \
+  ': release preflight proof removed' \
+  test_installer_proves_unit_preflight_before_claiming_installed
+mutate installer-revision-renamed systemd/install-liveness-reconciler.sh \
+  '/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$RELEASE_DIR/REVISION"' \
+  '/usr/bin/install -o root -g root -m 0444 "$WORK_DIR/REVISION" "$RELEASE_DIR/REVISION.bak"' \
+  test_release_manifest_covers_exactly_the_installed_byte_set
+mutate unit-preflight-unpinned-dir systemd/paperclip-liveness-reconciler.service \
+  'WorkingDirectory=/usr/local/libexec/paperclip-liveness-reconciler/@SOURCE_REF@' \
+  'WorkingDirectory=/usr/local/libexec/paperclip-liveness-reconciler' \
+  test_unit_preflight_checks_installed_release_manifest
+mutate builder-manifest-drops-timer systemd/build-liveness-reconciler-bundle.sh \
+  '  systemd/paperclip-liveness-reconciler.timer' '' \
+  test_bundle_manifest_still_covers_payload_units_and_installer
+# Narrows the bundle manifest so the pre-fix layout passes its own preflight
+# and the service-scope assertion fires first: the executed repro must go red.
+mutate builder-manifest-narrowed systemd/build-liveness-reconciler-bundle.sh \
+  'sha256sum "${files[@]}" REVISION > SHA256SUMS' \
+  'sha256sum liveness_reconciler.py liveness_reconciler_source.js REVISION > SHA256SUMS' \
+  test_old_layout_fails_preflight_and_regenerated_manifest_passes
+
 mutate rollback docs/liveness-reconciler.md \
   'systemctl --user stop paperclip-liveness-reconciler.service' ':' \
   test_rollback_stops_timer_and_active_service_before_removal
