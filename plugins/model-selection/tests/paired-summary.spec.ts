@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -49,7 +49,9 @@ function run(lines: unknown[]) {
   return { ...result, report, out };
 }
 
-describe("bounded paired decision summary", () => {
+// The TOG-2138 gate harness lives in the private operations repository; the
+// public toolkit ships the summarizer without it, so the suite needs it present.
+describe.skipIf(!existsSync(gate))("bounded paired decision summary", () => {
   it("accepts one correlated pair without claiming the 48h clean window", () => {
     const result = run([record("host"), record("plugin-shadow")]);
     expect(result.status).toBe(0);

@@ -752,7 +752,7 @@ test("another tenant's gateway cannot reach this company's queue", async () => {
   await withServer(configFor(dir), {}, async (call) => {
     const response = await call(
       rpc("tools/call", { name: "submit_provisioning_request", arguments: { template: "E4_AUDIT_ANALYST", title: "t" } }),
-      { ...IDENTITY_HEADERS, "x-paperclip-company-id": "00000000-0000-4000-8000-000000000000" },
+      { ...IDENTITY_HEADERS, "x-paperclip-company-id": "ffffffff-ffff-4fff-8fff-ffffffffffff" },
     );
     assert.equal(response.status, 403);
     assert.equal(response.json.error.code, "wrong_company");
