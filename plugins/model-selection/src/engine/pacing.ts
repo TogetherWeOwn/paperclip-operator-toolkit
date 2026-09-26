@@ -487,7 +487,7 @@ export function avoidThresholdFor(config: LaneAvoidConfig, laneId: string): numb
 
 /**
  * 2026-09-07 07:12Z owner rule (going-to-bed note): "fully use the full
- * weekly amount" of the rick.dugger Codex account before a manual reset — the
+ * weekly amount" of the primary Codex account before a manual reset — the
  * codex lane must stay usable until it is genuinely exhausted rather than
  * parked at the generic AVOID threshold. Parking it early moved ~25 T2 cards
  * onto bare claude-sonnet-5 (the owner's Claude Max, then at 0.87 weekly) at
