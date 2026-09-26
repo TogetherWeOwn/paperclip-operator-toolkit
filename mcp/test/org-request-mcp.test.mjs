@@ -948,7 +948,7 @@ test("the tenancy the queue sees comes from the server, not from queueEnv", asyn
   // control survives a cfg object assembled some other way.
   const cfg = {
     ...configFor(dir),
-    queueEnv: { COMPANY_ID: "00000000-0000-4000-8000-000000000000", PAPERCLIP_DB_CTR: "not-our-db" },
+    queueEnv: { COMPANY_ID: "ffffffff-ffff-4fff-8fff-ffffffffffff", PAPERCLIP_DB_CTR: "not-our-db" },
   };
   const run = makeQueueRunner(cfg);
   await run(["submit", "--requester", CALLER, "--template", "E4_AUDIT_ANALYST", "--title", "t"]);
