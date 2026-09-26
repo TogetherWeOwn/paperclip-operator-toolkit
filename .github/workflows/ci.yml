@@ -186,7 +186,8 @@ name: CI
 #     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
 #     plugins/dispatch                  see the `dispatch-suite` job below
-#     gh-event-capture                  see the `capture-suite` job below
+#     gh-event-capture                  PRIVATE — stays in the private repo (no
+#                                       `capture-suite` job in this tree)
 #     mcp/                              see the `mcp-suite` job below
 #
 #   RUN IN THE `privilege-suites` JOB BELOW:
@@ -346,11 +347,11 @@ concurrency:
 jobs:
   privilege-suites:
     name: Privilege ceiling suites
-    # TOG-3051: this job used to be the one exception that needed a container
-    # daemon, because it declared a `postgres` service container. It now starts
-    # its own ephemeral PostgreSQL cluster instead, so NO job in this workflow
-    # needs Docker and every one of them runs on the isolated pool.
-    runs-on: [self-hosted, isolated]
+    # This job used to be the one exception that needed a container daemon
+    # (it declared a `postgres` service container). It now starts its own
+    # ephemeral PostgreSQL cluster instead, so NO job in this workflow needs a
+    # service container; the gate below keeps it that way.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       PGHOST: 127.0.0.1
@@ -540,27 +541,30 @@ jobs:
 
   offline-suites:
     name: Offline suites
-    # This is the only migrated job in the first concurrency-1 slice. Keep the
-    # exact job name above: branch protection matches the check-run name. There
-    # is deliberately no ubuntu-latest fallback; an unavailable private runner
-    # must queue visibly rather than consume paid minutes or bypass isolation.
+    # Keep the exact job name above: branch protection matches the check-run
+    # name. This tree runs on GitHub-hosted runners; the private fleet's
+    # no-paid-fallback rule lives in the private repo with the fleet.
+    # Self-hosted example (private fleet equivalent of the old isolated pool):
+    #     runs-on: [self-hosted, linux, X64]
+    # plus a runner-identity proof step matching your fleet's naming. See
+    # verification/tog-2677-selfhosted-runner-gate.sh, which enforces the
+    # label contract for this workflow.
     # The two long mutation steps have their own 55m/25m deadlines below, so a
     # runaway step is bounded before the job ceiling is reached. The ceiling
     # itself stays where TOG-2918 put it (d40fda8e, 100 -> 150): the 102.30 min
     # measured on PR #306 was a clean-tree SUCCESS, not a worst case, so it is
     # a floor for the ceiling and not a target. Lower it only against a
     # post-merge duration measured with the step bounds actually in effect.
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - name: Prove the private runner selected this job
+      - name: Log the runner platform
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${RUNNER_NAME:-}" == coolify-vps-* ]]
           [[ "${RUNNER_OS:-}" == Linux ]]
           [[ "${RUNNER_ARCH:-}" == X64 ]]
-          printf 'private runner: name=%s os=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+          printf 'runner: name=%s os=%s arch=%s\n' "${RUNNER_NAME:-unknown}" "$RUNNER_OS" "$RUNNER_ARCH"
 
       - uses: actions/checkout@v4
         with:
@@ -570,20 +574,14 @@ jobs:
         with:
           node-version: '20'
 
-      # TOG-2677. Keep the migration contract executable: changing the label,
-      # restoring a paid fallback, deleting the runner proof, or dropping the
-      # clean checkout must turn this job red.
-      - name: self-hosted runner migration contract
+      # TOG-2677. Keep the runner-label contract executable: a tenant
+      # self-hosted label, or any runs-on value outside the pinned set, or
+      # dropping the clean checkout must turn this job red.
+      - name: runner-label contract
         run: ./test_tog2677_selfhosted_runner.sh
 
-      # TOG-3884. Dedicated-UID offline fixtures: the isolated-UID migration
-      # and probe scripts are exercised entirely against fabricated fixtures
-      # (fake passwd/group, stub systemctl, mktemp trees). No host, systemd,
-      # PostgreSQL, network, credential, or root privilege is used, so this
-      # suite runs on the same self-hosted isolated runner as every other
-      # offline suite without altering runner targeting.
-      - name: dedicated-UID offline fixture suite
-        run: python3 -m unittest discover -s github-runner -p 'test_isolated_*.py'
+      # TOG-3884's dedicated-UID offline fixtures (`github-runner/`) stay in
+      # the private repo with the fleet they install; no step for them here.
 
       # Every tool here is a script; there is no build. A parse error is the
       # most common regression and the cheapest to catch, so catch it first —
@@ -4053,7 +4051,7 @@ jobs:
   # lands; otherwise moving the steps would silently remove both gates.
   long-mutation-gates:
     name: Long mutation gates
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -4704,7 +4702,7 @@ jobs:
   # isolation IS the fix.
   runbook-gates:
     name: Operator runbook gates
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4803,7 +4801,7 @@ jobs:
   # test count. See the header.
   broker-suite:
     name: gh-token-broker suite
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
@@ -4901,7 +4899,7 @@ jobs:
   # check stays operator-run because a fixture certifies only the fixture.
   omniroute-broker-suite:
     name: omniroute-broker suite
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -4960,7 +4958,7 @@ jobs:
   # covers the wiring.
   dispatch-suite:
     name: dispatch suite
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
@@ -5084,196 +5082,12 @@ jobs:
           fi
           [ $rc -eq 0 ] && echo "issue-write surface: absent; wake path: per-issue only"
           exit $rc
-
   # ---------------------------------------------------------------------------
-  # gh-event-capture (TOG-289 / TOG-244).
+  # gh-event-capture (TOG-289 / TOG-244) stays in the private repo.
   #
-  # The self-hosted GitHub webhook store that stands in — partially, and the
-  # README is emphatic about which parts — for the org audit log GitHub Free
-  # does not give us.
-  #
-  # Its own job for the same reason as `broker-suite`: a different runtime
-  # concern from the shell suites, and a failure here should read as "the
-  # capture suite went red", not as one opaque "CI failed".
-  #
-  # NO INSTALL STEP, and that is not an omission. This directory has zero
-  # runtime and zero dev dependencies: `node --test` on the sources, an
-  # in-memory store standing in for D1, and a stub HTTP server for the shell
-  # tools. Nothing here reaches npm, Cloudflare or GitHub. If a dependency ever
-  # becomes necessary, the `--include=dev --ignore-scripts` install and the
-  # did-it-actually-land guard from `broker-suite` are the pattern to copy.
-  #
-  # Gated on EXIT STATUS, never on a test count. See the header.
-  capture-suite:
-    name: gh-event-capture suite
-    runs-on: [self-hosted, isolated]
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: gh-event-capture
-    steps:
-      - uses: actions/checkout@v4
-
-      # Node 24: the suite uses the global Request/Response/Headers and the
-      # WebCrypto that the Workers runtime provides, so testing on a Node that
-      # lacks them would be testing a different program than the one deployed.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Syntax check
-        run: |
-          set -euo pipefail
-          npm run check
-          for f in scripts/*.sh test/*.sh; do bash -n "$f"; done
-
-      - name: Receiver suite
-        run: npm test
-
-      - name: Shell tool suite
-        run: ./test/test_scripts.sh
-
-      # The assertion behind every other step here. Reintroduce the exact bug
-      # this module exists to prevent — a receiver that accepts without
-      # verifying the signature — into a THROWAWAY COPY, never the tracked
-      # file, and require the suite to reject it.
-      #
-      # The URL is public by construction, so "we verify signatures" is the
-      # whole security model. A suite that would stay green without the
-      # verification is decoration, and it would be believed.
-      #
-      # TOG-339 — this step was itself decoration for its whole life, and the
-      # CISO review (TOG-315) caught it. Two independent defects, both fixed
-      # below; do not undo either.
-      #
-      #   1. It staged an ENUMERATED SUBSET (`src test package.json`), while
-      #      the suite's NUL-byte scan walks src/ test/ scripts/ migrations/d1/
-      #      and the root. The staged copy died on `ENOENT scandir scripts`
-      #      BEFORE the mutation was ever exercised, so it was red no matter
-      #      what src/app.js did. Staging is now the whole directory, because a
-      #      hand-maintained list silently rots the next time a directory is
-      #      added and nothing in CI would say so.
-      #
-      #   2. It had no BASELINE. The verdict is "suite passed -> error, else
-      #      it worked", so a copy that is ALWAYS red always reports success.
-      #      Run verbatim with no mutation applied it printed "suite correctly
-      #      went red against the unverifying mutant" and CI went green. This
-      #      is the TOG-253 lesson that mutation_check() already encodes for
-      #      the shell suites above; capture-suite never got it. A red is only
-      #      attributable to the mutation if the unmutated copy is green FIRST.
-      #
-      # TOG-354 — a third defect of the same family, found verifying the two
-      # above. A red attributable to the mutation is still not necessarily a
-      # red attributable to SIGNATURE VERIFICATION, and this step only asked
-      # for "some test failed". See the two guards inline below.
-      - name: Prove the suite detects a receiver that skips verification
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp -r . "$mut/"
-
-          # Both runs go through this one function. They must differ ONLY by the
-          # mutation — if the baseline and the mutant ran different commands, a
-          # command that is broken for any other reason would look like a red
-          # and we would be back to a gate that proves nothing.
-          run_suite() { (cd "$mut" && node --test --test-reporter=tap test/capture.test.mjs > "$1" 2>&1); }
-
-          # STEP 1 — baseline. Without this the gate measures nothing.
-          if ! run_suite baseline.txt; then
-            echo "::error::the UNMUTATED copy already fails — this gate proves nothing, fix the staging before trusting any red below"
-            cat "$mut/baseline.txt"
-            exit 1
-          fi
-          # A SKIPPED test is a disabled test, and it leaves the baseline green.
-          # Without this, the very tests this gate exists to exercise can be
-          # switched off and every check below still reports success. `todo` is
-          # the same hole by another name: the assertions still run but their
-          # failure is not counted, so a todo'd signature test is a signature
-          # test that cannot go red.
-          if ! grep -qE '^# skipped 0$' "$mut/baseline.txt" ||
-             ! grep -qE '^# todo 0$' "$mut/baseline.txt"; then
-            echo "::error::the staged suite DISABLES tests (skip/todo) — a disabled signature test switches off the thing this gate proves"
-            grep -E '^ok [0-9]+ - .*# (SKIP|TODO)' "$mut/baseline.txt"
-            exit 1
-          fi
-          echo "baseline: the unmutated staged copy is GREEN with nothing skipped — a red below is attributable to the mutation"
-
-          # STEP 2 — mutate, and require the suite to notice.
-          node -e '
-            const fs = require("fs")
-            const p = process.argv[1]
-            const s = fs.readFileSync(p, "utf8")
-            const call = "const verdict = await verifySignature({ secret: webhookSecret, body: bodyBytes, header: signature })"
-            if (!s.includes(call)) {
-              console.error("::error::could not find the verification call to mutate; this guard is now blind, fix it")
-              process.exit(2)
-            }
-            fs.writeFileSync(p, s.replace(call, "const verdict = { ok: true }"))
-          ' "$mut/src/app.js" || exit 1
-          node --check "$mut/src/app.js"
-          if run_suite out.txt; then
-            echo "::error::the suite PASSED against a receiver that does not verify signatures"
-            grep -E '^# (tests|pass|fail|skipped)' "$mut/out.txt"
-            exit 1
-          fi
-          # TOG-354 — the red must be THE red. "Some test failed" is not the
-          # assertion we want: an unverifying receiver also reddens the
-          # rejection-counter tests, for BOOKKEEPING reasons — they fail
-          # because nothing is being rejected, not because anything checked
-          # that a forgery was refused. So all five signature tests could be
-          # deleted and this step still printed "correctly went red" and exited
-          # 0. Name the tests that must fail.
-          #
-          # On the enumerated list, given defect 1 above: the staging list
-          # rotted SILENTLY (a missing directory became an ENOENT that read as
-          # success). This one rots LOUDLY — a renamed or deleted test is
-          # reported as missing and the step goes red, rather than quietly
-          # reducing what is checked. Keep that property if you restructure it.
-          not_ok="$(awk '/^not ok [0-9]+ - /{sub(/^not ok [0-9]+ - /,"");print}' "$mut/out.txt")"
-          present="$(awk '/^(not )?ok [0-9]+ - /{sub(/^(not )?ok [0-9]+ - /,"");print}' "$mut/out.txt")"
-          missing=0
-          for name in \
-            "an UNSIGNED delivery is rejected with 401 and stores nothing" \
-            "a delivery signed with the WRONG secret is rejected with 401 and stores nothing" \
-            "a TAMPERED body fails the signature that was valid for the original" \
-            "a MALFORMED signature header is rejected without being treated as a mismatch" \
-            "every 401 looks identical, so probing cannot distinguish the failure"
-          do
-            if ! grep -Fxq -- "$name" <<<"$present"; then
-              echo "::error::required signature test is no longer in the suite: $name"
-              missing=1
-            elif ! grep -Fxq -- "$name" <<<"$not_ok"; then
-              echo "::error::the unverifying mutant did NOT fail: $name — this red is not attributable to signature verification"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::the mutant went red, but not on the signature tests — the gate would be decoration again"
-            exit 1
-          fi
-          echo "suite correctly went red against the unverifying mutant, on every required signature test; it failed on:"
-          grep -E '^not ok ' "$mut/out.txt"
-
-      # The shell suite fabricates its own RSA key and stubs the GitHub API.
-      # Anything that starts needing a real credential is a regression in the
-      # suite's isolation, not a networking problem to open the runner up for.
-      - name: Prove the shell suite needs no credential and leaks no key
-        env:
-          GH_APP_ID: ''
-          GH_APP_PRIVATE_KEY: ''
-        run: |
-          set -uo pipefail
-          ./test/test_scripts.sh > out.txt 2>&1; rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "::error::the shell suite requires a credential to pass; it must not"
-            cat out.txt; exit 1
-          fi
-          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
-            echo "::error::private key material reached the suite's stdout"
-            exit 1
-          fi
-          echo "shell suite: passes with GH_APP_* empty, no key in output"
-          rm -f out.txt
+  # Its suite ran here as `capture-suite` until the public/private split
+  # (TOG-4517): the `gh-event-capture/` directory is private, so there is
+  # no suite to run in this tree. Do not re-add the job without the directory.
 
   # ---------------------------------------------------------------------------
   # The host-side MCP transport (TOG-196 / TOG-194).
@@ -5292,7 +5106,7 @@ jobs:
   # Gated on EXIT STATUS, never a test count. See the header.
   mcp-suite:
     name: org-request-mcp suite
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -5599,7 +5413,7 @@ jobs:
   # Offline: no credential, no network, no host. Tests are written for Vitest.
   model-selection-suite:
     name: model-selection suite
-    runs-on: [self-hosted, isolated]
+    runs-on: ubuntu-latest
     # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
     # gate runs (the gate refuses outside CI), and each mutant re-runs the full
     # Vitest suite capped at 2 forks. The named gate grew from 55 to 115 mutants

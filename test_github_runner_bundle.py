@@ -88,7 +88,7 @@ class RunnerBundleContract(unittest.TestCase):
 
     def test_installer_models_five_org_runners_with_default_labels(self):
         source = INSTALL.read_text()
-        self.assertIn('RUNNER_LABEL="two-selfhosted"', source)
+        self.assertIn('RUNNER_LABEL="selfhosted"', source)
         self.assertIn('RUNNER_GROUP="Default"', source)
         self.assertIn('RUNNER_ROOT="/opt/actions-runners"', source)
         self.assertIn('INSTANCE_ROOT="$SCOPE_ROOT/$RUNNER_NAME"', source)
@@ -98,7 +98,7 @@ class RunnerBundleContract(unittest.TestCase):
         self.assertIn("--disableupdate", source)
         self.assertIn('[[ $ALLOW_REPLACE -eq 0 ]] || CONFIG_ARGS+=(--replace)', source)
         self.assertNotIn("--replace\n", source)
-        self.assertIn('two-selfhosted || "$RUNNER_LABEL" == isolated', source)
+        self.assertIn('selfhosted || "$RUNNER_LABEL" == isolated', source)
 
     def test_verifier_rejects_host_docker_socket_and_checks_service(self):
         source = VERIFY.read_text()
@@ -352,7 +352,7 @@ exit 0
                     {"name": "self-hosted"},
                     {"name": "Linux"},
                     {"name": "X64"},
-                    {"name": "two-selfhosted"},
+                    {"name": "selfhosted"},
                 ],
             }))
             import pwd

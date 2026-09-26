@@ -1,6 +1,13 @@
-# paperclip-ops-tooling
+# paperclip-operator-toolkit
 
-Operator tooling for PaperclipAI companies on the `example.net` VPS.
+Operator tooling for PaperclipAI companies on your own VPS.
+
+> **Public extraction.** This repository is the public subset of a private operator repository,
+> split with history preserved for public paths only. Host-specific pieces (self-hosted runner
+> fleet, webhook capture store, operator runbook, tenant grant expectations) stay private; references
+> to them below describe the private deployment. Hostnames default to `*.example.net` and company
+> IDs to `00000000-…` placeholders; override them through the documented environment variables.
+> Licensed under MIT (see [LICENSE](LICENSE)); report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 **Most of these are operator-run CLIs. `org_request_queue.sh` is not — agents drive it.**
 
@@ -103,7 +110,6 @@ operator-run.
 | `interaction_triage.sh` | For the interactions **already pending** on the board, says who can actually answer each one (TOG-423). Companion to `interaction_route.sh check`, which is the pre-flight for one you have not created yet. Encodes the resolve gate as the deployed server enforces it — including the part most people get backwards: an **unassigned** issue is open to every agent, so *assigning* a pending question narrows who may answer it, and assigning it to the agent who asked makes it permanently unanswerable. `--strict` exits 3 on any interaction that was graded agent-resolvable but that no agent can actually resolve. | `test_interaction_triage.sh` |
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
-| `gh-event-capture/` | Self-hosted GitHub webhook store — the partial stand-in for the org audit log GitHub Free does not provide. **Read its README § 1 before relying on it: it is a monitoring aid, not evidence.** | `npm test`, `test/test_scripts.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
 | `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
 | `docs/plugin-package-path.md` | Why `gh-token-broker` shipping from an agent workspace makes deploying code and re-declaring authority the same write (TOG-349), and the operator steps to move it to a host-owned path. |

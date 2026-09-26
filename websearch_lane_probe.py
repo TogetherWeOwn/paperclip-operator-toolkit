@@ -22,7 +22,7 @@ routes through. It posts a board-visible comment only for MANIFEST_DROP.
 OTHER_ERROR remains non-zero and visible in the routine run, but does not page
 as the manifest defect.
 
-The OmniRoute lane (cliproxy/claude-sonnet-5 via router.example.net) was in
+The OmniRoute lane (cliproxy/claude-sonnet-5 via the configured router host) was in
 this set until 2026-09-16 and is now retired: the owner rule of 2026-09-13 sends
 everything except Hindsight direct to CLIProxy, and the 07:36Z cutover
 (TOG-2880) completed that move. A verdict on a route no traffic takes is not a

@@ -239,7 +239,7 @@ fi
 # An earlier revision of this section sent bare ids (`claude-sonnet-5`, ...) to the
 # completion surface. That does NOT reach teamclaude, and it silently reaches
 # something else instead. Measured 2026-08-24, with the teamclaude node NOT yet
-# registered, using an agent key against router.example.net:
+# registered, using an agent key against the configured router host:
 #
 #   claude-opus-5              -> 200, echoed "anthropic/claude-opus-5"
 #   claude-sonnet-5            -> 200, echoed "anthropic/claude-sonnet-5"

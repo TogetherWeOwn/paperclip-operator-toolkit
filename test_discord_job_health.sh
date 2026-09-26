@@ -62,7 +62,7 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; }
 # `configuredCompanyIds` is what varies between the denial case and the
 # "workaround applied" case.
 # ---------------------------------------------------------------------------
-OURS="00000000-0000-0000-0000-000000000001"
+OURS="00000000-0000-4000-8000-000000000001"
 OTHER="8f967443-0000-0000-0000-000000000002"
 
 # run <file> [args...] -> sets OUT and CODE
