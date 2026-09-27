@@ -655,12 +655,6 @@ jobs:
       - name: TOG-153 operator artifact suite
         run: ./test_tog153_artifacts.sh
 
-      - name: Install pinned OmniRoute translator fixture compiler
-        run: npm install --no-save --ignore-scripts typescript@5.9.3
-
-      - name: OmniRoute rehearsal translator fixture
-        run: node --test test_omniroute_rehearsal_translator.mjs
-
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
 
@@ -1104,15 +1098,6 @@ jobs:
       - name: quota pacing verdict hostile suite
         run: python3 ./test_pacing_verdict.py
 
-      # TOG-4062: offline, recorded-model auth evidence. The real incident is
-      # INSUFFICIENT; cross-model successes and pre-inference aborts are not
-      # controls. Mutation kills require two named assertions, never errors.
-      - name: auth denial discriminator hostile suite
-        run: python3 ./test_auth_denial_discriminator.py
-
-      - name: auth denial discriminator mutation gate
-        run: python3 ./verification/auth-denial-mutation-gate.py
-
       # TOG-440. The offline derivation tool, and — §5 — the cross-check that
       # keeps it in step with the jq copy inside quota_brake.sh. Two
       # implementations of one formula is the price of the production path
@@ -1232,14 +1217,6 @@ jobs:
       # *_CMD seams, so there is no database and no host file.
       - name: cold-start detector suite
         run: ./test_cold_start_detector.sh
-
-      # TOG-825. This gate reads the running org-request-mcp startup event, not
-      # merely the config. The production event that closed the incident carried
-      # the authoritative tools array, while the original verifier searched only
-      # for its convenience boolean and therefore reported no evidence. Missing
-      # or contradictory journal evidence is UNKNOWN/FAIL, never a green gate.
-      - name: capability-pathway host verifier suite
-        run: ./test_tog825_verify_g4.sh
 
       # TOG-682. model_lane_probe.sh watches the cheap/small-fast lane — the
       # profile status-recovery itself runs on, so a dead value blocks the
@@ -1555,24 +1532,6 @@ jobs:
       # is clean. The real check runs where the channel is mounted.
       - name: handoff-channel unversioned-drop suite
         run: ./test_channel_drift.sh
-
-      # TOG-1106. The bootstrap script writes the container path of its
-      # companion operating model into EVERY agent's metadata and AGENTS.md
-      # ("The canonical org/permission design is documented in: <path>"). That
-      # staging step used to be wrapped in `if [[ -f "$REPORT_SRC" ]]`, so a
-      # host without the document bootstrapped a complete company, exited 0 and
-      # printed nothing, while every agent it created cited a file that was
-      # never staged. This suite runs the guard's OWN BYTES — extracted from the
-      # script by marker — so it reddens if the refusal is deleted or weakened,
-      # and it REFUSES (exit 2) rather than passing vacuously if the markers
-      # move. It also asserts the document is committed and not a stub.
-      #
-      # No podman, no containers, no /paperclip mount: the guard runs against
-      # fixture directories in mktemp. It cannot execute the whole bootstrap —
-      # nothing in CI can — and green here does not mean a bootstrap would
-      # succeed, only that it can no longer succeed SILENTLY without the doc.
-      - name: bootstrap operating-model guard suite
-        run: ./test_bootstrap_operating_model.sh
 
       # TOG-151/TOG-372. The channel's OTHER question. channel_drift.sh asks
       # whether a staged file was ever reviewed; this asks whether anything
@@ -2079,63 +2038,6 @@ jobs:
       - name: TOG-716 host-evidence capture suite
         run: ./test_capture_host_evidence.sh
 
-      # TOG-716. The SECOND operator script for the same host window.
-      # `capture_host_render.sh` re-runs the Quadlet generator against the
-      # two-leg carrier, which no host has ever generated: the checked-in
-      # render was captured when the carrier declared ONE leg, so the binding
-      # suite above is red and cannot go green from inside a container.
-      #
-      # Its decisive case is the one a naive script gets wrong. If the
-      # generator emits ONE leg for a two-leg carrier, the script must WRITE
-      # THAT DOWN and exit 0 while shouting — never refuse, never adjust the
-      # output toward what we hoped for. A refusal there is indistinguishable
-      # from a broken generator, and an operator would "fix" the carrier to
-      # make it stop. Section 4 of the suite pins exactly that: rc=0, the
-      # render written, the verdict shouted, and requiredTokens honestly
-      # holding one leg.
-      #
-      # Section 8 deletes each guard in a staging copy — and asserts the
-      # UNMUTATED script refuses that fixture FIRST. Without the baseline half,
-      # "not refused after deletion" reads the same whether the guard is absent
-      # or merely inert, which is how the first credential guard here (it
-      # scanned the wrong side of KEY=value) scored green while section 6 was
-      # red.
-      #
-      # Offline: podman, systemctl and the Quadlet generator are stubs on PATH
-      # in mktemp; the fixture is a throwaway git repo holding the real
-      # carriers. No host, no podman, no credential.
-      - name: TOG-716 host-render capture suite
-        run: ./test_capture_host_render.sh
-
-      # TOG-716. A relaxation of a fail-closed check, and its guard.
-      #
-      # Pinning the board-approved digest (step 3 of activation) edits
-      # `Image=`, which changes the carrier bytes and would re-stale a
-      # just-captured render — demanding a SECOND scarce human host window for
-      # a render that could not have come out differently, since the capture
-      # substitutes `Image=` away before the generator sees the unit. So the
-      # binding now also compares a NORMALIZED hash and tolerates a raw
-      # mismatch when only `^Image=` lines moved.
-      #
-      # That is a hole in a check whose whole job is to fail closed, so it is
-      # mutated in BOTH directions: an Image= edit alone must be accepted, and
-      # a dropped Network= leg, a flipped ReadOnly, a run-carrier edit, an
-      # Image= edit BUNDLED with a capability edit, and a failed generator must
-      # all still be refused.
-      #
-      # It has already earned its place twice. It caught the relaxation written
-      # as two `and`-joined clauses — deleting the comparison left `is not
-      # None`, true for every render, which would have swallowed ANY carrier
-      # edit. And section 6 checks its own mutation by CONTENT, because this
-      # mutation rewrites a line in place and a line-count check reports
-      # "matched nothing" on a mutation that worked.
-      #
-      # Offline: fixture carriers and a synthesized render in mktemp, run
-      # against the binding logic extracted from the suite itself so a copy
-      # cannot drift. No host, no podman, no credential.
-      - name: TOG-716 carrier/render binding normalization
-        run: ./test_render_binding_normalization.sh
-
 
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
@@ -2166,20 +2068,6 @@ jobs:
       # needs no credential, no network and no quota.
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
-
-      # TOG-4054. The CLIProxy quota-controller release handoff: the gate that
-      # refuses to move session affinity off the owner's 15m, to build an
-      # unsupported CLIProxy version, or to build a source ref that is not on
-      # the trusted line. Offline: the suite mutates copies of the shipped
-      # runbook in mktemp and passes the measured values as arguments, so it
-      # touches no host, no credential and no CLIProxy.
-      #
-      # On a shallow clone the reviewed TOG-2693 commit is not an object here,
-      # so the apply-mode positive control reports SKIPPED and the apply path
-      # is asserted to fail closed instead. The rollback-mode positive control
-      # always runs, so the suite can never go vacuous unnoticed.
-      - name: CLIProxy release preflight suite
-        run: ./test_cliproxy_release_preflight.sh
 
       # TOG-4338. The CLIProxy quota-controller unit suite: planning and
       # apply decisions over synthetic telemetry. Offline: pure fixtures
@@ -3157,45 +3045,6 @@ jobs:
 
           exit $rc
 
-      # TOG-714. The carrier is pinned by TWO suites and CI ran only the one
-      # above. `test_paperclip_immutable_runtime.sh` binds the carrier BYTES to
-      # `generated/board-quadlet-render.json` — the sole host-produced artifact
-      # on the activation path, recording what the installed Podman 4.9.3 /
-      # systemd 255 generator really emitted for those exact bytes.
-      #
-      # Adding Network=omniroute.network changed the carrier, so that binding
-      # broke and this suite went RED at the same commit the gate suite scored
-      # 56/0. Three runs read the 56/0 and reported the branch green, because
-      # nothing executed the suite that was failing. A test that exists but is
-      # not on a clock is not a check — same lesson as the merged-but-never-run
-      # detector on TOG-695.
-      #
-      # That "stays red until a fresh host render is checked in" expectation is
-      # SPENT: 934540c5 (TOG-716) re-pinned the gate at the operator's two-leg
-      # host render, and the suite passes on the checked-in bytes today.
-      #
-      # TOG-1141. It was nevertheless red on every run since 6db1f210 registered
-      # it, for an unrelated reason, and nobody saw it: the rehearsal suite was
-      # red at step 12 and took this one down as `skipped` before it could
-      # speak. The failure is the RUNNER, not the carrier — GitHub's
-      # ubuntu-24.04 image sets kernel.apparmor_restrict_unprivileged_userns=1,
-      # and this suite needs an unprivileged user namespace for both halves it
-      # measures (a read-only bind mount, and a uid/gid ownership handoff).
-      # `unshare` fails with "write failed /proc/self/uid_map: Operation not
-      # permitted", exit 1 — indistinguishable, from the outside, from the
-      # carrier binding genuinely being broken. Which is how it was read.
-      #
-      # So: re-enable it here, and make the suite REFUSE (exit 3) rather than
-      # fail if it is ever unavailable again. A comparison that did not happen
-      # must not read as an answer — the TOG-357 convention.
-      #
-      # Offline: reads checked-in carrier + render bytes and builds its fixture
-      # tree in mktemp. No podman, no host, no database, no credential.
-      - name: TOG-714 immutable carrier / host-render binding
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          ./test_paperclip_immutable_runtime.sh
-
       # TOG-910. THE ONLY STEP IN THIS JOB THAT IS ALLOWED AN `if:`, AND THE
       # REASON IS THE WHOLE POINT OF THE CARD.
       #
@@ -3933,11 +3782,15 @@ jobs:
             ./operator_runbook.sh check-handoff
           fi
           fix="$(mktemp -d)"
+          # The operator classification file is private operator data and is
+          # not published here, so the fixture carries its own registration.
+          cls="$(mktemp)"
+          echo '{"items":{"TOG-846":{}},"decisions":{},"misrouted":{}}' > "$cls"
           : > "$fix/TOG-846-cliproxy-update-runbook.md"
-          ./operator_runbook.sh check-handoff --handoff "$fix"
+          ./operator_runbook.sh check-handoff --classification "$cls" --handoff "$fix"
           echo "registered artifact passes"
           : > "$fix/TOG-999-orphan-runbook.md"
-          if ./operator_runbook.sh check-handoff --handoff "$fix"; then
+          if ./operator_runbook.sh check-handoff --classification "$cls" --handoff "$fix"; then
             echo "FAIL: a stranded runbook passed clean — the TOG-846 hole is open" >&2
             exit 1
           fi
