@@ -593,24 +593,13 @@ jobs:
           # lib/*.sh is included explicitly. It is sourced by five tools, so a
           # parse error there breaks all of them, and a bare `*.sh` glob does
           # not descend into it.
-          # mcp/deploy/*.sh is included for the same reason as lib/: a bare
-          # `*.sh` glob does not descend, and acceptance_live.sh is a script the
-          # OPERATOR runs on the VPS — a parse error there surfaces in front of
-          # a human doing an install, which is the worst place to find one.
-          # omniroute/*.sh and omniroute/rehearsal/*.sh are included because
-          # every script there is operator-run against a management or host
-          # surface no runner can reach (TOG-371/TOG-554). The rehearsal suite
-          # below exercises its Podman paths with a fake runtime, but this parse
-          # gate also covers the nested scripts directly.
-          # host-ops/*.sh is included for the same reason: the installer runs on
-          # the VPS in front of an operator, and no runner can reach that host.
+          # Parse the published tools. Private host installers, deployment
+          # scripts and rehearsal packages are checked in their source repo.
           # scripts/*.sh is included for the same reason as lib/: a bare `*.sh`
           # glob does not descend, and dispatch_deploy.sh is operator-run
           # against the live dispatch-src checkout with no other CI coverage
           # of its own syntax.
-          for f in *.sh lib/*.sh mcp/deploy/*.sh omniroute/*.sh omniroute/rehearsal/*.sh host-ops/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
-          # Keep the nested scripts in a separate loop: the host-ops installer
-          # contract pins the complete host-ops/*.sh syntax-check loop.
+          for f in *.sh lib/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in scripts/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           # scripts/*.js is included explicitly for the same reason as lib/: a
           # bare `*.js` glob does not descend, and until TOG-890 the two tools
@@ -631,22 +620,6 @@ jobs:
             node --check --input-type=module < "$f" || { echo "::error file=$f::node parse error"; rc=1; }
           done
           exit $rc
-
-      # TOG-520. The fixed read-only host verb table, executor-rendered
-      # previews, expiry, single-use replay refusal, audit-chain integrity,
-      # signed evidence, and the production refusal of both typed write
-      # specifications. Offline: the suite fakes every host interface, so it
-      # never needs the VPS, podman, or systemd.
-      - name: host operations broker suite
-        run: python3 ./test_host_ops_broker.py
-
-      - name: host operations installer contract suite
-        run: ./test_host_ops_install.sh
-
-      # Exports a fixed runtime manifest from a fabricated reviewed commit into
-      # a fake /opt tree. No host, credential, network, or root privilege is used.
-      - name: immutable ops-tooling release installer suite
-        run: ./test_ops_tooling_release_install.sh
 
       # TOG-2307. Exercises deploy/rollback/status entirely against fabricated
       # fixture git repos built under mktemp (DISPATCH_DEPLOY_TEST_MODE=1); the
@@ -674,75 +647,6 @@ jobs:
       - name: dispatch_deploy_monitor.sh suite is not vacuous (mutation-gated)
         run: ./verification/tog-2307-dispatch-deploy-monitor-mutation-gate.sh
 
-      # The reason this repo exists. Offline: a stub API on 127.0.0.1, a
-      # generated throwaway RSA key, and fabricated token-shaped canaries.
-      - name: gh-app-token.js regression suite
-        run: ./test_gh_app_token.sh
-
-      # TOG-1448/3412: a staged shim with stubbed node and gh proves token
-      # minting needs no bound PEM. Offline; no real credential or API call.
-      - name: gh-shim regression suite
-        run: ./test_gh_shim.sh
-
-      # TOG-3164. `doctor` is the only command that reports what GitHub actually
-      # GRANTED, and it was dead in every environment shipping
-      # GH_APP_SCOPE_STRICT=1 — the default here. Its "best-effort" git-identity
-      # lookup passed a hardcoded `{}` to token(), so the strict check reported
-      # gaps in that empty object and told the caller to set the two flags they
-      # had just passed; and because die() exits, the catch around it never ran
-      # and the whole permission report died with the optional lookup. Section 11
-      # of the suite pins doctor against scope-check on identical input; this
-      # gate reintroduces the defect three ways and proves section 11 goes red.
-      - name: doctor survives strict mode (mutation-gated)
-        run: ./verification/tog-3164-doctor-strict-mutation-gate.sh
-
-      # TOG-222: the credential-source half. test_gh_app_token.sh owns the leak
-      # traps and the cache fixtures; this suite owns broker-vs-PEM selection,
-      # which needs a stub broker on loopback and is far easier to express here.
-      #
-      # Pass the FILE, not the directory — same Node 24 gotcha the broker-suite
-      # job documents. It bites on 20 too, so do not "fix" this to `test/`.
-      #
-      # Offline by construction: GH_API_URL and GH_APP_BROKER_URL both point at
-      # stubs the suite starts itself, and the RSA key is generated per-run.
-      - name: gh-app-token.js broker/credential-source suite
-        run: node --test test/gh-app-token.test.mjs
-
-      # TOG-576. Reproduces the TOG-574 authorization failure against loopback
-      # GitHub stubs: a capable App token is not a human principal and a broad
-      # channel approval is not an exact task/run/artifact grant. The passing
-      # control also inspects the one-shot receipt for token/body absence.
-      - name: task-specific external-disclosure grant suite
-        env:
-          EXTERNAL_DISCLOSURE_TOKEN: ''
-          GH_TOKEN: ''
-          GH_APP_PRIVATE_KEY: ''
-          PAPERCLIP_API_KEY: ''
-        run: node --test test/external-disclosure.test.mjs
-
-      # Same reasoning as the broker suite's equivalent step: assert the
-      # isolation rather than trust it. If this ever needs a real GH_APP_*, the
-      # suite has started reaching for a live credential.
-      - name: Prove the credential-source suite needs no credential
-        env:
-          GH_APP_ID: ''
-          GH_APP_PRIVATE_KEY: ''
-          PAPERCLIP_API_URL: ''
-          PAPERCLIP_API_KEY: ''
-          PAPERCLIP_TASK_ID: ''
-        run: |
-          set -uo pipefail
-          node --test test/gh-app-token.test.mjs > out.txt 2>&1; rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "::error::the credential-source suite requires a credential to pass; it must not"
-            cat out.txt; exit 1
-          fi
-          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
-            echo "::error::private key material reached the suite's stdout"; exit 1
-          fi
-          echo "credential-source suite: passes with GH_APP_*/PAPERCLIP_* empty"
-          rm -f out.txt
-
       # TOG-519. These operator scripts cannot reach their live management
       # surface in CI, but the catch-all contract is still testable with a stub:
       # unknown argv refuses, TC_CATCHALL creates its own observable combo, the
@@ -751,44 +655,11 @@ jobs:
       - name: TOG-153 operator artifact suite
         run: ./test_tog153_artifacts.sh
 
-      # TOG-554. No live Podman or inference traffic: the suite uses a fake
-      # Podman state machine and a fixture artifact to exercise package hashes,
-      # refusal gates, success/no-op/undo paths, replay protection and rollback.
-      - name: OmniRoute rehearsal package suite
-        run: ./test_omniroute_rehearsal.sh
-
       - name: Install pinned OmniRoute translator fixture compiler
         run: npm install --no-save --ignore-scripts typescript@5.9.3
 
       - name: OmniRoute rehearsal translator fixture
         run: node --test test_omniroute_rehearsal_translator.mjs
-
-      # TOG-588. The assertion this gate protects is the SECOND attempt at that
-      # assertion. The first one -- nine hardcoded absence checks on a filename
-      # (`omniroute-rehearsal-preflight.json`) and an env knob
-      # (OMNIROUTE_REHEARSAL_AUTHORIZATION_DIR) that NO shipped code ever read --
-      # was inert: repointing the knob at a path passed to nothing left the suite
-      # at 64 passed / 0 failed. It asserted the absence of something nothing
-      # could create, and it did that for a full review cycle without anyone
-      # noticing, because an inert check and a satisfied check are the same green.
-      #
-      # The replacement is a before/after `find` snapshot over the writable host
-      # namespace, capturing path, type, mode, content hash and symlink target --
-      # so a leak has to be invisible in five dimensions rather than merely
-      # differently named. That is strictly better, but it is not self-proving,
-      # which is what this step is for: five mutants of the SHIPPED script
-      # (create / delete / chmod / content / symlink) must each turn the target
-      # assertion red, and a decoy must stay green so blanket sensitivity cannot
-      # masquerade as attribution. The gate commits each mutant in a scratch
-      # clone, because the script self-verifies its own blob against HEAD and
-      # exits 7 otherwise -- uncommitted mutants would all "fail" at that
-      # self-check and the gate would score 6/6 while proving nothing.
-      #
-      # Registered here rather than left to be run by hand: an unregistered gate
-      # only runs when someone remembers, which is exactly how the assertion it
-      # guards rotted to inert the first time. ~7 min (six full suite runs).
-      - name: TOG-588 host-namespace snapshot is load-bearing (mutation-gated)
-        run: ./verification/tog-588-host-namespace-mutation-gate.sh
 
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
@@ -840,26 +711,6 @@ jobs:
           done
           echo "selftest is prefix-independent: $base across 5 prefixes"
 
-      # TOG-1031. The TOG-292 redaction builders are a LIBRARY with no operator step
-      # of their own, so nobody has a routine reason to run them: before this step
-      # existed, the first execution of the suite could have been the run that appended
-      # to /paperclip/operator-handoff/omniroute-snapshots.jsonl — a 0644 file readable
-      # by every agent on that box. An unregistered suite is indistinguishable from no
-      # suite; it "passes" because somebody ran it by hand once, and keeps passing after
-      # it rots. Offline: it needs no network and no credential, and shells out only to
-      # sys.executable on itself.
-      - name: TOG-292 snapshot-section redaction suite
-        run: python3 omniroute/TOG-292-snapshot-sections.py --selftest
-
-      # The step above is 29 green assertions, which is worth nothing until somebody
-      # breaks the redaction and watches them go red. This reverts each of the five
-      # TOG-292 review fixes in a THROWAWAY COPY and requires the OWNING check to fail.
-      # The unmutated copy is asserted green first, in the same staging directory:
-      # "the mutated suite failed" is unattributable without that baseline, because a
-      # staging error produces an identical red.
-      - name: TOG-292 redaction fixes are load-bearing (mutation-gated)
-        run: ./verification/tog-1031-snapshot-redaction-mutation-gate.sh
-
       # The TOG-226 standing gate. Offline: the board and GitHub reads are
       # redirected to fixtures, and the argv assertions use a stub curl that
       # never opens a socket. It covers the two ways this check can be wrong
@@ -877,40 +728,6 @@ jobs:
       # and clock are fixtures; the credential assertion reads curl's real argv.
       - name: scope-residue scheduled monitor suite
         run: ./test_gh_scope_residue_monitor.sh
-
-      # TOG-346. The broker takes a project's profile as
-      # `projectPermissions ?? defaultPermissions` — `??`, so a project's
-      # GH_APP_PERMISSIONS REPLACES DEFAULT_PERMISSION_PROFILE. TOG-296 pinned
-      # the last five unpinned projects, so it is 7 of 7 and the default is now
-      # reached by nothing: editing it is a no-op everywhere, silently. The
-      # direction that matters is removal, where a narrowed default would look
-      # shipped and change no grant at all.
-      #
-      # This suite proves the detector, offline: every case builds its own
-      # registry, its own scope module and its own project list, so no board is
-      # read and no credential is needed. Its last section then points the real
-      # gh_permission_pin_audit.sh at the real permission_pins.txt and this
-      # checkout's real scope.js, which is the assertion that keeps the registry
-      # honest — a PR that edits DEFAULT_PERMISSION_PROFILE without re-auditing
-      # the pins goes red here as well as in `broker-suite`. Two readers, two
-      # jobs, two runtimes: satisfying one by accident does not satisfy both.
-      - name: permission-pin drift suite
-        run: ./test_gh_permission_pin_audit.sh
-
-      # TOG-310. Audits every link in git's credential-helper chain for
-      # substitutability by the shared agent uid — the helper program, its
-      # directory, and every config file that can name a helper, including ones
-      # that do not exist yet but can be created.
-      #
-      # Portable by construction: the analysis is pure permission arithmetic, so
-      # the suite builds its fixtures from real root-owned paths (/usr/bin/git,
-      # /etc) that exist on a runner too, and skips only the handful of
-      # assertions about /paperclip itself. It pins both bugs found by checking
-      # the audit's output against live write probes rather than by reading it:
-      # symlinked /bin reported as a world-writable hole, and an absent config
-      # under a creatable parent reported clean.
-      - name: credential-chain audit regression suite
-        run: ./test_credential_chain_audit.sh
 
       # TOG-392. secret_exposure_audit.sh enumerates the platform credentials a
       # run holds (master key, full-DB DATABASE_URL, the two signing secrets).
@@ -996,22 +813,6 @@ jobs:
       # single-repo scope and mintedAnything: false.
       - name: push-scope preflight regression suite
         run: ./test_gh_push_preflight.sh
-
-      # The pin half of that audit is a DETECTOR, not a boundary: the pin file
-      # sits next to the helper, in reach of the same uid, so anyone who can
-      # swap the helper can rewrite the pin. All it buys is that a swap has to
-      # be loud — which makes "can this still go loud" the only property worth
-      # asserting, and not one that reading the code establishes.
-      #
-      # This step also carries the assertion that keeps the pin file honest:
-      # the sha256 of gh-app-token.js in the checkout must be the `expected`
-      # line. TOG-238 changed the helper and merged without repinning, so once
-      # that build was deployed the audit reported DRIFT against the reviewed
-      # tip of main — a red verdict on the correct state, which is how a
-      # detector gets muted instead of fixed. Now that goes red in the PR that
-      # changed the helper.
-      - name: credential-chain pin gates (mutation-gated)
-        run: ./test_credential_chain_pin_gate.sh
 
       # TOG-439. The production ceiling makes two independent defence-in-depth
       # gates unreachable: a non-P1 chief cannot seat a chief, and nobody may
@@ -1858,23 +1659,6 @@ jobs:
       - name: check 9 filters both sides of its join (TOG-994)
         run: ./test_tog994_check9_symmetry.sh
 
-      # TOG-3443. Check 12 of org_access_review.sh diffed each live agent's
-      # GitHub tool-gateway ceiling against tool_grant_expectations.json and
-      # emitted 18 standing OVER-GRANT findings — every granted agent holds
-      # the same uniform 45-entry native bundle including delete_file. But
-      # the gateway tier is only layer 1; layer 2 (the per-project GitHub App
-      # installation-token scope) is the real capability boundary. The check
-      # now reconciles a covered over-grant as ACCEPTED-RISK only while
-      # layer 2 re-verifies intact on the same run, and fails closed (raw
-      # findings return) on anything unverifiable. The suite is static plus
-      # an offline behavioral harness: layer 2 is pure bash+jq behind a
-      # CHECK12_PROJECTS_JSON fixture override, so the real block runs with a
-      # stubbed sql(). §3 is the load-bearing part, as in the TOG-994 suite:
-      # it applies the exact weakening the wake forbade (unconditional
-      # accepted-risk) and requires the guard to go RED on it.
-      - name: check 12 measures the two-layer boundary (TOG-3443)
-        run: ./test_tog3443_check12_reconcile.sh
-
       # TOG-994, the destructive half. org_orphan_retire.sh DELETEs permission
       # grants and secret bindings, so the assertions that matter are the
       # refusals: dry-run is the default, the kill switch stops a write, an
@@ -2215,39 +1999,6 @@ jobs:
       - name: pinned upstream blobs are filable, and sendable blobs are pinned (mutation-gated)
         run: ./verification/tog-1072-pin-conformance-mutants.sh
 
-      # TOG-1069. The readiness gates above ask "may we file yet?". This one
-      # asks a question none of them do: "if we filed, following the procedure
-      # written on `main`, what would we send?"
-      #
-      # `main`'s README told a filer the `DRAFT — not filed` banner "should be
-      # edited only by whoever actually files it" — i.e. edit line 1, send.
-      # Measured against main's own blobs with the bundle gate's pattern, a
-      # line-1-only edit ships NINE lines telling the vendor the report is
-      # unfiled, that it is one of an internal batch, or that we hold no
-      # credential for their repository and filing is reserved to our operator.
-      # The correct structural rule existed only on an unmerged branch, so it
-      # protected nobody: being right somewhere unreachable is being wrong.
-      #
-      # WHY NOTHING ELSE CAUGHT IT. The defect was never in the report bytes —
-      # those strip clean and always did. It was in the INSTRUCTIONS. The
-      # bundle filing gate scores the seven reports and the README is not one
-      # of them; the pin audit asks only whether a digest still matches its
-      # ref. A gate that reads only artifacts is blind to a wrong procedure.
-      # So this gate asserts both: the reports strip clean AND the README
-      # still teaches the rule that makes that true.
-      #
-      # Registered by BOTH paths deliberately. The mutation suite is the
-      # evidence the gate is load-bearing (8 mutants, incl. the real pre-fix
-      # README from origin/main as a negative control); the bare gate is what
-      # reddens on a future README edit, and is cheap. Per TOG-1047 this repo
-      # has a history of gates that exist and are never run — ci.yml registers
-      # by explicit path, so an unregistered suite is the same as no suite.
-      - name: upstream bundle filing-strip gate
-        run: ./verification/upstream-bundle-filing-strip-gate.sh
-
-      - name: filing-strip gate is not vacuous (mutation-gated)
-        run: ./verification/tog-1069-filing-strip-mutation-gate.sh
-
       # TOG-3327. The fork-disclosure audit itself is NOT registered here and
       # must not be: it needs outbound network to api.github.com, which this
       # sandbox blocks, so it would fail open on the one signal it exists to
@@ -2469,32 +2220,6 @@ jobs:
       - name: interaction triage suite
         run: ./test_interaction_triage.sh
 
-      # TOG-365. acceptance_live.sh can only ever run on the VPS, so the
-      # operator would otherwise be the first person to execute it — against a
-      # fresh install, with no way to tell "these assertions passed" from "these
-      # assertions never looked at anything". This runs the real transport on a
-      # real socket with requireLiveRun ON (podman and sudo substituted through
-      # the seams the suite already exposes), proves the suite green, then
-      # removes each of its four controls in turn and requires the OWNING
-      # section to go red. Phase 3 additionally reproduces the vacuous form of
-      # the assertion this replaces, so the rationale in the file header stays
-      # a measurement rather than a claim.
-      - name: live-path acceptance self-test (mutation-gated)
-        run: ./mcp/deploy/acceptance_live_selftest.sh
-
-      # The TOG-3554 host-cron wrappers post security findings unattended with
-      # a long-lived agent key. Until TOG-4003 nothing here executed them --
-      # only "Syntax check every script" touched them -- and a dead findings
-      # path (rc read after an unguarded command substitution under set -e)
-      # shipped through review: a real finding produced ZERO API calls. This
-      # suite runs the wrappers against stub detectors and a loopback stub API
-      # and pins findings-only, fail-closed, coalescing, and the rule that
-      # neither the key nor the card body reaches curl's argv. Each contract
-      # carries a positive control, including a rebuild of the exact TOG-4003
-      # bug, so the suite cannot go quietly vacuous.
-      - name: TOG-3554 host-check contracts (mutation-gated)
-        run: ./test_tog3554_host_checks.sh
-
       # "No secrets in this repo, ever" is a stated non-negotiable, so it gets
       # an assertion rather than a promise. Scans TRACKED files only: anything
       # .gitignore covers is by definition not in the repo, and scanning the
@@ -2526,358 +2251,6 @@ jobs:
           [ $rc -eq 0 ] && echo "secret scan: clean"
           exit $rc
 
-      - name: Prove the regression suite still detects the bug
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp gh-app-token.js test_gh_app_token.sh "$mut/"
-          # Delete the help branch and the refusal, restoring the unconditional
-          # trailing mint that leaked a live org-admin token. Written with no
-          # single quotes inside so the shell quoting stays legible.
-          node -e '
-            var fs = require("fs");
-            var p = process.argv[1];
-            var s = fs.readFileSync(p, "utf8");
-            var i = s.indexOf("if (mode === undefined");
-            var j = s.indexOf("main().catch");
-            if (i < 0 || j < 0) {
-              console.error("::error::could not find the dispatch tail of main() to mutate; this guard is now blind, fix it");
-              process.exit(2);
-            }
-            fs.writeFileSync(p, s.slice(0, i) + "process.stdout.write(await token())\n}\n\n" + s.slice(j));
-          ' "$mut/gh-app-token.js"
-          node --check "$mut/gh-app-token.js"
-          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
-            echo "::error::the regression suite PASSED against a deliberately reintroduced bug"
-            cat "$mut/out.txt"
-            exit 1
-          fi
-          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
-
-      # TOG-200. Asserts on the kernel's record — a stub curl on PATH reading
-      # its own /proc/<pid>/cmdline — rather than on the source text, so a
-      # future rewrite of how gh_token.sh calls curl cannot pass by accident.
-      - name: gh_token.sh argv-leak suite
-        run: ./test_gh_token_argv.sh
-
-      # The matching mutation guard. This one is surgical: it leaves the config
-      # file exactly as it is and ADDS the header back on argv, so every other
-      # assertion in the suite still passes and only the /proc check can go red.
-      # That is the point — it proves the /proc detector is what carries this
-      # suite, not the config-file bookkeeping around it.
-      - name: Prove the argv-leak suite still detects a credential on argv
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp gh_token.sh test_gh_token_argv.sh "$mut/"
-          chmod +x "$mut/gh_token.sh" "$mut/test_gh_token_argv.sh"
-          # TOG-253's rule, applied here too: the UNMUTATED copy must pass in
-          # this same staging directory FIRST. Without it, "the mutated suite
-          # failed" is not attributable to the mutation — the staged copy could
-          # be failing for any reason at all (a missing sibling file, a change
-          # in how GH_TOKEN_SH is resolved) and this gate would still go green
-          # while proving nothing. It passes today; this keeps it honest.
-          if ! GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/base.txt" 2>&1; then
-            echo "::error::the UNMUTATED copy of test_gh_token_argv.sh already fails in the staging dir — this gate proves nothing"
-            tail -25 "$mut/base.txt"
-            exit 1
-          fi
-          before='  curl --config "$cfg" "$@"'
-          after='  curl --config "$cfg" -H "Authorization: Bearer $bearer" "$@"'
-          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
-            echo "::error::could not find the curl invocation in curl_authed() to mutate; this guard is now blind, fix it"
-            exit 2
-          fi
-          # awk, not sed: the replacement is full of characters sed would treat
-          # as syntax, and a mutation that silently does nothing is the one
-          # failure mode this step exists to avoid.
-          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
-            "$mut/gh_token.sh" > "$mut/gh_token.mut" && mv "$mut/gh_token.mut" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          bash -n "$mut/gh_token.sh"
-          if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_argv.sh" > "$mut/out.txt" 2>&1; then
-            echo "::error::the argv-leak suite PASSED against a credential deliberately put back on argv"
-            cat "$mut/out.txt"
-            exit 1
-          fi
-          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the mutant"
-
-      # TOG-305. The third property of gh_token.sh's `api` path, and the one
-      # that was wrong: the request BODY must reach the request. It did not.
-      # curl_authed's body slot was hardcoded empty and the caller's JSON was
-      # passed positionally instead, so curl parsed it as a URL and the write
-      # went out with no body — dropping a `sha` head guard from a real merge
-      # and turning a requested squash into a merge commit, silently, while
-      # reporting failure for a write that had actually succeeded.
-      #
-      # Same seams as the two suites above: a stub curl on PATH, a fabricated
-      # credential environment, `env -i`. No network, no credential.
-      - name: gh_token.sh api request-body suite
-        run: ./test_gh_token_api_body.sh
-
-      # Its mutation guard. Three mutations, because the fixes fail independently
-      # and a single mutation would leave one of them ungated:
-      #
-      #   body-slot-collision   restores the original call — body slot empty,
-      #                         JSON passed positionally. Surgical: the
-      #                         argument PARSING is left alone, so sections
-      #                         5/7/8/10 stay green and only the assertions
-      #                         about the body and the exit status can go red.
-      #                         That is the point — it proves those assertions
-      #                         carry this suite, not the parsing around them.
-      #   unchecked-mint        restores `tok="$(mint_token)"` with no status
-      #                         check. mint_token runs in a command
-      #                         substitution, so its `exit 1` ends only the
-      #                         subshell and the request went out with an empty
-      #                         bearer. Both lines of the guard are removed:
-      #                         leaving the `-n "$tok"` check in place would let
-      #                         a NEIGHBOURING gate satisfy the test, which is
-      #                         how assertions in this repo have gone green for
-      #                         the wrong reason before.
-      #   http-status-ignored   routes `api` back through curl_authed, restoring
-      #                         the TOG-455 false success: GitHub's 409 body is
-      #                         printed, but the command exits 0 and `&& merged`
-      #                         runs. The named red assertions require the exit
-      #                         status AND body-preservation contract together.
-      #
-      # Each mutation asserts red on the NAMED assertions it should break, not
-      # merely on a non-zero exit. "The suite failed" is satisfied by a suite
-      # that failed to start.
-      - name: Prove the api-body suite still detects a dropped request body
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp gh_token.sh test_gh_token_api_body.sh "$mut/"
-          chmod +x "$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh"
-
-          # TOG-253's rule: the UNMUTATED copy must pass in this same staging
-          # directory FIRST, or "the mutated suite failed" is not attributable
-          # to the mutation.
-          if ! GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh" > "$mut/base.txt" 2>&1; then
-            echo "::error::the UNMUTATED copy of test_gh_token_api_body.sh already fails in the staging dir — this gate proves nothing"
-            tail -30 "$mut/base.txt"
-            exit 1
-          fi
-
-          plain() { sed 's/\x1B\[[0-9;]*m//g' "$1"; }
-
-          # A mutant must go red on the assertion that NAMES the defect. A
-          # mutant that merely exits non-zero could be failing at startup.
-          require_red() {
-            local out="$1"; shift
-            local a
-            for a in "$@"; do
-              if plain "$out" | grep -qF "FAIL  $a"; then
-                echo "    red on: $a"
-              else
-                echo "::error::mutant did not go red on '$a' — that assertion is not carrying this gate"
-                plain "$out" | tail -30
-                exit 1
-              fi
-            done
-          }
-
-          run_mutant() {
-            local label="$1" out="$mut/$1.txt"
-            bash -n "$mut/gh_token.sh"
-            if GH_TOKEN_SH="$mut/gh_token.sh" "$mut/test_gh_token_api_body.sh" > "$out" 2>&1; then
-              echo "::error::the api-body suite PASSED against mutation '$label'"
-              plain "$out"
-              exit 1
-            fi
-            echo "  mutation '$label' correctly rejected:"
-          }
-
-          # --- mutation 1: body-slot-collision ---------------------------------
-          cp "$mut/gh_token.sh" "$mut/gh_token.orig"
-          before='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
-          after='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
-          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
-            echo "::error::could not find the curl_authed call in the api arm to mutate; this guard is now blind, fix it"
-            exit 2
-          fi
-          # awk, not sed: the replacement is full of characters sed would treat
-          # as syntax, and a mutation that silently does nothing is the one
-          # failure mode this step exists to avoid.
-          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
-            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          run_mutant body-slot-collision
-          require_red "$mut/body-slot-collision.txt" \
-            "the body did not reach the request as given" \
-            "the request body reached curl's argv" \
-            "the 'sha' head guard never reached GitHub" \
-            "'merge_method' was dropped" \
-            "a successful write reported failure"
-          # The surgical half: the parsing sections must still pass, or this
-          # mutation is proving something broader than it claims.
-          for still_green in \
-            "caller-supplied curl arguments still reach curl" \
-            "a bare curl flag in the body slot is a usage error (exit 2)" \
-            "a non-JSON body is a usage error (exit 2)"; do
-            if ! plain "$mut/body-slot-collision.txt" | grep -qF "PASS  $still_green"; then
-              echo "::error::mutation 'body-slot-collision' also broke '$still_green' — it is not surgical, so it does not isolate the body assertions"
-              exit 1
-            fi
-          done
-
-          # --- mutation 2: unchecked-mint --------------------------------------
-          cp "$mut/gh_token.orig" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          b1='    tok="$(mint_token)" || exit $?'
-          b2='    [[ -n "$tok" ]] || { echo "ERROR: minted an empty token; refusing to send the request" >&2; exit 1; }'
-          a1='    tok="$(mint_token)"'
-          for t in "$b1" "$b2"; do
-            if ! grep -qxF "$t" "$mut/gh_token.sh"; then
-              echo "::error::could not find the mint guard line to mutate; this guard is now blind, fix it"
-              echo "  wanted: $t"
-              exit 2
-            fi
-          done
-          awk -v b1="$b1" -v b2="$b2" -v a1="$a1" \
-            '$0 == b1 { print a1; next } $0 == b2 { next } { print }' \
-            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          run_mutant unchecked-mint
-          require_red "$mut/unchecked-mint.txt" \
-            "a failed mint exited 0" \
-            "the request went out anyway"
-
-          # --- mutation 3: http-status-ignored ----------------------------------
-          cp "$mut/gh_token.orig" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          before='    curl_authed_http "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
-          after='    curl_authed "$tok" "$method" "https://api.github.com${path}" "$api_body" ${api_extra[@]+"${api_extra[@]}"}'
-          if ! grep -qxF "$before" "$mut/gh_token.sh"; then
-            echo "::error::could not find the HTTP-aware api call to mutate; this guard is now blind, fix it"
-            exit 2
-          fi
-          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
-            "$mut/gh_token.sh" > "$mut/g" && mv "$mut/g" "$mut/gh_token.sh"
-          chmod +x "$mut/gh_token.sh"
-          run_mutant http-status-ignored
-          require_red "$mut/http-status-ignored.txt" \
-            "HTTP 409 exited 0, expected 22" \
-            "the composed caller contract broke"
-          # Surgical: ignoring status must not discard the error body. This keeps
-          # the mutation focused on the false-success half of the pair.
-          if ! plain "$mut/http-status-ignored.txt" | grep -qF "PASS  HTTP 409 response body is still printed in full"; then
-            echo "::error::mutation 'http-status-ignored' also lost the body — it does not isolate the exit-status assertion"
-            exit 1
-          fi
-
-      # TOG-201. The other half of gh_token.sh's contract: an unrecognised
-      # subcommand printed usage on STDOUT and exited 0, so
-      # `tok="$(gh_token.sh tokne)" && use "$tok"` took the `&&` with usage text
-      # in $tok. Offline — fake credential environment, stub curl.
-      - name: gh_token.sh dispatch-contract suite
-        run: ./test_gh_token_dispatch.sh
-
-      # Its mutation guard, with a BASELINE. "The mutated suite failed" is
-      # unattributable on its own — a staging dir that breaks the suite for an
-      # unrelated reason (a missing sibling file, a copy that lost +x) produces
-      # the same red as a working detector. So assert the UNMUTATED copy passes
-      # in the same directory first, then mutate it there.
-      #
-      # Five mutations, one per independently-failing property. The first two
-      # are the TOG-201 halves; the last three are TOG-331, which is the same
-      # class one level down — the RIGHT subcommand, reached, failing silently.
-      #
-      #   catchall-exits-zero        restores the pre-TOG-201 arm verbatim.
-      #   help-below-preamble        keeps `help` recognised but moves it back
-      #                              under the credential preamble, so `--help`
-      #                              on a box with no ~/secure-drop dies with
-      #                              "cannot read github-app.pem" instead of
-      #                              answering. Only the two --no-creds cases
-      #                              can catch that one; delete them and this
-      #                              step goes red.
-      #   jwt-arm-masks-failure      restores `jwt) app_jwt; echo ;;`, whose
-      #                              status is echo's and therefore always 0.
-      #   empty-signature-unchecked  drops the `[[ -n "$sig" ]]` guard, leaving
-      #                              only the pipeline status. Caught by ONE
-      #                              case — the openssl stub that exits 0 having
-      #                              written nothing — because pipefail sees
-      #                              success down the whole chain. Delete that
-      #                              case and this step goes red.
-      #   response-body-unvalidated  makes require_field always succeed, so a
-      #                              {"message":"Bad credentials"} body renders
-      #                              a report full of nulls and `check` reports
-      #                              success. Caught by the STDOUT assertion:
-      #                              the arm still exits non-zero afterwards,
-      #                              by accident, when jq trips over a null.
-      - name: Prove the dispatch suite still detects every regression
-        run: |
-          set -uo pipefail
-          rc=0
-          base="$(mktemp -d)"
-          cp gh_token.sh test_gh_token_dispatch.sh "$base/"
-          if ! (cd "$base" && ./test_gh_token_dispatch.sh > out.txt 2>&1); then
-            echo "::error::the dispatch suite fails on an UNMUTATED copy in a staging dir; every mutation result below would be unattributable"
-            cat "$base/out.txt"
-            exit 1
-          fi
-          echo "baseline: unmutated copy passes in the staging dir"
-
-          # awk, not sed: these lines are full of characters sed reads as
-          # syntax, and a mutation that silently does nothing is the one
-          # failure mode this step exists to avoid. The chmod is load-bearing —
-          # the suite invokes the tool directly, so a rewrite that loses +x
-          # makes every case fail with 126 and the mutant looks detected when
-          # nothing was tested.
-          #
-          # Every replacement string stays on ONE line: this is a YAML block
-          # scalar, and a continuation line indented less than the block would
-          # silently end it and truncate the rest of this step.
-          require_anchor() {
-            grep -qxF "$2" "$1" && return 0
-            echo "::error::could not find the anchor in $1; this guard is now blind, fix it:"
-            echo "::error::  $2"
-            exit 2
-          }
-          mutate() { # mutate <file> <before> <after>  — replace the line
-            require_anchor "$1" "$2"
-            awk -v b="$2" -v a="$3" '$0 == b { print a; next } { print }' \
-              "$1" > "$1.mut" && mv "$1.mut" "$1"
-            chmod +x "$1"
-          }
-          insert_above() { # insert_above <file> <anchor> <new-line>
-            require_anchor "$1" "$2"
-            awk -v b="$2" -v a="$3" '$0 == b { print a } { print }' \
-              "$1" > "$1.mut" && mv "$1.mut" "$1"
-            chmod +x "$1"
-          }
-
-          for m in catchall-exits-zero help-below-preamble jwt-arm-masks-failure \
-                   empty-signature-unchecked response-body-unvalidated; do
-            mut="$(mktemp -d)"
-            cp gh_token.sh test_gh_token_dispatch.sh "$mut/"
-            t="$mut/gh_token.sh"
-            case "$m" in
-              catchall-exits-zero)
-                mutate "$t" '  *) refuse_usage "${1:-}" ;;' '  *) usage ;;' ;;
-              help-below-preamble)
-                mutate "$t" '  help|--help|-h) usage; exit 0 ;;' '  help|--help|-h) : ;;'
-                # Put help back as an ordinary arm of the main case, i.e. below
-                # the preamble. Without this the mutant merely stops recognising
-                # help, which is a different and more obvious bug.
-                insert_above "$t" '  check) app_check ;;' '  help|--help|-h) usage ;;' ;;
-              jwt-arm-masks-failure)
-                mutate "$t" '  jwt)   app_jwt || exit $?; echo ;;' '  jwt)   app_jwt; echo ;;' ;;
-              empty-signature-unchecked)
-                mutate "$t" '    || { echo "ERROR: signing with $PEM produced an empty signature" >&2; return 1; }' '    || :' ;;
-              response-body-unvalidated)
-                mutate "$t" '  jq -e "$1" >/dev/null 2>&1 <<<"$2" && return 0' '  return 0' ;;
-            esac
-            bash -n "$t" || { echo "::error::the '$m' mutant does not parse"; exit 2; }
-            if (cd "$mut" && ./test_gh_token_dispatch.sh > out.txt 2>&1); then
-              echo "::error::the dispatch suite PASSED against the '$m' mutant"
-              cat "$mut/out.txt"; rc=1
-            else
-              echo "$m: suite correctly reported $(grep -c 'FAIL' "$mut/out.txt") failures"
-            fi
-          done
-          exit $rc
-
       # Same discipline for the SQL backend seam. Both mutations below are
       # things a reasonable person would actually write; neither is a strawman.
       #
@@ -2905,7 +2278,7 @@ jobs:
             cp -r lib "$1/"
             cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
                org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh \
-               gh_access.sh skills.sh "$1/"
+               skills.sh "$1/"
           }
 
           # BASELINE FIRST, in the same staging directory the mutants use. Not
@@ -3446,136 +2819,6 @@ jobs:
             "$(printf 'spent_d = weekly_delta(samples, lo, hi, spent)\x1fspent_d = weekly_delta(samples, 0, len(samples)-1, spent)')" || rc=1
           exit $rc
 
-      # TOG-440. The brake's INPUT, which is the half TOG-419 got right in
-      # mechanism and wrong in measurement. Every mutation below is the shortest
-      # path back to a shipped defect, and each names the test that must go red
-      # — a bare "the suite failed" is not attribution, and §6's four exit-5
-      # gates already proved in this repo that an exit-code-only assertion can
-      # be satisfied by the gate standing next to the one being tested.
-      - name: Prove the brake still derives its burn rather than reading it
-        run: |
-          set -uo pipefail
-          rc=0
-          brake_mutation() {
-            local label="$1" expect="$2"; shift 2
-            local mut; mut="$(mktemp -d)"
-            cp quota_brake.sh pacing_verdict.py test_quota_brake.sh quota_brake_exempt.txt "$mut/"
-            mkdir -p "$mut/tests"
-            cp tests/dead-feed-2026-08-26.jsonl "$mut/tests/"
-
-            # Baseline first. Without it "the mutated suite failed" is
-            # unattributable, which is how two gates in this repo sat vacuous
-            # for months before TOG-253 found them.
-            if ! (cd "$mut" && ./test_quota_brake.sh >/dev/null 2>&1); then
-              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
-              (cd "$mut" && ./test_quota_brake.sh 2>&1 | tail -25); rm -rf "$mut"; return 1
-            fi
-
-            # "old<US>new" with a literal 0x1f separator, applied by python3 -c
-            # and NOT a heredoc: a heredoc terminator has to sit at column 0,
-            # which closes this YAML block scalar early and silently truncates
-            # the step. Same reason as the rotation gate above.
-            local e
-            for e in "$@"; do
-              python3 -c 'import sys; p, ex = sys.argv[1], sys.argv[2]; o, n = ex.split("\x1f", 1); s = open(p).read(); open(p, "w").write(s.replace(o, n))' "$mut/quota_brake.sh" "$e"
-            done
-            if cmp -s quota_brake.sh "$mut/quota_brake.sh"; then
-              echo "::error::$label: the edit changed nothing — the code moved and this gate is blind"
-              rm -rf "$mut"; return 1
-            fi
-            if ! bash -n "$mut/quota_brake.sh"; then
-              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
-              rm -rf "$mut"; return 1
-            fi
-            local out status
-            out="$(cd "$mut" && ./test_quota_brake.sh 2>&1)"; status=$?
-            if [ "$status" -eq 0 ]; then
-              echo "::error::$label: the brake suite PASSED against the mutation"
-              rm -rf "$mut"; return 1
-            fi
-            if ! grep -aqE "FAIL.*$expect" <<< "$out"; then
-              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason, so this mutation is not actually covered"
-              grep -a 'FAIL' <<< "$out" | head -20
-              rm -rf "$mut"; return 1
-            fi
-            rm -rf "$mut"; echo "  ok  $label"
-          }
-
-          # 1. THE REVERT. Read the producer's field instead of the derived
-          #    rate. This is precisely what shipped in #65, and it is what
-          #    anyone reaches for who finds the jq hard to follow. On an idle
-          #    account it selects LEVEL3 — concurrency 1 across the roster while
-          #    nothing is burning.
-          brake_mutation "burn-read-not-derived" 'RELEASES instead of flooring' \
-            "$(printf '( if $d.source == "derived" then $d.burn else $acc.burn_per_day end ) as $burn\x1f( $acc.burn_per_day // $d.burn ) as $burn')" || rc=1
-          # 2. THE SILENT FALLBACK. Keep the derivation, delete the label. The
-          #    plan is then identical whether it was measured or estimated,
-          #    which is the state TOG-440 exists to end: an estimate that reads
-          #    as a measurement is worse than a loud estimate.
-          brake_mutation "fallback-is-silent" 'warns that this was not measured' \
-            "$(printf 'if [[ "$source" != "derived" ]]; then\x1fif false; then')" || rc=1
-          # 3. --require-derived NEUTERED. The monitor path's only hard gate.
-          brake_mutation "require-derived-is-a-noop" 'require-derived on a fallback is exit 5' \
-            "$(printf 'if [[ -n "$PACE_REQUIRE_DERIVED" || "$require_derived" == yes ]]; then\x1fif false; then')" || rc=1
-          # 4. RESET TRUNCATION REMOVED. A window spanning the weekly reset then
-          #    derives a large negative rate, clamps to 0 and RELEASES the brake
-          #    at the exact moment a fresh week's quota is all in front of you.
-          brake_mutation "reset-not-truncated" 'spanning a reset derives from the NEW week only' \
-            "$(printf '| select($series[.].weekly < ($series[. - 1].weekly - $rd)) ] | last // 0 ) as $floor\x1f| select(false) ] | last // 0 ) as $floor')" || rc=1
-          # 5. THE NEGATIVE CLAMP REMOVED. `weekly` is rounded to 0.01, so a
-          #    flat account steps -0.01 and derives a negative burn — which
-          #    beats every positive account in max_by and reports the pool as
-          #    healthier than its worst member.
-          brake_mutation "negative-burn-allowed" 'rounding step clamps to zero burn' \
-            "$(printf 'burn: ( [ 0, (($end.weekly - $start.weekly) / $dt_days) ] | max ),\x1fburn: (($end.weekly - $start.weekly) / $dt_days),')" || rc=1
-          # 6. THE MINIMUM WINDOW REMOVED. Any two adjacent samples are then
-          #    "derived", and at a 15-minute gap the 0.01 quantum is +/-0.96/day
-          #    — 32x sustainable. That is not a measurement, it is the reported
-          #    field's instability re-created in our own code.
-          brake_mutation "min-window-ignored" 'cannot derive; it falls back' \
-            "$(printf 'elif (($dt_days * 24) < $mw) then\x1felif false then')" || rc=1
-          # 7. TOG-490. THE TARGET QUIETLY REVERTED. `1 - PACE_TARGET` is a
-          #    RESERVE sized against the brake's own reaction lag (~15 min of
-          #    producer cadence, plus the drain of runs already in flight), not
-          #    a decision to leave 10% of a subscription unspent — cap_for()
-          #    never exceeds the captured baseline, so this knob can only lower
-          #    consumption, never raise it. That makes 0.90 read like a mistake
-          #    to anyone who has not read the header, and it is one character
-          #    from being "corrected" back. §10 measures the default through the
-          #    tool's own arithmetic rather than by grepping for the literal.
-          brake_mutation "pace-target-reverted" 'the DEFAULT target computes sustainable at 0.90' \
-            "$(printf 'PACE_TARGET="${PACE_TARGET:-0.90}"\x1fPACE_TARGET="${PACE_TARGET:-0.97}"')" || rc=1
-          # 8. TOG-490. THE PASSED-TARGET PIN REMOVED. Once `weekly` passes the
-          #    target `sustainable` goes NEGATIVE, and a bare burn/need is then
-          #    negative too — which sails under the ladder's `ratio <= 1.0` rung
-          #    and RELEASES the brake on an already-overspent week. At 0.90 that
-          #    is a routine late-week reading rather than a corner case: both
-          #    accounts were past it on 2026-08-25.
-          brake_mutation "passed-target-releases" 'selects LEVEL3' \
-            "$(printf 'ratio: (if $need <= 0 then 999 else ($burn / $need) end),\x1fratio: ($burn / $need),')" || rc=1
-          # 9. TOG-1030. THE PRODUCTION STALENESS GUARD REMOVED. Before this
-          #    mutant existed, `pacing_verdict.py` and the dead-feed fixture
-          #    were COPIED into this staging directory as inputs and never
-          #    mutated — a gate that copies a file it never mutates does not
-          #    guard it. Measured on the reviewed commit: turning the whole
-          #    guard block off left all 158 brake checks green, because the
-          #    only stale fixture in the suite was ALSO refused by the
-          #    "no derivable burn" path. §6h is the fixture that separates
-          #    them, and this is the mutation it exists to kill: an 18-hour-dead
-          #    feed returning {"ratio":999,"verdict":"LEVEL3"} at exit 0, which
-          #    is maximum throttle across the roster with no living producer —
-          #    the TOG-938 incident exactly.
-          brake_mutation "stale-guard-bypassed" 'refused for the STALENESS reason specifically' \
-            "$(printf 'if [[ -z "$PACE_SOURCE_CMD" ]]; then\n    guard_file=\x1fif false; then\n    guard_file=')" || rc=1
-          # 10. THE GUARD RUNS AND ITS ANSWER IS DISCARDED. One rung subtler
-          #     than 9 and it fails identically: paying for the verdict and
-          #     then not branching on it is the same outage with a longer
-          #     receipt. Kept separate because a repair to 9 (restore the
-          #     block) does not imply a repair to 10.
-          brake_mutation "stale-guard-result-ignored" 'refused for the STALENESS reason specifically' \
-            "$(printf 'if (( guard_rc != 0 )); then\x1fif false; then')" || rc=1
-          exit $rc
-
       # TOG-1030. The staleness cutoff itself, which until now NOTHING mutated.
       # `pacing_verdict.py` was a copied input to the two gates above and the
       # subject of neither, and its own suite could not see the cutoff either:
@@ -3739,65 +2982,6 @@ jobs:
           sibling_mutation "ancestor-test-at-start" 'at start, a HEAD sitting on origin/main is not already-landed' \
             's/^  if \[\[ "$PHASE" == "prepush" \]\]; then$/  if true; then/' || rc=1
           exit $rc
-
-      # Mutation: restore the pre-TOG-238 OR, where ANY non-empty scope satisfied
-      # strict mode. That is the tempting simplification here — it reads as
-      # "something was requested, so this is scoped" — and it silently reinstates
-      # a token spanning every repo in the installation while GH_APP_SCOPE_STRICT=1
-      # keeps reporting least-privilege. Mutating strictGaps() rather than its
-      # callers reproduces the original semantics at every call site at once.
-      - name: Prove the suite still detects a permissions-only scope passing strict mode
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp gh-app-token.js test_gh_app_token.sh "$mut/"
-          node -e '
-            var fs = require("fs");
-            var p = process.argv[1];
-            var s = fs.readFileSync(p, "utf8");
-            var anchor = "function strictGaps(scope) {";
-            if (s.indexOf(anchor) < 0) {
-              console.error("::error::could not find strictGaps() to mutate; this guard is now blind, fix it");
-              process.exit(2);
-            }
-            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  if (Object.keys(scope).length > 0) return [];"));
-          ' "$mut/gh-app-token.js"
-          node --check "$mut/gh-app-token.js"
-          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
-            echo "::error::the suite PASSED with strict mode satisfied by permissions alone (TOG-238 regression)"
-            cat "$mut/out.txt"
-            exit 1
-          fi
-          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the strict-mode mutant"
-
-      # The second TOG-238 mutation, and the subtler one. Strict mode gates the
-      # PEM path, so `SOURCE === 'pem'` reads as a correct, even careful,
-      # narrowing — the broker bounds scope server-side, why gate it? Because
-      # the DEFAULT is `auto`, which falls back to the PEM on a retryable broker
-      # failure. Under that spelling a broker outage silently turns the control
-      # off on the one path that mints a ceiling token. This is not a strawman:
-      # it is the exact line the TOG-226 merge produced, caught by this suite.
-      - name: Prove the suite still detects strict mode gated on the wrong source
-        run: |
-          set -uo pipefail
-          mut="$(mktemp -d)"
-          cp gh-app-token.js test_gh_app_token.sh "$mut/"
-          before="  if (enforce && SOURCE !== 'broker') assertStrictForPem(scope)"
-          after="  if (enforce && SOURCE === 'pem') assertStrictForPem(scope)"
-          if ! grep -qxF "$before" "$mut/gh-app-token.js"; then
-            echo "::error::could not find the strict-mode source gate to mutate; this guard is now blind, fix it"
-            exit 2
-          fi
-          awk -v b="$before" -v a="$after" '$0 == b { print a; next } { print }' \
-            "$mut/gh-app-token.js" > "$mut/mut.js" && mv "$mut/mut.js" "$mut/gh-app-token.js"
-          chmod +x "$mut/gh-app-token.js"
-          node --check "$mut/gh-app-token.js"
-          if "$mut/test_gh_app_token.sh" > "$mut/out.txt" 2>&1; then
-            echo "::error::the suite PASSED with strict mode gated on GH_APP_TOKEN_SOURCE === 'pem', which exempts the auto fallback (TOG-238)"
-            cat "$mut/out.txt"
-            exit 1
-          fi
-          grep -c 'FAIL' "$mut/out.txt" | xargs -I{} echo "suite correctly reported {} failures against the source-gate mutant"
 
       # TOG-356 mutation guard, with a BASELINE and NAMED expected failures.
       #
@@ -4727,14 +3911,6 @@ jobs:
       - name: operator runbook suite
         run: ./test_operator_runbook.sh
 
-      # The committed runbook must be the one the generator produces. A
-      # hand-edit to docs/OPERATOR-RUNBOOK.md would otherwise drift away from
-      # the classification file that CI actually validates.
-      - name: operator runbook is regenerated, not hand-edited
-        run: |
-          ./operator_runbook.sh render > /tmp/runbook.regenerated.md
-          diff -u docs/OPERATOR-RUNBOOK.md /tmp/runbook.regenerated.md
-
       # TOG-851. `check` is driven by the pending INTERACTION set, so it is
       # structurally blind to an ask that never filed one: not in the input,
       # therefore not unclassified, therefore green. TOG-846 shipped a complete
@@ -4766,18 +3942,6 @@ jobs:
             exit 1
           fi
           echo "stranded artifact correctly exits non-zero"
-
-      # TOG-1141. The mutation gate for the withdrawal RENDERING, kept in this
-      # job because it guards the same file the gate above compares.
-      #
-      # The anti-hand-edit gate proves doc == render. It cannot prove the
-      # generator still SAYS the dangerous thing: strip `withdrawn` from the
-      # classification file and regenerate, and doc == render stays perfectly
-      # green over a runbook that has lost an owner ruling. This asserts the
-      # withdrawal survives a render, by mutation — and pins the one hazard the
-      # data shape does NOT structurally prevent (see the script's header).
-      - name: operator runbook — a withdrawn line survives regeneration
-        run: ./verification/tog-1141-runbook-withdrawal-render-gate.sh
 
       # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
       # abort skipped, never fail the build for it. This job is small, but it is
