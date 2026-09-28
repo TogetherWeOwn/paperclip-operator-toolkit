@@ -1,5 +1,6 @@
 import { copyFile, cp, mkdir, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 
 // The job and step that actually execute this gate on the private runner.
 // TOG-2789: the refusal first named `Offline suites`, which never runs this
@@ -57,6 +58,10 @@ export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
 export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATION_TREE_REPO_FIXTURES) {
   for (const relativePath of fixtures) {
     const target = join(scratchRoot, relativePath);
+    // Mirror the checkout: a fixture that is absent from this repository (the
+    // TOG-2138 gate harness stays in the private operations repo) stays absent
+    // in the mutation tree, and the spec that reads it skips on its own.
+    if (!existsSync(join(repoRoot, relativePath))) continue;
     await mkdir(dirname(target), { recursive: true });
     await copyFile(join(repoRoot, relativePath), target);
   }
