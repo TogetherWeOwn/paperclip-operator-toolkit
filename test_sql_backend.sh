@@ -214,11 +214,12 @@ done
 
 hdr "10. The tools actually source the helper"
 # Cheap, but it is the assertion that catches someone reintroducing a
-# hardcoded `podman exec` in one tool while the others move on. gh_access.sh
-# and skills.sh joined this list in TOG-300; they were the last two holdouts.
+# hardcoded `podman exec` in one tool while the others move on. skills.sh
+# joined this list in TOG-300. (gh_access.sh, the other TOG-300 holdout,
+# stays in the private repository.)
 CONVERTED="org_provisioner.sh org_request_queue.sh org_access_review.sh
            test_privilege_ceilings.sh test_request_queue.sh
-           gh_access.sh skills.sh"
+           skills.sh"
 for f in $CONVERTED; do
   if grep -q 'lib/pcsql.sh' "$HERE/$f"; then ok "$f sources lib/pcsql.sh"
   else bad "$f does not source lib/pcsql.sh"; fi
@@ -325,7 +326,6 @@ drives_selected_backend() {
     bad "$desc — reached NO backend; the tool never queried, so this proves nothing"
   fi
 }
-drives_selected_backend "gh_access.sh show queries through lib/pcsql.sh" gh_access.sh show T0
 drives_selected_backend "skills.sh show queries through lib/pcsql.sh"    skills.sh    show T0
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
