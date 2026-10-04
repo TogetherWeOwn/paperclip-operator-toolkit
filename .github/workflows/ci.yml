@@ -300,6 +300,11 @@ on:
     branches: [main]
   pull_request:
   merge_group:
+  # CI standard (TOG-14877): nightly full run catches regressions that slip
+  # past path-gated PR runs. Scheduled runs always run everything: the
+  # `changes` job forces docs_only=false on schedule events.
+  schedule:
+    - cron: "23 4 * * *"
 
 # `merge_group` is INERT until a merge-queue rule exists on `main` (TOG-3145).
 # It is here first, and on purpose, because the ordering is a trap: if the
@@ -345,8 +350,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # CI standard (TOG-14877): change detection. Native `git diff --name-only`
+  # against the merge base; no third-party action. Outputs docs_only so
+  # docs-only PRs skip the heavy suites while `ci-ok` stays green. Any
+  # non-docs change (including dependency manifests, .github/**, shared code
+  # or the filter itself) runs everything. Push-to-main, merge_group,
+  # schedule and dispatch always run everything.
+  changes:
+    name: Change detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "non-PR event (${{ github.event_name }}): full run"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          merge_base="$(git merge-base "$base" "$head")"
+          files="$(git diff --name-only "$merge_base" "$head")"
+          echo "changed files:"; echo "$files"
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Docs-only = every file is markdown or under docs/.
+          if echo "$files" | grep -vqE '(\.md$|^docs/)'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   privilege-suites:
     name: Privilege ceiling suites
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     # This job used to be the one exception that needed a container daemon
     # (it declared a `postgres` service container). It now starts its own
     # ephemeral PostgreSQL cluster instead, so NO job in this workflow needs a
@@ -541,6 +588,8 @@ jobs:
 
   offline-suites:
     name: Offline suites
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     # Keep the exact job name above: branch protection matches the check-run
     # name. This tree runs on GitHub-hosted runners; the private fleet's
     # no-paid-fallback rule lives in the private repo with the fleet.
@@ -3084,6 +3133,8 @@ jobs:
   # lands; otherwise moving the steps would silently remove both gates.
   long-mutation-gates:
     name: Long mutation gates
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -3735,6 +3786,8 @@ jobs:
   # isolation IS the fix.
   runbook-gates:
     name: Operator runbook gates
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -3818,6 +3871,8 @@ jobs:
   # test count. See the header.
   broker-suite:
     name: gh-token-broker suite
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -3916,6 +3971,8 @@ jobs:
   # check stays operator-run because a fixture certifies only the fixture.
   omniroute-broker-suite:
     name: omniroute-broker suite
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -3975,6 +4032,8 @@ jobs:
   # covers the wiring.
   dispatch-suite:
     name: dispatch suite
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -4123,6 +4182,8 @@ jobs:
   # Gated on EXIT STATUS, never a test count. See the header.
   mcp-suite:
     name: org-request-mcp suite
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -4430,6 +4491,8 @@ jobs:
   # Offline: no credential, no network, no host. Tests are written for Vitest.
   model-selection-suite:
     name: model-selection suite
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
     # gate runs (the gate refuses outside CI), and each mutant re-runs the full
@@ -4517,3 +4580,34 @@ jobs:
             exit 1
           fi
           echo "dist ok: committed bundle matches src"
+
+  # CI standard (TOG-14877): the single required aggregator. Branch
+  # protection requires only `ci-ok` (plus pr-lint), so docs-only gating
+  # can never block merges: skipped jobs count as success here.
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - changes
+      - privilege-suites
+      - offline-suites
+      - long-mutation-gates
+      - runbook-gates
+      - broker-suite
+      - omniroute-broker-suite
+      - dispatch-suite
+      - mcp-suite
+      - model-selection-suite
+    steps:
+      - name: Aggregate gated results
+        run: |
+          set -euo pipefail
+          failed="${{ contains(needs.*.result, 'failure') }}"
+          cancelled="${{ contains(needs.*.result, 'cancelled') }}"
+          if [ "$failed" = "true" ] || [ "$cancelled" = "true" ]; then
+            echo "::error::a needed job failed or was cancelled"
+            exit 1
+          fi
+          echo "ci-ok: every needed job succeeded or was skipped"
