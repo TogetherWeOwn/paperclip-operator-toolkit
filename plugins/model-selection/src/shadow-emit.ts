@@ -1,17 +1,18 @@
 import { SHADOW_EXPLANATIONS_CAP, SHADOW_PICK_WHY_MAX_CHARS } from "./constants.js";
+import { PUBLIC_FORMAT_IDENTIFIERS } from "./format-compatibility.js";
 import { slotFactorFor, type LaneLedger, type OperatorOverrideEntry } from "./engine/pacing.js";
 import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, SelectionDecision } from "./engine/types.js";
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * `tog2138-decision-v1`, the paired
+ * Versioned paired decisions, the
  * host/plugin-shadow agreement stream the shadow gate harness
  * correlates. The separate host dispatcher has been retired, so both writer
  * projections now come from the same authoritative `advise()` decision. This
  * module only builds records; `worker.ts` appends the pair via
  * `ctx.localFolders`.
  */
-export const SHADOW_SCHEMA_VERSION = "tog2138-decision-v1";
+export const SHADOW_SCHEMA_VERSION = PUBLIC_FORMAT_IDENTIFIERS.shadowSchemaVersion;
 export type DecisionWriter = "host" | "plugin-shadow";
 
 export type ShadowLaneState = "available" | "degraded" | "exhausted" | "unavailable";

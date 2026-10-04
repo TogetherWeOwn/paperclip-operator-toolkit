@@ -310,10 +310,64 @@ describe("worker", () => {
     expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
   });
 
+  it("reads only the configured stored tier alias through the advise path", async () => {
+    const alias = "legacy-benchmark-v1";
+    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
+    const stored = { modelScores: [{ ...promotedSonnet(), tierSpecVersion: alias }] };
+    await h.ctx.state.set(key, stored);
+    const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-sonnet-5");
+    expect(await h.ctx.state.get(key)).toEqual(stored);
+    await h.ctx.state.set(key, { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "unconfigured-benchmark-v1" }] });
+    const unknown = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((unknown as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+  });
+
+  it("persists the configured score identifier without rewriting its algorithm fields", async () => {
+    const alias = "legacy-benchmark-v1";
+    const baseline = await boot(baseConfig());
+    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
+    await baseline.runJob("refreshScores");
+    await h.runJob("refreshScores");
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
+    const canonical = await baseline.ctx.state.get(key) as { modelScores: ModelScore[]; cardLedger: unknown; computedAt: string };
+    const stored = await h.ctx.state.get(key) as typeof canonical;
+    expect(stored.modelScores.length).toBeGreaterThan(0);
+    expect(stored).toEqual({ ...canonical, modelScores: canonical.modelScores.map((score) => ({ ...score, tierSpecVersion: alias })) });
+  });
+
+  it("round-trips the configured posterior identifier through refresh and the read-only report", async () => {
+    const alias = "legacy-posterior-v1";
+    const h = await boot(baseConfig({ acceptedWork: { enabled: true }, formatCompatibility: { acceptedWorkSpecVersion: alias } }));
+    await h.runJob("refreshScores");
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay };
+    const stored = await h.ctx.state.get(key) as { specVersion: string; cohorts: unknown[] };
+    expect(stored.specVersion).toBe(alias);
+    const report = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
+    expect((report as { data: { specVersion: string; cohorts: unknown[] } }).data).toMatchObject({ specVersion: alias, cohorts: stored.cohorts });
+    expect(await h.ctx.state.get(key)).toEqual(stored);
+    await h.ctx.state.set(key, { ...stored, specVersion: "unconfigured-posterior-v1" });
+    const unknown = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
+    expect((unknown as { data: { ok: boolean } }).data.ok).toBe(false);
+  });
+
+  it("serializes both shadow projections with only the configured format change", async () => {
+    const alias = "legacy-paired-decision-v1";
+    const h = await boot(baseConfig({ shadowEmit: { enabled: true }, formatCompatibility: { shadowSchemaVersion: alias } }));
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    const shard = `decisions-${new Date(NOW).toISOString().slice(0, 13).replace("T", "-")}Z.jsonl`;
+    const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, shard);
+    const records = text.trim().split("\n").map((line) => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+    expect(records.map((record) => record.schema)).toEqual([alias, alias]);
+  });
+
   it("keeps the configured tier when the stored tier came from another spec version", async () => {
     await harness.ctx.state.set(
       { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
-      { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "tog2636-v0" }] },
+      { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "benchmark-prior-v0" }] },
     );
     const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
     expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");

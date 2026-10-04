@@ -448,6 +448,18 @@ export const SELECTION_CONFIG_SCHEMA = {
      * installing this plugin must not start writing files an operator did
      * not ask for.
      */
+    formatCompatibility: {
+      type: "object",
+      title: "Private format compatibility",
+      description: "Exact v1 format identifiers supplied by a reviewed private deployment. Absent/null fields use generic public identities; this never relaxes payload validation.",
+      additionalProperties: false,
+      default: {},
+      properties: {
+        tierSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+        acceptedWorkSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+        shadowSchemaVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+      },
+    },
     shadowEmit: {
       type: "object",
       title: "Shadow decision emitter",

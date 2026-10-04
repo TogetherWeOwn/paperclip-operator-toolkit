@@ -267,7 +267,7 @@ describe("normalizeAcceptedWorkOverlay — stored state fails open, never throws
   it("returns null on malformed, version-mismatched, or non-object state", () => {
     expect(normalizeAcceptedWorkOverlay(null)).toBeNull();
     expect(normalizeAcceptedWorkOverlay([])).toBeNull();
-    expect(normalizeAcceptedWorkOverlay({ ...good, specVersion: "tog0000-v0" })).toBeNull();
+    expect(normalizeAcceptedWorkOverlay({ ...good, specVersion: "unknown-posterior-v0" })).toBeNull();
     expect(normalizeAcceptedWorkOverlay({ ...good, cohorts: null })).toBeNull();
     expect(normalizeAcceptedWorkOverlay({ ...good, cohorts: [{ servedModel: "x" }] })).toBeNull();
     expect(normalizeAcceptedWorkOverlay({ ...good, cohorts: [{ ...good.cohorts[0], resolved: -1 }] })).toBeNull();

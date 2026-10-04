@@ -30,8 +30,10 @@
  * written under v2 and a re-tier can never silently rewrite history.
  */
 
+import { PUBLIC_FORMAT_IDENTIFIERS } from "../format-compatibility.js";
+
 /** Frozen spec identity. Bump on ANY change to identities, anchors, or weights. */
-export const BENCHMARK_SPEC_VERSION = "tog2636-v1";
+export const BENCHMARK_SPEC_VERSION = PUBLIC_FORMAT_IDENTIFIERS.tierSpecVersion;
 
 /**
  * One benchmark in the basket. `anchor` is the normalisation denominator — the

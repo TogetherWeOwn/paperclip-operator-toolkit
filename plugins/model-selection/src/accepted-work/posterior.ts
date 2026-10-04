@@ -35,8 +35,10 @@ import {
  *   never lifts them, it only labels them.
  */
 
+import { PUBLIC_FORMAT_IDENTIFIERS } from "../format-compatibility.js";
+
 /** Frozen spec identity. Bump on ANY change to cohorting, censoring, or math. */
-export const ACCEPTED_WORK_SPEC_VERSION = "tog12972-v1";
+export const ACCEPTED_WORK_SPEC_VERSION = PUBLIC_FORMAT_IDENTIFIERS.acceptedWorkSpecVersion;
 
 /** One closed card, attributed to its served cohort. Built by the worker. */
 export interface AcceptedWorkCardInput {

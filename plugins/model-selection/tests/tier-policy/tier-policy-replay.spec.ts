@@ -1,6 +1,6 @@
 /**
- * Zero-diff replay: the data-driven `legacy-model-selection-v1`
- * evaluator against a frozen, hashed copy of the SERVING evaluator
+ * Policy-output replay: the data-driven `legacy-model-selection-v1`
+ * evaluator against an explicitly normalized public derivative of a captured evaluator
  * (`serving-evaluator-t1cap080.js`, main 5a9be61 + the operator's T1 capability
  * 0.8 carry-forward).
  *
@@ -54,11 +54,12 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "../fixtures.js";
 import * as serving from "./serving-evaluator-t1cap080.js";
 
 const FIXTURE_PATH = fileURLToPath(new URL("./serving-evaluator-t1cap080.js", import.meta.url));
-// Path to the serving build's dist/worker.js (model-selection-0.4.0-main5a9be61-t1cap080).
+// Optional explicit path to the original captured worker artifact, not a host default.
 // Unset (the default, and always in CI): the byte-for-byte re-extraction test is skipped.
 const SERVING_WORKER = process.env.TIER_POLICY_SERVING_WORKER ?? "";
 const SERVING_WORKER_SHA256 = "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099";
-const SLICES_SHA256 = "34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65";
+const ORIGINAL_SLICES_SHA256 = "34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65";
+const PUBLIC_SLICES_SHA256 = "42d5b2e9c6d14f20198f563623950fad450f9ee19f05c4aa262bd8b314575745";
 const SLICE_RANGES: ReadonlyArray<readonly [number, number]> = [[93, 93], [281, 285], [1464, 1508], [1580, 1701], [1896, 1902]];
 
 const sha256 = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
@@ -72,22 +73,33 @@ function fixtureSlices(): string {
   return `${lines.slice(begin + 1, end).join("\n")}\n`;
 }
 
-describe("frozen serving evaluator", () => {
-  it("is byte-identical to the captured slices", () => {
-    expect(sha256(fixtureSlices())).toBe(SLICES_SHA256);
+function normalizeCapturedSlices(slices: string): string {
+  if (sha256(slices) !== ORIGINAL_SLICES_SHA256) throw new Error("unexpected original captured slice bytes");
+  const declaration = /^var BENCHMARK_SPEC_VERSION = "[^"\n]+";$/gm;
+  if ([...slices.matchAll(declaration)].length !== 1) throw new Error("format declaration anchor is not unique");
+  return slices.replace(declaration, 'var BENCHMARK_SPEC_VERSION = "benchmark-prior-v1";');
+}
+
+describe("public derivative of the frozen captured evaluator", () => {
+  it("pins the derivative separately from the unchanged original provenance", () => {
+    expect(sha256(fixtureSlices())).toBe(PUBLIC_SLICES_SHA256);
+    expect(PUBLIC_SLICES_SHA256).not.toBe(ORIGINAL_SLICES_SHA256);
+    expect(fixtureSlices()).not.toMatch(/(TOG|PAP)-?[0-9]+/i);
+    expect(() => normalizeCapturedSlices(fixtureSlices())).toThrow("unexpected original captured slice bytes");
   });
 
   // The artifact only exists on the serving host; CI has no copy. Skipped unless
   // TIER_POLICY_SERVING_WORKER points at an existing worker.js.
-  it.skipIf(!SERVING_WORKER || !existsSync(SERVING_WORKER))("re-extracts byte-for-byte from the serving worker.js", () => {
+  it.skipIf(!SERVING_WORKER || !existsSync(SERVING_WORKER))("verifies original artifact provenance before applying the one-declaration public normalization", () => {
     const worker = readFileSync(SERVING_WORKER);
     expect(sha256(worker)).toBe(SERVING_WORKER_SHA256);
     const lines = worker.toString("utf8").split("\n");
     const slices = `${SLICE_RANGES.flatMap(([from, to]) => lines.slice(from - 1, to)).join("\n")}\n`;
-    expect(slices).toBe(fixtureSlices());
+    expect(sha256(slices)).toBe(ORIGINAL_SLICES_SHA256);
+    expect(normalizeCapturedSlices(slices)).toBe(fixtureSlices());
   });
 
-  it("records the serving build the policy is pinned to", () => {
+  it("preserves the original worker provenance and capability thresholds", () => {
     expect(LEGACY_MODEL_SELECTION_V1.legacyCompatibility.servingWorkerSha256).toBe(SERVING_WORKER_SHA256);
     expect(serving.T1_CAPABILITY_THRESHOLD).toBe(0.8);
     expect(serving.SCORE_THRESHOLDS).toEqual({ T1: 0.85, T2: 0.8, T3: 0.75 });

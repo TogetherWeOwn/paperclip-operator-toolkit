@@ -1,16 +1,17 @@
-// Frozen copy of the SERVING tier/capability evaluator. Do not edit.
+// Frozen PUBLIC DERIVATIVE of the captured tier/capability evaluator.
+// Do not call this the byte-identical original or silently refresh its provenance.
 //
-// Source: dist/worker.js of the serving model-selection-0.4.0-main5a9be61-t1cap080 build
-//   (path supplied at test time via TIER_POLICY_SERVING_WORKER)
-//   sha256 dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099
-//   (= main 5a9be61 + the operator's 2026-10-01 T1_CAPABILITY_THRESHOLD 0.8 carry-forward)
-// Line ranges copied byte-for-byte: 93,93, 281,285, 1464,1508, 1580,1701, 1896,1902
-// sha256 of the concatenated slices (one trailing newline): 34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65
+// Original worker artifact SHA-256 (unchanged):
+//   dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099
+// Original captured slices SHA-256 (unchanged, one trailing newline):
+//   34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65
+// Original line ranges: 93,93, 281,285, 1464,1508, 1580,1701, 1896,1902
 //
-// tier-policy-replay.spec.ts re-hashes the region between the markers below and,
-// where the serving artifact is readable (TIER_POLICY_SERVING_WORKER set),
-// re-extracts it from worker.js. The only lines outside the markers are this
-// header and the export list.
+// Public normalization changes ONLY the benchmark-format identifier declaration;
+// all algorithm/threshold lines inside the markers are otherwise unchanged.
+// tier-policy-replay.spec.ts pins the distinct derivative hash. Its optional
+// TIER_POLICY_SERVING_WORKER check first verifies the original worker/slice hashes,
+// then applies that exact one-declaration normalization before comparison.
 // BEGIN SERVING SLICES
 var TIER_ORDER = ["T3", "T2", "T1"];
 // operator 2026-10-01 (owner-approved): T1 capability bar 0.85 -> 0.80 (t1cap080 carry-forward)
@@ -19,7 +20,7 @@ var SCORE_THRESHOLDS = { T1: 0.85, T2: 0.8, T3: 0.75 };
 var SCORE_PRIOR_K = 6;
 var SCORE_PROVEN_N = 8;
 // src/engine/benchmark-prior.ts
-var BENCHMARK_SPEC_VERSION = "tog2636-v1";
+var BENCHMARK_SPEC_VERSION = "benchmark-prior-v1";
 var BENCHMARKS = [
   { key: "terminalBenchV4Pass1", anchor: 0.6, weight: 0.25 },
   { key: "mercorApex11Pass1", anchor: 0.7, weight: 0.2 },

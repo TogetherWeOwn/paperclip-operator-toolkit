@@ -22,6 +22,7 @@ import {
   type Tier,
 } from "../constants.js";
 import { validateSecretRefShape } from "./secret-ref.js";
+import { resolveFormatCompatibility, type FormatCompatibility } from "../format-compatibility.js";
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
@@ -129,6 +130,7 @@ export interface ResolvedConfig {
     stopWindow: number;
   };
   shadowEmit: { enabled: boolean; maxRecords: number; shardMaxRecords: number; retentionShards: number };
+  formatCompatibility?: FormatCompatibility;
   accountAdmissionShadow: { enabled: boolean };
   aaSync: { enabled: boolean };
   /** Default-off free-list sync. Absent/disabled = legacy behavior exactly. */
@@ -469,6 +471,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       stopWindow: num(earnIn.stopWindow, 8),
     },
     accountAdmissionShadow: { enabled: bool(accountAdmissionShadow.enabled, false) },
+    formatCompatibility: resolveFormatCompatibility(root.formatCompatibility),
     shadowEmit: {
       enabled: bool(shadowEmit.enabled, false),
       maxRecords: num(shadowEmit.maxRecords, 5000),

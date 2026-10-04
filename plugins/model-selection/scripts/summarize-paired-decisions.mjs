@@ -28,6 +28,10 @@ const endText = arg("--end");
 const outIndex = process.argv.indexOf("--out");
 const outPath = outIndex >= 0 ? process.argv[outIndex + 1] : null;
 const gatePath = arg("--gate-harness");
+const reportSchema = process.argv.includes("--report-schema") ? arg("--report-schema") : "paired-decision-summary-v2";
+if (reportSchema.length > 80 || !/^[a-z0-9][a-z0-9._:-]*-v2$/.test(reportSchema)) {
+  fail("--report-schema must be an exact v2 identifier");
+}
 const startMs = parseUtc(startText, "--start");
 const endMs = parseUtc(endText, "--end");
 if (endMs <= startMs) fail("--end must be later than --start");
@@ -125,7 +129,7 @@ try {
   }
 
   const report = {
-    schema: "tog2504-bounded-summary-v2",
+    schema: reportSchema,
     window: { start: startText, end: endText, maxHours: 24 },
     dataGap,
     denominators,

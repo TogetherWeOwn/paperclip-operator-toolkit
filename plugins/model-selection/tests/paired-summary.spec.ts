@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 
 const script = new URL("../scripts/summarize-paired-decisions.mjs", import.meta.url).pathname;
 const gate = process.env.PAIRED_DECISION_GATE_HARNESS ?? "";
@@ -11,7 +12,7 @@ const end = "2026-09-15T00:00:00Z";
 
 function record(writer: "host" | "plugin-shadow", overrides: Record<string, unknown> = {}) {
   return {
-    schema: "tog2138-decision-v1",
+    schema: process.env.PAIRED_DECISION_SCHEMA_VERSION ?? SHADOW_SCHEMA_VERSION,
     writer,
     issueId: "issue-1",
     issueIdentifier: "EX-1",
@@ -107,7 +108,17 @@ sys.exit(7)
 `);
     const result = spawnSync(process.execPath, [script, "--input", input, "--start", start, "--end", end, "--gate-harness", injected], { encoding: "utf8" });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ dataGap: false, cleanWindowGateEvaluated: false, fullCleanWindowGateExit: 7 });
+    const canonical = JSON.parse(result.stdout);
+    expect(canonical).toMatchObject({ schema: "paired-decision-summary-v2", dataGap: false, cleanWindowGateEvaluated: false, fullCleanWindowGateExit: 7 });
+    const args = [script, "--input", input, "--start", start, "--end", end, "--gate-harness", injected];
+    const legacy = spawnSync(process.execPath, [...args, "--report-schema", "legacy-bounded-summary-v2"], { encoding: "utf8" });
+    expect(legacy.status).toBe(0);
+    expect(JSON.parse(legacy.stdout)).toEqual({ ...canonical, schema: "legacy-bounded-summary-v2" });
+    for (const invalid of ["legacy-bounded-summary-v1", "", "UNVALIDATED", "x".repeat(80) + "-v2"]) {
+      const refused = spawnSync(process.execPath, [...args, "--report-schema", invalid], { encoding: "utf8" });
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("--report-schema must be an exact v2 identifier");
+    }
   });
 });
 

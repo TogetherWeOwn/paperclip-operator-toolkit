@@ -339,6 +339,47 @@ data. It reports the earliest actual correlated pair as `observationStart` and
 sets `cleanWindowGateEvaluated: false`; never substitute plugin-config apply
 time or report the clean-window gate as passed from this bounded summary.
 
+### Private format compatibility
+
+Public defaults use `benchmark-prior-v1`, `accepted-work-posterior-v1`,
+`paired-decision-v1` and `paired-decision-summary-v2`. A private deployment
+that already persists or consumes other identifiers must supply its reviewed
+mapping **before** pinning this source revision; this public move does not
+activate a deployment or rewrite historical records.
+
+```json
+{
+  "formatCompatibility": {
+    "tierSpecVersion": "legacy-benchmark-v1",
+    "acceptedWorkSpecVersion": "legacy-posterior-v1",
+    "shadowSchemaVersion": "legacy-paired-decision-v1"
+  }
+}
+```
+
+These are synthetic examples, not installation values. Each field is one exact
+v1 identifier, not a list, wildcard or prefix rule. Null/absence is canonical-only;
+invalid profiles refuse rather than silently changing storage. Reads translate
+only the configured alias on a cloned payload before the existing strict
+version/structure checks. Writes and both shadow projections translate only the
+canonical identifier; in-memory scores and math remain canonical. Other stored
+versions stay rejected. Do not use this identity bridge to relabel different
+cohorting, benchmark weights, censoring or algorithm semantics.
+
+For a private bounded-summary reader that requires a retained v2 report name,
+pass `--report-schema legacy-bounded-summary-v2` explicitly. The report payload,
+24-hour bound and clean-window disclaimer stay unchanged. Optional deployment
+integration may set `PAIRED_DECISION_SCHEMA_VERSION` to the same reviewed shadow
+identifier used by its private harness. The headroom library snapshot uses the
+generic `reviewer-fixer-headroom-v1`; it has no tool handler in this source tree,
+and no live headroom integration is claimed here.
+
+The frozen evaluator test is now an explicitly labeled public derivative. Its
+original worker and slice hashes remain unchanged. Only the benchmark-identifier
+declaration is normalized; a distinct derivative hash is pinned. The optional
+original-artifact test verifies both original hashes before applying that one
+normalization. An unconfigured/skipped artifact check is not deployment proof.
+
 Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
 configuring its existing `shadow-decisions` local folder. Preserve the complete
 live config with a parsed read-merge-write and readback; do not use a textual

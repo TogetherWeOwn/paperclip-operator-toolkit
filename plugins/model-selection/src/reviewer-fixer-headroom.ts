@@ -33,7 +33,7 @@
  * - The burn-down trajectory (done).
  */
 
-export const REVIEWER_FIXER_HEADROOM_SCHEMA = "tog14458-reviewer-fixer-headroom-v1";
+export const REVIEWER_FIXER_HEADROOM_SCHEMA = "reviewer-fixer-headroom-v1";
 
 export const MAX_HEADROOM_AGENTS_PER_ROLE = 64;
 export const MAX_SATURATED_IDS = 32;

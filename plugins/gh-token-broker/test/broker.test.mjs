@@ -285,13 +285,10 @@ function registered(projectId) {
 }
 
 // THE TRIPWIRE. If you are reading this because it went red, you changed
-// DEFAULT_PERMISSION_PROFILE. That change reaches NO project on its own — all
-// seven pin their own set. Update the `baseline` line in permission_pins.txt,
-// decide per project whether the change should reach it, and run
-// `./gh_permission_pin_audit.sh --fanout-plan` for the value each project must
-// now carry. Do not "fix" this by deleting the assertion: the silence it
-// replaces is exactly what let the CI-visibility change ship to six of seven
-// projects.
+// DEFAULT_PERMISSION_PROFILE. A pinned project does not inherit that change.
+// The private deployment must update its registry baseline and deliberately
+// decide which pins should change. These optional checks do not claim to prove
+// a registry that is absent from this public checkout.
 test("the pin registry's baseline is the default profile", { skip: REGISTRY_SKIP }, () => {
   assert.deepEqual(
     REGISTRY_BASELINE,
@@ -344,11 +341,9 @@ test("a registered divergence actually diverges, and says why", { skip: REGISTRY
   }
 });
 
-// workflows:write is the only divergence in the registry today, and it is not a
-// preference: GitHub refuses a MERGE whose diff touches `.github/workflows/**`
-// unless the token holds it (403 at merge time, not at push time). Any other
-// permission diverging is worth a second look, so adding one has to be a
-// deliberate edit here rather than a line nobody reviews.
+// The optional registry expectation here permits only the workflow permission
+// delta. This is a test expectation, not a current deployment inventory. A
+// changed private registry needs its own review, not a fabricated public proof.
 test("the only permission any project diverges on is workflows", { skip: REGISTRY_SKIP }, () => {
   for (const project of REGISTRY.projects.filter((p) => p.state === "delta")) {
     const added = Object.keys(applyDelta(REGISTRY_BASELINE, project.delta))

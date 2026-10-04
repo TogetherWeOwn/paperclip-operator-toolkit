@@ -320,7 +320,7 @@ describe("applyDerivedTiers", () => {
     aaOmniscienceSignedIndex: 30,
   };
 
-  function score(modelId: string, derivedTier: Tier | null, specVersion = BENCHMARK_SPEC_VERSION): ModelScore {
+  function score(modelId: string, derivedTier: Tier | null, specVersion: string = BENCHMARK_SPEC_VERSION): ModelScore {
     return { ...buildModelScore(modelId, 48, {}, TIERS, BASKET), derivedTier, tierSpecVersion: specVersion };
   }
 
@@ -348,7 +348,7 @@ describe("applyDerivedTiers", () => {
   // A tier written under a superseded spec describes a rule this build no longer
   // implements. Ignore it until refreshScores rewrites it; never reinterpret it.
   it("ignores a tier written under a different spec version", () => {
-    const out = applyDerivedTiers(roster, { c: score("c", "T3", "tog2636-v0") });
+    const out = applyDerivedTiers(roster, { c: score("c", "T3", "benchmark-prior-v0") });
     expect(out.find((m) => m.id === "c")?.tier).toBe("T1");
   });
 

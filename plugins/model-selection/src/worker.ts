@@ -6,6 +6,7 @@ import { planApply, planEnvRepair, selectionWritesAllowed } from "./actuate/appl
 import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
+import { decodePersistedFormat, encodePersistedFormat } from "./format-compatibility.js";
 import {
   AA_FETCH_TIMEOUT_MS,
   AA_FREE_FETCH_INTERVAL_MS,
@@ -697,7 +698,9 @@ export function createPlugin() {
           existing = "";
         }
         const lines = existing.split("\n").filter((line) => line.trim().length > 0);
-        lines.push(...records.map((record) => JSON.stringify(record)));
+        lines.push(...records.map((record) => JSON.stringify(
+          encodePersistedFormat("shadowSchemaVersion", record, config.formatCompatibility),
+        )));
         // A retained shard must never split the newest host/shadow pair. An
         // odd configured cap is rounded down, with two records as the floor.
         const pairAlignedCap = Math.max(2, config.shadowEmit.shardMaxRecords - (config.shadowEmit.shardMaxRecords % 2));
@@ -819,11 +822,13 @@ export function createPlugin() {
         return ledger as Record<string, CardLedgerEntry>;
       };
 
-      const readModelScores = async (companyId: string): Promise<Record<string, ModelScore>> => {
+      const readModelScores = async (companyId: string, config: ResolvedConfig): Promise<Record<string, ModelScore>> => {
         const stored = asRecord(await ctx.state.get(scoresKey(companyId)));
         const scores = Array.isArray(stored.modelScores) ? (stored.modelScores as ModelScore[]) : [];
         const byModelId: Record<string, ModelScore> = {};
-        for (const score of scores) byModelId[score.modelId] = score;
+        for (const score of scores) {
+          byModelId[score.modelId] = decodePersistedFormat("tierSpecVersion", score, config.formatCompatibility);
+        }
         return byModelId;
       };
 
@@ -1361,7 +1366,7 @@ export function createPlugin() {
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
         const cardLedger = await readCardLedger(companyId);
-        const modelScores = await readModelScores(companyId);
+        const modelScores = await readModelScores(companyId, config);
         const laneOutageOverride = await readLaneOutage(companyId);
         const zaiPaceOverride = await readZaiPaceOverride(companyId);
         const now = Date.now();
@@ -2513,7 +2518,7 @@ export function createPlugin() {
           readLaneLedger(companyId),
           readOperatorOverrides(companyId),
           readCardLedger(companyId),
-          readModelScores(companyId),
+          readModelScores(companyId, config),
           readLaneOutage(companyId),
           readZaiPaceOverride(companyId),
           ctx.state.get(laneAvailabilityKey(companyId)),
@@ -3761,7 +3766,10 @@ export function createPlugin() {
             scopeId: companyId,
             stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay,
           });
-          const overlay = normalizeAcceptedWorkOverlay(stored);
+          const config = await companyConfig(companyId);
+          const overlay = normalizeAcceptedWorkOverlay(
+            decodePersistedFormat("acceptedWorkSpecVersion", stored, config.formatCompatibility),
+          );
           if (!overlay) {
             return {
               content:
@@ -3769,6 +3777,7 @@ export function createPlugin() {
               data: toolRejection("no-report-yet"),
             };
           }
+          const reportOverlay = encodePersistedFormat("acceptedWorkSpecVersion", overlay, config.formatCompatibility);
           const lines = overlay.cohorts.map((cohort) => {
             const held = cohort.held ? ` [held: ${cohort.held}]` : "";
             const maturity = cohort.proven ? "proven" : `sparse (${cohort.resolved}/8)`;
@@ -3778,13 +3787,13 @@ export function createPlugin() {
           });
           return {
             content:
-              `Accepted-work posterior as of ${overlay.computedAt} (${overlay.specVersion}): ` +
+              `Accepted-work posterior as of ${overlay.computedAt} (${reportOverlay.specVersion}): ` +
               `${overlay.cohorts.length} cohorts, ` +
               `${overlay.unattributed.closedCardsWithoutClosingRun} closed cards unattributed.\n` +
               `${lines.join("\n") || "No cohorts."}\n` +
               "First-party accepted-work posteriors — independent review/rework outcomes per served cohort. Read-only; not a routing input.",
             data: {
-              specVersion: overlay.specVersion,
+              specVersion: reportOverlay.specVersion,
               computedAt: overlay.computedAt,
               cohorts: overlay.cohorts,
               unattributed: overlay.unattributed,
@@ -4160,13 +4169,14 @@ export function createPlugin() {
                 nowMs,
                 nowIso: new Date(nowMs).toISOString(),
               });
-              await ctx.state.set(acceptedWorkKey, overlay);
+              const storedOverlay = encodePersistedFormat("acceptedWorkSpecVersion", overlay, config.formatCompatibility);
+              await ctx.state.set(acceptedWorkKey, storedOverlay);
               ctx.logger.info("accepted-work overlay refreshed", {
                 companyId: company.id,
                 cohorts: overlay.cohorts.length,
                 cards: acceptedWorkCards.length,
                 unattributed: closedCardsWithoutClosingRun,
-                specVersion: overlay.specVersion,
+                specVersion: storedOverlay.specVersion,
                 computedAt: overlay.computedAt,
               });
             }
@@ -4177,7 +4187,9 @@ export function createPlugin() {
             // successful pass wrote, and the spec-version guard cannot see it —
             // that guard catches a code change, never a stale capture.
             const computedAt = new Date().toISOString();
-            await ctx.state.set(scoresKey(company.id), { modelScores, cardLedger, computedAt });
+            const storedModelScores = modelScores.map((score) =>
+              encodePersistedFormat("tierSpecVersion", score, config.formatCompatibility));
+            await ctx.state.set(scoresKey(company.id), { modelScores: storedModelScores, cardLedger, computedAt });
             ctx.logger.info("model scores refreshed", {
               companyId: company.id,
               models: modelScores.length,
@@ -4187,7 +4199,7 @@ export function createPlugin() {
               // the upstream claude-local `provider: "anthropic"` literal is
               // still live; zero means it was fixed or no such runs landed.
               unattributableCostRuns,
-              tierSpecVersion: BENCHMARK_SPEC_VERSION,
+              tierSpecVersion: config.formatCompatibility?.tierSpecVersion ?? BENCHMARK_SPEC_VERSION,
               computedAt,
               retiered: retierings.length,
               unscored: modelScores.filter((score) => score.derivedTier === null).length,
@@ -4894,7 +4906,7 @@ export function createPlugin() {
               ledger: await readLaneLedger(companyId),
               laneOutageOverride: await readLaneOutage(companyId),
               nowIso: new Date().toISOString(),
-              modelScores: await readModelScores(companyId),
+              modelScores: await readModelScores(companyId, config),
               laneAvoidConfig: config.pacing.avoid,
               pacingMode: config.pacing.mode,
             }),
@@ -5200,7 +5212,7 @@ export function createPlugin() {
             // write decision is still caught.
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
-            const modelScores = await readModelScores(company.id);
+            const modelScores = await readModelScores(company.id, config);
             const nowIso = new Date().toISOString();
 
             // One memo per company per pass: `advise` re-describes
@@ -5477,7 +5489,7 @@ export function createPlugin() {
 
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
-            const modelScores = await readModelScores(company.id);
+            const modelScores = await readModelScores(company.id, config);
             const nowIso = new Date().toISOString();
             const nowMs = Date.parse(nowIso);
             // The pin lifecycle's clock, read once per pass.
@@ -5801,7 +5813,7 @@ export function createPlugin() {
 
           const laneLedger = await readLaneLedger(companyId);
           const laneOutageOverride = await readLaneOutage(companyId);
-          const modelScores = await readModelScores(companyId);
+          const modelScores = await readModelScores(companyId, config);
           const nowIso = new Date().toISOString();
           const contextUsageCache: ContextUsageCache = new Map();
           const primaries = applyDerivedTiers(config.models, modelScores).filter(
@@ -6261,7 +6273,7 @@ export function createPlugin() {
 
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
-            const modelScores = await readModelScores(company.id);
+            const modelScores = await readModelScores(company.id, config);
             const nowIso = new Date().toISOString();
             const now = Date.now();
 
