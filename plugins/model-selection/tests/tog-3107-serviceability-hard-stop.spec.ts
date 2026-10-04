@@ -28,6 +28,18 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
  * `serviceable:false`, `reason:"serviceability-window-exhausted"`,
  * `urgentResetAt` = the earliest tripped window's resetsAt.
  *
+ * TOG-7648 revision (owner-directed, operator update 22:40Z on TOG-7566): the
+ * lane-level condemnation above fires ONLY when no account can still serve
+ * (`serviceableAccountCount == 0`). The 52-run evidence stands, but it is a
+ * claim about where the provider routes — cliproxy kept hitting the BLOWN
+ * account — so it is enforced at the account level, where the provider
+ * actually routes: the tripped account still reads `serviceable:false`,
+ * `state:"exhausted"`, `recommendedShare: 0`, and the host controller
+ * disables its auth. A healthy sibling keeps the lane open. The tests below
+ * that asserted any-trip poisoning now assert the count-gated predicate;
+ * every assertion that still holds (single tripped account, all-tripped
+ * lanes, margin boundaries) is unchanged.
+ *
  * Every document below is live telemetry fetched 2026-09-16T23:13:12Z,
  * mid-incident, from the configured lane status URLs (fetch evidence on the
  * TOG-3107 card). Definitions and margins mirror the live pacing config.
@@ -90,6 +102,16 @@ const CLAUDE_LIVE = {
     { lane: "claude-lane-1", health: "degraded", weight: 1, governing_window: "seven_day", window_seconds: { five_hour: 18000, seven_day: 604800 }, five_hour_utilization: 1.0, five_hour_resets_at: "2026-09-16T23:20:00.443210Z", seven_day_utilization: 0.84, seven_day_resets_at: "2026-09-18T19:00:00.443239Z" },
     { lane: "claude-lane-2", health: "healthy", weight: 1, governing_window: "seven_day", window_seconds: { five_hour: 18000, seven_day: 604800 }, five_hour_utilization: 0.05, five_hour_resets_at: "2026-09-17T03:30:00.666229Z", seven_day_utilization: 0.71, seven_day_resets_at: "2026-09-19T09:59:59.666254Z" },
   ],
+};
+
+/**
+ * TOG-7648 fixtures: every account blown, so `serviceableAccountCount == 0`
+ * and the count-gated trip still fires. The live storm documents above keep a
+ * healthy sibling and now SERVE — that is the fix, not a fixture rot.
+ */
+const CLAUDE_ALL_TRIPPED = {
+  ...CLAUDE_LIVE,
+  records: [CLAUDE_LIVE.records[0], { ...CLAUDE_LIVE.records[1], five_hour_utilization: 1.0 }],
 };
 
 const CODEX_LIVE = {
@@ -237,12 +259,29 @@ describe("TOG-3107: a tripped serviceability window is a hard stop", () => {
     expect(verdict.accounts[0]).toMatchObject({ serviceable: false, state: "exhausted" });
   });
 
-  it("does not let the healthy peer account rescue the tripped lane", () => {
+  it("lets the healthy peer account carry the lane while the tripped account stays excluded", () => {
+    // TOG-7648: the count-gated predicate. The lane serves through the
+    // healthy sibling, and the tripped account is excluded at the account
+    // level — serviceable:false, state:"exhausted", recommendedShare 0 — so
+    // dispatch never rides it. That per-account exclusion is what carries
+    // TOG-3107's no-failover evidence now.
     const verdict = liveVerdict(CLAUDE, CLAUDE_LIVE);
+    expect(verdict.serviceable).toBe(true);
+    expect(verdict.state).toBe("on");
+    expect(verdict.reason).toBe("ok");
+    expect(verdict.serviceableAccountCount).toBe(1);
+    expect(verdict.accounts[0]).toMatchObject({ serviceable: false, state: "exhausted", recommendedShare: 0 });
+    expect(verdict.accounts[1]).toMatchObject({ serviceable: true, state: "on", recommendedShare: 1 });
+  });
+
+  it("still hard-stops when every account is tripped (serviceableAccountCount == 0)", () => {
+    // The preserved half of the old assertion: with nothing left to serve,
+    // the count-gated trip fires exactly as TOG-3107 specified.
+    const verdict = liveVerdict(CLAUDE, CLAUDE_ALL_TRIPPED);
     expect(verdict.serviceable).toBe(false);
     expect(verdict.state).toBe("exhausted");
     expect(verdict.reason).toBe("serviceability-window-exhausted");
-    expect(verdict.serviceableAccountCount).toBe(1);
+    expect(verdict.serviceableAccountCount).toBe(0);
     expect(verdict.urgentResetAt).toBe("2026-09-16T23:20:00.443Z");
   });
 
@@ -261,9 +300,13 @@ describe("TOG-3107: a tripped serviceability window is a hard stop", () => {
     expect(verdict.urgentResetAt).toBe("2026-09-23T12:57:28.988Z");
   });
 
-  it("fallback proof: claude tripped + codex exhausted selects a live lane, never a 429 lane", () => {
+  it("fallback proof: claude condemned + codex exhausted selects a live lane, never a 429 lane", () => {
+    // TOG-7648: "condemned" now means every account blown
+    // (serviceableAccountCount == 0), so this board uses CLAUDE_ALL_TRIPPED.
+    // The count-gated trip fires exactly as TOG-3107 specified; the pick
+    // lands on a live lane, never a 429 lane.
     const ledger = ledgerOf([
-      ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_LIVE)],
+      ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_ALL_TRIPPED)],
       ["cliproxy-codex", liveVerdict(CODEX, CODEX_LIVE, 0.2)],
       ["cliproxy-opencode-go", liveVerdict(OPENCODE_GO, OPENCODE_GO_LIVE)],
       ["cliproxy-zai", liveVerdict(ZAI, ZAI_LIVE)],
@@ -274,10 +317,35 @@ describe("TOG-3107: a tripped serviceability window is a hard stop", () => {
       config: config({ models: stormModels(), laneLedger: ledger }),
     });
     expect(decision.outcome).toBe("selected");
-    // Z.ai is the only serviceable lane left on the live board — the pick
+    // Z.ai is the only serviceable lane left on this board — the pick
     // must land there, not on the claude/codex/opencode-go 429 lanes.
     expect(decision.modelId).toBe("storm-zai");
     for (const dead of ["storm-claude", "storm-codex", "storm-opencode-go"]) {
+      expect(decision.rejections.some((r) => r.stage === "lane-unserviceable" && r.modelId === dead)).toBe(true);
+    }
+  });
+
+  it("TOG-7648 regression: one tripped account + healthy sibling serves at dispatch level", () => {
+    // The card's acceptance test, measured at the selectModel level: the
+    // live storm board — claude-lane-1 at 5h 1.0, claude-lane-2 healthy —
+    // now serves through the sibling, so the cheapest model storm-claude
+    // wins. codex/opencode-go stay rejected lane-unserviceable. The blown
+    // account itself carries share 0 (proven in the lane-level test above),
+    // so dispatch never rides it.
+    const ledger = ledgerOf([
+      ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_LIVE)],
+      ["cliproxy-codex", liveVerdict(CODEX, CODEX_LIVE, 0.2)],
+      ["cliproxy-opencode-go", liveVerdict(OPENCODE_GO, OPENCODE_GO_LIVE)],
+      ["cliproxy-zai", liveVerdict(ZAI, ZAI_LIVE)],
+    ]);
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "tog-7648", labelNames: ["tier:T1"] },
+      config: config({ models: stormModels(), laneLedger: ledger }),
+    });
+    expect(decision.outcome).toBe("selected");
+    expect(decision.modelId).toBe("storm-claude");
+    for (const dead of ["storm-codex", "storm-opencode-go"]) {
       expect(decision.rejections.some((r) => r.stage === "lane-unserviceable" && r.modelId === dead)).toBe(true);
     }
   });
@@ -355,9 +423,15 @@ describe("TOG-3107: a tripped serviceability window is a hard stop", () => {
  * default would pass without the gate under test ever running.
  */
 describe("TOG-3107 requirement 3 on the pre-2990 live roster", () => {
+  // TOG-7648: "both T1 lanes tripped" now means every account blown
+  // (serviceableAccountCount == 0), so the claude entry uses
+  // CLAUDE_ALL_TRIPPED. A single tripped account beside a healthy sibling
+  // SERVES under the count-gated predicate — that is the fix, proven in the
+  // regression test above — and would turn the tier-exhausted assertions
+  // below into selections.
   const stormLedger = (): LaneLedger =>
     ledgerOf([
-      ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_LIVE)],
+      ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_ALL_TRIPPED)],
       ["cliproxy-codex", liveVerdict(CODEX, CODEX_LIVE, 0.2)],
       ["cliproxy-opencode-go", liveVerdict(OPENCODE_GO, OPENCODE_GO_LIVE)],
       ["cliproxy-zai", liveVerdict(ZAI, ZAI_LIVE)],

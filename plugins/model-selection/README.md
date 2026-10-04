@@ -18,6 +18,10 @@ that tier**, and pins the cheapest survivor onto the issue via
 `assigneeAdapterOverrides`. It writes nothing at all until an operator flips
 `selection.mode` to `enforce`.
 
+For the disabled-by-default, report-only account budget evaluator and reservation
+simulator, see [bounded admission shadow](docs/admission-shadow.md). It never
+governs host starts, changes the selection or proves served-account routing.
+
 ## What it deliberately is not
 
 - **It does not classify.** The tier key is read, never inferred (ADR-0007 /
@@ -77,6 +81,18 @@ on its agent's floor. Guessing the volume term is the specific failure this
 plugin exists to avoid.
 
 ---
+
+## Pace-relative lane avoidance
+
+New admission avoids a lane only when its governing-window utilization reaches
+`pacing.avoid`'s default or per-lane threshold **and** utilization exceeds the
+window's elapsed fraction by more than **0.1**. This reuses the pace engine's
+default deadband and its normalized score deviation; equality is not avoided.
+For example, 0.75 utilization at 0.83 elapsed remains eligible even with a 0.75
+threshold, and existing within-tier ordering prefers its near-reset headroom.
+The avoidance margin is the engine default, not a new live setting or a lane's
+optional pace-classification override. Missing/nonfinite scores remain neutral;
+positive exhaustion, outages, tier floors, and quality gates still apply.
 
 ## Two safety properties worth naming
 
@@ -182,17 +198,32 @@ key at all, the same discipline `agentEnv` follows for the ancillary writes.
 
 Every model pin is paired with a context-safe runtime envelope:
 
-- the plugin estimates required context from an explicit caller requirement or
-  the latest issue-scoped run's uncached plus cached input totals;
-- tier volume profiles are deliberately not used for this gate: they contain
-  cumulative multi-turn billing totals, not one request's peak context, so using
-  them would wrongly exclude narrow models before an issue has run;
+- an explicit caller requirement wins; otherwise the plugin uses the maximum
+  single-request prompt in the latest finalized issue run's verified local log;
+- neither run `usage_json` nor tier volume profiles are request-sized: both are
+  cumulative billing usage. They are never summed, averaged, divided by turns,
+  or ceiling-clamped into a supposed observed peak;
+- peak retrieval requires optional `selection.contextRunLogRoot`, the absolute
+  **operator-verified** host run-log root (no default or environment guessing).
+  Unconfigured, inaccessible, malformed, truncated, unsupported, or oversized
+  evidence uses `selection.fleetContextCeilingTokens` with source
+  `fleet-ceiling-fallback`. A verified issue with no finalized history has source
+  `none`. Explicit requirements and genuine observed peaks remain uncapped;
+- decision-tool traces report source, tokens, run ID and evidence/fallback reason.
+  No log text, filesystem path, or credentials are returned. See
+  [the source contract and fixture tests](docs/context-evidence.md);
 - candidates whose roster `contextWindow` is below a real issue estimate are
   rejected at the hard `context-window` gate, including a sticky incumbent;
-- a model narrower than `selection.fleetContextCeilingTokens` gets
-  `CLAUDE_CODE_MAX_CONTEXT_TOKENS=floor(contextWindow * compactionRatio)` in the
-  issue override (defaults: 1,000,000 and 0.75);
-- a model at or above the fleet ceiling gets no issue-level compaction binding.
+- the admission gate (`estimateIssueContext`) caps observed run context at
+  `selection.fleetContextCeilingTokens` (default 1,000,000; held at 200,000
+  for glm-5.3);
+- a model narrower than the AGENT-level `selection.agentEnvContextTokens`
+  (default 1,000,000; unset resolves to the fleet ceiling) gets
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS=max(floor(contextWindow * compactionRatio),
+  min(contextWindow, 250000))` in the issue override (ratio default 0.75;
+  the 250k floor is the 2026-09-19/20 thrash fix);
+- a model at or above the agent-env cap gets no issue-level compaction
+  binding and inherits the agent env instead.
 
 The host shallow-spreads issue `adapterConfig` over the agent config, so an issue
 `env` object replaces the agent's `env` object rather than deep-merging it. The
@@ -248,18 +279,29 @@ Order of operations:
 ### Paired host/plugin decision evidence
 
 `shadowEmit.enabled` is off by default. When enabled, every authoritative
-`advise()` decision appends two `tog2138-decision-v1` records to
-`shadow-decisions/decisions.jsonl`: one tagged `writer: "host"` and one tagged
+`advise()` decision appends two `tog2138-decision-v1` records to the current
+UTC-hour shard in `shadow-decisions/` (`decisions-YYYY-MM-DD-HHZ.jsonl`): one
+tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
 timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
 the comparison stream without restoring the host `tier_dispatcher.py` retired
 by TOG-2481 or adding a second actuator.
 
+Shards stay small on purpose: each hourly shard is rewritten whole on every
+append and capped at `shadowEmit.shardMaxRecords` (default 200, pair-aligned
+so a host/shadow pair is never split). Whole shards older than the newest
+`shadowEmit.retentionShards` (default 48) are deleted; the legacy single-file
+`decisions.jsonl`, if present, is left untouched as historical evidence. The
+one unbounded free-text field, `pickWhy`, is clamped to 8000 characters with
+an explicit `...[truncated N chars]` marker so a single record can never trip
+the host oversized-line drop; structured fields are never truncated.
+
 A bounded interval can be split by writer without copying or changing records:
 
 ```bash
-jq -c 'select(.writer == "host")' decisions.jsonl > host.jsonl
-jq -c 'select(.writer == "plugin-shadow")' decisions.jsonl > shadow.jsonl
+cat shadow-decisions/decisions-*.jsonl > interval.jsonl
+jq -c 'select(.writer == "host")' interval.jsonl > host.jsonl
+jq -c 'select(.writer == "plugin-shadow")' interval.jsonl > shadow.jsonl
 python3 "$COMPANY_ROOT/ops/tog-2138/gate_harness.py" agreement \
   --host host.jsonl --shadow shadow.jsonl --out agreement.json
 ```
@@ -270,11 +312,15 @@ comparison (maximum 24 hours), use the repository-pinned consumer through:
 
 ```bash
 npm run decisions:summary -- \
-  --input decisions.jsonl \
+  --input shadow-decisions \
   --start 2026-09-14T00:00:00Z \
   --end 2026-09-15T00:00:00Z \
   --out summary-24h.json
 ```
+
+`--input` accepts a single JSONL file (legacy `decisions.jsonl`) or a
+directory of UTC-hour shards; a directory reads every matching shard in
+lexical (= chronological) order and ignores non-shard files.
 
 That command exits nonzero on empty, missing-writer, malformed, or unpaired
 data. It reports the earliest actual correlated pair as `observationStart` and
@@ -287,7 +333,7 @@ live config with a parsed read-merge-write and readback; do not use a textual
 `replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
 or secret references. TOG-2500 remains a prerequisite for any live config
 write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
-JSONL file as historical evidence. No host service or timer is started or
+shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
 
 ### Config
@@ -501,6 +547,18 @@ The policy does not override pins, force probes, or enable the dormant earn-in
 scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ---
+
+## TOG-11793: the model is decided when the run starts
+
+Pins race the run they are meant to steer (TOG-11780). With the fork's run-model
+hook installed, `onResolveRunModel` decides each issue run's model at its start, from
+hot caches only, under a sticky rule, and returns plain plugin-owned env. It is off
+by default (`runResolve.enabled`), needs `selection.mode: "enforce"`, and, once on,
+retires the creation/assignment pin, `labelOnlyPass`, `balancePass`, `repinPass` and the
+`agent.run.failed` re-pin. Tier labels stay. The fork build declares the capability
+only when built with `MODEL_SELECTION_RUN_RESOLVE=1`, so the default artifact still
+installs on a host without the hook. Operator guide, sticky matrix, rollback and known
+limits: [docs/run-scoped-decision.md](docs/run-scoped-decision.md).
 
 ## Typed narrower than the host
 

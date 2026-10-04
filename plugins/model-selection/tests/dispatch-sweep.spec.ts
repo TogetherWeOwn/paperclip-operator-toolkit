@@ -1,9 +1,9 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Issue } from "@paperclipai/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
+import { DISPATCH_SWEEP_JOB_BUDGET_MS, JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { wakeFailureCodeFor } from "../src/dispatch-reporting.js";
 import { createPlugin } from "../src/worker.js";
 
@@ -729,6 +729,92 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(harness.activity).toHaveLength(2);
     const companyIds = harness.activity.map((entry) => (entry.metadata as { companyId: string }).companyId).sort();
     expect(companyIds).toEqual(["co-1", "co-2"]);
+  });
+
+  it("TOG-7785: stops starting new gather RPCs when the job budget is reached, still emitting a partial summary", async () => {
+    const cards = [
+      issue("i1", { createdAt: new Date(NOW - 60 * 60_000) }),
+      issue("i2", { createdAt: new Date(NOW - 60 * 60_000) }),
+    ];
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }),
+      cards,
+    );
+    withOrchestration(harness, {});
+
+    // The job computes idle against Date.now(), so the mocked clock starts
+    // at the real now (both cards read idle) and jumps past the cooperative
+    // deadline once the first gather completes.
+    let nowMs = NOW;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let orchestrationCalls = 0;
+    const originalOrchestration = harness.ctx.issues.summaries.getOrchestration;
+    harness.ctx.issues.summaries.getOrchestration = (async (input: { issueId: string; companyId: string }) => {
+      orchestrationCalls += 1;
+      const result = await originalOrchestration(input);
+      nowMs = NOW + DISPATCH_SWEEP_JOB_BUDGET_MS + 1;
+      return result;
+    }) as never;
+    const warnLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
+    const originalWarn = harness.ctx.logger.warn.bind(harness.ctx.logger);
+    harness.ctx.logger.warn = ((message: string, metadata: Record<string, unknown>) => {
+      warnLogs.push({ message, metadata });
+      return originalWarn(message, metadata);
+    }) as typeof harness.ctx.logger.warn;
+    let wakeups = 0;
+    harness.ctx.issues.requestWakeup = (async () => {
+      wakeups += 1;
+      return { queued: true, runId: "r1" };
+    }) as typeof harness.ctx.issues.requestWakeup;
+    // TOG-9368: the fix under test — a deadline crossed mid-gather must
+    // skip the second per-issue RPC, not just the next loop iteration.
+    let interactionsCalls = 0;
+    const originalListInteractions = harness.ctx.issues.listInteractions.bind(harness.ctx.issues);
+    harness.ctx.issues.listInteractions = (async (...args: [string, string]) => {
+      interactionsCalls += 1;
+      return originalListInteractions(...args);
+    }) as typeof harness.ctx.issues.listInteractions;
+
+    try {
+      await harness.runJob(JOB_KEYS.dispatchSweep);
+    } finally {
+      nowSpy.mockRestore();
+      harness.ctx.logger.warn = originalWarn;
+    }
+
+    // Named mutant: "deadline check removed". Without it both issues are
+    // gathered and the first pick is woken; with it no *new* gather RPC
+    // starts past the budget and no wake RPC fires.
+    //
+    // TOG-9368: the clock jumps past the deadline while the first
+    // `getOrchestration` is in flight, so the mid-gather checkpoint trips
+    // before `listInteractions` — the first issue is dropped with an
+    // incomplete gather rather than completed without its interactions
+    // read (which would misreport "no pending interactions"). The second
+    // gather never starts.
+    expect(orchestrationCalls).toBe(1);
+    expect(interactionsCalls).toBe(0);
+    expect(wakeups).toBe(0);
+    const stopWarns = warnLogs.filter((entry) => entry.message.includes("stopped before the host RPC wall"));
+    expect(stopWarns).toHaveLength(1);
+    expect(stopWarns[0]?.metadata.budgetMs).toBe(DISPATCH_SWEEP_JOB_BUDGET_MS);
+    expect(stopWarns[0]?.metadata.gathered).toBe(0);
+    // Partial firing still emits metrics and a summary naming the coverage.
+    expect(harness.metrics.length).toBeGreaterThan(0);
+    expect(harness.activity).toHaveLength(1);
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      pickedIssueIds: string[];
+      notes?: string[];
+    };
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    expect(metadata.pickedIssueIds).toEqual([]);
+    expect(metadata.notes?.some((note) => note.includes("partial firing"))).toBe(true);
+    const completeLogs = (
+      harness.logs as Array<{ level: string; message: string; meta: Record<string, unknown> }>
+    ).filter((entry) => entry.message === "dispatch sweep complete");
+    expect(completeLogs).toHaveLength(1);
+    expect(completeLogs[0]?.meta.budgetExhausted).toBe(true);
   });
 });
 

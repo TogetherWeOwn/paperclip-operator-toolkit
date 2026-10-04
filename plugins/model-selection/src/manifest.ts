@@ -2,6 +2,8 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 import { SELECTION_CONFIG_SCHEMA } from "./config/schema.js";
 import { JOB_KEYS, LOCAL_FOLDER_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TOOL_NAMES } from "./constants.js";
+import { RUN_RESOLVE_ENV_KEYS } from "./engine/run-resolve.js";
+import { TIER_POLICY_TOOL_DESCRIPTION, TIER_POLICY_TOOL_DISPLAY_NAME, TIER_POLICY_TOOL_PARAMETERS } from "./tier-policy-tool.js";
 
 const DESCRIPTOR_SCHEMA = {
   type: "object",
@@ -29,10 +31,14 @@ const DESCRIPTOR_SCHEMA = {
       items: { type: "string", enum: ["tools", "structured-output", "vision", "long-context", "computer-use"] },
     },
     requiredContextTokens: { type: "integer", minimum: 1 },
+    admissionShadow: {
+      type: "object",
+      description: "Optional non-secret account/window snapshot. Only evaluated when accountAdmissionShadow.enabled is true; never changes the decision or applies admission.",
+    },
   },
 } as const;
 
-const manifest: PaperclipPluginManifestV1 = {
+const baseManifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: PLUGIN_API_VERSION,
   version: PLUGIN_VERSION,
@@ -156,8 +162,8 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.pollLanes,
       displayName: "Poll lane capacity",
       description:
-        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
-      schedule: "*/5 * * * *",
+        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. TOG-8108: every 2 minutes, inside the tightest publisher-declared freshness budget (180s live) — at 5 minutes, picks older than 180s read every lane UNKNOWN ~half the time. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+      schedule: "*/2 * * * *",
     },
     {
       jobKey: JOB_KEYS.refreshScores,
@@ -179,6 +185,13 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Fetch models.dev's catalogue and compare every roster row's $/Mtok against the list price its LANE's provider publishes. Reports drift to the activity log and stores the diff for an operator to approve — it never writes a price. A 2026-09-22 hand audit found 26 of 117 rows wrong, five of them priced 0/0/0, so this exists to make the next drift visible within a day instead of at the next audit. Daily, not 6-hourly: vendor list prices change on the order of months, and the feed is 4.8 MB.",
       schedule: "41 5 * * *",
+    },
+    {
+      jobKey: JOB_KEYS.refreshAaFreeSync,
+      displayName: "Refresh aa.ai free-list sync",
+      description:
+        "Fetch the official aa.ai FREE-tier legacy list (at most once a day; 429 honors Retry-After; 401/403 stops the source) and store the CAS snapshot plus a per-company reviewable diff of curated model x effort bindings. Report-only: it never writes a binding, pin, tier, or price. Off unless a company enables aaFreeSync.",
+      schedule: "23 6 * * *",
     },
     {
       jobKey: JOB_KEYS.classifyIssues,
@@ -214,6 +227,13 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "TOG-2481 absorption of the standalone dispatch plugin (TOG-747/TOG-706): finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
       schedule: "*/30 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.refreshRunResolve,
+      displayName: "Warm the run-scoped decision snapshot",
+      description:
+        "TOG-11793: reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
+      schedule: "* * * * *",
     },
   ],
   tools: [
@@ -288,6 +308,40 @@ const manifest: PaperclipPluginManifestV1 = {
       parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
     },
     {
+      name: TOOL_NAMES.admissionShadowReport,
+      displayName: "Account admission shadow report",
+      description: "Read the last opt-in bounded account admission shadow snapshot. No reservations, host start coverage or served-account proof; never invokes selection or actuation.",
+      parametersSchema: { type: "object", additionalProperties: false } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.aaFreeSyncReport,
+      displayName: "aa.ai free-list sync report",
+      description:
+        "The last free-list sync diff: which curated model x effort bindings verify against the snapshot, which break and why, which slugs are ambiguous, and which roster rows have no binding. Read-only; writes nothing.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.refreshAaFreeSyncNow,
+      displayName: "Refresh aa.ai free-list sync now",
+      description:
+        "Run the free-list fetch + per-company diff immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a binding, pin, tier, or price.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.tierOutcomes,
+      displayName: "Tier poll outcomes",
+      description:
+        "Per-tier lane-poll success/fail counters: how many polls each tier's lanes served or missed. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.acceptedWorkReport,
+      displayName: "Accepted-work posterior report",
+      description:
+        "Per-cohort accepted-work posteriors: which served model x effort x task-class cohorts have mature accept/rework evidence, and what each cohort's posterior is. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
       name: TOOL_NAMES.setLaneOutage,
       displayName: "Declare or clear a lane outage",
       description:
@@ -317,6 +371,12 @@ const manifest: PaperclipPluginManifestV1 = {
         },
       } as unknown as Record<string, unknown>,
     },
+    {
+      name: TOOL_NAMES.tierPolicy,
+      displayName: TIER_POLICY_TOOL_DISPLAY_NAME,
+      description: TIER_POLICY_TOOL_DESCRIPTION,
+      parametersSchema: TIER_POLICY_TOOL_PARAMETERS as unknown as Record<string, unknown>,
+    },
   ],
   apiRoutes: [
     {
@@ -339,5 +399,42 @@ const manifest: PaperclipPluginManifestV1 = {
     },
   ],
 };
+
+/**
+ * TOG-11793. The capability the fork's run-model hook (TOG-11792) requires of
+ * its one holder per company.
+ */
+export const RUN_MODEL_RESOLVE_CAPABILITY = "run.model.resolve";
+
+declare const __MODEL_SELECTION_RUN_RESOLVE__: boolean | undefined;
+
+/**
+ * Whether this build declares `run.model.resolve` + `modelRouting`. Inlined by
+ * `esbuild.config.mjs` from `MODEL_SELECTION_RUN_RESOLVE=1`, so the choice is
+ * made when the artifact is built and cannot drift with the host's runtime
+ * environment. Off by default: a host that predates the hook rejects an
+ * unknown capability at install, so the default artifact installs everywhere
+ * and the hook-enabled artifact is built deliberately for the fork.
+ */
+export const RUN_RESOLVE_IN_MANIFEST: boolean =
+  typeof __MODEL_SELECTION_RUN_RESOLVE__ === "boolean"
+    ? __MODEL_SELECTION_RUN_RESOLVE__
+    : process.env.MODEL_SELECTION_RUN_RESOLVE === "1";
+
+/**
+ * The manifest, with or without the run-model hook declaration. The extra keys
+ * are widened past the SDK's manifest type because the SDK this package builds
+ * against predates them; the fork host's own validator is the authority.
+ */
+export function buildManifest(runResolve: boolean): PaperclipPluginManifestV1 {
+  if (!runResolve) return baseManifest;
+  return {
+    ...baseManifest,
+    capabilities: [...baseManifest.capabilities, RUN_MODEL_RESOLVE_CAPABILITY],
+    modelRouting: { envKeys: [...RUN_RESOLVE_ENV_KEYS] },
+  } as unknown as PaperclipPluginManifestV1;
+}
+
+const manifest: PaperclipPluginManifestV1 = buildManifest(RUN_RESOLVE_IN_MANIFEST);
 
 export default manifest;

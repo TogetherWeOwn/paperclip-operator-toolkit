@@ -25,8 +25,48 @@ const root = resolve(new URL("..", import.meta.url).pathname);
 const repoRoot = resolve(root, "../..");
 
 const mutants = [
-  // TOG-3930: the re-landed serviceability stop must survive neither a healthy
-  // peer nor an indeterminate roll-up, and account verdicts must agree with it.
+  {
+    name: "lane-avoid-restores-raw-utilization-only",
+    file: "src/engine/pacing.ts",
+    from: "  return score.utilization >= avoidThresholdFor(config, model.laneId) && score.deviation > DEFAULT_MARGIN;",
+    to: "  return score.utilization >= avoidThresholdFor(config, model.laneId);",
+  },
+  {
+    name: "lane-avoid-inclusive-margin-boundary",
+    file: "src/engine/pacing.ts",
+    from: "score.deviation > DEFAULT_MARGIN;",
+    to: "score.deviation >= DEFAULT_MARGIN;",
+  },
+  // TOG-11595: counts-only is a validated producer schema, and cooldowns are
+  // exact-model evidence whose expiry is checked at selection time.
+  {
+    name: "counts-only-inferred-without-tag",
+    file: "src/lane-capacity/counts-only.ts",
+    from: '  if (raw.observationQuality !== "counts-only") return null;',
+    to: '  if (false && raw.observationQuality !== "counts-only") return null;',
+  },
+  {
+    name: "model-cooldown-widens-to-siblings",
+    file: "src/lane-capacity/counts-only.ts",
+    from: '(entry.model === null || entry.model === modelId)',
+    to: '(entry.model === null || typeof entry.model === "string")',
+  },
+  {
+    name: "model-cooldown-expiry-equality-still-blocks",
+    file: "src/lane-capacity/counts-only.ts",
+    from: 'Date.parse(entry.retry_at) > nowMs',
+    to: 'Date.parse(entry.retry_at) >= nowMs',
+  },
+  {
+    name: "transient-error-cooldown-excludes",
+    file: "src/lane-capacity/counts-only.ts",
+    from: 'entry.reason !== "transient_error" &&',
+    to: 'true &&',
+  },
+  // TOG-3930 / TOG-7648: the serviceability stop is count-gated — the lane is
+  // condemned only when a trip exists AND no account can still serve. A healthy
+  // peer carries the lane, but an indeterminate peer must not mask the trip,
+  // and the tripped account itself stays excluded (account verdicts agree).
   {
     name: "serviceability-ignore-margin",
     file: "src/lane-capacity/pace.ts",
@@ -52,16 +92,32 @@ const mutants = [
     to: '      const exhausted = account.health === "exhausted" || account.health === "unavailable";',
   },
   {
-    name: "serviceability-healthy-peer-rescues-lane",
+    // TOG-7648: restores the pre-fix defect — ANY trip condemns the lane even
+    // with a healthy sibling serving. Killed by the healthy-peer-carries test
+    // (lane level) and the TOG-7648 dispatch-level regression.
+    name: "serviceability-any-trip-poisons-lane",
     file: "src/lane-capacity/pace.ts",
-    from: "  if (internal.some((entry) => entry.tripped)) {",
-    to: "  if (internal.every((entry) => entry.tripped)) {",
+    from: "  if (internal.some((entry) => entry.tripped) && serviceableAccountCount === 0) {",
+    to: "  if (internal.some((entry) => entry.tripped)) {",
   },
   {
-    name: "serviceability-indeterminate-peer-masks-trip",
+    // TOG-7648: off-by-one on the count — condemns while one account can still
+    // serve. Killed by the same sibling-serve tests; the all-tripped tests
+    // still pass under it (count 0 condemns either way), so its killer set is
+    // disjoint from the remove-lane-hard-stop mutant below.
+    name: "serviceability-count-off-by-one-condemns-with-a-healthy-peer",
     file: "src/lane-capacity/pace.ts",
-    from: "  if (internal.some((entry) => entry.tripped)) {",
-    to: "  if (internal.some((entry) => entry.tripped) && !internal.some((entry) => entry.indeterminateWeight || entry.indeterminateGovernor)) {",
+    from: "  if (internal.some((entry) => entry.tripped) && serviceableAccountCount === 0) {",
+    to: "  if (internal.some((entry) => entry.tripped) && serviceableAccountCount <= 1) {",
+  },
+  {
+    // TOG-7648: an indeterminate peer must not mask the trip via the count.
+    // Counting every account as serviceable re-opens the lane whenever the
+    // peer is merely unknown. Killed by the indeterminate-peer tests.
+    name: "serviceability-indeterminate-account-counts-as-serviceable",
+    file: "src/lane-capacity/pace.ts",
+    from: "  const serviceableAccountCount = internal.filter((entry) => entry.verdict.serviceable).length;",
+    to: "  const serviceableAccountCount = internal.length;",
   },
   {
     name: "serviceability-latest-reset-instead-of-earliest",
@@ -76,9 +132,13 @@ const mutants = [
     to: "urgentResetAt: null",
   },
   {
+    // TOG-7648: removes the count-gated hard stop entirely. The all-tripped
+    // lane then falls through to `all-accounts-unserviceable` (no reset), so
+    // the all-tripped and opencode-go-monthly tests (reason + earliest reset)
+    // kill it.
     name: "serviceability-remove-lane-hard-stop",
     file: "src/lane-capacity/pace.ts",
-    from: "  if (internal.some((entry) => entry.tripped)) {",
+    from: "  if (internal.some((entry) => entry.tripped) && serviceableAccountCount === 0) {",
     to: "  if (false) {",
   },
   {
@@ -413,6 +473,159 @@ const mutants = [
     file: "src/engine/scores.ts",
     from: "    if (model.enabled !== false) raise(enabledTop, model.id, model.tier);",
     to: "    raise(enabledTop, model.id, model.tier);",
+  },
+  {
+    // TOG-11543: the legacy policy is pinned to the SERVING build, whose T1
+    // capability bar is 0.8 (the operator's t1cap080 carry-forward), not to the
+    // 0.85 tier cut. Reverting it re-introduces the source/serving split the
+    // zero-diff replay exists to catch.
+    name: "t1-capability-bar-reverts-to-tier-cut",
+    file: "src/engine/tier-policy.ts",
+    from: '    legacyTier("T1", "T1", 2, T1_CAPABILITY_THRESHOLD),',
+    to: '    legacyTier("T1", "T1", 2, SCORE_THRESHOLDS.T1),',
+  },
+  {
+    // The veto margin is an evaluator constant, not policy data. Widening it
+    // lets a proven-bad model keep its capable verdict.
+    name: "legacy-veto-margin-widened",
+    file: "src/engine/tier-policy.ts",
+    from: "  vetoMargin: 0.1,",
+    to: "  vetoMargin: 0.15,",
+  },
+  {
+    // A numeric rule over the free list has no published index version, so it
+    // is never enforced as written. Reporting it "enforced" would show an
+    // operator a raw index cut that the router does not apply.
+    name: "version-unknown-rule-reported-enforced",
+    file: "src/engine/tier-policy.ts",
+    from: '  return "not-enforced-version-unknown";',
+    to: '  return "enforced";',
+  },
+  {
+    // An edit may not strip an S-tier's flag. Relaxing an S-tier needs a
+    // recorded CEO decision, never a quiet policy edit.
+    name: "s-tier-flag-drop-allowed",
+    file: "src/engine/tier-policy.ts",
+    from: "    if (!after.sTier) push(",
+    to: "    if (false && !after.sTier) push(",
+  },
+  {
+    // No unversioned cross-index comparisons: "latest" and "unknown" are not
+    // versions.
+    name: "unversioned-metric-accepted",
+    file: "src/engine/tier-policy.ts",
+    from: 'const UNVERSIONED = new Set(["", "latest", "unknown"]);',
+    to: 'const UNVERSIONED = new Set([""]);',
+  },
+  {
+    // Two tiers with the same cut overlap: the upper one can never be labelled.
+    name: "legacy-ladder-allows-equal-cuts",
+    file: "src/engine/tier-policy.ts",
+    from: "    if (!(upper.legacy?.scoreThreshold > lower.legacy?.scoreThreshold)) {",
+    to: "    if (!(upper.legacy?.scoreThreshold >= lower.legacy?.scoreThreshold)) {",
+  },
+  // TOG-12490: the `model_selection_tier_policy` edit path. Each guard below is
+  // one TOG-11549 D3/D4/D6 refusal; killed by tests/tier-policy/tier-policy-edit.spec.ts
+  // (and, for the worker log, tests/tool-error-shape-part2.spec.ts).
+  {
+    // D4 compare-and-set: a proposal against a stale revision is a lost update.
+    name: "tier-policy-edit-skips-revision-cas",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "  if (request.expectedRevision !== undefined && baseRevision !== null && request.expectedRevision !== baseRevision) {",
+    to: "  if (false) {",
+  },
+  {
+    // A mutating action with no expectedRevision cannot be compare-and-set at all.
+    name: "tier-policy-edit-expected-revision-optional",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "    if (request.expectedRevision === undefined) {",
+    to: "    if (false) {",
+  },
+  {
+    // D3: every mutation carries a reason for the audit record.
+    name: "tier-policy-edit-reason-optional",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "    if (reason === null) issues.push(",
+    to: "    if (false) issues.push(",
+  },
+  {
+    // Removing the default tier leaves the router with no tier to fall back to.
+    name: "tier-policy-edit-removes-default-tier",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "  if (base.defaultTierId === tierId) {",
+    to: "  if (false) {",
+  },
+  {
+    // Removing a tier a task class still names leaves a dangling reference.
+    name: "tier-policy-edit-removes-referenced-tier",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "  if (referencing.length > 0) {",
+    to: "  if (false) {",
+  },
+  {
+    // A tier id is the key every label, pin and ref uses; an edit may only rename.
+    name: "tier-policy-edit-allows-id-change",
+    file: "src/engine/tier-policy-edit.ts",
+    from: '    if (key === "id") {\n      issues.push({ path: "patch.id", code: "immutable-id", message: "a tier id never changes; rename with patch.name" });\n    } else if (!(EDITABLE_TIER_FIELDS as readonly string[]).includes(key)) {',
+    to: '    if (false) {\n      issues.push({ path: "patch.id", code: "immutable-id", message: "a tier id never changes; rename with patch.name" });\n    } else if (key !== "id" && !(EDITABLE_TIER_FIELDS as readonly string[]).includes(key)) {',
+  },
+  {
+    // A partial legacy patch must merge; replacing it wholesale silently drops
+    // the capability bar the caller did not mention.
+    name: "tier-policy-edit-replaces-legacy-wholesale",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "    next[key] = MERGED_TIER_FIELDS.has(key) && isPlainObject(value)",
+    to: "    next[key] = false && isPlainObject(value)",
+  },
+  {
+    // Without `previous`, an edit could drop an S-tier flag or lower its bar.
+    name: "tier-policy-edit-validates-without-previous",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "  const issues = validateTierPolicy(proposed, { previous: base });",
+    to: "  const issues = validateTierPolicy(proposed);",
+  },
+  {
+    // A supplied base that already cleared an S-tier flag launders the
+    // relaxation unless the built-in active policy is checked too.
+    name: "tier-policy-edit-trusts-supplied-base-s-tier",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "  if (!baseIsActive) {",
+    to: "  if (false) {",
+  },
+  {
+    // D4: with no proven CAS persistence path the outcome is never "accepted".
+    name: "tier-policy-edit-reports-accepted",
+    file: "src/engine/tier-policy-edit.ts",
+    from: '    outcome: ok ? "proposalOnly" : "rejected",',
+    to: '    outcome: ok ? "accepted" : "rejected",',
+  },
+  {
+    name: "tier-policy-edit-reports-persisted",
+    file: "src/engine/tier-policy-edit.ts",
+    from: "    persisted: false,",
+    to: "    persisted: ok,",
+  },
+  {
+    // The reason is free text from the caller; it belongs in `data`, not the plugin log.
+    name: "tier-policy-tool-logs-reason",
+    file: "src/worker.ts",
+    from: "            changedPaths: result.diff.length,",
+    to: "            changedPaths: result.diff.length,\n            reason: result.reason,",
+  },
+  {
+    // The no-stats branch is the capability GATE, not the tier cut. Reading the
+    // cut here moves T1 from 0.8 to 0.85 for every model with no T1 history.
+    name: "no-stats-capability-reads-tier-cut",
+    file: "src/engine/scores.ts",
+    from: "          capable: pp >= capabilityThresholds[tier],",
+    to: "          capable: pp >= scoreThresholds[tier],",
+  },
+  {
+    // Same split on the stats branch.
+    name: "summarize-capability-reads-tier-cut",
+    file: "src/engine/scores.ts",
+    from: "      ? summarize(stats, tier, pp, capability.priorK, capability.provenN, capabilityThresholds, capability.vetoMargin)",
+    to: "      ? summarize(stats, tier, pp, capability.priorK, capability.provenN, scoreThresholds, capability.vetoMargin)",
   },
   {
     // TOG-2674: an exhausted account with utilization 1 must not dilute a
@@ -824,8 +1037,14 @@ const mutants = [
     // to two cards, and a card inherits another card's context estimate.
     name: "drop-issueid-precedence-guard",
     file: "src/sql.ts",
-    from: "\n            and context_snapshot->>'issueId' is null",
-    to: "",
+    // TOG-11632: the creation pin's live-runs lookup reuses this exact
+    // guarded shape, so the bare guard line now matches twice. Anchor on the
+    // trailing `finished_at is not null`, which only the context-lookup query
+    // has after it — the mutant still drops exactly the precedence guard.
+    from:
+      "\n            and context_snapshot->>'issueId' is null\n" +
+      "            and finished_at is not null",
+    to: "\n            and finished_at is not null",
   },
   {
     // TOG-2862: `repinPass` reads the context estimate in `describeIssue` and
@@ -833,14 +1052,151 @@ const mutants = [
     // per-pass cache restores two unindexed heartbeat_runs reads per
     // re-pinnable candidate — the shape that hit the host's 300 s RPC wall.
     //
-    // `balancePass` makes a character-identical call two levels deeper, so the
-    // anchor is newline-prefixed: it pins the indentation exactly, and the
-    // occurrence check above turns a reindent into BROKEN GATE rather than a
-    // mutant that silently moves to the wrong pass.
+    // Keep the effective-tier argument intact: this mutant only removes
+    // the context cache, not the repin tier-safety guard. TOG-11688: the
+    // converted repin row body carries 16-space indentation (was 14 on the
+    // #457 base); dropping the cache argument still restores the double-read
+    // shape, killed by the "reads the heartbeat context at most once per
+    // re-pinnable candidate" test in tests/scheduled-passes.spec.ts.
     name: "drop-repin-context-cache",
     file: "src/worker.ts",
-    from: "\n              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
-    to: "\n              const result = await advise(company.id, { issueId }, false, undefined, true);",
+    from: "\n                const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);",
+    to: "\n                const result = await advise(company.id, { issueId }, false, tier, true);",
+  },
+  {
+    // TOG-11592: a dead pin must not lose its recorded tier during selection.
+    // TOG-11688: the repin body is a row callback, one indent deeper.
+    name: "repin-drops-effective-tier",
+    file: "src/worker.ts",
+    from: "\n                const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);",
+    to: "\n                const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
+  },
+  {
+    // TOG-11592: a regular candidate at a stronger rung preempts fallback.
+    name: "fallback-preempts-stronger-regular",
+    file: "src/engine/select.ts",
+    from: "const selectionPool = regularModels.length > 0 ? regularModels : qualified;",
+    to: "const selectionPool = qualified;",
+  },
+  {
+    // TOG-11592: fresh pins still have to satisfy the effective requirement.
+    // TOG-11688: 8-space indentation on the #457 base is unchanged here.
+    name: "repin-keeps-fresh-weaker-pin",
+    file: "src/worker.ts",
+    from: "if (!model || tierIndex(model.tier) < tierIndex(tier)) return false;",
+    to: "if (!model) return false;"
+  },
+  {
+    // TOG-11593: the recovery opener is dropped, so a fresh fallback pin
+    // rides the usability `continue` forever after its normal lane heals.
+    // Killed by the recovery test in tests/repin-fallback-recovery.spec.ts
+    // (verified by hand: 2 failures with the opener removed).
+    name: "repin-holds-recovered-fallback",
+    file: "src/worker.ts",
+    from: "                !hasRecoveredNormal &&\n",
+    to: "",
+  },
+  {
+    // TOG-11593: recovery may move sideways to another fallback-only row —
+    // churn that buys no recovery. Killed by the never-sideways test in
+    // tests/repin-fallback-recovery.spec.ts (verified by hand: 2 failures
+    // with the guard removed).
+    name: "repin-moves-fallback-sideways",
+    file: "src/worker.ts",
+    from:
+      "                // TOG-11593: recovery moves back to a normal lane, never\n" +
+      "                // sideways to another fallback-only row — that churn buys no\n" +
+      "                // recovery. Re-stamp an expired pin so the sideways case does\n" +
+      "                // not re-pay advise on every pass, mirroring the same-model\n" +
+      "                // branch above.\n" +
+      "                if (pinnedIsFallbackOnly && selectedModel.fallbackOnly) {\n" +
+      "                  if (pinExpired) {\n" +
+      "                    if (repinDeadlineAt !== null && Date.now() >= repinDeadlineAt) return \"unsettled\";\n" +
+      "                    await recordPinTimestamp(company.id, issueId, nowIso);\n" +
+      "                  }\n" +
+      "                  return \"settled\";\n" +
+      "                }\n",
+    to: "",
+  },
+  // --- TOG-6895 named mutants: pin lifecycle in the repin pass -------------
+  // One per lifecycle behavior. Each is the natural wrong implementation, and
+  // each is killed by the TOG-6895 tests in tests/scheduled-passes.spec.ts
+  // (worker half) or tests/context.spec.ts (env-rewrite half) — verified
+  // locally by applying each mutant and watching the named test fail.
+  {
+    // (a) clear-on-blocked removed: a blocked card's healthy pin survives via
+    // the usability `continue`, re-pinning a card that cannot run and burning
+    // one of the 6 writes/run on a lane reservation nobody needs.
+    name: "repin-keeps-blocked-pin",
+    file: "src/worker.ts",
+    from: '              if (described.status === "blocked") {',
+    to: '              if (false) { // MUTANT repin-keeps-blocked-pin',
+  },
+  {
+    // (a) clears bypass the write budget: with no increment the limit break
+    // never fires and one pass can clear the whole board.
+    // TOG-11688: the clear block is a row callback — it returns "stop" at
+    // the write cap instead of `continue`-ing past it. Re-anchored
+    // TOG-12431 to the gated increment: in advisory mode the clear itself is
+    // skipped, so the budget counts actual writes. The anchor removes only
+    // the write-budget increment.
+    name: "pin-clear-bypasses-write-limit",
+    file: "src/worker.ts",
+    from:
+      "                  if (writesAllowed) repinned += 1;\n" +
+      '                  return repinned >= REPIN_PASS_WRITE_LIMIT ? "stop" : "settled";\n' +
+      "                }",
+    to:
+      '                  return repinned >= REPIN_PASS_WRITE_LIMIT ? "stop" : "settled";\n' +
+      "                }",
+  },
+  {
+    // (b) expiry never fires: stale pins ride the usability `continue`
+    // forever, and the 73/92 stale pins from the 2026-09-27 census stay put.
+    name: "pin-expiry-never-fires",
+    file: "src/worker.ts",
+    from: "              const pinExpired = isPinExpired(pinPinnedAt, issueId, nowMs);",
+    to: "              const pinExpired = false;",
+  },
+  {
+    // (b) the reverse: every pin re-validates every pass, so a healthy fresh
+    // pin churns through advise (and moves whenever a cheaper candidate
+    // exists) instead of holding still.
+    name: "pin-expiry-always-fires",
+    file: "src/worker.ts",
+    from: "              const pinExpired = isPinExpired(pinPinnedAt, issueId, nowMs);",
+    to: "              const pinExpired = true;",
+  },
+  {
+    // (b) missing entry treated as fresh: pins from before the lifecycle
+    // clock (or with a lost stamp) are kept on trust instead of re-validated.
+    name: "pin-missing-timestamp-treated-as-fresh",
+    file: "src/worker.ts",
+    from: '        if (typeof raw !== "string") return true;',
+    to: '        if (typeof raw !== "string") return false;',
+  },
+  {
+    // (c) unknown-assignee branch reverts to wholesale preserve: a repin off
+    // a dead lane leaves the sub-call surfaces resolving to it.
+    // Re-anchored TOG-3688 to the merged cheap-key loop (cheapId target);
+    // still matches once. Killed by the unknown-assignee re-derive test in
+    // tests/context.spec.ts, which expects the snapshot's cheap keys to
+    // follow the NEW model even when the agent env was never read.
+    name: "unknown-assignee-skips-env-rederive",
+    file: "src/engine/context.ts",
+    from:
+      "    for (const key of ANCILLARY_MODEL_ENV_KEYS) {\n" +
+      "      if (!agentEnvKnown && !(key in overrideEnv)) continue;\n" +
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: cheapId };\n" +
+      "    }",
+    to:
+      "  if (agentEnvKnown) {\n" +
+      "    for (const key of ANCILLARY_MODEL_ENV_KEYS) {\n" +
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: cheapId };\n" +
+      "    }\n" +
+      "  }",
   },
   // --- TOG-3132 acceptance-criteria named mutants -------------------------
   // One per failure shape the availability term exists to catch. Each is the
@@ -859,8 +1215,8 @@ const mutants = [
     // "cooldown" is degraded -> `avoid` -> still selectable (TOG-811).
     name: "cooldown-health-merely-down-ranked",
     file: "src/engine/availability.ts",
-    from: '  if (health !== "healthy") {',
-    to: '  if (health !== "healthy" && health !== "cooldown" && health !== "cooling_down") {',
+    from: '  if (health !== "healthy" && !(countsOnly && health === "unknown")) {',
+    to: '  if (health !== "healthy" && !(countsOnly && health === "unknown") && health !== "cooldown" && health !== "cooling_down") {',
   },
   {
     // AC-2: the cooldown must be read off the RECORD. Gating it on the
@@ -997,11 +1353,12 @@ const mutants = [
   {
     // The original defect, exactly: skip any card carrying a tier:* label. 120
     // of 126 eligible open cards carried one and 97.1% of those labels were not
-    // this plugin's, so this single `continue` starved the job completely.
+    // this plugin's, so this single skip starved the job completely.
+    // TOG-11688: the classify body is a row callback returning "settled".
     name: "skip-any-tier-label-unconditionally",
     file: "src/worker.ts",
-    from: "              if (existingLabelTier !== null) {\n                if (!config.classification.reclassifyForeignLabels) continue;\n                if (!isForeignLabel) continue;\n              }",
-    to: "              if (existingLabelTier !== null) continue;",
+    from: "                if (existingLabelTier !== null) {\n                  if (!config.classification.reclassifyForeignLabels) return \"settled\";\n                  if (!isForeignLabel) return \"settled\";\n                }",
+    to: "                if (existingLabelTier !== null) return \"settled\";",
   },
   {
     // Write the new tier label ADDITIVELY instead of replacing the foreign one.
@@ -1032,6 +1389,10 @@ const mutants = [
   // designed, not a coverage gap: what IS mutably load-bearing below is the
   // event wiring, the guards no later re-read duplicates, and the AC3
   // throttle.
+  // TOG-11632 exception to the above: the creation path no longer gates on
+  // `!result.isIdle` at all — the assignment wake's queued run would veto its
+  // own pin — so its two queued-vs-started checks inside `pinnableBeforeStart`
+  // ARE singly load-bearing and get their own mutants below.
   {
     // AC2 exposure-window wiring: driving `pinAtDecisionTime` only from
     // tests (or only from the scheduled passes) left the event path
@@ -1079,13 +1440,49 @@ const mutants = [
     name: "creation-pin-ignores-floor-equal",
     file: "src/worker.ts",
     from:
-      "        if (result.pinnedModelId !== null) return;\n" +
+      // TOG-11794: the check now lives in `pinAtTier`; the same-pick guard
+      // above it keeps this anchor clear of the balance/repin passes' deeper-
+      // indented floor reads.
+      "        if (result.decision.modelId === expectedPinnedModelId) return null;\n" +
       "        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);\n" +
       "        if (result.decision.modelId === floorModelId) {",
     to:
-      "        if (result.pinnedModelId !== null) return;\n" +
+      "        if (result.decision.modelId === expectedPinnedModelId) return null;\n" +
       "        const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);\n" +
       "        if (false) {",
+  },
+  // --- TOG-11794: first pin at event time, classifier off the critical path --
+  // 0 of 130 first runs matched a pin because the creation pin awaited the
+  // classifier (15 s timeout) while the run was claimed in ~2 s. Each mutant
+  // below is the natural regression back to that shape.
+  {
+    // The regression itself: classify before the first write. Killed by the
+    // in-flight timing test (the pin must land while the classifier is held)
+    // and the before-classifier ordering test.
+    name: "creation-pin-awaits-classifier-first",
+    file: "src/worker.ts",
+    from: "        const firstPinnedModelId = await pinAtTier(",
+    to:
+      "        if (!described.hasTierLabel) await classifyForPin(companyId, issueId, described, config, source);\n" +
+      "        const firstPinnedModelId = await pinAtTier(",
+  },
+  {
+    // The first pin is sticky, so a classified DOWN-tier re-pin must suppress
+    // stickiness or `advise` just returns the first pin. Killed by the
+    // down-tier re-pin test.
+    name: "creation-repin-keeps-sticky",
+    file: "src/worker.ts",
+    from: "        const result = await advise(companyId, { issueId }, false, tier, isRepin);",
+    to: "        const result = await advise(companyId, { issueId }, false, tier, false);",
+  },
+  {
+    // A re-pin must stop once the run starts; the change then applies at the
+    // next boundary. Killed by the started-during-classification test and the
+    // TOG-11632 landed-after-start test.
+    name: "creation-repin-skips-started-check",
+    file: "src/worker.ts",
+    from: "        if (!(await pinnableBeforeStart(companyId, issueId))) {\n          if (isRepin) {",
+    to: "        if (false) {\n          if (isRepin) {",
   },
   {
     // AC3: the notice must fire once per throttle window, not once per
@@ -1095,6 +1492,28 @@ const mutants = [
     file: "src/worker.ts",
     from: "          if (!Number.isNaN(lastAtMs) && Date.now() - lastAtMs < NO_ELIGIBLE_NOTICE_THROTTLE_MS) return;",
     to: "          if (false) return;",
+  },
+  // --- TOG-11632 named mutants: pinnableBeforeStart's queued-vs-started ----
+  // The creation path's whole point is pinning THROUGH the wake's queued run,
+  // so each of these two checks is the line between "the fix works" and
+  // "pins onto live work". Each is killed by its named TOG-11632 test in
+  // tests/creation-pin.spec.ts — verified by hand-applying each mutant and
+  // watching that test fail.
+  {
+    // Dropping the per-run check pins onto a STARTED run — exactly the
+    // warm-session reset the old strict-idle gate existed to prevent.
+    name: "creation-pin-drops-queued-check",
+    file: "src/worker.ts",
+    from: '          return run.status === "queued" && run.started_at == null;\n        });\n      };',
+    to: '          return true;\n        });\n      };',
+  },
+  {
+    // Dropping the status half lets a `running` row whose started_at is not
+    // yet populated through — only the status test refuses it.
+    name: "creation-pin-ignores-running-status",
+    file: "src/worker.ts",
+    from: '          return run.status === "queued" && run.started_at == null;\n        });\n      };',
+    to: '          return run.started_at == null;\n        });\n      };',
   },
 
   // --- TOG-3132 second failure shape: the LANE-EVIDENCE term ----------------
@@ -1249,12 +1668,17 @@ const mutants = [
     // The whole point of the card: a repin that evacuates the main model off an
     // exhausted lane and leaves the haiku-class sub-calls pointed at it. That
     // is not a degradation — run 6d0c6de7 on TOG-3002 died `acpx_turn_failed`.
+    // Under TOG-3116 this anchor pins the PIN-LANE loop's write (the only
+    // place `input.model.id` is written to env); the cheap-key loop has its
+    // own drop mutant below. TOG-6895/main re-shaped the loop bodies (unknown-
+    // assignee carry rule, blocked-model gate) but the two anchor lines are
+    // unchanged, still matching once.
     name: "drop-subcall-surface-pins",
     file: "src/engine/context.ts",
     from:
       "      if (isSecretBinding(env[key])) continue;\n" +
       "      env[key] = { type: \"plain\", value: input.model.id };\n",
-    to: "      void key;\n",
+    to: "    void key;\n",
   },
   {
     // The dangerous half. `assigneeAdapterOverrides.adapterConfig` merges into
@@ -1280,11 +1704,144 @@ const mutants = [
   {
     // A secret-bound surface cannot be read back or reconstructed, so we never
     // clobber one — the same rule `ancillaryDriftForAgent` applies when it
-    // refuses to call a secret-bound surface "drifted".
+    // refuses to call a secret-bound surface "drifted". One mutant covers BOTH
+    // guarded loops (TOG-3116's pin-lane loop and the cheap-key loop):
+    // removing either guard alone would be a weaker mutant than the code now
+    // contains, and a shared anchor would match twice.
+    // Re-anchored TOG-3688 to the merged write block (unknown-assignee carry
+    // rule + blocked-model gate + cheapPick fallback); still matches once.
     name: "overwrite-a-secret-bound-subcall-surface",
     file: "src/engine/context.ts",
-    from: "      if (isSecretBinding(env[key])) continue;\n",
+    from:
+      "    for (const key of PIN_LANE_MODEL_ENV_KEYS) {\n" +
+      "      if (!agentEnvKnown && !(key in overrideEnv)) continue;\n" +
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: input.model.id };\n" +
+      "    }\n" +
+      "    const cheapPick = input.cheapModelId || input.model.id;\n" +
+      "    const cheapId = isAdapterBlockedModel(cheapPick, input.agentAdapterType)\n" +
+      "      ? input.model.id\n" +
+      "      : cheapPick;\n" +
+      "    for (const key of ANCILLARY_MODEL_ENV_KEYS) {\n" +
+      "      if (!agentEnvKnown && !(key in overrideEnv)) continue;\n" +
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: cheapId };\n" +
+      "    }\n",
+    to:
+      "    for (const key of PIN_LANE_MODEL_ENV_KEYS) {\n" +
+      "      if (!agentEnvKnown && !(key in overrideEnv)) continue;\n" +
+      "      env[key] = { type: \"plain\", value: input.model.id };\n" +
+      "    }\n" +
+      "    const cheapPick = input.cheapModelId || input.model.id;\n" +
+      "    const cheapId = isAdapterBlockedModel(cheapPick, input.agentAdapterType)\n" +
+      "      ? input.model.id\n" +
+      "      : cheapPick;\n" +
+      "    for (const key of ANCILLARY_MODEL_ENV_KEYS) {\n" +
+      "      if (!agentEnvKnown && !(key in overrideEnv)) continue;\n" +
+      "      env[key] = { type: \"plain\", value: cheapId };\n" +
+      "    }\n",
+  },
+  // --- TOG-3116 six-surface evacuation -------------------------------------
+  {
+    // The cheap half of the write: dropping only the ANCILLARY loop's write
+    // leaves the two haiku-class keys wherever the frozen override env had
+    // them — the exact 118-card residue the 00:0xZ board sweep measured.
+    name: "drop-the-cheap-surface-pins",
+    file: "src/engine/context.ts",
+    from:
+      "      if (isSecretBinding(env[key])) continue;\n" +
+      "      env[key] = { type: \"plain\", value: cheapId };\n",
+    to: "      void key; void cheapId;\n",
+  },
+  {
+    // The cheap keys are not the main pin: collapsing the cheap pick onto the
+    // pin prices every background haiku-class call at the pin's tier —
+    // TOG-3116 scope 3 exists to keep that from being the default behavior.
+    // Re-anchored TOG-3688 (`cheapPick` + blocked-model fallback); still
+    // matches once.
+    name: "point-the-cheap-keys-at-the-main-pin",
+    file: "src/engine/context.ts",
+    from: "    const cheapPick = input.cheapModelId || input.model.id;",
+    to: "    const cheapPick = input.model.id;",
+  },
+  {
+    // `cheapestHealthyModelIdForTier` must consult the lane-outage record: on
+    // the rehearsed incident, luna undercuts haiku on blended list price, so a
+    // resolver that skips the outage check resolves the cheap keys straight
+    // back onto the exhausted Codex lane.
+    name: "ignore-the-lane-outage-in-cheap-resolution",
+    file: "src/engine/context.ts",
+    from: "    if (laneOutageExcluded(input.laneOutageOverride, input.nowIso, model)) return false;\n",
     to: "",
+  },
+  {
+    // TOG-3116, remediation half. The balance pass short-circuits on
+    // "the pin is already what we would pick". Restoring that short-circuit
+    // without the envDrifted escape makes the drain unreachable for the exact
+    // 149-card population it exists for — pin healthy, sub-call env frozen —
+    // while every other test stays green. This is the regression that would
+    // ship the fix inert, so it gets its own mutant.
+    // TOG-11688: the balance body is a row callback returning "settled".
+    name: "short-circuit-a-healthy-pin-before-the-env-drift-check",
+    file: "src/worker.ts",
+    from: "if (result.decision.modelId === pinnedModelId && !envDrifted) return \"settled\";",
+    to: "if (result.decision.modelId === pinnedModelId) return \"settled\";",
+  },
+  {
+    // The drain must stop once the board is clean. A predicate hardwired true
+    // rewrites every overridden card on every pass — an infinite write loop
+    // that also resets warm sessions fleet-wide.
+    name: "treat-every-override-env-as-drifted",
+    file: "src/engine/context.ts",
+    from: "  const env = input.existingOverrideEnv;\n  if (!env) return false;",
+    to: "  const env = input.existingOverrideEnv;\n  if (!env) return false;\n  return true;",
+  },
+  {
+    // Secret-bound surfaces cannot be read or rewritten. Flagging one schedules
+    // a write that provably cannot fix what it was scheduled for.
+    name: "flag-secret-bound-surfaces-as-drifted",
+    file: "src/engine/context.ts",
+    from: "    if (entry === undefined || isSecretBinding(entry)) continue;",
+    to: "    if (entry === undefined) continue;",
+  },
+  // --- TOG-11642 agent-env cap split + stamped floor -----------------------
+  {
+    // Collapsing the split reintroduces the defect: with the fleet ceiling
+    // held at 200k for glm-5.3, the pin stamps against 200k instead of the
+    // 1M agent-env cap — Muse's 1,048,576 window gets a 150k stamp instead
+    // of inheriting the agent env. Killed by the config.spec split-
+    // resolution test (fleet 200k + agentEnv 1M must resolve to 1M).
+    name: "collapse-agent-env-cap-onto-fleet-ceiling",
+    file: "src/config/resolve.ts",
+    from:
+      "      agentEnvContextTokens: num(\n" +
+      "        selection.agentEnvContextTokens,\n" +
+      "        num(selection.fleetContextCeilingTokens, 1_000_000),\n" +
+      "      ),",
+    to:
+      "      agentEnvContextTokens: num(\n" +
+      "        selection.fleetContextCeilingTokens,\n" +
+      "        1_000_000,\n" +
+      "      ),",
+  },
+  {
+    // Removing the 250k floor restores the thrash-incident stamp: glm-5.3's
+    // 200k window stamps 150000, which thrashed autocompact and killed ~1 in
+    // 4 runs on 09-19/20. Killed by the TOG-11642 floor tests (200k window
+    // stamps 200000, Sol 272k stamps 250000).
+    name: "remove-stamped-context-floor",
+    file: "src/engine/context.ts",
+    from:
+      "      value: String(\n" +
+      "        Math.max(\n" +
+      "          Math.floor(modelWindow * ratio),\n" +
+      "          Math.min(modelWindow, MIN_STAMPED_CONTEXT_TOKENS),\n" +
+      "        ),\n" +
+      "      ),",
+    to:
+      "      value: String(\n" +
+      "        Math.max(1, Math.floor(modelWindow * ratio)),\n" +
+      "      ),",
   },
   // TOG-3996: price-reconciliation invariants whose failure mode is
   // a confidently-wrong number rather than an error. Each one, broken, still
@@ -1586,58 +2143,1121 @@ const mutants = [
     from: "              note: model.note,\n",
     to: "",
   },
-  // The shard split and the impact gate decide what the sweep covers
-  // and whether it may be skipped, so each is killed by a named spec in
-  // tests/mutation-gate-runtime.spec.ts or tests/mutation-impact.spec.ts.
+  // --- TOG-4959: per-tier poll-outcome counters are read-only telemetry ----
+  // The failure this gate exists to catch is a counter that increments
+  // unconditionally (or never) while reading green: tier rosters audited by
+  // lane means rather than outcomes. Each mutant below breaks one half of a
+  // behavioural pair in tests/tier-outcomes.spec.ts or the worker wiring.
   {
-    name: "shard-selection-slices-overlap",
-    file: "scripts/mutation-gate-runtime.mjs",
-    from: "position % shard.total === shard.index - 1",
-    to: "position % shard.total <= shard.index - 1",
+    // Served polls must increment `succeeded`, not `failed`: counting a
+    // healthy lane as missed inverts the outcome the tool reports.
+    name: "tier-outcomes-success-counted-as-failure",
+    file: "src/engine/tier-outcomes.ts",
+    from: "      if (result.error === null && result.serviceable === true) counter.succeeded += 1;",
+    to: "      if (result.error === null && result.serviceable === true) counter.failed += 1;",
   },
   {
-    name: "shard-empty-spec-means-unsharded",
-    file: "scripts/mutation-gate-runtime.mjs",
-    from: "if (spec === undefined || spec === null) return null;",
-    to: "if (spec === undefined || spec === null || `${spec}`.trim() === \"\") return null;",
+    // An indeterminate poll (no error, serviceable null) is absence of
+    // evidence and must increment `polls` only — the same tri-state
+    // discipline lane-evidence.ts follows for `unproven`.
+    name: "tier-outcomes-indeterminate-counted-as-failure",
+    file: "src/engine/tier-outcomes.ts",
+    from: "      else if (result.error !== null || result.serviceable === false) counter.failed += 1;",
+    to: "      else counter.failed += 1;",
   },
   {
-    name: "impact-plugin-prefix-loses-trailing-slash",
-    file: "scripts/mutation-impact.mjs",
-    from: "Object.freeze([\"plugins/model-selection/\"])",
-    to: "Object.freeze([\"plugins/model-selection\"])",
+    // A disabled roster row is not selectable, so its tier must not earn poll
+    // evidence from its lane — the same rule scores.ts applies to top rungs.
+    name: "tier-outcomes-disabled-rows-earn-evidence",
+    file: "src/engine/tier-outcomes.ts",
+    from: "    if (model.enabled === false) continue;",
+    to: "",
   },
   {
-    name: "impact-unusable-base-reads-clean",
-    file: "scripts/mutation-impact.mjs",
-    from: "if (resolved.base === undefined) return { impacted: true, reason: resolved.reason, matched: [] };",
-    to: "if (resolved.base === undefined) return { impacted: false, reason: resolved.reason, matched: [] };",
+    // The tool must actually be registered under its own name: a handler
+    // wired to the wrong name leaves `model_selection_tier_outcomes`
+    // unregistered, and the harness throws on an unregistered tool.
+    name: "tier-outcomes-tool-never-registered",
+    file: "src/worker.ts",
+    from: "        TOOL_NAMES.tierOutcomes,",
+    to: "        TOOL_NAMES.priceDriftReport,",
+  },
+
+  // --- TOG-5227 user-assigned skip + per-issue isolation --------------------
+  // A user-assigned card (Operator:* cards carry assignee_user_id) rejects
+  // issues.update with an agent override ("Issue can only have one
+  // assignee"). Each mutant is the natural wrong implementation: dropping a
+  // guard the live incident proved load-bearing, not a nonsense edit.
+  {
+    // Without the backstop, labelOnlyPass attempts the pin on a card the
+    // host will reject. The skip test seeds assigneeUserId and asserts no
+    // write happens.
+    // TOG-11688: the label-only body is a row callback returning "settled".
+    name: "label-only-pins-user-assigned-cards",
+    file: "src/worker.ts",
+    from:
+      "                if (described.hasOperatorPin) return \"settled\";\n" +
+      "                // TOG-5227: backstop for the `assignee_user_id is null`\n" +
+      "                // predicate above — a user-assigned card rejects issues.update\n" +
+      "                // with an agent override (\"Issue can only have one assignee\").\n" +
+      "                if (described.assigneeUserId) return \"settled\";\n" +
+      "                const labelTier = tierFromLabels(described.descriptor.labelNames);",
+    to:
+      "                if (described.hasOperatorPin) return \"settled\";\n" +
+      "                const labelTier = tierFromLabels(described.descriptor.labelNames);",
   },
   {
-    name: "impact-missing-base-reads-clean",
-    file: "scripts/mutation-impact.mjs",
-    from: "return { impacted: true, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
-    to: "return { impacted: false, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
+    // Same hole in balancePass: without the backstop the pass attempts the
+    // write on a user-assigned card instead of skipping it.
+    // TOG-11688: the balance body is a row callback returning "settled".
+    name: "balance-pins-user-assigned-cards",
+    file: "src/worker.ts",
+    from:
+      "                if (described.hasOperatorPin) return \"settled\";\n" +
+      "                // TOG-5227: backstop for the `assignee_user_id is null`\n" +
+      "                // predicate above — a user-assigned card rejects issues.update\n" +
+      "                // with an agent override (\"Issue can only have one assignee\").\n" +
+      "                if (described.assigneeUserId) return \"settled\";\n" +
+      "                const status = described.status;",
+    to:
+      "                if (described.hasOperatorPin) return \"settled\";\n" +
+      "                const status = described.status;",
   },
   {
-    name: "impact-failed-diff-reads-clean",
-    file: "scripts/mutation-impact.mjs",
-    from: "return { impacted: true, reason: `git diff ${base}..HEAD failed`, matched: [] };",
-    to: "return { impacted: false, reason: `git diff ${base}..HEAD failed`, matched: [] };",
+    // The shipped defect itself: one card's pin rejection propagates out of
+    // the row loop, aborting the pass for the whole company and skipping the
+    // scan-mark advance. The isolation test throws the exact live error for
+    // i1 and requires i2 to pin plus the watermark to advance.
+    name: "label-only-pin-failure-aborts-pass",
+    file: "src/worker.ts",
+    from: '                ctx.logger.warn("label-only pass skipped a card it could not pin", {',
+    to: '                throw cause; // eslint-disable-line no-throw-literal\n                ctx.logger.warn("label-only pass skipped a card it could not pin", {',
   },
   {
-    name: "impact-diff-loses-nul-separation",
-    file: "scripts/mutation-impact.mjs",
-    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
-    to: "[\"diff\", \"--name-only\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+    // Same abort shape on the balance pinned-branch write site. The pinned
+    // and unpinned branches share the warn line character-for-character, so
+    // the anchor runs through the branch-distinctive advisory-else logger
+    // line TOG-12431 added ("would balance" vs "would pin unpinned card")
+    // to land exactly once.
+    // Re-anchored TOG-3688, TOG-11688 (row callback: the catch returns
+    // "settled"; a throw still aborts the pass because it propagates out of
+    // the walk into the pass-level catch, skipping the scan-mark advance),
+    // then TOG-12431; still matches once. Killed by the TOG-5227
+    // pinned-branch isolation test in tests/scheduled-passes.spec.ts.
+    name: "balance-pin-failure-aborts-pass",
+    file: "src/worker.ts",
+    from:
+      "                    } catch (cause) {\n" +
+      '                      ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
+      "                        companyId: company.id,\n" +
+      "                        issue: identifier,\n" +
+      "                        error: cause instanceof Error ? cause.message : String(cause),\n" +
+      "                      });\n" +
+      '                      return "settled";\n' +
+      "                    }\n" +
+      "                  } else {\n" +
+      '                    ctx.logger.info("balance pass advisory: would balance, nothing written", {\n',
+    to:
+      "                    } catch (cause) {\n" +
+      '                      ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
+      "                        companyId: company.id,\n" +
+      "                        issue: identifier,\n" +
+      "                        error: cause instanceof Error ? cause.message : String(cause),\n" +
+      "                      });\n" +
+      "                      throw cause;\n" +
+      "                    }\n" +
+      "                  } else {\n" +
+      '                    ctx.logger.info("balance pass advisory: would balance, nothing written", {\n',
   },
   {
-    name: "impact-diff-collapses-renames",
-    file: "scripts/mutation-impact.mjs",
-    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
-    to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
+    // Same abort shape on the balance unpinned-branch write site, anchored
+    // through its own advisory-else logger line ("would pin unpinned card").
+    // Re-anchored TOG-12431; still matches once.
+    name: "balance-unpinned-pin-failure-aborts-pass",
+    file: "src/worker.ts",
+    from:
+      "                  } catch (cause) {\n" +
+      '                    ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
+      "                      companyId: company.id,\n" +
+      "                      issue: identifier,\n" +
+      "                      error: cause instanceof Error ? cause.message : String(cause),\n" +
+      "                    });\n" +
+      '                    return "settled";\n' +
+      "                  }\n" +
+      "                } else {\n" +
+      '                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {\n',
+    to:
+      "                  } catch (cause) {\n" +
+      '                    ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
+      "                      companyId: company.id,\n" +
+      "                      issue: identifier,\n" +
+      "                      error: cause instanceof Error ? cause.message : String(cause),\n" +
+      "                    });\n" +
+      "                    throw cause;\n" +
+      "                  }\n" +
+      "                } else {\n" +
+      '                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {\n',
+  },
+
+  // --- TOG-12431: selection gate on every router-owned pin write ---------
+  // Each mutant drops one conjunct of the central gate or removes one site's
+  // check — the natural regressions back to the TOG-12427 defect (advisory
+  // installs writing pins). Each is killed by its named TOG-12431 test in
+  // tests/scheduled-passes.spec.ts, tests/creation-pin.spec.ts or
+  // tests/apply.spec.ts — verified locally by applying each mutant and
+  // watching that test fail.
+  {
+    // Advise mode writes: the mode conjunct is dropped, so an advisory
+    // install pins exactly like enforce. Killed by every advise-shape
+    // TOG-12431 test.
+    name: "selection-gate-ignores-mode",
+    file: "src/actuate/apply.ts",
+    from: '  return config.selection.enabled && config.selection.mode === "enforce";',
+    to: "  return config.selection.enabled;",
+  },
+  {
+    // Selection-disabled writes: the enabled conjunct is dropped, so a
+    // company that switched selection off still pins in enforce mode.
+    // Killed by every selection-disabled TOG-12431 test.
+    name: "selection-gate-ignores-enabled",
+    file: "src/actuate/apply.ts",
+    from: '  return config.selection.enabled && config.selection.mode === "enforce";',
+    to: '  return config.selection.mode === "enforce";',
+  },
+  {
+    // The creation/assignment pin ignores the gate. Killed by the
+    // issue.created advisory tests in tests/creation-pin.spec.ts.
+    name: "creation-pin-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "        const writesAllowed = selectionWritesAllowed(config);\n" +
+      "        if (writesAllowed) {\n" +
+      "          const creationPatch = modelOverrideForContext({\n",
+    to:
+      "        const writesAllowed = true;\n" +
+      "        if (writesAllowed) {\n" +
+      "          const creationPatch = modelOverrideForContext({\n",
+  },
+  {
+    // labelOnlyPass ignores the gate: the parent card's headline defect.
+    // Killed by the labelOnlyPass advisory tests.
+    name: "label-only-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "                if (writesAllowed) {\n" +
+      "                  try {\n" +
+      "                    const labelOnlyPatch = modelOverrideForContext({\n",
+    to:
+      "                if (true) {\n" +
+      "                  try {\n" +
+      "                    const labelOnlyPatch = modelOverrideForContext({\n",
+  },
+  {
+    // The repin clear-on-blocked ignores the gate: advisory clears the pin
+    // instead of just reporting it. Killed by the blocked-card advisory test.
+    name: "repin-clear-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "                  // TOG-12431: clearing a pin mutates a selection variable like\n" +
+      "                  // any other write — advisory reports it without doing it.\n" +
+      "                  if (writesAllowed) {\n" +
+      "                    await ctx.issues.update(\n" +
+      "                      issueId,\n" +
+      "                      { assigneeAdapterOverrides: null } as Parameters<typeof ctx.issues.update>[1],\n" +
+      "                      company.id,\n",
+    to:
+      "                  // TOG-12431: clearing a pin mutates a selection variable like\n" +
+      "                  // any other write — advisory reports it without doing it.\n" +
+      "                  if (true) {\n" +
+      "                    await ctx.issues.update(\n" +
+      "                      issueId,\n" +
+      "                      { assigneeAdapterOverrides: null } as Parameters<typeof ctx.issues.update>[1],\n" +
+      "                      company.id,\n",
+  },
+  {
+    // repinPass ignores the gate on the re-pin write. Killed by the demoted-pin
+    // advisory tests. Anchored through the TOG-12431 comment so the
+    // creation-pin's identical `if (writesAllowed) {` + update shape does not
+    // collide: that site has no such comment.
+    name: "repin-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "                // TOG-12431: the write needs enforcement; the decision and its\n" +
+      "                // log do not.\n" +
+      "                if (writesAllowed) {\n",
+    to:
+      "                // TOG-12431: the write needs enforcement; the decision and its\n" +
+      "                // log do not.\n" +
+      "                if (true) {\n",
+  },
+  {
+    // balancePass ignores the gate on the pinned branch (including the
+    // env-evacuation, which mutates the override like any repin). Killed by
+    // the pinned-card advisory tests. Anchored through the env-evacuation
+    // comment, which no other gate site carries.
+    name: "balance-pinned-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "                  // TOG-12431: the write needs enforcement — including the\n" +
+      "                  // env-evacuation, which mutates the override like any repin.\n" +
+      "                  // The decision and its log do not.\n" +
+      "                  if (writesAllowed) {\n",
+    to:
+      "                  // TOG-12431: the write needs enforcement — including the\n" +
+      "                  // env-evacuation, which mutates the override like any repin.\n" +
+      "                  // The decision and its log do not.\n" +
+      "                  if (true) {\n",
+  },
+  {
+    // balancePass ignores the gate on the unpinned branch. Killed by the
+    // unpinned-card advisory tests. Anchored through that branch's own
+    // comment.
+    name: "balance-unpinned-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "                // TOG-5227: same per-issue isolation as the pinned branch.\n" +
+      "                // TOG-12431: this branch's write is gated like the pinned one.\n" +
+      "                if (writesAllowed) {\n",
+    to:
+      "                // TOG-5227: same per-issue isolation as the pinned branch.\n" +
+      "                // TOG-12431: this branch's write is gated like the pinned one.\n" +
+      "                if (true) {\n",
+  },
+
+  // --- TOG-12206 P2: opt-in free-list sync/discovery/shadow ------------------
+  // Each mutant is the natural wrong implementation of a P2 guarantee: the
+  // default-off posture, the shadow-only evidence, the quota, and the
+  // candidate carry. Killed by tests/aa-free/aa-free-sync.spec.ts and the
+  // aaFreeSync block in tests/config.spec.ts.
+  {
+    // Without the gate, every decision carries the evidence key (null when
+    // v2 is off) and the legacy shape is gone. Killed by the byte-for-byte
+    // legacy test (`"aaEffortEvidence" in decision` is false).
+    name: "aa-free-evidence-attached-when-off",
+    file: "src/worker.ts",
+    from: "        if (v2Evidence) decision.aaEffortEvidence = v2Evidence;",
+    to: "        decision.aaEffortEvidence = v2Evidence;",
+  },
+  {
+    // Stale snapshots must yield ineligible, never a match on old data.
+    // Killed by the stale-snapshot advise test (pure and worker level).
+    name: "aa-free-stale-snapshot-still-evidences",
+    file: "src/aa-free/sync.ts",
+    from:
+      "  const held = input.model.fallbackOnly ? (\"fallback-only\" as const) : null;\n" +
+      "  if (input.stale) {\n" +
+      '    return { ...base, status: "ineligible", candidateId: null, reason: "snapshot-stale", aaIndex: null, held };\n' +
+      "  }",
+    to: "  const held = input.model.fallbackOnly ? (\"fallback-only\" as const) : null;",
+  },
+  {
+    // S-tier stays held even as evidence: sync never lifts a fallback-only
+    // pick. Killed by the held-evidence test (matched and stale legs).
+    name: "aa-free-stier-evidence-unheld",
+    file: "src/aa-free/sync.ts",
+    from: "  const held = input.model.fallbackOnly ? (\"fallback-only\" as const) : null;",
+    to: "  const held = null;",
+  },
+  {
+    // Two bindings claiming one slug means neither may serve as evidence.
+    // Killed by the ambiguous-slug advise test (pure and worker level).
+    name: "aa-free-ambiguous-slug-admitted",
+    file: "src/aa-free/sync.ts",
+    from:
+      "    const claimants = input.bindings.filter((b) => b.aaSlug === looked.binding.aaSlug).length;\n" +
+      "    if (claimants > 1) {\n" +
+      '      return { ...base, status: "ineligible", candidateId: looked.candidateId, reason: "slug-ambiguous", aaIndex: null, held };\n' +
+      "    }",
+    to: "",
+  },
+  {
+    // The D1 quota: a denied source stays stopped for the day. Without the
+    // gate every firing re-fetches. Killed by the 403 test's second firing
+    // (calls stays 1).
+    name: "aa-free-quota-gate-ignored",
+    file: "src/worker.ts",
+    from: "        if (shouldFetchFreeSync({ nextEligibleAt: previous.nextEligibleAt }, nowMs)) {",
+    to: "        if (true) {",
+  },
+  {
+    // 401/403 stops the source: no substitution, no retry. A retryable
+    // back-off would re-fetch in an hour. Killed by the 403 test's
+    // nextEligibleAt assertion (>23h, not ~1h).
+    name: "aa-free-access-denied-retried",
+    file: "src/worker.ts",
+    from:
+      "                const outcome: FreeFetchOutcome =\n" +
+      '                  result.error === "aa-access-denied"\n' +
+      '                    ? "fatal"',
+    to:
+      "                const outcome: FreeFetchOutcome =\n" +
+      '                  result.error === "aa-access-denied"\n' +
+      '                    ? "retryable"',
+  },
+  {
+    // The carry, never a re-derivation: substituting the model id for the
+    // evidenced candidate silently points at a different candidate. Killed
+    // by the recoverSelectedCandidate carry test.
+    name: "aa-free-candidate-id-substituted",
+    file: "src/aa-free/sync.ts",
+    from: "  return { ...found, candidateId: decision.aaEffortEvidence?.candidateId ?? null };",
+    to: "  return { ...found, candidateId: decision.modelId };",
+  },
+  {
+    // Duplicate binding keys must yield no evidence rather than wrong
+    // evidence (the breakage surfaces in the per-company diff instead).
+    // Without the guard the constructor throw propagates out of advise.
+    // Killed by the duplicate-keys test (expects null).
+    name: "aa-free-duplicate-keys-throw-through-advise",
+    file: "src/aa-free/sync.ts",
+    from:
+      "  let registry: AaEffortRegistry;\n" +
+      "  try {\n" +
+      "    registry = new AaEffortRegistry(input.bindings);\n" +
+      "  } catch {\n" +
+      "    // Duplicate keys in unverified input: no evidence rather than wrong\n" +
+      "    // evidence. The breakage itself surfaces in the per-company diff.\n" +
+      "    return null;\n" +
+      "  }",
+    to: "  const registry = new AaEffortRegistry(input.bindings);",
+  },
+  {
+    // The report tool must actually be registered under its own name (same
+    // shape as the tier-outcomes precedent above). Killed by the registry
+    // test, which executes every TOOL_NAMES entry.
+    name: "aa-free-report-tool-never-registered",
+    file: "src/worker.ts",
+    from: "        TOOL_NAMES.aaFreeSyncReport,",
+    to: "        TOOL_NAMES.priceDriftReport,",
+  },
+  {
+    // Same for the manual refresh tool. Killed by the same registry test.
+    name: "aa-free-refresh-tool-never-registered",
+    file: "src/worker.ts",
+    from: "        TOOL_NAMES.refreshAaFreeSyncNow,",
+    to: "        TOOL_NAMES.reconcilePricesNow,",
+  },
+  {
+    // Default-off: an absent section leaves dispatch identical to today.
+    // Killed by the default-off config test.
+    name: "aa-free-sync-enabled-by-default",
+    file: "src/config/resolve.ts",
+    from: "      enabled: bool(aaFreeSync.enabled, false),",
+    to: "      enabled: bool(aaFreeSync.enabled, true),",
+  },
+  // --- TOG-12972: first-party accepted-work posterior producer ------------
+  // Each guard below is one card-requirement refusal; killed by
+  // tests/accepted-work.spec.ts (pure) or tests/accepted-work-worker.spec.ts
+  // (worker), verified by hand-applying each mutant.
+  {
+    // Default-off: an absent section builds no overlay. Killed by the
+    // default-off config test and the disabled-builds-nothing worker test.
+    name: "accepted-work-enabled-by-default",
+    file: "src/config/resolve.ts",
+    from: "    acceptedWork: {\n      enabled: bool(acceptedWork.enabled, false),\n    },",
+    to: "    acceptedWork: {\n      enabled: bool(acceptedWork.enabled, true),\n    },",
+  },
+  {
+    // The overlay must be gated: without the flag the job must not build or
+    // store it. Killed by the disabled-builds-nothing worker test.
+    name: "accepted-work-built-when-disabled",
+    file: "src/worker.ts",
+    from: "            if (config.acceptedWork.enabled) {",
+    to: "            if (true) {",
+  },
+  {
+    // The effort-control rule: a max observation must never score a high
+    // cell. Killed by the max-never-lands-in-high pure test.
+    name: "accepted-work-effort-borrows-high-for-max",
+    file: "src/accepted-work/cohort.ts",
+    from: "  if (!MEASURABLE_EFFORTS.has(effort)) {",
+    to: "  if (effort === \"max\") return { status: \"known\", servedEffort: \"high\", reason: \"pinned-effort\" };\n  if (!MEASURABLE_EFFORTS.has(effort)) {",
+  },
+  {
+    // Unknown served identity stays unassigned: it is never inferred from
+    // the requested model name. Killed by the served-not-requested test.
+    name: "accepted-work-infers-served-from-pin",
+    file: "src/accepted-work/posterior.ts",
+    from: "  const model = resolveServedModel(card.rawServedModel, models);",
+    to: "  const model = card.rawServedModel ? { status: \"known\", servedModel: card.rawServedModel, reason: \"exact-match\" } : resolveServedModel(card.rawServedModel, models);",
+  },
+  {
+    // Alias-ambiguous identities are rejected, never suffix-matched. Killed
+    // by the bare-suffix-stays-unknown pure test.
+    name: "accepted-work-suffix-matches-ambiguous-id",
+    file: "src/accepted-work/cohort.ts",
+    from: "  // Fail closed: no suffix match, no alias expansion, no case folding. A bare",
+    to: "  const suffix = models.find((model) => trimmed.endsWith(model.id) || model.id.endsWith(trimmed));\n  if (suffix) {\n    return { status: \"known\", servedModel: suffix.id, reason: \"exact-match\" };\n  }\n  // Fail closed: no suffix match, no alias expansion, no case folding. A bare",
+  },
+  {
+    // S-tier cohorts stay held: the overlay never lifts a fallbackOnly row.
+    // Killed by the held S-tier tests (pure and worker level).
+    name: "accepted-work-stier-evidence-unheld",
+    file: "src/accepted-work/posterior.ts",
+    from: "  const held = served?.fallbackOnly === true ? (\"fallback-only\" as const) : null;",
+    to: "  const held = null;",
+  },
+  {
+    // The 14-day censor: young cards are pending, never scored. Killed by the
+    // censor-as-pending pure test.
+    name: "accepted-work-omits-14-day-censor",
+    file: "src/accepted-work/posterior.ts",
+    from: "    const resolved = rows.filter((r) => r.rejected || input.nowMs - r.closedAtMs >= censorMs);",
+    to: "    const resolved = rows.filter((r) => true);",
+  },
+  {
+    // The false-positive control: deleting the no-stats capability guard
+    // must fail. Killed by the existing "keeps tier and per-tier capable
+    // independent" test in tests/benchmark-prior.spec.ts (verified by hand:
+    // a low-prior no-stats model reads capable:false, true under the mutant).
+    name: "accepted-work-capability-guard-removed",
+    file: "src/engine/scores.ts",
+    from: "          capable: pp >= capabilityThresholds[tier],",
+    to: "          capable: true,",
+  },
+  {
+    // The report tool must actually be registered under its own name (same
+    // shape as the aa-free precedent). Killed by the registry test, which
+    // executes every TOOL_NAMES entry.
+    name: "accepted-work-report-tool-never-registered",
+    file: "src/worker.ts",
+    from: "        TOOL_NAMES.acceptedWorkReport,",
+    to: "        TOOL_NAMES.tierOutcomes,",
+  },
+  // --- TOG-12305: same-model env repair of a poisoned pin -----------------
+  // Each is killed by tests/pin-env-repair.spec.ts (verified by hand).
+  {
+    // The repair pre-empts a writing pin path, so a fresh pin or an allowed
+    // pace repin lands on the OLD model instead of the decision's.
+    name: "env-repair-preempts-pin-path",
+    file: "src/actuate/apply.ts",
+    from: "  if (plan.write || decision.advisory || !context.hasExistingOverride || !context.envRepair) return plan;",
+    to: "  if (decision.advisory || !context.hasExistingOverride || !context.envRepair) return plan;",
+  },
+  {
+    // Enforcement off must still mean this plugin writes nothing at all.
+    name: "env-repair-writes-in-advisory",
+    file: "src/actuate/apply.ts",
+    from: "  if (plan.write || decision.advisory || !context.hasExistingOverride || !context.envRepair) return plan;",
+    to: "  if (plan.write || !context.hasExistingOverride || !context.envRepair) return plan;",
+  },
+  {
+    // A stale-ref verdict without the assignee env is a guess (TOG-3045).
+    name: "stale-refs-read-unknown-agent-env",
+    file: "src/engine/context.ts",
+    from: "  if (!existingOverrideEnv || agentEnv === null || agentEnv === undefined) return [];",
+    to: "  if (!existingOverrideEnv) return [];\n  agentEnv = agentEnv ?? {};",
+  },
+  {
+    // The host keys a binding on secret + path, not version.
+    name: "stale-refs-compare-version",
+    file: "src/engine/context.ts",
+    from: "  return typeof ref === \"string\" && ref.length > 0 ? `${String(record.type)}:${ref}` : null;",
+    to: "  return typeof ref === \"string\" && ref.length > 0 ? `${String(record.type)}:${ref}:${String(record.version)}` : null;",
+  },
+  {
+    // An optional user secret never blocks a run, so it is never stale.
+    name: "stale-refs-enforce-optional-user-refs",
+    file: "src/engine/context.ts",
+    from: "    if (record.type === \"user_secret_ref\" && (record.required === false || record.allowMissingOverride === true)) {",
+    to: "    if (false) {",
+  },
+  {
+    name: "run-failure-repair-ignores-advisory",
+    file: "src/worker.ts",
+    from: "        if (!result || !result.hasOverride || result.decision.advisory) return;",
+    to: "        if (!result || !result.hasOverride) return;",
+  },
+  {
+    name: "run-failure-repair-any-error-code",
+    file: "src/worker.ts",
+    from: "        if (payload.errorCode === \"configuration_incomplete\") {",
+    to: "        if (typeof payload.errorCode === \"string\") {",
+  },
+  {
+    // The apply-path repair must not start the pace-repin hysteresis clock.
+    name: "apply-env-repair-logs-as-a-pin",
+    file: "src/worker.ts",
+    from: "          if (plan.envRepairOnly) {\n            await ctx.activity.log({",
+    to: "          if (false) {\n            await ctx.activity.log({",
+  },
+  // --- TOG-11793 named mutants: run-scoped model decision -------------------
+  // Tests: tests/run-resolve.spec.ts, tests/run-resolve-worker.spec.ts,
+  // tests/hot-cache.spec.ts. The creation-path `runScoped` early return in
+  // `pinAtDecisionTime` is deliberately NOT mutated: `pinAtTier` repeats the
+  // same guard, so removing either copy alone is equivalent (defense in depth).
+  {
+    // The tier-change switch: without it a raised tier is declined by the
+    // engine's own floor gate (reported as `unserviceable`) and a LOWERED tier
+    // keeps the pricier incumbent forever. Killed by both tier-change tests.
+    name: "run-resolve-sticky-ignores-tier-change",
+    file: "src/engine/run-resolve.ts",
+    from: "    if (prior.tier !== null && prior.tier !== currentTier) {",
+    to: "    if (false && prior.tier !== null && prior.tier !== currentTier) {",
+  },
+  {
+    // The unserviceable switch: a model on a stopped lane would be kept
+    // because it is "sticky". Killed by the stopped-lane test.
+    name: "run-resolve-sticky-never-leaves-unserviceable",
+    file: "src/engine/run-resolve.ts",
+    from: "    } else if (!probeKeeps) {",
+    to: "    } else if (false && !probeKeeps) {",
+  },
+  {
+    // The fallback-recovery switch: a card that landed on a fallback during an
+    // outage would ride it for ever. Killed by the primary-recovered test.
+    name: "run-resolve-never-revisits-fallback",
+    file: "src/engine/run-resolve.ts",
+    from: "    } else if (prior.fallback && !out) {",
+    to: "    } else if (false && prior.fallback && !out) {",
+  },
+  {
+    // A kept fallback must stay a fallback, or the NEXT run cannot see that it
+    // is still sitting on one. Killed by the primary-still-down test.
+    name: "run-resolve-fallback-flag-lost-on-keep",
+    file: "src/engine/run-resolve.ts",
+    from: "  const fallback = keptPrior ? prior.fallback : isFallbackDecision(chosen, roster);",
+    to: "  const fallback = isFallbackDecision(chosen, roster);",
+  },
+  {
+    // Returning the agent's env alongside the decision's: the exact secret-copy
+    // class this design exists to remove. Killed by the env-allowlist tests.
+    name: "run-resolve-returns-agent-env",
+    file: "src/engine/run-resolve.ts",
+    from: "      ...(Object.keys(env).length > 0 ? { env } : {}),",
+    to: "      env: { ...(agentEnv as Record<string, string>), ...env },",
+  },
+  {
+    // Writing a declared key the agent binds to a secret makes the host refuse
+    // the whole decision. Killed by the secret-bound-key test.
+    name: "run-resolve-writes-secret-bound-key",
+    file: "src/engine/run-resolve.ts",
+    from: "    if (!RUN_RESOLVE_ENV_KEYS.includes(key) || secretBound(key)) return;",
+    to: "    if (!RUN_RESOLVE_ENV_KEYS.includes(key)) return;",
+  },
+  {
+    // Nothing serviceable must park the run, never read as "use the default".
+    // Killed by the pure and worker defer tests.
+    name: "run-resolve-no-eligible-model-keeps-default",
+    file: "src/engine/run-resolve.ts",
+    from: '    return defer("no serviceable model", decision);',
+    to: '    return { kind: "keep", reason: "no serviceable model" };',
+  },
+  {
+    // The 1 s cap on waiting for a classification. Killed by the give-up test.
+    name: "run-resolve-classifier-wait-uncapped",
+    file: "src/worker.ts",
+    from: "              Math.min(config.runResolve.classifierWaitMs, Math.max(0, remaining() - 50)),",
+    to: "              Math.max(0, remaining() - 50),",
+  },
+  {
+    // An unexpected failure must defer, never fall through to the default.
+    // Killed by the unreadable-agent and cold-snapshot tests.
+    name: "run-resolve-error-keeps-default",
+    file: "src/worker.ts",
+    from: '          return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason }, "defer");',
+    to: '          return finish({ kind: "keep" }, "keep.error");',
+  },
+  {
+    // The flag/enforce gate on the handler. Killed by the flag-off and
+    // advisory tests.
+    name: "run-resolve-routes-while-inactive",
+    file: "src/worker.ts",
+    from: '          if (!runResolveActive(config)) return finish({ kind: "keep" }, "keep.inactive");',
+    to: '          if (false && !runResolveActive(config)) return finish({ kind: "keep" }, "keep.inactive");',
+  },
+  {
+    // The pin retirements: each writer keeps pinning once decisions are live.
+    // Killed by the paired off/on tests.
+    name: "retire-label-only-pass-not-applied",
+    file: "src/worker.ts",
+    from: "            if (runResolveActive(config)) {\n              ctx.logger.info(\"label-only pass skipped",
+    to: "            if (false && runResolveActive(config)) {\n              ctx.logger.info(\"label-only pass skipped",
+  },
+  {
+    name: "retire-balance-pass-not-applied",
+    file: "src/worker.ts",
+    from: "            if (runResolveActive(config)) {\n              ctx.logger.info(\"balance pass skipped",
+    to: "            if (false && runResolveActive(config)) {\n              ctx.logger.info(\"balance pass skipped",
+  },
+  {
+    name: "retire-repin-pass-not-applied",
+    file: "src/worker.ts",
+    from: "            if (runResolveActive(config)) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };",
+    to: "            if (false && runResolveActive(config)) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };",
+  },
+  {
+    name: "retire-creation-pin-not-applied",
+    file: "src/worker.ts",
+    from: "        if (runResolveActive(config)) return null;\n        const { tier, expectedPinnedModelId, receivedAtMs } = attempt;",
+    to: "        if (false && runResolveActive(config)) return null;\n        const { tier, expectedPinnedModelId, receivedAtMs } = attempt;",
+  },
+  {
+    // A stale entry must be served, not re-awaited: dropping the fresh-hit
+    // return makes every warm read refresh. Killed by the zero-host-reads test.
+    name: "hot-cache-fresh-hit-refreshes",
+    file: "src/hot-cache.ts",
+    from: "      if (cached.ageMs < this.options.ttlMs) return { ...cached, stale: false };",
+    to: "      if (false) return { ...cached, stale: false };",
+  },
+  {
+    // Single flight: concurrent cold callers must share one load.
+    name: "hot-cache-loses-single-flight",
+    file: "src/hot-cache.ts",
+    from: "    if (running) return running;",
+    to: "    if (false) return running as Promise<V>;",
+  },
+  {
+    // The cold-load budget: without it a cold snapshot holds the run past the
+    // host deadline. Killed by the budget test.
+    name: "hot-cache-cold-load-unbounded",
+    file: "src/hot-cache.ts",
+    from: "      const value = await Promise.race([pending, budget]);",
+    to: "      const value = await pending;",
+  },
+  // --- TOG-12768: tier capability is monotone, promotions stop at it ------
+  // Killed by tests/scores.spec.ts, tests/benchmark-prior.spec.ts and
+  // tests/pick-order.spec.ts respectively (verified by hand).
+  {
+    // A glm-5.3 shape (T2 measured-fail, T1 prior-only) reads T1-capable again.
+    name: "capability-not-monotone-at-build",
+    file: "src/engine/scores.ts",
+    from: "  const monotoneTierScores = enforceMonotoneCapability(tierScores);",
+    to: "  const monotoneTierScores = tierScores;",
+  },
+  {
+    // A derived tier promotes past the hardest tier the model is capable at.
+    name: "promotion-ignores-capability-ceiling",
+    file: "src/engine/scores.ts",
+    from: "  if (tierIndex(derived) > tierIndex(ceiling)) return { ...model, tier: ceiling };",
+    to: "",
+  },
+  {
+    // Selection reads a score stored before the rule existed without it.
+    name: "selection-reads-raw-tier-verdict",
+    file: "src/engine/select.ts",
+    from: "    const score = tierScoreFor(modelScore, requiredTier);",
+    to: "    const score = modelScore?.tiers?.[requiredTier];",
+  },
+  // TOG-12966: the lane quota snapshot -> shadow observation adapter. Utilization-only
+  // observations are advisory attainment; identity is the committed table only.
+  {
+    name: "obs-cached-observation-not-stale",
+    file: "src/admission-observation.ts",
+    from: "      if (record && observationQuality === 'cached') raise('stale', 'cached-observation');",
+    to: "      if (false && record && observationQuality === 'cached') raise('stale', 'cached-observation');",
+  },
+  {
+    name: "obs-max-age-boundary-exclusive",
+    file: "src/admission-observation.ts",
+    from: "observedAt !== null && input.now - observedAt > input.maxAgeMs;",
+    to: "observedAt !== null && input.now - observedAt >= input.maxAgeMs;",
+  },
+  {
+    name: "obs-too-old-never-stale",
+    file: "src/admission-observation.ts",
+    from: "      if (tooOld) raise('stale', 'older-than-max-age');",
+    to: "      if (false) raise('stale', 'older-than-max-age');",
+  },
+  {
+    name: "obs-missing-reset-only-unknown",
+    file: "src/admission-observation.ts",
+    from: "raise('invalid', 'missing-reset')",
+    to: "raise('unknown', 'missing-reset')",
+  },
+  {
+    name: "obs-reset-jitter-not-snapped",
+    file: "src/admission-observation.ts",
+    from: "        : Math.round(reportedResetMs / RESET_IDENTITY_GRID_MS) * RESET_IDENTITY_GRID_MS;",
+    to: "        : reportedResetMs;",
+  },
+  {
+    name: "obs-missing-utilization-becomes-zero",
+    file: "src/admission-observation.ts",
+    from: "        quota: utilization !== null && !countsOnly ? 1 : null,\n        consumed: countsOnly ? null : utilization,",
+    to: "        quota: 1,\n        consumed: countsOnly ? null : (utilization ?? 0),",
+  },
+  {
+    name: "obs-counts-only-keeps-utilization",
+    file: "src/admission-observation.ts",
+    from: "      const countsOnly = observationQuality === 'counts-only';",
+    to: "      const countsOnly = false;",
+  },
+  {
+    name: "obs-unlabelled-observation-accepted",
+    file: "src/admission-observation.ts",
+    from: "        else if (observationQuality === null) raise('unknown', 'observation-quality-missing-or-unrecognized');",
+    to: "        else if (false) raise('unknown', 'observation-quality-missing-or-unrecognized');",
+  },
+  {
+    name: "obs-reset-at-observation-accepted",
+    file: "src/admission-observation.ts",
+    from: "resetAt !== null && resetAt <= observedAt",
+    to: "resetAt !== null && resetAt < observedAt",
+  },
+  {
+    name: "obs-reset-beyond-window-accepted",
+    file: "src/admission-observation.ts",
+    from: "resetAt - observedAt > WINDOW_MS[window.kind]",
+    to: "resetAt - observedAt > WINDOW_MS[window.kind] * 100",
+  },
+  {
+    name: "obs-weekly-window-length-wrong",
+    file: "src/admission-observation.ts",
+    from: "  weekly: 7 * 24 * 60 * 60 * 1000,",
+    to: "  weekly: 6 * 24 * 60 * 60 * 1000,",
+  },
+  {
+    name: "obs-five-hour-window-length-wrong",
+    file: "src/admission-observation.ts",
+    from: "  'five-hour': 5 * 60 * 60 * 1000,",
+    to: "  'five-hour': 4 * 60 * 60 * 1000,",
+  },
+  {
+    name: "obs-shared-pool-double-counted",
+    file: "src/admission-observation.ts",
+    from: "      if (!seen.has(print)) {",
+    to: "      if (true) {",
+  },
+  {
+    name: "obs-shared-pool-conflict-not-detected",
+    file: "src/admission-observation.ts",
+    from: "filter(([, group]) => group.size > 1)",
+    to: "filter(([, group]) => group.size > 99)",
+  },
+  {
+    name: "obs-duplicate-lane-binding-allowed",
+    file: "src/admission-observation.ts",
+    from: "    if (lanes.has(entry.laneId)) throw new Error('duplicate-lane-binding');",
+    to: "    if (false && lanes.has(entry.laneId)) throw new Error('duplicate-lane-binding');",
+  },
+  {
+    name: "obs-record-n-lane-binding-allowed",
+    file: "src/admission-observation.ts",
+    from: "if (![entry.laneId, entry.accountId, entry.poolId, entry.providerId].every(stableBudgetId)) {",
+    to: "if (![entry.accountId, entry.poolId, entry.providerId].every(stableBudgetId)) {",
+  },
+  {
+    name: "obs-shared-pool-mixed-provider-allowed",
+    file: "src/admission-observation.ts",
+    from: "    if (pool && (pool.providerId !== entry.providerId || pool.kinds !== key)) throw",
+    to: "    if (pool && false) throw",
+  },
+  {
+    name: "obs-unstable-lane-echoed",
+    file: "src/admission-observation.ts",
+    from: "    if (!stableBudgetId(lane)) { unstableLaneCount += 1; continue; }",
+    to: "    if (false) { unstableLaneCount += 1; continue; }",
+  },
+  {
+    name: "obs-duplicate-lane-record-picks-first",
+    file: "src/admission-observation.ts",
+    from: "    const record = records.length === 1 ? records[0]! : null;",
+    to: "    const record = records[0] ?? null;",
+  },
+  {
+    name: "obs-utilization-only-computes-budget",
+    file: "src/admission-budget.ts",
+    from: "  if (utilizationOnly) {\n    return {",
+    to: "  if (false && utilizationOnly) {\n    return {",
+  },
+  {
+    name: "obs-utilization-only-requires-plan-weight",
+    file: "src/admission-budget.ts",
+    from: "if (!(utilizationOnly && (field",
+    to: "if (!(false && (field",
+  },
+  {
+    name: "obs-source-invalid-downgraded-to-unknown",
+    file: "src/admission-budget.ts",
+    from: "if (invalid.length || raw.dataState === 'invalid') result.dataState = 'invalid';",
+    to: "if (invalid.length) result.dataState = 'invalid';",
+  },
+  {
+    name: "obs-utilization-only-binding-admittable",
+    file: "src/admission-budget.ts",
+    from: "w.dataState !== 'known' || w.raw.unit === UTILIZATION_ONLY_UNIT)) {",
+    to: "w.dataState !== 'known')) {",
+  },
+  {
+    name: "obs-utilization-only-counts-as-known-allowance",
+    file: "src/admission-shadow.ts",
+    from: "\n          && w.safeBudget !== null))) {",
+    to: "\n          ))) {",
+  },
+  {
+    name: "obs-snapshot-accepts-explicit-accounts",
+    file: "src/admission-shadow.ts",
+    from: "fields(rawInput, ['enabled', 'cohortId', 'maxAgeMs', 'laneQuotaSnapshot', 'holds', 'bindings']);",
+    to: "fields(rawInput, ['enabled', 'cohortId', 'maxAgeMs', 'laneQuotaSnapshot', 'holds', 'bindings', 'accounts', 'windows']);",
+  },
+  {
+    name: "obs-adapter-provenance-dropped",
+    file: "src/admission-shadow.ts",
+    from: "      report.observationAdapter = { schema, evidenceKind",
+    to: "      void { schema, evidenceKind",
+  },
+  // --- TOG-12234 named mutants: reassignment re-home and the fallback lease --
+  // Each guard is removed, weakened or rescoped once; every mutant below was
+  // hand-applied and watched failing the named test in
+  // tests/reassignment-and-fallback-lease.spec.ts (or tests/context.spec.ts).
+  // Two guards are deliberately absent: the re-home's first moved-on check
+  // and its described-assignee check are each masked by the final fresh read
+  // and the clear path's own assignee check, so removing either alone changes
+  // no write (defense in depth, documented on the PR).
+  {
+    // Killed by: rebuilds the pin from the new assignee's env.
+    name: "reassign-arm-removed",
+    file: "src/worker.ts",
+    from: "        } else if (issueId && assignedTo && assignedFrom && assignedFrom !== assignedTo) {",
+    to: "        } else if (false) {",
+  },
+  {
+    // Killed by: does not write a card whose override carries no env.
+    name: "rehome-writes-envless-override",
+    file: "src/worker.ts",
+    from: "        if (adapterConfig.env == null) return;\n        const rawPinnedModelId",
+    to: "        const rawPinnedModelId",
+  },
+  {
+    // Killed by: rebuilds the pin from the new assignee's env (no A-only binding).
+    name: "rehome-rebuilds-from-old-env",
+    file: "src/worker.ts",
+    from: "            agentEnv: described.agentEnv,\n            agentAdapterType: described.agentAdapterType,\n            agentAdapterConfig: described.agentAdapterConfig,\n            existingOverrideEnv: described.existingOverrideEnv,\n            cheapModelId: cheapestHealthyModelIdForTier({",
+    to: "            agentEnv: described.existingOverrideEnv ?? described.agentEnv,\n            agentAdapterType: described.agentAdapterType,\n            agentAdapterConfig: described.agentAdapterConfig,\n            existingOverrideEnv: described.existingOverrideEnv,\n            cheapModelId: cheapestHealthyModelIdForTier({",
+  },
+  {
+    // Killed by: clears the env when the new assignee's env cannot be read.
+    name: "rehome-rebuilds-over-unknown-env",
+    file: "src/worker.ts",
+    from: "          described.assigneeAgentId === toAgentId &&\n          described.agentEnv !== null &&\n",
+    to: "          described.assigneeAgentId === toAgentId &&\n",
+  },
+  {
+    // Killed by: clears the env on a closed card.
+    name: "rehome-rebuilds-closed-card",
+    file: "src/worker.ts",
+    from: "          described.agentEnv !== null &&\n          balanceOpenStatuses.has(described.status) &&\n          !described.hasOperatorPin\n",
+    to: "          described.agentEnv !== null &&\n          !described.hasOperatorPin\n",
+  },
+  {
+    // Killed by: clears the env on an operator-pinned card.
+    name: "rehome-rebuilds-operator-pin",
+    file: "src/worker.ts",
+    from: "          balanceOpenStatuses.has(described.status) &&\n          !described.hasOperatorPin\n        ) {\n          const patch = modelOverrideForContext({",
+    to: "          balanceOpenStatuses.has(described.status)\n        ) {\n          const patch = modelOverrideForContext({",
+  },
+  {
+    // Killed by: carries a fallback pin's stamp to the new home.
+    name: "rehome-drops-stamp",
+    file: "src/worker.ts",
+    from: "            provenance: readPinProvenance(described.existingOverrideEnv),\n",
+    to: "            provenance: null,\n",
+  },
+  {
+    // Killed by: does not write when the card moves on after the assignee read.
+    name: "rehome-skips-fresh-assignee-check",
+    file: "src/worker.ts",
+    from: "            fresh?.assigneeAgentId === toAgentId &&\n            freshModel === adapterConfig.model &&",
+    to: "            freshModel === adapterConfig.model &&",
+  },
+  {
+    // Killed by: rebuilds the pin from the new assignee's env.
+    name: "rehome-fresh-check-rescoped-to-old-assignee",
+    file: "src/worker.ts",
+    from: "            fresh?.assigneeAgentId === toAgentId &&\n            freshModel === adapterConfig.model &&",
+    to: "            fresh?.assigneeAgentId === fromAgentId &&\n            freshModel === adapterConfig.model &&",
+  },
+  {
+    // Killed by: clears rather than rebuilds when the pin changes.
+    name: "rehome-skips-fresh-model-check",
+    file: "src/worker.ts",
+    from: "            fresh?.assigneeAgentId === toAgentId &&\n            freshModel === adapterConfig.model &&\n            (await pinnableBeforeStart(companyId, issueId))",
+    to: "            fresh?.assigneeAgentId === toAgentId &&\n            (await pinnableBeforeStart(companyId, issueId))",
+  },
+  {
+    // Killed by: clears the env, keeping the model, once a run has started.
+    name: "rehome-rebuilds-under-started-run",
+    file: "src/worker.ts",
+    from: "            freshModel === adapterConfig.model &&\n            (await pinnableBeforeStart(companyId, issueId))\n",
+    to: "            freshModel === adapterConfig.model &&\n            true\n",
+  },
+  {
+    // Killed by: does not write when the card moves on after the first issue read.
+    name: "clear-ignores-moved-on",
+    file: "src/worker.ts",
+    from: "        const current = await ctx.issues.get(issueId, companyId);\n        if (!current || current.assigneeAgentId !== toAgentId) return;",
+    to: "        const current = await ctx.issues.get(issueId, companyId);\n        if (!current) return;",
+  },
+  {
+    // Killed by: clears the env, keeping the model, once a run has started.
+    name: "clear-keeps-old-env",
+    file: "src/worker.ts",
+    from: "        delete keptAdapterConfig.env;\n        delete overrides.adapterConfig;",
+    to: "        delete overrides.adapterConfig;",
+  },
+  {
+    // Killed by: stamps and indexes the fallback pin the repin pass writes.
+    name: "provenance-never-stamps",
+    file: "src/worker.ts",
+    from: "        model.fallbackOnly === true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+    to: "        false\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+  },
+  {
+    // Killed by: writes no stamp and no index entry for a regular pin.
+    name: "provenance-stamps-every-pin",
+    file: "src/worker.ts",
+    from: "        model.fallbackOnly === true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+    to: "        true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+  },
+  {
+    // Killed by: bounds the index, evicting the oldest decision.
+    name: "index-never-evicts",
+    file: "src/worker.ts",
+    from: "            if (entries.length > FALLBACK_PIN_INDEX_MAX) {",
+    to: "            if (false) {",
+  },
+  {
+    // Killed by: context.spec: drops an earlier pin's stamp when this pin carries none.
+    name: "stamp-survives-unstamped-rewrite",
+    file: "src/engine/context.ts",
+    from: "  delete env[PIN_PROVENANCE_ENV_KEY];\n  if (input.provenance",
+    to: "  if (input.provenance",
+  },
+  {
+    // Killed by: context.spec: never writes a stamp-only env over an unknown assignee's env.
+    name: "stamp-written-over-unknown-env",
+    file: "src/engine/context.ts",
+    from: "  if (input.provenance && (agentEnvKnown || Object.keys(env).length > 0)) {",
+    to: "  if (input.provenance) {",
+  },
+  {
+    // Killed by: re-decides a stamped fallback once a primary is serviceable again.
+    name: "lease-pass-not-scheduled",
+    file: "src/worker.ts",
+    from: "          await runFallbackLeasePass(company.id);",
+    to: "          void 0;",
+  },
+  {
+    // Killed by: never touches a non-fallback pin.
+    name: "lease-ignores-stamp",
+    file: "src/worker.ts",
+    from: "              !described ||\n              stamp?.decisionId !== entry.decisionId ||\n",
+    to: "              !described ||\n",
+  },
+  {
+    // Killed by: drops an entry whose stamp has been replaced by a later decision.
+    name: "lease-stamp-presence-only",
+    file: "src/worker.ts",
+    from: "              !described ||\n              stamp?.decisionId !== entry.decisionId ||\n",
+    to: "              !described ||\n              !stamp ||\n",
+  },
+  {
+    // Killed by: drops entries on closed and operator-pinned cards.
+    name: "lease-releases-operator-pin",
+    file: "src/worker.ts",
+    from: "              !pinnedModelId ||\n              described.hasOperatorPin ||\n",
+    to: "              !pinnedModelId ||\n",
+  },
+  {
+    // Killed by: drops entries on closed and operator-pinned cards.
+    name: "lease-keeps-closed-entries",
+    file: "src/worker.ts",
+    from: "              described.hasOperatorPin ||\n              !balanceOpenStatuses.has(described.status)\n            ) {\n              dropped.set(issueId, entry.decisionId);",
+    to: "              described.hasOperatorPin\n            ) {\n              dropped.set(issueId, entry.decisionId);",
+  },
+  {
+    // Killed by: holds the fallback while no primary can take the card (no decision metric).
+    name: "lease-primaries-include-fallbacks",
+    file: "src/worker.ts",
+    from: "            (model) => model.enabled && !model.fallbackOnly,\n          );\n\n          const dropped",
+    to: "            (model) => model.enabled,\n          );\n\n          const dropped",
+  },
+  {
+    // Killed by: holds the fallback while no primary can take the card (no decision metric).
+    name: "lease-skips-primary-precheck",
+    file: "src/worker.ts",
+    from: "            if (!primaries.some((model) => usable(model.id))) continue;",
+    to: "",
+  },
+  {
+    // Killed by: caps the writes per firing.
+    name: "lease-uncapped-writes",
+    file: "src/worker.ts",
+    from: "            if (released >= FALLBACK_LEASE_WRITE_LIMIT) break;",
+    to: "",
+  },
+  {
+    // Killed by: caps the examined entries per firing.
+    name: "lease-uncapped-examine",
+    file: "src/worker.ts",
+    from: "          for (const [issueId, entry] of indexed.slice(0, FALLBACK_LEASE_EXAMINE_LIMIT)) {",
+    to: "          for (const [issueId, entry] of indexed) {",
+  },
+  {
+    // Killed by: caps the examined entries per firing and visits the unchecked ones next.
+    name: "lease-no-rotation",
+    file: "src/worker.ts",
+    from: "              (a.checkedAt ?? \"\").localeCompare(b.checkedAt ?? \"\") || a.decidedAt.localeCompare(b.decidedAt),",
+    to: "              a.decidedAt.localeCompare(b.decidedAt),",
+  },
+  {
+    // TOG-12431 (review of the reviewer-rebased head): the three writers this
+    // feature adds take the same single gate as the five scheduled/event pin
+    // sites. Killed by the advisory re-home/lease tests, which run in BOTH
+    // non-enforcing postures (advise mode and selection-disabled), so each
+    // conjunct of selectionWritesAllowed is proven load-bearing.
+    //
+    // Killed by: advisory reassignment writes no rebuild patch.
+    name: "rehome-rebuild-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "            if (writesAllowed) {\n" +
+      "              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);\n" +
+      "              await recordFallbackPin(companyId, issueId, patch);",
+    to:
+      "            if (true) {\n" +
+      "              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);\n" +
+      "              await recordFallbackPin(companyId, issueId, patch);",
+  },
+  {
+    // Killed by: advisory reassignment clears no env either — #482 has no
+    // hygiene exception.
+    name: "rehome-clear-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "        if (writesAllowed) {\n" +
+      "          await ctx.issues.update(\n" +
+      "            issueId,\n" +
+      "            { assigneeAdapterOverrides: Object.keys(overrides).length > 0 ? overrides : null } as Parameters<",
+    to:
+      "        if (true) {\n" +
+      "          await ctx.issues.update(\n" +
+      "            issueId,\n" +
+      "            { assigneeAdapterOverrides: Object.keys(overrides).length > 0 ? overrides : null } as Parameters<",
+  },
+  {
+    // Killed by: advisory lease release writes no patch AND must not drop the
+    // index entry — an unwritten release keeps the lease findable.
+    name: "lease-release-ignores-selection-gate",
+    file: "src/worker.ts",
+    from:
+      "            if (writesAllowed) {\n" +
+      "              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);\n" +
+      "              dropped.set(issueId, entry.decisionId);",
+    to:
+      "            if (true) {\n" +
+      "              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);\n" +
+      "              dropped.set(issueId, entry.decisionId);",
   },
 ];
+
+// `--maxWorkers=2` is load-bearing, not tuning. At vitest's default worker
+// count this suite is OOM-killed (rc=137) whenever the host is busy, and the
+// gate reports that as "baseline suite is red" / a KILLED mutant — a verdict
+// that depends on machine load rather than on the code. Observed 2026-09-17:
+// the same tree passed 27/27 and then failed its own baseline minutes later
+// while a second run shared the host.
 
 /**
  * TOG-3200. Optional comma-separated name filter, e.g.

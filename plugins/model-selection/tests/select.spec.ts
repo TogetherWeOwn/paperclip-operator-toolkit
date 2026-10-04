@@ -706,7 +706,7 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
       observedAt: "2026-09-10T12:00:00.000Z",
       state: "on",
       serviceable: true,
-      score: { utilization: 0.85, elapsed: 0.5, deviation: 0 },
+      score: { utilization: 0.85, elapsed: 0.5, deviation: 0.35 },
       accounts: [],
       knownAccountCount: 1,
       knownWeight: 1,
@@ -735,6 +735,39 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
     expect(
       decision.rejections.some((r) => r.stage === "lane-avoid" && r.modelId === "avoided-model"),
     ).toBe(true);
+  });
+
+  it("admits a threshold-reaching lane behind pace near reset without bypassing tier floors", () => {
+    const belowTier = model(MODELS.find((entry) => entry.tier === "T2")!, { id: "below-tier", laneId: "codex" });
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ state: "behind", score: { utilization: 0.75, elapsed: 0.83, deviation: -0.08 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-near-reset", labelNames: ["tier:T1"] },
+      config: config({
+        models: [belowTier, fallbackModel, avoidedModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneAvoidConfig: { defaultThreshold: 0.75, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe("avoided-model");
+    expect(decision.rejections.some((r) => r.stage === "lane-avoid")).toBe(false);
+    expect(decision.rejections.some((r) => r.stage === "tier-floor" && r.modelId === "below-tier")).toBe(true);
+  });
+
+  it("keeps exhaustion a hard stop even when the lane is not ahead of pace", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ state: "exhausted", serviceable: false, score: { utilization: 1, elapsed: 1, deviation: 0 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-exhausted-at-reset", labelNames: ["tier:T1"] },
+      config: config({ models: [avoidedModel, fallbackModel], pacingMode: "enforce", laneLedger, laneAvoidConfig: { defaultThreshold: 0.75, perLane: {} } }),
+    });
+    expect(decision.modelId).toBe("fallback-model");
+    expect(decision.rejections.some((r) => r.stage === "lane-unserviceable" && r.modelId === "avoided-model")).toBe(true);
   });
 
   it("2026-09-07 07:12Z owner rule: codex's own AVOID_LANE=0.99 keeps it admitted at 0.85 where the generic 0.8 threshold would have excluded it", () => {
@@ -888,7 +921,7 @@ describe("T1 stays off opencode-go unless codex is at/over its avoid threshold (
           observedAt: "2026-09-07T03:15:00.000Z",
           state: "on",
           serviceable: true,
-          score: { utilization, elapsed: 0.5, deviation: 0 },
+          score: { utilization, elapsed: 0.5, deviation: utilization - 0.5 },
           accounts: [],
           knownAccountCount: 1,
           knownWeight: 1,
@@ -935,7 +968,7 @@ describe("T1 stays off opencode-go unless codex is at/over its avoid threshold (
     expect(
       decision.rejections.some((r) => r.modelId === goModel.id && r.reason.includes("Go fallback only")),
     ).toBe(false);
-    // codexModel itself is excluded by the pre-existing generic lane-avoid gate at 0.85 >= 0.8.
+    // Codex is above threshold AND ahead of its governing window's midpoint.
     expect(decision.rejections.some((r) => r.modelId === codexModel.id && r.stage === "lane-avoid")).toBe(true);
   });
 

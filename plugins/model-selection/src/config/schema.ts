@@ -60,6 +60,22 @@ export const SELECTION_CONFIG_SCHEMA = {
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
         /** Fleet-wide harness compaction ceiling. Models at/above it need no per-issue env override. */
         fleetContextCeilingTokens: { type: "integer", minimum: 1, default: 1000000 },
+        contextRunLogRoot: {
+          type: "string",
+          minLength: 1,
+          description: "Operator-verified absolute local run-log root. Unset or unreadable logs use the labelled fleet-ceiling fallback; no run totals are used as peaks.",
+        },
+        /**
+         * TOG-11642. The agent-level context cap the per-pin
+         * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` stamp compares against. Split from
+         * `fleetContextCeilingTokens` (the admission ceiling, held at 200k for
+         * glm-5.3): a pin stamps
+         * `max(floor(window*ratio), min(window, 250000))` when its window is
+         * below THIS cap and inherits the agent env otherwise. Unset resolves
+         * to the fleet ceiling, so behaviour is unchanged until the operator
+         * sets it (1M to release Muse's 1,048,576 window).
+         */
+        agentEnvContextTokens: { type: "integer", minimum: 1, default: 1000000 },
         /** Fraction of a narrower model's context window where Claude Code should compact. */
         compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 },
       },
@@ -269,7 +285,8 @@ export const SELECTION_CONFIG_SCHEMA = {
         /**
          * TOG-2481 port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
          * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
-         * excluded from NEW admission even while still serviceable —
+         * excluded from NEW admission only when its governing pace deviation
+         * also exceeds the pace engine's default 0.1 margin —
          * `defaultThreshold` is the blanket rule, `perLane` is how a specific
          * lane (e.g. codex, per the 2026-09-07 07:12Z owner rule) earns a
          * higher threshold than the default.
@@ -438,9 +455,33 @@ export const SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
-        /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
+        /**
+         * TOG-13566. Legacy single-file cap, kept for read compatibility with
+         * an existing `decisions.jsonl`. New writes go to hourly shards (see
+         * `shardMaxRecords`); this number no longer sizes any write.
+         */
         maxRecords: { type: "integer", minimum: 1, default: 5000 },
+        /**
+         * TOG-13566. Each hourly shard file is rewritten whole on every
+         * append; this caps a shard by dropping its oldest records. Small on
+         * purpose: the whole-file atomic rewrite that timed out at 30 s on a
+         * ~38 MB single file stays a kilobyte-scale RPC payload per shard.
+         */
+        shardMaxRecords: { type: "integer", minimum: 2, default: 200 },
+        /**
+         * TOG-13566. How many newest hourly shard files to keep. Whole old
+         * shards are deleted past this count. 48 covers the 48-hour agreement
+         * stream the gate harness correlates.
+         */
+        retentionShards: { type: "integer", minimum: 1, default: 48 },
       },
+      default: {},
+    },
+    accountAdmissionShadow: {
+      type: "object",
+      title: "Account admission shadow report (never enforces)",
+      additionalProperties: false,
+      properties: { enabled: { type: "boolean", default: false } },
       default: {},
     },
     /**
@@ -454,6 +495,60 @@ export const SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true },
+      },
+      default: {},
+    },
+    /**
+     * TOG-12206 P2: free-list sync/discovery/shadow. Default OFF — an absent
+     * section, or `enabled: false`, leaves dispatch byte-for-byte identical
+     * to today (no fetch, no snapshot, no evidence). Bindings are curated
+     * model x effective-effort rows (see `aa-free/sync.ts verifyBindings`);
+     * the secret ref reuses the existing company `ARTIFICIALANALYSIS_API_KEY`
+     * binding resolved at `aaFreeSync.apiKeySecretRef` — never printed,
+     * persisted or exported, never substituted.
+     */
+    aaFreeSync: {
+      type: "object",
+      title: "aa.ai free-list sync (TOG-12206 P2)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        apiKeySecretRef: SECRET_REF_SCHEMA,
+        bindings: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["candidateId", "modelId", "laneId", "evaluatedEffort", "aaSlug"],
+            properties: {
+              candidateId: { type: "string", minLength: 1 },
+              modelId: { type: "string", minLength: 1 },
+              laneId: { type: "string", minLength: 1 },
+              evaluatedEffort: { type: "string", minLength: 1 },
+              aaSlug: { type: "string", minLength: 1 },
+              observationalOnly: { type: "boolean" },
+            },
+          },
+          default: [],
+        },
+        /** Hours a snapshot stays fresh for shadow evidence. Bounded; stale yields no evidence. */
+        maxSnapshotAgeHours: { type: "number", minimum: 1, default: 49 },
+      },
+      default: {},
+    },
+    /**
+     * TOG-12972: first-party accepted-work posterior producer. Default OFF —
+     * an absent section, or `enabled: false`, builds no overlay and stores
+     * nothing (no fetch, no state change). The producer only folds this
+     * company's own closed-card outcomes into a versioned posterior overlay;
+     * nothing reads it for routing in this slice.
+     */
+    acceptedWork: {
+      type: "object",
+      title: "First-party accepted-work posterior (TOG-12972)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
       },
       default: {},
     },
@@ -554,6 +649,30 @@ export const SELECTION_CONFIG_SCHEMA = {
         },
         /** The lower floor a matching wake reason gets. Only takes effect below the card's judged tier — never raises it. */
         floorTier: { type: "string", enum: [...TIERS], default: "T3" },
+      },
+      default: {},
+    },
+    /**
+     * TOG-11793 (TOG-11780 §4.3). Run-scoped model decision. Requires a host
+     * built with the `run.model.resolve` hook and a manifest built with
+     * `MODEL_SELECTION_RUN_RESOLVE=1`. Off by default: `onResolveRunModel`
+     * answers `keep` and every legacy pin path is unchanged. On: each issue run
+     * is decided at its start from hot caches, and the creation/assignment
+     * pins, `labelOnlyPass`/`balancePass` pin writes and the `repinPass` /
+     * `agent.run.failed` re-pins are retired. Tier labels stay.
+     */
+    runResolve: {
+      type: "object",
+      title: "Run-scoped model decision (TOG-11793)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /** The hot snapshot is refreshed once older than this; stale data is served while it refreshes. */
+        snapshotTtlMs: { type: "integer", minimum: 5000, maximum: 300000, default: 45000 },
+        /** Longest wait for an already-in-flight classification. Capped at 1000: the hook never starts one. */
+        classifierWaitMs: { type: "integer", minimum: 0, maximum: 1000, default: 1000 },
+        /** `retryAfterMs` carried by a `defer` answer. */
+        deferRetryMs: { type: "integer", minimum: 1000, maximum: 60000, default: 5000 },
       },
       default: {},
     },

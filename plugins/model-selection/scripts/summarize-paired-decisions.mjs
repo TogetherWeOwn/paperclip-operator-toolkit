@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,9 +38,26 @@ const endMs = parseUtc(endText, "--end");
 if (endMs <= startMs) fail("--end must be later than --start");
 if (endMs - startMs > 24 * 60 * 60 * 1000) fail("interval must be no longer than 24 hours");
 
+/**
+ * TOG-13566. `--input` accepts a single JSONL file (legacy `decisions.jsonl`)
+ * or a directory of UTC-hour shards (`decisions-YYYY-MM-DD-HHZ.jsonl`). A
+ * directory reads every matching shard in lexical (= chronological) order and
+ * concatenates their lines; non-shard files are ignored.
+ */
+const SHARD_FILE_PATTERN = /^decisions-\d{4}-\d{2}-\d{2}-\d{2}Z\.jsonl$/;
 let source;
 try {
-  source = await readFile(inputPath, "utf8");
+  const inputStat = await stat(inputPath);
+  if (inputStat.isDirectory()) {
+    const names = (await readdir(inputPath)).filter((name) => SHARD_FILE_PATTERN.test(name)).sort();
+    if (names.length === 0) fail(`no shadow shards (decisions-YYYY-MM-DD-HHZ.jsonl) in ${inputPath}`);
+    const parts = [];
+    for (const name of names) parts.push(await readFile(join(inputPath, name), "utf8"));
+    source = parts.join("");
+    if (!source.endsWith("\n")) source += "\n";
+  } else {
+    source = await readFile(inputPath, "utf8");
+  }
   await readFile(gatePath, "utf8");
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));

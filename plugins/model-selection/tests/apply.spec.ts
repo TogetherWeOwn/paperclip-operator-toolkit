@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { planApply } from "../src/actuate/apply.js";
+import { planApply, selectionWritesAllowed } from "../src/actuate/apply.js";
 import { selectModel } from "../src/engine/select.js";
 import { NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
@@ -87,6 +87,16 @@ describe("write policy", () => {
     const plan = planApply(held, clean, "i1");
     expect(plan.write).toBe(false);
     expect(plan.reason).toContain("held-at-floor");
+  });
+
+  it("TOG-12431: selectionWritesAllowed is true only for enabled + enforce", () => {
+    // The single gate every router-owned pin site checks. Both conjuncts
+    // matter: advise mode computes without writing, and selection disabled
+    // writes nothing regardless of mode.
+    expect(selectionWritesAllowed({ selection: { enabled: true, mode: "enforce" } })).toBe(true);
+    expect(selectionWritesAllowed({ selection: { enabled: true, mode: "advise" } })).toBe(false);
+    expect(selectionWritesAllowed({ selection: { enabled: false, mode: "enforce" } })).toBe(false);
+    expect(selectionWritesAllowed({ selection: { enabled: false, mode: "advise" } })).toBe(false);
   });
 
   it("TOG-3210: never writes a wake-scoped decision, even in enforce mode — the card's real tier survives untouched", () => {

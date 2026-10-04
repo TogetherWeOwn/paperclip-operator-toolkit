@@ -162,6 +162,26 @@ export interface IssueDescriptor {
   exclusion?: CapabilityExclusion;
   /** Assignee agent's `adapterConfig.model` — the tier floor. */
   agentFloorModelId?: string | null;
+  /**
+   * TOG-8108. Assignee agent's `adapterType` (e.g. `claude_local`), or
+   * null/absent when UNKNOWN. Decides adapter-compatibility: `devin/*` models
+   * are ineligible on `claude_local` (Devin's content filter rejects the
+   * Claude Code / Agent SDK system banner — Cognition ticket 71806 — measured
+   * 25 failed / 3 succeeded runs). Unknown never excludes.
+   */
+  agentAdapterType?: string | null;
+  /**
+   * TOG-8108. Board priority (`critical`/`high`/...) as recorded. Gates the
+   * free-lane earn-in reorder: protected priorities never take experimental
+   * traffic. Null/absent = unknown, earn-in proceeds as before.
+   */
+  priority?: string | null;
+  /**
+   * TOG-8108. Card title, raw and never inferred here. Gates the free-lane
+   * earn-in reorder alongside `priority`: review/gate cards never take
+   * experimental traffic (`free-lane-earn-in.ts` judges the text).
+   */
+  title?: string | null;
   /** Model already used on this issue, if any. Sticky driver. */
   stickyModelId?: string | null;
   requiredCapabilities?: readonly string[];
@@ -239,7 +259,9 @@ export interface Candidate extends CostBreakdown {
 export type RejectionOperand =
   | { kind: "disabled" }
   | { kind: "capability"; missing: string[] }
-  | { kind: "capability-score"; tier: Tier; p: number | null }
+  /** TOG-8108. Adapter-compatibility: model id prefix + assignee adapter. */
+  | { kind: "adapter"; modelId: string; adapterType: string }
+  | { kind: "capability-score"; tier: Tier; p: number | null; cappedBy?: Tier }
   | { kind: "card-accept-rate"; tier: Tier; cardsResolved: number; cardsAccepted: number }
   | { kind: "context-window"; contextWindow: number; requiredContextTokens: number }
   | { kind: "tier-floor"; tier: Tier; requiredTier: Tier }
@@ -285,6 +307,7 @@ export interface Rejection {
   stage:
     | "disabled"
     | "capability"
+    | "adapter"
     | "capability-score"
     | "card-accept-rate"
     | "context-window"
@@ -356,6 +379,42 @@ export interface ShadowDiffRecord {
   agree: boolean;
 }
 
+/**
+ * TOG-12206 P2: shadow-only v2 evidence for the selected model, resolved
+ * AFTER selection from the last-good free-list snapshot. Never an input to
+ * selection — `select.ts` never sets this; only the worker's `advise()`
+ * attaches it, and only when `aaFreeSync` is enabled with curated bindings
+ * and a fresh snapshot. Absent (not null) on every legacy-path decision, so
+ * disabling v2 restores the decision shape byte-for-byte.
+ */
+export interface AaEffortEvidence {
+  status: "matched" | "ineligible";
+  /** The curated candidate, carried through recovery so it can never be re-derived into a different one. Null unless matched. */
+  candidateId: string | null;
+  reason:
+    | "effort-unknown"
+    | "no-binding"
+    | "observational-only"
+    | "slug-absent-from-snapshot"
+    | "slug-ambiguous"
+    | "snapshot-stale"
+    | null;
+  /** What the roster asked for (the selected row's curated effort, if any). */
+  requestedEffort: string;
+  /** What the invocation will actually run (deployed resolver output). */
+  effectiveEffort: string;
+  /** Always null at advise time: served effort is post-hoc only, never an input. */
+  observedServedEffort: null;
+  /** The candidate's free-list index. Null unless matched. */
+  aaIndex: number | null;
+  /** Content address of the snapshot this evidence came from. */
+  snapshotDigest: string;
+  /** True when the snapshot exceeded its freshness bound — evidence is then always ineligible. */
+  stale: boolean;
+  /** S-tier (`fallbackOnly`) picks stay held even as evidence: sync never lifts them. */
+  held: "fallback-only" | null;
+}
+
 export interface SelectionDecision {
   outcome: Outcome;
   modelId: string | null;
@@ -406,6 +465,12 @@ export interface SelectionDecision {
    * presence always forces `true` so the lowered tier can never be written.
    */
   wakeScopedTier: Tier | null;
+  /**
+   * TOG-12206 P2: shadow-only v2 evidence, attached by the worker's `advise()`
+   * AFTER selection — never an input to it. Optional so the legacy path keeps
+   * the decision shape byte-for-byte (key absent, not null) when v2 is off.
+   */
+  aaEffortEvidence?: AaEffortEvidence | null;
 }
 
 /**
@@ -438,6 +503,12 @@ export interface TierScore {
   p: number;
   capable: boolean | null;
   proven: boolean;
+  /**
+   * TOG-12768: set when `capable` was forced false by monotonicity — this tier
+   * has no proven evidence of its own and an easier tier (the one named) failed
+   * on its own verdict. Absent when `capable` is this tier's own verdict.
+   */
+  cappedBy?: Tier;
   costPerSuccessUsd: number | null;
   medMin: number | null;
   rework: number;

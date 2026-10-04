@@ -50,6 +50,8 @@ function card(overrides: Partial<EarnInCandidateCard> = {}): EarnInCandidateCard
 // gpt-5.6-luna/T1 fixture: proven=true in MODEL_SCORES, so it is NOT an
 // earn-in candidate as-is. Build an unproven-but-capable score for these
 // tests, mirroring the "unproven, capable" shape earn-in exists to admit.
+// T2 passes here: the MODEL_SCORES T2 row is a proven failure, and TOG-12768
+// caps an unproven T1 above it (see the dedicated test below).
 const UNPROVEN_CAPABLE_SCORE: ModelScore = {
   modelId: "gpt-5.6-luna",
   aaIndex: 43,
@@ -70,7 +72,7 @@ const UNPROVEN_CAPABLE_SCORE: ModelScore = {
       medMin: null,
       rework: 0,
     },
-    T2: MODEL_SCORES[1]!.tiers.T2,
+    T2: { ...MODEL_SCORES[1]!.tiers.T2, pObs: 0.85, p: 0.86, capable: true },
     T3: MODEL_SCORES[1]!.tiers.T3,
   },
   overall: MODEL_SCORES[1]!.overall,
@@ -186,6 +188,18 @@ describe("planEarnIn — gates", () => {
     const decision = decide({ modelScore: notCapable });
     expect(decision.dispatch).toBe(false);
     expect(decision.reason).toContain("not judged capable");
+  });
+
+  it("TOG-12768: refuses a T1 earn-in for a model that fails the easier T2 tier on its own proven verdict", () => {
+    const failsT2: ModelScore = {
+      ...UNPROVEN_CAPABLE_SCORE,
+      tiers: { ...UNPROVEN_CAPABLE_SCORE.tiers, T2: MODEL_SCORES[1]!.tiers.T2 },
+    };
+    expect(failsT2.tiers.T1.capable).toBe(true);
+    expect(failsT2.tiers.T2).toMatchObject({ capable: false, proven: true });
+    const decision = decide({ modelScore: failsT2 });
+    expect(decision.dispatch).toBe(false);
+    expect(decision.reason).toContain("not judged capable at T1");
   });
 
   it("refuses a model with no score at all", () => {

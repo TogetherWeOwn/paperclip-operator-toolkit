@@ -12,7 +12,12 @@ import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
+import { budgetWindowId, type BudgetWindowObservation } from "../src/admission-budget.js";
+import type {
+  DecisionAdmissionShadowInput, AdmissionShadowReport, LaneSnapshotAdmissionShadowInput,
+} from "../src/admission-shadow.js";
 import { LANED_MODELS, MODELS, NO_ESCALATION, NOW, PROFILES, account, laneDoc, subCallPins } from "./fixtures.js";
+import { assistantUsage, contextLogFixture, runLog } from "./context-log-fixture.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
@@ -119,6 +124,41 @@ async function boot(
   return harness;
 }
 
+function admissionSnapshot(): DecisionAdmissionShadowInput {
+  const window: BudgetWindowObservation = {
+    providerId: "fixture-provider", poolId: "fixture-pool", kind: "weekly", startAt: NOW - 1000,
+    resetAt: NOW + 100_000, observedAt: NOW, sourceRevision: "fixture", schemaRevision: "v1",
+    unit: "allowance", quota: 100, consumed: 2, safetyHeadroom: 1, planWeight: 1, dataState: "known",
+  };
+  const windowId = budgetWindowId(window);
+  return {
+    enabled: true, cohortId: "fixture-cohort", maxAgeMs: 500,
+    accounts: [{ accountId: "fixture-account", providerId: "fixture-provider", windowIds: [windowId] }],
+    windows: [window], holds: [],
+    bindings: MODELS.map(model => ({ modelId: model.id, binding: {
+      bindingKey: `binding:${model.id}`, lane: "fixture-lane", accountId: "fixture-account", providerId: "fixture-provider",
+      windowIds: [windowId], canStart: true, activeSlots: 0, maxSlots: 2, cooldownUntil: null,
+      estimate: { revision: "fixture", durationMs: 100, windows: [{ windowId, unit: "allowance", upperBurn: 1 }] },
+    } })),
+  };
+}
+
+/** The lane-snapshot alternative: identity comes from the committed lane table, never the caller. */
+function laneSnapshotShadow(): LaneSnapshotAdmissionShadowInput {
+  return {
+    enabled: true, cohortId: "fixture-cohort", maxAgeMs: 60_000,
+    laneQuotaSnapshot: { schemaVersion: 1, observedAt: new Date(NOW - 1000).toISOString(), records: [{
+      lane: "claude-lane-1", observationQuality: "live",
+      five_hour_utilization: 0.4, five_hour_resets_at: new Date(NOW + 3_600_000).toISOString(),
+      seven_day_utilization: 0.99, seven_day_resets_at: new Date(NOW + 86_400_000).toISOString(),
+    }] },
+    bindings: MODELS.map(model => ({ modelId: model.id, binding: {
+      bindingKey: `binding:${model.id}`, lane: "fixture-lane", accountId: "claude-acct-1", providerId: "claude",
+      windowIds: null, canStart: true, activeSlots: 0, maxSlots: 2, cooldownUntil: null, estimate: null,
+    } })),
+  };
+}
+
 const runCtx = { companyId: COMPANY, agentId: "agent-1", runId: "run-1" };
 
 describe("worker", () => {
@@ -133,6 +173,108 @@ describe("worker", () => {
     // database.namespace.migrate capability that unit tests could not see.
     const result = pluginManifestV1Schema.safeParse(manifest);
     expect(result.success).toBe(true);
+  });
+
+  it.each(["advise", "enforce", "sticky", "held", "exhausted", "hard-stop-repin"].flatMap(
+    scenario => ["explicit", "lane-snapshot"].map(variant => [scenario, variant] as const),
+  ))(
+    "keeps complete legacy decisions and actuation golden-identical with account shadow on/off (%s, %s input)",
+    async (scenario, variant) => {
+      const models = MODELS.map(model => ({ ...model,
+        laneId: scenario === "hard-stop-repin" && model.id === "claude-opus-5" ? "dead-lane" : "fixture-lane",
+        enabled: scenario === "exhausted" ? false : model.enabled }));
+      if (scenario === "hard-stop-repin") models.push({ ...models.find(m => m.id === "claude-opus-5")!, id: "healthy-t1", laneId: "fixture-lane" });
+      const config = baseConfig({ models,
+        pacing: { mode: scenario === "hard-stop-repin" ? "enforce" : "off" },
+        selection: { enabled: true, mode: scenario === "advise" ? "advise" : "enforce", stickyModelWithinIssue: true } });
+      const seed = scenario === "sticky" || scenario === "hard-stop-repin"
+        ? issue({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } }, checkoutRunId: null, executionRunId: null }) : issue();
+      const run = async (enabled?: boolean) => {
+        const h = await boot({ ...config, ...(enabled === undefined ? {} : { accountAdmissionShadow: { enabled } }) }, seed);
+        if (scenario === "hard-stop-repin") await h.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+          { "dead-lane": { laneId: "dead-lane", fetchedAt: new Date(NOW).toISOString(), error: null, observation: null,
+            verdict: { laneId: "dead-lane", observedAt: new Date(NOW).toISOString(), state: "exhausted", serviceable: false,
+              score: null, accounts: [], knownAccountCount: 1, knownWeight: 1, serviceableAccountCount: 0,
+              urgentResetAt: null, reason: "fixture exhausted" } } });
+        if (scenario === "held") await h.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.volumeProfiles }, { profiles: [], signals: NO_ESCALATION });
+        const params = { issueId: ISSUE, admissionShadow: variant === "explicit" ? admissionSnapshot() : laneSnapshotShadow() };
+        const advice = await h.executeTool(TOOL_NAMES.advise, params, runCtx);
+        const applied = await h.executeTool(TOOL_NAMES.apply, params, runCtx);
+        return { h, advice, applied, finalIssue: await h.ctx.issues.get(ISSUE, COMPANY) };
+      };
+      const omitted = await run();
+      const off = await run(false);
+      const on = await run(true);
+      for (const actual of [off, on]) {
+        expect(JSON.stringify(actual.advice)).toBe(JSON.stringify(omitted.advice));
+        expect(JSON.stringify(actual.applied)).toBe(JSON.stringify(omitted.applied));
+        expect(actual.finalIssue).toEqual(omitted.finalIssue);
+        expect(actual.h.activity).toEqual(omitted.h.activity);
+      }
+      const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+      expect(await omitted.h.ctx.state.get(key)).toBeNull();
+      expect(await off.h.ctx.state.get(key)).toBeNull();
+      const stored = await on.h.ctx.state.get(key) as { report: AdmissionShadowReport };
+      expect(stored.report).toMatchObject({ governsHostStarts: false, claimsReservations: false, selectedOrServedAccount: null });
+      if (variant === "lane-snapshot") {
+        const rows = stored.report.observationAdapter!.rows;
+        expect(rows).toHaveLength(9);
+        expect(rows.filter(r => r.laneId === "claude-lane-1").map(r => r.state)).toEqual(["known", "known"]);
+        expect(rows.filter(r => r.laneId !== "claude-lane-1").every(r => r.reasons.includes("lane-absent-from-snapshot"))).toBe(true);
+        expect(stored.report.evaluations[0]!.bindings.every(b => b.proposal === "unknown" && b.allowedStarts === null)).toBe(true);
+      } else expect(stored.report.observationAdapter).toBeUndefined();
+      if (scenario === "enforce" || scenario === "advise") {
+        expect(stored.report.evaluations[0]!.bindings.length).toBeGreaterThan(0);
+        expect((omitted.advice as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+      }
+      if (scenario === "enforce") expect(on.finalIssue?.assigneeAdapterOverrides).not.toBeNull();
+      if (scenario === "hard-stop-repin") expect(on.finalIssue?.assigneeAdapterOverrides?.adapterConfig?.model).toBe("healthy-t1");
+      if (scenario === "sticky" || scenario === "exhausted") {
+        expect(stored.report.evaluations[0]!.bindings).toEqual([]);
+        expect(stored.report.accounts[0]!.infeasibilityReasons).toContain("no-observed-eligible-account-binding");
+      }
+    },
+  );
+
+  it("isolates malformed account shadow and report storage failures from actual apply", async () => {
+    const config = baseConfig({ selection: { enabled: true, mode: "enforce" },
+      models: MODELS.map(model => ({ ...model, laneId: "fixture-lane" })), accountAdmissionShadow: { enabled: true } });
+    const baseline = await boot(config);
+    const expected = await baseline.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    for (const failure of ["malformed", "storage", "bad-lane-snapshot"]) {
+      const h = await boot(config);
+      if (failure === "storage") {
+        const original = h.ctx.state.set.bind(h.ctx.state);
+        vi.spyOn(h.ctx.state, "set").mockImplementation(async (key, value) => {
+          if (key.stateKey === PLUGIN_STATE_KEYS.admissionShadowReport) throw new Error("fixture-storage-failure");
+          return original(key, value);
+        });
+      }
+      const result = await h.executeTool(TOOL_NAMES.apply, {
+        issueId: ISSUE, admissionShadow: failure === "malformed" ? { enabled: true }
+          : failure === "bad-lane-snapshot" ? { ...laneSnapshotShadow(), maxAgeMs: 0 } : admissionSnapshot(),
+      }, runCtx);
+      expect(result).toEqual(expected);
+      expect(await h.ctx.issues.get(ISSUE, COMPANY)).toEqual(await baseline.ctx.issues.get(ISSUE, COMPANY));
+      expect(h.activity).toEqual(baseline.activity);
+    }
+  });
+
+  it("reads account shadow without invoking advice, alarms, override writes or another company", async () => {
+    const h = await boot(baseConfig());
+    const update = vi.spyOn(h.ctx.issues, "update");
+    const get = vi.spyOn(h.ctx.issues, "get");
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, runCtx) as { data: { ok: boolean } }).data.ok).toBe(false);
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+    const snapshot = { issueId: ISSUE, evaluatedAt: NOW, report: { mode: "shadow-only" } };
+    await h.ctx.state.set(key, snapshot);
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, runCtx) as { data: unknown }).data).toEqual(snapshot);
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, { ...runCtx, companyId: "other-company" }) as { data: unknown }).data).not.toEqual(snapshot);
+    expect(update).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(h.activity).toEqual([]);
   });
 
   // TOG-2988: the derived tier has to reach `selectModel`, not just sit on the
@@ -193,25 +335,61 @@ describe("worker", () => {
     expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
   });
 
-  it("includes cached input from the last issue run and skips a narrow candidate", async () => {
+  it.each([
+    { peak: 150_000, selected: "narrow" },
+    { peak: 400_000, selected: "wide" },
+  ])("routes cumulative 2.7M usage by actual peak $peak, not by totals or ceiling", async ({ peak, selected }) => {
     const t1 = MODELS.find((model) => model.tier === "T1")!;
     const narrow = { ...t1, id: "narrow", contextWindow: 200_000, costPerMTokIn: 0.1 };
     const wide = { ...t1, id: "wide", contextWindow: 1_000_000 };
-    const enforcing = await boot(
-      baseConfig({ selection: { enabled: true, mode: "enforce" }, models: [narrow, wide] }),
-    );
-    enforcing.ctx.db.query = async (sql: string) =>
-      sql.includes("usage_json->>'inputTokens'")
-        ? ([{ input_tokens: 100_000, cached_input_tokens: 300_000 }] as never)
+    const repeatedTurns = peak === 150_000 ? 25 : 22;
+    const fixture = await contextLogFixture(runLog([
+      ...Array.from({ length: repeatedTurns }, () => assistantUsage(20_000, 70_000, 10_000)),
+      assistantUsage(20_000, peak - 30_000, 10_000),
+      assistantUsage(2_700_000 - repeatedTurns * 100_000 - peak),
+      { type: "result", usage: { input_tokens: 2_700_000 } },
+    ]));
+    try {
+      const enforcing = await boot(baseConfig({
+        selection: { enabled: true, mode: "enforce", fleetContextCeilingTokens: 200_000, contextRunLogRoot: fixture.root },
+        models: [narrow, wide],
+      }));
+      enforcing.ctx.db.query = async (sql: string) => sql.includes("log_ref")
+        ? ([{ ...fixture.row, input_tokens: 2_700_000, cached_input_tokens: 2_000_000 }] as never)
         : ([] as never);
+      const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+      const decision = (result as {
+        data: { decision: { modelId: string; trace: string[]; rejections: Array<{ modelId: string; stage: string }> } };
+      }).data.decision;
+      expect(decision.modelId).toBe(selected);
+      expect(decision.trace).toContain(
+        `context: source=last-run-peak tokens=${peak} run=run-prev evidence=local-file/claude-assistant-usage`,
+      );
+      expect(decision.rejections.some((entry) => entry.modelId === "narrow" && entry.stage === "context-window"))
+        .toBe(peak > 200_000);
+    } finally { await fixture.cleanup(); }
+  });
 
-    const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
-    const decision = (result as {
-      data: { decision: { modelId: string; rejections: Array<{ modelId: string; stage: string }> } };
-    }).data.decision;
-    expect(decision.modelId).toBe("wide");
-    expect(decision.rejections).toContainEqual(
-      expect.objectContaining({ modelId: "narrow", stage: "context-window" }),
+  it("labels missing peak evidence as a conservative fleet fallback, never a run measurement", async () => {
+    const advising = await boot(baseConfig({ selection: { fleetContextCeilingTokens: 200_000 } }));
+    advising.ctx.db.query = async (sql: string) => sql.includes("log_ref")
+      ? ([{ id: "run-prev", input_tokens: 2_700_000, cached_input_tokens: 2_000_000 }] as never)
+      : ([] as never);
+    const result = await advising.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { trace: string[] } }).data.trace).toContain(
+      "context: source=fleet-ceiling-fallback tokens=200000 run=run-prev evidence=log-root-unconfigured",
+    );
+  });
+
+  it("keeps explicit requirements authoritative even if the history read fails", async () => {
+    const advising = await boot(baseConfig({ selection: { fleetContextCeilingTokens: 200_000 } }));
+    advising.ctx.db.query = async (sql: string) => {
+      if (sql.includes("log_ref")) throw new Error("history unavailable");
+      return [] as never;
+    };
+    const result = await advising.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, requiredContextTokens: 300_000 }, runCtx);
+    expect((result as { data: { trace: string[] } }).data.trace).toContain(
+      "context: source=explicit tokens=300000 run=none evidence=history-read-failed",
     );
   });
 
@@ -254,7 +432,7 @@ describe("worker", () => {
       adapterConfig: {
         model: narrowT3.id,
         env: {
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
           ...subCallPins(narrowT3.id),
         },
       },
@@ -294,8 +472,10 @@ describe("worker", () => {
         model: "claude-opus-5",
         env: {
           KEEP_ME: { type: "plain", value: "yes" },
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
-          ...subCallPins("claude-opus-5"),
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
+          // T3 pick on the fixtures roster is haiku, so the cheap keys land there,
+          // not on the T1 pin (TOG-3116).
+          ...subCallPins("claude-opus-5", "claude-haiku-4-5-20251001"),
         },
       },
     });
@@ -352,7 +532,7 @@ describe("worker", () => {
     // to lose. Contrast the unreadable-agent case, where env is left alone
     // entirely (`context.spec.ts`, "writes no env at all when ... unknown").
     expect(after?.assigneeAdapterOverrides).toEqual({
-      adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5", "claude-haiku-4-5-20251001") },
     });
     expect(new Set(after?.labelIds ?? [])).toEqual(new Set([OTHER_LABEL_ID, TIER_LABEL_ID]));
     expect(enforcing.activity[0]?.metadata?.tierSource).toBe("capability-exclusion");
@@ -824,7 +1004,9 @@ describe("worker", () => {
       runCtx,
     );
     expect((result as { content: string }).content).toContain("not a configured roster entry");
-    expect((result as { data: unknown }).data).toBeNull();
+    // TOG-4763: rejections still carry a plain-object data (never null), so the
+    // gateway's structuredContent mapping never yields null.
+    expect((result as { data: unknown }).data).toEqual({ ok: false, error: "unknown-model", modelId: "cliproxy/not-in-roster" });
   });
 
   // TOG-2379: a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
@@ -977,6 +1159,122 @@ describe("worker", () => {
     });
   });
 
+  // TOG-4959. Per-tier lane-poll outcome counters: the `pollLaneCapacity` job
+  // increments them from the same results it merges into the lane ledger, and
+  // `model_selection_tier_outcomes` reads them back. Read-only end to end —
+  // nothing here may change which model a decision selects.
+  describe("TOG-4959 tier poll outcomes", () => {
+    const LANED = MODELS.map((entry) => ({
+      ...entry,
+      laneId: entry.id === "claude-haiku-4-5-20251001" ? "lane-zai" : "lane-claude",
+    }));
+    // `free: true` lanes are the deterministic served-fixture: the pace
+    // engine returns `serviceable: true` for them by construction
+    // (`pace.ts` free-lane branch), with no document-shape or clock
+    // dependence — so these tests measure the counters, not the verdict.
+    const tierConfig = () =>
+      baseConfig({
+        models: LANED,
+        pacing: {
+          mode: "enforce",
+          lanes: [
+            {
+              laneId: "lane-zai",
+              statusUrl: "https://status.example.com/lane-zai",
+              free: true,
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+            {
+              laneId: "lane-claude",
+              statusUrl: "https://status.example.com/lane-claude",
+              free: true,
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+          ],
+        },
+      });
+
+    async function outcomesFor(h: Awaited<ReturnType<typeof boot>>) {
+      return h.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.tierPollOutcomes,
+      }) as Promise<Record<string, unknown> | null>;
+    }
+
+    it("accumulates per-tier counters from a live lane poll without changing selection", async () => {
+      const h = await boot(tierConfig());
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async () =>
+        new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+
+      const before = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.runJob("pollLaneCapacity");
+      const after = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      // The acceptance invariant: the counters move, the selection does not.
+      expect((after as { data: { modelId: string } }).data.modelId).toBe(
+        (before as { data: { modelId: string } }).data.modelId,
+      );
+
+      const stored = await outcomesFor(h);
+      const tiers = (stored?.tiers ?? {}) as Record<string, { polls: number; succeeded: number; failed: number }>;
+      // lane-zai serves T3 alone; lane-claude serves T1 + T2.
+      expect(tiers.T3).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T2).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T1).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+
+    it("counts a failing lane as failed for exactly the tiers it serves", async () => {
+      const h = await boot(tierConfig());
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async (url: unknown) => {
+        if (String(url).includes("lane-zai")) return new Response("nope", { status: 404 }) as never;
+        return new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      };
+
+      await h.runJob("pollLaneCapacity");
+
+      const stored = await outcomesFor(h);
+      const tiers = (stored?.tiers ?? {}) as Record<string, { polls: number; succeeded: number; failed: number }>;
+      expect(tiers.T3).toMatchObject({ polls: 1, succeeded: 0, failed: 1 });
+      expect(tiers.T2).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T1).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+
+    it("tierOutcomes tool answers zeroes before any poll and counters after", async () => {
+      const h = await boot(tierConfig());
+      const empty = (await h.executeTool(TOOL_NAMES.tierOutcomes, {}, runCtx)) as {
+        content: string;
+        data: { updatedAt: null; tiers: Record<string, { polls: number }> };
+      };
+      expect(typeof empty.content).toBe("string");
+      expect(empty.data.updatedAt).toBeNull();
+      expect(empty.data.tiers.T3!.polls).toBe(0);
+
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async () =>
+        new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      await h.runJob("pollLaneCapacity");
+
+      const filled = (await h.executeTool(TOOL_NAMES.tierOutcomes, {}, runCtx)) as {
+        content: string;
+        data: { updatedAt: string | null; tiers: Record<string, { polls: number; succeeded: number; failed: number }> };
+      };
+      expect(typeof filled.content).toBe("string");
+      expect(typeof filled.data.updatedAt).toBe("string");
+      expect(filled.data.tiers.T3).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+  });
+
   describe("TOG-2137 Defect 2: tier-exhausted operator alarm", () => {
     function unserviceableVerdict(laneId: string): LanePaceVerdict {
       return {
@@ -1081,18 +1379,27 @@ describe("worker", () => {
   });
 
   describe("TOG-2137/2138: shadow decision emitter wiring in worker.ts", () => {
-    // Not exported from worker.ts (it's a local `const`); the QA-flagged gap
-    // is exactly that no test drove this path, so the filename is pinned here
-    // deliberately rather than imported.
-    const SHADOW_FILE = "decisions.jsonl";
+    // TOG-13566: emits land in the UTC-hour shard for the decision timestamp
+    // (`decisions-YYYY-MM-DD-HHZ.jsonl`), not in a single `decisions.jsonl`.
+    // The fixture clock is frozen at NOW (2026-09-10T12:00Z), so every advise()
+    // in these tests lands in `decisions-2026-09-10-12Z.jsonl`. The shard name
+    // is pinned here deliberately rather than imported — the emitter keeps it
+    // as a local `const`, and the QA-flagged gap this block covers is exactly
+    // that no test drove this path.
+    const SHADOW_SHARD = "decisions-2026-09-10-12Z.jsonl";
 
     async function readShadowLines(h: Awaited<ReturnType<typeof boot>>): Promise<string[]> {
-      const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_FILE);
+      const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_SHARD);
       return text.split("\n").filter((line) => line.trim().length > 0);
     }
 
+    async function listShards(h: Awaited<ReturnType<typeof boot>>): Promise<string[]> {
+      const listing = await h.ctx.localFolders.list(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions);
+      return listing.entries.filter((entry) => entry.kind === "file").map((entry) => entry.name).sort();
+    }
+
     it("writes a correlated host/plugin-shadow pair on advise() when shadowEmit.enabled is true", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
 
       const lines = await readShadowLines(h);
@@ -1117,8 +1424,8 @@ describe("worker", () => {
       await expect(readShadowLines(harness)).rejects.toThrow(/not found/i);
     });
 
-    it("caps the shadow log at config.shadowEmit.maxRecords, keeping the newest records", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 2 } }));
+    it("caps the shadow shard at config.shadowEmit.shardMaxRecords, keeping the newest records", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 2 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
@@ -1130,8 +1437,8 @@ describe("worker", () => {
       }
     });
 
-    it("keeps complete pairs when maxRecords is odd", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 3 } }));
+    it("keeps complete pairs when shardMaxRecords is odd", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 3 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
 
@@ -1141,23 +1448,52 @@ describe("worker", () => {
       expect(records[0].ts).toBe(records[1].ts);
     });
 
-    it("swallows a shadow-emit write failure — advise() still returns its decision, and the failure is logged", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+    it("TOG-13566: retention deletes whole old shards past retentionShards, newest pair intact", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
+      // Seed two shards from older hours directly — the emitter never writes
+      // outside the current hour, so retention is the only path that removes
+      // them.
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions-2020-01-01-00Z.jsonl", '{"writer":"host"}\n',
+      );
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions-2020-01-01-01Z.jsonl", '{"writer":"host"}\n',
+      );
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      // Current-hour shard holds the fresh pair; both seeded shards are gone.
+      expect(await listShards(h)).toEqual([SHADOW_SHARD]);
+      const records = (await readShadowLines(h)).map((line) => JSON.parse(line));
+      expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+    });
+
+    it("TOG-13566: retention never touches the legacy single-file decisions.jsonl", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl", '{"writer":"host","legacy":true}\n',
+      );
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const legacy = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl");
+      expect(legacy).toContain('"legacy":true');
+    });
+
+    it("TOG-13566: a write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
       h.ctx.localFolders.writeTextAtomic = async () => {
         throw new Error("simulated local-folder I/O failure");
       };
 
       const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-      const decision = (result as { data: { modelId: string } }).data;
-      expect(decision.modelId).toBe("claude-opus-5");
+      expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
       expect(h.logs.some((l) => l.level === "warn" && l.message.includes("shadow decision emit failed"))).toBe(true);
 
       h.ctx.localFolders.writeTextAtomic = originalWrite;
     });
 
     it("TOG-2373: a transient read failure after existing records aborts the emit instead of truncating history", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       expect(await readShadowLines(h)).toHaveLength(4);
@@ -1184,7 +1520,7 @@ describe("worker", () => {
     });
 
     it("TOG-2373: two overlapping emits both land instead of collapsing to one record", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
 
       await Promise.all([
         h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx),

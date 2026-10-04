@@ -1,5 +1,6 @@
-import type { LanePaceObservation, LanePaceVerdict, PaceState } from "../lane-capacity/pace.js";
+import { DEFAULT_MARGIN, type LanePaceObservation, type LanePaceVerdict, type PaceState } from "../lane-capacity/pace.js";
 import { OPERATOR_PIN_LABEL } from "../constants.js";
+import { activeModelCooldown, type ModelCooldown } from "../lane-capacity/counts-only.js";
 import { compareSamePriceFamily } from "./same-price-family.js";
 import type { Candidate, ModelEntry } from "./types.js";
 
@@ -50,6 +51,12 @@ export interface LaneLedgerEntry {
   unserviceableSince?: string | null;
   /** The `verdict.reason` carried by the observation that set `unserviceableSince`. */
   unserviceableReason?: LanePaceVerdict["reason"] | null;
+  /** Retained across failed polls, bounded by source freshness AND cooldown expiry. */
+  modelCooldownEvidence?: Array<{
+    observedAt: string;
+    staleAfterSeconds: number;
+    entries: ModelCooldown[];
+  }>;
 }
 
 export type LaneLedger = Record<string, LaneLedgerEntry>;
@@ -127,6 +134,9 @@ export function mergeLedgerEntry(
       error: result.error,
       unserviceableSince,
       unserviceableReason,
+      modelCooldownEvidence: result.verdict
+        ? cooldownEvidence(result.observation ?? null)
+        : previous?.modelCooldownEvidence ?? cooldownEvidence(previous?.observation ?? null),
     },
   };
 }
@@ -157,6 +167,31 @@ const PACE_STATE_RANK: Record<PaceState, number> = {
 function paceStateOf(ledger: LaneLedger, model: ModelEntry | undefined): PaceState {
   if (!model) return "unknown";
   return laneVerdictFor(ledger, model.laneId ?? null)?.state ?? "unknown";
+}
+
+/**
+ * TOG-12258: the only lane states the balance pass pulls idle pins toward —
+ * a lane trailing its fair-share pace should get volume routed to it before
+ * its allowance window closes unused. Everything else (including `on`,
+ * `ahead`, and `unknown`) is never a pace-pull target.
+ */
+const PACE_PULL_STATES: ReadonlySet<PaceState> = new Set(["behind", "behind-urgent"]);
+
+/** TOG-12258: whether this model's lane is trailing pace. `unknown` (unobserved or lane-less) is never behind. */
+export function isBehindPace(ledger: LaneLedger, model: ModelEntry | undefined): boolean {
+  return PACE_PULL_STATES.has(paceStateOf(ledger, model));
+}
+
+/**
+ * TOG-12258: this model's lane rank in the new-pin preference order (lower =
+ * more preferred). The balance-pass pace-pull gate requires the target's rank
+ * to be strictly better (lower) than the pinned lane's, so a pull never moves
+ * a card sideways between equally-behind lanes or backwards onto a
+ * better-paced lane. The rank map itself stays private — all ordering stays
+ * in `orderCandidatesByPace`.
+ */
+export function pacePreferenceRank(ledger: LaneLedger, model: ModelEntry | undefined): number {
+  return PACE_STATE_RANK[paceStateOf(ledger, model)];
 }
 
 function deviationOf(ledger: LaneLedger, model: ModelEntry | undefined): number {
@@ -348,11 +383,32 @@ const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = n
  * `mergeLedgerEntry`) precisely so it survives that, and it is authoritative
  * until a successful poll contradicts it.
  */
-export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry): boolean {
+function cooldownEvidence(observation: LanePaceObservation | null): NonNullable<LaneLedgerEntry["modelCooldownEvidence"]> {
+  if (!observation || observation.error !== null || !observation.observedAt) return [];
+  return observation.accounts.flatMap((account) => account.modelCooldowns?.length ? [{
+    observedAt: observation.observedAt!,
+    staleAfterSeconds: Math.min(900, observation.staleAfterSeconds ?? 900, account.staleAfterSeconds ?? 900),
+    entries: account.modelCooldowns,
+  }] : []);
+}
+
+export function modelCooldownExcluded(ledger: LaneLedger, model: ModelEntry, nowMs: number): boolean {
+  const entry = model.laneId ? ledger[model.laneId] : null;
+  if (!entry) return false;
+  const evidence = entry.modelCooldownEvidence ?? cooldownEvidence(entry.observation);
+  return evidence.some((sample) => {
+    const ageMs = nowMs - Date.parse(sample.observedAt);
+    return ageMs >= -60_000 && ageMs <= sample.staleAfterSeconds * 1000 &&
+      activeModelCooldown(sample.entries, model.id, nowMs);
+  });
+}
+
+export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry, nowMs = Date.now()): boolean {
   const laneId = model.laneId ?? null;
   if (!laneId) return false;
   const entry = ledger[laneId];
   if (!entry) return false;
+  if (modelCooldownExcluded(ledger, model, nowMs)) return true;
   if (entry.verdict) return unserviceableVerdict(entry.verdict);
   // No current reading. Fall back to the last observation that produced one;
   // `?? null` so a ledger persisted before this field existed reads as "never
@@ -486,30 +542,25 @@ export function avoidThresholdFor(config: LaneAvoidConfig, laneId: string): numb
 }
 
 /**
- * 2026-09-07 07:12Z owner rule (going-to-bed note): "fully use the full
- * weekly amount" of the primary Codex account before a manual reset — the
- * codex lane must stay usable until it is genuinely exhausted rather than
- * parked at the generic AVOID threshold. Parking it early moved ~25 T2 cards
- * onto bare claude-sonnet-5 (the owner's Claude Max, then at 0.87 weekly) at
- * 06:5xZ. `AVOID_LANE` is how a lane earns a higher threshold than the 0.8
- * default; this function is fail-neutral like `hardStopExcluded` — a
- * verdict with no measured utilization (`score` null) excludes nothing.
+ * Avoid new admission only when the governing window is BOTH at the lane's
+ * configured utilization threshold AND ahead of its elapsed trajectory by
+ * more than the pace engine's default margin (0.1). High utilization near
+ * reset is not itself pressure: .75 used at .83 elapsed still has headroom.
  *
- * 2026-09-08 22:55Z owner rule: the collector labels a lane "degraded" at
- * >=0.9 utilization; treating "degraded" itself as unusable caused a Claude
- * flood incident by excluding the lane before its own avoid threshold was
- * actually crossed. This function must key ONLY on measured utilization
- * against `avoidThresholdFor`, never on the lane's reported health/state —
- * "degraded" stays usable until the threshold, exactly like the Python
- * source's `usable()` (health gates only exclude on exhausted/unavailable,
- * which is `hardStopExcluded`'s job, not this one).
+ * Per-lane thresholds still apply (e.g. Codex's higher threshold), and a
+ * collector health/state label alone never triggers avoidance. Missing or
+ * nonfinite pace scores stay neutral. Exhaustion and declared outages remain
+ * separate hard gates; this soft admission rule never waives them.
  */
 export function laneAvoidExcluded(ledger: LaneLedger, model: ModelEntry, config: LaneAvoidConfig): boolean {
   if (!model.laneId) return false;
-  const verdict = laneVerdictFor(ledger, model.laneId);
-  const utilization = verdict?.score?.utilization;
-  if (utilization === null || utilization === undefined) return false;
-  return utilization >= avoidThresholdFor(config, model.laneId);
+  const score = laneVerdictFor(ledger, model.laneId)?.score;
+  if (!score || !Number.isFinite(score.utilization) || !Number.isFinite(score.elapsed) || !Number.isFinite(score.deviation)) return false;
+  // The governing score's deviation is utilization minus elapsed, normalized
+  // by the pace engine to avoid floating-point drift at the strict boundary.
+  // Reuse its default deadband: threshold alone must not park a lane whose
+  // remaining allowance is on pace (or at risk of expiring unused).
+  return score.utilization >= avoidThresholdFor(config, model.laneId) && score.deviation > DEFAULT_MARGIN;
 }
 
 /**

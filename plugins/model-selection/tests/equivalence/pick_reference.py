@@ -5,7 +5,7 @@ Ground-truth oracle for TOG-2481 task #10's equivalence harness.
 This is NOT a rewrite-from-memory of `tier_dispatcher.py`'s `pick()` and its
 dependencies — every function body below is copied verbatim from
 `~/paperclip-enterprise-company/ops/tog-1926/tier_dispatcher.py` (confirmed
-present at that path in the example company workspace, read in full
+present at that path in the ef993a7e-... company workspace, read in full
 2026-09-14), with exactly one class of change: every place the original read
 a file (`model-usage-v1.json`, `lane_outage.json`, `<lane>.json`,
 `model_scores.json`, `zai_pace_override.json`) or shelled out to `sql()` now

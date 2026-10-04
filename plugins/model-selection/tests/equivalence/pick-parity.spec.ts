@@ -303,7 +303,10 @@ function buildLaneLedger(def: ScenarioDef): LaneLedger {
         observedAt: "t",
         state: "on",
         serviceable: state.serviceable ?? true,
-        score: { utilization: state.utilization ?? 0, elapsed: 0.5, deviation: 0 },
+        // Legacy avoidance cases are all ahead of pace at this midpoint.
+        // Keep the frozen raw-utilization oracle on that common domain;
+        // near-reset behavior is intentionally different and tested separately.
+        score: { utilization: state.utilization ?? 0, elapsed: 0.5, deviation: (state.utilization ?? 0) - 0.5 },
         accounts: [],
         knownAccountCount: accountCount,
         knownWeight: accountCount,

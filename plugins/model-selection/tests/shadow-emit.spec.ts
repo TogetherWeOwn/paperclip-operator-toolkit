@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { SHADOW_EXPLANATIONS_CAP } from "../src/constants.js";
+import { SHADOW_EXPLANATIONS_CAP, SHADOW_PICK_WHY_MAX_CHARS } from "../src/constants.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import { selectModel } from "../src/engine/select.js";
-import { buildHostRecord, buildShadowRecord, SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
+import { boundPickWhy, buildHostRecord, buildShadowRecord, SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 import type { LanePaceObservation, LanePaceVerdict, PaceWindowVerdict } from "../src/lane-capacity/pace.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
@@ -487,6 +487,23 @@ describe("paired decision records", () => {
     });
     expect(record.explanations.length).toBe(SHADOW_EXPLANATIONS_CAP);
     expect(record.explanationsTruncated).toBe(5);
+  });
+
+  it("TOG-13566: boundPickWhy passes a short trace through untouched", () => {
+    expect(boundPickWhy(["a", "b"])).toBe("a; b");
+    expect(boundPickWhy([])).toBe("");
+  });
+
+  it("TOG-13566: boundPickWhy clamps a long trace with an explicit truncated marker", () => {
+    // 3× the cap: the marker (~20 chars) is noise next to the cut, and the
+    // contract that matters is a bounded output, not a strictly shorter one
+    // (a trace 1 char over the cap legitimately grows by the marker).
+    const trace = [`x`.repeat(SHADOW_PICK_WHY_MAX_CHARS * 3)];
+    const full = trace.join("; ");
+    const bounded = boundPickWhy(trace);
+    expect(bounded.length).toBeLessThan(full.length);
+    expect(bounded.length).toBeLessThanOrEqual(SHADOW_PICK_WHY_MAX_CHARS + 30);
+    expect(bounded).toBe(`x`.repeat(SHADOW_PICK_WHY_MAX_CHARS) + `...[truncated ${full.length - SHADOW_PICK_WHY_MAX_CHARS} chars]`);
   });
 
   it("reports a live operator override with its id and expiry", () => {

@@ -32,10 +32,29 @@ export const TOOL_NAMES = {
   priceDriftReport: "model_selection_price_drift_report",
   /** TOG-3996: run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
   reconcilePricesNow: "model_selection_reconcile_prices_now",
+  /** TOG-12206 P2: the last free-list sync diff (verified/broken/ambiguous/unbound), as an operator-reviewable report. Read-only. */
+  aaFreeSyncReport: "model_selection_aa_free_sync_report",
+  /** TOG-12206 P2: run the free-list fetch + diff immediately instead of waiting for the daily tick. Still report-only. */
+  refreshAaFreeSyncNow: "model_selection_refresh_aa_free_sync_now",
+  /** TOG-12972: the first-party accepted-work posterior overlay, as an operator-reviewable report. Read-only. */
+  acceptedWorkReport: "model_selection_accepted_work_report",
+  /**
+   * TOG-4959. Per-tier lane-poll outcome counters. Read-only: the
+   * `pollLaneCapacity` job increments, this tool reads back.
+   */
+  tierOutcomes: "model_selection_tier_outcomes",
+  /** Read the last explicitly enabled account shadow snapshot; never actuates. */
+  admissionShadowReport: "model_selection_admission_shadow_report",
   /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
   setZaiPaceOverride: "model_selection_set_zai_pace_override",
+  /**
+   * TOG-12490 (TOG-11543 P2, TOG-11549 D4). Add, edit, remove, validate or diff
+   * tier-policy tiers. Prepare/validate/diff only: returns `proposalOnly` or
+   * `rejected`, never writes state or config, never changes routing.
+   */
+  tierPolicy: "model_selection_tier_policy",
 } as const;
 
 /**
@@ -110,6 +129,8 @@ export const JOB_KEYS = {
   refreshAaIndex: "refreshAaIndex",
   /** TOG-3996: reconcile roster prices against models.dev and report drift (never auto-applies). */
   reconcilePrices: "reconcilePrices",
+  /** TOG-12206 P2: fetch the free AA legacy list (quota-gated) and store the CAS snapshot + per-company reviewable diff. Never writes pins/tiers/enabled. */
+  refreshAaFreeSync: "refreshAaFreeSync",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
   /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
@@ -124,6 +145,8 @@ export const JOB_KEYS = {
    * dispatcher, not two.
    */
   dispatchSweep: "dispatch-sweep",
+  /** TOG-11793: warm the run-scoped decision's hot snapshot once a minute. */
+  refreshRunResolve: "refreshRunResolveSnapshot",
 } as const;
 
 /**
@@ -168,6 +191,8 @@ export const PLUGIN_STATE_KEYS = {
   reworkSignals: "reworkSignals",
   /** Rolling 7-day list-price vs cost-per-accepted-card shadow-diff records (Slice 3). */
   shadowDiffs: "shadowDiffs",
+  /** One bounded, caller-supplied account shadow snapshot, never a reservation ledger. */
+  admissionShadowReport: "admissionShadowReport",
   /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
   earnInState: "earnInState",
   /**
@@ -220,6 +245,29 @@ export const PLUGIN_STATE_KEYS = {
    * different price change on the same row does surface again.
    */
   priceDriftSurfaced: "priceDriftSurfaced",
+  /**
+   * TOG-12206 P2, instance-scoped (the free list is not company-specific):
+   * the last-good free-list snapshot `{fetchedAt, digest, snapshot,
+   * lastAttemptAt, lastError, nextEligibleAt}`. A failed fetch keeps the
+   * last good snapshot in place and records the attempt; the snapshot is
+   * dated, so a stale one is legible as stale. `nextEligibleAt` is the D1
+   * quota gate (at most one scheduled fetch/day, 429 honors Retry-After).
+   */
+  aaFreeSyncSnapshot: "aaFreeSyncSnapshot",
+  /**
+   * TOG-12206 P2, per-company: the most recent free-list sync diff
+   * (`{ranAt, digest, error, diff}`), so `aaFreeSyncReport` can answer
+   * without re-fetching. The diff is the artifact — this job writes no
+   * binding anywhere.
+   */
+  aaFreeSyncDiff: "aaFreeSyncDiff",
+  /**
+   * TOG-12972, per-company: the first-party accepted-work posterior overlay
+   * (`{specVersion, computedAt, cohorts, unattributed}`), so
+   * `acceptedWorkReport` can answer without re-reading runs. The overlay is
+   * the artifact — nothing reads it for routing in this slice.
+   */
+  acceptedWorkOverlay: "acceptedWorkOverlay",
   /**
    * Per-issue capability-exclusion flag recorded by `classifyIssues`
    * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
@@ -290,6 +338,30 @@ export const PLUGIN_STATE_KEYS = {
    * operator alarm card.
    */
   noEligibleNotices: "noEligibleNotices",
+  /**
+   * TOG-6895. Per-issue pin timestamps (`{issueId: ISOString}`), the pin
+   * lifecycle's only clock. Written on every pin and clear, read by the
+   * repin pass: a pin older than PIN_MAX_AGE_MS is re-validated through
+   * `advise` even when the pinned lane still reads usable. Missing entry =
+   * expired (fail-safe toward re-validation, never toward keeping).
+   */
+  pinPinnedAt: "pinPinnedAt",
+  /**
+   * TOG-4959, per-company: per-tier lane-poll outcome counters
+   * (`{tiers: {T1: {polls, succeeded, failed, lastAt}, ...}, updatedAt}`).
+   * Written by the `pollLaneCapacity` job, read by the read-only
+   * `model_selection_tier_outcomes` tool. Read-only telemetry: selection
+   * never reads this key, so the counters cannot change routing.
+   */
+  tierPollOutcomes: "tierPollOutcomes",
+  /**
+   * TOG-12234, per-company: index of issues whose pin carries a fallback
+   * provenance stamp (`{issueId: {decisionId, decidedAt, checkedAt}}`).
+   * Written next to every pin write and clear; read by the fallback lease
+   * pass, which examines only these issues. The stamp on the issue is the
+   * authority: an entry whose `decisionId` no longer matches is dropped.
+   */
+  fallbackPins: "fallbackPins",
 } as const;
 
 /**
@@ -334,6 +406,18 @@ export const MODELS_DEV_USER_AGENT =
 export const MODELS_DEV_MAX_RESPONSE_BYTES = 16_000_000;
 export const MODELS_DEV_FETCH_TIMEOUT_MS = 20_000;
 
+/**
+ * TOG-12206 P2 (D1 quota). The free legacy list is fetched at most once a
+ * day on the schedule, plus bounded transient retries. 429 honors
+ * `Retry-After`; 401/403 stops the source for the day (no substitution).
+ * Never conflate with the new `/language/models/free` 100/24h budget.
+ */
+export const AA_FREE_FETCH_TIMEOUT_MS = 10_000;
+/** The legacy list measured ~688 rows; this leaves wide headroom without inviting abuse. */
+export const AA_FREE_MAX_RESPONSE_BYTES = 8_000_000;
+export const AA_FREE_FETCH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const AA_FREE_RETRY_INTERVAL_MS = 60 * 60 * 1000;
+
 export const PACING_MODES = ["off", "shadow", "enforce"] as const;
 export type PacingMode = (typeof PACING_MODES)[number];
 
@@ -360,6 +444,20 @@ export const LOCAL_FOLDER_KEYS = {
  * dropping them.
  */
 export const SHADOW_EXPLANATIONS_CAP = 200;
+
+/**
+ * TOG-13566. Shadow-decision records are single JSONL lines, and the
+ * `writeTextAtomic` payload is itself one newline-delimited JSON-RPC line on
+ * the worker's stdout. A live-shape record measured ~16 KB, but a roster or
+ * lane-account blowup can push one line past the host's per-line cap, which
+ * the host answers by dropping the line ("dropping oversized worker line").
+ * `pickWhy` (the joined `select.ts` trace) is the one unbounded free-text
+ * field, so it is clamped to this many characters with a `...[truncated N
+ * chars]` marker rather than silently cut. Structured fields (candidates,
+ * explanations, lane snapshot) are never truncated — a truncated list would
+ * read as a complete measurement.
+ */
+export const SHADOW_PICK_WHY_MAX_CHARS = 8000;
 
 /** Ahead-of-line throttling never drives a lane's slot share below this. */
 export const DEFAULT_SLOT_FLOOR_FRACTION = 0.25;
@@ -443,19 +541,125 @@ export const COST_BAND_MULTIPLIER = 1.2;
 export const CLASSIFY_FETCH_MULTIPLIER = 10;
 /** Hard ceiling on that over-fetch, so a large `batchSize` cannot page the whole board. */
 export const CLASSIFY_FETCH_LIMIT_MAX = 400;
-/** Stop starting new classifications with a minute left before the host's 300 s job RPC wall. */
-export const CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1000;
+/**
+ * Stop starting new classifications with 100 s left before the host's 300 s
+ * job RPC wall (TOG-11688). Was a 4-minute cooperative budget — but this
+ * pass hit 288 s max over the last 4 h, right at the wall: its rows
+ * (`ctx.issues.get` plus the classifier HTTP call) pay the same contended
+ * host-RPC cost as every other row-walking pass. 200 s caps the job at
+ * two-thirds of the wall, leaving a full 100 s — more than the slowest
+ * observed row — for the in-flight row when the host fires.
+ */
+export const CLASSIFY_JOB_BUDGET_MS = 200 * 1000;
+/**
+ * TOG-11688: per-row admission headroom for the classify pass. The classifier
+ * HTTP call defaults to 15 s (`resolve.ts`) but the row also pays a
+ * `ctx.issues.get` read, and rows cost 40-95 s each in contended host RPC
+ * across the row-walking passes — no new row starts unless this much job
+ * budget remains. Paired with the adaptive admission in worker.ts, which
+ * raises the bar to 1.5x the slowest row seen this firing.
+ */
+export const CLASSIFY_ROW_TIMEOUT_MS = 30 * 1000;
 
 /** `tier_dispatcher.py` `label_only_pass()`'s fixed `limit 100` row fetch. No separate write cap in the source. */
 export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;
+/**
+ * Stop starting new label-only pins with 100 s left before the host's 300 s
+ * RPC wall (TOG-11688). Was a 4-minute cooperative budget with the host's
+ * full minute of headroom — but the observed row costs (40-95 s each in
+ * describeIssue + advise host RPC) mean an admitted row can still spend ~95 s
+ * past admission and blow the wall: the timeout postmortem shows failures at
+ * ~300 s alongside successes at 259-295 s, i.e. no margin at all. 200 s caps
+ * the job at two-thirds of the wall, leaving a full 100 s — more than the
+ * slowest observed row — for the in-flight row's abandoned promise to settle
+ * without the host firing first.
+ */
+export const LABEL_ONLY_PASS_JOB_BUDGET_MS = 200 * 1000;
+/**
+ * TOG-7123 (2026-09-28 reopen): per-row admission headroom for the label-only
+ * pass. The 4-minute job budget above is only checked BETWEEN rows, so a row
+ * admitted with 1 ms of budget left can still spend ~98 s in host calls
+ * (TOG-3867, 2026-09-28 11:04Z) and blow the host's 300 s wall. No new row
+ * starts unless this much job budget remains — admission stops at ~210 s
+ * elapsed, leaving the rest of the job budget plus the full minute of host
+ * headroom. A row that goes slow anyway trips the write gate in worker.ts
+ * (no routing mutation after the budget) instead of an orphaned write.
+ */
+export const LABEL_ONLY_PASS_ROW_TIMEOUT_MS = 30 * 1000;
+/**
+ * TOG-11688: per-firing row cap for the label-only pass. The candidate fetch
+ * pulls 100 rows, and rows cost 40-95 s each in host RPC — without a cap the
+ * pass can never drain inside any sub-wall budget, so the same backlog rows
+ * are re-fetched (and re-timed-out on) every firing. Eight rows bound the
+ * worst case below the 200 s budget even at the slowest observed row cost;
+ * the watermark is the cursor (uncapped excess rows stay newer than the
+ * creep mark and are reached on later firings).
+ */
+export const LABEL_ONLY_PASS_MAX_ROWS_PER_FIRING = 8;
 /** `tier_dispatcher.py` `repin_pass()`'s fixed `limit 400` row fetch. */
 export const REPIN_PASS_FETCH_LIMIT = 400;
 /** `tier_dispatcher.py` `repin_pass(limit=6)`'s default write cap per run. */
 export const REPIN_PASS_WRITE_LIMIT = 6;
+/**
+ * Stop starting new repin work with 100 s left before the host's 300 s job
+ * RPC wall (TOG-11688). This pass had NO job budget at all — it walked up
+ * to 400 fetched rows bounded only by the 6-write cap, and failed 2/24
+ * firings at 301 s over the last 4 h. 200 s caps the job at two-thirds of
+ * the wall, leaving more than the slowest observed row of headroom.
+ */
+export const REPIN_PASS_JOB_BUDGET_MS = 200 * 1000;
+/**
+ * TOG-11688: per-row admission headroom for the repin pass — same
+ * slow-admitted-row defect as the label-only and balance passes (a row
+ * admitted with budget left spends 40-95 s in describeIssue + advise host
+ * RPC and crosses the wall). No new row starts unless this much job budget
+ * remains; paired with the adaptive admission in worker.ts, which raises
+ * the bar to 1.5x the slowest row seen this firing.
+ */
+export const REPIN_PASS_ROW_TIMEOUT_MS = 30 * 1000;
+/**
+ * TOG-6895. A pin older than this is re-validated through `advise` on the
+ * next repin pass even when the pinned lane still reads usable. 24h: the
+ * 2026-09-27 census found 73/92 live pins stale by `updated_at`, and the
+ * pass fires every 10 minutes, so anything much shorter would re-validate
+ * the whole board every firing while anything much longer leaves a dead
+ * pin parked for days.
+ */
+export const PIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * TOG-12234 (TOG-11688: no pass may walk all open issues). The fallback
+ * lease pass examines at most this many indexed issues per firing, least
+ * recently checked first, so a large index rotates through over several
+ * firings instead of stretching one past the host's 300 s job wall.
+ */
+export const FALLBACK_LEASE_EXAMINE_LIMIT = 20;
+/** TOG-12234. Re-pins per lease-pass firing; same cap as the repin pass. */
+export const FALLBACK_LEASE_WRITE_LIMIT = 6;
+/**
+ * TOG-12234. Hard ceiling on the fallback-pin index. Past it the oldest
+ * decisions are evicted; an evicted pin is still re-validated by the 24 h
+ * pin expiry, only later.
+ */
+export const FALLBACK_PIN_INDEX_MAX = 500;
 /** Bounded keyset page size: 400 rows caused the host's 300 s job RPC wall to fire before completion. */
 export const BALANCE_PASS_FETCH_LIMIT = 50;
-/** Stop starting new balance work with a full minute left before the host's 300 s RPC wall. */
-export const BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1000;
+/**
+ * Stop starting new balance work with 100 s left before the host's 300 s
+ * RPC wall (TOG-11688). Same evidence as the label-only pass: this pass also
+ * failed at 300004 ms on 2026-09-28 11:00Z, and its rows pay the same
+ * describeIssue + advise host-RPC cost. 200 s leaves more than the slowest
+ * observed row of headroom for the in-flight row when the host fires.
+ */
+export const BALANCE_PASS_JOB_BUDGET_MS = 200 * 1000;
+/**
+ * TOG-7123 (2026-09-28 reopen): per-row admission headroom for the balance
+ * pass — same slow-admitted-row defect as the label-only pass (balance also
+ * failed at 300004 ms on 2026-09-28 11:00Z). Same semantics: no new row
+ * starts unless this much job budget remains; a slow row trips the write
+ * gate (no routing mutation after the budget, keyset cursor held) instead of
+ * an orphaned write past the host wall.
+ */
+export const BALANCE_PASS_ROW_TIMEOUT_MS = 30 * 1000;
 /** `tier_dispatcher.py` `balance_pass(limit=8)`'s default write cap per run. */
 export const BALANCE_PASS_WRITE_LIMIT = 8;
 /** `balance_pass()`'s `cheaper = blended(nm) <= 0.8*blended(pm)` cost-down threshold. */
@@ -472,6 +676,14 @@ export const BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
  * paginating through, matching the standalone plugin's own behavior exactly.
  */
 export const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
+
+/**
+ * TOG-7785: stop starting new dispatch-sweep work with a full minute left
+ * before the host's 300 s job RPC wall. The sweep had no job time budget and
+ * hit the wall three firings running on 2026-09-28; classify and balance both
+ * already carry this 4-minute cooperative deadline.
+ */
+export const DISPATCH_SWEEP_JOB_BUDGET_MS = 4 * 60 * 1000;
 
 /**
  * TOG-3132: lookback for the lane-evidence aggregate over `heartbeat_runs`.

@@ -4,6 +4,7 @@
 // local rather than imported.
 import { DEFAULT_PACE_ACCOUNT_KEY_FIELDS, DEFAULT_PACE_WEIGHT_FIELDS } from "../constants.js";
 import type { CapacityHealth } from "./types.js";
+import { countsOnlyEvidence, modelCooldowns, type CountsOnlyEvidence, type ModelCooldown } from "./counts-only.js";
 import { firstValue, fraction, normalizeHealth, recordOf, timestamp } from "./value-normalization.js";
 
 export type PaceState = "behind-urgent" | "behind" | "on" | "ahead" | "unknown" | "exhausted" | "free";
@@ -57,6 +58,8 @@ export interface PaceAccountObservation {
   recentBurnUnitsPerHour?: number | null;
   staleAfterSeconds?: number | null;
   windows: PaceWindowObservation[];
+  countsOnly?: CountsOnlyEvidence;
+  modelCooldowns?: ModelCooldown[];
 }
 
 export interface LanePaceObservation {
@@ -134,7 +137,7 @@ export interface PacePolicy {
 }
 
 const SCALE = 1_000;
-const DEFAULT_MARGIN = 0.1;
+export const DEFAULT_MARGIN = 0.1;
 const DEFAULT_URGENT_RESET_SECONDS = 24 * 60 * 60;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 15 * 60;
 
@@ -233,6 +236,13 @@ export function normalizeLaneDocument(input: {
   const parsedRecords = records.map(recordOf);
   if (parsedRecords.some((record) => record === null)) return empty("invalid-document");
   const validRecords = parsedRecords as Record<string, unknown>[];
+  const utilizationFields = input.definition.windows.flatMap((window) => window.utilizationFields);
+  const counts = validRecords.map((record) => countsOnlyEvidence(record, utilizationFields));
+  const cooldowns = validRecords.map(modelCooldowns);
+  if (validRecords.some((record, index) =>
+    (record.observationQuality === "counts-only" && counts[index] === null) || cooldowns[index] === null)) {
+    return empty("invalid-document");
+  }
   const accountKeyFields = [...(input.definition.accountKeyFields ?? DEFAULT_PACE_ACCOUNT_KEY_FIELDS)];
   const accountKeys = validRecords.map((record) => accountKey(record, accountKeyFields));
   if (accountKeys.some((key) => key === null) || new Set(accountKeys).size !== accountKeys.length) {
@@ -244,11 +254,18 @@ export function normalizeLaneDocument(input: {
   const accounts = validRecords.map((record, index): PaceAccountObservation => {
     const weight = normalizedWeight(record, weightFields);
     const reportedGoverningWindow = typeof record[governingWindowField] === "string" ? record[governingWindowField] as string : null;
+    const countsOnly = counts[index];
+    const reportedHealth = firstValue(record, input.definition.healthFields)?.value;
+    const health = normalizeHealth(reportedHealth);
     return {
       accountKey: accountKeys[index]!,
       authKey: text(record, ["auth_key", "authKey"]),
       plan: text(record, ["plan"]),
-      health: normalizeHealth(firstValue(record, input.definition.healthFields)?.value) ?? "unknown",
+      health: countsOnly
+        ? record.exhausted === true ? "exhausted" : reportedHealth === "unknown" ? "unknown" : health === "unknown" ? "unavailable" : health ?? "unavailable"
+        : health ?? "unknown",
+      ...(countsOnly ? { countsOnly } : {}),
+      ...(cooldowns[index]!.length > 0 ? { modelCooldowns: cooldowns[index]! } : {}),
       weight: weight.weight,
       weightSource: weight.source,
       governingWindow: reportedGoverningWindow,
@@ -260,7 +277,7 @@ export function normalizeLaneDocument(input: {
       recommendedShare: firstNumber(record, ["recommended_share", "recommendedShare"], "non-negative"),
       recentBurnUnitsPerHour: firstNumber(record, ["recent_burn_units_per_hour"], "non-negative"),
       staleAfterSeconds: positiveNumber(record.stale_after_seconds),
-      windows: input.definition.windows.map((window) => {
+      windows: countsOnly ? [] : input.definition.windows.map((window) => {
         const nested = matchingWindowRecord(record, window);
         const utilization = nestedOrFlatValue(record, nested, "utilization", window.utilizationFields);
         const reset = nestedOrFlatValue(record, nested, "resets_at", window.resetFields);
@@ -443,6 +460,7 @@ function governingWindow(account: PaceAccountObservation, windows: PaceWindowVer
 
 function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict[], tripCeilingMilli: number): boolean {
   if (account.health === "exhausted" || account.health === "unavailable") return false;
+  if (account.countsOnly && account.health !== "healthy" && account.health !== "unknown") return false;
   if (trippedServiceabilityWindows(windows, tripCeilingMilli).length > 0) return false;
   return windows.every((window) => window.utilization === null || window.utilization < 1);
 }
@@ -457,8 +475,9 @@ function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict
  * runs, because cliproxy does not fail over within a lane — it kept routing to
  * the blown account for the whole storm. An any-account-serviceable roll-up
  * therefore overstates a lane whose provider behaves that way, so a tripped
- * serviceability window on ANY account poisons the lane (see
- * `evaluateLanePace`), and the account itself reads `exhausted` until reset.
+ * serviceability window exhausts its own account (see `evaluateLanePace`)
+ * (TOG-7648: the lane itself is condemned only when no account can still
+ * serve), and the account reads `exhausted` until reset.
  *
  * Note this is strictly wider than the per-window `serviceable` flag set in
  * `scoredWindow`, which trips only at a hard `utilization >= 1`: the margin
@@ -508,7 +527,8 @@ export function evaluateLanePace(input: {
   const observedAtMs = Date.parse(input.observation.observedAt);
   const asOfMs = Date.parse(asOf);
   const freshnessBudget = Math.min(input.observation.staleAfterSeconds ?? maxSnapshotAgeSeconds, maxSnapshotAgeSeconds);
-  if ((asOfMs - observedAtMs) / 1_000 > freshnessBudget) {
+  if ((asOfMs - observedAtMs) / 1_000 > freshnessBudget ||
+    (input.observation.accounts.some((account) => account.countsOnly) && observedAtMs - asOfMs > 60_000)) {
     return { laneId: input.observation.laneId, observedAt: input.observation.observedAt, state: "unknown", serviceable: null, score: null, targetBurnRate: null, observedBurnRate: null, deficit: null, accounts: [], knownAccountCount: 0, knownWeight: 0, serviceableAccountCount: 0, urgentResetAt: null, reason: "snapshot-stale" };
   }
 
@@ -540,7 +560,7 @@ export function evaluateLanePace(input: {
       // resolve (absent, wrong role, or missing utilization/reset/weight). It
       // has no computable allowance, so it must not be dispatched to on some
       // other window's capacity.
-      const indeterminateGovernor = accountServiceable && account.governingWindow !== null;
+      const indeterminateGovernor = accountServiceable && !account.countsOnly && account.governingWindow !== null;
       return {
         verdict: {
           accountKey: account.accountKey,
@@ -560,7 +580,7 @@ export function evaluateLanePace(input: {
           score: null,
           normalizedRemaining: null,
           targetBurnRate: null,
-          observedBurnRate: account.recentBurnUnitsPerHour ?? null,
+          observedBurnRate: account.countsOnly ? null : account.recentBurnUnitsPerHour ?? null,
           deficit: null,
           recommendedShare: 0,
           paceDebt: null,
@@ -676,10 +696,16 @@ export function evaluateLanePace(input: {
       ? 0
       : rawShare(entry) / shareDenominator,
   }));
-  // A tripped serviceability window blocks the lane even when another account
-  // is healthy or has indeterminate capacity. Keep its reset ahead of all other
-  // account roll-up exits; it is the earliest possible relief, not a reopen time.
-  if (internal.some((entry) => entry.tripped)) {
+  // TOG-7648: a tripped serviceability window condemns the lane only when no
+  // account can still serve (serviceableAccountCount == 0). A healthy sibling
+  // keeps the lane open; the tripped account itself stays excluded —
+  // serviceable:false, state:exhausted, recommendedShare 0 — so dispatch never
+  // rides it. TOG-3107's no-failover evidence is preserved at the account
+  // level, where the provider actually routes; the lane roll-up no longer
+  // repeats it. With nothing serviceable left the lane is still poisoned, and
+  // the tripped reset stays ahead of every other exit: it is the earliest
+  // possible relief, not a reopen time.
+  if (internal.some((entry) => entry.tripped) && serviceableAccountCount === 0) {
     const trippedResets = internal.flatMap((entry) => entry.trippedResetsAt)
       .sort((left, right) => left.ms - right.ms);
     const known = internal.filter((entry) => entry.utilizationMilli !== null);

@@ -31,10 +31,29 @@ var TOOL_NAMES = {
   priceDriftReport: "model_selection_price_drift_report",
   /** TOG-3996: run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
   reconcilePricesNow: "model_selection_reconcile_prices_now",
+  /** TOG-12206 P2: the last free-list sync diff (verified/broken/ambiguous/unbound), as an operator-reviewable report. Read-only. */
+  aaFreeSyncReport: "model_selection_aa_free_sync_report",
+  /** TOG-12206 P2: run the free-list fetch + diff immediately instead of waiting for the daily tick. Still report-only. */
+  refreshAaFreeSyncNow: "model_selection_refresh_aa_free_sync_now",
+  /** TOG-12972: the first-party accepted-work posterior overlay, as an operator-reviewable report. Read-only. */
+  acceptedWorkReport: "model_selection_accepted_work_report",
+  /**
+   * TOG-4959. Per-tier lane-poll outcome counters. Read-only: the
+   * `pollLaneCapacity` job increments, this tool reads back.
+   */
+  tierOutcomes: "model_selection_tier_outcomes",
+  /** Read the last explicitly enabled account shadow snapshot; never actuates. */
+  admissionShadowReport: "model_selection_admission_shadow_report",
   /** TOG-2481 port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /** TOG-2481 port of `zai_pace_override()` / `zai_pace_override.json`. */
-  setZaiPaceOverride: "model_selection_set_zai_pace_override"
+  setZaiPaceOverride: "model_selection_set_zai_pace_override",
+  /**
+   * TOG-12490 (TOG-11543 P2, TOG-11549 D4). Add, edit, remove, validate or diff
+   * tier-policy tiers. Prepare/validate/diff only: returns `proposalOnly` or
+   * `rejected`, never writes state or config, never changes routing.
+   */
+  tierPolicy: "model_selection_tier_policy"
 };
 var LANE_ID_CODEX = "cliproxy-codex";
 var LANE_ID_OPENCODE_GO = "cliproxy-opencode-go";
@@ -63,6 +82,8 @@ var JOB_KEYS = {
   refreshAaIndex: "refreshAaIndex",
   /** TOG-3996: reconcile roster prices against models.dev and report drift (never auto-applies). */
   reconcilePrices: "reconcilePrices",
+  /** TOG-12206 P2: fetch the free AA legacy list (quota-gated) and store the CAS snapshot + per-company reviewable diff. Never writes pins/tiers/enabled. */
+  refreshAaFreeSync: "refreshAaFreeSync",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
   /** Ported from `tier_dispatcher.py`'s `label_only_pass()`. */
@@ -76,10 +97,15 @@ var JOB_KEYS = {
    * stall-sweep + wakeup, ported wholesale so the `plugins` table shows one
    * dispatcher, not two.
    */
-  dispatchSweep: "dispatch-sweep"
+  dispatchSweep: "dispatch-sweep",
+  /** TOG-11793: warm the run-scoped decision's hot snapshot once a minute. */
+  refreshRunResolve: "refreshRunResolveSnapshot"
 };
 var TIERS = ["T1", "T2", "T3"];
+var TIER_ORDER = ["T3", "T2", "T1"];
 var NO_ELIGIBLE_NOTICE_THROTTLE_MS = 60 * 60 * 1e3;
+var AA_FREE_FETCH_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+var AA_FREE_RETRY_INTERVAL_MS = 60 * 60 * 1e3;
 var PACING_MODES = ["off", "shadow", "enforce"];
 var LOCAL_FOLDER_KEYS = {
   /**
@@ -95,10 +121,21 @@ var LOCAL_FOLDER_KEYS = {
 };
 var DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 var DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
+var SCORE_THRESHOLDS = { T1: 0.85, T2: 0.8, T3: 0.75 };
+var SCORE_PRIOR_K = 6;
+var SCORE_PROVEN_N = 8;
 var REOPEN_WINDOW_MS = 72 * 60 * 60 * 1e3;
 var REJECTION_WINDOW_MS = 48 * 60 * 60 * 1e3;
-var CLASSIFY_JOB_BUDGET_MS = 4 * 60 * 1e3;
-var BALANCE_PASS_JOB_BUDGET_MS = 4 * 60 * 1e3;
+var CLASSIFY_JOB_BUDGET_MS = 200 * 1e3;
+var CLASSIFY_ROW_TIMEOUT_MS = 30 * 1e3;
+var LABEL_ONLY_PASS_JOB_BUDGET_MS = 200 * 1e3;
+var LABEL_ONLY_PASS_ROW_TIMEOUT_MS = 30 * 1e3;
+var REPIN_PASS_JOB_BUDGET_MS = 200 * 1e3;
+var REPIN_PASS_ROW_TIMEOUT_MS = 30 * 1e3;
+var PIN_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
+var BALANCE_PASS_JOB_BUDGET_MS = 200 * 1e3;
+var BALANCE_PASS_ROW_TIMEOUT_MS = 30 * 1e3;
+var DISPATCH_SWEEP_JOB_BUDGET_MS = 4 * 60 * 1e3;
 
 // src/engine/effort.ts
 var EFFORT_LADDER = [
@@ -158,6 +195,22 @@ var SELECTION_CONFIG_SCHEMA = {
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
         /** Fleet-wide harness compaction ceiling. Models at/above it need no per-issue env override. */
         fleetContextCeilingTokens: { type: "integer", minimum: 1, default: 1e6 },
+        contextRunLogRoot: {
+          type: "string",
+          minLength: 1,
+          description: "Operator-verified absolute local run-log root. Unset or unreadable logs use the labelled fleet-ceiling fallback; no run totals are used as peaks."
+        },
+        /**
+         * TOG-11642. The agent-level context cap the per-pin
+         * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` stamp compares against. Split from
+         * `fleetContextCeilingTokens` (the admission ceiling, held at 200k for
+         * glm-5.3): a pin stamps
+         * `max(floor(window*ratio), min(window, 250000))` when its window is
+         * below THIS cap and inherits the agent env otherwise. Unset resolves
+         * to the fleet ceiling, so behaviour is unchanged until the operator
+         * sets it (1M to release Muse's 1,048,576 window).
+         */
+        agentEnvContextTokens: { type: "integer", minimum: 1, default: 1e6 },
         /** Fraction of a narrower model's context window where Claude Code should compact. */
         compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 }
       },
@@ -366,7 +419,8 @@ var SELECTION_CONFIG_SCHEMA = {
         /**
          * TOG-2481 port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
          * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
-         * excluded from NEW admission even while still serviceable —
+         * excluded from NEW admission only when its governing pace deviation
+         * also exceeds the pace engine's default 0.1 margin —
          * `defaultThreshold` is the blanket rule, `perLane` is how a specific
          * lane (e.g. codex, per the 2026-09-07 07:12Z owner rule) earns a
          * higher threshold than the default.
@@ -535,9 +589,33 @@ var SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
-        /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
-        maxRecords: { type: "integer", minimum: 1, default: 5e3 }
+        /**
+         * TOG-13566. Legacy single-file cap, kept for read compatibility with
+         * an existing `decisions.jsonl`. New writes go to hourly shards (see
+         * `shardMaxRecords`); this number no longer sizes any write.
+         */
+        maxRecords: { type: "integer", minimum: 1, default: 5e3 },
+        /**
+         * TOG-13566. Each hourly shard file is rewritten whole on every
+         * append; this caps a shard by dropping its oldest records. Small on
+         * purpose: the whole-file atomic rewrite that timed out at 30 s on a
+         * ~38 MB single file stays a kilobyte-scale RPC payload per shard.
+         */
+        shardMaxRecords: { type: "integer", minimum: 2, default: 200 },
+        /**
+         * TOG-13566. How many newest hourly shard files to keep. Whole old
+         * shards are deleted past this count. 48 covers the 48-hour agreement
+         * stream the gate harness correlates.
+         */
+        retentionShards: { type: "integer", minimum: 1, default: 48 }
       },
+      default: {}
+    },
+    accountAdmissionShadow: {
+      type: "object",
+      title: "Account admission shadow report (never enforces)",
+      additionalProperties: false,
+      properties: { enabled: { type: "boolean", default: false } },
       default: {}
     },
     /**
@@ -551,6 +629,60 @@ var SELECTION_CONFIG_SCHEMA = {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true }
+      },
+      default: {}
+    },
+    /**
+     * TOG-12206 P2: free-list sync/discovery/shadow. Default OFF — an absent
+     * section, or `enabled: false`, leaves dispatch byte-for-byte identical
+     * to today (no fetch, no snapshot, no evidence). Bindings are curated
+     * model x effective-effort rows (see `aa-free/sync.ts verifyBindings`);
+     * the secret ref reuses the existing company `ARTIFICIALANALYSIS_API_KEY`
+     * binding resolved at `aaFreeSync.apiKeySecretRef` — never printed,
+     * persisted or exported, never substituted.
+     */
+    aaFreeSync: {
+      type: "object",
+      title: "aa.ai free-list sync (TOG-12206 P2)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        apiKeySecretRef: SECRET_REF_SCHEMA,
+        bindings: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["candidateId", "modelId", "laneId", "evaluatedEffort", "aaSlug"],
+            properties: {
+              candidateId: { type: "string", minLength: 1 },
+              modelId: { type: "string", minLength: 1 },
+              laneId: { type: "string", minLength: 1 },
+              evaluatedEffort: { type: "string", minLength: 1 },
+              aaSlug: { type: "string", minLength: 1 },
+              observationalOnly: { type: "boolean" }
+            }
+          },
+          default: []
+        },
+        /** Hours a snapshot stays fresh for shadow evidence. Bounded; stale yields no evidence. */
+        maxSnapshotAgeHours: { type: "number", minimum: 1, default: 49 }
+      },
+      default: {}
+    },
+    /**
+     * TOG-12972: first-party accepted-work posterior producer. Default OFF —
+     * an absent section, or `enabled: false`, builds no overlay and stores
+     * nothing (no fetch, no state change). The producer only folds this
+     * company's own closed-card outcomes into a versioned posterior overlay;
+     * nothing reads it for routing in this slice.
+     */
+    acceptedWork: {
+      type: "object",
+      title: "First-party accepted-work posterior (TOG-12972)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false }
       },
       default: {}
     },
@@ -649,7 +781,398 @@ var SELECTION_CONFIG_SCHEMA = {
         floorTier: { type: "string", enum: [...TIERS], default: "T3" }
       },
       default: {}
+    },
+    /**
+     * TOG-11793 (TOG-11780 §4.3). Run-scoped model decision. Requires a host
+     * built with the `run.model.resolve` hook and a manifest built with
+     * `MODEL_SELECTION_RUN_RESOLVE=1`. Off by default: `onResolveRunModel`
+     * answers `keep` and every legacy pin path is unchanged. On: each issue run
+     * is decided at its start from hot caches, and the creation/assignment
+     * pins, `labelOnlyPass`/`balancePass` pin writes and the `repinPass` /
+     * `agent.run.failed` re-pins are retired. Tier labels stay.
+     */
+    runResolve: {
+      type: "object",
+      title: "Run-scoped model decision (TOG-11793)",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /** The hot snapshot is refreshed once older than this; stale data is served while it refreshes. */
+        snapshotTtlMs: { type: "integer", minimum: 5e3, maximum: 3e5, default: 45e3 },
+        /** Longest wait for an already-in-flight classification. Capped at 1000: the hook never starts one. */
+        classifierWaitMs: { type: "integer", minimum: 0, maximum: 1e3, default: 1e3 },
+        /** `retryAfterMs` carried by a `defer` answer. */
+        deferRetryMs: { type: "integer", minimum: 1e3, maximum: 6e4, default: 5e3 }
+      },
+      default: {}
     }
+  }
+};
+
+// src/aa-free/sync.ts
+var BINDABLE_EFFORTS = /* @__PURE__ */ new Set([...EFFORT_LADDER, "none"]);
+
+// src/lane-capacity/pace.ts
+var DEFAULT_URGENT_RESET_SECONDS = 24 * 60 * 60;
+var DEFAULT_MAX_SNAPSHOT_AGE_SECONDS = 15 * 60;
+
+// src/engine/cost.ts
+var PROFILE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1e3;
+
+// src/aa-free/parse.ts
+var AA_FREE_SOURCE = "artificialanalysis.ai/api/v2/data/llms/models";
+var AA_FREE_PROFILE = "aa-free-v1";
+
+// src/engine/tier-policy.ts
+var TIER_POLICY_SCHEMA_VERSION = 2;
+var LEGACY_EVALUATOR_ID = "legacy-model-selection-v1";
+var EVIDENCE_V2_EVALUATOR_ID = "evidence-v2";
+var CAPABILITY_PRIOR_BINDING = "existing-capability-prior-v1";
+var LEGACY_CAPABILITY_PARAMS = Object.freeze({
+  /** Pseudo-observations contributed by the prior (posterior weight). */
+  priorK: SCORE_PRIOR_K,
+  /** Judged runs before a (model, tier) verdict is "proven". */
+  provenN: SCORE_PROVEN_N,
+  /** A proven model is vetoed when its observed rate is this far under the bar. */
+  vetoMargin: 0.1
+});
+var ALL_AA_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "default",
+  "unknown"
+];
+var DECISION_BINDINGS = Object.freeze({
+  "aa-free-v1/intelligence-index": {
+    id: "aa-free-v1/intelligence-index",
+    kind: "numeric-metric",
+    metric: "artificial_analysis_intelligence_index",
+    source: AA_FREE_SOURCE,
+    publishedVersion: "unknown",
+    unit: "index-points"
+  },
+  [CAPABILITY_PRIOR_BINDING]: {
+    id: CAPABILITY_PRIOR_BINDING,
+    kind: "capability-predicate",
+    metric: null,
+    source: null,
+    publishedVersion: null,
+    unit: null
+  }
+});
+var UNVERSIONED = /* @__PURE__ */ new Set(["", "latest", "unknown"]);
+var KNOWN_EFFORTS = new Set(ALL_AA_EFFORTS);
+var LEGACY_TIER_IDS = TIER_ORDER;
+function isFiniteNumber(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+function inUnitInterval(v) {
+  return isFiniteNumber(v) && v > 0 && v <= 1;
+}
+function validateRule(rule, path, evaluator, issues) {
+  const push = (code, message, at = path) => issues.push({ path: at, code, message });
+  if (rule.optionalSourceRule) {
+    const o = rule.optionalSourceRule;
+    if (!o.source || !o.metric) push("optional-source-incomplete", "optionalSourceRule needs a source and a metric");
+    if (typeof o.version !== "string" || UNVERSIONED.has(o.version)) {
+      push("unversioned-metric", "optionalSourceRule must pin a metric version", `${path}.optionalSourceRule.version`);
+    }
+  }
+  if (rule.kind === "capability-predicate") {
+    if (rule.decisionBinding !== CAPABILITY_PRIOR_BINDING) {
+      push("unknown-binding", `capability predicate must bind ${CAPABILITY_PRIOR_BINDING}`);
+    }
+    if (rule.policyRevision !== evaluator) {
+      push("predicate-evaluator-mismatch", `capability predicate names ${rule.policyRevision}, policy runs ${evaluator}`);
+    }
+    return;
+  }
+  if (rule.kind !== "numeric-metric") {
+    push("unknown-rule-kind", `unknown rule kind ${String(rule.kind)}`);
+    return;
+  }
+  if (typeof rule.version !== "string" || UNVERSIONED.has(rule.version)) {
+    push("unversioned-metric", "a numeric rule must pin a metric version (no unversioned comparisons)", `${path}.version`);
+  }
+  if (rule.operator === "between") {
+    const v = rule.value;
+    if (!Array.isArray(v) || v.length !== 2 || !v.every(isFiniteNumber) || v[0] > v[1]) {
+      push("invalid-value", "between needs a finite [lo, hi] with lo <= hi", `${path}.value`);
+    }
+  } else if (rule.operator === "gte" || rule.operator === "lte") {
+    if (!isFiniteNumber(rule.value)) push("invalid-value", "value must be a finite number", `${path}.value`);
+  } else {
+    push("unsupported-operator", `unsupported operator ${String(rule.operator)}`, `${path}.operator`);
+  }
+  if (rule.maxAgeHours !== void 0 && !(isFiniteNumber(rule.maxAgeHours) && rule.maxAgeHours > 0)) {
+    push("invalid-ttl", "maxAgeHours must be a positive finite number", `${path}.maxAgeHours`);
+  }
+  if (rule.onMissing !== "reject" && rule.onMissing !== "legacy") {
+    push("invalid-on-missing", "onMissing must be reject or legacy", `${path}.onMissing`);
+  }
+  const binding = DECISION_BINDINGS[rule.decisionBinding];
+  if (!binding) {
+    if (!rule.optionalSourceRule) push("unknown-metric", `no decision binding ${rule.decisionBinding} in ${AA_FREE_PROFILE}`);
+    return;
+  }
+  if (binding.kind !== "numeric-metric") {
+    push("binding-kind-mismatch", `${binding.id} is not a numeric metric`);
+    return;
+  }
+  if (rule.metric !== binding.metric || rule.source !== binding.source) {
+    push("unknown-metric", `${rule.source}/${rule.metric} is not what ${binding.id} binds`);
+  }
+  if (rule.unit !== binding.unit) push("unsupported-unit", `${binding.id} is measured in ${binding.unit}`, `${path}.unit`);
+  if (evaluator === LEGACY_EVALUATOR_ID && !UNVERSIONED.has(binding.publishedVersion ?? "")) {
+    push("legacy-numeric-unsupported", `${LEGACY_EVALUATOR_ID} cannot enforce ${binding.id}`);
+  }
+}
+function validateTierPolicy(policy, options = {}) {
+  const issues = [];
+  const push = (path, code, message) => issues.push({ path, code, message });
+  if (policy.schemaVersion !== TIER_POLICY_SCHEMA_VERSION) push("schemaVersion", "unsupported-schema", `schemaVersion must be ${TIER_POLICY_SCHEMA_VERSION}`);
+  if (!Number.isInteger(policy.revision) || policy.revision < 1) push("revision", "invalid-revision", "revision must be a positive integer");
+  if (policy.decisionProfile !== AA_FREE_PROFILE) push("decisionProfile", "unsupported-profile", `decisionProfile must be ${AA_FREE_PROFILE}`);
+  if (policy.optionalRichDecisionWeight !== 0) push("optionalRichDecisionWeight", "optional-rich-weighted", "optional rich data has zero decision weight");
+  if (policy.evaluator === EVIDENCE_V2_EVALUATOR_ID) {
+    push("evaluator", "evaluator-unavailable", "evidence-v2 is opt-in and not available in this build");
+  } else if (policy.evaluator !== LEGACY_EVALUATOR_ID) {
+    push("evaluator", "unknown-evaluator", `unknown evaluator ${String(policy.evaluator)}`);
+  }
+  const tiers = Array.isArray(policy.tiers) ? policy.tiers : [];
+  if (tiers.length === 0) push("tiers", "no-tiers", "a policy needs at least one tier");
+  const ids = /* @__PURE__ */ new Set();
+  const orders = /* @__PURE__ */ new Set();
+  tiers.forEach((tier, i) => {
+    const at = `tiers[${i}]`;
+    if (typeof tier.id !== "string" || tier.id.length === 0) push(`${at}.id`, "invalid-id", "tier id must be a non-empty string");
+    if (ids.has(tier.id)) push(`${at}.id`, "duplicate-id", `duplicate tier id ${tier.id}`);
+    ids.add(tier.id);
+    if (typeof tier.name !== "string" || tier.name.trim().length === 0) push(`${at}.name`, "invalid-name", "tier name must be non-empty");
+    if (!Number.isInteger(tier.order)) push(`${at}.order`, "invalid-order", "order must be an integer");
+    if (orders.has(tier.order)) push(`${at}.order`, "duplicate-order", `duplicate order ${tier.order}`);
+    orders.add(tier.order);
+    const rules = tier.entryRules?.all ?? [];
+    if (rules.length === 0) push(`${at}.entryRules`, "no-entry-rules", "a tier needs at least one entry rule");
+    rules.forEach((rule, r) => validateRule(rule, `${at}.entryRules.all[${r}]`, policy.evaluator, issues));
+    if (policy.evaluator === LEGACY_EVALUATOR_ID && !rules.some((r) => r.kind === "capability-predicate")) {
+      push(`${at}.entryRules`, "missing-capability-predicate", `${LEGACY_EVALUATOR_ID} admits only through ${CAPABILITY_PRIOR_BINDING}`);
+    }
+    const efforts = tier.allowedEfforts ?? [];
+    if (efforts.length === 0) push(`${at}.allowedEfforts`, "no-efforts", "allowedEfforts must not be empty");
+    if (new Set(efforts).size !== efforts.length) push(`${at}.allowedEfforts`, "duplicate-effort", "allowedEfforts has duplicates");
+    for (const e of efforts) if (!KNOWN_EFFORTS.has(e)) push(`${at}.allowedEfforts`, "unknown-effort", `unknown effort ${String(e)}`);
+    const ev = tier.evidence;
+    if (!ev || !["legacy", "prior-only", "posterior-required"].includes(ev.mode)) {
+      push(`${at}.evidence.mode`, "invalid-evidence-mode", "unknown evidence mode");
+    } else {
+      if (!Number.isInteger(ev.minIndependentTasks) || ev.minIndependentTasks < 0) {
+        push(`${at}.evidence.minIndependentTasks`, "invalid-sample-gate", "minIndependentTasks must be a non-negative integer");
+      }
+      if (ev.maxAgeDays !== void 0 && !(isFiniteNumber(ev.maxAgeDays) && ev.maxAgeDays > 0)) {
+        push(`${at}.evidence.maxAgeDays`, "invalid-ttl", "maxAgeDays must be a positive finite number");
+      }
+      if (policy.evaluator === LEGACY_EVALUATOR_ID && (ev.mode !== "legacy" || ev.cohort !== "legacy-model-id")) {
+        push(`${at}.evidence`, "evidence-evaluator-mismatch", `${LEGACY_EVALUATOR_ID} uses legacy evidence on the legacy-model-id cohort`);
+      }
+    }
+    if (!inUnitInterval(tier.legacy?.scoreThreshold)) push(`${at}.legacy.scoreThreshold`, "invalid-threshold", "scoreThreshold must be finite in (0, 1]");
+    if (!inUnitInterval(tier.legacy?.capabilityThreshold)) {
+      push(`${at}.legacy.capabilityThreshold`, "invalid-threshold", "capabilityThreshold must be finite in (0, 1]");
+    }
+  });
+  if (!ids.has(policy.defaultTierId)) push("defaultTierId", "unknown-tier-ref", `default tier ${policy.defaultTierId} does not exist`);
+  for (const [taskClass, ref] of Object.entries(policy.taskClassTierRefs ?? {})) {
+    if (!ids.has(ref)) push(`taskClassTierRefs.${taskClass}`, "unknown-tier-ref", `task class ${taskClass} names missing tier ${ref}`);
+  }
+  if (policy.evaluator === LEGACY_EVALUATOR_ID && tiers.length > 0) validateLegacyLadder(tiers, push);
+  if (options.previous) validateSTierNotWeakened(options.previous, policy, push);
+  return issues;
+}
+function validateLegacyLadder(tiers, push) {
+  const ids = tiers.map((t) => t.id);
+  const missing = LEGACY_TIER_IDS.filter((id) => !ids.includes(id));
+  const extra = ids.filter((id) => !LEGACY_TIER_IDS.includes(id));
+  if (missing.length > 0) push("tiers", "legacy-tier-missing", `${LEGACY_EVALUATOR_ID} needs tiers ${missing.join(", ")}`);
+  if (extra.length > 0) push("tiers", "legacy-tier-unknown", `${LEGACY_EVALUATOR_ID} cannot evaluate tiers ${extra.join(", ")}`);
+  if (missing.length > 0 || extra.length > 0) return;
+  const ascending = [...tiers].sort((a, b) => a.order - b.order).map((t) => t.id);
+  if (ascending.join(",") !== LEGACY_TIER_IDS.join(",")) {
+    push("tiers", "invalid-tier-order", `order must ascend ${LEGACY_TIER_IDS.join(" < ")}; got ${ascending.join(" < ")}`);
+    return;
+  }
+  const byId = new Map(tiers.map((t) => [t.id, t]));
+  for (let i = 1; i < LEGACY_TIER_IDS.length; i++) {
+    const lower = byId.get(LEGACY_TIER_IDS[i - 1]);
+    const upper = byId.get(LEGACY_TIER_IDS[i]);
+    if (!(upper.legacy?.scoreThreshold > lower.legacy?.scoreThreshold)) {
+      push(`tiers.${upper.id}.legacy.scoreThreshold`, "overlapping-tiers", `${upper.id} cut must be above ${lower.id} cut`);
+    }
+    if (!(upper.legacy?.capabilityThreshold >= lower.legacy?.capabilityThreshold)) {
+      push(`tiers.${upper.id}.legacy.capabilityThreshold`, "inverted-capability", `${upper.id} capability bar is below ${lower.id}`);
+    }
+  }
+}
+function validateSTierNotWeakened(previous, next, push) {
+  for (const before of previous.tiers) {
+    if (!before.sTier) continue;
+    const after = next.tiers.find((t) => t.id === before.id);
+    const at = `tiers.${before.id}`;
+    if (!after) {
+      push(at, "s-tier-weakened", `S-tier ${before.id} cannot be removed`);
+      continue;
+    }
+    if (!after.sTier) push(`${at}.sTier`, "s-tier-weakened", `${before.id} cannot drop its S-tier flag`);
+    if (before.fallbackOnly && !after.fallbackOnly) push(`${at}.fallbackOnly`, "s-tier-weakened", `${before.id} must stay fallbackOnly`);
+    if (after.legacy.scoreThreshold < before.legacy.scoreThreshold || after.legacy.capabilityThreshold < before.legacy.capabilityThreshold) {
+      push(`${at}.legacy`, "s-tier-weakened", `${before.id} thresholds cannot be lowered`);
+    }
+  }
+}
+var TierPolicyError = class extends Error {
+  constructor(issues) {
+    super(`invalid tier policy: ${issues.map((i) => `${i.path}: ${i.code}`).join("; ")}`);
+    this.issues = issues;
+    this.name = "TierPolicyError";
+  }
+};
+function ruleEnforcement(rule) {
+  if (rule.optionalSourceRule) return "not-enforced-in-aa-free-v1";
+  if (rule.kind === "capability-predicate") return "enforced";
+  if (!DECISION_BINDINGS[rule.decisionBinding]) return "not-enforced-in-aa-free-v1";
+  return "not-enforced-version-unknown";
+}
+function compileTierPolicy(policy, options = {}) {
+  const issues = validateTierPolicy(policy, options);
+  if (issues.length > 0) throw new TierPolicyError(issues);
+  const byId = new Map(policy.tiers.map((t) => [t.id, t]));
+  const scoreThresholds = {};
+  const capabilityThresholds = {};
+  const tierNames = {};
+  for (const id of LEGACY_TIER_IDS) {
+    const tier = byId.get(id);
+    scoreThresholds[id] = tier.legacy.scoreThreshold;
+    capabilityThresholds[id] = tier.legacy.capabilityThreshold;
+    tierNames[id] = tier.name;
+  }
+  const rules = [];
+  for (const tier of policy.tiers) {
+    tier.entryRules.all.forEach((rule, ruleIndex) => {
+      const status = ruleEnforcement(rule);
+      rules.push({ tierId: tier.id, ruleIndex, status, replacement: status === "enforced" ? null : CAPABILITY_PRIOR_BINDING });
+    });
+  }
+  return Object.freeze({
+    revision: policy.revision,
+    evaluator: LEGACY_EVALUATOR_ID,
+    scoreThresholds: Object.freeze(scoreThresholds),
+    capabilityThresholds: Object.freeze(capabilityThresholds),
+    capability: LEGACY_CAPABILITY_PARAMS,
+    defaultTierId: policy.defaultTierId,
+    tierNames: Object.freeze(tierNames),
+    rules: Object.freeze(rules)
+  });
+}
+var T1_CAPABILITY_THRESHOLD = 0.8;
+function legacyTier(id, name, order, capabilityThreshold) {
+  return {
+    id,
+    name,
+    order,
+    entryRules: { all: [{ kind: "capability-predicate", decisionBinding: CAPABILITY_PRIOR_BINDING, policyRevision: LEGACY_EVALUATOR_ID }] },
+    allowedEfforts: ALL_AA_EFFORTS,
+    evidence: { mode: "legacy", minIndependentTasks: 0, cohort: "legacy-model-id" },
+    fallbackOnly: false,
+    sTier: false,
+    legacy: { scoreThreshold: SCORE_THRESHOLDS[id], capabilityThreshold, sourceRevision: "3da20ab13+t1cap080" }
+  };
+}
+var LEGACY_MODEL_SELECTION_V1 = Object.freeze({
+  schemaVersion: TIER_POLICY_SCHEMA_VERSION,
+  revision: 1,
+  evaluator: LEGACY_EVALUATOR_ID,
+  decisionProfile: AA_FREE_PROFILE,
+  optionalRichDecisionWeight: 0,
+  tiers: Object.freeze([
+    legacyTier("T3", "T3", 0, SCORE_THRESHOLDS.T3),
+    legacyTier("T2", "T2", 1, SCORE_THRESHOLDS.T2),
+    legacyTier("T1", "T1", 2, T1_CAPABILITY_THRESHOLD)
+  ]),
+  defaultTierId: "T1",
+  taskClassTierRefs: Object.freeze({}),
+  legacyCompatibility: Object.freeze({
+    sourceRevision: "3da20ab13",
+    servingBuild: "model-selection-0.4.0-main5a9be61-t1cap080",
+    servingWorkerSha256: "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099",
+    rosterSnapshotHash: null,
+    baselineDecisionCorpusHash: null
+  })
+});
+var LEGACY_TIER_POLICY = compileTierPolicy(LEGACY_MODEL_SELECTION_V1);
+
+// src/engine/scores.ts
+var TIER_ORDER_BY_CAPABILITY_DESC = [...TIER_ORDER].reverse();
+
+// src/engine/context.ts
+var CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+var ANCILLARY_MODEL_ENV_KEYS = [
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+];
+var PIN_LANE_MODEL_ENV_KEYS = [
+  "PAPERCLIP_ASSIGNED_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL"
+];
+var ALL_MODEL_ENV_KEYS = [
+  ...PIN_LANE_MODEL_ENV_KEYS,
+  ...ANCILLARY_MODEL_ENV_KEYS
+];
+
+// src/engine/run-resolve.ts
+var RUN_RESOLVE_ENV_KEYS = [
+  CONTEXT_LIMIT_ENV_KEY,
+  ...PIN_LANE_MODEL_ENV_KEYS,
+  ...ANCILLARY_MODEL_ENV_KEYS
+];
+
+// src/tier-policy-tool.ts
+var TIER_POLICY_ACTIONS = ["add", "edit", "remove", "validate", "diff"];
+var EDITABLE_TIER_FIELDS = [
+  "name",
+  "order",
+  "entryRules",
+  "allowedEfforts",
+  "evidence",
+  "fallbackOnly",
+  "sTier",
+  "legacy"
+];
+var TIER_POLICY_TOOL_DISPLAY_NAME = "Tier policy: add, edit, remove, validate, diff";
+var TIER_POLICY_TOOL_DESCRIPTION = "Prepare a tier-policy change as data (TOG-11549 D4): add, edit (name, order, entry rules, efforts, evidence, fallbackOnly/sTier, legacy thresholds) or remove a tier, or validate/diff a candidate policy. add/edit/remove need expectedRevision (must equal the base revision) and a reason. Returns proposalOnly or rejected with issues, a diff keyed by tier id, the dry-run impact and an audit id. Prepare/validate/diff only: writes nothing and never changes routing; the base is the built-in active policy unless basePolicy is supplied.";
+var TIER_POLICY_TOOL_PARAMETERS = {
+  type: "object",
+  required: ["action"],
+  properties: {
+    action: { type: "string", enum: [...TIER_POLICY_ACTIONS] },
+    expectedRevision: { type: "integer", minimum: 1, description: "Compare-and-set: must equal the base policy revision." },
+    reason: { type: "string", description: "Why the change is wanted; required for add/edit/remove." },
+    dryRun: { type: "boolean", description: "Defaults to true. This build never persists either way." },
+    tierId: { type: "string", description: "The tier to edit or remove." },
+    tier: { type: "object", description: "add: the full tier definition." },
+    patch: {
+      type: "object",
+      description: `edit: fields to change, any of ${EDITABLE_TIER_FIELDS.join(", ")}; legacy and evidence merge shallowly.`
+    },
+    policy: { type: "object", description: "validate/diff: a full candidate policy at the next revision." },
+    basePolicy: { type: "object", description: "Optional base to edit instead of the built-in active policy." }
   }
 };
 
@@ -679,10 +1202,14 @@ var DESCRIPTOR_SCHEMA = {
       type: "array",
       items: { type: "string", enum: ["tools", "structured-output", "vision", "long-context", "computer-use"] }
     },
-    requiredContextTokens: { type: "integer", minimum: 1 }
+    requiredContextTokens: { type: "integer", minimum: 1 },
+    admissionShadow: {
+      type: "object",
+      description: "Optional non-secret account/window snapshot. Only evaluated when accountAdmissionShadow.enabled is true; never changes the decision or applies admission."
+    }
   }
 };
-var manifest = {
+var baseManifest = {
   id: PLUGIN_ID,
   apiVersion: PLUGIN_API_VERSION,
   version: PLUGIN_VERSION,
@@ -802,8 +1329,8 @@ var manifest = {
     {
       jobKey: JOB_KEYS.pollLanes,
       displayName: "Poll lane capacity",
-      description: "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
-      schedule: "*/5 * * * *"
+      description: "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. TOG-8108: every 2 minutes, inside the tightest publisher-declared freshness budget (180s live) \u2014 at 5 minutes, picks older than 180s read every lane UNKNOWN ~half the time. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+      schedule: "*/2 * * * *"
     },
     {
       jobKey: JOB_KEYS.refreshScores,
@@ -822,6 +1349,12 @@ var manifest = {
       displayName: "Reconcile roster prices against models.dev",
       description: "Fetch models.dev's catalogue and compare every roster row's $/Mtok against the list price its LANE's provider publishes. Reports drift to the activity log and stores the diff for an operator to approve \u2014 it never writes a price. A 2026-09-22 hand audit found 26 of 117 rows wrong, five of them priced 0/0/0, so this exists to make the next drift visible within a day instead of at the next audit. Daily, not 6-hourly: vendor list prices change on the order of months, and the feed is 4.8 MB.",
       schedule: "41 5 * * *"
+    },
+    {
+      jobKey: JOB_KEYS.refreshAaFreeSync,
+      displayName: "Refresh aa.ai free-list sync",
+      description: "Fetch the official aa.ai FREE-tier legacy list (at most once a day; 429 honors Retry-After; 401/403 stops the source) and store the CAS snapshot plus a per-company reviewable diff of curated model x effort bindings. Report-only: it never writes a binding, pin, tier, or price. Off unless a company enables aaFreeSync.",
+      schedule: "23 6 * * *"
     },
     {
       jobKey: JOB_KEYS.classifyIssues,
@@ -852,6 +1385,12 @@ var manifest = {
       displayName: "Stall-sweep dispatch",
       description: "TOG-2481 absorption of the standalone dispatch plugin (TOG-747/TOG-706): finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set \u2014 same cadence and same default as the plugin it replaces.",
       schedule: "*/30 * * * *"
+    },
+    {
+      jobKey: JOB_KEYS.refreshRunResolve,
+      displayName: "Warm the run-scoped decision snapshot",
+      description: "TOG-11793: reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
+      schedule: "* * * * *"
     }
   ],
   tools: [
@@ -912,6 +1451,36 @@ var manifest = {
       parametersSchema: { type: "object" }
     },
     {
+      name: TOOL_NAMES.admissionShadowReport,
+      displayName: "Account admission shadow report",
+      description: "Read the last opt-in bounded account admission shadow snapshot. No reservations, host start coverage or served-account proof; never invokes selection or actuation.",
+      parametersSchema: { type: "object", additionalProperties: false }
+    },
+    {
+      name: TOOL_NAMES.aaFreeSyncReport,
+      displayName: "aa.ai free-list sync report",
+      description: "The last free-list sync diff: which curated model x effort bindings verify against the snapshot, which break and why, which slugs are ambiguous, and which roster rows have no binding. Read-only; writes nothing.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.refreshAaFreeSyncNow,
+      displayName: "Refresh aa.ai free-list sync now",
+      description: "Run the free-list fetch + per-company diff immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a binding, pin, tier, or price.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.tierOutcomes,
+      displayName: "Tier poll outcomes",
+      description: "Per-tier lane-poll success/fail counters: how many polls each tier's lanes served or missed. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" }
+    },
+    {
+      name: TOOL_NAMES.acceptedWorkReport,
+      displayName: "Accepted-work posterior report",
+      description: "Per-cohort accepted-work posteriors: which served model x effort x task-class cohorts have mature accept/rework evidence, and what each cohort's posterior is. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" }
+    },
+    {
       name: TOOL_NAMES.setLaneOutage,
       displayName: "Declare or clear a lane outage",
       description: "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
@@ -938,6 +1507,12 @@ var manifest = {
           until: { type: "string" }
         }
       }
+    },
+    {
+      name: TOOL_NAMES.tierPolicy,
+      displayName: TIER_POLICY_TOOL_DISPLAY_NAME,
+      description: TIER_POLICY_TOOL_DESCRIPTION,
+      parametersSchema: TIER_POLICY_TOOL_PARAMETERS
     }
   ],
   apiRoutes: [
@@ -961,8 +1536,22 @@ var manifest = {
     }
   ]
 };
+var RUN_MODEL_RESOLVE_CAPABILITY = "run.model.resolve";
+var RUN_RESOLVE_IN_MANIFEST = true ? false : process.env.MODEL_SELECTION_RUN_RESOLVE === "1";
+function buildManifest(runResolve) {
+  if (!runResolve) return baseManifest;
+  return {
+    ...baseManifest,
+    capabilities: [...baseManifest.capabilities, RUN_MODEL_RESOLVE_CAPABILITY],
+    modelRouting: { envKeys: [...RUN_RESOLVE_ENV_KEYS] }
+  };
+}
+var manifest = buildManifest(RUN_RESOLVE_IN_MANIFEST);
 var manifest_default = manifest;
 export {
+  RUN_MODEL_RESOLVE_CAPABILITY,
+  RUN_RESOLVE_IN_MANIFEST,
+  buildManifest,
   manifest_default as default
 };
 //# sourceMappingURL=manifest.js.map

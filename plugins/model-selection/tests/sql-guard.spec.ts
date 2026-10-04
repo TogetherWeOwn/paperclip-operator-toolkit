@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACTIVE_ROUTED_RUN_MODELS_SQL,
+  CREATION_PIN_LIVE_RUNS_SQL,
   LANE_EVIDENCE_RUNS_SQL,
   LAST_RUN_CONTEXT_USAGE_SQL,
+  PREVIOUS_RUN_DECISION_SQL,
   REFRESH_SCORE_CLOSING_RUNS_SQL,
   REFRESH_SCORE_RUNS_SQL,
 } from "../src/sql.js";
@@ -36,6 +39,13 @@ describe("scheduled SQL namespace guard", () => {
     // TOG-3132: the lane-evidence aggregate runs on the same path and is
     // alias-free for the same reason.
     ["lane evidence runs", LANE_EVIDENCE_RUNS_SQL],
+    // TOG-11632: the creation pin's queued-PK read and running-runs UNION
+    // run on the same path and are alias-free for the same reason.
+    ["creation-pin live runs", CREATION_PIN_LIVE_RUNS_SQL],
+    // TOG-11793: the run-scoped decision's database fallback and its live
+    // routed-run read share the same alias-free shape.
+    ["previous run decision", PREVIOUS_RUN_DECISION_SQL],
+    ["active routed run models", ACTIVE_ROUTED_RUN_MODELS_SQL],
   ])("accepts the exact scheduled %s query", (_name, query) => {
     expect(() => validateLikeHost(query, "plugin_model_selection_test")).not.toThrow();
   });

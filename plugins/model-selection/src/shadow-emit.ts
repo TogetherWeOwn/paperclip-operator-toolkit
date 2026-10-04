@@ -1,4 +1,4 @@
-import { SHADOW_EXPLANATIONS_CAP } from "./constants.js";
+import { SHADOW_EXPLANATIONS_CAP, SHADOW_PICK_WHY_MAX_CHARS } from "./constants.js";
 import { slotFactorFor, type LaneLedger, type OperatorOverrideEntry } from "./engine/pacing.js";
 import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, SelectionDecision } from "./engine/types.js";
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
@@ -336,6 +336,19 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
   });
 }
 
+/**
+ * TOG-13566. Clamp the one unbounded free-text field so a single record can
+ * never be an oversized JSONL/RPC line by itself. Pure string cut with an
+ * explicit `...[truncated N chars]` tail — the marker makes the cut visible
+ * to the comparison stream instead of a silent truncation.
+ */
+export function boundPickWhy(trace: readonly string[]): string {
+  const full = trace.join("; ");
+  if (full.length <= SHADOW_PICK_WHY_MAX_CHARS) return full;
+  const cut = full.slice(0, SHADOW_PICK_WHY_MAX_CHARS);
+  return `${cut}...[truncated ${full.length - SHADOW_PICK_WHY_MAX_CHARS} chars]`;
+}
+
 function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): ShadowDecisionRecord {
   const { decision, descriptor } = input;
   const tier = decision.effectiveTier ?? decision.judgement.tier;
@@ -381,7 +394,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     operatorOverride: input.operatorOverride
       ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt }
       : null,
-    pickWhy: decision.trace.join("; "),
+    pickWhy: boundPickWhy(decision.trace),
   };
 }
 

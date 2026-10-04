@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { LANE_ID_OPENCODE_GO } from "../src/constants.js";
+import { classifyRunFailure } from "../src/engine/scores.js";
 import {
   AUTO_QUARANTINE_SECONDS,
   autoQuarantineFor,
@@ -32,6 +34,7 @@ const ROSTER: ModelEntry[] = [
   model("gpt-5.6-luna", "cliproxy-codex"),
   model("claude-sonnet-5", "cliproxy-claude"),
   model("glm-5.3", "cliproxy-zai"),
+  model("deepseek-v4-flash", LANE_ID_OPENCODE_GO),
   model("laneless-model", null),
 ];
 
@@ -109,6 +112,81 @@ describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", 
   it("refuses to guess a lane when nothing resolves — the phrase alone is not attribution", () => {
     expect(
       laneExhaustionFromRunFailure({ error: LIVE_MANAGED_OPENCODE, models: ROSTER }),
+    ).toBeNull();
+  });
+});
+
+describe("laneExhaustionFromRunFailure — subscription-lapsed 403 family (TOG-4812)", () => {
+  /**
+   * Verbatim from the 2026-09-20 host probe on TOG-3434 (re-probed 2026-09-26):
+   * `opencode-go/deepseek-v4-flash -> 403 "Upstream request failed: An active
+   * OpenCode Go subscription is required to use Go models."` The lane names
+   * itself in CLIProxy's own words, carries no roster id, and arrives as a 403
+   * — so attribution MUST come from the fallback, and the phrase must fire on
+   * the `error` text.
+   */
+  const LIVE_SUBSCRIPTION_403 =
+    'API Error: Request rejected (403) · Upstream request failed: An active OpenCode Go subscription is required to use Go models.';
+
+  it("attributes the live subscription 403 to the failed run's own Go lane", () => {
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_SUBSCRIPTION_403,
+      models: ROSTER,
+      fallbackModelId: "deepseek-v4-flash",
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict!.laneId).toBe(LANE_ID_OPENCODE_GO);
+    expect(verdict!.laneId).toBe("cliproxy-opencode-go");
+    expect(verdict!.modelId).toBe("deepseek-v4-flash");
+    // CLIProxy names the lane in its own words ("OpenCode Go"), which is not a
+    // roster id — so attribution MUST come from the fallback, not the text.
+    expect(verdict!.modelFromErrorText).toBe(false);
+  });
+
+  it("folds the subscription verdict into an auto-quarantine on the Go lane", () => {
+    const at = Date.parse("2026-09-26T04:30:00.000Z");
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_SUBSCRIPTION_403,
+      models: ROSTER,
+      fallbackModelId: "deepseek-v4-flash",
+    });
+    expect(verdict).not.toBeNull();
+    const addition = autoQuarantineFor(verdict!, at);
+    expect(addition.lanes).toEqual([LANE_ID_OPENCODE_GO]);
+    expect(addition.until).toBe(new Date(at + AUTO_QUARANTINE_SECONDS * 1_000).toISOString());
+    const merged = mergeLaneOutage(null, addition, new Date(at).toISOString());
+    expect(merged.lanes).toEqual([LANE_ID_OPENCODE_GO]);
+  });
+
+  it("classifies the subscription 403 as infra (weight 0), never model quality", () => {
+    expect(classifyRunFailure(LIVE_SUBSCRIPTION_403, null, "deepseek-v4-flash")).toEqual({
+      kind: "infra",
+      weight: 0,
+    });
+  });
+
+  /**
+   * The discriminator. A bare 403 and a missing-field-shaped `required` are
+   * both 403-adjacent failures that must NOT evacuate a lane: the first is an
+   * authn-shaped rejection with no exhaustion evidence, the second is a
+   * per-request shape error on a healthy lane. If this test ever fails, the
+   * phrase has been loosened past the `subscription … required` adjacency and
+   * the quarantine will start evacuating healthy lanes.
+   */
+  it("does NOT quarantine on a bare 403 or an unrelated required-field 403", () => {
+    for (const error of [
+      "API Error: Request rejected (403) · Forbidden",
+      "API Error: Request rejected (403) · subscription ID required: pass your account identifier",
+    ]) {
+      expect(
+        laneExhaustionFromRunFailure({ error, models: ROSTER, fallbackModelId: "deepseek-v4-flash" }),
+      ).toBeNull();
+    }
+  });
+
+  it("refuses to guess a lane when nothing resolves — the phrase alone is not attribution", () => {
+    expect(
+      laneExhaustionFromRunFailure({ error: LIVE_SUBSCRIPTION_403, models: ROSTER }),
     ).toBeNull();
   });
 });

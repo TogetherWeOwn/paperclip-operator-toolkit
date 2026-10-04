@@ -64,6 +64,13 @@ import type { ModelEntry } from "../engine/types.js";
  *    No model id is embedded — CLIProxy names the lane in its own words
  *    ("OpenCode Go", "Z.ai"), not roster ids — so attribution runs through
  *    the `fallbackModelId` path: the model the failed run was going to use.
+ *  - `An active OpenCode Go subscription is required to use Go models` —
+ *    TOG-4812. CLIProxy's 403 when the OpenCode Go plan has lapsed (probed
+ *    2026-09-20 on TOG-3434, re-probed 2026-09-26). Same shape as the
+ *    managed-capacity family: the lane in CLIProxy's own words, no roster
+ *    id, so attribution runs through the `fallbackModelId` path. Scoped to
+ *    the literal `subscription … required` adjacency — a bare 403, and a
+ *    `subscription ID required`-shaped missing-field error, do not match.
  */
 const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   /all credentials for model\s+\S+\s+are cooling down/i,
@@ -75,6 +82,7 @@ const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   // 2,193 either way, zero disagreements), and a bound keeps a future
   // multi-sentence error from matching across an unrelated clause.
   /no healthy managed .{0,60}capacity remains/i,
+  /subscription( is)? required/i,
 ];
 
 /**
@@ -171,10 +179,11 @@ export function mergeLaneOutage(
 /**
  * How long an auto-quarantine holds without further evidence.
  *
- * Sized against the two clocks that clear it. `pollLanes` runs every 5 minutes
- * and writes the lane's real verdict, and a recovered lane becomes serviceable
- * there — but the outage override is checked independently of the ledger, so
- * it needs an expiry of its own. 15 minutes is three poll cycles: long enough
+ * Sized against the two clocks that clear it. `pollLanes` runs every 2 minutes
+ * (TOG-8108; was 5) and writes the lane's real verdict, and a recovered lane
+ * becomes serviceable there — but the outage override is checked independently
+ * of the ledger, so it needs an expiry of its own. 15 minutes is seven poll
+ * cycles: long enough
  * that a lane genuinely out for the week is not re-probed every few minutes by
  * an unlucky card, short enough that a false positive on a healthy lane costs
  * at most one quarter-hour of traffic pushed up to Claude.

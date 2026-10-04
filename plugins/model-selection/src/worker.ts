@@ -1,9 +1,17 @@
+import { randomUUID } from "node:crypto";
+
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 
-import { planApply } from "./actuate/apply.js";
+import { planApply, planEnvRepair, selectionWritesAllowed } from "./actuate/apply.js";
+import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
+import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
   AA_FETCH_TIMEOUT_MS,
+  AA_FREE_FETCH_INTERVAL_MS,
+  AA_FREE_FETCH_TIMEOUT_MS,
+  AA_FREE_MAX_RESPONSE_BYTES,
+  AA_FREE_RETRY_INTERVAL_MS,
   AA_LEADERBOARD_URL,
   AA_MAX_RESPONSE_BYTES,
   AA_SNAPSHOT_HISTORY_LIMIT,
@@ -16,23 +24,35 @@ import {
   BALANCE_PASS_FETCH_LIMIT,
   BALANCE_PASS_JOB_BUDGET_MS,
   BALANCE_PASS_PROBATION_PRICE_USD,
+  BALANCE_PASS_ROW_TIMEOUT_MS,
   BALANCE_PASS_WRITE_LIMIT,
   CARD_LEDGER_WINDOW_DAYS,
   CLASSIFY_FETCH_LIMIT_MAX,
   CLASSIFY_FETCH_MULTIPLIER,
   CLASSIFY_JOB_BUDGET_MS,
+  CLASSIFY_ROW_TIMEOUT_MS,
+  FALLBACK_LEASE_EXAMINE_LIMIT,
+  FALLBACK_LEASE_WRITE_LIMIT,
+  FALLBACK_PIN_INDEX_MAX,
   DISPATCH_ISSUE_PAGE_LIMIT,
+  DISPATCH_SWEEP_JOB_BUDGET_MS,
   LANE_EVIDENCE_TTL_MS,
   LANE_EVIDENCE_WINDOW_HOURS,
   JOB_KEYS,
   LOCAL_FOLDER_KEYS,
   LABEL_ONLY_PASS_FETCH_LIMIT,
+  LABEL_ONLY_PASS_JOB_BUDGET_MS,
+  LABEL_ONLY_PASS_MAX_ROWS_PER_FIRING,
+  LABEL_ONLY_PASS_ROW_TIMEOUT_MS,
   NO_ELIGIBLE_NOTICE_THROTTLE_MS,
   OPERATOR_PIN_LABEL,
+  PIN_MAX_AGE_MS,
   PLUGIN_STATE_KEYS,
   REJECTION_WINDOW_MS,
   REOPEN_WINDOW_MS,
   REPIN_PASS_FETCH_LIMIT,
+  REPIN_PASS_JOB_BUDGET_MS,
+  REPIN_PASS_ROW_TIMEOUT_MS,
   REPIN_PASS_WRITE_LIMIT,
   ROUTE_KEYS,
   SCORE_THRESHOLDS,
@@ -45,14 +65,42 @@ import {
 } from "./constants.js";
 import { diffSnapshot, type AaDiffModelInput } from "./aa-index/diff.js";
 import { fetchAaSnapshot, type AaHttpClient } from "./aa-index/fetch.js";
+import { fetchAaFreeList } from "./aa-free/fetch.js";
+import { parseAaFreeList, type AaFreeSnapshot } from "./aa-free/parse.js";
+import {
+  buildAdviseEvidence,
+  buildSyncDiff,
+  freeSnapshotDigest,
+  isSnapshotFresh,
+  nextEligibleAfter,
+  recoverSelectedCandidate,
+  shouldFetchFreeSync,
+  type AaFreeSyncDiff,
+  type FreeFetchOutcome,
+} from "./aa-free/sync.js";
+import {
+  buildAcceptedWorkOverlay,
+  normalizeAcceptedWorkOverlay,
+  type AcceptedWorkCardInput,
+  type AcceptedWorkOverlay,
+} from "./accepted-work/posterior.js";
 import { effortSuffixOf, resolveAaSlug, tierImpliedByIndex } from "./aa-index/match.js";
 import { parseAaLeaderboardHtml, type AaModelRecord } from "./aa-index/parse.js";
 import { reconcilePrices, type PriceReconcileReport, type PriceRosterRow } from "./price-sync/diff.js";
 import { fetchPriceCatalog, type PriceHttpClient } from "./price-sync/fetch.js";
 import { parsePriceCatalog } from "./price-sync/parse.js";
 import { ancillaryDriftForAgent, recommendAncillaryModel, type AncillarySurfaceDrift } from "./engine/ancillary.js";
-import { estimateIssueContext, modelOverrideForContext } from "./engine/context.js";
+import {
+  cheapestHealthyModelIdForTier,
+  overrideEnvOnExcludedLane,
+  estimateIssueContext,
+  modelOverrideForContext,
+  staleOverrideSecretRefKeys,
+  readPinProvenance,
+  type PinProvenance,
+} from "./engine/context.js";
 import { resolveConfiguredModelId } from "./engine/model-id.js";
+import { tierIndex } from "./engine/cost.js";
 import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
@@ -66,6 +114,7 @@ import {
   buildModelScore,
   findClosingRun,
   foldReworkIntoStats,
+  tierScoreFor,
   type CardRow,
   type ClosingRunCandidate,
   type ReworkClosingRun,
@@ -74,6 +123,7 @@ import {
 import { BENCHMARK_SPEC_VERSION, type BenchmarkRow } from "./engine/benchmark-prior.js";
 import { FROZEN_BENCHMARK_ROWS } from "./engine/benchmark-data.js";
 import type {
+  AaEffortEvidence,
   CardLedgerEntry,
   IssueDescriptor,
   ModelEntry,
@@ -82,17 +132,24 @@ import type {
   SelectionDecision,
   VolumeProfile,
 } from "./engine/types.js";
+import { inheritedEffortFrom } from "./engine/effort.js";
+import { prepareTierPolicyEdit, renderTierPolicyEditResult } from "./engine/tier-policy-edit.js";
+import { TIER_POLICY_TOOL_DESCRIPTION, TIER_POLICY_TOOL_DISPLAY_NAME, TIER_POLICY_TOOL_PARAMETERS } from "./tier-policy-tool.js";
+import type { AaBinding } from "./aa-free/registry.js";
 import {
   activeOperatorOverride,
   activeZaiPaceOverride,
   blendedListPrice,
   hardStopExcluded,
+  isBehindPace,
   isLaneOutageActive,
   laneAvoidExcluded,
   laneEffectiveUtilization,
   laneHasRoom,
+  laneHealthyAccountCount,
   laneOutageExcluded,
   mergeLedgerEntry,
+  pacePreferenceRank,
   recordOperatorOverride,
   repinAllowed,
   type LaneLedger,
@@ -105,18 +162,37 @@ import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from ".
 import { autoQuarantineFor, laneExhaustionFromRunFailure, mergeLaneOutage } from "./lane-capacity/run-failure.js";
 import { buildHostRecord, buildShadowRecord } from "./shadow-emit.js";
 import {
+  ACTIVE_ROUTED_RUN_MODELS_SQL,
+  CREATION_PIN_LIVE_RUNS_SQL,
   LANE_EVIDENCE_RUNS_SQL,
   LAST_RUN_CONTEXT_USAGE_SQL,
+  PREVIOUS_RUN_DECISION_SQL,
   REFRESH_SCORE_CLOSING_RUNS_SQL,
   REFRESH_SCORE_RUNS_SQL,
 } from "./sql.js";
+import { HotCache, HotCacheTimeout, withinMs } from "./hot-cache.js";
+import {
+  resolveRunDecision,
+  type ResolveRunModelParams,
+  type ResolveRunModelResult,
+  type RunAgentFacts,
+  type RunDecisionRecord,
+  type RunIssueFacts,
+  type RunResolveSnapshot,
+} from "./engine/run-resolve.js";
 import {
   buildLaneEvidence,
   costDownWouldAbandonProvenLane,
   evidenceStateFor,
   type LaneEvidenceSnapshot,
 } from "./engine/lane-evidence.js";
+import {
+  accumulateTierPollOutcomes,
+  normalizeTierPollOutcomes,
+  type TierPollOutcomes,
+} from "./engine/tier-outcomes.js";
 import { callClassifier, type ClassificationHttpClient } from "./engine/classify-call.js";
+import { scanMarkAfterWalk, walkRowsWithinDeadline } from "./row-walk.js";
 import {
   buildClassificationPrompt,
   parseClassificationResponse,
@@ -142,10 +218,42 @@ import {
   type WakeOutcome,
 } from "./dispatch-reporting.js";
 
+/**
+ * TOG-11793. The SDK this package builds against (2026.824.1) predates the
+ * run-model hook; the fork's SDK (TOG-11792) adds `onResolveRunModel` to
+ * `PluginDefinition`. Widen the definition here so the handler type-checks on
+ * both, and the host's own validator stays the authority on the wire shape.
+ */
+type PluginDefinitionWithRunResolve = Parameters<typeof definePlugin>[0] & {
+  onResolveRunModel?: (params: ResolveRunModelParams) => Promise<ResolveRunModelResult>;
+};
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/**
+ * TOG-4763. The Paperclip tool gateway maps a plugin result to
+ * `structuredContent: result?.data ?? null`, and the Claude client rejects a
+ * null `structuredContent` — every tool call that returned only `{content}`
+ * (or an explicit `data: null`) failed schema validation in Claude Code.
+ * Every `ctx.tools.register` handler below therefore returns a plain-object
+ * `data` on EVERY path, including validation rejections, which use this
+ * `{ ok: false, error: <code> }` shape. `content` is unchanged — it stays the
+ * human-readable message; `data` is the machine-readable record.
+ */
+function toolRejection(error: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ok: false, error, ...extra };
 }
 
 interface StoredProfiles {
@@ -200,12 +308,6 @@ function summary(decision: SelectionDecision): string {
 }
 
 /**
- * TOG-2862. The measured half of an issue's context estimate: the input and
- * cached-input token counts of the most recent heartbeat run scoped to it.
- */
-type ContextUsage = { lastRunInputTokens: number | null; lastRunCachedInputTokens: number | null };
-
-/**
  * A single scheduled pass's per-issue memo of {@link ContextUsage}, keyed
  * `companyId:issueId`. Created per pass and passed explicitly, so it cannot
  * outlive its pass or leak one company's rows into another's. In-flight
@@ -242,6 +344,14 @@ export function createPlugin() {
     scopeKind: "instance" as const,
     stateKey: PLUGIN_STATE_KEYS.knownCompanies,
   });
+
+  /**
+   * TOG-11793. Bound by `setup()`; the SDK calls `onResolveRunModel` on the
+   * definition, which has no access to the setup closure. Until setup has run
+   * the honest answer is `defer`, never a guess.
+   */
+  let runResolveHandler = null as ((params: ResolveRunModelParams) => Promise<ResolveRunModelResult>) | null;
+  let invalidateRunSnapshot = null as ((companyId: string) => void) | null;
 
   return definePlugin({
     multiCompanyConfig: true,
@@ -504,13 +614,26 @@ export function createPlugin() {
         await ctx.state.set(tierExhaustedAlarmsKey(companyId), { ...alarms, [issueId]: new Date().toISOString() });
       };
 
-      // --- TOG-2137/2138/2504: paired decision emitter -----------------
-
-      const SHADOW_DECISIONS_FILE = "decisions.jsonl";
+      // --- TOG-2137/2138/2504, shards TOG-13566: paired decision emitter --
 
       /**
-       * A missing shadow-decisions file is the ordinary first-write case (folder
-       * just configured, or `maxRecords` history not yet created) and the only
+       * TOG-13566. Hourly shard name, UTC, zero-padded so lexical order is
+       * chronological order: `decisions-2026-10-03-14Z.jsonl`. Shard names are
+       * derived from the record timestamp, never from wall-clock at write
+       * time, so a late or replayed decision lands in its own hour.
+       */
+      const SHADOW_SHARD_PREFIX = "decisions-";
+      const SHADOW_SHARD_PATTERN = /^decisions-(\d{4}-\d{2}-\d{2}-\d{2})Z\.jsonl$/;
+      const shadowShardFor = (nowIso: string): string => {
+        // `2026-09-10T12` → `2026-09-10-12`: no `T` or `:` in a folder file
+        // name, and lexical order stays chronological order.
+        const hour = new Date(nowIso).toISOString().slice(0, 13).replace("T", "-");
+        return `${SHADOW_SHARD_PREFIX}${hour}Z.jsonl`;
+      };
+
+      /**
+       * A missing shadow-decisions shard is the ordinary first-write case
+       * (folder just configured, or this hour not yet created) and the only
        * read failure that may be treated as "start from empty". Both the real
        * host (`fs` ENOENT surfaced through the RPC error message, since the
        * ENOENT string `code` does not survive the JSON-RPC error-code coercion)
@@ -526,7 +649,7 @@ export function createPlugin() {
       };
 
       // Per-company promise chain so overlapping `advise()`/`apply()` calls
-      // serialize their read-modify-write against the same JSONL file instead
+      // serialize their read-modify-write against the same shard file instead
       // of racing: two emits that both read the same "before" content and then
       // both write collapse to whichever write lands last, silently dropping
       // the other's record (TOG-2373).
@@ -534,22 +657,36 @@ export function createPlugin() {
 
       /**
        * Off by default (`shadowEmit.enabled`). Each authoritative decision
-       * appends one `host` and one `plugin-shadow` projection to the same JSONL
-       * file, capped at `maxRecords` — `ctx.localFolders` has no native
-       * append, and the host only offers whole-file atomic replace. A write
-       * failure is logged and swallowed: shadow emission is a side channel for
-       * the TOG-2138 comparison stream, and must never fail the
+       * appends one `host` and one `plugin-shadow` projection to the current
+       * UTC-hour shard, capped at `shardMaxRecords` — `ctx.localFolders` has
+       * no native append, and the host only offers whole-file atomic replace.
+       *
+       * TOG-13566: the pre-shard design rewrote one `decisions.jsonl` whole on
+       * every append. At `maxRecords: 5000` with ~16 KB live-shape records that
+       * is a ~38 MB single `writeTextAtomic` RPC arg — one newline-delimited
+       * JSON-RPC line on the worker's stdout — which timed out after 30 s
+       * (158×) and tripped the host's oversized-line drop (158×), so no shadow
+       * evidence accumulated at all. An hourly shard rewrite is kilobyte-scale
+       * in the common case, and a single shard can never grow past
+       * `shardMaxRecords` bounded-size records. Retention deletes whole old
+       * shards past `retentionShards`; the legacy `decisions.jsonl`, if
+       * present, is left untouched as historical evidence.
+       *
+       * A write failure is logged and swallowed: shadow emission is a side
+       * channel for the TOG-2138 comparison stream, and must never fail the
        * `advise()`/`apply` call it rides on. A read failure is swallowed only
-       * when it means "no file yet" — any other read failure aborts the emit
+       * when it means "no shard yet" — any other read failure aborts the emit
        * instead of overwriting real history with a one-record file.
        */
       const emitDecisionPairSerialized = async (
         companyId: string,
         records: readonly ReturnType<typeof buildShadowRecord>[],
       ): Promise<void> => {
+        const config = await companyConfig(companyId);
+        const shard = shadowShardFor(records[0]?.ts ?? new Date().toISOString());
         let existing = "";
         try {
-          existing = await ctx.localFolders.readText(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_DECISIONS_FILE);
+          existing = await ctx.localFolders.readText(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, shard);
         } catch (err) {
           if (!isMissingShadowFileError(err)) {
             ctx.logger.warn("model-selection: shadow decision emit aborted — could not read existing log", {
@@ -561,20 +698,37 @@ export function createPlugin() {
         }
         const lines = existing.split("\n").filter((line) => line.trim().length > 0);
         lines.push(...records.map((record) => JSON.stringify(record)));
-        const config = await companyConfig(companyId);
-        // A retained history must never split the newest host/shadow pair. An
+        // A retained shard must never split the newest host/shadow pair. An
         // odd configured cap is rounded down, with two records as the floor.
-        const pairAlignedCap = Math.max(2, config.shadowEmit.maxRecords - (config.shadowEmit.maxRecords % 2));
+        const pairAlignedCap = Math.max(2, config.shadowEmit.shardMaxRecords - (config.shadowEmit.shardMaxRecords % 2));
         const capped = lines.length > pairAlignedCap ? lines.slice(-pairAlignedCap) : lines;
         try {
           await ctx.localFolders.writeTextAtomic(
             companyId,
             LOCAL_FOLDER_KEYS.shadowDecisions,
-            SHADOW_DECISIONS_FILE,
+            shard,
             capped.join("\n") + "\n",
           );
         } catch (err) {
           ctx.logger.warn("model-selection: shadow decision emit failed", { error: String(err) });
+          return;
+        }
+        // Best-effort retention: drop whole shards older than the newest
+        // `retentionShards`. A retention failure must never fail the emit that
+        // just landed — it is logged and swallowed like any side-channel
+        // failure. The legacy single-file `decisions.jsonl` is never touched.
+        try {
+          const listing = await ctx.localFolders.list(companyId, LOCAL_FOLDER_KEYS.shadowDecisions);
+          const shards = listing.entries
+            .filter((entry) => entry.kind === "file" && SHADOW_SHARD_PATTERN.test(entry.name))
+            .map((entry) => entry.name)
+            .sort();
+          const excess = shards.length - Math.max(1, config.shadowEmit.retentionShards);
+          for (let i = 0; i < excess; i++) {
+            await ctx.localFolders.deleteFile(companyId, LOCAL_FOLDER_KEYS.shadowDecisions, shards[i]!);
+          }
+        } catch (err) {
+          ctx.logger.warn("model-selection: shadow shard retention skipped", { error: String(err) });
         }
       };
 
@@ -808,27 +962,33 @@ export function createPlugin() {
       const readLastRunContextUsage = async (
         companyId: string,
         issueId: string,
-      ): Promise<{ lastRunInputTokens: number | null; lastRunCachedInputTokens: number | null }> => {
-        const contextRows = (await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId])) as unknown[];
-        const contextRow = asRecord(contextRows[0]);
-        const rawInput = Number(contextRow.input_tokens);
-        const rawCached = Number(contextRow.cached_input_tokens);
-        return {
-          lastRunInputTokens: Number.isFinite(rawInput) && rawInput >= 0 ? Math.floor(rawInput) : null,
-          lastRunCachedInputTokens: Number.isFinite(rawCached) && rawCached >= 0 ? Math.floor(rawCached) : null,
-        };
+        logRoot: string | null,
+      ): Promise<ContextUsage> => {
+        try {
+          const rows = await ctx.db.query(LAST_RUN_CONTEXT_USAGE_SQL, [companyId, issueId]);
+          if (!Array.isArray(rows)) throw new Error("Malformed history result");
+          if (rows.length === 0) return {
+            lastRunPeakTokens: null, history: "no-history", runId: null, evidence: "no-finalized-run",
+          };
+          return await readRunContextEvidence(rows[0], companyId, logRoot);
+        } catch {
+          return {
+            lastRunPeakTokens: null, history: "unavailable", runId: null, evidence: "history-read-failed",
+          };
+        }
       };
 
       const loadContextUsage = (
         companyId: string,
         issueId: string,
+        logRoot: string | null,
         cache?: ContextUsageCache,
       ): Promise<ContextUsage> => {
-        if (!cache) return readLastRunContextUsage(companyId, issueId);
+        if (!cache) return readLastRunContextUsage(companyId, issueId, logRoot);
         const key = `${companyId}:${issueId}`;
         const memo = cache.get(key);
         if (memo) return memo;
-        const pending = readLastRunContextUsage(companyId, issueId);
+        const pending = readLastRunContextUsage(companyId, issueId, logRoot);
         cache.set(key, pending);
         return pending;
       };
@@ -867,9 +1027,16 @@ export function createPlugin() {
         agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
-        contextUsage: () => Promise<ContextUsage>;
+        contextUsage: (logRoot: string | null) => Promise<ContextUsage>;
         /** TOG-3111: the assignment signal a creation-time pin keys on. */
         assigneeAgentId: string | null;
+        /**
+         * TOG-5227: the human assignment, if any. A card with a user
+         * assignee rejects `issues.update` with an agent override
+         * ("Issue can only have one assignee"), so the scheduled pin
+         * passes skip it — SQL first, this field as the per-row backstop.
+         */
+        assigneeUserId: string | null;
         /** TOG-3111: raw description for the classification prompt. */
         description: string;
       } | null> => {
@@ -929,6 +1096,12 @@ export function createPlugin() {
           labelNames,
           pinnedModelId,
           agentFloorModelId,
+          // TOG-8108: adapter-compatibility gate (`devin/*` vs `claude_local`)
+          // and the earn-in guard (priority + review/gate title) both read
+          // these. Recorded from the issue/agent rows, never inferred.
+          agentAdapterType,
+          priority: typeof issue.priority === "string" ? issue.priority : null,
+          title: String(issue.title ?? ""),
           agentName,
           // Sticky is derived from the pin: if the issue is already pinned, the
           // run is already on that model and a change would reset the session.
@@ -975,13 +1148,98 @@ export function createPlugin() {
           title: String(issue.title ?? ""),
           identifier: typeof issue.identifier === "string" ? issue.identifier : null,
           assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
+          assigneeUserId:
+            typeof issue.assigneeUserId === "string" && issue.assigneeUserId.length > 0
+              ? issue.assigneeUserId
+              : null,
           description: String(issue.description ?? ""),
           agentEnv,
           agentAdapterType,
           agentAdapterConfig,
           existingOverrideEnv,
-          contextUsage: () => loadContextUsage(companyId, issueId, contextUsageCache),
+          contextUsage: (logRoot) => loadContextUsage(companyId, issueId, logRoot, contextUsageCache),
         };
+      };
+
+      // --- TOG-12206 P2: opt-in free-list sync/discovery/shadow ---------------
+      //
+      // Shadow-only v2 evidence, resolved AFTER selection from the last-good
+      // free-list snapshot. Never an input to selection: the winner is already
+      // decided, and this only annotates the decision for the shadow stream.
+      // Returns null on every legacy leg (disabled, unconfigured,
+      // snapshot-less, undecided) — the caller attaches the field only on a
+      // non-null return, so disabling v2 restores the decision shape
+      // byte-for-byte (key absent, not null).
+      const aaFreeSyncSnapshotKey = () => ({
+        scopeKind: "instance" as const,
+        stateKey: PLUGIN_STATE_KEYS.aaFreeSyncSnapshot,
+      });
+
+      interface AaFreeSyncSnapshotState {
+        fetchedAt: string | null;
+        digest: string | null;
+        snapshot: AaFreeSnapshot | null;
+        lastAttemptAt: string | null;
+        lastError: string | null;
+        nextEligibleAt: string | null;
+      }
+
+      const readAaFreeSyncSnapshot = async (): Promise<AaFreeSyncSnapshotState> => {
+        const stored = asRecord(await ctx.state.get(aaFreeSyncSnapshotKey()));
+        const snapshot = asRecord(stored.snapshot);
+        return {
+          fetchedAt: typeof stored.fetchedAt === "string" ? stored.fetchedAt : null,
+          digest: typeof stored.digest === "string" ? stored.digest : null,
+          snapshot:
+            Array.isArray(snapshot.rows) && typeof snapshot.retrievedAt === "string"
+              ? (stored.snapshot as AaFreeSnapshot)
+              : null,
+          lastAttemptAt: typeof stored.lastAttemptAt === "string" ? stored.lastAttemptAt : null,
+          lastError: typeof stored.lastError === "string" ? stored.lastError : null,
+          nextEligibleAt: typeof stored.nextEligibleAt === "string" ? stored.nextEligibleAt : null,
+        };
+      };
+
+      const aaFreeSyncDiffKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.aaFreeSyncDiff,
+      });
+
+      const buildAaFreeEvidence = async (input: {
+        companyId: string;
+        config: ResolvedConfig;
+        decision: SelectionDecision;
+        agentAdapterType: string | null;
+        agentAdapterConfig: Record<string, unknown> | null;
+      }): Promise<AaEffortEvidence | null> => {
+        if (!input.config.aaFreeSync.enabled) return null;
+        if (input.config.aaFreeSync.bindings.length === 0) return null;
+        if (!input.decision.modelId) return null;
+        const selected = input.config.models.find((model) => model.id === input.decision.modelId);
+        if (!selected) return null;
+        const stored = await readAaFreeSyncSnapshot();
+        if (!stored.snapshot || !stored.digest || !stored.fetchedAt) return null;
+        const maxAgeMs = input.config.aaFreeSync.maxSnapshotAgeHours * 60 * 60 * 1000;
+        const stale = !isSnapshotFresh(stored.fetchedAt, Date.now(), maxAgeMs);
+        return buildAdviseEvidence({
+          bindings: input.config.aaFreeSync.bindings.map((b) => ({
+            candidateId: b.candidateId,
+            modelId: b.modelId,
+            laneId: b.laneId,
+            evaluatedEffort: b.evaluatedEffort as AaBinding["evaluatedEffort"],
+            aaSlug: b.aaSlug,
+            ...(b.observationalOnly !== undefined ? { observationalOnly: b.observationalOnly } : {}),
+          })),
+          snapshot: stored.snapshot,
+          digest: stored.digest,
+          stale,
+          // ModelEntry.laneId is optional; the sync view requires the key.
+          model: { id: selected.id, laneId: selected.laneId ?? null, fallbackOnly: selected.fallbackOnly, enabled: selected.enabled },
+          adapterType: input.agentAdapterType,
+          requestedEffort: selected.effort ?? null,
+          inheritedEffort: inheritedEffortFrom(input.agentAdapterType, input.agentAdapterConfig),
+        });
       };
 
       const advise = async (
@@ -1051,23 +1309,34 @@ export function createPlugin() {
         /** TOG-3995. `null` = UNKNOWN; read only for the effort it already carries. */
         agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
+        /**
+         * TOG-3116: target for the haiku-class sub-call env keys on this
+         * card's override write — the cheapest healthy T3 model under the
+         * CURRENT outage state, or null when none qualifies (the write then
+         * falls back to the pin; see `ModelOverrideInput.cheapModelId`).
+         */
+        ancillaryModelId: string | null;
+        /** TOG-12234: the assignee a fallback pin's provenance stamp names. */
+        assigneeAgentId: string | null;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
         if (!issueId) return null;
         const config = await companyConfig(companyId);
         const described = await describeIssue(companyId, issueId, params, contextUsageCache);
         if (!described) return null;
-        if (forceTier) {
-          described.descriptor.labelNames = [`${TIER_LABEL_PREFIX}${forceTier}`];
-        }
-        if (suppressSticky) {
-          described.descriptor.stickyModelId = null;
-        }
+        // A deliberate repin keeps the caller's effective tier even when the
+        // old pin's lane is dead. Merely replacing labels cannot do this:
+        // resolveTier gives a serviceable pin precedence over those labels.
+        const selectionDescriptor: IssueDescriptor = {
+          ...described.descriptor,
+          ...(forceTier ? { pinnedModelId: null, labelNames: [`${TIER_LABEL_PREFIX}${forceTier}`] } : {}),
+          ...(suppressSticky ? { stickyModelId: null } : {}),
+        };
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
         const pacingActive = config.pacing.mode !== "off";
         const profileTier = resolveTier(
-          described.descriptor,
+          selectionDescriptor,
           config.models,
           config.selection.defaultTier,
           {
@@ -1079,15 +1348,15 @@ export function createPlugin() {
         // needs the `heartbeat_runs` read, and it sits AFTER `resolveTier`,
         // which reads labels and lane state only — so nothing above this line
         // depends on it.
-        const usage = await described.contextUsage();
+        const usage = await described.contextUsage(config.selection.contextRunLogRoot);
         const contextEstimate = estimateIssueContext({
           explicitTokens:
             typeof params.requiredContextTokens === "number" ? params.requiredContextTokens : undefined,
-          lastRunInputTokens: usage.lastRunInputTokens,
-          lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
+          lastRunPeakTokens: usage.lastRunPeakTokens,
+          history: usage.history,
           fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
         });
-        described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
+        selectionDescriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
         const nowIso = new Date().toISOString();
         const overrides = await readOperatorOverrides(companyId);
         const liveOverride = activeOperatorOverride(overrides, issueId, nowIso);
@@ -1100,9 +1369,9 @@ export function createPlugin() {
           config.pacing.mode !== "off" ? await activePinsWeightByLane(companyId, config.models) : {};
 
         const decision = selectModel({
-          descriptor: described.descriptor,
+          descriptor: selectionDescriptor,
           config: {
-            enforcementEnabled: config.selection.enabled && config.selection.mode === "enforce",
+            enforcementEnabled: selectionWritesAllowed(config),
             defaultTier: config.selection.defaultTier,
             // TOG-2988: the roster's hand-placed tier is overlaid with the tier
             // `refreshScores` derived from the model's posterior. Unscored models
@@ -1142,6 +1411,24 @@ export function createPlugin() {
           availability: await readAvailability(companyId, now),
           laneEvidence: await readLaneEvidence(companyId, config.models, now),
         });
+        decision.trace.push(
+          `context: source=${contextEstimate.source} tokens=${contextEstimate.tokens ?? "unknown"} ` +
+          `run=${usage.runId ?? "none"} evidence=${usage.evidence}`,
+        );
+
+        // TOG-12206 P2: shadow-only v2 evidence, resolved AFTER selection from
+        // the last-good free-list snapshot. Never an input to selection: the
+        // winner is already decided above, and this only annotates the
+        // decision for the shadow stream. Absent entirely (not null) when v2
+        // is disabled, unconfigured, or snapshot-less — the legacy shape.
+        const v2Evidence = await buildAaFreeEvidence({
+          companyId,
+          config,
+          decision,
+          agentAdapterType: described.agentAdapterType,
+          agentAdapterConfig: described.agentAdapterConfig,
+        });
+        if (v2Evidence) decision.aaEffortEvidence = v2Evidence;
 
         // Whether the CURRENTLY PINNED model (not the newly-computed winner) sits
         // on an unserviceable lane — this, not a routine pace-preference change,
@@ -1186,7 +1473,7 @@ export function createPlugin() {
             issueIdentifier: described.identifier,
             nowIso,
             decision,
-            descriptor: described.descriptor,
+            descriptor: selectionDescriptor,
             status: described.status,
             hasOverride: described.hasOverride,
             hasOperatorPin: described.hasOperatorPin,
@@ -1202,6 +1489,41 @@ export function createPlugin() {
           };
           await emitDecisionPair(companyId, [buildHostRecord(recordInput), buildShadowRecord(recordInput)]);
         }
+
+        // Optional post-selection side report. No result reaches selection or
+        // actuation; malformed observations/storage failures cannot veto a pick.
+        if (config.accountAdmissionShadow.enabled && params.admissionShadow !== undefined) {
+          try {
+            const report = reportDecisionAdmissionShadow(
+              params.admissionShadow as DecisionAdmissionShadowInput,
+              now,
+              decision.candidates.map(candidate => ({
+                modelId: candidate.modelId,
+                lane: config.models.find(model => model.id === candidate.modelId)?.laneId ?? null,
+              })),
+            );
+            if (report) await ctx.state.set({
+              scopeKind: "company", scopeId: companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+            }, { issueId, evaluatedAt: now, report });
+          } catch {
+            // Do not echo potentially sensitive caller input in logs.
+            ctx.logger.warn("model-selection: account admission shadow failed; selection unchanged");
+          }
+        }
+
+        // TOG-3116: resolve the cheap-key target once per advise so every
+        // override write site consumes the same answer. Pure — every input is
+        // already in scope here, so this adds no IO to the advise path.
+        const ancillaryModelId = cheapestHealthyModelIdForTier({
+          models: config.models,
+          tier: "T3",
+          ledger: laneLedger,
+          laneOutageOverride,
+          nowIso,
+          modelScores,
+          laneAvoidConfig: config.pacing.avoid,
+          pacingMode: config.pacing.mode,
+        });
 
         return {
           decision,
@@ -1223,6 +1545,8 @@ export function createPlugin() {
           agentAdapterType: described.agentAdapterType,
           agentAdapterConfig: described.agentAdapterConfig,
           existingOverrideEnv: described.existingOverrideEnv,
+          ancillaryModelId,
+          assigneeAgentId: described.assigneeAgentId,
         };
       };
 
@@ -1235,6 +1559,7 @@ export function createPlugin() {
             type: "object",
             properties: {
               issueId: { type: "string" },
+              admissionShadow: { type: "object", description: "Optional non-secret, report-only account snapshot; requires accountAdmissionShadow.enabled." },
               wakeReason: {
                 type: "string",
                 description:
@@ -1245,7 +1570,7 @@ export function createPlugin() {
         },
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));
-          if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          if (!result) return { content: "Issue not found, or issueId was missing.", data: toolRejection("issue-not-found") };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
             result.issueId,
@@ -1268,6 +1593,7 @@ export function createPlugin() {
             type: "object",
             properties: {
               issueId: { type: "string" },
+              admissionShadow: { type: "object", description: "Optional non-secret, report-only account snapshot; requires accountAdmissionShadow.enabled." },
               wakeReason: {
                 type: "string",
                 description:
@@ -1278,7 +1604,7 @@ export function createPlugin() {
         },
         async (params, runCtx): Promise<ToolResult> => {
           const result = await advise(runCtx.companyId, asRecord(params));
-          if (!result) return { content: "Issue not found, or issueId was missing.", data: null };
+          if (!result) return { content: "Issue not found, or issueId was missing.", data: toolRejection("issue-not-found") };
           await raiseOrClearTierExhaustedAlarm(
             runCtx.companyId,
             result.issueId,
@@ -1305,6 +1631,13 @@ export function createPlugin() {
               // from "the label decided it" would re-add a duplicate.
               hasExistingTierLabel: result.hasTierLabel,
               status: result.status,
+              // TOG-12305. Consulted only when the pin path declines: an
+              // existing override that binds secret refs the assignee does not
+              // carry cannot start a run, so it is rebuilt on the SAME model.
+              envRepair: {
+                pinnedModelId: result.pinnedModelId,
+                staleSecretRefKeys: staleOverrideSecretRefKeys(result.existingOverrideEnv, result.agentEnv),
+              },
               ...(paceRepinEligible
                 ? {
                     paceRepin: {
@@ -1325,7 +1658,13 @@ export function createPlugin() {
             return { content: `No write: ${plan.reason}`, data: { decision: result.decision, plan } };
           }
 
-          const selectedModel = result.config.models.find((model) => model.id === plan.modelId);
+          // TOG-12206 P2: recover through the candidate-carrying path so the
+          // v2 identity evidenced at advise time travels with the row instead
+          // of being re-derived (possibly differently) from the bare model id.
+          const selectedModel = recoverSelectedCandidate(result.config.models, {
+            modelId: plan.modelId,
+            aaEffortEvidence: result.decision.aaEffortEvidence,
+          });
           if (!selectedModel) {
             return {
               content: `No write: selected model ${plan.modelId} is absent from the resolved roster`,
@@ -1334,12 +1673,14 @@ export function createPlugin() {
           }
           const patch: IssueUpdatePatch = modelOverrideForContext({
             model: selectedModel,
-            fleetCeilingTokens: result.config.selection.fleetContextCeilingTokens,
+            agentEnvContextTokens: result.config.selection.agentEnvContextTokens,
             compactionRatio: result.config.selection.compactionRatio,
             agentEnv: result.agentEnv,
             agentAdapterType: result.agentAdapterType,
             agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
+            cheapModelId: result.ancillaryModelId,
+            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
           });
           let labelNote = "";
           if (plan.labelName && result.decision.effectiveTier) {
@@ -1366,6 +1707,24 @@ export function createPlugin() {
             runCtx.companyId,
             { actorAgentId: runCtx.agentId ?? null, actorRunId: runCtx.runId ?? null },
           );
+          await recordFallbackPin(runCtx.companyId, result.issueId, patch);
+
+          if (plan.envRepairOnly) {
+            await ctx.activity.log({
+              companyId: runCtx.companyId,
+              message: `Model Selection repaired the env of its ${plan.modelId} pin on this issue (model unchanged)`,
+              entityType: "issue",
+              entityId: result.issueId,
+              metadata: {
+                modelId: plan.modelId,
+                staleSecretRefKeys: staleOverrideSecretRefKeys(result.existingOverrideEnv, result.agentEnv),
+                trigger: "apply",
+              },
+            });
+            // Not a repin: the model did not move, so the idle hysteresis
+            // that `paceRepinHistory` feeds must not start counting.
+            return { content: plan.reason, data: { decision: result.decision, plan } };
+          }
 
           await ctx.activity.log({
             companyId: runCtx.companyId,
@@ -1415,14 +1774,14 @@ export function createPlugin() {
           const issueId = typeof supplied.issueId === "string" ? supplied.issueId : null;
           const modelId = typeof supplied.modelId === "string" ? supplied.modelId : null;
           if (!issueId || !modelId) {
-            return { content: "issueId and modelId are both required.", data: null };
+            return { content: "issueId and modelId are both required.", data: toolRejection("missing-params") };
           }
           const config = await companyConfig(runCtx.companyId);
           const configuredModelId = resolveConfiguredModelId(modelId, config.models);
           if (!configuredModelId) {
             return {
               content: `modelId ${modelId} is not a configured roster entry.`,
-              data: null,
+              data: toolRejection("unknown-model", { modelId }),
             };
           }
           const ttlSeconds =
@@ -1465,10 +1824,10 @@ export function createPlugin() {
           const lanes = Array.isArray(supplied.lanes) ? supplied.lanes.filter((l): l is string => typeof l === "string") : [];
           const models = Array.isArray(supplied.models) ? supplied.models.filter((m): m is string => typeof m === "string") : [];
           const until = typeof supplied.until === "string" ? supplied.until : null;
-          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: toolRejection("missing-until") };
           if (lanes.length === 0 && models.length === 0) {
             await ctx.state.set(laneOutageKey(runCtx.companyId), null);
-            return { content: "lane outage cleared.", data: null };
+            return { content: "lane outage cleared.", data: { ok: true, cleared: true } };
           }
           const reason = typeof supplied.reason === "string" ? supplied.reason : undefined;
           const override: LaneOutageOverride = { lanes, models, until, ...(reason ? { reason } : {}) };
@@ -1495,14 +1854,47 @@ export function createPlugin() {
         async (params, runCtx): Promise<ToolResult> => {
           const supplied = asRecord(params);
           const until = typeof supplied.until === "string" ? supplied.until : null;
-          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: null };
+          if (!until) return { content: "until is required (ISO-8601 UTC timestamp).", data: toolRejection("missing-until") };
           if (typeof supplied.margin !== "number") {
             await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), null);
-            return { content: "zai pace override cleared.", data: null };
+            return { content: "zai pace override cleared.", data: { ok: true, cleared: true } };
           }
           const override: ZaiPaceOverride = { margin: supplied.margin, until };
           await ctx.state.set(zaiPaceOverrideKey(runCtx.companyId), override);
           return { content: `zai pace override recorded: margin ${supplied.margin} until ${until}`, data: override };
+        },
+      );
+
+      // TOG-12490 (TOG-11543 P2, TOG-11549 D4). Prepare/validate/diff only: the
+      // SDK has no compare-and-set primitive, so nothing proves a write would
+      // land on one authoritative revision. The tool therefore never touches
+      // ctx.state or config and never changes routing; the log line is the audit.
+      ctx.tools.register(
+        TOOL_NAMES.tierPolicy,
+        {
+          displayName: TIER_POLICY_TOOL_DISPLAY_NAME,
+          description: TIER_POLICY_TOOL_DESCRIPTION,
+          parametersSchema: TIER_POLICY_TOOL_PARAMETERS as unknown as Record<string, unknown>,
+        },
+        async (params, runCtx): Promise<ToolResult> => {
+          const result = prepareTierPolicyEdit(asRecord(params), {
+            agentId: typeof runCtx?.agentId === "string" ? runCtx.agentId : null,
+            runId: typeof runCtx?.runId === "string" ? runCtx.runId : null,
+          });
+          ctx.logger.info("tier policy proposal", {
+            auditId: result.auditId,
+            action: result.action,
+            outcome: result.outcome,
+            baseSource: result.baseSource,
+            baseRevision: result.baseRevision,
+            proposedRevision: result.proposedRevision,
+            issueCodes: result.issues.map((i) => i.code),
+            changedPaths: result.diff.length,
+            companyId: runCtx?.companyId ?? null,
+            agentId: runCtx?.agentId ?? null,
+            runId: runCtx?.runId ?? null,
+          });
+          return { content: renderTierPolicyEditResult(result), data: result as unknown as Record<string, unknown> };
         },
       );
 
@@ -1523,21 +1915,34 @@ export function createPlugin() {
         const payload = asRecord(event.payload);
         const changes = asRecord(payload.changes);
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
+        // TOG-11793: any change may be a label or assignee change the next
+        // run-scoped decision must see.
+        if (issueId) runIssueCache.invalidate(runIssueKey(event.companyId, issueId));
 
         // TOG-3111: fresh assignment (null -> agent id) is the other
         // "creation moment" — cards are frequently created unassigned and
         // assigned by a later PATCH, after `issue.created` already fired and
-        // found no assignee. Agent-to-agent reassignment is deliberately out
-        // of scope: that card already had its creation moment under the
-        // previous assignee, and moving an existing card is repinPass
-        // territory, not a creation pin.
+        // found no assignee. Agent-to-agent reassignment is not a creation
+        // moment (the card had one under the previous assignee), so it does
+        // not re-decide the model; it only re-homes the pin's env (TOG-12234).
         const assignment = asRecord(changes.assigneeAgentId);
         const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
+        const assignedFrom = typeof assignment.from === "string" ? assignment.from : null;
         if (issueId && assignedTo && assignment.from == null) {
           try {
             await pinAtDecisionTime(event.companyId, issueId, "issue.updated:assignment");
           } catch (cause) {
             ctx.logger.error("assignment-time pin failed", {
+              companyId: event.companyId,
+              issueId,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        } else if (issueId && assignedTo && assignedFrom && assignedFrom !== assignedTo) {
+          try {
+            await rehomePinOnReassignment(event.companyId, issueId, assignedFrom, assignedTo);
+          } catch (cause) {
+            ctx.logger.error("reassignment pin re-home failed", {
               companyId: event.companyId,
               issueId,
               error: cause instanceof Error ? cause.message : String(cause),
@@ -1661,19 +2066,57 @@ export function createPlugin() {
       };
 
       /**
-       * TOG-3111 half 2. Classify (if needed), label, and pin one card from
-       * the event stream instead of waiting for the 10-minute passes. Label-tier
-       * semantics — the pin is decided at the card's own tier label (existing,
-       * or just written by the classification above), the same outcome
-       * `labelOnlyPass` would produce, NOT balancePass's forced T1: an event
-       * path that changed routing policy would be a silent policy change, and
-       * this only moves the same decision earlier in time. Never writes unless
-       * the card is agent-assigned, open, idle and unpinned;
-       * `balanceWriteStillSafe` re-reads all of that immediately before the
-       * write, because an override landing on a card that just dispatched
-       * would reset a warm session.
+       * TOG-11793. True when run-scoped decisions are live for this company:
+       * the flag is on AND the install enforces. Only then are the legacy pin
+       * writers retired — an advisory install writes no pin anyway, and
+       * retiring them while the handler answers `keep` would leave nothing
+       * routing at all. Tier labels are never retired.
+       */
+      const runResolveActive = (config: ResolvedConfig): boolean =>
+        config.runResolve.enabled && selectionWritesAllowed(config);
+
+      /**
+       * TOG-11793. Classifications this worker has started and not finished,
+       * by issue. The run-scoped hook may WAIT (<= 1 s) on one that is already
+       * running so a card created a moment ago gets its classified tier; it
+       * never starts one (TOG-11780 §6). Entries remove themselves on settle.
+       */
+      const classificationsInFlight = new Map<string, Promise<Tier | null>>();
+      const trackClassification = (issueId: string, work: Promise<Tier | null>): Promise<Tier | null> => {
+        const tracked: Promise<Tier | null> = work
+          .catch(() => null)
+          .finally(() => {
+            if (classificationsInFlight.get(issueId) === tracked) classificationsInFlight.delete(issueId);
+          });
+        classificationsInFlight.set(issueId, tracked);
+        return tracked;
+      };
+
+      /**
+       * TOG-3111 half 2, restructured by TOG-11794 (TOG-11780 §7 item 2).
+       * Label-tier semantics — the pin is decided at the card's own tier label
+       * (existing, or just written by the classification below), the same
+       * outcome `labelOnlyPass` would produce, NOT balancePass's forced T1: an
+       * event path that changed routing policy would be a silent policy
+       * change, and this only moves the same decision earlier in time. Never
+       * writes unless the card is agent-assigned, open, unpinned and its live
+       * runs are all queued-and-unstarted (`creationWriteStillSafe`).
+       *
+       * Two phases, in this order:
+       * 1. First pin, from data already in hand: `resolveTier()`'s judgement
+       *    (label, else the assignee's floor tier, else the configured
+       *    default — ADR-0007, no text heuristics). No network call precedes
+       *    this write; the wake's run is claimed at p50 2.19 s after it is
+       *    queued, and the classifier alone can take 15 s, so a pin that
+       *    waited for it landed on 0 of 130 first runs.
+       * 2. Classifier refinement, for an unlabelled card only. It writes the
+       *    label as before; a different tier re-pins only while the wake's
+       *    run is still unstarted. Otherwise the label stands and repinPass's
+       *    `tierWithFallback` lets it supersede a weaker pin at the next idle
+       *    boundary.
        */
       const pinAtDecisionTime = async (companyId: string, issueId: string, source: string): Promise<void> => {
+        const receivedAtMs = Date.now();
         const config = await companyConfig(companyId);
         if (!config.classification.enabled) return;
 
@@ -1686,154 +2129,277 @@ export function createPlugin() {
         if (described.hasOperatorPin) return;
         if (described.descriptor.pinnedModelId) return;
 
-        // The tier this card is pinned at: its existing label's tier, or the
-        // tier the classification below is about to write. Passed explicitly
-        // to `advise` (its `forceTier` slot) rather than re-read from the
-        // issue: making the label-write -> label-read round trip
-        // load-bearing within one tick would couple correctness to the
-        // host's `issues.get` label enrichment, and the plugin already
-        // knows the answer.
-        let tier: Tier | null = described.hasTierLabel
-          ? tierFromLabels(described.descriptor.labelNames)
-          : null;
+        // TOG-11793: with run-scoped decisions live, the pin is retired but the
+        // classification still runs and still writes the label — the hook reads
+        // it (or waits on it) at the run boundary.
+        const runScoped = runResolveActive(config);
+        const heuristicTier = resolveTier(described.descriptor, config.models, config.selection.defaultTier).tier;
+        const firstPinnedModelId = await pinAtTier(companyId, issueId, described.identifier, source, config, {
+          tier: heuristicTier,
+          expectedPinnedModelId: null,
+          receivedAtMs,
+        });
+        if (described.hasTierLabel) return; // the label already decided the tier
 
-        if (!described.hasTierLabel) {
-          // Mirror of classifyIssues' per-row path minus the row query: the
-          // event already named this card; classifyIssues cannot see it
-          // precisely because it dispatches before the next pass fires.
-          if (!config.classification.baseUrl || !config.classification.modelId) return;
-          let apiKey: string | null = null;
-          if (config.classification.apiKeySecretRef) {
-            try {
-              apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef as never, {
-                companyId,
-                configPath: "classification.apiKeySecretRef",
-              });
-            } catch {
-              ctx.logger.error("creation-pin classification secret unavailable", { companyId, issueId });
-              return;
-            }
-          }
-          const classified = await callClassifier(
-            {
-              baseUrl: config.classification.baseUrl,
-              protocol: config.classification.protocol,
-              modelId: config.classification.modelId,
-              apiKey,
-              system: RUBRIC,
-              userPrompt: buildClassificationPrompt(
-                described.title,
-                described.description,
-                described.descriptor.agentName ?? "",
-                config.classification.descriptionChars,
-              ),
-              maxOutputTokens: config.classification.maxOutputTokens,
-              requestTimeoutMs: config.classification.requestTimeoutMs,
-              maxResponseBytes: config.classification.maxResponseBytes,
-            },
-            classificationHttp,
-          );
-          if (!classified.text) {
-            ctx.logger.info("creation-pin classification skipped", {
+        const labelTier = await trackClassification(
+          issueId,
+          classifyForPin(companyId, issueId, described, config, source),
+        );
+        if (runScoped) return; // the label stands; the next run boundary applies it
+        if (!labelTier || labelTier === heuristicTier) return;
+        await pinAtTier(companyId, issueId, described.identifier, source, config, {
+          tier: labelTier,
+          expectedPinnedModelId: firstPinnedModelId,
+          receivedAtMs,
+        });
+      };
+
+      /**
+       * Phase 2 of `pinAtDecisionTime`: classify one unlabelled card and write
+       * its `tier:*` label. Mirror of classifyIssues' per-row path minus the
+       * row query: the event already named this card; classifyIssues cannot
+       * see it precisely because it dispatches before the next pass fires.
+       * Returns the label tier, or null when no classification was made.
+       */
+      const classifyForPin = async (
+        companyId: string,
+        issueId: string,
+        described: NonNullable<Awaited<ReturnType<typeof describeIssue>>>,
+        config: ResolvedConfig,
+        source: string,
+      ): Promise<Tier | null> => {
+        if (!config.classification.baseUrl || !config.classification.modelId) return null;
+        let apiKey: string | null = null;
+        if (config.classification.apiKeySecretRef) {
+          try {
+            apiKey = await ctx.secrets.resolve(config.classification.apiKeySecretRef as never, {
               companyId,
-              issueId,
-              why: classified.error,
+              configPath: "classification.apiKeySecretRef",
             });
-            return;
+          } catch {
+            ctx.logger.error("creation-pin classification secret unavailable", { companyId, issueId });
+            return null;
           }
-          const judgement = parseClassificationResponse(classified.text);
-          if (!judgement) {
-            ctx.logger.info("creation-pin classification unparseable", { companyId, issueId });
-            return;
-          }
-          const { labelTier } = resolveClassifiedTiers(judgement, {
-            t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
-            t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
-          });
-          tier = labelTier;
-          const labelId = config.tierLabelIds[labelTier];
-          if (labelId) {
-            // Union, never replace: the host REPLACES the label set on a
-            // labelIds write (issues.ts syncIssueLabels).
-            await ctx.issues.update(
-              issueId,
-              { labelIds: [...new Set([...described.existingLabelIds, labelId])] } as Parameters<
-                typeof ctx.issues.update
-              >[1],
-              companyId,
-            );
-          }
-          if (judgement.exclusion) {
-            const exclusions = await readClassificationExclusions(companyId);
-            await ctx.state.set(classificationExclusionsKey(companyId), { ...exclusions, [issueId]: true });
-          }
-          await ctx.activity.log({
+        }
+        const classified = await callClassifier(
+          {
+            baseUrl: config.classification.baseUrl,
+            protocol: config.classification.protocol,
+            modelId: config.classification.modelId,
+            apiKey,
+            system: RUBRIC,
+            userPrompt: buildClassificationPrompt(
+              described.title,
+              described.description,
+              described.descriptor.agentName ?? "",
+              config.classification.descriptionChars,
+            ),
+            maxOutputTokens: config.classification.maxOutputTokens,
+            requestTimeoutMs: config.classification.requestTimeoutMs,
+            maxResponseBytes: config.classification.maxResponseBytes,
+          },
+          classificationHttp,
+        );
+        if (!classified.text) {
+          ctx.logger.info("creation-pin classification skipped", {
             companyId,
-            message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${
-              judgement.exclusion ? ", capability-excluded" : ""
-            } at card creation`,
-            entityType: "issue",
-            entityId: issueId,
-            metadata: {
-              tier: labelTier,
-              confidence: judgement.confidence,
-              reason: judgement.reason,
-              source,
-            },
+            issueId,
+            why: classified.error,
           });
+          return null;
         }
+        const judgement = parseClassificationResponse(classified.text);
+        if (!judgement) {
+          ctx.logger.info("creation-pin classification unparseable", { companyId, issueId });
+          return null;
+        }
+        const { labelTier } = resolveClassifiedTiers(judgement, {
+          t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+          t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
+        });
+        const labelId = config.tierLabelIds[labelTier];
+        if (labelId) {
+          // Union, never replace: the host REPLACES the label set on a
+          // labelIds write (issues.ts syncIssueLabels).
+          await ctx.issues.update(
+            issueId,
+            { labelIds: [...new Set([...described.existingLabelIds, labelId])] } as Parameters<
+              typeof ctx.issues.update
+            >[1],
+            companyId,
+          );
+        }
+        if (judgement.exclusion) {
+          const exclusions = await readClassificationExclusions(companyId);
+          await ctx.state.set(classificationExclusionsKey(companyId), { ...exclusions, [issueId]: true });
+        }
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${
+            judgement.exclusion ? ", capability-excluded" : ""
+          } at card creation`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            tier: labelTier,
+            confidence: judgement.confidence,
+            reason: judgement.reason,
+            source,
+          },
+        });
+        return labelTier;
+      };
 
-        if (!tier) return; // no label, no classification, nothing to pin at
-        const result = await advise(companyId, { issueId }, false, tier, false);
+      /**
+       * One guarded creation-path pin write at `tier`. `expectedPinnedModelId`
+       * is the pin this write may replace: null for the first pin, or the
+       * first pin's model for the classifier re-pin — any other pin (an
+       * operator's, a pass's) landing in between wins. Returns the model it
+       * wrote, or null when it wrote nothing.
+       */
+      const pinAtTier = async (
+        companyId: string,
+        issueId: string,
+        identifier: string | null,
+        source: string,
+        config: ResolvedConfig,
+        attempt: { tier: Tier; expectedPinnedModelId: string | null; receivedAtMs: number },
+      ): Promise<string | null> => {
+        // TOG-11793: the creation/assignment pin is retired once run-scoped
+        // decisions are live; the run boundary decides instead.
+        if (runResolveActive(config)) return null;
+        const { tier, expectedPinnedModelId, receivedAtMs } = attempt;
+        const isRepin = expectedPinnedModelId !== null;
+        // `forceTier` passes the tier explicitly rather than re-reading it
+        // from the issue: making the label-write -> label-read round trip
+        // load-bearing within one tick would couple correctness to the host's
+        // `issues.get` label enrichment, and the plugin already knows the
+        // answer. A re-pin suppresses stickiness, which would otherwise
+        // re-select the first pin it exists to replace.
+        const result = await advise(companyId, { issueId }, false, tier, isRepin);
         if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
-          await maybeLogUnpinnableCard(companyId, issueId, described.identifier, result?.decision ?? null);
-          return;
+          await maybeLogUnpinnableCard(companyId, issueId, identifier, result?.decision ?? null);
+          return null;
         }
-        // `advise` re-described the card: trust its fresher idle/pin reads,
-        // not the pre-classification ones.
-        if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return;
-        if (result.pinnedModelId !== null) return;
+        // `advise` re-described the card: trust its fresher status/pin
+        // reads, not the pre-decision ones — but NOT its idle read.
+        // TOG-11632: the assignment wake's run is queued, and often already
+        // claimed, by now, so strict idleness aborts nearly every pin.
+        // `pinnableBeforeStart` re-reads the card's live runs and allows the
+        // queued-but-unstarted window, which is safe because Paperclip reads
+        // the override at run START, not queue time.
+        if (!balanceOpenStatuses.has(result.status)) return null;
+        const currentPinnedModelId = resolveConfiguredModelId(result.pinnedModelId, config.models) ?? result.pinnedModelId;
+        if (currentPinnedModelId !== expectedPinnedModelId) return null;
+        if (!(await pinnableBeforeStart(companyId, issueId))) {
+          if (isRepin) {
+            ctx.logger.info("classified tier applies from next boundary: run already started", {
+              companyId,
+              issueId,
+              source,
+              tier,
+            });
+          }
+          return null;
+        }
+        if (result.decision.modelId === expectedPinnedModelId) return null;
         const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
         if (result.decision.modelId === floorModelId) {
           // The router decided, and its pick IS the floor model — same
           // convention as labelOnlyPass/balancePass: no redundant override on
           // a card already running exactly that model.
           ctx.logger.info("creation-time pin skipped: pick equals floor", { companyId, issueId, source });
-          return;
+          return null;
         }
-        const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
-        if (!selectedModel) return;
-        if (!(await balanceWriteStillSafe(companyId, issueId, null, config.models))) return;
-        await ctx.issues.update(
-          issueId,
-          modelOverrideForContext({
+        // TOG-12206 P2: candidate-carrying recovery (see the apply path).
+        const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+        if (!selectedModel) return null;
+        // TOG-11632: the creation path's own final read — the shared
+        // `balanceWriteStillSafe` below stays strict-idle for the scheduled
+        // passes, and would veto this pin on the wake's queued run.
+        if (!(await creationWriteStillSafe(companyId, issueId, config.models, expectedPinnedModelId))) return null;
+        // TOG-12431: the creation path classifies and labels in every
+        // posture, but the override write needs enforcement. Advisory
+        // installs decide and report; they pin nothing.
+        const writesAllowed = selectionWritesAllowed(config);
+        if (writesAllowed) {
+          const creationPatch = modelOverrideForContext({
             model: selectedModel,
-            fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+            agentEnvContextTokens: config.selection.agentEnvContextTokens,
             compactionRatio: config.selection.compactionRatio,
             agentEnv: result.agentEnv,
             agentAdapterType: result.agentAdapterType,
             agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
-          }) as Parameters<typeof ctx.issues.update>[1],
-          companyId,
-        );
+            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+          });
+          await ctx.issues.update(issueId, creationPatch as Parameters<typeof ctx.issues.update>[1], companyId);
+          await recordFallbackPin(companyId, issueId, creationPatch);
+        }
+        // Event receipt -> write. TOG-11780 §8 targets p99 <= 250 ms for the
+        // first pin; a re-pin carries the classifier's latency by design.
+        const latencyMs = Date.now() - receivedAtMs;
+        if (writesAllowed) {
+          // TOG-11632: the run may have STARTED between the final gate and the
+          // write. The pin still landed and applies from the next run, so say
+          // so — informational, never a failure. Only meaningful after a write.
+          const afterRows = (await ctx.db.query(CREATION_PIN_LIVE_RUNS_SQL, [
+            companyId,
+            issueId,
+          ])) as unknown[];
+          if (
+            afterRows.some((row) => {
+              const run = asRecord(row);
+              return run.status !== "queued" || run.started_at != null;
+            })
+          ) {
+            ctx.logger.info("creation-time pin landed after run start (applies from next run)", {
+              companyId,
+              issueId,
+              source,
+            });
+          }
+        } else {
+          ctx.logger.info("creation-time pin skipped: advisory selection, nothing written", {
+            companyId,
+            issueId,
+            source,
+            modelId: result.decision.modelId,
+          });
+        }
         await ctx.activity.log({
           companyId,
-          message: `Model Selection pinned ${result.decision.modelId} (${result.decision.effectiveTier}) at card creation — TOG-3111 (${source})`,
+          // TOG-8108: name the card that was actually pinned. This message
+          // hardcoded TOG-3111 (the card that built this path), so every
+          // creation-time pin pointed at the wrong card.
+          message: isRepin
+            ? `Model Selection re-pinned ${expectedPinnedModelId} -> ${result.decision.modelId} (${result.decision.effectiveTier}) after classification, before the first run started — ${identifier ?? issueId} (${source})${writesAllowed ? "" : " — advisory, nothing written"}`
+            : `Model Selection pinned ${result.decision.modelId} (${result.decision.effectiveTier}) at card creation — ${identifier ?? issueId} (${source})${writesAllowed ? "" : " — advisory, nothing written"}`,
           entityType: "issue",
           entityId: issueId,
           metadata: {
             modelId: result.decision.modelId,
             tier: result.decision.effectiveTier,
             source,
+            phase: isRepin ? "classified-repin" : "first-pin",
+            ...(isRepin ? { from: expectedPinnedModelId } : {}),
+            latencyMs,
+            identifier,
             trace: result.decision.trace,
+            // TOG-12206 P2: the served leg of the v2 identity — which
+            // curated candidate this pin actually served (null on legacy).
+            candidateId: selectedModel.candidateId,
+            // TOG-12431: present only when the gate above skipped the write.
+            ...(writesAllowed ? {} : { advisory: true, written: false }),
           },
         });
+        return writesAllowed ? selectedModel.id : null;
       };
 
       ctx.events.on("issue.created", async (event) => {
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
         if (!issueId) return;
+        runIssueCache.invalidate(runIssueKey(event.companyId, issueId));
         try {
           await pinAtDecisionTime(event.companyId, issueId, "issue.created");
         } catch (cause) {
@@ -1843,6 +2409,358 @@ export function createPlugin() {
             issueId,
             error: cause instanceof Error ? cause.message : String(cause),
           });
+        }
+      });
+
+      // --- TOG-11793 (TOG-11780 §4.3, §6): run-scoped model decision -------
+      //
+      // `onResolveRunModel` is called by the host inside `executeRun`, before
+      // the adapter config merge, with a deadline. It answers from memory:
+      //
+      //  - the company snapshot (config, volume profiles, lane ledger, scores,
+      //    availability, lane evidence, live lane weights) is loaded by the
+      //    refresh job and by a background refresh once older than the TTL;
+      //    it is served STALE when a refresh fails;
+      //  - issue labels and agent facts are cached per id and invalidated by
+      //    the issue events;
+      //  - the previous decision comes from the decision cache, with one
+      //    `heartbeat_runs` read as the miss path;
+      //  - the classifier is never started here. A classification the event
+      //    path already has in flight is awaited for at most `classifierWaitMs`.
+      //
+      // Anything the handler cannot get inside its budget becomes `defer`: the
+      // host parks the run for a bounded retry and never falls back to the
+      // agent default (owner directive, TOG-3111).
+
+      /** Time kept back from the host deadline for the answer's own trip. */
+      const RUN_RESOLVE_DEADLINE_MARGIN_MS = 150;
+      const RUN_RESOLVE_ISSUE_TTL_MS = 15_000;
+      const RUN_RESOLVE_AGENT_TTL_MS = 60_000;
+      const RUN_RESOLVE_PEAK_TTL_MS = 10 * 60_000;
+      const RUN_RESOLVE_CACHE_ENTRIES = 5_000;
+
+      const logRunResolveRefreshError = (key: string, error: unknown): void => {
+        ctx.logger.warn("run-resolve cache refresh failed; serving stale", {
+          key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      };
+
+      const runSnapshotCache = new HotCache<RunResolveSnapshot>({
+        ttlMs: 45_000,
+        maxEntries: 64,
+        onRefreshError: logRunResolveRefreshError,
+      });
+      const runIssueCache = new HotCache<RunIssueFacts | null>({
+        ttlMs: RUN_RESOLVE_ISSUE_TTL_MS,
+        maxEntries: RUN_RESOLVE_CACHE_ENTRIES,
+        onRefreshError: logRunResolveRefreshError,
+      });
+      const runAgentCache = new HotCache<RunAgentFacts | null>({
+        ttlMs: RUN_RESOLVE_AGENT_TTL_MS,
+        maxEntries: 1_000,
+        onRefreshError: logRunResolveRefreshError,
+      });
+      /** Previous-run peak context, filled by a background read after a decision (never on the path). */
+      const runPeakCache = new HotCache<number | null>({
+        ttlMs: RUN_RESOLVE_PEAK_TTL_MS,
+        maxEntries: RUN_RESOLVE_CACHE_ENTRIES,
+        onRefreshError: logRunResolveRefreshError,
+      });
+      /** `decisionId` -> the decision this worker made, so the next run's sticky check is a memory hit. */
+      const runDecisionCache = new HotCache<RunDecisionRecord>({
+        ttlMs: Number.MAX_SAFE_INTEGER,
+        maxEntries: RUN_RESOLVE_CACHE_ENTRIES,
+      });
+
+      const runSnapshotKey = (companyId: string) => companyId;
+      const runIssueKey = (companyId: string, issueId: string) => `${companyId}:${issueId}`;
+      invalidateRunSnapshot = (companyId) => runSnapshotCache.invalidate(runSnapshotKey(companyId));
+
+      const loadRunResolveSnapshot = async (companyId: string): Promise<RunResolveSnapshot> => {
+        const config = await companyConfig(companyId);
+        const loadedAtMs = Date.now();
+        // A company that has not turned this on (or does not enforce) never
+        // pays for the reads below: the handler answers `keep` from `config`.
+        if (!runResolveActive(config) || config.models.length === 0) {
+          return {
+            config,
+            profiles: [],
+            signals: [],
+            laneLedger: {},
+            operatorOverrides: {},
+            cardLedger: {},
+            modelScores: {},
+            laneOutageOverride: null,
+            zaiPaceOverride: null,
+            pinsWeightByLane: {},
+            availabilityRaw: null,
+            laneEvidence: { lanes: [], windowHours: LANE_EVIDENCE_WINDOW_HOURS, unreadableReason: "snapshot not loaded" },
+            loadedAtMs,
+          };
+        }
+        const [
+          { profiles, signals },
+          laneLedger,
+          operatorOverrides,
+          cardLedger,
+          modelScores,
+          laneOutageOverride,
+          zaiPaceOverride,
+          availabilityRaw,
+          laneEvidence,
+          pinsWeightByLane,
+        ] = await Promise.all([
+          readProfiles(companyId),
+          readLaneLedger(companyId),
+          readOperatorOverrides(companyId),
+          readCardLedger(companyId),
+          readModelScores(companyId),
+          readLaneOutage(companyId),
+          readZaiPaceOverride(companyId),
+          ctx.state.get(laneAvailabilityKey(companyId)),
+          readLaneEvidence(companyId, config.models, loadedAtMs),
+          config.pacing.mode !== "off" ? runLaneWeights(companyId, config.models) : Promise.resolve({}),
+        ]);
+        return {
+          config,
+          profiles,
+          signals,
+          laneLedger,
+          operatorOverrides,
+          cardLedger,
+          modelScores,
+          laneOutageOverride,
+          zaiPaceOverride,
+          pinsWeightByLane,
+          availabilityRaw,
+          laneEvidence,
+          loadedAtMs,
+        };
+      };
+
+      /** Legacy pins still count (they exist until cleared) plus the live routed runs. */
+      const runLaneWeights = async (
+        companyId: string,
+        models: ResolvedConfig["models"],
+      ): Promise<Record<string, number>> => {
+        const weights = await activePinsWeightByLane(companyId, models);
+        const rows = (await ctx.db.query(ACTIVE_ROUTED_RUN_MODELS_SQL, [companyId])) as unknown[];
+        for (const row of rows) {
+          const rawModelId = asRecord(row).routed_model;
+          const modelId = resolveConfiguredModelId(typeof rawModelId === "string" ? rawModelId : null, models);
+          const model = models.find((candidate) => candidate.id === modelId);
+          if (!model || !model.laneId) continue;
+          weights[model.laneId] = (weights[model.laneId] ?? 0) + (blendedListPrice(model) < 1.0 ? 0.5 : 1.0);
+        }
+        return weights;
+      };
+
+      const loadRunIssueFacts = async (companyId: string, issueId: string): Promise<RunIssueFacts | null> => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue) return null;
+        return {
+          labelNames: (issue.labels ?? [])
+            .map((label) => label.name)
+            .filter((name): name is string => typeof name === "string"),
+          priority: typeof issue.priority === "string" ? issue.priority : null,
+          title: String(issue.title ?? ""),
+          status: String(issue.status ?? ""),
+        };
+      };
+
+      const loadRunAgentFacts = async (companyId: string, agentId: string): Promise<RunAgentFacts | null> => {
+        const agent = asRecord(await ctx.agents.get(agentId, companyId));
+        if (Object.keys(agent).length === 0) return null;
+        return {
+          name: typeof agent.name === "string" ? agent.name : null,
+          adapterConfig: asRecord(agent.adapterConfig),
+        };
+      };
+
+      const parseDecisionRecord = (raw: unknown, decisionId: string): RunDecisionRecord | null => {
+        const record = asRecord(typeof raw === "string" ? safeJsonParse(raw) : raw);
+        if (record.decisionId !== decisionId || typeof record.model !== "string" || record.model.length === 0) return null;
+        const tier = typeof record.tier === "string" && (TIERS as readonly string[]).includes(record.tier)
+          ? (record.tier as Tier)
+          : null;
+        return { decisionId, model: record.model, tier, fallback: record.fallback === true };
+      };
+
+      /**
+       * The previous run's routed decision. Memory first; one primary-key read
+       * on a miss. A read that fails or times out degrades to "the model the
+       * previous run reported, tier unknown": sticky still holds while that
+       * model is serviceable, only the tier-change switch is skipped.
+       */
+      const readPriorDecision = async (
+        params: ResolveRunModelParams,
+        budgetMs: number,
+      ): Promise<RunDecisionRecord | null> => {
+        const previous = params.previous;
+        if (!previous || !previous.decisionId || !previous.model) return null;
+        const cached = runDecisionCache.peek(previous.decisionId);
+        if (cached) return cached.value;
+        const degraded: RunDecisionRecord = {
+          decisionId: previous.decisionId,
+          model: previous.model,
+          tier: null,
+          fallback: false,
+        };
+        const read = (async (): Promise<RunDecisionRecord | null> => {
+          const rows = (await ctx.db.query(PREVIOUS_RUN_DECISION_SQL, [params.companyId, previous.runId])) as unknown[];
+          return parseDecisionRecord(asRecord(rows[0]).model_decision, previous.decisionId as string);
+        })().catch(() => null);
+        const record = await withinMs(read, budgetMs, null);
+        if (!record) return degraded;
+        runDecisionCache.set(previous.decisionId, record);
+        return record;
+      };
+
+      const fireAndForget = (work: Promise<unknown>, what: string): void => {
+        work.catch((error: unknown) => {
+          ctx.logger.warn(`run-resolve ${what} failed`, { error: error instanceof Error ? error.message : String(error) });
+        });
+      };
+
+      const resolveRunModel = async (params: ResolveRunModelParams): Promise<ResolveRunModelResult> => {
+        const startedAt = performance.now();
+        const elapsed = (): number => performance.now() - startedAt;
+        const budgetMs = Math.max(50, params.deadlineMs - RUN_RESOLVE_DEADLINE_MARGIN_MS);
+        const remaining = (): number => Math.max(0, budgetMs - elapsed());
+        const finish = (result: ResolveRunModelResult, outcome: string): ResolveRunModelResult => {
+          fireAndForget(
+            Promise.all([
+              ctx.metrics.write("model_selection.run_resolve.latency_ms", Math.round(elapsed() * 100) / 100),
+              ctx.metrics.write(`model_selection.run_resolve.${outcome}`, 1),
+            ]),
+            "metrics",
+          );
+          return result;
+        };
+        let deferRetryMs = 5_000;
+        try {
+          if (!params.issueId) return finish({ kind: "keep" }, "keep.non_issue");
+          const issueId = params.issueId;
+          const companyId = params.companyId;
+
+          const snapshotRead = await runSnapshotCache.get(
+            runSnapshotKey(companyId),
+            () => loadRunResolveSnapshot(companyId),
+            remaining(),
+          );
+          const snapshot = snapshotRead.value;
+          const { config } = snapshot;
+          deferRetryMs = config.runResolve.deferRetryMs;
+          runSnapshotCache.setTtl(config.runResolve.snapshotTtlMs);
+          if (snapshotRead.stale) fireAndForget(Promise.resolve(ctx.metrics.write("model_selection.run_resolve.stale_snapshot", 1)), "metrics");
+          // Off, or advisory: the handler routes nothing and says so. The
+          // legacy paths (still live in this posture) own the pin.
+          if (!runResolveActive(config)) return finish({ kind: "keep" }, "keep.inactive");
+          if (params.issueOverrideModel) return finish({ kind: "keep" }, "keep.override");
+
+          const [issueRead, agentRead] = await Promise.all([
+            runIssueCache.get(runIssueKey(companyId, issueId), () => loadRunIssueFacts(companyId, issueId), remaining()),
+            runAgentCache.get(`${companyId}:${params.agentId}`, () => loadRunAgentFacts(companyId, params.agentId), remaining()),
+          ]);
+          const issue = issueRead.value;
+          const agent = agentRead.value;
+          if (!issue) return finish({ kind: "keep" }, "keep.issue_unreadable");
+          if (!agent) {
+            return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason: "assignee agent is unreadable" }, "defer");
+          }
+
+          // An unlabelled card whose classification is already running gets to
+          // finish, within the cap. Never started from here.
+          let classifiedTier: Tier | null = null;
+          const hasTierLabel = issue.labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX));
+          const inFlight = hasTierLabel ? undefined : classificationsInFlight.get(issueId);
+          if (inFlight) {
+            classifiedTier = await withinMs(
+              inFlight,
+              Math.min(config.runResolve.classifierWaitMs, Math.max(0, remaining() - 50)),
+              null,
+            );
+          }
+
+          const prior = await readPriorDecision(params, Math.min(100, remaining()));
+          const peak = runPeakCache.peek(runIssueKey(companyId, issueId))?.value ?? null;
+
+          const resolution = resolveRunDecision({
+            params,
+            issue,
+            agent,
+            snapshot,
+            prior,
+            classifiedTier,
+            lastRunPeakTokens: peak,
+            now: Date.now(),
+          });
+
+          if (resolution.kind === "keep") return finish({ kind: "keep" }, "keep.engine");
+          if (resolution.kind === "defer") {
+            return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason: resolution.reason }, "defer");
+          }
+
+          const { result } = resolution;
+          runDecisionCache.set(result.decisionId, {
+            decisionId: result.decisionId,
+            model: result.model,
+            tier: resolution.tier,
+            fallback: result.fallback === true,
+          });
+          // The measured context peak feeds the NEXT decision; read it off the
+          // path, once per TTL, only for an issue that already has history.
+          if ((prior || params.previous) && !runPeakCache.peek(runIssueKey(companyId, issueId))) {
+            fireAndForget(
+              runPeakCache.refresh(runIssueKey(companyId, issueId), async () => {
+                const usage = await loadContextUsage(companyId, issueId, config.selection.contextRunLogRoot);
+                return usage.lastRunPeakTokens;
+              }),
+              "context warm",
+            );
+          }
+          fireAndForget(Promise.resolve(ctx.metrics.write(`model_selection.run_resolve.tier_source.${resolution.tierSource}`, 1)), "metrics");
+          if (resolution.switch) {
+            const change = resolution.switch;
+            fireAndForget(
+              ctx.activity.log({
+                companyId,
+                message: `Model Selection ${change.reason === "first-decision" ? "decided" : "switched"} the run model ${change.from ?? "(default)"} -> ${change.to} (${resolution.tier}, ${resolution.tierSource}): ${change.reason} — ${change.detail}`,
+                entityType: "issue",
+                entityId: issueId,
+                metadata: {
+                  runId: params.runId,
+                  decisionId: result.decisionId,
+                  from: change.from,
+                  to: change.to,
+                  reason: change.reason,
+                  detail: change.detail,
+                  tier: resolution.tier,
+                  tierSource: resolution.tierSource,
+                  fallback: result.fallback === true,
+                  trace: resolution.trace,
+                },
+              }),
+              "switch activity",
+            );
+          }
+          return finish(result, "decide");
+        } catch (error) {
+          const reason =
+            error instanceof HotCacheTimeout
+              ? `hot cache cold: ${error.message}`
+              : `internal error: ${error instanceof Error ? error.message : String(error)}`;
+          ctx.logger.warn("run-resolve deferred", { runId: params.runId, reason });
+          return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason }, "defer");
+        }
+      };
+      runResolveHandler = resolveRunModel;
+
+      /** Warm every known company's snapshot once a minute, so the decision path finds it fresh. */
+      ctx.jobs.register(JOB_KEYS.refreshRunResolve, async () => {
+        for (const company of listKnownCompanies()) {
+          await runSnapshotCache.refresh(runSnapshotKey(company.id), () => loadRunResolveSnapshot(company.id));
         }
       });
 
@@ -2024,9 +2942,11 @@ export function createPlugin() {
       });
 
       // --- scheduled lane-capacity poll (TOG-2137) ---------------------------
-      // Runs every 5 minutes, well inside pace's own ~15-minute default
-      // freshness budget. One company's failure, or one lane's failure within
-      // a company, must never block any other company or lane.
+      // TOG-8108: runs every 2 minutes, inside the tightest publisher-declared
+      // freshness budget (180s live). At 5 minutes, picks older than 180s read
+      // every lane UNKNOWN ~half the time. One company's failure, or one
+      // lane's failure within a company, must never block any other company
+      // or lane.
       ctx.jobs.register(JOB_KEYS.pollLanes, async () => {
         const companies = listKnownCompanies();
         for (const company of companies) {
@@ -2080,6 +3000,43 @@ export function createPlugin() {
               ledger = mergeLedgerEntry(ledger, result);
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
+
+            // TOG-4959. Per-tier poll-outcome counters: read-only telemetry,
+            // never consulted by selection. Each lane result increments the
+            // tiers that lane serves (roster `laneId` map). Fail-closed on a
+            // corrupt stored value (normalize fails open to empty counters)
+            // and on a write failure (the ledger above already landed; a lost
+            // counter increment must not fail the poll).
+            try {
+              const stored = await ctx.state.get({
+                scopeKind: "company" as const,
+                scopeId: company.id,
+                stateKey: PLUGIN_STATE_KEYS.tierPollOutcomes,
+              });
+              const outcomes = accumulateTierPollOutcomes(
+                normalizeTierPollOutcomes(stored),
+                [...results, ...secretFailures].map((result) => ({
+                  laneId: result.laneId,
+                  error: result.error,
+                  serviceable: result.verdict?.serviceable ?? null,
+                })),
+                config.models,
+                fetchedAt,
+              );
+              await ctx.state.set(
+                {
+                  scopeKind: "company" as const,
+                  scopeId: company.id,
+                  stateKey: PLUGIN_STATE_KEYS.tierPollOutcomes,
+                },
+                outcomes satisfies TierPollOutcomes,
+              );
+            } catch (cause) {
+              ctx.logger.warn("tier poll outcome counters not updated", {
+                companyId: company.id,
+                error: cause instanceof Error ? cause.message : String(cause),
+              });
+            }
 
             // TOG-3132 AC-2: the availability term's writer. Published from the
             // same poll the ledger comes from, so the selector and the pacer can
@@ -2421,6 +3378,287 @@ export function createPlugin() {
         await runPriceReconcile();
       });
 
+      // --- scheduled free-list sync (TOG-12206 P2) ---------------------------
+      //
+      // Default-off at every layer: the job returns before any network when
+      // no company enables `aaFreeSync`, and per-company diffs are computed
+      // only for companies that enabled it. The artifact is the per-company
+      // diff (`aaFreeSyncReport` reads it back) — this job writes no binding
+      // anywhere: no pins, no tiers, no enabled flags, no adapter models.
+      //
+      // Fetched once at instance scope (the free list is not
+      // company-specific), diffed per company against that company's roster.
+      // Quota (D1): at most one scheduled fetch/day; 429 honors Retry-After;
+      // 401/403 stops the source for the day with no credential substitution.
+      // A failed fetch keeps the last-good snapshot in place and records the
+      // attempt; diffs still recompute from whatever snapshot is stored, so a
+      // curation change reflects without waiting for the next fetch.
+      interface AaFreeSyncOutcome {
+        ranAt: string;
+        fetched: boolean;
+        error: string | null;
+        digest: string | null;
+        /** Per company: the reviewable diff tallies. Empty when nothing ran. */
+        companies: Array<{
+          companyId: string;
+          verified: number;
+          broken: number;
+          ambiguous: number;
+          unbound: number;
+        }>;
+      }
+
+      const runAaFreeSync = async (): Promise<AaFreeSyncOutcome> => {
+        const ranAt = new Date().toISOString();
+        const nowMs = Date.now();
+        const empty: AaFreeSyncOutcome = { ranAt, fetched: false, error: null, digest: null, companies: [] };
+
+        const enabled: Array<{ id: string; config: ResolvedConfig }> = [];
+        for (const company of listKnownCompanies()) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.aaFreeSync.enabled) enabled.push({ id: company.id, config });
+          } catch (cause) {
+            ctx.logger.error("free-list sync config read failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+        if (enabled.length === 0) return empty;
+
+        const previous = await readAaFreeSyncSnapshot();
+        let snapshot = previous.snapshot;
+        let digest = previous.digest;
+        let fetchedAt = previous.fetchedAt;
+        let fetchError: string | null = null;
+        let fetched = false;
+
+        if (shouldFetchFreeSync({ nextEligibleAt: previous.nextEligibleAt }, nowMs)) {
+          // One credential for the instance-scoped fetch: the first enabled
+          // company that configured one. A denial stops the source — the job
+          // never tries a second company's credential for the same fetch.
+          const provider = enabled.find((entry) => entry.config.aaFreeSync.apiKeySecretRef);
+          if (!provider || !provider.config.aaFreeSync.apiKeySecretRef) {
+            fetchError = "aa-free-no-credential";
+            ctx.logger.error("free-list sync skipped: no enabled company configured aaFreeSync.apiKeySecretRef", {});
+          } else {
+            let apiKey: string | null = null;
+            try {
+              apiKey = await ctx.secrets.resolve(provider.config.aaFreeSync.apiKeySecretRef as never, {
+                companyId: provider.id,
+                configPath: "aaFreeSync.apiKeySecretRef",
+              });
+            } catch {
+              fetchError = "aa-free-secret-unavailable";
+              ctx.logger.error("free-list sync secret unavailable; keeping prior snapshot", {
+                companyId: provider.id,
+              });
+            }
+            if (!fetchError) {
+              const result = await fetchAaFreeList({
+                http: { fetch: (url, init) => ctx.http.fetch(url, init) },
+                apiKey: apiKey ?? "",
+                timeoutMs: AA_FREE_FETCH_TIMEOUT_MS,
+                maxResponseBytes: AA_FREE_MAX_RESPONSE_BYTES,
+              });
+              const attemptAt = new Date().toISOString();
+              if (!result.ok) {
+                const outcome: FreeFetchOutcome =
+                  result.error === "aa-access-denied"
+                    ? "fatal"
+                    : result.error === "aa-rate-limited"
+                      ? "rate-limited"
+                      : result.retryable
+                        ? "retryable"
+                        : "fatal";
+                fetchError = result.error;
+                await ctx.state.set(aaFreeSyncSnapshotKey(), {
+                  fetchedAt: previous.fetchedAt,
+                  digest: previous.digest,
+                  snapshot: previous.snapshot,
+                  lastAttemptAt: attemptAt,
+                  lastError: result.error,
+                  nextEligibleAt: nextEligibleAfter(outcome, nowMs,
+                    result.error === "aa-rate-limited" ? result.retryAfterSeconds : null,
+                    { successMs: AA_FREE_FETCH_INTERVAL_MS, retryMs: AA_FREE_RETRY_INTERVAL_MS }),
+                });
+                ctx.logger.error("free-list sync fetch failed; keeping prior snapshot", { error: result.error });
+              } else {
+                const parsed = parseAaFreeList(result.text, attemptAt);
+                if (!parsed) {
+                  fetchError = "aa-free-parse-failed";
+                  await ctx.state.set(aaFreeSyncSnapshotKey(), {
+                    fetchedAt: previous.fetchedAt,
+                    digest: previous.digest,
+                    snapshot: previous.snapshot,
+                    lastAttemptAt: attemptAt,
+                    lastError: fetchError,
+                    nextEligibleAt: nextEligibleAfter("retryable", nowMs, null,
+                      { successMs: AA_FREE_FETCH_INTERVAL_MS, retryMs: AA_FREE_RETRY_INTERVAL_MS }),
+                  });
+                  ctx.logger.error("free-list sync parse failed; keeping prior snapshot", {});
+                } else {
+                  fetched = true;
+                  snapshot = parsed;
+                  digest = freeSnapshotDigest(parsed);
+                  fetchedAt = attemptAt;
+                  await ctx.state.set(aaFreeSyncSnapshotKey(), {
+                    fetchedAt,
+                    digest,
+                    snapshot: parsed,
+                    lastAttemptAt: attemptAt,
+                    lastError: null,
+                    nextEligibleAt: nextEligibleAfter("ok", nowMs, null,
+                      { successMs: AA_FREE_FETCH_INTERVAL_MS, retryMs: AA_FREE_RETRY_INTERVAL_MS }),
+                  });
+                  ctx.logger.info("free-list sync snapshot refreshed", {
+                    fetchedAt,
+                    digest,
+                    rows: parsed.rows.length,
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        const outcome: AaFreeSyncOutcome = { ranAt, fetched, error: fetchError, digest, companies: [] };
+        for (const { id, config } of enabled) {
+          try {
+            if (!snapshot || !digest || !fetchedAt) {
+              await ctx.state.set(aaFreeSyncDiffKey(id), {
+                ranAt,
+                digest: null,
+                error: fetchError ?? "aa-free-no-snapshot-yet",
+                diff: null,
+              });
+              continue;
+            }
+            const bindings = config.aaFreeSync.bindings.map((b) => ({
+              candidateId: b.candidateId,
+              modelId: b.modelId,
+              laneId: b.laneId,
+              evaluatedEffort: b.evaluatedEffort as AaBinding["evaluatedEffort"],
+              aaSlug: b.aaSlug,
+              ...(b.observationalOnly !== undefined ? { observationalOnly: b.observationalOnly } : {}),
+            }));
+            const models = config.models.map((model) => ({
+              id: model.id,
+              laneId: model.laneId ?? null,
+              fallbackOnly: model.fallbackOnly,
+              enabled: model.enabled,
+            }));
+            const diff = buildSyncDiff({ bindings, models, snapshot, digest });
+            await ctx.state.set(aaFreeSyncDiffKey(id), { ranAt, digest, error: fetchError, diff });
+            outcome.companies.push({
+              companyId: id,
+              verified: diff.verified.length,
+              broken: diff.broken.length,
+              ambiguous: diff.ambiguous.length,
+              unbound: diff.unbound.length,
+            });
+            ctx.logger.info("free-list sync diff complete", {
+              companyId: id,
+              verified: diff.verified.length,
+              broken: diff.broken.length,
+              ambiguous: diff.ambiguous.length,
+              unbound: diff.unbound.length,
+            });
+          } catch (cause) {
+            ctx.logger.error("free-list sync diff failed for a company", {
+              companyId: id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+
+        return outcome;
+      };
+
+      ctx.jobs.register(JOB_KEYS.refreshAaFreeSync, async () => {
+        await runAaFreeSync();
+      });
+
+      ctx.tools.register(
+        TOOL_NAMES.aaFreeSyncReport,
+        {
+          displayName: "aa.ai free-list sync report",
+          description:
+            "The last free-list sync diff: which curated model x effort bindings verify against the snapshot, which break and why, which slugs are ambiguous, and which roster rows have no binding. Read-only; writes nothing.",
+          parametersSchema: { type: "object" },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          const companyId = toolCtx?.companyId;
+          if (!companyId) {
+            return { content: "No company scope on this call; cannot read a per-company sync report.", data: toolRejection("missing-company-scope") };
+          }
+          const stored = asRecord(await ctx.state.get(aaFreeSyncDiffKey(companyId)));
+          const diff = asRecord(stored.diff) as unknown as AaFreeSyncDiff | null;
+          if (!stored.diff || !diff || !Array.isArray(diff.verified)) {
+            return {
+              content:
+                "No free-list sync diff has completed for this company yet. Run " +
+                `${TOOL_NAMES.refreshAaFreeSyncNow} or wait for the daily job.`,
+              data: toolRejection("no-report-yet"),
+            };
+          }
+          const lines: string[] = [];
+          for (const v of diff.verified) {
+            lines.push(
+              `- verified ${v.binding.candidateId} (${v.binding.modelId} x ${v.binding.laneId} x ${v.binding.evaluatedEffort}): index ${v.aaIndex ?? "unknown"}${v.held ? ` [held: ${v.held}]` : ""}`,
+            );
+          }
+          for (const b of diff.broken) {
+            lines.push(`- BROKEN ${b.binding.candidateId} (${b.binding.modelId} x ${b.binding.laneId} x ${b.binding.evaluatedEffort}): ${b.reason} — ${b.detail}`);
+          }
+          for (const a of diff.ambiguous) {
+            lines.push(`- AMBIGUOUS slug ${a.aaSlug}: claimed by ${a.candidateIds.join(", ")}`);
+          }
+          for (const u of diff.unbound) {
+            lines.push(
+              `- unbound ${u.modelId} (${u.laneId})${u.suggestedSlug ? `: exact slug ${u.suggestedSlug} is a curation proposal` : ""}${u.familySlugs.length > 0 ? ` [family: ${u.familySlugs.join(", ")}]` : ""}`,
+            );
+          }
+          return {
+            content:
+              `free-list sync as of ${stored.ranAt ?? "unknown"} (snapshot ${String(stored.digest ?? "none")}): ` +
+              `${diff.verified.length} verified, ${diff.broken.length} broken, ${diff.ambiguous.length} ambiguous, ` +
+              `${diff.unbound.length} unbound, ${diff.unmatchedSlugs.length} unmatched snapshot slugs` +
+              `${diff.unmatchedTruncated > 0 ? ` (+${diff.unmatchedTruncated} truncated)` : ""}` +
+              `${stored.error ? ` [fetch: ${String(stored.error)}]` : ""}.\n` +
+              `${lines.join("\n") || "No rows."}\n` +
+              "A reviewable diff only — curate bindings by hand, this job never writes one.",
+            data: { ranAt: stored.ranAt ?? null, digest: stored.digest ?? null, error: stored.error ?? null, diff },
+          };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.refreshAaFreeSyncNow,
+        {
+          displayName: "Refresh aa.ai free-list sync now",
+          description:
+            "Run the free-list fetch + per-company diff immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a binding, pin, tier, or price.",
+          parametersSchema: { type: "object" },
+        },
+        async (): Promise<ToolResult> => {
+          const result = await runAaFreeSync();
+          if (result.error) {
+            return { content: `free-list sync attempted but failed: ${result.error}`, data: result };
+          }
+          const verified = result.companies.reduce((sum, c) => sum + c.verified, 0);
+          const broken = result.companies.reduce((sum, c) => sum + c.broken, 0);
+          return {
+            content:
+              result.companies.length === 0
+                ? "free-list sync ran: no company has aaFreeSync enabled, so nothing was fetched. Reported only — nothing was written."
+                : `free-list sync complete: ${verified} verified, ${broken} broken across ${result.companies.length} companies. Reported only — no binding was written.`,
+            data: result,
+          };
+        },
+      );
+
       ctx.tools.register(
         TOOL_NAMES.reconcilePricesNow,
         {
@@ -2443,6 +3681,120 @@ export function createPlugin() {
         },
       );
 
+      // TOG-4959. Per-tier lane-poll outcome counters, queryable from agent
+      // runs. Read-only: reads the counters the `pollLaneCapacity` job
+      // maintains, never touches selection, the ledger, or the roster. No
+      // "no report yet" failure — a company whose lanes have never polled
+      // gets honest zeroes, not an error.
+      ctx.tools.register(
+        TOOL_NAMES.admissionShadowReport,
+        {
+          displayName: "Account admission shadow report",
+          description: "Read the last explicitly enabled account shadow snapshot; never selects, reserves or actuates.",
+          parametersSchema: { type: "object", additionalProperties: false },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          if (!toolCtx?.companyId) return { content: "Company scope required.", data: toolRejection("missing-company-scope") };
+          const stored = asRecord(await ctx.state.get({
+            scopeKind: "company", scopeId: toolCtx.companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+          }));
+          return {
+            content: stored.report ? "Last caller-supplied account shadow snapshot; no host starts or reservations governed. Check evaluatedAt and observation freshness; this is not a live admission decision."
+              : "No explicitly enabled account shadow snapshot has been recorded.",
+            data: stored.report ? stored : toolRejection("no-report-yet"),
+          };
+        },
+      );
+
+      ctx.tools.register(
+        TOOL_NAMES.tierOutcomes,
+        {
+          displayName: "Tier poll outcomes",
+          description:
+            "Per-tier lane-poll success/fail counters: how many polls each tier's lanes served or missed. Read-only; writes nothing and never changes selection.",
+          parametersSchema: { type: "object" },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          const companyId = toolCtx?.companyId;
+          if (!companyId) {
+            return { content: "No company scope on this call; cannot read per-tier poll outcomes.", data: toolRejection("missing-company-scope") };
+          }
+          const stored = await ctx.state.get({
+            scopeKind: "company" as const,
+            scopeId: companyId,
+            stateKey: PLUGIN_STATE_KEYS.tierPollOutcomes,
+          });
+          const outcomes = normalizeTierPollOutcomes(stored);
+          const lines = (Object.keys(outcomes.tiers) as Array<keyof typeof outcomes.tiers>).map((tier) => {
+            const counter = outcomes.tiers[tier];
+            return `- ${tier}: ${counter.polls} polls, ${counter.succeeded} served, ${counter.failed} missed${counter.lastAt ? ` (last ${counter.lastAt})` : ""}`;
+          });
+          return {
+            content:
+              `Tier poll outcomes${outcomes.updatedAt ? ` as of ${outcomes.updatedAt}` : " (no lane poll recorded yet)"}.\n` +
+              `${lines.join("\n")}\n` +
+              "Per-tier lane-poll outcomes — how often each tier's lanes served. Read-only; not a routing input.",
+            data: { updatedAt: outcomes.updatedAt, tiers: outcomes.tiers },
+          };
+        },
+      );
+
+      // TOG-12972. First-party accepted-work posterior report. Read-only: reads
+      // the overlay the `refreshScores` job maintains, never touches selection,
+      // the ledger, or the roster. A company that never enabled the producer
+      // gets an honest "no overlay yet", not an error — same discipline as the
+      // tier-outcomes precedent above. Corrupt or superseded stored state
+      // normalizes to the same answer rather than throwing.
+      ctx.tools.register(
+        TOOL_NAMES.acceptedWorkReport,
+        {
+          displayName: "Accepted-work posterior report",
+          description:
+            "Per-cohort accepted-work posteriors: which served model x effort x task-class cohorts have mature accept/rework evidence, and what each cohort's posterior is. Read-only; writes nothing and never changes selection.",
+          parametersSchema: { type: "object" },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          const companyId = toolCtx?.companyId;
+          if (!companyId) {
+            return { content: "No company scope on this call; cannot read the accepted-work overlay.", data: toolRejection("missing-company-scope") };
+          }
+          const stored = await ctx.state.get({
+            scopeKind: "company" as const,
+            scopeId: companyId,
+            stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay,
+          });
+          const overlay = normalizeAcceptedWorkOverlay(stored);
+          if (!overlay) {
+            return {
+              content:
+                "No accepted-work overlay has been produced for this company yet. Enable `acceptedWork` and wait for the scheduled score refresh. Read-only; nothing was written.",
+              data: toolRejection("no-report-yet"),
+            };
+          }
+          const lines = overlay.cohorts.map((cohort) => {
+            const held = cohort.held ? ` [held: ${cohort.held}]` : "";
+            const maturity = cohort.proven ? "proven" : `sparse (${cohort.resolved}/8)`;
+            return `- ${cohort.servedModel} x ${cohort.servedEffort} x ${cohort.taskClass}: ` +
+              `p=${cohort.p.toFixed(3)} (prior ${cohort.priorP.toFixed(3)}), ` +
+              `${cohort.accepted}/${cohort.resolved} accepted, ${cohort.pending} pending, ${maturity}${held}`;
+          });
+          return {
+            content:
+              `Accepted-work posterior as of ${overlay.computedAt} (${overlay.specVersion}): ` +
+              `${overlay.cohorts.length} cohorts, ` +
+              `${overlay.unattributed.closedCardsWithoutClosingRun} closed cards unattributed.\n` +
+              `${lines.join("\n") || "No cohorts."}\n` +
+              "First-party accepted-work posteriors — independent review/rework outcomes per served cohort. Read-only; not a routing input.",
+            data: {
+              specVersion: overlay.specVersion,
+              computedAt: overlay.computedAt,
+              cohorts: overlay.cohorts,
+              unattributed: overlay.unattributed,
+            },
+          };
+        },
+      );
+
       ctx.tools.register(
         TOOL_NAMES.priceDriftReport,
         {
@@ -2454,7 +3806,7 @@ export function createPlugin() {
         async (_args, toolCtx): Promise<ToolResult> => {
           const companyId = toolCtx?.companyId;
           if (!companyId) {
-            return { content: "No company scope on this call; cannot read a per-company price report." };
+            return { content: "No company scope on this call; cannot read a per-company price report.", data: toolRejection("missing-company-scope") };
           }
           const stored = asRecord(await ctx.state.get(priceReconcileReportKey(companyId)));
           const report = stored.report as PriceReconcileReport | undefined;
@@ -2463,6 +3815,7 @@ export function createPlugin() {
               content:
                 "No models.dev price reconciliation has completed for this company yet. Run " +
                 `${TOOL_NAMES.reconcilePricesNow} or wait for the daily job.`,
+              data: toolRejection("no-report-yet"),
             };
           }
           const lines = report.drift.map((row) => {
@@ -2517,6 +3870,15 @@ export function createPlugin() {
             }
 
             const tierByIssue = new Map<string, Tier | null>();
+            // TOG-12972: post-hoc cohort coordinates for the accepted-work
+            // overlay. Read in the same per-issue pass as the tier label, so
+            // the producer adds no extra `issues.get` calls: label names for
+            // the `class:` task-class cell, and the pin's `adapterConfig` for
+            // the served-effort cell (effort keys are written alongside the
+            // model by `modelOverrideForContext`). An unreadable issue leaves
+            // both null — unattributable, never guessed.
+            const labelsByIssue = new Map<string, readonly string[]>();
+            const pinConfigByIssue = new Map<string, Record<string, unknown> | null>();
             for (const issueId of issueIds) {
               try {
                 const issue = await ctx.issues.get(issueId, company.id);
@@ -2529,11 +3891,18 @@ export function createPlugin() {
                   issueId,
                   tierValue && (TIERS as readonly string[]).includes(tierValue) ? (tierValue as Tier) : null,
                 );
+                labelsByIssue.set(issueId, labelNames);
+                pinConfigByIssue.set(
+                  issueId,
+                  asRecord(asRecord(issue?.assigneeAdapterOverrides).adapterConfig),
+                );
               } catch {
                 // An issue we cannot read is unattributable, not tier:none —
                 // the same "drop rather than guess" policy accumulateRunStats
                 // applies to every other unattributable row.
                 tierByIssue.set(issueId, null);
+                labelsByIssue.set(issueId, []);
+                pinConfigByIssue.set(issueId, null);
               }
             }
 
@@ -2683,6 +4052,28 @@ export function createPlugin() {
                 latestClosingRunByIssue.set(run.issueId, run);
               }
             }
+            // TOG-12972: the raw closing-run identity per issue, WITHOUT the
+            // `resolveConfiguredModelId` pre-filter above. The overlay resolves
+            // the served model itself — exact roster id or `unknown` — so an
+            // alias-ambiguous or unrostered identity lands in the unknown cell
+            // instead of vanishing before attribution. Read only by the
+            // overlay block below; the legacy ledger keeps the filtered map.
+            const rawClosingModelByIssue = new Map<string, string | null>();
+            const rawClosingAtByIssue = new Map<string, number>();
+            for (const row of closingRunRows) {
+              const r = asRecord(row);
+              const issueId = typeof r.issue_id === "string" ? r.issue_id : "";
+              if (!issueId) continue;
+              const atMs = toNumber(r.finished_at_ms) ?? 0;
+              const currentMs = rawClosingAtByIssue.get(issueId) ?? -1;
+              if (!rawClosingModelByIssue.has(issueId) || atMs > currentMs) {
+                rawClosingModelByIssue.set(
+                  issueId,
+                  typeof r.model === "string" && r.model ? r.model : null,
+                );
+                rawClosingAtByIssue.set(issueId, atMs);
+              }
+            }
 
             const cardRows: CardRow[] = [];
             for (const row of cardIssueRows) {
@@ -2727,6 +4118,60 @@ export function createPlugin() {
               priorPByModel,
               blendedListPriceByModel,
             );
+
+            // TOG-12972: first-party accepted-work posterior overlay,
+            // shadow-only. Built from the SAME rows the ledger above already
+            // read — no new query, no new `issues.get` calls — and only when
+            // the operator enables it. The overlay is stored under its own
+            // state key; nothing reads it for routing in this slice.
+            const acceptedWorkKey = {
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay,
+            };
+            if (config.acceptedWork.enabled) {
+              let closedCardsWithoutClosingRun = 0;
+              const acceptedWorkCards: AcceptedWorkCardInput[] = [];
+              for (const row of cardIssueRows) {
+                const r = asRecord(row);
+                const issueId = typeof r.id === "string" ? r.id : null;
+                if (!issueId) continue;
+                // No succeeded run in the window at all: unattributed, counted.
+                // A run that IS present but resolves to no roster id still
+                // produces a card — the overlay attributes it to the unknown
+                // cell rather than dropping it before attribution.
+                if (!rawClosingModelByIssue.has(issueId)) {
+                  closedCardsWithoutClosingRun += 1;
+                  continue;
+                }
+                acceptedWorkCards.push({
+                  issueId,
+                  rawServedModel: rawClosingModelByIssue.get(issueId) ?? null,
+                  pinAdapterConfig: pinConfigByIssue.get(issueId) ?? null,
+                  labelNames: labelsByIssue.get(issueId) ?? [],
+                  closedAtMs: toNumber(r.closed_at_ms) ?? 0,
+                  rejected: rejectedIssueIds.has(issueId),
+                });
+              }
+              const nowMs = Date.now();
+              const overlay: AcceptedWorkOverlay = buildAcceptedWorkOverlay({
+                cards: acceptedWorkCards,
+                models: config.models,
+                priorPByModel,
+                unattributed: { closedCardsWithoutClosingRun },
+                nowMs,
+                nowIso: new Date(nowMs).toISOString(),
+              });
+              await ctx.state.set(acceptedWorkKey, overlay);
+              ctx.logger.info("accepted-work overlay refreshed", {
+                companyId: company.id,
+                cohorts: overlay.cohorts.length,
+                cards: acceptedWorkCards.length,
+                unattributed: closedCardsWithoutClosingRun,
+                specVersion: overlay.specVersion,
+                computedAt: overlay.computedAt,
+              });
+            }
 
             // `computedAt` stamps the capture itself. Without it a stalled
             // refresh (the failure TOG-2862 gates for) is undetectable from the
@@ -2778,12 +4223,30 @@ export function createPlugin() {
       // is re-examined and replaced. `classification.reclassifyForeignLabels:
       // false` is the one-key rollback to the old unconditional skip.
       ctx.jobs.register(JOB_KEYS.classifyIssues, async () => {
+        // TOG-11688: ONE budget for the whole firing. A per-company budget
+        // multiplied the 200 s by the company count while the host's 300 s
+        // `runJob` wall covers the firing, not a company.
+        const classifyJobStartedAt = Date.now();
+        const classifyDeadline = classifyJobStartedAt + CLASSIFY_JOB_BUDGET_MS;
+        // Admission is 1.5x the slowest row of the FIRING: it carries across companies.
+        let classifySlowestRowMs = 0;
         const companies = listKnownCompanies();
         for (const company of companies) {
+          if (Date.now() >= classifyDeadline) {
+            ctx.logger.warn("issue classification pass stopped before the host RPC wall", {
+              companyId: company.id,
+              jobDurationMs: Date.now() - classifyJobStartedAt,
+            });
+            break;
+          }
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
             if (!config.classification.baseUrl || !config.classification.modelId) continue;
+            // Narrowed by the `continue` above; captured so the row closure
+            // below keeps the narrowing.
+            const classifyBaseUrl = config.classification.baseUrl;
+            const classifyModelId = config.classification.modelId;
 
             let apiKey: string | null = null;
             if (config.classification.apiKeySecretRef) {
@@ -2807,12 +4270,11 @@ export function createPlugin() {
             // TOG-3200: over-fetch. Because every label-based skip happens
             // per-row AFTER this query, a `limit batchSize` returns the same
             // top-N skipped rows on every run and never reaches row N+1. The
-            // loop below stops at `batchSize` actual classifications instead.
+            // walk below stops at `batchSize` actual classifications instead.
             const classifyFetchLimit = Math.min(
               config.classification.batchSize * CLASSIFY_FETCH_MULTIPLIER,
               CLASSIFY_FETCH_LIMIT_MAX,
             );
-            const classifyDeadline = Date.now() + CLASSIFY_JOB_BUDGET_MS;
             // TOG-3585: incremental scan — only issues updated since this
             // pass's own watermark. A bare `updated_at` predicate on the
             // existing row query: strictly fewer rows than before, same shape.
@@ -2861,185 +4323,213 @@ export function createPlugin() {
             const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
             let reclassified = 0;
-            // TOG-3585: rows this loop actually reached, for the watermark
-            // fix below — a `break` on the batch/deadline budget must not be
-            // mistaken for having examined every fetched row.
-            const examinedRows: unknown[] = [];
-            let brokeEarly = false;
-            for (const row of candidateRows) {
-              const r = asRecord(row);
-              const issueId = typeof r.id === "string" ? r.id : null;
-              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) {
-                examinedRows.push(row);
-                continue;
-              }
+            // TOG-11688: the shared hard-return walk (`row-walk.ts`) — a
+            // classify row (`ctx.issues.get` plus the classifier HTTP call)
+            // pays the same contended host-RPC cost as an advise row, and
+            // this pass hit 288 s max over the last 4 h. The WHOLE row body
+            // races the remaining budget; every write below sits behind the
+            // write gate, which also stops an abandoned row from committing.
+            const walk = await walkRowsWithinDeadline(
+              candidateRows,
+              { deadlineAt: classifyDeadline, rowTimeoutMs: CLASSIFY_ROW_TIMEOUT_MS, slowestRowMs: classifySlowestRowMs },
+              async (row, rowStartedAt) => {
+                const r = asRecord(row);
+                const issueId = typeof r.id === "string" ? r.id : null;
+                const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+                if (!issueId) return "settled";
 
-              if (classified >= config.classification.batchSize || Date.now() >= classifyDeadline) {
-                brokeEarly = true;
-                break;
-              }
-              examinedRows.push(row);
-
-              // The row query above cannot see labels (not allowlisted), so
-              // label and pin state is read per candidate via
-              // `ctx.issues.get()` — the same source `describeIssue` uses for
-              // label reads elsewhere in this worker.
-              let issue: Awaited<ReturnType<typeof ctx.issues.get>>;
-              try {
-                issue = await ctx.issues.get(issueId, company.id);
-              } catch {
-                continue;
-              }
-              if (!issue) continue;
-              const labelNames = (issue.labels ?? [])
-                .map((label) => label.name)
-                .filter((name): name is string => typeof name === "string");
-              const existingLabelIds =
-                issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
-
-              // An operator pin means "leave the model choice on this issue
-              // alone" — unchanged, and checked before anything else.
-              if (labelNames.includes(OPERATOR_PIN_LABEL)) continue;
-
-              // TOG-3200. An existing tier:* label used to end the candidate
-              // here unconditionally, which made classification a one-shot
-              // stamp. Measured 2026-09-17: 120 of 126 eligible open cards
-              // carried one, 97% of them agent self-assessments rather than
-              // this job's verdict, and the job classified 0 issues in 36 runs.
-              //
-              // The skip is now provenance-scoped. Our OWN recorded verdict
-              // still ends the candidate — re-running the classifier against
-              // its own last answer is pure spend. Somebody else's label is
-              // re-examined and replaced, because it is exactly the input the
-              // card says is wrong. `reclassifyForeignLabels: false` restores
-              // the old unconditional skip.
-              //
-              // "Ours" is checked against BOTH label views the host exposes —
-              // the `tier:*` name and the label id we actually wrote — and
-              // either one matching is enough. The two can only disagree if a
-              // caller returns them inconsistently, and the asymmetry of the
-              // mistake decides which way to lean: wrongly calling a label
-              // foreign re-runs the classifier on every job tick forever, while
-              // wrongly calling it ours just leaves the card on the tier we
-              // ourselves assigned. So a disagreement resolves to "ours".
-              const existingLabelTier = tierFromLabels(labelNames);
-              const ourRecordedTier = classifierLabeled[issueId];
-              const ourLabelId = ourRecordedTier ? config.tierLabelIds[ourRecordedTier] : undefined;
-              const stillCarriesOurLabel =
-                ourRecordedTier !== undefined &&
-                (ourRecordedTier === existingLabelTier ||
-                  (typeof ourLabelId === "string" && existingLabelIds.includes(ourLabelId)));
-              const isForeignLabel = existingLabelTier !== null && !stillCarriesOurLabel;
-              if (existingLabelTier !== null) {
-                if (!config.classification.reclassifyForeignLabels) continue;
-                if (!isForeignLabel) continue;
-              }
-
-              const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
-              const title = typeof r.title === "string" ? r.title : "";
-              const description = typeof r.description === "string" ? r.description : "";
-              const prompt = buildClassificationPrompt(title, description, agentName, config.classification.descriptionChars);
-
-              const result = await callClassifier(
-                {
-                  baseUrl: config.classification.baseUrl,
-                  protocol: config.classification.protocol,
-                  modelId: config.classification.modelId,
-                  apiKey,
-                  system: RUBRIC,
-                  userPrompt: prompt,
-                  maxOutputTokens: config.classification.maxOutputTokens,
-                  requestTimeoutMs: config.classification.requestTimeoutMs,
-                  maxResponseBytes: config.classification.maxResponseBytes,
-                },
-                classificationHttp,
-              );
-              if (!result.text) {
-                ctx.logger.info("classification skipped", { companyId: company.id, issue: identifier, why: result.error });
-                continue;
-              }
-
-              const judgement = parseClassificationResponse(result.text);
-              if (!judgement) {
-                ctx.logger.info("classification unparseable", { companyId: company.id, issue: identifier });
-                continue;
-              }
-
-              const { labelTier, pickTier } = resolveClassifiedTiers(judgement, {
-                t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
-                t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
-              });
-              void pickTier; // consumed by the apply-sweep (TOG-2481 task #6/#7), not this job
-
-              const labelId = config.tierLabelIds[labelTier];
-              if (labelId) {
-                // TOG-3200: adding is only correct when there was no tier label
-                // to begin with. Replacing a foreign one means DROPPING it —
-                // leaving both would be a two-tier card, and `tierFromLabels`
-                // resolves that by taking the most capable, so an additive
-                // write would silently preserve every T1 it was meant to
-                // correct. Drop every tier:* id, then add the one verdict.
-                const tierLabelIdsOnIssue = new Set(
-                  (issue.labels ?? [])
-                    .filter((label) => typeof label.name === "string" && label.name.startsWith(TIER_LABEL_PREFIX))
-                    .map((label) => label.id)
-                    .filter((id): id is string => typeof id === "string"),
-                );
-                for (const id of Object.values(config.tierLabelIds)) {
-                  if (typeof id === "string") tierLabelIdsOnIssue.add(id);
+                // The row query above cannot see labels (not allowlisted), so
+                // label and pin state is read per candidate via
+                // `ctx.issues.get()` — the same source `describeIssue` uses for
+                // label reads elsewhere in this worker.
+                let issue: Awaited<ReturnType<typeof ctx.issues.get>>;
+                try {
+                  issue = await ctx.issues.get(issueId, company.id);
+                } catch {
+                  return "settled";
                 }
-                const nextLabelIds = [
-                  ...new Set([...existingLabelIds.filter((id) => !tierLabelIdsOnIssue.has(id)), labelId]),
-                ];
-                await ctx.issues.update(
-                  issueId,
-                  { labelIds: nextLabelIds } as Parameters<typeof ctx.issues.update>[1],
-                  company.id,
+                if (!issue) return "settled";
+                const labelNames = (issue.labels ?? [])
+                  .map((label) => label.name)
+                  .filter((name): name is string => typeof name === "string");
+                const existingLabelIds =
+                  issue.labelIds ?? (issue.labels ?? []).map((label) => label.id).filter((id) => typeof id === "string");
+
+                // An operator pin means "leave the model choice on this issue
+                // alone" — unchanged, and checked before anything else.
+                if (labelNames.includes(OPERATOR_PIN_LABEL)) return "settled";
+
+                // TOG-3200. An existing tier:* label used to end the candidate
+                // here unconditionally, which made classification a one-shot
+                // stamp. Measured 2026-09-17: 120 of 126 eligible open cards
+                // carried one, 97% of them agent self-assessments rather than
+                // this job's verdict, and the job classified 0 issues in 36 runs.
+                //
+                // The skip is now provenance-scoped. Our OWN recorded verdict
+                // still ends the candidate — re-running the classifier against
+                // its own last answer is pure spend. Somebody else's label is
+                // re-examined and replaced, because it is exactly the input the
+                // card says is wrong. `reclassifyForeignLabels: false` restores
+                // the old unconditional skip.
+                //
+                // "Ours" is checked against BOTH label views the host exposes —
+                // the `tier:*` name and the label id we actually wrote — and
+                // either one matching is enough. The two can only disagree if a
+                // caller returns them inconsistently, and the asymmetry of the
+                // mistake decides which way to lean: wrongly calling a label
+                // foreign re-runs the classifier on every job tick forever, while
+                // wrongly calling it ours just leaves the card on the tier we
+                // ourselves assigned. So a disagreement resolves to "ours".
+                const existingLabelTier = tierFromLabels(labelNames);
+                const ourRecordedTier = classifierLabeled[issueId];
+                const ourLabelId = ourRecordedTier ? config.tierLabelIds[ourRecordedTier] : undefined;
+                const stillCarriesOurLabel =
+                  ourRecordedTier !== undefined &&
+                  (ourRecordedTier === existingLabelTier ||
+                    (typeof ourLabelId === "string" && existingLabelIds.includes(ourLabelId)));
+                const isForeignLabel = existingLabelTier !== null && !stillCarriesOurLabel;
+                if (existingLabelTier !== null) {
+                  if (!config.classification.reclassifyForeignLabels) return "settled";
+                  if (!isForeignLabel) return "settled";
+                }
+
+                const agentName = typeof r.agent_name === "string" ? r.agent_name : "";
+                const title = typeof r.title === "string" ? r.title : "";
+                const description = typeof r.description === "string" ? r.description : "";
+                const prompt = buildClassificationPrompt(title, description, agentName, config.classification.descriptionChars);
+
+                const result = await callClassifier(
+                  {
+                    baseUrl: classifyBaseUrl,
+                    protocol: config.classification.protocol,
+                    modelId: classifyModelId,
+                    apiKey,
+                    system: RUBRIC,
+                    userPrompt: prompt,
+                    maxOutputTokens: config.classification.maxOutputTokens,
+                    requestTimeoutMs: config.classification.requestTimeoutMs,
+                    maxResponseBytes: config.classification.maxResponseBytes,
+                  },
+                  classificationHttp,
                 );
-                // Record provenance only once the write landed — a label we
-                // failed to write is not a label we own, and claiming it would
-                // make this card permanently unreclassifiable.
-                await ctx.state.set(classifierLabeledKey(company.id), { ...classifierLabeled, [issueId]: labelTier });
-                classifierLabeled[issueId] = labelTier;
-              }
+                if (!result.text) {
+                  ctx.logger.info("classification skipped", { companyId: company.id, issue: identifier, why: result.error });
+                  return "settled";
+                }
 
-              if (judgement.exclusion) {
-                await ctx.state.set(classificationExclusionsKey(company.id), { ...exclusions, [issueId]: true });
-                exclusions[issueId] = true;
-              }
+                const judgement = parseClassificationResponse(result.text);
+                if (!judgement) {
+                  ctx.logger.info("classification unparseable", { companyId: company.id, issue: identifier });
+                  return "settled";
+                }
 
-              await ctx.activity.log({
+                const { labelTier, pickTier } = resolveClassifiedTiers(judgement, {
+                  t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
+                  t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
+                });
+                void pickTier; // consumed by the apply-sweep (TOG-2481 task #6/#7), not this job
+
+                // TOG-11688 write gate: the host fires at 300 s regardless, so
+                // a write with no budget left — or after burning more than the
+                // row's own slice — is an orphaned mutation: refuse it. This is
+                // also what stops a row the walk abandoned at the deadline from
+                // committing. The row is `unsettled`: the cursor stops before
+                // it and next firing re-attempts it from live state.
+                if (Date.now() >= classifyDeadline || Date.now() - rowStartedAt >= CLASSIFY_ROW_TIMEOUT_MS) {
+                  ctx.logger.warn("classification pass skipped slow row write: row exceeded its time slice", {
+                    companyId: company.id,
+                    issue: identifier,
+                    rowDurationMs: Date.now() - rowStartedAt,
+                    rowTimeoutMs: CLASSIFY_ROW_TIMEOUT_MS,
+                  });
+                  return "unsettled";
+                }
+
+                const labelId = config.tierLabelIds[labelTier];
+                if (labelId) {
+                  // TOG-3200: adding is only correct when there was no tier label
+                  // to begin with. Replacing a foreign one means DROPPING it —
+                  // leaving both would be a two-tier card, and `tierFromLabels`
+                  // resolves that by taking the most capable, so an additive
+                  // write would silently preserve every T1 it was meant to
+                  // correct. Drop every tier:* id, then add the one verdict.
+                  const tierLabelIdsOnIssue = new Set(
+                    (issue.labels ?? [])
+                      .filter((label) => typeof label.name === "string" && label.name.startsWith(TIER_LABEL_PREFIX))
+                      .map((label) => label.id)
+                      .filter((id): id is string => typeof id === "string"),
+                  );
+                  for (const id of Object.values(config.tierLabelIds)) {
+                    if (typeof id === "string") tierLabelIdsOnIssue.add(id);
+                  }
+                  const nextLabelIds = [
+                    ...new Set([...existingLabelIds.filter((id) => !tierLabelIdsOnIssue.has(id)), labelId]),
+                  ];
+                  await ctx.issues.update(
+                    issueId,
+                    { labelIds: nextLabelIds } as Parameters<typeof ctx.issues.update>[1],
+                    company.id,
+                  );
+                  // Record provenance only once the write landed — a label we
+                  // failed to write is not a label we own, and claiming it would
+                  // make this card permanently unreclassifiable.
+                  await ctx.state.set(classifierLabeledKey(company.id), { ...classifierLabeled, [issueId]: labelTier });
+                  classifierLabeled[issueId] = labelTier;
+                }
+
+                if (judgement.exclusion) {
+                  await ctx.state.set(classificationExclusionsKey(company.id), { ...exclusions, [issueId]: true });
+                  exclusions[issueId] = true;
+                }
+
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}${isForeignLabel ? `, replacing an unattributed ${existingLabelTier} label` : ""}`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  metadata: {
+                    tier: labelTier,
+                    pickTier,
+                    confidence: judgement.confidence,
+                    reason: judgement.reason,
+                    ...(isForeignLabel ? { replacedLabelTier: existingLabelTier } : {}),
+                  },
+                });
+                classified += 1;
+                if (isForeignLabel) reclassified += 1;
+                return classified >= config.classification.batchSize ? "stop" : "settled";
+              },
+            );
+            classifySlowestRowMs = walk.slowestRowMs;
+            if (walk.abandoned) {
+              const abandoned = asRecord(walk.abandoned.row);
+              ctx.logger.warn("classification pass abandoned a slow row at the deadline", {
                 companyId: company.id,
-                message: `Model Selection classified this issue as ${labelTier} (confidence ${judgement.confidence})${judgement.exclusion ? ", capability-excluded" : ""}${isForeignLabel ? `, replacing an unattributed ${existingLabelTier} label` : ""}`,
-                entityType: "issue",
-                entityId: issueId,
-                metadata: {
-                  tier: labelTier,
-                  pickTier,
-                  confidence: judgement.confidence,
-                  reason: judgement.reason,
-                  ...(isForeignLabel ? { replacedLabelTier: existingLabelTier } : {}),
-                },
+                issue: typeof abandoned.identifier === "string" ? abandoned.identifier : abandoned.id,
+                rowDurationMs: walk.abandoned.rowDurationMs,
               });
-              classified += 1;
-              if (isForeignLabel) reclassified += 1;
             }
 
-            await advanceScanMark(
+            await advanceScanCursor(
               company.id,
               PLUGIN_STATE_KEYS.classifyLastScanAt,
-              examinedRows,
+              candidateRows,
+              walk.settledPrefix,
               classifyFetchLimit,
               classifyFiringStartMs,
-              !brokeEarly,
             );
             ctx.logger.info("issue classification pass complete", {
               companyId: company.id,
               classified,
               reclassified,
               candidates: candidateRows.length,
+              examined: walk.examined.length,
+              skippedSlowRows: walk.unsettled,
+              slowestRowMs: walk.slowestRowMs,
+              budgetExhausted: walk.budgetExhausted,
+              jobDurationMs: Date.now() - classifyJobStartedAt,
             });
+            if (walk.budgetExhausted) break;
           } catch (cause) {
             ctx.logger.error("issue classification failed for a company", {
               companyId: company.id,
@@ -3078,8 +4568,9 @@ export function createPlugin() {
        *
        *   - an unreadable or unparseable mark reads as epoch (full scan);
        *   - the mark advances to the firing start only when the fetch did NOT
-       *     hit its row limit (drained); on a capped fetch it advances to the
-       *     oldest `updated_at` actually seen, so cap-skipped rows stay
+       *     hit its row limit (drained) and every row was settled; otherwise
+       *     it is a cursor past the settled prefix (TOG-11688,
+       *     `scanMarkAfterWalk`), so unreached and unsettled rows stay
        *     visible next firing;
        *   - rows without a parseable `updated_at` never move the mark.
        */
@@ -3096,51 +4587,408 @@ export function createPlugin() {
         );
       };
 
-      const oldestUpdatedAtMs = (rows: unknown[]): number | null => {
-        let oldest: number | null = null;
-        for (const row of rows) {
-          const raw = asRecord(row).updated_at;
-          const ms = raw instanceof Date ? raw.getTime() : typeof raw === "string" ? Date.parse(raw) : Number.NaN;
-          if (!Number.isFinite(ms)) continue;
-          if (oldest === null || ms < oldest) oldest = ms;
-        }
-        return oldest;
-      };
-
       /**
-       * TOG-3585: advance the watermark after a bounded fetch. Drained (fewer
-       * rows than the limit) AND fully examined means everything newer than
-       * the mark was seen — jump to the firing start. Otherwise (capped
-       * fetch, or the caller's own loop broke early on a write/time budget
-       * before working through every fetched row) rows remain unexamined —
-       * creep to the oldest of the rows the caller actually looked at, so
-       * next firing overlaps rather than skips.
-       *
-       * `fullyExamined` defaults to true for callers whose loop has no early
-       * break other than draining `rows` itself (e.g. `labelOnlyPass`).
-       * Callers with a batch-size or wall-clock break (`classifyIssues`,
-       * `runRepinPassForCompany`) must pass `false` — and only the subset of
-       * rows their loop actually reached — whenever that break fires, even
-       * if the underlying fetch was itself uncapped. Conflating "fetch
-       * wasn't capped" with "loop wasn't cut short" is exactly the
-       * starvation bug this pass fixes: it silently dropped fetched-but-
-       * unexamined rows from every future scan until they were touched
-       * again.
+       * TOG-3585 / TOG-11688: advance the watermark after a bounded walk.
+       * `settledPrefix` is the walk's count of leading fetched rows that were
+       * decided; the mark jumps to the firing start only when that is every
+       * row of a drained fetch, and otherwise moves just past the settled
+       * prefix (see `scanMarkAfterWalk`). A walk cut short by a deadline,
+       * write limit, batch size or row cap — or holding a slow-skipped or
+       * abandoned row — therefore resumes at the first row it did not
+       * settle instead of re-walking the rows it already decided.
        */
-      const advanceScanMark = async (
+      const advanceScanCursor = async (
         companyId: string,
         stateKey: string,
         rows: unknown[],
+        settledPrefix: number,
         fetchLimit: number,
         firingStartMs: number,
-        fullyExamined = true,
       ): Promise<void> => {
-        if (fullyExamined && rows.length < fetchLimit) {
-          await writeScanMark(companyId, stateKey, firingStartMs);
-          return;
+        const mark = scanMarkAfterWalk(rows, settledPrefix, fetchLimit, firingStartMs);
+        if (mark !== null) await writeScanMark(companyId, stateKey, mark);
+      };
+
+      /**
+       * TOG-6895: the pin lifecycle's only clock. Pins carry no timestamp
+       * (`adapterConfig.model` is a bare string) and `issues.updated_at`
+       * moves on any comment, so this `issueId -> pinnedAt ISO` map —
+       * written on every pin and clear, read by the repin pass — is what
+       * ages a pin. Same `noEligibleNotices` map shape (`{issueId: ISO}`),
+       * different state key and a different reason to exist.
+       */
+      const pinPinnedAtKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.pinPinnedAt,
+      });
+
+      const readPinPinnedAt = async (companyId: string): Promise<Record<string, string>> => {
+        const stored = asRecord(await ctx.state.get(pinPinnedAtKey(companyId)));
+        const out: Record<string, string> = {};
+        for (const [issueId, at] of Object.entries(stored)) {
+          if (typeof at === "string") out[issueId] = at;
         }
-        const oldest = oldestUpdatedAtMs(rows);
-        if (oldest !== null) await writeScanMark(companyId, stateKey, oldest);
+        return out;
+      };
+
+      /**
+       * TOG-6895: a pin older than PIN_MAX_AGE_MS must be re-validated
+       * through `advise` even when the pinned lane still reads usable.
+       * Missing entry = expired: fail-safe toward re-validation, never
+       * toward keeping a pin whose age we cannot prove.
+       */
+      const isPinExpired = (pinnedAt: Record<string, string>, issueId: string, nowMs: number): boolean => {
+        const raw = pinnedAt[issueId];
+        if (typeof raw !== "string") return true;
+        const atMs = Date.parse(raw);
+        if (!Number.isFinite(atMs)) return true;
+        return nowMs - atMs >= PIN_MAX_AGE_MS;
+      };
+
+      /**
+       * TOG-6895: stamp the lifecycle clock after a pin lands, or remove
+       * the entry when the pin is cleared. Bounded like the
+       * `maybeLogUnpinnableCard` throttle map: entries older than a week
+       * can never make a pin look FRESH again, so drop them on write.
+       * Best-effort — a lost stamp only re-validates one pin early.
+       */
+      const recordPinTimestamp = async (
+        companyId: string,
+        issueId: string,
+        atIso: string | null,
+      ): Promise<void> => {
+        try {
+          const stored = await readPinPinnedAt(companyId);
+          const pruned: Record<string, string> = {};
+          const nowMs = Date.parse(atIso ?? "") || Date.now();
+          for (const [id, at] of Object.entries(stored)) {
+            if (id !== issueId && nowMs - Date.parse(at) < 7 * 24 * 60 * 60 * 1000) pruned[id] = at;
+          }
+          if (atIso !== null) pruned[issueId] = atIso;
+          await ctx.state.set(pinPinnedAtKey(companyId), pruned);
+        } catch {
+          // A lost timestamp only re-validates one pin early; never fail
+          // the pass over the clock.
+        }
+      };
+
+      /**
+       * TOG-12234 (TOG-11780 §7 item 4). The fallback lease's bookkeeping.
+       * A pin on a `fallbackOnly` model carries a provenance stamp in its
+       * override env (`PIN_PROVENANCE_ENV_KEY`), and this index of stamped
+       * issue ids lets the lease pass visit only those issues (TOG-11688).
+       * The stamp is the authority; the index is a pointer to it, and an
+       * entry whose `decisionId` no longer matches the issue's stamp is
+       * dropped on its next visit.
+       */
+      const fallbackPinsKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.fallbackPins,
+      });
+
+      interface FallbackPinEntry {
+        decisionId: string;
+        decidedAt: string;
+        /** Last lease-pass visit; orders the examine cap's rotation. */
+        checkedAt: string | null;
+      }
+
+      const readFallbackPins = async (companyId: string): Promise<Record<string, FallbackPinEntry>> => {
+        const stored = asRecord(await ctx.state.get(fallbackPinsKey(companyId)));
+        const out: Record<string, FallbackPinEntry> = {};
+        for (const [issueId, raw] of Object.entries(stored)) {
+          const entry = asRecord(raw);
+          if (typeof entry.decisionId !== "string" || typeof entry.decidedAt !== "string") continue;
+          out[issueId] = {
+            decisionId: entry.decisionId,
+            decidedAt: entry.decidedAt,
+            checkedAt: typeof entry.checkedAt === "string" ? entry.checkedAt : null,
+          };
+        }
+        return out;
+      };
+
+      /** The stamp a new pin on `model` must carry, or null for a non-fallback pin. */
+      const fallbackPinProvenance = (
+        model: { fallbackOnly?: boolean },
+        agentId: string | null,
+      ): PinProvenance | null =>
+        model.fallbackOnly === true
+          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }
+          : null;
+
+      /**
+       * Mirror what was just written into the index: add the issue when the
+       * written env carries a stamp, drop it otherwise (a non-fallback pin,
+       * or a clear). Reads the stamp back from the patch rather than from the
+       * caller's intent, because `modelOverrideForContext` declines to write
+       * a stamp into an unknown assignee's env. Best-effort like
+       * `recordPinTimestamp`: a lost entry only leaves that pin to the 24 h
+       * expiry, so it is logged, never thrown over a pin that already landed.
+       */
+      const recordFallbackPin = async (
+        companyId: string,
+        issueId: string,
+        written: { assigneeAdapterOverrides?: { adapterConfig?: { env?: Record<string, unknown> } } | null } | null,
+      ): Promise<void> => {
+        try {
+          const stamp = readPinProvenance(written?.assigneeAdapterOverrides?.adapterConfig?.env);
+          const stored = await readFallbackPins(companyId);
+          if (stamp === null) {
+            if (!(issueId in stored)) return;
+            delete stored[issueId];
+          } else {
+            stored[issueId] = { decisionId: stamp.decisionId, decidedAt: stamp.decidedAt, checkedAt: null };
+            const entries = Object.entries(stored);
+            if (entries.length > FALLBACK_PIN_INDEX_MAX) {
+              // Evict the oldest decisions: an evicted pin is not lost, only
+              // left to the repin pass's 24 h expiry.
+              entries
+                .sort(([, a], [, b]) => a.decidedAt.localeCompare(b.decidedAt))
+                .slice(0, entries.length - FALLBACK_PIN_INDEX_MAX)
+                .forEach(([id]) => delete stored[id]);
+            }
+          }
+          await ctx.state.set(fallbackPinsKey(companyId), stored);
+        } catch (cause) {
+          ctx.logger.warn("fallback pin index write failed", {
+            companyId,
+            issueId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      };
+
+      /**
+       * TOG-11632. Whether the creation-time pin may write this card's
+       * override right now.
+       *
+       * The classifier and `advise` are slower than the assignment wake's
+       * queue -> claim, so by the time the creation pin decides, the card's
+       * run is queued and often claimed, and `describeIssue`'s `isIdle` is
+       * false. Gating the creation pin on strict idleness aborted nearly
+       * every pin (85% of runs were bypassing the pacer). A queued-but-
+       * unstarted run is still safe to pin under: Paperclip reads
+       * `assigneeAdapterOverrides` at run START, not at queue time.
+       *
+       * Keyed on the card's live `heartbeat_runs` rows
+       * (`CREATION_PIN_LIVE_RUNS_SQL`), NOT on `executionRunId`: this fork
+       * stamps that column at claim, so it cannot name a queued run
+       * (TOG-11780 §2.3). Returns true when `checkoutRunId` is null, no
+       * scheduled retry is queued/running, and every live run attributed to
+       * the card is `queued` with `started_at IS NULL` (vacuously true with
+       * none). Any `running` row, or any row with `started_at` set, reads as
+       * "not pinnable": fail closed.
+       *
+       * Creation/assignment path ONLY. The scheduled repin/balance passes
+       * keep the strict idle-only `balanceWriteStillSafe` below: they sweep
+       * cards whose runs they did not just watch get queued.
+       */
+      const pinnableBeforeStart = async (companyId: string, issueId: string): Promise<boolean> => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue) return false;
+        if (issue.checkoutRunId) return false;
+        const scheduledRetryStatus = issue.scheduledRetry?.status ?? null;
+        if (scheduledRetryStatus === "queued" || scheduledRetryStatus === "running") return false;
+        // Keyed on the card's live runs, not `executionRunId`: the fork stamps
+        // that column at claim, so a queued run is invisible through it.
+        const liveRows = (await ctx.db.query(CREATION_PIN_LIVE_RUNS_SQL, [
+          companyId,
+          issueId,
+        ])) as unknown[];
+        return liveRows.every((row) => {
+          const run = asRecord(row);
+          return run.status === "queued" && run.started_at == null;
+        });
+      };
+
+      /**
+       * TOG-11632. The creation pin's final fail-closed read: the same
+       * status/operator/pin checks as `balanceWriteStillSafe`, but the
+       * run-attachment check goes through `pinnableBeforeStart` so the
+       * assignment wake's already-queued run does not veto its own pin.
+       */
+      const creationWriteStillSafe = async (
+        companyId: string,
+        issueId: string,
+        models: ResolvedConfig["models"],
+        /** TOG-11794: the pin this write may replace; null = must be unpinned. */
+        expectedPinnedModelId: string | null,
+      ): Promise<boolean> => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        if (!issue || !balanceOpenStatuses.has(String(issue.status ?? ""))) return false;
+        if ((issue.labels ?? []).some((label) => label.name === OPERATOR_PIN_LABEL)) return false;
+
+        const overrides = asRecord(issue.assigneeAdapterOverrides);
+        const adapterConfig = asRecord(overrides.adapterConfig);
+        const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+        const currentPinnedModelId = resolveConfiguredModelId(rawPinnedModelId, models);
+        if (rawPinnedModelId && !currentPinnedModelId) return false;
+        if (currentPinnedModelId !== expectedPinnedModelId) return false;
+
+        return pinnableBeforeStart(companyId, issueId);
+      };
+
+      /**
+       * TOG-12234 (TOG-11780 §5). Re-home a pin's env when a card moves from
+       * one agent to another.
+       *
+       * The override env was built from the PREVIOUS assignee's env, and the
+       * host swaps it in wholesale for the new assignee's: left alone, the
+       * new assignee's run carries the old agent's secret refs, which the
+       * host validates against the run's agent and refuses ("configuration
+       * incomplete"). This is not a new routing decision — the model stays
+       * as pinned — only the env under it moves.
+       *
+       * Rebuild from the new assignee's env when the pin can be rewritten
+       * before the next run starts (`pinnableBeforeStart`, TOG-11632), so the
+       * context ceiling and sub-call keys follow the pin. Otherwise (run
+       * already started, operator pin, closed card, unknown assignee env, a
+       * pin outside the roster, or classification off) drop the env and keep
+       * everything else: the run then gets the new assignee's own env whole.
+       * Either way none of the old env survives. A card with no override env
+       * has nothing to carry and is not written.
+       */
+      const rehomePinOnReassignment = async (
+        companyId: string,
+        issueId: string,
+        fromAgentId: string,
+        toAgentId: string,
+      ): Promise<void> => {
+        const issue = await ctx.issues.get(issueId, companyId);
+        // Moved on again: the later reassignment's own event re-homes it.
+        if (!issue || issue.assigneeAgentId !== toAgentId) return;
+        const adapterConfig = asRecord(asRecord(issue.assigneeAdapterOverrides).adapterConfig);
+        if (adapterConfig.env == null) return;
+        const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
+
+        const config = await companyConfig(companyId);
+        // TOG-12431: the re-home is an override write like any other, so it
+        // takes the same single gate as the five scheduled/event pin sites.
+        // Advisory installs log the re-home and write nothing — the previous
+        // assignee's env stays until enforcement (or the TOG-12305 repair
+        // path, with its own advisory check) re-homes it. No exception.
+        const writesAllowed = selectionWritesAllowed(config);
+        const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
+        const pinnedModelId = resolveConfiguredModelId(rawPinnedModelId, config.models);
+        const pinnedModel = config.models.find((model) => model.id === pinnedModelId) ?? null;
+        const described = await describeIssue(companyId, issueId, {});
+        if (
+          config.classification.enabled &&
+          pinnedModel !== null &&
+          described !== null &&
+          described.assigneeAgentId === toAgentId &&
+          described.agentEnv !== null &&
+          balanceOpenStatuses.has(described.status) &&
+          !described.hasOperatorPin
+        ) {
+          const patch = modelOverrideForContext({
+            model: pinnedModel,
+            agentEnvContextTokens: config.selection.agentEnvContextTokens,
+            compactionRatio: config.selection.compactionRatio,
+            agentEnv: described.agentEnv,
+            agentAdapterType: described.agentAdapterType,
+            agentAdapterConfig: described.agentAdapterConfig,
+            existingOverrideEnv: described.existingOverrideEnv,
+            cheapModelId: cheapestHealthyModelIdForTier({
+              models: config.models,
+              tier: "T3",
+              ledger: await readLaneLedger(companyId),
+              laneOutageOverride: await readLaneOutage(companyId),
+              nowIso: new Date().toISOString(),
+              modelScores: await readModelScores(companyId),
+              laneAvoidConfig: config.pacing.avoid,
+              pacingMode: config.pacing.mode,
+            }),
+            // Same decision, new home: a fallback pin keeps its stamp, so the
+            // lease pass still finds it.
+            provenance: readPinProvenance(described.existingOverrideEnv),
+          });
+          // Final reads, last before the write: still this assignee, still
+          // this pin, and no run has started that would read the old env.
+          const fresh = await ctx.issues.get(issueId, companyId);
+          const freshModel = asRecord(asRecord(fresh?.assigneeAdapterOverrides).adapterConfig).model;
+          if (
+            fresh?.assigneeAgentId === toAgentId &&
+            freshModel === adapterConfig.model &&
+            (await pinnableBeforeStart(companyId, issueId))
+          ) {
+            // TOG-12431: advisory installs decide and report; they pin
+            // nothing — including here, on the rebuild.
+            if (writesAllowed) {
+              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
+              await recordFallbackPin(companyId, issueId, patch);
+            } else {
+              ctx.logger.info("reassignment re-home advisory: would rebuild the pin env, nothing written", {
+                companyId,
+                issue: described.identifier ?? issueId,
+                modelId: pinnedModel.id,
+                fromAgentId,
+                toAgentId,
+              });
+            }
+            await ctx.activity.log({
+              companyId,
+              message: `Model Selection rebuilt the ${pinnedModel.id} pin's env for the new assignee on ${described.identifier ?? issueId}${advisorySuffix}`,
+              entityType: "issue",
+              entityId: issueId,
+              metadata: {
+                modelId: pinnedModel.id,
+                fromAgentId,
+                toAgentId,
+                action: "rebuild-env",
+                ...(writesAllowed ? {} : { advisory: true, written: false }),
+              },
+            });
+            return;
+          }
+        }
+
+        // Clear: re-read so the write starts from the override as it is now.
+        const current = await ctx.issues.get(issueId, companyId);
+        if (!current || current.assigneeAgentId !== toAgentId) return;
+        const overrides = { ...asRecord(current.assigneeAdapterOverrides) };
+        const keptAdapterConfig = { ...asRecord(overrides.adapterConfig) };
+        if (keptAdapterConfig.env == null) return;
+        delete keptAdapterConfig.env;
+        delete overrides.adapterConfig;
+        if (Object.keys(keptAdapterConfig).length > 0) overrides.adapterConfig = keptAdapterConfig;
+        // TOG-12431: the clear mutates the override exactly like a repin, so
+        // it is gated too — there is deliberately no hygiene exception (see
+        // selectionWritesAllowed). Advisory installs keep the stale env on
+        // paper and log the would-be clear.
+        if (writesAllowed) {
+          await ctx.issues.update(
+            issueId,
+            { assigneeAdapterOverrides: Object.keys(overrides).length > 0 ? overrides : null } as Parameters<
+              typeof ctx.issues.update
+            >[1],
+            companyId,
+          );
+          await recordFallbackPin(companyId, issueId, null);
+        } else {
+          ctx.logger.info("reassignment re-home advisory: would clear the previous assignee's pin env, nothing written", {
+            companyId,
+            issue: described?.identifier ?? issueId,
+            fromAgentId,
+            toAgentId,
+          });
+        }
+        await ctx.activity.log({
+          companyId,
+          message: `Model Selection cleared the previous assignee's pin env on ${described?.identifier ?? issueId}; model pin kept${advisorySuffix}`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: {
+            modelId: typeof keptAdapterConfig.model === "string" ? keptAdapterConfig.model : null,
+            fromAgentId,
+            toAgentId,
+            action: "clear-env",
+            ...(writesAllowed ? {} : { advisory: true, written: false }),
+          },
+        });
       };
 
       /** Final fail-closed read immediately before a balance write. */
@@ -3204,14 +5052,14 @@ export function createPlugin() {
         nowIso: string,
       ): boolean => {
         if (!modelId) return false;
-        const model = config.models.find((m) => m.id === modelId && m.enabled);
-        if (!model) return false;
+        const model = applyDerivedTiers(config.models, modelScores).find((m) => m.id === modelId && m.enabled);
+        if (!model || tierIndex(model.tier) < tierIndex(tier)) return false;
         if (typeof requiredContextTokens === "number" && model.contextWindow < requiredContextTokens) return false;
         if (config.pacing.mode === "off") return true;
         if (hardStopExcluded(laneLedger, model)) return false;
         if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
         if (laneOutageExcluded(laneOutageOverride, nowIso, model)) return false;
-        const score = modelScores[model.id]?.tiers[tier];
+        const score = tierScoreFor(modelScores[model.id], tier);
         if (score && score.capable === false) return false;
         return true;
       };
@@ -3246,20 +5094,18 @@ export function createPlugin() {
        * three passes. TOG-2983/2987/2989 sat exactly like this during the
        * incident until an operator hand-labelled them.
        *
-       * `resolveTier()` (engine/tier.ts) already establishes the fallback a
-       * missing label should take — pin's own tier, then the assignee's
-       * floor, then `selection.defaultTier` — per ADR-0008's "a missing
-       * label is not a missing decision." This mirrors that same precedence
-       * (skipping the pin-serviceability and capability-exclusion steps,
-       * which these three passes don't otherwise evaluate) so a label-less
-       * candidate resolves to the same answer `advise()` would give it,
-       * instead of being invisible to the sweep that is supposed to catch it.
+       * `resolveTier()` supplies the capability exclusion and missing-label
+       * fallback: pin's tier, assignee floor, then selection.defaultTier.
+       * During a repin, retain that recorded requirement even if its lane is
+       * unusable, and let a stronger label supersede a stale weaker pin.
        */
-      const tierWithFallback = (descriptor: IssueDescriptor, models: ResolvedConfig["models"], defaultTier: Tier): Tier =>
-        tierFromLabels(descriptor.labelNames) ??
-        tierOfModel(descriptor.pinnedModelId, models) ??
-        tierOfModel(descriptor.agentFloorModelId, models) ??
-        defaultTier;
+      const tierWithFallback = (descriptor: IssueDescriptor, models: ResolvedConfig["models"], defaultTier: Tier): Tier => {
+        // Preserve the strongest recorded judgement across a lane failure:
+        // neither a stale weaker pin nor a weaker label can lower this floor.
+        const judgedTier = resolveTier(descriptor, models, defaultTier).tier;
+        const labelTier = tierFromLabels(descriptor.labelNames);
+        return labelTier && tierIndex(labelTier) > tierIndex(judgedTier) ? labelTier : judgedTier;
+      };
 
       // --- scheduled label-only pass (TOG-2481, tier_dispatcher.py
       // label_only_pass()) --------------------------------------------------
@@ -3273,10 +5119,39 @@ export function createPlugin() {
       // re-classifying.
       ctx.jobs.register(JOB_KEYS.labelOnlyPass, async () => {
         const companies = listKnownCompanies();
+        // TOG-7123: the 2026-09-27 incident — this pass fetched 100 rows and
+        // walked every one with no elapsed-time budget, so a slow board ran
+        // past the host's 300 s job RPC wall (two firings hit 300061 ms and
+        // 300085 ms while the worker kept walking rows it could never
+        // report). Same cooperative budget as classifyIssues and
+        // balancePass (200 s since TOG-11688): stop starting new rows with
+        // headroom, keep the rows already settled, and let the scan cursor
+        // resume the rest next firing.
+        const jobStartedAt = Date.now();
+        const deadlineAt = jobStartedAt + LABEL_ONLY_PASS_JOB_BUDGET_MS;
+        // Admission is 1.5x the slowest row of the FIRING: it carries across companies.
+        let slowestRowMs = 0;
         for (const company of companies) {
+          if (Date.now() >= deadlineAt) {
+            ctx.logger.warn("label-only pass stopped before the host RPC wall", {
+              companyId: company.id,
+              durationMs: Date.now() - jobStartedAt,
+              budgetMs: LABEL_ONLY_PASS_JOB_BUDGET_MS,
+            });
+            break;
+          }
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+            // TOG-11793: retired once run-scoped decisions are live.
+            if (runResolveActive(config)) {
+              ctx.logger.info("label-only pass skipped: run-scoped model decisions are live", { companyId: company.id });
+              continue;
+            }
+            // TOG-12431: advisory installs walk the same rows and log the
+            // same decisions, but write no override.
+            const writesAllowed = selectionWritesAllowed(config);
+            const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
 
             // Same allowlisted-table constraint as classifyIssues: the row
             // query can only see issues/agents, never labels — so this finds
@@ -3299,6 +5174,10 @@ export function createPlugin() {
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
+                  -- TOG-5227: a user-assigned card rejects issues.update
+                  -- with an agent override ("Issue can only have one
+                  -- assignee"), which used to abort the whole pass.
+                  and i.assignee_user_id is null
                   and i.updated_at > $3
                   and (i.assignee_adapter_overrides is null
                        or i.assignee_adapter_overrides->'adapterConfig'->>'model' is null)
@@ -3335,90 +5214,180 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let pinned = 0;
-            for (const row of candidateRows) {
-              const r = asRecord(row);
-              const issueId = typeof r.id === "string" ? r.id : null;
-              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) continue;
+            // TOG-7123 / TOG-11688: the shared hard-return walk
+            // (`row-walk.ts`). The 2026-09-28 reopen: a between-row deadline
+            // check cannot contain an already-admitted slow row — TOG-3867
+            // spent ~98 s inside host calls AFTER the host's 300 s wall had
+            // fired. The walk owns adaptive admission, the hard return (the
+            // WHOLE row body below — `describeIssue` included — races the
+            // remaining budget) and the per-firing ROW CAP: eight rows bound
+            // the worst case below the 200 s budget at the slowest observed
+            // row cost, and the scan cursor carries the excess to the next
+            // firing. Every write sits behind the write gate.
+            const walk = await walkRowsWithinDeadline(
+              candidateRows,
+              {
+                deadlineAt,
+                rowTimeoutMs: LABEL_ONLY_PASS_ROW_TIMEOUT_MS,
+                maxRows: LABEL_ONLY_PASS_MAX_ROWS_PER_FIRING,
+                slowestRowMs,
+              },
+              async (row, rowStartedAt) => {
+                const r = asRecord(row);
+                const issueId = typeof r.id === "string" ? r.id : null;
+                const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+                if (!issueId) return "settled";
 
-              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
-              if (!described) continue;
-              if (described.hasOperatorPin) continue;
-              const labelTier = tierFromLabels(described.descriptor.labelNames);
-              const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
+                const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
+                if (!described) return "settled";
+                if (described.hasOperatorPin) return "settled";
+                // TOG-5227: backstop for the `assignee_user_id is null`
+                // predicate above — a user-assigned card rejects issues.update
+                // with an agent override ("Issue can only have one assignee").
+                if (described.assigneeUserId) return "settled";
+                const labelTier = tierFromLabels(described.descriptor.labelNames);
+                const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
+                const result = await advise(company.id, { issueId }, false, undefined, false, contextUsageCache);
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                  // A row the walk abandoned must not write even its notice.
+                  if (Date.now() >= deadlineAt) return "unsettled";
+                  ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
+                  // TOG-3111 AC3: a card the router cannot pin must be visible
+                  // on its own activity feed, not just in this worker's log.
+                  await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
+                  return "settled";
+                }
+                const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+                if (
+                  result.decision.modelId === floorModelId &&
+                  isUsableAndCapable(
+                    floorModelId,
+                    tier,
+                    described.descriptor.requiredContextTokens,
+                    config,
+                    laneLedger,
+                    laneOutageOverride,
+                    modelScores,
+                    nowIso,
+                  )
+                ) {
+                  // TOG-3037: elide only while the floor is actually serviceable.
+                  // An implicit NULL-override pin to a dead-lane floor is exactly
+                  // the invariant violation this pass exists to close, and a
+                  // NULL override is invisible to `repinPass` going forward.
+                  ctx.logger.info("label-only pass skipped: pick equals healthy floor", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                  });
+                  return "settled";
+                }
 
-              const result = await advise(company.id, { issueId }, false, undefined, false, contextUsageCache);
-              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
-                ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
-                // TOG-3111 AC3: a card the router cannot pin must be visible
-                // on its own activity feed, not just in this worker's log.
-                await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
-                continue;
-              }
-              const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-              if (
-                result.decision.modelId === floorModelId &&
-                isUsableAndCapable(
-                  floorModelId,
-                  tier,
-                  described.descriptor.requiredContextTokens,
-                  config,
-                  laneLedger,
-                  laneOutageOverride,
-                  modelScores,
-                  nowIso,
-                )
-              ) {
-                // TOG-3037: elide only while the floor is actually serviceable.
-                // An implicit NULL-override pin to a dead-lane floor is exactly
-                // the invariant violation this pass exists to close, and a
-                // NULL override is invisible to `repinPass` going forward.
-                ctx.logger.info("label-only pass skipped: pick equals healthy floor", {
+                // TOG-12206 P2: candidate-carrying recovery (see the apply path).
+                const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+                if (!selectedModel) return "settled";
+                if (Date.now() >= deadlineAt || Date.now() - rowStartedAt >= LABEL_ONLY_PASS_ROW_TIMEOUT_MS) {
+                  // TOG-7123 reopen: this row's own host calls consumed the
+                  // budget — committing the pin now would write a mutation the
+                  // host's RPC response can never carry (the orphaned-write half
+                  // of the 2026-09-28 11:00Z incident), and a row the walk
+                  // abandoned lands here too. Skip the write: the row is
+                  // `unsettled`, the cursor stops before it, and next firing
+                  // re-attempts it from live state. Logger-visible, never
+                  // activity: a skip is routine flow control.
+                  ctx.logger.warn("label-only pass skipped slow row write: row exceeded its time slice", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                    rowDurationMs: Date.now() - rowStartedAt,
+                    rowTimeoutMs: LABEL_ONLY_PASS_ROW_TIMEOUT_MS,
+                  });
+                  return "unsettled";
+                }
+                // TOG-5227: one bad card must not abort the pass (and skip the
+                // scan-mark advance below, re-hitting the same card forever).
+                if (writesAllowed) {
+                  try {
+                    const labelOnlyPatch = modelOverrideForContext({
+                      model: selectedModel,
+                      agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                      compactionRatio: config.selection.compactionRatio,
+                      agentEnv: described.agentEnv,
+                      agentAdapterType: described.agentAdapterType,
+                      agentAdapterConfig: described.agentAdapterConfig,
+                      existingOverrideEnv: described.existingOverrideEnv,
+                      // TOG-3116: haiku-class sub-call keys follow the cheapest
+                      // healthy T3 pick (falls back to the pin when none).
+                      cheapModelId: result.ancillaryModelId,
+                      provenance: fallbackPinProvenance(selectedModel, described.assigneeAgentId),
+                    });
+                    await ctx.issues.update(issueId, labelOnlyPatch as Parameters<typeof ctx.issues.update>[1], company.id);
+                    await recordFallbackPin(company.id, issueId, labelOnlyPatch);
+                  } catch (cause) {
+                    ctx.logger.warn("label-only pass skipped a card it could not pin", {
+                      companyId: company.id,
+                      issue: identifier,
+                      error: cause instanceof Error ? cause.message : String(cause),
+                    });
+                    return "settled";
+                  }
+                } else {
+                  ctx.logger.info("label-only pass advisory: would pin, nothing written", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                    modelId: result.decision.modelId,
+                  });
+                }
+                await ctx.activity.log({
                   companyId: company.id,
-                  issue: identifier,
-                  tier,
+                  message:
+                    result.decision.modelId === floorModelId
+                      ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier}): floor lane unserviceable${advisorySuffix}`
+                      : `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from ${
+                          labelTier ? "the existing tier label" : "the tier floor/default (no tier label present)"
+                        }${advisorySuffix}`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  // TOG-12206 P2: the served leg of the v2 identity (null on legacy).
+                  metadata: { modelId: result.decision.modelId, tier, fromLabel: labelTier !== null, trace: result.decision.trace, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
-                continue;
-              }
-
-              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
-              if (!selectedModel) continue;
-              await ctx.issues.update(
-                issueId,
-                modelOverrideForContext({
-                  model: selectedModel,
-                  fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
-                  compactionRatio: config.selection.compactionRatio,
-                  agentEnv: described.agentEnv,
-                  agentAdapterType: described.agentAdapterType,
-                  agentAdapterConfig: described.agentAdapterConfig,
-                  existingOverrideEnv: described.existingOverrideEnv,
-                }) as Parameters<typeof ctx.issues.update>[1],
-                company.id,
-              );
-              await ctx.activity.log({
+                if (writesAllowed) pinned += 1;
+                return "settled";
+              },
+            );
+            slowestRowMs = walk.slowestRowMs;
+            if (walk.abandoned) {
+              const abandoned = asRecord(walk.abandoned.row);
+              ctx.logger.warn("label-only pass abandoned a slow row at the deadline", {
                 companyId: company.id,
-                message:
-                  result.decision.modelId === floorModelId
-                    ? `Model Selection explicitly pinned ${result.decision.modelId} (${tier}): floor lane unserviceable`
-                    : `Model Selection label-only pinned ${result.decision.modelId} (${tier}) from ${
-                        labelTier ? "the existing tier label" : "the tier floor/default (no tier label present)"
-                      }`,
-                entityType: "issue",
-                entityId: issueId,
-                metadata: { modelId: result.decision.modelId, tier, fromLabel: labelTier !== null, trace: result.decision.trace },
+                issue: typeof abandoned.identifier === "string" ? abandoned.identifier : abandoned.id,
+                rowDurationMs: walk.abandoned.rowDurationMs,
               });
-              pinned += 1;
             }
 
-            await advanceScanMark(
+            await advanceScanCursor(
               company.id,
               PLUGIN_STATE_KEYS.labelOnlyLastScanAt,
               candidateRows,
+              walk.settledPrefix,
               LABEL_ONLY_PASS_FETCH_LIMIT,
               labelOnlyFiringStartMs,
             );
-            ctx.logger.info("label-only pass complete", { companyId: company.id, pinned, candidates: candidateRows.length });
+            ctx.logger.info("label-only pass complete", {
+              companyId: company.id,
+              pinned,
+              candidates: candidateRows.length,
+              examined: walk.examined.length,
+              skippedSlowRows: walk.unsettled,
+              slowestRowMs: walk.slowestRowMs,
+              rowCapHit: walk.rowCapHit,
+              budgetExhausted: walk.budgetExhausted,
+              jobDurationMs: Date.now() - jobStartedAt,
+            });
+            // The row cap is per company; only an exhausted budget ends the
+            // firing for every company after this one.
+            if (walk.budgetExhausted) break;
           } catch (cause) {
             ctx.logger.error("label-only pass failed for a company", {
               companyId: company.id,
@@ -3444,20 +5413,40 @@ export function createPlugin() {
        *
        * TOG-3585: the scheduled job passes its incremental watermark
        * (`sinceIso` + `firingStartMs`) so the scan covers only issues updated
-       * since the last firing. The reactive `agent.run.failed` caller passes
-       * neither — a lane rejection must sweep the full candidate set
-       * immediately, never a cursor-narrowed one.
+       * since the last firing, plus the firing's TOG-11688 `deadlineAt`. The
+       * reactive `agent.run.failed` caller passes none of it — a lane
+       * rejection must sweep the full candidate set immediately, never a
+       * cursor-narrowed or deadline-cut one.
        */
       const runRepinPassForCompany = async (
         companyId: string,
-        incremental?: { sinceIso: string; firingStartMs: number },
-      ): Promise<number> => {
+        incremental?: { sinceIso: string; firingStartMs: number; deadlineAt: number; slowestRowMs: number },
+      ): Promise<{ repinned: number; budgetExhausted: boolean; slowestRowMs: number }> => {
         const company = { id: companyId };
         let repinnedTotal = 0;
+        let budgetExhausted = false;
+        let repinSlowestRowMs = incremental?.slowestRowMs ?? 0;
         {
           try {
             const config = await companyConfig(company.id);
-            if (!config.classification.enabled) return 0;
+            if (!config.classification.enabled) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };
+            // TOG-11793: the repin passes (scheduled and `agent.run.failed`)
+            // are retired once run-scoped decisions are live: capacity is read
+            // at the next run boundary instead.
+            if (runResolveActive(config)) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };
+            // TOG-12431: advisory installs walk the same rows and log the
+            // same decisions, but write no override.
+            const writesAllowed = selectionWritesAllowed(config);
+            const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
+            // TOG-11688: this pass had NO job budget — it walked up to 400
+            // fetched rows bounded only by the 6-write cap, and failed 2/24
+            // firings at 301 s over the last 4 h. The scheduled caller passes
+            // the firing's deadline (200 s beneath the host's 300 s wall);
+            // the reactive `agent.run.failed` caller passes none (a lane
+            // rejection must sweep the full candidate set immediately), so it
+            // keeps the old unbounded shape.
+            const repinJobStartedAt = Date.now();
+            const repinDeadlineAt: number | null = incremental ? incremental.deadlineAt : null;
 
             const candidateRows = (await ctx.db.query(
               `select i.id::text as id,
@@ -3488,13 +5477,16 @@ export function createPlugin() {
                 since: incremental.sinceIso,
               });
               await writeScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt, incremental.firingStartMs);
-              return 0;
+              return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };
             }
 
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const modelScores = await readModelScores(company.id);
             const nowIso = new Date().toISOString();
+            const nowMs = Date.parse(nowIso);
+            // TOG-6895: the pin lifecycle's clock, read once per pass.
+            const pinPinnedAt = await readPinPinnedAt(company.id);
 
             // TOG-2862. One memo per company per pass: `advise` re-describes
             // the rows that survive the cheap rejections, and without this it
@@ -3502,108 +5494,275 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let repinned = 0;
-            // TOG-3585: rows this loop actually reached, for the watermark
-            // fix below — a `break` on the write limit must not be mistaken
-            // for having examined every fetched row.
-            const examinedRows: unknown[] = [];
-            let brokeEarly = false;
-            for (const row of candidateRows) {
-              if (repinned >= REPIN_PASS_WRITE_LIMIT) {
-                brokeEarly = true;
-                break;
-              }
-              examinedRows.push(row);
-              const r = asRecord(row);
-              const issueId = typeof r.id === "string" ? r.id : null;
-              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) continue;
+            // TOG-11688: the write gate. A row whose own host calls consumed
+            // the budget — or burned more than its own row slice, same
+            // per-row-slice half as the label-only and balance gates —
+            // commits no mutation past the deadline: the orphaned-write half
+            // of the incident, and what stops a row the walk abandoned from
+            // committing. The row is `unsettled`: the cursor stops before it
+            // and next firing re-attempts it from live state. No deadline
+            // (reactive path) never gates.
+            const rowSliceSpent = (rowStartedAt: number): boolean =>
+              repinDeadlineAt !== null &&
+              (Date.now() >= repinDeadlineAt || Date.now() - rowStartedAt >= REPIN_PASS_ROW_TIMEOUT_MS);
+            // TOG-11688: the shared hard-return walk (`row-walk.ts`). The
+            // WHOLE row body — describe, the clear-on-blocked write, the
+            // context measurement and the advise — races the remaining
+            // budget; `deadlineAt: null` (reactive path) walks unbounded.
+            const walk = await walkRowsWithinDeadline(
+              candidateRows,
+              {
+                deadlineAt: repinDeadlineAt,
+                rowTimeoutMs: REPIN_PASS_ROW_TIMEOUT_MS,
+                slowestRowMs: incremental?.slowestRowMs,
+              },
+              async (row, rowStartedAt) => {
+                const r = asRecord(row);
+                const issueId = typeof r.id === "string" ? r.id : null;
+                const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+                if (!issueId) return "settled";
 
-              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
-              if (!described) continue;
-              if (described.hasOperatorPin) continue;
-              const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
+                const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
+                if (!described) return "settled";
+                // TOG-11592 (#457, merged): preserve manual pins and active
+                // runs with the idle guard — a non-idle card is not repinnable.
+                if (described.hasOperatorPin || !described.isIdle) return "settled";
+                const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
-              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
-              // First point in the pass that actually needs the measurement —
-              // every candidate rejected above cost zero `heartbeat_runs` reads.
-              const usage = await described.contextUsage();
-              const contextEstimate = estimateIssueContext({
-                lastRunInputTokens: usage.lastRunInputTokens,
-                lastRunCachedInputTokens: usage.lastRunCachedInputTokens,
-                fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
-              });
-              described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
-              if (
-                isUsableAndCapable(
-                  pinnedModelId,
-                  tier,
-                  described.descriptor.requiredContextTokens,
-                  config,
-                  laneLedger,
-                  laneOutageOverride,
-                  modelScores,
-                  nowIso,
-                )
-              ) {
-                continue;
-              }
-
-              const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);
-              if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
-              if (result.decision.modelId === pinnedModelId) continue;
-              if (
-                !isUsableAndCapable(
-                  result.decision.modelId,
-                  tier,
-                  described.descriptor.requiredContextTokens,
-                  config,
-                  laneLedger,
-                  laneOutageOverride,
-                  modelScores,
-                  nowIso,
-                )
-              ) {
-                continue;
-              }
-
-              const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
-              if (!selectedModel) continue;
-              await ctx.issues.update(
-                issueId,
-                modelOverrideForContext({
-                  model: selectedModel,
+                const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+                // TOG-6895 (a) clear-on-blocked: a blocked card needs no lane
+                // reservation — clear the pin instead of re-pinning it. Runs
+                // before the usability check so a blocked card never spends
+                // the advise call either. Operator pins are already exempt
+                // above; the write shares REPIN_PASS_WRITE_LIMIT with repins.
+                if (described.status === "blocked") {
+                  if (rowSliceSpent(rowStartedAt)) {
+                    ctx.logger.warn("repin pass skipped slow row write: row exceeded its time slice", {
+                      companyId: company.id,
+                      issue: identifier,
+                      tier,
+                      rowDurationMs: Date.now() - rowStartedAt,
+                      rowTimeoutMs: REPIN_PASS_ROW_TIMEOUT_MS,
+                    });
+                    return "unsettled";
+                  }
+                  // TOG-12431: clearing a pin mutates a selection variable like
+                  // any other write — advisory reports it without doing it.
+                  if (writesAllowed) {
+                    await ctx.issues.update(
+                      issueId,
+                      { assigneeAdapterOverrides: null } as Parameters<typeof ctx.issues.update>[1],
+                      company.id,
+                    );
+                    await recordPinTimestamp(company.id, issueId, null);
+                    await recordFallbackPin(company.id, issueId, null);
+                  } else {
+                    ctx.logger.info("repin pass advisory: would clear pin, nothing written", {
+                      companyId: company.id,
+                      issue: identifier,
+                      tier,
+                    });
+                  }
+                  await ctx.activity.log({
+                    companyId: company.id,
+                    message: `Model Selection cleared pin on ${identifier ?? issueId} (blocked): lane reservation released${advisorySuffix}`,
+                    entityType: "issue",
+                    entityId: issueId,
+                    metadata: { from: pinnedModelId, modelId: null, tier, reason: "clear-on-blocked", ...(writesAllowed ? {} : { advisory: true, written: false }) },
+                  });
+                  if (writesAllowed) repinned += 1;
+                  return repinned >= REPIN_PASS_WRITE_LIMIT ? "stop" : "settled";
+                }
+                // First point in the pass that actually needs the measurement —
+                // every candidate rejected above cost zero `heartbeat_runs` reads.
+                const usage = await described.contextUsage(config.selection.contextRunLogRoot);
+                const contextEstimate = estimateIssueContext({
+                  lastRunPeakTokens: usage.lastRunPeakTokens,
+                  history: usage.history,
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
-                  compactionRatio: config.selection.compactionRatio,
-                  agentEnv: described.agentEnv,
-                  agentAdapterType: described.agentAdapterType,
-                  agentAdapterConfig: described.agentAdapterConfig,
-                  existingOverrideEnv: described.existingOverrideEnv,
-                }) as Parameters<typeof ctx.issues.update>[1],
-                company.id,
-              );
-              await ctx.activity.log({
+                });
+                described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
+                // TOG-6895 (b) 24h expiry: a stale pin is re-validated through
+                // `advise` even when the pinned lane still reads usable. Only
+                // the usability early return is skipped — everything below
+                // (fresh advise, same-model no-op, capability re-check) still
+                // applies, so expiry can only ever re-affirm or move the pin,
+                // never blank it.
+                const pinExpired = isPinExpired(pinPinnedAt, issueId, nowMs);
+                // TOG-11593: a usable fallback-only pin must not ride the
+                // usability `return` below forever. While every normal lane
+                // is down the fallback is the right place to be (and holding
+                // it costs zero advise calls); once any non-fallback model is
+                // usable and capable at this tier again, fall through to the
+                // guarded advise path so the card moves back. The advise,
+                // same-model, capability, and write-safety gates below stay
+                // the deciders — this only re-opens the question.
+                const pinnedIsFallbackOnly =
+                  config.models.find((model) => model.id === pinnedModelId)?.fallbackOnly === true;
+                const hasRecoveredNormal =
+                  pinnedIsFallbackOnly &&
+                  config.models.some(
+                    (model) =>
+                      !model.fallbackOnly &&
+                      isUsableAndCapable(
+                        model.id,
+                        tier,
+                        described.descriptor.requiredContextTokens,
+                        config,
+                        laneLedger,
+                        laneOutageOverride,
+                        modelScores,
+                        nowIso,
+                      ),
+                  );
+                if (
+                  !pinExpired &&
+                  !hasRecoveredNormal &&
+                  isUsableAndCapable(
+                    pinnedModelId,
+                    tier,
+                    described.descriptor.requiredContextTokens,
+                    config,
+                    laneLedger,
+                    laneOutageOverride,
+                    modelScores,
+                    nowIso,
+                  )
+                ) {
+                  return "settled";
+                }
+
+                // TOG-11592 (#457, merged): carry the tier into advise so a
+                // deliberate repin keeps the caller's effective tier even
+                // when the old pin's lane is dead.
+                const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
+                if (result.decision.modelId === pinnedModelId) {
+                  // TOG-6895 (b): an expired pin the fresh advise re-affirms is
+                  // still alive — re-stamp it so the next pass does not pay
+                  // for the same re-validation again. No issue write, so no
+                  // write-limit cost; still no write past the deadline.
+                  if (pinExpired) {
+                    if (repinDeadlineAt !== null && Date.now() >= repinDeadlineAt) return "unsettled";
+                    await recordPinTimestamp(company.id, issueId, nowIso);
+                  }
+                  return "settled";
+                }
+                if (
+                  !isUsableAndCapable(
+                    result.decision.modelId,
+                    tier,
+                    described.descriptor.requiredContextTokens,
+                    config,
+                    laneLedger,
+                    laneOutageOverride,
+                    modelScores,
+                    nowIso,
+                  )
+                ) {
+                  return "settled";
+                }
+
+                // TOG-12206 P2: candidate-carrying recovery (see the apply path).
+                const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+                if (!selectedModel) return "settled";
+                // TOG-11593: recovery moves back to a normal lane, never
+                // sideways to another fallback-only row — that churn buys no
+                // recovery. Re-stamp an expired pin so the sideways case does
+                // not re-pay advise on every pass, mirroring the same-model
+                // branch above.
+                if (pinnedIsFallbackOnly && selectedModel.fallbackOnly) {
+                  if (pinExpired) {
+                    if (repinDeadlineAt !== null && Date.now() >= repinDeadlineAt) return "unsettled";
+                    await recordPinTimestamp(company.id, issueId, nowIso);
+                  }
+                  return "settled";
+                }
+                if (rowSliceSpent(rowStartedAt)) {
+                  // (order: deadline first — a spent row never pays the
+                  // re-read below; both guards skip the write.)
+                  ctx.logger.warn("repin pass skipped slow row write: row exceeded its time slice", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                    rowDurationMs: Date.now() - rowStartedAt,
+                    rowTimeoutMs: REPIN_PASS_ROW_TIMEOUT_MS,
+                  });
+                  return "unsettled";
+                }
+                // TOG-11592 (#457, merged): final write-safety re-read — the
+                // pin must still be safe after the row's own host calls.
+                if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) return "settled";
+                // TOG-12431: the write needs enforcement; the decision and its
+                // log do not.
+                if (writesAllowed) {
+                  const repinPatch = modelOverrideForContext({
+                    model: selectedModel,
+                    agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                    compactionRatio: config.selection.compactionRatio,
+                    agentEnv: described.agentEnv,
+                    agentAdapterType: described.agentAdapterType,
+                    agentAdapterConfig: described.agentAdapterConfig,
+                    existingOverrideEnv: described.existingOverrideEnv,
+                    cheapModelId: result.ancillaryModelId,
+                    provenance: fallbackPinProvenance(selectedModel, described.assigneeAgentId),
+                  });
+                  await ctx.issues.update(issueId, repinPatch as Parameters<typeof ctx.issues.update>[1], company.id);
+                  await recordPinTimestamp(company.id, issueId, nowIso);
+                  await recordFallbackPin(company.id, issueId, repinPatch);
+                } else {
+                  ctx.logger.info("repin pass advisory: would re-pin, nothing written", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                    from: pinnedModelId,
+                    modelId: result.decision.modelId,
+                  });
+                }
+                await ctx.activity.log({
+                  companyId: company.id,
+                  message: `Model Selection re-pinned ${pinnedModelId} -> ${result.decision.modelId} (${tier}): ${pinExpired ? "pin expired, re-validated" : hasRecoveredNormal ? "fallback lane recovered; normal lane serviceable again" : "lane unusable or measurably demoted"}${advisorySuffix}`,
+                  entityType: "issue",
+                  entityId: issueId,
+                  // TOG-12206 P2: the served leg of the v2 identity (null on legacy).
+                  metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, trace: result.decision.trace, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
+                });
+                if (writesAllowed) repinned += 1;
+                return repinned >= REPIN_PASS_WRITE_LIMIT ? "stop" : "settled";
+              },
+            );
+            repinSlowestRowMs = walk.slowestRowMs;
+            if (walk.abandoned) {
+              const abandoned = asRecord(walk.abandoned.row);
+              ctx.logger.warn("repin pass abandoned a slow row at the deadline", {
                 companyId: company.id,
-                message: `Model Selection re-pinned ${pinnedModelId} -> ${result.decision.modelId} (${tier}): lane unusable or measurably demoted`,
-                entityType: "issue",
-                entityId: issueId,
-                metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, trace: result.decision.trace },
+                issue: typeof abandoned.identifier === "string" ? abandoned.identifier : abandoned.id,
+                rowDurationMs: walk.abandoned.rowDurationMs,
               });
-              repinned += 1;
-              void identifier;
             }
 
             repinnedTotal = repinned;
+            budgetExhausted = walk.budgetExhausted;
             if (incremental) {
-              await advanceScanMark(
+              await advanceScanCursor(
                 company.id,
                 PLUGIN_STATE_KEYS.repinLastScanAt,
-                examinedRows,
+                candidateRows,
+                walk.settledPrefix,
                 REPIN_PASS_FETCH_LIMIT,
                 incremental.firingStartMs,
-                !brokeEarly,
               );
             }
-            ctx.logger.info("repin pass complete", { companyId: company.id, repinned, candidates: candidateRows.length });
+            ctx.logger.info("repin pass complete", {
+              companyId: company.id,
+              repinned,
+              candidates: candidateRows.length,
+              examined: walk.examined.length,
+              skippedSlowRows: walk.unsettled,
+              slowestRowMs: walk.slowestRowMs,
+              budgetExhausted: walk.budgetExhausted,
+              jobDurationMs: Date.now() - repinJobStartedAt,
+            });
           } catch (cause) {
             ctx.logger.error("repin pass failed for a company", {
               companyId: company.id,
@@ -3611,18 +5770,269 @@ export function createPlugin() {
             });
           }
         }
-        return repinnedTotal;
+        return { repinned: repinnedTotal, budgetExhausted, slowestRowMs: repinSlowestRowMs };
+      };
+
+      /**
+       * TOG-12234 (TOG-11780 §7 item 4). The fallback lease.
+       *
+       * A pin on a `fallbackOnly` model is a stopgap taken because no regular
+       * model was serviceable. The repin pass leaves a usable pin alone for
+       * 24 h (`PIN_MAX_AGE_MS`), so without this a card stays on the fallback
+       * for up to a day after its primary comes back. This pass re-decides a
+       * stamped fallback pin as soon as some regular model for its tier is
+       * serviceable again, and touches nothing else: it walks only the
+       * stamped-issue index (never all open issues, TOG-11688), examines at
+       * most `FALLBACK_LEASE_EXAMINE_LIMIT` entries, least recently checked
+       * first, and writes at most `FALLBACK_LEASE_WRITE_LIMIT` pins.
+       *
+       * An entry whose issue is gone, closed, operator-held, no longer on a
+       * roster model, or carries a different stamp than the index recorded
+       * (re-pinned since, or never stamped) is dropped: the stamp on the
+       * issue is the authority, the index only points at it.
+       */
+      const runFallbackLeasePass = async (companyId: string): Promise<number> => {
+        let released = 0;
+        try {
+          const indexed = Object.entries(await readFallbackPins(companyId));
+          if (indexed.length === 0) return 0;
+          const config = await companyConfig(companyId);
+          if (!config.classification.enabled) return 0;
+          // TOG-12431: the lease release re-pins the card off the fallback,
+          // so it takes the same single gate as every other override write.
+          // Advisory installs walk the index and log the release; the lease
+          // holds (the pin and its index entry stay, the visit is recorded).
+          const writesAllowed = selectionWritesAllowed(config);
+          const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
+
+          const laneLedger = await readLaneLedger(companyId);
+          const laneOutageOverride = await readLaneOutage(companyId);
+          const modelScores = await readModelScores(companyId);
+          const nowIso = new Date().toISOString();
+          const contextUsageCache: ContextUsageCache = new Map();
+          const primaries = applyDerivedTiers(config.models, modelScores).filter(
+            (model) => model.enabled && !model.fallbackOnly,
+          );
+
+          const dropped = new Map<string, string>();
+          const checked = new Map<string, string>();
+          indexed.sort(
+            ([, a], [, b]) =>
+              (a.checkedAt ?? "").localeCompare(b.checkedAt ?? "") || a.decidedAt.localeCompare(b.decidedAt),
+          );
+          for (const [issueId, entry] of indexed.slice(0, FALLBACK_LEASE_EXAMINE_LIMIT)) {
+            if (released >= FALLBACK_LEASE_WRITE_LIMIT) break;
+            const described = await describeIssue(companyId, issueId, {}, contextUsageCache);
+            const stamp = described ? readPinProvenance(described.existingOverrideEnv) : null;
+            const pinnedModelId = described
+              ? resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models)
+              : null;
+            if (
+              !described ||
+              stamp?.decisionId !== entry.decisionId ||
+              !pinnedModelId ||
+              described.hasOperatorPin ||
+              !balanceOpenStatuses.has(described.status)
+            ) {
+              dropped.set(issueId, entry.decisionId);
+              continue;
+            }
+            checked.set(issueId, entry.decisionId);
+            // Blocked cards are the repin pass's: it releases their pin.
+            if (!described.isIdle || described.status === "blocked") continue;
+
+            const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
+            const usage = await described.contextUsage(config.selection.contextRunLogRoot);
+            described.descriptor.requiredContextTokens =
+              estimateIssueContext({
+                lastRunPeakTokens: usage.lastRunPeakTokens,
+                history: usage.history,
+                fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+              }).tokens ?? undefined;
+            const usable = (modelId: string) =>
+              isUsableAndCapable(
+                modelId,
+                tier,
+                described.descriptor.requiredContextTokens,
+                config,
+                laneLedger,
+                laneOutageOverride,
+                modelScores,
+                nowIso,
+              );
+            // The lease holds while no regular model can take the card.
+            if (!primaries.some((model) => usable(model.id))) continue;
+
+            const result = await advise(companyId, { issueId }, false, tier, true, contextUsageCache);
+            if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
+            const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
+            if (!selectedModel || selectedModel.fallbackOnly || selectedModel.id === pinnedModelId) continue;
+            if (!usable(selectedModel.id)) continue;
+            if (!(await balanceWriteStillSafe(companyId, issueId, pinnedModelId, config.models))) continue;
+
+            const patch = modelOverrideForContext({
+              model: selectedModel,
+              agentEnvContextTokens: config.selection.agentEnvContextTokens,
+              compactionRatio: config.selection.compactionRatio,
+              agentEnv: described.agentEnv,
+              agentAdapterType: described.agentAdapterType,
+              agentAdapterConfig: described.agentAdapterConfig,
+              existingOverrideEnv: described.existingOverrideEnv,
+              cheapModelId: result.ancillaryModelId,
+              provenance: null,
+            });
+            // TOG-12431: `advise` already refuses advisory decisions for
+            // writes that flow through `planApply`; this pass writes
+            // directly, so it honors the same gate here. The index entry is
+            // dropped only with the write: an unwritten release keeps the
+            // lease findable, and the visit is still recorded via `checked`.
+            if (writesAllowed) {
+              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
+              dropped.set(issueId, entry.decisionId);
+              await recordPinTimestamp(companyId, issueId, nowIso);
+            } else {
+              ctx.logger.info("fallback lease pass advisory: would release the fallback pin, nothing written", {
+                companyId,
+                issue: described.identifier ?? issueId,
+                from: pinnedModelId,
+                modelId: selectedModel.id,
+                tier,
+              });
+            }
+            await ctx.activity.log({
+              companyId,
+              message: `Model Selection moved ${described.identifier ?? issueId} off fallback ${pinnedModelId} -> ${selectedModel.id} (${tier}): primary serviceable again${advisorySuffix}`,
+              entityType: "issue",
+              entityId: issueId,
+              metadata: {
+                from: pinnedModelId,
+                modelId: selectedModel.id,
+                tier,
+                decisionId: entry.decisionId,
+                reason: "fallback-lease",
+                trace: result.decision.trace,
+                ...(writesAllowed ? {} : { advisory: true, written: false }),
+              },
+            });
+            if (writesAllowed) released += 1;
+          }
+
+          // Apply this pass's edits to a fresh read, and only to entries that
+          // still describe the decision this pass saw: a pin written while the
+          // pass ran keeps its new entry.
+          const latest = await readFallbackPins(companyId);
+          for (const [issueId, decisionId] of dropped) {
+            if (latest[issueId]?.decisionId === decisionId) delete latest[issueId];
+          }
+          for (const [issueId, decisionId] of checked) {
+            const current = latest[issueId];
+            if (current?.decisionId === decisionId) current.checkedAt = nowIso;
+          }
+          await ctx.state.set(fallbackPinsKey(companyId), latest);
+          ctx.logger.info("fallback lease pass complete", { companyId, released, indexed: indexed.length });
+        } catch (cause) {
+          ctx.logger.error("fallback lease pass failed for a company", {
+            companyId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+        return released;
       };
 
       ctx.jobs.register(JOB_KEYS.repinPass, async () => {
+        // TOG-11688: ONE budget for the whole firing — the host's 300 s
+        // `runJob` wall covers the firing, not a company.
+        const jobStartedAt = Date.now();
+        const deadlineAt = jobStartedAt + REPIN_PASS_JOB_BUDGET_MS;
+        // Admission is 1.5x the slowest row of the FIRING: it carries across companies.
+        let slowestRowMs = 0;
         for (const company of listKnownCompanies()) {
+          if (Date.now() >= deadlineAt) {
+            ctx.logger.warn("repin pass stopped before the host RPC wall", {
+              companyId: company.id,
+              jobDurationMs: Date.now() - jobStartedAt,
+            });
+            break;
+          }
           // TOG-3585: the scheduled firing scans incrementally; the reactive
           // `agent.run.failed` caller below passes no cursor (full sweep).
           const firingStartMs = Date.now();
           const sinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt)).toISOString();
-          await runRepinPassForCompany(company.id, { sinceIso, firingStartMs });
+          const sweep = await runRepinPassForCompany(company.id, { sinceIso, firingStartMs, deadlineAt, slowestRowMs });
+          slowestRowMs = sweep.slowestRowMs;
+          if (sweep.budgetExhausted) break;
+          // TOG-12234: independent of the incremental scan, which skips a
+          // firing when no issue changed; a lane recovering changes no issue.
+          await runFallbackLeasePass(company.id);
         }
       });
+
+      // TOG-12305 / TOG-11869 Class B. An override `env` REPLACES the
+      // assignee's env wholesale (host `mergeModelProfileAdapterConfig`), so a
+      // pin written while the assignee carried a secret binding it has since
+      // lost keeps naming that ref. The host then refuses every run on the card
+      // with `configuration_incomplete` before a session starts, and rule 2 of
+      // `planApply` (never touch an existing override) kept the pin poisoned
+      // until a human cleared it. A failed run with that code is the evidence;
+      // this rebuilds the override env from the CURRENT assignee env on the
+      // SAME model. It never changes the model and never writes in advisory.
+      // Idempotent: after one repair no stale key remains, so a second failure
+      // for an unrelated missing binding writes nothing.
+      const repairPinEnvAfterConfigFailure = async (
+        companyId: string,
+        issueId: string,
+        runId: string | null,
+      ): Promise<void> => {
+        let result: Awaited<ReturnType<typeof advise>>;
+        try {
+          result = await advise(companyId, { issueId }, false);
+        } catch {
+          return;
+        }
+        if (!result || !result.hasOverride || result.decision.advisory) return;
+        const staleSecretRefKeys = staleOverrideSecretRefKeys(result.existingOverrideEnv, result.agentEnv);
+        const plan = planEnvRepair({ pinnedModelId: result.pinnedModelId, staleSecretRefKeys }, issueId);
+        if (!plan?.modelId) return;
+        const pinnedModel = result.config.models.find((model) => model.id === plan.modelId);
+        if (!pinnedModel) {
+          ctx.logger.warn("pin env repair skipped: pinned model is absent from the resolved roster", {
+            companyId,
+            issueId,
+            modelId: plan.modelId,
+          });
+          return;
+        }
+        const patch: IssueUpdatePatch = modelOverrideForContext({
+          model: pinnedModel,
+          agentEnvContextTokens: result.config.selection.agentEnvContextTokens,
+          compactionRatio: result.config.selection.compactionRatio,
+          agentEnv: result.agentEnv,
+          agentAdapterType: result.agentAdapterType,
+          agentAdapterConfig: result.agentAdapterConfig,
+          existingOverrideEnv: result.existingOverrideEnv,
+          cheapModelId: result.ancillaryModelId,
+        });
+        try {
+          await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
+        } catch (cause) {
+          // TOG-5227: a card with a user assignee rejects an agent override.
+          ctx.logger.warn("pin env repair write rejected", {
+            companyId,
+            issueId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+          return;
+        }
+        await ctx.activity.log({
+          companyId,
+          message:
+            `Model Selection repaired the env of its ${plan.modelId} pin on this issue (model unchanged): `
+            + `a run failed configuration_incomplete on secret refs the assignee no longer carries.`,
+          entityType: "issue",
+          entityId: issueId,
+          metadata: { modelId: plan.modelId, staleSecretRefKeys, runId, trigger: "agent.run.failed" },
+        });
+      };
 
       // --- TOG-3012: immediate lane quarantine from a rejected run ----------
       //
@@ -3658,6 +6068,19 @@ export function createPlugin() {
           return;
         }
         if (config.models.length === 0) return;
+
+        // TOG-12305. A binding refusal is never a lane-capacity verdict, so it
+        // takes its own path and skips the lane read below entirely.
+        if (payload.errorCode === "configuration_incomplete") {
+          if (issueId) {
+            await repairPinEnvAfterConfigFailure(
+              companyId,
+              issueId,
+              typeof payload.runId === "string" ? payload.runId : null,
+            );
+          }
+          return;
+        }
 
         // Only consulted for rejections that name no model (an `errorCode`-only
         // `usage_limit_reached`). Read lazily so an ordinary run failure —
@@ -3723,7 +6146,7 @@ export function createPlugin() {
           },
         });
 
-        const repinned = await runRepinPassForCompany(companyId);
+        const { repinned } = await runRepinPassForCompany(companyId);
         ctx.logger.info("lane quarantine repin complete", { companyId, laneId: verdict.laneId, repinned });
       });
 
@@ -3741,6 +6164,9 @@ export function createPlugin() {
         const companies = listKnownCompanies();
         const jobStartedAt = Date.now();
         const deadlineAt = jobStartedAt + BALANCE_PASS_JOB_BUDGET_MS;
+        // TOG-11688: admission is 1.5x the slowest row of the FIRING, so the
+        // slowest row carries from one company's walk into the next.
+        let slowestRowMs = 0;
         for (const company of companies) {
           if (Date.now() >= deadlineAt) {
             ctx.logger.warn("balance pass stopped before the host RPC wall", {
@@ -3754,6 +6180,15 @@ export function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
+            // TOG-11793: retired once run-scoped decisions are live.
+            if (runResolveActive(config)) {
+              ctx.logger.info("balance pass skipped: run-scoped model decisions are live", { companyId: company.id });
+              continue;
+            }
+            // TOG-12431: advisory installs walk the same rows and log the
+            // same decisions, but write no override.
+            const writesAllowed = selectionWritesAllowed(config);
+            const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
 
             // TOG-3585: incremental gate — one aggregate row before the page
             // fetch. When nothing in the candidate statuses changed since the
@@ -3777,6 +6212,10 @@ export function createPlugin() {
                   `select max(updated_at) as max_updated
                      from issues
                     where company_id = $1
+                      -- TOG-5227: the gate watches routable cards only, so a
+                      -- user-assigned card changing cannot force a cycle that
+                      -- would only skip it again.
+                      and assignee_user_id is null
                       and status in ('todo','in_progress','blocked','in_review')`,
                   [company.id],
                 )) as unknown[];
@@ -3816,6 +6255,10 @@ export function createPlugin() {
                   and i.id::text > $2
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
+                  -- TOG-5227: a user-assigned card rejects issues.update
+                  -- with an agent override ("Issue can only have one
+                  -- assignee"), which used to abort the whole pass.
+                  and i.assignee_user_id is null
                 order by i.id::text asc
                 limit $3`,
               [company.id, afterId, String(BALANCE_PASS_FETCH_LIMIT)],
@@ -3834,189 +6277,365 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let balanced = 0;
-            let scanned = 0;
-            let lastScannedId = afterId;
-            let budgetExhausted = false;
-            for (const row of candidateRows) {
-              if (balanced >= BALANCE_PASS_WRITE_LIMIT) break;
-              if (Date.now() >= deadlineAt) {
-                budgetExhausted = true;
-                break;
-              }
-              const r = asRecord(row);
-              const issueId = typeof r.id === "string" ? r.id : null;
-              const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
-              if (!issueId) continue;
-              scanned += 1;
-              lastScannedId = issueId;
-              if (activeRunIssueIds.has(issueId)) continue;
+            // TOG-12258 pace-pull: per-pass, per-target-lane move accounting.
+            // `pacePullWeights` is the active-pins weight snapshot the free-
+            // slot caps are computed from, read lazily on the first pace-pull
+            // candidate so passes with no behind lane pay no extra query;
+            // `pacePullMoved` counts committed pace-pull writes per target lane
+            // so the pass stops pulling toward a lane once its free slots at
+            // first sight are spent.
+            let pacePullWeights: Record<string, number> | null = null;
+            let pacePullZaiMargin: number | null = null;
+            const pacePullFreeSlots = new Map<string, number>();
+            const pacePullMoved = new Map<string, number>();
+            // TOG-11688: the whole row body runs inside the shared walk
+            // (`row-walk.ts`) — adaptive admission (remaining budget must
+            // cover the fixed slice AND 1.5x the slowest row this firing), a
+            // HARD RETURN racing every host call of the row (describe,
+            // advise, the probation/over-cap/evidence reads) against the job
+            // deadline, and the write gate below, which also stops an
+            // abandoned row's body from committing after the timer won.
+            const isPastWriteDeadline = (rowStartedAt: number): boolean =>
+              Date.now() >= deadlineAt || Date.now() - rowStartedAt >= BALANCE_PASS_ROW_TIMEOUT_MS;
+            const walk = await walkRowsWithinDeadline(
+              candidateRows,
+              { deadlineAt, rowTimeoutMs: BALANCE_PASS_ROW_TIMEOUT_MS, slowestRowMs },
+              async (row, rowStartedAt) => {
+                const r = asRecord(row);
+                const issueId = typeof r.id === "string" ? r.id : null;
+                const identifier = typeof r.identifier === "string" ? r.identifier : issueId;
+                if (!issueId) return "settled";
+                if (activeRunIssueIds.has(issueId)) return "settled";
 
-              const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
-              if (!described) continue;
-              if (!balanceOpenStatuses.has(described.status)) continue;
-              if (!described.isIdle) continue;
-              if (described.hasOperatorPin) continue;
-              const status = described.status;
-              const labelTier = tierFromLabels(described.descriptor.labelNames);
-              const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
-              const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : undefined;
-              // TOG-3024: the unpinned branch below force-pins T1 for a
-              // *recorded* former-exclusion judgement (an explicit tier:*
-              // label with no pin yet) — that is a floor-lift, not a
-              // rebalance, and must stay gated on an actual label rather than
-              // defaulting every bare unpinned+unlabelled idle card straight
-              // to T1. Only the pinned branch gets the tierWithFallback
-              // treatment: a card that already has a pin just needs SOME
-              // tier bucket to run its capability/cost checks against, same
-              // as labelOnlyPass/repinPass.
-              if (!labelTier && !pinnedModelId) continue;
-              const tier = labelTier ?? tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
-
-              if (pinnedModelId && pinnedModel) {
-                const currentUtilization = pinnedModel.laneId
-                  ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId)
-                  : null;
-                const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);
-                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) continue;
-                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
-                if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) continue;
-                if (result.decision.modelId === pinnedModelId) continue;
-                const newModel = config.models.find((m) => m.id === result.decision.modelId);
-                if (!newModel) continue;
-                const newUtilization = newModel.laneId ? laneEffectiveUtilization(laneLedger, newModel.laneId) : null;
-
-                const cheaper = blendedListPrice(newModel) <= BALANCE_PASS_COST_DOWN_MULTIPLIER * blendedListPrice(pinnedModel);
-                const pinnedScore = modelScores[pinnedModelId]?.tiers[tier];
-                let incapable = pinnedScore ? pinnedScore.capable === false : false;
-
-                // `probation` (balance_pass()): a pinned model priced under
-                // BALANCE_PASS_PROBATION_PRICE_USD and still unproven may hold
-                // only ONE active card company-wide — the exploration slot —
-                // before it is demoted. Only worth the extra DB round trip
-                // when the cheaper/incapable checks above have not already
-                // decided this row.
-                if (
-                  !incapable &&
-                  blendedListPrice(pinnedModel) < BALANCE_PASS_PROBATION_PRICE_USD &&
-                  !(pinnedScore?.proven ?? false)
-                ) {
-                  const activeCount = await countActivePinsOfModel(company.id, pinnedModelId);
-                  if (activeCount > 1) incapable = true;
-                }
-
-                // `over_cap`: this card's own lane no longer has room for it
-                // (extra: -1 because this card already counts itself in the
-                // ledger's active-pins weight) — only checked for todo/
-                // in_progress, matching the Python source's `status in
-                // ("todo","in_progress")` guard.
-                if (
-                  !incapable &&
-                  (status === "todo" || status === "in_progress") &&
-                  pinnedModel.laneId &&
-                  config.pacing.mode !== "off"
-                ) {
-                  const pinsWeightByLane = await activePinsWeightByLane(company.id, config.models);
-                  const admitted = laneHasRoom({
-                    laneId: pinnedModel.laneId,
-                    activePinsWeight: pinsWeightByLane[pinnedModel.laneId] ?? 0,
-                    extra: -1,
-                    ledger: laneLedger,
-                    capPerAccount: config.pacing.laneCapPerAccount,
-                    fiveHourWindowName: config.pacing.fiveHourWindowName,
-                    zaiLaneId: config.pacing.zai.laneId,
-                    zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
-                    zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
-                    zaiPaceOverrideMargin: null,
-                    nowMs: now,
+                const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
+                if (!described) return "settled";
+                if (!balanceOpenStatuses.has(described.status)) return "settled";
+                if (!described.isIdle) return "settled";
+                if (described.hasOperatorPin) return "settled";
+                // TOG-5227: backstop for the `assignee_user_id is null`
+                // predicate above — a user-assigned card rejects issues.update
+                // with an agent override ("Issue can only have one assignee").
+                if (described.assigneeUserId) return "settled";
+                const status = described.status;
+                const labelTier = tierFromLabels(described.descriptor.labelNames);
+                const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
+                const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : undefined;
+                // TOG-3024: the unpinned branch below force-pins T1 for a
+                // *recorded* former-exclusion judgement (an explicit tier:*
+                // label with no pin yet) — that is a floor-lift, not a
+                // rebalance, and must stay gated on an actual label rather than
+                // defaulting every bare unpinned+unlabelled idle card straight
+                // to T1. Only the pinned branch gets the tierWithFallback
+                // treatment: a card that already has a pin just needs SOME
+                // tier bucket to run its capability/cost checks against, same
+                // as labelOnlyPass/repinPass.
+                if (!labelTier && !pinnedModelId) return "settled";
+                const tier = labelTier ?? tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
+                // A row that went slow anyway commits no routing mutation:
+                // `unsettled` (still examined, so the id-cycle passes it and
+                // re-reads its live state when the cycle wraps, with no hot
+                // loop on one slow card).
+                const skipSlowWrite = (logTier: string): "unsettled" => {
+                  ctx.logger.warn("balance pass skipped slow row write: row exceeded its time slice", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier: logTier,
+                    rowDurationMs: Date.now() - rowStartedAt,
+                    rowTimeoutMs: BALANCE_PASS_ROW_TIMEOUT_MS,
                   });
-                  if (!admitted) incapable = true;
-                }
+                  return "unsettled";
+                };
 
-                const busier =
-                  currentUtilization !== null &&
-                  newUtilization !== null &&
-                  currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
-
-                if (!(cheaper || incapable || busier)) continue;
-
-                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
-                if (!selectedModel) continue;
-
-                // TOG-3132. 2026-09-17 08:10:14Z this pass moved TOG-3088 off
-                // `claude-haiku-4-5-20251001` (the only healthy T3 lane) onto
-                // `deepseek-v4-flash` (0/3) for `cost-down`, and did the same to
-                // seven more cards in eleven hours. `selectModel` now excludes a
-                // PROVEN-DEAD lane outright, but `deepseek-v4-flash` at 0/3 is
-                // not proven dead — it is unproven, and nothing about a cheaper
-                // price is evidence it will serve.
-                //
-                // `incapable` and `busier` are deliberately exempt: those are
-                // "this card cannot stay here", and refusing to move it would
-                // wedge it on a lane already judged unusable. Only a move made
-                // PURELY to save money has to clear this bar.
-                if (cheaper && !incapable && !busier) {
-                  const evidence = await readLaneEvidence(company.id, config.models, now);
-                  const from = evidenceStateFor(evidence, pinnedModel.laneId ?? null);
-                  const to = evidenceStateFor(evidence, selectedModel.laneId ?? null);
-                  if (costDownWouldAbandonProvenLane(from, to)) {
-                    await ctx.activity.log({
-                      companyId: company.id,
-                      message:
-                        `Model Selection held ${pinnedModelId} (cost-down to ${selectedModel.id} refused): ` +
-                        `lane ${pinnedModel.laneId ?? "(none)"} is proven-good over ` +
-                        `${evidence.windowHours}h, lane ${selectedModel.laneId ?? "(none)"} is ${to}`,
-                      entityType: "issue",
-                      entityId: issueId,
-                      metadata: {
-                        from: pinnedModelId,
-                        heldAgainst: selectedModel.id,
-                        fromEvidence: from,
-                        toEvidence: to,
-                        reason: "lane-evidence",
-                      },
-                    });
-                    continue;
-                  }
-                }
-                if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) continue;
-                await ctx.issues.update(
-                  issueId,
-                  modelOverrideForContext({
-                    model: selectedModel,
-                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
-                    compactionRatio: config.selection.compactionRatio,
-                    agentEnv: result.agentEnv,
-                    agentAdapterType: result.agentAdapterType,
-                    agentAdapterConfig: result.agentAdapterConfig,
+                if (pinnedModelId && pinnedModel) {
+                  const currentUtilization = pinnedModel.laneId
+                    ? laneEffectiveUtilization(laneLedger, pinnedModel.laneId)
+                    : null;
+                  const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);
+                  if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
+                  if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
+                  if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) return "settled";
+                  // TOG-3116. A card whose pin is already correct but whose
+                  // sub-call env is frozen on a dead lane must still be written.
+                  // This is checked BEFORE the same-model short-circuit below,
+                  // not alongside cheaper/incapable/busier: those are all
+                  // properties of the PIN, and this row's pin is fine. Putting it
+                  // after the short-circuit would make it unreachable for exactly
+                  // the 149-card population it exists to drain.
+                  const envDrifted = overrideEnvOnExcludedLane({
                     existingOverrideEnv: result.existingOverrideEnv,
-                  }) as Parameters<typeof ctx.issues.update>[1],
-                  company.id,
-                );
-                await ctx.activity.log({
-                  companyId: company.id,
-                  message: `Model Selection balanced ${pinnedModelId} -> ${result.decision.modelId} (${tier}): ${
-                    cheaper ? "cost-down" : incapable ? "demote" : "rebalance"
-                  }`,
-                  entityType: "issue",
-                  entityId: issueId,
-                  metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, cheaper, incapable, busier },
-                });
-                balanced += 1;
-                void identifier;
-              } else {
+                    models: config.models,
+                    ledger: laneLedger,
+                    laneOutageOverride,
+                    nowIso,
+                    laneAvoidConfig: config.pacing.avoid,
+                    pacingMode: config.pacing.mode,
+                  });
+                  if (result.decision.modelId === pinnedModelId && !envDrifted) return "settled";
+                  const newModel = config.models.find((m) => m.id === result.decision.modelId);
+                  if (!newModel) return "settled";
+                  const newUtilization = newModel.laneId ? laneEffectiveUtilization(laneLedger, newModel.laneId) : null;
+
+                  const cheaper = blendedListPrice(newModel) <= BALANCE_PASS_COST_DOWN_MULTIPLIER * blendedListPrice(pinnedModel);
+                  const pinnedScore = tierScoreFor(modelScores[pinnedModelId], tier);
+                  let incapable = pinnedScore ? pinnedScore.capable === false : false;
+
+                  // `probation` (balance_pass()): a pinned model priced under
+                  // BALANCE_PASS_PROBATION_PRICE_USD and still unproven may hold
+                  // only ONE active card company-wide — the exploration slot —
+                  // before it is demoted. Only worth the extra DB round trip
+                  // when the cheaper/incapable checks above have not already
+                  // decided this row.
+                  if (
+                    !incapable &&
+                    blendedListPrice(pinnedModel) < BALANCE_PASS_PROBATION_PRICE_USD &&
+                    !(pinnedScore?.proven ?? false)
+                  ) {
+                    const activeCount = await countActivePinsOfModel(company.id, pinnedModelId);
+                    if (activeCount > 1) incapable = true;
+                  }
+
+                  // `over_cap`: this card's own lane no longer has room for it
+                  // (extra: -1 because this card already counts itself in the
+                  // ledger's active-pins weight) — only checked for todo/
+                  // in_progress, matching the Python source's `status in
+                  // ("todo","in_progress")` guard.
+                  if (
+                    !incapable &&
+                    (status === "todo" || status === "in_progress") &&
+                    pinnedModel.laneId &&
+                    config.pacing.mode !== "off"
+                  ) {
+                    const pinsWeightByLane = await activePinsWeightByLane(company.id, config.models);
+                    const admitted = laneHasRoom({
+                      laneId: pinnedModel.laneId,
+                      activePinsWeight: pinsWeightByLane[pinnedModel.laneId] ?? 0,
+                      extra: -1,
+                      ledger: laneLedger,
+                      capPerAccount: config.pacing.laneCapPerAccount,
+                      fiveHourWindowName: config.pacing.fiveHourWindowName,
+                      zaiLaneId: config.pacing.zai.laneId,
+                      zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+                      zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+                      zaiPaceOverrideMargin: null,
+                      nowMs: now,
+                    });
+                    if (!admitted) incapable = true;
+                  }
+
+                  const busier =
+                    currentUtilization !== null &&
+                    newUtilization !== null &&
+                    currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
+
+                  // TOG-12258 pace-pull: `orderCandidatesByPace` ranks only NEW
+                  // pins, so a pin that landed before its lane fell behind never
+                  // moves until PIN_MAX_AGE_MS expiry. Pull an idle card toward
+                  // a behind-pace lane when pacing is enforced, `advise()` picked
+                  // a behind/behind-urgent model on a strictly better-ranked lane
+                  // than the pin's, and the target lane has room (including the
+                  // 06-10Z weekday zai peak cap, via `laneHasRoom`). Moves per
+                  // pass are capped at the target lane's free slots at first
+                  // sight; the reason is recorded as `pace-pull` in the activity
+                  // trace. Advisory decisions and shadow/off pacing never pull:
+                  // in those modes pace did not (or must not) choose the winner.
+                  let pacePull = false;
+                  let pacePullTargetLaneId: string | null = null;
+                  if (
+                    !cheaper &&
+                    !incapable &&
+                    !busier &&
+                    !envDrifted &&
+                    config.pacing.mode === "enforce" &&
+                    !result.decision.advisory &&
+                    result.decision.modelId !== pinnedModelId &&
+                    isBehindPace(laneLedger, newModel) &&
+                    pacePreferenceRank(laneLedger, newModel) < pacePreferenceRank(laneLedger, pinnedModel)
+                  ) {
+                    const targetLaneId = newModel.laneId ?? null;
+                    if (targetLaneId) {
+                      if (pacePullWeights === null) {
+                        pacePullWeights = await activePinsWeightByLane(company.id, config.models);
+                        pacePullZaiMargin = activeZaiPaceOverride(await readZaiPaceOverride(company.id), nowIso);
+                      }
+                      const moved = pacePullMoved.get(targetLaneId) ?? 0;
+                      let freeSlots = pacePullFreeSlots.get(targetLaneId);
+                      if (freeSlots === undefined) {
+                        const per = config.pacing.laneCapPerAccount[targetLaneId];
+                        const accounts = Math.max(1, laneHealthyAccountCount(laneLedger, targetLaneId));
+                        freeSlots =
+                          per === undefined
+                            ? Number.POSITIVE_INFINITY
+                            : Math.max(0, Math.floor(per * accounts - (pacePullWeights[targetLaneId] ?? 0)));
+                        pacePullFreeSlots.set(targetLaneId, freeSlots);
+                      }
+                      const targetRoom =
+                        moved < freeSlots &&
+                        laneHasRoom({
+                          laneId: targetLaneId,
+                          activePinsWeight: pacePullWeights[targetLaneId] ?? 0,
+                          ledger: laneLedger,
+                          capPerAccount: config.pacing.laneCapPerAccount,
+                          fiveHourWindowName: config.pacing.fiveHourWindowName,
+                          zaiLaneId: config.pacing.zai.laneId,
+                          zaiWeeklyWindowName: config.pacing.zai.weeklyWindowName,
+                          zaiWeeklyDefaultMargin: config.pacing.zai.weeklyDefaultMargin,
+                          zaiPaceOverrideMargin: pacePullZaiMargin,
+                          nowMs: now,
+                        });
+                      if (targetRoom) {
+                        pacePull = true;
+                        pacePullTargetLaneId = targetLaneId;
+                      }
+                    }
+                  }
+
+                  if (!(cheaper || incapable || busier || envDrifted || pacePull)) return "settled";
+
+                  // TOG-12206 P2: candidate-carrying recovery (see the apply path).
+                  const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+                  if (!selectedModel) return "settled";
+
+                  // TOG-3132. 2026-09-17 08:10:14Z this pass moved TOG-3088 off
+                  // `claude-haiku-4-5-20251001` (the only healthy T3 lane) onto
+                  // `deepseek-v4-flash` (0/3) for `cost-down`, and did the same to
+                  // seven more cards in eleven hours. `selectModel` now excludes a
+                  // PROVEN-DEAD lane outright, but `deepseek-v4-flash` at 0/3 is
+                  // not proven dead — it is unproven, and nothing about a cheaper
+                  // price is evidence it will serve.
+                  //
+                  // `incapable` and `busier` are deliberately exempt: those are
+                  // "this card cannot stay here", and refusing to move it would
+                  // wedge it on a lane already judged unusable. Only a move made
+                  // PURELY to save money has to clear this bar.
+                  if (cheaper && !incapable && !busier) {
+                    const evidence = await readLaneEvidence(company.id, config.models, now);
+                    const from = evidenceStateFor(evidence, pinnedModel.laneId ?? null);
+                    const to = evidenceStateFor(evidence, selectedModel.laneId ?? null);
+                    if (costDownWouldAbandonProvenLane(from, to)) {
+                      // An abandoned row's body must not log after the
+                      // deadline either: the next firing re-decides it.
+                      if (Date.now() >= deadlineAt) return "unsettled";
+                      await ctx.activity.log({
+                        companyId: company.id,
+                        message:
+                          `Model Selection held ${pinnedModelId} (cost-down to ${selectedModel.id} refused): ` +
+                          `lane ${pinnedModel.laneId ?? "(none)"} is proven-good over ` +
+                          `${evidence.windowHours}h, lane ${selectedModel.laneId ?? "(none)"} is ${to}`,
+                        entityType: "issue",
+                        entityId: issueId,
+                        metadata: {
+                          from: pinnedModelId,
+                          heldAgainst: selectedModel.id,
+                          fromEvidence: from,
+                          toEvidence: to,
+                          reason: "lane-evidence",
+                        },
+                      });
+                      return "settled";
+                    }
+                  }
+                  if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) return "settled";
+                  if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(tier);
+                  // TOG-5227: one bad card must not abort the pass (and skip
+                  // the cursor/scan-mark writes below, re-hitting the same
+                  // card forever).
+                  // TOG-12431: the write needs enforcement — including the
+                  // env-evacuation, which mutates the override like any repin.
+                  // The decision and its log do not.
+                  if (writesAllowed) {
+                    try {
+                      const balancePatch = modelOverrideForContext({
+                        model: selectedModel,
+                        agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                        compactionRatio: config.selection.compactionRatio,
+                        agentEnv: result.agentEnv,
+                        agentAdapterType: result.agentAdapterType,
+                        agentAdapterConfig: result.agentAdapterConfig,
+                        existingOverrideEnv: result.existingOverrideEnv,
+                        // TOG-3116: haiku-class sub-call keys follow the
+                        // cheapest healthy T3 pick (falls back to the pin).
+                        cheapModelId: result.ancillaryModelId,
+                        provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+                      });
+                      await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
+                      await recordFallbackPin(company.id, issueId, balancePatch);
+                    } catch (cause) {
+                      ctx.logger.warn("balance pass skipped a card it could not pin", {
+                        companyId: company.id,
+                        issue: identifier,
+                        error: cause instanceof Error ? cause.message : String(cause),
+                      });
+                      return "settled";
+                    }
+                  } else {
+                    ctx.logger.info("balance pass advisory: would balance, nothing written", {
+                      companyId: company.id,
+                      issue: identifier,
+                      tier,
+                      from: pinnedModelId,
+                      modelId: result.decision.modelId,
+                    });
+                  }
+                  await ctx.activity.log({
+                    companyId: company.id,
+                    message:
+                      (result.decision.modelId === pinnedModelId
+                        ? `Model Selection evacuated sub-call env off a dead lane on ${pinnedModelId} (${tier}): pin unchanged`
+                        : `Model Selection balanced ${pinnedModelId} -> ${result.decision.modelId} (${tier}): ${
+                            cheaper
+                              ? "cost-down"
+                              : incapable
+                                ? "demote"
+                                : busier
+                                  ? "rebalance"
+                                  : pacePull
+                                    ? "pace-pull"
+                                    : "env-evacuation"
+                          }`) + advisorySuffix,
+                    entityType: "issue",
+                    entityId: issueId,
+                    metadata: {
+                      from: pinnedModelId,
+                      modelId: result.decision.modelId,
+                      tier,
+                      cheaper,
+                      incapable,
+                      busier,
+                      envDrifted,
+                      pacePull,
+                      // TOG-12206 P2: the served leg of the v2 identity (null on legacy).
+                      candidateId: selectedModel.candidateId,
+                      ...(writesAllowed ? {} : { advisory: true, written: false }),
+                    },
+                  });
+                  // TOG-12431: a shadow install writes nothing, so neither the
+                  // pass counter nor the per-lane pace-pull cap may count it.
+                  if (writesAllowed) {
+                    balanced += 1;
+                    if (pacePullTargetLaneId) {
+                      pacePullMoved.set(
+                        pacePullTargetLaneId,
+                        (pacePullMoved.get(pacePullTargetLaneId) ?? 0) + 1,
+                      );
+                    }
+                  }
+                  return balanced >= BALANCE_PASS_WRITE_LIMIT ? "stop" : "settled";
+                }
+
                 // Unpinned + labelled = former exclusion: give it a balanced
                 // T1-class pin instead of leaving it on the agent floor.
                 // `pick("T1", floor)` in Python — always T1, never this row's
                 // own tier label.
                 const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                  if (Date.now() >= deadlineAt) return "unsettled";
                   // TOG-3111 AC3: same visibility as the label-only pass —
                   // this branch previously `continue`d without a trace.
                   await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
-                  continue;
+                  return "settled";
                 }
-                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) continue;
-                if (result.pinnedModelId !== null) continue;
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
+                if (result.pinnedModelId !== null) return "settled";
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 // TOG-3037: only elide onto the implicit NULL-override floor
                 // pin while that floor's own lane is serviceable right now —
@@ -4035,62 +6654,109 @@ export function createPlugin() {
                     modelScores,
                     nowIso,
                   );
-                if (floorHealthy) continue;
+                if (floorHealthy) return "settled";
 
-                const selectedModel = config.models.find((model) => model.id === result.decision.modelId);
-                if (!selectedModel) continue;
-                if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) continue;
-                await ctx.issues.update(
-                  issueId,
-                  modelOverrideForContext({
-                    model: selectedModel,
-                    fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
-                    compactionRatio: config.selection.compactionRatio,
-                    agentEnv: result.agentEnv,
-                    agentAdapterType: result.agentAdapterType,
-                    agentAdapterConfig: result.agentAdapterConfig,
-                    existingOverrideEnv: result.existingOverrideEnv,
-                  }) as Parameters<typeof ctx.issues.update>[1],
-                  company.id,
-                );
+                // TOG-12206 P2: candidate-carrying recovery (see the apply path).
+                const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+                if (!selectedModel) return "settled";
+                if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) return "settled";
+                if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite("T1");
+                // TOG-5227: same per-issue isolation as the pinned branch.
+                // TOG-12431: this branch's write is gated like the pinned one.
+                if (writesAllowed) {
+                  try {
+                    const balancePatch = modelOverrideForContext({
+                      model: selectedModel,
+                      agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                      compactionRatio: config.selection.compactionRatio,
+                      agentEnv: result.agentEnv,
+                      agentAdapterType: result.agentAdapterType,
+                      agentAdapterConfig: result.agentAdapterConfig,
+                      existingOverrideEnv: result.existingOverrideEnv,
+                      // TOG-3116: haiku-class sub-call keys follow the
+                      // cheapest healthy T3 pick (falls back to the pin).
+                      cheapModelId: result.ancillaryModelId,
+                      provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+                    });
+                    await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
+                    await recordFallbackPin(company.id, issueId, balancePatch);
+                  } catch (cause) {
+                    ctx.logger.warn("balance pass skipped a card it could not pin", {
+                      companyId: company.id,
+                      issue: identifier,
+                      error: cause instanceof Error ? cause.message : String(cause),
+                    });
+                    return "settled";
+                  }
+                } else {
+                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {
+                    companyId: company.id,
+                    issue: identifier,
+                    modelId: result.decision.modelId,
+                  });
+                }
                 await ctx.activity.log({
                   companyId: company.id,
                   message:
-                    result.decision.modelId === floorModelId
+                    (result.decision.modelId === floorModelId
                       ? `Model Selection explicitly pinned ${result.decision.modelId} (T1): floor lane unserviceable`
-                      : `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`,
+                      : `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`) + advisorySuffix,
                   entityType: "issue",
                   entityId: issueId,
-                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1" },
+                  // TOG-12206 P2: the served leg of the v2 identity (null on legacy).
+                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1", candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
-                balanced += 1;
-                void identifier;
-              }
+                // TOG-12431: a shadow install writes nothing, so the pass
+                // counter must not count it.
+                if (writesAllowed) balanced += 1;
+                return balanced >= BALANCE_PASS_WRITE_LIMIT ? "stop" : "settled";
+              },
+            );
+            slowestRowMs = walk.slowestRowMs;
+            if (walk.abandoned) {
+              const abandoned = asRecord(walk.abandoned.row);
+              ctx.logger.warn("balance pass abandoned a slow row at the deadline", {
+                companyId: company.id,
+                issue: typeof abandoned.identifier === "string" ? abandoned.identifier : abandoned.id,
+                rowDurationMs: walk.abandoned.rowDurationMs,
+              });
             }
 
+            // TOG-11688: the id cursor passes every EXAMINED row (an
+            // unsettled one included — the cycle re-reads it on wrap) and
+            // stops before an abandoned or unreached one, so a row the timer
+            // abandoned is the first row of the next firing, not skipped.
+            const scanned = walk.examined.length;
+            const lastExamined = scanned > 0 ? asRecord(walk.examined[scanned - 1]).id : undefined;
+            const lastScannedId = typeof lastExamined === "string" ? lastExamined : afterId;
             const cycleComplete =
               scanned === candidateRows.length && candidateRows.length < BALANCE_PASS_FETCH_LIMIT;
             const nextAfterId = cycleComplete ? null : lastScannedId || null;
             await ctx.state.set(cursorKey, { afterId: nextAfterId });
             // TOG-3585: the id-cycle cursor above preserves position; the
             // scan mark records that this firing SAW the board, so the next
-            // firing's aggregate gate can skip a quiet board. Always advanced
-            // on a completed cycle — even budget-exhausted — because the mark
-            // is about "board seen", not "cycle drained".
-            await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
+            // firing's aggregate gate can skip a quiet board. TOG-11688:
+            // written only when the cycle completes — a mark written mid-cycle
+            // let a quiet board skip the unvisited rest of the cycle forever,
+            // and a deadline-bounded walk now ends mid-cycle routinely.
+            if (cycleComplete) {
+              await writeScanMark(company.id, PLUGIN_STATE_KEYS.balanceLastScanAt, balanceFiringStartMs);
+            }
             ctx.logger.info("balance pass complete", {
               companyId: company.id,
               balanced,
               candidates: candidateRows.length,
               scanned,
+              skippedSlowRows: walk.unsettled,
+              slowestRowMs: walk.slowestRowMs,
               afterId: afterId || null,
               nextAfterId,
               cycleComplete,
-              budgetExhausted,
+              budgetExhausted: walk.budgetExhausted,
               durationMs: Date.now() - startedAt,
               jobDurationMs: Date.now() - jobStartedAt,
             });
-            if (budgetExhausted) break;
+            if (walk.budgetExhausted) break;
           } catch (cause) {
             ctx.logger.error("balance pass failed for a company", {
               companyId: company.id,
@@ -4110,7 +6776,21 @@ export function createPlugin() {
       // ran, so the `plugins` table shows one dispatcher instead of two.
       ctx.jobs.register(JOB_KEYS.dispatchSweep, async (job) => {
         const companies = listKnownCompanies();
+        // TOG-7785: cooperative deadline mirroring the classify/balance
+        // passes — stop starting new work with a full minute left before
+        // the host's 300 s job RPC wall. Partial firings still emit their
+        // metrics/summary with a partial-coverage note below.
+        const jobStartedAt = Date.now();
+        const deadlineAt = jobStartedAt + DISPATCH_SWEEP_JOB_BUDGET_MS;
         for (const company of companies) {
+          if (Date.now() >= deadlineAt) {
+            ctx.logger.warn("dispatch sweep stopped before the host RPC wall", {
+              companyId: company.id,
+              durationMs: Date.now() - jobStartedAt,
+              budgetMs: DISPATCH_SWEEP_JOB_BUDGET_MS,
+            });
+            break;
+          }
           try {
             const config = await companyConfig(company.id);
             const dispatchConfig = config.dispatch;
@@ -4168,8 +6848,34 @@ export function createPlugin() {
             // agent busy, which the orchestration union alone would miss.
             const busyAssigneesFromRuns = new Set<string>();
             let unreadable = 0;
+            let budgetExhausted = false;
+            let budgetStopLogged = false;
+            // TOG-7785: one warn per partial company firing — later
+            // checkpoints still break, but only the first logs.
+            const stopOnBudget = (extra: Record<string, unknown>): boolean => {
+              if (Date.now() < deadlineAt) return false;
+              budgetExhausted = true;
+              if (!budgetStopLogged) {
+                budgetStopLogged = true;
+                ctx.logger.warn("dispatch sweep stopped before the host RPC wall", {
+                  companyId: company.id,
+                  durationMs: Date.now() - jobStartedAt,
+                  budgetMs: DISPATCH_SWEEP_JOB_BUDGET_MS,
+                  ...extra,
+                });
+              }
+              return true;
+            };
             const sweepNowMs = Date.now();
             for (const issue of nonTerminal) {
+              if (
+                stopOnBudget({
+                  gathered: population.length,
+                  remaining: nonTerminal.length - population.length,
+                })
+              ) {
+                break;
+              }
               if (!issue.assigneeAgentId) {
                 population.push({ issue });
                 continue;
@@ -4189,6 +6895,21 @@ export function createPlugin() {
                   companyId: company.id,
                 });
                 const relation = orchestration.relations[issue.id];
+                // TOG-9368: re-check the cooperative deadline between the
+                // two per-issue RPCs. The top-of-loop checkpoint passed
+                // before `getOrchestration`, which can itself outlast the
+                // budget — without this, `listInteractions` still fires
+                // (the ~11 s overrun seen post-deploy on 2026-09-28).
+                // Breaking here drops this issue from the population, the
+                // same as a top-of-loop stop one iteration earlier.
+                if (
+                  stopOnBudget({
+                    gathered: population.length,
+                    remaining: nonTerminal.length - population.length,
+                  })
+                ) {
+                  break;
+                }
                 // TOG-2572: neither a future monitor check nor a pending
                 // interaction is on the orchestration summary — a monitor
                 // wake and a human-only ask are both invisible to
@@ -4325,6 +7046,9 @@ export function createPlugin() {
             };
             const laneByIssueId = new Map<string, string | null>();
             for (const entry of population) {
+              if (stopOnBudget({ lanesResolved: laneByIssueId.size, population: population.length })) {
+                break;
+              }
               const assignee = entry.issue.assigneeAgentId;
               if (!assignee) continue;
               const row = entry.issue as unknown as Record<string, unknown>;
@@ -4355,6 +7079,14 @@ export function createPlugin() {
               // refusal after already waking priors, discarding the rest of
               // the result set.
               for (const pick of selection.picks) {
+                if (
+                  stopOnBudget({
+                    picksWoken: wakeOutcomes.filter((o) => o.queued).length,
+                    picksRemaining: selection.picks.length - wakeOutcomes.length,
+                  })
+                ) {
+                  break;
+                }
                 try {
                   const result = await ctx.issues.requestWakeup(pick.issue.id, company.id, {
                     reason: "dispatch_stalled_issue",
@@ -4396,6 +7128,15 @@ export function createPlugin() {
               }
             }
 
+            if (budgetExhausted) {
+              notes.push(
+                `partial firing: job budget ${DISPATCH_SWEEP_JOB_BUDGET_MS}ms reached — ` +
+                  `gathered ${population.length} of ${nonTerminal.length} issues, ` +
+                  `resolved lanes for ${laneByIssueId.size} of ${population.length}, ` +
+                  `woke ${wakeOutcomes.filter((o) => o.queued).length} of ${selection.picks.length} picks`,
+              );
+            }
+
             if (!dispatchConfig.wakeEnabled && selection.picks.length > 0) {
               notes.push(
                 `report-only: would have woken ${selection.picks
@@ -4417,6 +7158,7 @@ export function createPlugin() {
 
             ctx.logger.info("dispatch sweep complete", {
               companyId: company.id,
+              budgetExhausted,
               woken: summary.counters.woken,
               candidatesReady: summary.legacy.candidates_ready,
               runnableQueue: summary.legacy.runnable_queue,
@@ -4458,6 +7200,18 @@ export function createPlugin() {
     },
 
     /**
+     * TOG-11793 (TOG-11780 §4.3). Answers the host's run-scoped model
+     * decision from hot caches only. Declared on the definition so the fork's
+     * SDK advertises `resolveRunModel`; a host without the hook never calls it.
+     */
+    async onResolveRunModel(params: ResolveRunModelParams): Promise<ResolveRunModelResult> {
+      if (!runResolveHandler) {
+        return { kind: "defer", retryAfterMs: 2_000, reason: "model-selection worker is not ready" };
+      }
+      return runResolveHandler(params);
+    },
+
+    /**
      * TOG-2438 reopen: the sole feed for `knownCompanyIds` (see the comment
      * above its declaration). The host calls this unconditionally for every
      * configured company at worker startup (`plugin-loader.ts` step 5b) and
@@ -4474,6 +7228,9 @@ export function createPlugin() {
      */
     async onConfigChanged(_newConfig, changeContext) {
       const companyId = changeContext?.companyId;
+      // TOG-11793: a config save (the flag, the roster, the tier policy) must
+      // not wait out the snapshot TTL.
+      if (companyId) invalidateRunSnapshot?.(companyId);
       if (!companyId || knownCompanyIds.has(companyId)) return;
       knownCompanyIds.add(companyId);
       if (context) {
@@ -4493,7 +7250,7 @@ export function createPlugin() {
       }
       return { status: 501, body: { error: "use the registered tools; the HTTP surface is reserved" } };
     },
-  });
+  } as PluginDefinitionWithRunResolve);
 }
 
 const plugin = createPlugin();

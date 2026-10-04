@@ -1,9 +1,9 @@
 import type { PacingMode, Tier } from "../constants.js";
 import type { SelectionObjective } from "../config/resolve.js";
 import { costOf, resolveProfile, tierAbove, tierIndex } from "./cost.js";
-import { resolveConfiguredModelId } from "./model-id.js";
+import { isAdapterBlockedModel, resolveConfiguredModelId } from "./model-id.js";
 import { computeShadowDiff, orderByObjective } from "./objective.js";
-import { zeroAcceptEvidence } from "./scores.js";
+import { tierScoreFor, zeroAcceptEvidence } from "./scores.js";
 import { resolveTier } from "./tier.js";
 import type {
   AvailabilityNote,
@@ -18,6 +18,7 @@ import type {
   VolumeProfile,
 } from "./types.js";
 import type { AvailabilitySnapshot, AvailabilityTerm, LaneAvailability } from "./availability.js";
+import { activeModelCooldown } from "../lane-capacity/counts-only.js";
 import {
   costDownWouldAbandonProvenLane,
   evidenceStateFor,
@@ -26,11 +27,12 @@ import {
 } from "./lane-evidence.js";
 import { LANE_ID_CODEX, LANE_ID_OPENCODE_GO, LANE_ID_ZAI } from "../constants.js";
 import { applyPickOrdering } from "./pick-order.js";
-import { freeEarnInWinner } from "./free-lane-earn-in.js";
+import { earnInGuardFor, freeEarnInWinner } from "./free-lane-earn-in.js";
 import { compareSamePriceFamily } from "./same-price-family.js";
 import {
   avoidThresholdFor,
   hardStopExcluded,
+  modelCooldownExcluded,
   laneAvoidExcluded,
   laneEffectiveUtilization,
   laneHasRoom,
@@ -282,6 +284,9 @@ export function selectModel(input: SelectInput): SelectionDecision {
    * without the tier walk leaving phantom rejections behind.
    */
   function laneRead(model: ModelEntry): LaneRead {
+    if (modelCooldownExcluded(ledger, model, now)) {
+      return { state: "unavailable", term: "cooldown", reason: `lane ${model.laneId}: active cooldown for ${model.id}` };
+    }
     if (!availability) return { state: "available" };
     if (availability.unreadableReason) {
       return { state: "unknown", term: "staleness", reason: availability.unreadableReason };
@@ -301,6 +306,9 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
     if (lane.state === "unknown") {
       return { state: "unknown", term: lane.term ?? "staleness", reason: `lane ${laneId}: ${lane.reason}` };
+    }
+    if (activeModelCooldown(lane.modelCooldowns ?? [], model.id, now)) {
+      return { state: "unavailable", term: "cooldown", reason: `lane ${laneId}: active cooldown for ${model.id}` };
     }
     // AC-3. Quota is not the only way to run out: the 00:39Z lane had 54% of
     // its weekly allowance left and still refused, because one credential
@@ -433,7 +441,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // never moves a pin: a blind instrument is not grounds to discard a
     // recorded human judgement.
     isLaneUnserviceable: (model) =>
-      (paceActive && hardStopExcluded(ledger, model)) || laneRead(model).state === "unavailable",
+      (paceActive && hardStopExcluded(ledger, model, now)) || laneRead(model).state === "unavailable",
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
 
@@ -514,7 +522,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const incumbent = config.models.find(
       (model) => model.id === stickyModelId && model.enabled,
     );
-    const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent);
+    const incumbentUnserviceable = incumbent && paceActive && hardStopExcluded(ledger, incumbent, now);
     if (incumbent && tierIndex(incumbent.tier) < tierIndex(requiredTier)) {
       trace.push(
         `sticky ${incumbent.id} (${incumbent.tier}) declined: below the ${requiredTier} required tier`,
@@ -524,6 +532,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
         stage: "tier-floor",
         reason: `tier ${incumbent.tier} is below the ${requiredTier} required tier`,
         operand: { kind: "tier-floor", tier: incumbent.tier, requiredTier },
+      });
+    } else if (incumbent && isAdapterBlockedModel(incumbent.id, descriptor.agentAdapterType)) {
+      // TOG-8108: staying sticky to an adapter-incompatible model would wedge
+      // the issue on a lane that refuses every dispatch at the provider level.
+      trace.push(
+        `sticky ${incumbent.id} declined: incompatible with the ${descriptor.agentAdapterType} adapter — re-selecting instead of wedging this issue on a refusing lane`,
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "adapter",
+        reason: `${incumbent.id} is incompatible with the ${descriptor.agentAdapterType} adapter (Devin rejects the Claude Code system banner)`,
+        operand: { kind: "adapter", modelId: incumbent.id, adapterType: descriptor.agentAdapterType as string },
       });
     } else if (
       incumbent &&
@@ -601,6 +621,22 @@ export function selectModel(input: SelectInput): SelectionDecision {
       rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster", operand: { kind: "disabled" } });
       continue;
     }
+    // TOG-8108. Adapter-compatibility: `devin/*` cannot serve a `claude_local`
+    // assignee — Devin's content filter rejects the Claude Code / Agent SDK
+    // system banner (Cognition ticket 71806; measured 25 failed / 3 succeeded
+    // runs on claude_local+devin). An exclusion, never a down-rank, and an
+    // unknown adapter never excludes. Runs before capability so the recorded
+    // gate names the incompatibility rather than a coincidental capability gap.
+    if (isAdapterBlockedModel(model.id, descriptor.agentAdapterType)) {
+      const adapterType = descriptor.agentAdapterType as string;
+      rejections.push({
+        modelId: model.id,
+        stage: "adapter",
+        reason: `${model.id} is incompatible with the ${adapterType} adapter (Devin rejects the Claude Code system banner)`,
+        operand: { kind: "adapter", modelId: model.id, adapterType },
+      });
+      continue;
+    }
     const missing = [...required].filter((capability) => !model.capabilities.includes(capability));
     if (missing.length > 0) {
       rejections.push({
@@ -627,13 +663,23 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // explicit `false` excludes; fail-open when `config.modelScores` is unset,
     // when this model has no recorded score, or when the tier verdict is
     // `null`, so a company with no scored history yet sees no change.
-    const score = config.modelScores?.[model.id]?.tiers[requiredTier];
+    // TOG-12768: read through `tierScoreFor`, so a tier with no proven
+    // evidence of its own cannot pass where an easier tier failed.
+    const modelScore = config.modelScores?.[model.id];
+    const score = tierScoreFor(modelScore, requiredTier);
     if (score && score.capable === false) {
+      const cappedBy = score.cappedBy;
       rejections.push({
         modelId: model.id,
         stage: "capability-score",
-        reason: `measured ${requiredTier} success rate (p=${score.p}) is below the capability threshold`,
-        operand: { kind: "capability-score", tier: requiredTier, p: score.p },
+        reason:
+          cappedBy === undefined
+            ? `measured ${requiredTier} success rate (p=${score.p}) is below the capability threshold`
+            : `no proven ${requiredTier} evidence of its own, and it fails the easier ${cappedBy} tier (p=${modelScore?.tiers[cappedBy]?.p})`,
+        operand:
+          cappedBy === undefined
+            ? { kind: "capability-score", tier: requiredTier, p: score.p }
+            : { kind: "capability-score", tier: requiredTier, p: score.p, cappedBy },
       });
       continue;
     }
@@ -691,7 +737,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // same rule `repinAllowed` applies to `pin:operator`: staying pinned to a
     // dead lane is a silent failure, not "leaving it alone", so the strongest
     // override in this design still yields to it.
-    if (paceActive && hardStopExcluded(ledger, model)) {
+    if (paceActive && hardStopExcluded(ledger, model, now)) {
       rejections.push({
         modelId: model.id,
         stage: "lane-unserviceable",
@@ -724,7 +770,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       rejections.push({
         modelId: model.id,
         stage: "lane-avoid",
-        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold`,
+        reason: `lane ${model.laneId ?? "(none)"} is at or above its avoid threshold and ahead of its window pace margin`,
         operand: { kind: "lane-avoid", laneId: model.laneId ?? null },
       });
       continue;
@@ -857,6 +903,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
   }
 
+  // TOG-8108: say what the adapter-compatibility gate did on every decision,
+  // including nothing — the same AC-6 discipline as the availability and
+  // evidence terms above, so `decisions.jsonl` answers "why did this
+  // claude_local card not get devin" without re-deriving it.
+  const adapterExcluded = rejections.filter((rejection) => rejection.stage === "adapter");
+  if (adapterExcluded.length > 0) {
+    trace.push(
+      `adapter compatibility excluded ${adapterExcluded.length} candidate(s): ` +
+        adapterExcluded.map((rejection) => `${rejection.modelId} [adapter]: ${rejection.reason}`).join("; "),
+    );
+  }
+
   if (qualified.length === 0) {
     // TOG-2137, Defect 2. Distinguish a genuine capacity dead end from an
     // ordinary config/capability gap. If every model from `requiredTier`
@@ -914,10 +972,15 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return base;
   }
 
-  // Cost against the judged tier's measured multi-turn volume. Ordinary picks
-  // use regular rows only; fallback-only rows are consulted only when every
-  // regular row was rejected or could not be costed. Disabled rows never enter
-  // either path.
+  // Cost against the judged tier's measured multi-turn volume. Consult
+  // fallback-only rows only when no regular row at or above the required tier
+  // clears ALL gates. A weaker normal row cannot suppress qualified fallback;
+  // a stronger qualified normal row must not lose to fallback at a lower rung.
+  const regularModels = qualified.filter((model) => !model.fallbackOnly);
+  const selectionPool = regularModels.length > 0 ? regularModels : qualified;
+  if (regularModels.length === 0) {
+    trace.push("no qualified regular candidate survived; considering fallback-only roster rows");
+  }
   const profileVerdict = resolveProfile(requiredTier, profiles, now);
   trace.push(`volume profile: ${profileVerdict.reason}`);
 
@@ -955,17 +1018,10 @@ export function selectModel(input: SelectInput): SelectionDecision {
   let candidates: Candidate[] = [];
   let landingTier: Tier = requiredTier;
   for (let rung: Tier | null = requiredTier; rung !== null; rung = tierAbove(rung)) {
-    const atRung = qualified.filter((model) => model.tier === rung);
+    const atRung = selectionPool.filter((model) => model.tier === rung);
     if (atRung.length === 0) continue;
 
-    let rungCandidates = costCandidates(atRung.filter((model) => !model.fallbackOnly));
-    if (rungCandidates.length === 0) {
-      const fallbackModels = atRung.filter((model) => model.fallbackOnly);
-      if (fallbackModels.length > 0) {
-        trace.push(`no regular candidate survived at ${rung}; considering fallback-only roster rows`);
-        rungCandidates = costCandidates(fallbackModels);
-      }
-    }
+    const rungCandidates = costCandidates(atRung);
     if (rungCandidates.length > 0) {
       landingTier = rung;
       candidates = rungCandidates;
@@ -1142,7 +1198,22 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // random 10% sampling roll, while this is a deterministic owner rule about
   // who wins the tier. Sticky continuity is unaffected — a sticky incumbent
   // returns before this runs.
-  const earnInPick = freeEarnInWinner(orderedCandidates, config.models, ledger, config.modelScores, requiredTier);
+  // TOG-8108: earn-in never fires on protected cards (critical/high
+  // priority, review/gate). The picker itself enforces the guard; this trace
+  // line says which side of it this decision fell on, so `decisions.jsonl`
+  // answers "why did this card not earn-in" without re-deriving it.
+  const earnInGuard = earnInGuardFor(descriptor);
+  const earnInPick = freeEarnInWinner(
+    orderedCandidates,
+    config.models,
+    ledger,
+    config.modelScores,
+    requiredTier,
+    descriptor,
+  );
+  if (earnInGuard.protected) {
+    trace.push(`free-lane earn-in skipped: ${earnInGuard.reason}`);
+  }
   const earnInOverridden =
     !!overrideModelId && orderedCandidates.some((candidate) => candidate.modelId === overrideModelId);
   if (earnInPick && !earnInOverridden && earnInPick.candidate.modelId !== orderedCandidates[0]?.modelId) {
@@ -1226,7 +1297,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const floorLaneDead =
       !!floorModel &&
       ((paceActive &&
-        (hardStopExcluded(ledger, floorModel) ||
+        (hardStopExcluded(ledger, floorModel, now) ||
           (!!config.laneAvoidConfig && laneAvoidExcluded(ledger, floorModel, config.laneAvoidConfig)) ||
           laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, floorModel))) ||
         floorLaneUnavailable);

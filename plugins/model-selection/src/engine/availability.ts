@@ -30,9 +30,10 @@
  *                   and not window_exhausted        # any window utilization >= 1.0
  *                   and binding.remaining_allowance > 0
  *
- * This module mirrors those three conditions exactly. Two consumers computing
- * "serviceable" from the same document by two different rules is how a lane
- * gets disabled on the host and still selected by the router.
+ * Allowance records mirror those three conditions. Validated counts-only
+ * records instead carry positive serviceability with unknown pace and no quota
+ * windows (TOG-11601); the selector applies their exact-model cooldowns.
+ * Guessing counts-only from missing utilization would bypass the allowance gate.
  *
  * COOLDOWN EXCLUDES HERE — IT DOES NOT MERELY DOWN-RANK
  *
@@ -44,7 +45,8 @@
  * already applies to capabilities: anything that is not positively `healthy`
  * is EXCLUDED, never scored down. That means every non-`healthy` string —
  * `exhausted`, `unavailable`, `cooldown`, `cooling_down`, or a value the
- * contract has not heard of yet — takes the lane out.
+ * contract has not heard of yet — takes the lane out. The sole exception is
+ * expected `unknown` health in a validated counts-only producer record.
  *
  * The second half of that same result: a record carrying a cooldown and no
  * utilization window yields zero evidence in the router's normalizer, and a
@@ -62,6 +64,7 @@
  * is not "available": it is a third state, and `select.ts` is required to say
  * it rather than pass quietly.
  */
+import { countsOnlyEvidence, modelCooldowns, type ModelCooldown } from "../lane-capacity/counts-only.js";
 
 /** Shared with `pacing_verdict.py:75`. A consumer may be tighter, never looser. */
 export const MAX_AGE_MINUTES = 120;
@@ -101,6 +104,8 @@ export interface LaneAvailability {
   accountCount: number;
   /** Accounts that passed the full serviceability test. The AC-3 term. */
   serviceableAccountCount: number;
+  /** Producer-intersected evidence; selection reevaluates expiry on its own clock. */
+  modelCooldowns?: readonly ModelCooldown[];
   ageMinutes: number | null;
 }
 
@@ -117,6 +122,7 @@ interface RecordVerdict {
   state: LaneState;
   term: AvailabilityTerm | null;
   reason: string;
+  modelCooldowns?: readonly ModelCooldown[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -226,11 +232,17 @@ function evaluateRecord(
   if (health === null) {
     return { state: "unknown", term: "staleness", reason: `${key}: no health field` };
   }
-  if (health !== "healthy") {
+  const countsOnly = countsOnlyEvidence(raw);
+  if (raw.exhausted === true && countsOnly) {
+    return { state: "unavailable", term: "health", reason: `${key}: explicitly exhausted` };
+  }
+  if (health !== "healthy" && !(countsOnly && health === "unknown")) {
     const term: AvailabilityTerm =
       health === "cooldown" || health === "cooling_down" ? "cooldown" : "health";
     return { state: "unavailable", term, reason: `${key}: health ${health}` };
   }
+
+  if (countsOnly) return { state: "available", term: null, reason: `${key}: counts-only serviceability; pace unknown` };
 
   const windows = Array.isArray(raw.windows)
     ? raw.windows.flatMap((w) => {
@@ -284,6 +296,7 @@ function rollUp(
     laneId,
     accountCount: verdicts.length,
     serviceableAccountCount: serviceable.length,
+    modelCooldowns: verdicts.flatMap((verdict) => verdict.modelCooldowns ?? []),
     ageMinutes,
   };
 
@@ -355,7 +368,13 @@ export function normalizeAvailability(
     const laneId = laneIdOf(record);
     if (!laneId) continue;
     const verdicts = byLane.get(laneId) ?? [];
-    verdicts.push(evaluateRecord(record, observedAtMs, nowMs));
+    const cooldowns = modelCooldowns(record);
+    const invalidCounts = record.observationQuality === "counts-only" && !countsOnlyEvidence(record);
+    const verdict: RecordVerdict = cooldowns === null || invalidCounts
+      ? { state: "unknown", term: "staleness", reason: "invalid counts-only or model cooldown telemetry" }
+      : evaluateRecord(record, observedAtMs, nowMs);
+    if (verdict.state !== "unknown" && cooldowns) verdict.modelCooldowns = cooldowns;
+    verdicts.push(verdict);
     byLane.set(laneId, verdicts);
   }
 

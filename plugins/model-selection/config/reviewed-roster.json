@@ -78,6 +78,26 @@
       "earnIn": null
     },
     {
+      "id": "claude-sonnet-5-5",
+      "tier": "T2",
+      "enabled": true,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 1000000,
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15,
+      "costPerMTokCacheRead": 0.3,
+      "aaIndex": null,
+      "note": "2026-10-04 TOG-14410: Claude route for the fleet-quota-balancer PRIMARY choice. Pricing mirrors claude-sonnet-5 (3/15/0.3) as a same-family placeholder pending a confirmed 5-5 meter; unscored (aaIndex null) so tier is retained, never inferred. T2 with a dated carve-out of the 2026-09-08 never-Claude-T2/T3-while-sol/luna rule, which predates the bridge ranking Claude second and forced FALLBACK on T2 work during the Go exhaustion. Pace gates still fail closed: chosen only while a Claude account is fresh, 5h <95% and weekly on-pace.",
+      "releasedAt": "2026-06-24",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
       "id": "claude-haiku-4-5-20251001",
       "tier": "T3",
       "enabled": false,
@@ -155,6 +175,26 @@
       "note": "owner 2026-09-05: spread across all accounts; codex lane carries T1 too",
       "aaIndex": 51,
       "aaIndexUpdatedAt": "2026-09-09",
+      "releasedAt": "2026-06-01",
+      "fallbackOnly": false,
+      "earnIn": null
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "tier": "T1",
+      "enabled": true,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "vision",
+        "long-context"
+      ],
+      "contextWindow": 400000,
+      "costPerMTokIn": 4,
+      "costPerMTokOut": 20,
+      "costPerMTokCacheRead": 0.4,
+      "aaIndex": null,
+      "note": "2026-10-04 TOG-14410: Codex route for the fleet-quota-balancer FALLBACK choice (fail-closed default when no Muse headroom and no serviceable Claude account). Pricing mirrors gpt-5.6-sol (4/20/0.4) as a same-family placeholder pending a confirmed 6.1 meter; unscored (aaIndex null) so tier is retained, never inferred. Regular T1 row, NOT fallbackOnly: fallbackOnly is last-resort-after-regular-exhaustion, while the bridge FALLBACK is a serviceable-lane pick that must compete on pace with the other quota lanes. Same-price-family rule (TOG-3406) applies to the 5.6/6.1 pair once 6.1 pricing is confirmed.",
       "releasedAt": "2026-06-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -368,6 +408,25 @@
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
       "note": "free Zen model (2026-09-06): $0, no Go quota; T3 by default, scorer demotes on evidence",
+      "releasedAt": "1970-01-01",
+      "fallbackOnly": false,
+      "earnIn": null,
+      "aaIndex": null
+    },
+    {
+      "id": "muse-spark-1.3-contributor",
+      "tier": "T3",
+      "enabled": true,
+      "capabilities": [
+        "tools",
+        "structured-output",
+        "long-context"
+      ],
+      "contextWindow": 1048576,
+      "costPerMTokIn": 0,
+      "costPerMTokOut": 0,
+      "costPerMTokCacheRead": 0,
+      "note": "2026-10-03 TOG-14066 (MUSE slice of TOG-13513): subscription Meta route for the fleet-quota-balancer MUSE choice (bridge pins xhigh at the agent row, not here); distinct access path from the disabled Zen -free rows below. T3 by family precedent; unscored (aaIndex null) so tier is retained, never inferred. $0 marginal under quota while under ceiling; pace orders quota lanes, not list price (spend source of record is cost_events). 1,048,576 window per the agent-env cap note.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,

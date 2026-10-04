@@ -1,0 +1,211 @@
+{
+  "_provenance": "SYNTHETIC. Reconstructed from the TOG-12966 card text (real lane-document record shape from the cliproxy lane documents); NOT a byte copy of the 2026-10-03T02:01Z snapshot, which this run could not read. No emails, credentials or display names.",
+  "snapshot": {
+    "schemaVersion": 1,
+    "observedAt": "2026-10-03T02:01:00Z",
+    "staleAfterSeconds": 300,
+    "records": [
+      {
+        "lane": "claude-lane-1",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "seven_day",
+        "window_seconds": {
+          "five_hour": 18000,
+          "seven_day": 604800
+        },
+        "five_hour_utilization": 0.62,
+        "five_hour_resets_at": "2026-10-03T06:20:00.443210Z",
+        "seven_day_utilization": 0.55,
+        "seven_day_resets_at": "2026-10-09T19:00:00.443239Z"
+      },
+      {
+        "lane": "claude-lane-2",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "seven_day",
+        "window_seconds": {
+          "five_hour": 18000,
+          "seven_day": 604800
+        },
+        "five_hour_utilization": 0.18,
+        "five_hour_resets_at": "2026-10-03T06:50:00.666229Z",
+        "seven_day_utilization": 0.93,
+        "seven_day_resets_at": "2026-10-03T09:59:59.666254Z"
+      },
+      {
+        "lane": "codex-lane-1",
+        "observationQuality": "cached",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "weekly": 604800
+        },
+        "weekly_utilization": 0.71,
+        "weekly_resets_at": "2026-10-07T11:12:45Z"
+      },
+      {
+        "lane": "codex-lane-2",
+        "observationQuality": "cached",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "weekly": 604800
+        },
+        "weekly_utilization": 0.88,
+        "weekly_resets_at": "2026-10-07T11:14:09Z"
+      },
+      {
+        "lane": "codex-lane-3",
+        "observationQuality": "cached",
+        "health": "exhausted",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "weekly": 604800
+        },
+        "weekly_utilization": 1.0,
+        "weekly_resets_at": "2026-10-07T11:12:50Z"
+      },
+      {
+        "lane": "meta-lane-1",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.0,
+        "five_hour_resets_at": "2026-10-03T04:10:00Z",
+        "weekly_utilization": 0.04,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-2",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.2,
+        "five_hour_resets_at": "2026-10-03T05:20:00Z",
+        "weekly_utilization": 0.11,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-3",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.35,
+        "five_hour_resets_at": "2026-10-03T03:30:00Z",
+        "weekly_utilization": 0.27,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-4",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.5,
+        "five_hour_resets_at": "2026-10-03T04:40:00Z",
+        "weekly_utilization": 0.46,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-5",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.7,
+        "five_hour_resets_at": "2026-10-03T05:50:00Z",
+        "weekly_utilization": 0.63,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-6",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.9,
+        "five_hour_resets_at": "2026-10-03T03:00:00Z",
+        "weekly_utilization": 0.81,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-7",
+        "observationQuality": "live",
+        "health": "healthy",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.97,
+        "five_hour_resets_at": "2026-10-03T04:10:00Z",
+        "weekly_utilization": 0.93,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "meta-lane-8",
+        "observationQuality": "live",
+        "health": "degraded",
+        "weight": 1,
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 1.0,
+        "five_hour_resets_at": "2026-10-03T05:20:00Z",
+        "weekly_utilization": 0.99,
+        "weekly_resets_at": "2026-10-05T00:00:00Z"
+      },
+      {
+        "lane": "zai-lane-1",
+        "observationQuality": "live",
+        "health": "healthy",
+        "plan": "pro",
+        "governing_window": "weekly",
+        "window_seconds": {
+          "five_hour": 18000,
+          "weekly": 604800
+        },
+        "five_hour_utilization": 0.4911,
+        "five_hour_resets_at": "2026-10-03T05:30:12Z",
+        "weekly_utilization": 0.438,
+        "weekly_resets_at": "2026-10-08T12:00:00Z"
+      }
+    ]
+  }
+}
