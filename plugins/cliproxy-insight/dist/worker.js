@@ -117,6 +117,9 @@ function firstNumber(record, fields) {
   }
   return null;
 }
+function toolRejection(error, extra = {}) {
+  return { ok: false, error, ...extra };
+}
 function resolveConfig(raw) {
   const r = asRecord(raw);
   return {
@@ -532,10 +535,13 @@ function createPlugin() {
         async (params) => {
           const input = asRecord(params);
           const companyId = typeof input.companyId === "string" ? input.companyId : "";
-          if (!companyId) return { error: "companyId is required" };
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!companyId)
+            return { error: "companyId is required", data: toolRejection("companyId is required") };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
           const config = resolveConfig(await ctx.config.get(companyId));
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
           const nowMs = Date.now();
           const requested = typeof input.provider === "string" ? input.provider : null;
           const providers = requested ? [requested] : await readProviderIndex(companyId);

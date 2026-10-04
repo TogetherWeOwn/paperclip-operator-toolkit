@@ -60,6 +60,21 @@ function firstNumber(record: Record<string, unknown>, fields: readonly string[])
   return null;
 }
 
+/**
+ * TOG-5007 (TOG-4713 D1d; TOG-4763 pattern). The Paperclip tool gateway maps
+ * a plugin result to `structuredContent: result?.data ?? null`, and the
+ * Claude client rejects a null `structuredContent` — a tool call returning
+ * only `{ error }` (or no `data` at all) fails schema validation in Claude
+ * Code. The `get_provider_usage` handler therefore returns a plain-object
+ * `data` on EVERY path, including validation rejections, which use this
+ * `{ ok: false, error: <code> }` shape. The `error` field is unchanged — it
+ * stays the machine-readable failure signal; `data` is the record the
+ * gateway maps to `structuredContent`.
+ */
+function toolRejection(error: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ok: false, error, ...extra };
+}
+
 function resolveConfig(raw: unknown): ResolvedConfig {
   const r = asRecord(raw);
   return {
@@ -755,11 +770,14 @@ export function createPlugin() {
         async (params) => {
           const input = asRecord(params);
           const companyId = typeof input.companyId === "string" ? input.companyId : "";
-          if (!companyId) return { error: "companyId is required" };
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!companyId)
+            return { error: "companyId is required", data: toolRejection("companyId is required") };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
 
           const config = resolveConfig(await ctx.config.get(companyId));
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
           const nowMs = Date.now();
           const requested = typeof input.provider === "string" ? input.provider : null;
           const providers = requested ? [requested] : await readProviderIndex(companyId);

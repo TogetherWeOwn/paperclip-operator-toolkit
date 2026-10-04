@@ -72,7 +72,7 @@ async function withHost(configs, fn, { replay = true, serviceError = false } = {
     http: { fetch: service("http.fetch", (p) => {
       assert.equal(p.init.method, "GET");
       assert.equal(p.init.headers["x-api-key"], fakeBearer);
-      assert.match(p.url, /^https:\/\/router\.example\.net\/telemetry\/cliproxy\/[a-z-]+\.json$/);
+      assert.match(p.url, /^https:\/\/router\.example.net\/telemetry\/cliproxy\/[a-z-]+\.json$/);
       return { status: 200, statusText: "OK", headers: { "content-type": "application/json" }, body: JSON.stringify({
         schemaVersion: 1, observedAt: new Date().toISOString(), staleAfterSeconds: 300,
         records: [{ accountId: "fixture-account", provider: "claude", health: "ok", utilization: 0.2 }],
