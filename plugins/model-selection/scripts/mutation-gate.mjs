@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,7 +10,9 @@ import {
   copyMutationTree,
   mutationGateAllowed,
   mutationGateVitestInvocation,
+  parseMutationShard,
   runSequentially,
+  selectMutationShard,
   stageRepoFixtures,
 } from "./mutation-gate-runtime.mjs";
 
@@ -1583,6 +1586,57 @@ const mutants = [
     from: "              note: model.note,\n",
     to: "",
   },
+  // The shard split and the impact gate decide what the sweep covers
+  // and whether it may be skipped, so each is killed by a named spec in
+  // tests/mutation-gate-runtime.spec.ts or tests/mutation-impact.spec.ts.
+  {
+    name: "shard-selection-slices-overlap",
+    file: "scripts/mutation-gate-runtime.mjs",
+    from: "position % shard.total === shard.index - 1",
+    to: "position % shard.total <= shard.index - 1",
+  },
+  {
+    name: "shard-empty-spec-means-unsharded",
+    file: "scripts/mutation-gate-runtime.mjs",
+    from: "if (spec === undefined || spec === null) return null;",
+    to: "if (spec === undefined || spec === null || `${spec}`.trim() === \"\") return null;",
+  },
+  {
+    name: "impact-plugin-prefix-loses-trailing-slash",
+    file: "scripts/mutation-impact.mjs",
+    from: "Object.freeze([\"plugins/model-selection/\"])",
+    to: "Object.freeze([\"plugins/model-selection\"])",
+  },
+  {
+    name: "impact-unusable-base-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "if (resolved.base === undefined) return { impacted: true, reason: resolved.reason, matched: [] };",
+    to: "if (resolved.base === undefined) return { impacted: false, reason: resolved.reason, matched: [] };",
+  },
+  {
+    name: "impact-missing-base-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "return { impacted: true, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
+    to: "return { impacted: false, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
+  },
+  {
+    name: "impact-failed-diff-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "return { impacted: true, reason: `git diff ${base}..HEAD failed`, matched: [] };",
+    to: "return { impacted: false, reason: `git diff ${base}..HEAD failed`, matched: [] };",
+  },
+  {
+    name: "impact-diff-loses-nul-separation",
+    file: "scripts/mutation-impact.mjs",
+    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+    to: "[\"diff\", \"--name-only\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+  },
+  {
+    name: "impact-diff-collapses-renames",
+    file: "scripts/mutation-impact.mjs",
+    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+    to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
+  },
 ];
 
 /**
@@ -1602,9 +1656,37 @@ const mutantFilter = (process.env.MUTANTS ?? "")
   .split(",")
   .map((name) => name.trim())
   .filter((name) => name.length > 0);
-const selected = mutantFilter.length > 0
-  ? mutants.filter((mutant) => mutantFilter.includes(mutant.name))
-  : mutants;
+
+/**
+ * `MUTATION_SHARD=i/N` runs the i-th of N round-robin slices of the
+ * list, so CI can spread the ~300-mutant sweep over N jobs instead of one
+ * serial ~3h step. Everything else stays per shard — both baselines, the
+ * per-mutant deadline, the fork cap, every assertion — and a shard is never
+ * reported as the full pass: its summary names the slice and the total, and
+ * "all shards green" is the only thing that means the sweep passed. A set but
+ * malformed value, an empty slice, or sharding combined with `MUTANTS` is a
+ * BROKEN GATE, never a silent run of everything or of nothing.
+ */
+let shard = null;
+try {
+  shard = parseMutationShard(process.env.MUTATION_SHARD);
+} catch (error) {
+  process.stderr.write(`BROKEN GATE: ${error.message}\n`);
+  process.exit(1);
+}
+if (shard !== null && mutantFilter.length > 0) {
+  process.stderr.write("BROKEN GATE: MUTATION_SHARD and MUTANTS are mutually exclusive — a shard of a filtered list is not a slice of the sweep\n");
+  process.exit(1);
+}
+const selected = shard !== null
+  ? selectMutationShard(mutants, shard)
+  : mutantFilter.length > 0
+    ? mutants.filter((mutant) => mutantFilter.includes(mutant.name))
+    : mutants;
+if (shard !== null && selected.length === 0) {
+  process.stderr.write(`BROKEN GATE: shard ${shard.index}/${shard.total} selects no mutants (of ${mutants.length}) — a shard that runs nothing would report green\n`);
+  process.exit(1);
+}
 if (mutantFilter.length > 0) {
   const unknown = mutantFilter.filter((name) => !mutants.some((mutant) => mutant.name === name));
   if (unknown.length > 0) {
@@ -1641,6 +1723,44 @@ function completed(result) {
   return result.signal === null &&
     result.status !== null &&
     `${result.stdout}`.includes("Test Files");
+}
+
+/**
+ * A run that never reached its summary decided nothing, but the per-run
+ * timeout kill and an outside SIGKILL share one shape (`status: null, signal:
+ * SIGKILL`), so a bare BROKEN GATE line cannot tell a wedged mutant from a
+ * runner that destroyed a healthy run. Capture what tells them apart — how
+ * long the run lived, whether spawn itself reports a timeout, and whether the
+ * host recorded an OOM kill — so the log names the cause instead of merely
+ * the mutant. Every read is best-effort: forensics must never fail the gate
+ * on their own.
+ */
+function describeInterruptedRun(result, durationMs) {
+  const parts = [
+    `durationMs=${durationMs}`,
+    `status=${result.status}`,
+    `signal=${result.signal}`,
+    `error=${result.error?.code ?? result.error?.message ?? "none"}`,
+  ];
+  try {
+    const meminfo = readFileSync("/proc/meminfo", "utf8");
+    parts.push(`memAvailableKiB=${/MemAvailable:\s+(\d+)/.exec(meminfo)?.[1] ?? "unknown"}`);
+    parts.push(`memTotalKiB=${/MemTotal:\s+(\d+)/.exec(meminfo)?.[1] ?? "unknown"}`);
+  } catch {
+    parts.push("meminfo=unreadable");
+  }
+  try {
+    const events = readFileSync("/sys/fs/cgroup/memory.events", "utf8");
+    parts.push(`cgroupOomKill=${/^oom_kill\s+(\d+)/m.exec(events)?.[1] ?? "unknown"}`);
+  } catch {
+    parts.push("cgroupOomKill=unreadable");
+  }
+  try {
+    parts.push(`loadavg=${readFileSync("/proc/loadavg", "utf8").trim()}`);
+  } catch {
+    parts.push("loadavg=unreadable");
+  }
+  return parts.join(" ");
 }
 
 const baseline = runTests();
@@ -1698,18 +1818,49 @@ try {
         return;
       }
 
+      const applyMutant = () => writeFile(path, original.replace(mutant.from, mutant.to));
+      const restoreMutant = () => writeFile(path, original);
+
+      await applyMutant();
+      let started = Date.now();
       let result;
       try {
-        await writeFile(path, original.replace(mutant.from, mutant.to));
         result = runTests(mutationRoot);
       } finally {
-        await writeFile(path, original);
+        await restoreMutant();
       }
 
       if (!completed(result)) {
-        console.error(`BROKEN GATE: ${mutant.name} run did not complete (status ${result.status}, signal ${result.signal})`);
-        failures += 1;
-      } else if (result.status === 0) {
+        // A run that never reached its summary decided nothing, so retry it
+        // once before calling it broken: a hosted runner can SIGKILL a healthy
+        // run from outside (its shape is identical to the timeout kill), and
+        // re-running costs one suite while re-running the shard costs
+        // twenty. A retry that completes is scored exactly like a first
+        // attempt — a kill is still a kill and a survival still fails the
+        // gate — so the retry can only rescue a run the runner destroyed,
+        // never a mutant the suite missed. Two consecutive non-completions
+        // stay BROKEN GATE, now carrying both attempts' forensics.
+        const first = describeInterruptedRun(result, Date.now() - started);
+        console.error(`RETRY: ${mutant.name} first run did not complete (${first})`);
+        await applyMutant();
+        started = Date.now();
+        try {
+          result = runTests(mutationRoot);
+        } finally {
+          await restoreMutant();
+        }
+        if (!completed(result)) {
+          console.error(
+            `BROKEN GATE: ${mutant.name} run did not complete twice ` +
+              `(first: ${first}; second: ${describeInterruptedRun(result, Date.now() - started)})`,
+          );
+          failures += 1;
+          return;
+        }
+        console.error(`RECOVERED: ${mutant.name} completed on retry; scoring the retry`);
+      }
+
+      if (result.status === 0) {
         console.error(`SURVIVED: ${mutant.name}`);
         failures += 1;
       } else {
@@ -1722,6 +1873,10 @@ try {
 }
 
 if (brokenGate || failures > 0) process.exit(1);
+if (shard !== null) {
+  console.log(`mutation gate shard ${shard.index}/${shard.total}: ${selected.length}/${selected.length} killed (of ${mutants.length})`);
+  process.exit(0);
+}
 if (selected.length !== mutants.length) {
   console.log(`mutation gate PARTIAL: ${selected.length}/${mutants.length} mutants run, all killed — NOT a passing gate`);
   process.exit(0);

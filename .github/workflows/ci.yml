@@ -4428,42 +4428,150 @@ jobs:
   # red" rather than as one opaque "CI failed".
   #
   # Offline: no credential, no network, no host. Tests are written for Vitest.
-  model-selection-suite:
-    name: model-selection suite
+  # Three jobs, one required check. The plugin's mutation gate used to be ONE
+  # serial step of the `model-selection suite` job: hundreds of mutants at
+  # tens of seconds each is hours against a ceiling that kept being raised and
+  # still lost to the sweep's growth. It also ran on every PR, including ones
+  # that never touched the plugin. So:
+  #
+  #   model-selection-impact   decides, from the diff, whether the gate can be
+  #                            affected (fails SAFE: any doubt => impacted)
+  #   model-selection-mutants  the sweep, split into N round-robin shards that
+  #                            run as parallel jobs; skipped when not impacted
+  #   model-selection-suite    UNCHANGED required context. Runs the Vitest suite
+  #                            and the build, and goes red unless the sweep
+  #                            passed (impacted) or was legitimately skipped
+  #                            (proven unimpacted). No ruleset edit is needed.
+  #
+  # All three run on the standard hosted runner: this is a public repo, so
+  # there is no private queue and no minute limit to route around.
+  model-selection-impact:
+    name: model-selection impact
     runs-on: ubuntu-latest
-    # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
-    # gate runs (the gate refuses outside CI), and each mutant re-runs the full
-    # Vitest suite capped at 2 forks. The named gate grew from 55 to 115 mutants
-    # over these cards' lives, so the sweep is bounded but serialized: 117 runs
-    # (baseline + isolated baseline + 115 mutants). Under self-hosted fleet load
-    # this exceeded the old 20m cap and was CANCELLED (a timeout, not a red
-    # test) — a rerun could never fix that.
-    #
-    # This ceiling is a hang-catcher, not a performance budget: each run is
-    # separately bounded by MUTATION_GATE_RUN_TIMEOUT_MS, which fails loudly and
-    # NAMES the mutant, so a genuine wedge is caught with a useful signal well
-    # before this fires. The danger a MIS-SIZED ceiling introduces is the
-    # inverse of a wedge: it converts an honest-but-slow sweep into a silent
-    # "cancelled" with no mutant named — the exact failure mode these cards are
-    # about.
-    #
-    # TOG-3649: 45m was itself too tight for the fully-grown 115-mutant sweep.
-    # On the #300 merge-forward (run 35548289466, job 106178148853) the honest
-    # sweep reached only 93/115 named mutants at the 45m ceiling — 22 never ran,
-    # and the job cancelled with no mutant named: precisely the silent-cancel
-    # this comment warns against. Measured ~28s/run under that load puts the
-    # full sweep near ~54m for the step alone, so 45m had negative headroom.
-    # The ceiling is now 90m — the same value already carried by the sibling
-    # `long-mutation-gates` job, and still well under the 150m Offline job. The
-    # per-mutant deadline is unchanged, so this does not weaken the gate; it
-    # lets every mutant actually run. Longer-term the sweep should be sharded
-    # into independently required jobs (owned by the CI restructure, TOG-3553);
-    # this raise is the bounded fix, not that restructure.
-    timeout-minutes: 90
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      impacted: ${{ steps.impact.outputs.impacted }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # Node 24: the same runtime the sweep uses. The script imports only node
+      # builtins and the gate runtime, so there is no install step here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Fails safe: an unknown event, a missing or all-zero base, a force-push
+      # whose previous head is gone, a failed fetch or diff all write
+      # impacted=true. A non-zero exit here is infrastructure and turns the
+      # required job red (its aggregation step reads the impact result).
+      - name: Decide whether this change can affect the plugin mutants
+        id: impact
+        run: node plugins/model-selection/scripts/mutation-impact.mjs
+
+  # The sweep. N parallel jobs, one round-robin shard each (MUTATION_SHARD=i/N,
+  # N = strategy.job-total, so the matrix is the single place the count lives and
+  # a spec pins it to a contiguous 1..N). Every assertion stays per shard: the
+  # baseline, the isolated baseline, the fork cap, the per-mutant deadline.
+  # A shard prints `mutation gate shard i/N: k/k killed (of TOTAL)` and is never
+  # the full pass; "all shards green" is what the aggregator in
+  # `model-selection-suite` requires.
+  #
+  # Ceiling: 40 min per shard. This is a hang-catcher, not a performance budget:
+  # each run is separately bounded by MUTATION_GATE_RUN_TIMEOUT_MS, which fails
+  # loudly and NAMES the mutant. The danger a mis-sized ceiling introduces is
+  # the inverse of a wedge — an honest-but-slow shard turned into a silent
+  # "cancelled" with no mutant named. When the sweep grows past ~10% headroom,
+  # raise the shard count, not this number.
+  model-selection-mutants:
+    name: model-selection mutants (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: model-selection-impact
+    if: ${{ needs.model-selection-impact.outputs.impacted == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: plugins/model-selection
     steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # Node 24: the version the instance runs plugins on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/model-selection/package-lock.json
+
+      # --include=dev is required for plugin-sdk devDependency.
+      - name: Install pinned host packages
+        run: npm ci --include=dev --ignore-scripts
+
+      # Guard the install.
+      - name: Verify the install actually landed
+        run: |
+          set -euo pipefail
+          [ -d "node_modules/@paperclipai/plugin-sdk" ] || {
+            echo "::error::@paperclipai/plugin-sdk is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
+            exit 1
+          }
+          echo "install ok: plugin-sdk present"
+
+      # The gate refuses outside CI (CI=true is set by the runner).
+      - name: Kill named selection mutants
+        env:
+          MUTATION_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: npm run test:mutants
+
+  # The required check. Same name, same context as before sharding, so the
+  # ruleset needs no edit. It always reports (`!cancelled()`) so a failed or
+  # skipped dependency is a RED here, never a missing check.
+  model-selection-suite:
+    name: model-selection suite
+    needs: [model-selection-impact, model-selection-mutants]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # 90 -> 40. The serial sweep that justified the old ceiling moved to
+    # model-selection-mutants; what remains is checkout, npm ci, the Vitest
+    # suite and the build.
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: plugins/model-selection
+    steps:
+      # First, and not behind the install: the verdict on the sweep needs no
+      # checkout. Only an impacted run with every shard green, or a run proven
+      # unimpacted with the matrix skipped, may pass; failed, cancelled, skipped
+      # while impacted, and a red impact job all fall through to the red default.
+      - name: Require the sharded mutation gate
+        working-directory: .
+        env:
+          IMPACT_RESULT: ${{ needs.model-selection-impact.result }}
+          IMPACTED: ${{ needs.model-selection-impact.outputs.impacted }}
+          MUTANTS_RESULT: ${{ needs.model-selection-mutants.result }}
+        run: |
+          set -euo pipefail
+          echo "impact=$IMPACT_RESULT impacted=$IMPACTED mutants=$MUTANTS_RESULT"
+          case "$IMPACT_RESULT/$IMPACTED/$MUTANTS_RESULT" in
+            success/true/success) ;;
+            success/false/skipped) ;;
+            *)
+              echo "::error title=Mutation gate::the sharded mutation gate did not pass (impact=$IMPACT_RESULT impacted=$IMPACTED mutants=$MUTANTS_RESULT). Open the model-selection mutants shard jobs for the named mutant."
+              exit 1
+              ;;
+          esac
+          echo "mutation gate: ok"
+
       - uses: actions/checkout@v4
 
       # Node 24: the version the instance runs plugins on.
@@ -4487,27 +4595,24 @@ jobs:
           }
           echo "install ok: plugin-sdk present"
 
-      # Run the Vitest suite and the named TOG-2134 mutation gate.
+      # Run the Vitest suite. The named mutation gate runs in
+      # `model-selection-mutants`, sharded; this job proves it passed.
       - name: Model selection suite
         run: npm test
-
-      - name: Kill named selection mutants
-        run: npm run test:mutants
 
       # Verify the plugin still builds.
       - name: Verify the plugin builds
         run: npm run build
 
-      # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access
-      # (PAPERCLIP_API_KEY, PAPERCLIP_COMPANY_ID). It is designed for the
-      # operator's environment, not for CI. The operator must run it separately
-      # on the archive extract per TOG-809 §3.
-      # TOG-3012: the host loads dist/worker.js, not src/. dist/ is TRACKED
-      # here, so a PR that changes src/ without committing the rebuilt bundle
-      # merges green and deploys a no-op. The build step above cannot catch it:
-      # it rebuilds into the working tree and says nothing about whether the
-      # committed bytes match. This does. Build is deterministic (esbuild pinned
-      # in package-lock, relative sourcemap paths), so a diff here is a stale
+      # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access.
+      # It is designed for the operator's environment, not for CI. The operator
+      # must run it separately on the archive extract.
+      # The host loads dist/worker.js, not src/. dist/ is TRACKED here, so a PR
+      # that changes src/ without committing the rebuilt bundle merges green and
+      # deploys a no-op. The build step above cannot catch it: it rebuilds into
+      # the working tree and says nothing about whether the committed bytes
+      # match. This does. Build is deterministic (esbuild pinned in
+      # package-lock, relative sourcemap paths), so a diff here is a stale
       # commit, never machine drift.
       - name: Fail if the committed dist/ is stale
         run: |
@@ -4517,3 +4622,31 @@ jobs:
             exit 1
           fi
           echo "dist ok: committed bundle matches src"
+
+  # Runs only when something above failed and names the failed jobs. It needs
+  # every suite so a red run always leaves a pointer; the sharded mutation
+  # jobs are pinned here by the plugin's spec.
+  failure-log-drain:
+    name: Failure log drain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - privilege-suites
+      - offline-suites
+      - long-mutation-gates
+      - runbook-gates
+      - broker-suite
+      - omniroute-broker-suite
+      - dispatch-suite
+      - mcp-suite
+      - model-selection-impact
+      - model-selection-mutants
+      - model-selection-suite
+    if: failure()
+    permissions:
+      contents: read
+    steps:
+      - name: Summarize failed jobs
+        run: |
+          set -euo pipefail
+          echo '${{ toJSON(needs) }}' | python3 -c "import json,sys; [print(k, '=', v.get('result')) for k, v in json.load(sys.stdin).items()]"

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,9 +7,12 @@ import { describe, expect, it } from "vitest";
 const root = new URL("..", import.meta.url).pathname;
 const gate = new URL("../scripts/mutation-gate.mjs", import.meta.url).pathname;
 const runtime = new URL("../scripts/mutation-gate-runtime.mjs", import.meta.url).href;
-const ciJob = "model-selection suite";
+// The step runs in the sharded `model-selection mutants` matrix; the
+// required `model-selection suite` job only aggregates its verdict.
+const ciJob = "model-selection mutants";
 const ciStep = "Kill named selection mutants";
-const refusal = `run on CI (private runner) — cite the PR's "${ciJob}" job, step "${ciStep}"`;
+const requiredCheck = "model-selection suite";
+const refusal = `run on CI (standard runner) — cite the PR's "${ciJob}" shard jobs, step "${ciStep}"`;
 const workflow = new URL("../../../.github/workflows/ci.yml", import.meta.url).pathname;
 const manifest = new URL("../package.json", import.meta.url).pathname;
 
@@ -22,6 +25,15 @@ function jobBlock(text: string, key: string) {
   if (start === -1) return null;
   const end = lines.findIndex((line, index) => index > start && /^  \S/.test(line));
   return lines.slice(start + 1, end === -1 ? lines.length : end);
+}
+
+// The lines of one `- name: <name>` step inside a job block: from its name line
+// up to (not including) the next step. Returns null when no such step exists.
+function stepLines(block: string[], name: string) {
+  const start = block.indexOf(`      - name: ${name}`);
+  if (start === -1) return null;
+  const end = block.findIndex((line, index) => index > start && /^ {6}- /.test(line));
+  return block.slice(start, end === -1 ? block.length : end);
 }
 
 function deniedEnv() {
@@ -93,6 +105,7 @@ describe("mutation gate runtime controls", () => {
         args: [
           "node_modules/vitest/vitest.mjs",
           "run",
+          "--cache=false",
           "--pool=forks",
           "--poolOptions.forks.maxForks=2",
           "--poolOptions.forks.minForks=1",
@@ -186,6 +199,7 @@ describe("mutation gate runtime controls", () => {
       args: [
         "node_modules/vitest/vitest.mjs",
         "run",
+        "--cache=false",
         "--pool=forks",
         `--poolOptions.forks.maxForks=${env.VITEST_MAX_FORKS}`,
         "--poolOptions.forks.minForks=1",
@@ -319,20 +333,261 @@ describe("mutation gate runtime controls", () => {
   // script. This asserts the wiring is present, not that it passes; a green
   // run of the step is what the citation is for.
   it("names a CI job and step that actually execute this gate", () => {
-    const block = jobBlock(readFileSync(workflow, "utf8"), "model-selection-suite");
-    expect(block, "ci.yml has no model-selection-suite job").not.toBeNull();
+    const block = jobBlock(readFileSync(workflow, "utf8"), "model-selection-mutants");
+    expect(block, "ci.yml has no model-selection-mutants job").not.toBeNull();
 
-    expect(block).toContain(`    name: ${ciJob}`);
+    expect(block).toContain("    name: " + ciJob + " (shard ${{ matrix.shard }}/${{ strategy.job-total }})");
 
-    const step = block!.indexOf(`      - name: ${ciStep}`);
-    expect(step, `no "${ciStep}" step inside the ${ciJob} job`).toBeGreaterThan(-1);
-    expect(block![step + 1]).toBe("        run: npm run test:mutants");
+    const step = stepLines(block!, ciStep);
+    expect(step, `no "${ciStep}" step inside the ${ciJob} job`).not.toBeNull();
+    expect(step).toContain("        run: npm run test:mutants");
+    expect(step).toContain("          MUTATION_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}");
 
     const scripts = JSON.parse(readFileSync(manifest, "utf8")).scripts as Record<string, string>;
     expect(scripts["test:mutants"]).toContain("scripts/mutation-gate.mjs");
 
     expect(refusal).toContain(ciJob);
     expect(refusal).toContain(ciStep);
+  });
+
+  // Sharding moves the verdict out of the required job, so each rule
+  // below closes one way for the sweep to go green while testing less than the
+  // whole list. All are pinned against ci.yml by literal line, the same way the
+  // job/step names are: a re-quoting fails the match, which is the safe side.
+  describe("sharded mutation workflow", () => {
+    const text = readFileSync(workflow, "utf8");
+    const mutants = jobBlock(text, "model-selection-mutants")!;
+    const impact = jobBlock(text, "model-selection-impact")!;
+    const suite = jobBlock(text, "model-selection-suite")!;
+
+    it("keeps the matrix a contiguous 1..N, so every shard i/N is actually run", () => {
+      // `strategy.job-total` is N, so a matrix missing a middle entry (1,2,3,5,
+      // 6,7 of 6) silently skips a slice: shard 4 never runs and shard 6 of 6 is
+      // asked for twice-removed. Contiguity from 1 is the invariant.
+      const row = mutants.find((line) => /^ {8}shard: \[[0-9, ]+\]$/.test(line));
+      expect(row, "no `shard: [...]` matrix row").toBeDefined();
+      const shards = row!.replace(/^ {8}shard: \[|\]$/g, "").split(",").map((n) => Number.parseInt(n, 10));
+      expect(shards.length).toBeGreaterThan(1);
+      expect(shards).toEqual(shards.map((_, index) => index + 1));
+    });
+
+    it.each([
+      "    needs: model-selection-impact",
+      "    if: ${{ needs.model-selection-impact.outputs.impacted == 'true' }}",
+      "    timeout-minutes: 40",
+      "      fail-fast: false",
+      "    permissions:",
+      "      contents: read",
+    ])("pins the mutants job to %s", (line) => {
+      expect(mutants).toContain(line);
+    });
+
+    it("exposes the impact verdict from the step that computes it", () => {
+      expect(impact).toContain("    name: model-selection impact");
+      expect(impact).toContain("      impacted: ${{ steps.impact.outputs.impacted }}");
+      const step = stepLines(impact, "Decide whether this change can affect the plugin mutants");
+      expect(step, "no impact step").not.toBeNull();
+      expect(step).toContain("        id: impact");
+      expect(step).toContain("        run: node plugins/model-selection/scripts/mutation-impact.mjs");
+    });
+
+    it("leaves the required context name and an always-reporting condition on the aggregator", () => {
+      expect(suite).toContain(`    name: ${requiredCheck}`);
+      // `!cancelled()` still runs after a red or skipped dependency, so the
+      // required check always reports a verdict; only a cancelled run (which is
+      // red or absent, never green) skips it.
+      expect(suite).toContain("    if: ${{ !cancelled() }}");
+      expect(suite).toContain("    needs: [model-selection-impact, model-selection-mutants]");
+      expect(suite).toContain("    timeout-minutes: 40");
+    });
+
+    it("does not run the sweep inside the required job any more", () => {
+      expect(suite.some((line) => line.includes(ciStep))).toBe(false);
+      expect(suite.some((line) => line.includes("npm run test:mutants"))).toBe(false);
+      expect(suite.some((line) => line.includes("MUTATION_SHARD"))).toBe(false);
+    });
+
+    it("fails the required job unless the sweep passed or was legitimately skipped", () => {
+      const step = stepLines(suite, "Require the sharded mutation gate");
+      expect(step, "no aggregation step in the suite job").not.toBeNull();
+      // First step: it must not wait behind the install, and only an impacted
+      // run with all shards green, or a proven-unimpacted run with the matrix
+      // skipped, may pass. Anything else — failed, cancelled, skipped while
+      // impacted, impact job red — falls through to the red default.
+      expect(suite.findIndex((line) => line.includes("- name: Require the sharded mutation gate"))).toBe(
+        suite.findIndex((line) => line.startsWith("      - ")),
+      );
+      expect(step).toContain("        working-directory: .");
+      expect(step).toContain("          IMPACT_RESULT: ${{ needs.model-selection-impact.result }}");
+      expect(step).toContain("          IMPACTED: ${{ needs.model-selection-impact.outputs.impacted }}");
+      expect(step).toContain("          MUTANTS_RESULT: ${{ needs.model-selection-mutants.result }}");
+      expect(step).toContain('            success/true/success) ;;');
+      expect(step).toContain('            success/false/skipped) ;;');
+      expect(step!.filter((line) => /^ {12}[a-z*/]+\)/.test(line))).toEqual([
+        "            success/true/success) ;;",
+        "            success/false/skipped) ;;",
+        "            *)",
+      ]);
+    });
+
+    it("feeds both new jobs to the failure-log drain", () => {
+      const drain = jobBlock(text, "failure-log-drain")!;
+      expect(drain).toContain("      - model-selection-impact");
+      expect(drain).toContain("      - model-selection-mutants");
+      expect(drain).toContain("      - model-selection-suite");
+    });
+  });
+
+  // The shard split is what lets N jobs cover one sweep, so its two
+  // properties are checked over every N the workflow could plausibly use and
+  // over list sizes that straddle N (empty, one, fewer than N, a prime, the
+  // real ~300): shards are pairwise disjoint and their union is the whole list.
+  // A mutant that falls between shards is one nobody kills — a sweep that
+  // reports green having tested less than it claims.
+  describe("mutation shard selection", () => {
+    const shardRuns = probe(`
+      import { parseMutationShard, selectMutationShard } from ${JSON.stringify(runtime)};
+      const out = {};
+      for (const size of [0, 1, 7, 8, 9, 97, 302]) {
+        const items = Array.from({ length: size }, (_, index) => index);
+        for (let total = 1; total <= 16; total += 1) {
+          const slices = [];
+          for (let index = 1; index <= total; index += 1) {
+            slices.push(selectMutationShard(items, parseMutationShard(index + "/" + total)));
+          }
+          out[size + "/" + total] = slices;
+        }
+      }
+      console.log(JSON.stringify(out));
+    `) as Record<string, number[][]>;
+
+    it.each(Object.keys(shardRuns))("splits a list of size/N %s into disjoint slices that cover it exactly", (key) => {
+      const [size = 0, total = 1] = key.split("/").map(Number);
+      const slices = shardRuns[key]!;
+      expect(slices).toHaveLength(total);
+      // flat + sorted equals 0..size-1 only if there is no duplicate (disjoint)
+      // and no gap (union is the whole list).
+      expect(slices.flat().sort((a, b) => a - b)).toEqual(Array.from({ length: size }, (_, index) => index));
+      // Round-robin keeps the slices balanced to within one mutant.
+      const lengths = slices.map((slice) => slice.length);
+      expect(Math.max(...lengths) - Math.min(...lengths)).toBeLessThanOrEqual(1);
+    });
+
+    it("assigns by index % N == i - 1, so adjacent (similarly expensive) mutants spread across shards", () => {
+      const result = probe(`
+        import { parseMutationShard, selectMutationShard } from ${JSON.stringify(runtime)};
+        const items = Array.from({ length: 16 }, (_, index) => index);
+        console.log(JSON.stringify({
+          second: selectMutationShard(items, parseMutationShard("2/8")),
+          last: selectMutationShard(items, parseMutationShard("8/8")),
+        }));
+      `);
+      expect(result).toEqual({ second: [1, 9], last: [7, 15] });
+    });
+
+    it("treats an unset spec as not sharded, and reads a padded one", () => {
+      const result = probe(`
+        import { parseMutationShard, selectMutationShard } from ${JSON.stringify(runtime)};
+        const items = ["a", "b", "c"];
+        console.log(JSON.stringify({
+          unset: parseMutationShard(undefined),
+          all: selectMutationShard(items, parseMutationShard(undefined)),
+          padded: parseMutationShard(${JSON.stringify(" 3/8\n")}),
+        }));
+      `);
+      expect(result).toEqual({ unset: null, all: ["a", "b", "c"], padded: { index: 3, total: 8 } });
+    });
+
+    // A set but malformed spec must THROW. Each row is a way for a workflow
+    // expression to go wrong that, treated leniently, becomes either "run the
+    // whole sweep serially again" or "run no mutants and report green".
+    const malformed = ["", " ", "0/8", "9/8", "1/0", "a/b", "1/8/2", "1", "3/", "/8", "-1/8", "1.5/8", "01/8", "1/99999999999999999999"];
+    it.each(malformed)("rejects the malformed spec %j", (spec) => {
+      const result = probe(`
+        import { parseMutationShard } from ${JSON.stringify(runtime)};
+        let outcome;
+        try { outcome = { parsed: parseMutationShard(${JSON.stringify(spec)}) }; }
+        catch (error) { outcome = { error: error.message }; }
+        console.log(JSON.stringify(outcome));
+      `) as { parsed?: unknown; error?: string };
+      expect(result.parsed).toBeUndefined();
+      expect(result.error).toMatch(/invalid MUTATION_SHARD/);
+    });
+
+    // The same refusals, end to end through the real gate script. Selection
+    // precedes the baseline, so every row exits before the first Vitest run —
+    // but "precedes" is exactly what a regression breaks, and a regression would
+    // otherwise launch a real sweep from inside a test that is itself run by the
+    // sweep. So the gate runs in a sandbox whose `vitest` is a stub that exits 97:
+    // a gate that wrongly proceeds reaches the stub, fails with a different
+    // message, and fails the row — no nested suite is ever started.
+    const stubbedGate = () => {
+      const sandbox = mkdtempSync(join(tmpdir(), "mutation-shard-gate-"));
+      const pluginRoot = join(sandbox, "plugins", "model-selection");
+      mkdirSync(join(pluginRoot, "scripts"), { recursive: true });
+      mkdirSync(join(pluginRoot, "node_modules", "vitest"), { recursive: true });
+      copyFileSync(gate, join(pluginRoot, "scripts", "mutation-gate.mjs"));
+      copyFileSync(new URL("../scripts/mutation-gate-runtime.mjs", import.meta.url).pathname, join(pluginRoot, "scripts", "mutation-gate-runtime.mjs"));
+      writeFileSync(join(pluginRoot, "node_modules", "vitest", "vitest.mjs"), "process.exit(97);\n");
+      return { sandbox, pluginRoot, script: join(pluginRoot, "scripts", "mutation-gate.mjs") };
+    };
+    const gateEnv = (extra: Record<string, string>) => {
+      const env: NodeJS.ProcessEnv = { ...process.env, MUTATION_GATE_LOCAL: "1", ...extra };
+      for (const name of ["MUTATION_SHARD", "MUTANTS"]) if (!(name in extra)) delete env[name];
+      return env;
+    };
+    it.each([
+      [{ MUTATION_SHARD: "" }, /invalid MUTATION_SHARD/],
+      [{ MUTATION_SHARD: "0/8" }, /invalid MUTATION_SHARD/],
+      [{ MUTATION_SHARD: "9/8" }, /invalid MUTATION_SHARD/],
+      [{ MUTATION_SHARD: "x" }, /invalid MUTATION_SHARD/],
+      [{ MUTATION_SHARD: "1/2", MUTANTS: "serviceability-ignore-margin" }, /mutually exclusive/],
+      [{ MUTATION_SHARD: "100000/100000" }, /selects no mutants/],
+    ] as Array<[Record<string, string>, RegExp]>)("the gate refuses %o before running anything", (extra, message) => {
+      const { sandbox, pluginRoot, script } = stubbedGate();
+      try {
+        const result = spawnSync(process.execPath, [script], {
+          cwd: pluginRoot,
+          encoding: "utf8",
+          env: gateEnv(extra),
+          timeout: 20_000,
+          killSignal: "SIGKILL",
+        });
+
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(/BROKEN GATE:/);
+        expect(result.stderr).toMatch(message);
+        expect(result.stderr).not.toMatch(/baseline/);
+      } finally {
+        rmSync(sandbox, { recursive: true, force: true });
+      }
+    });
+
+    // The converse, which the refusals above cannot show: a well-formed shard
+    // does get past selection and reaches the baseline. With the stub as vitest
+    // that is a BROKEN GATE naming the baseline — i.e. "selection accepted this
+    // spec" — and, because the baseline never completed, no mutant ran and no
+    // `shard ... killed` line was printed. A shard summary is therefore only ever
+    // the product of a real sweep.
+    it("a well-formed shard passes selection and stops at the baseline, printing no summary", () => {
+      const { sandbox, pluginRoot, script } = stubbedGate();
+      try {
+        const result = spawnSync(process.execPath, [script], {
+          cwd: pluginRoot,
+          encoding: "utf8",
+          env: gateEnv({ MUTATION_SHARD: "3/8" }),
+          timeout: 20_000,
+          killSignal: "SIGKILL",
+        });
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toMatch(/BROKEN GATE: baseline run did not complete/);
+        expect(result.stdout).not.toMatch(/mutation gate/);
+      } finally {
+        rmSync(sandbox, { recursive: true, force: true });
+      }
+    });
   });
 
   // TOG-2980 / TOG-3049. Mutants run from a scratch copy of the plugin, so a
