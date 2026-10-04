@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -1724,6 +1725,44 @@ function completed(result) {
     `${result.stdout}`.includes("Test Files");
 }
 
+/**
+ * A run that never reached its summary decided nothing, but the per-run
+ * timeout kill and an outside SIGKILL share one shape (`status: null, signal:
+ * SIGKILL`), so a bare BROKEN GATE line cannot tell a wedged mutant from a
+ * runner that destroyed a healthy run. Capture what tells them apart — how
+ * long the run lived, whether spawn itself reports a timeout, and whether the
+ * host recorded an OOM kill — so the log names the cause instead of merely
+ * the mutant. Every read is best-effort: forensics must never fail the gate
+ * on their own.
+ */
+function describeInterruptedRun(result, durationMs) {
+  const parts = [
+    `durationMs=${durationMs}`,
+    `status=${result.status}`,
+    `signal=${result.signal}`,
+    `error=${result.error?.code ?? result.error?.message ?? "none"}`,
+  ];
+  try {
+    const meminfo = readFileSync("/proc/meminfo", "utf8");
+    parts.push(`memAvailableKiB=${/MemAvailable:\s+(\d+)/.exec(meminfo)?.[1] ?? "unknown"}`);
+    parts.push(`memTotalKiB=${/MemTotal:\s+(\d+)/.exec(meminfo)?.[1] ?? "unknown"}`);
+  } catch {
+    parts.push("meminfo=unreadable");
+  }
+  try {
+    const events = readFileSync("/sys/fs/cgroup/memory.events", "utf8");
+    parts.push(`cgroupOomKill=${/^oom_kill\s+(\d+)/m.exec(events)?.[1] ?? "unknown"}`);
+  } catch {
+    parts.push("cgroupOomKill=unreadable");
+  }
+  try {
+    parts.push(`loadavg=${readFileSync("/proc/loadavg", "utf8").trim()}`);
+  } catch {
+    parts.push("loadavg=unreadable");
+  }
+  return parts.join(" ");
+}
+
 const baseline = runTests();
 if (!completed(baseline)) {
   process.stderr.write(`BROKEN GATE: baseline run did not complete (status ${baseline.status}, signal ${baseline.signal})\n`);
@@ -1779,18 +1818,49 @@ try {
         return;
       }
 
+      const applyMutant = () => writeFile(path, original.replace(mutant.from, mutant.to));
+      const restoreMutant = () => writeFile(path, original);
+
+      await applyMutant();
+      let started = Date.now();
       let result;
       try {
-        await writeFile(path, original.replace(mutant.from, mutant.to));
         result = runTests(mutationRoot);
       } finally {
-        await writeFile(path, original);
+        await restoreMutant();
       }
 
       if (!completed(result)) {
-        console.error(`BROKEN GATE: ${mutant.name} run did not complete (status ${result.status}, signal ${result.signal})`);
-        failures += 1;
-      } else if (result.status === 0) {
+        // A run that never reached its summary decided nothing, so retry it
+        // once before calling it broken: a hosted runner can SIGKILL a healthy
+        // run from outside (its shape is identical to the timeout kill), and
+        // re-running costs one suite while re-running the shard costs
+        // twenty. A retry that completes is scored exactly like a first
+        // attempt — a kill is still a kill and a survival still fails the
+        // gate — so the retry can only rescue a run the runner destroyed,
+        // never a mutant the suite missed. Two consecutive non-completions
+        // stay BROKEN GATE, now carrying both attempts' forensics.
+        const first = describeInterruptedRun(result, Date.now() - started);
+        console.error(`RETRY: ${mutant.name} first run did not complete (${first})`);
+        await applyMutant();
+        started = Date.now();
+        try {
+          result = runTests(mutationRoot);
+        } finally {
+          await restoreMutant();
+        }
+        if (!completed(result)) {
+          console.error(
+            `BROKEN GATE: ${mutant.name} run did not complete twice ` +
+              `(first: ${first}; second: ${describeInterruptedRun(result, Date.now() - started)})`,
+          );
+          failures += 1;
+          return;
+        }
+        console.error(`RECOVERED: ${mutant.name} completed on retry; scoring the retry`);
+      }
+
+      if (result.status === 0) {
         console.error(`SURVIVED: ${mutant.name}`);
         failures += 1;
       } else {
