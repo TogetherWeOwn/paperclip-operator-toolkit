@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import {
   DEFAULT_AVOID_PER_LANE,
   DEFAULT_FIVE_HOUR_WINDOW_NAME,
@@ -20,10 +22,11 @@ import {
   type Tier,
 } from "../constants.js";
 import { validateSecretRefShape } from "./secret-ref.js";
+import { resolveFormatCompatibility, type FormatCompatibility } from "../format-compatibility.js";
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
-/** Mirrors paperclip-model-router's `SecretRef` (TOG-2379). */
+/** Mirrors paperclip-model-router's `SecretRef`. */
 export interface SecretRef {
   type: "secret_ref";
   secretId: string;
@@ -39,7 +42,7 @@ export interface LaneSourceConfig {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy: PacePolicy;
-  /** TOG-2379: resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
+  /** Resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
 }
 
@@ -60,7 +63,7 @@ export interface ClassificationConfig {
   t3ConfidenceFloor: number;
   t2ConfidenceFloor: number;
   batchSize: number;
-  /** TOG-3200: re-examine a `tier:*` label this plugin did not write. Defaults on. */
+  /** Re-examine a `tier:*` label this plugin did not write. Defaults on. */
   reclassifyForeignLabels: boolean;
 }
 
@@ -71,10 +74,14 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
-    /** TOG-3132: exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
+    /** Exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
     holdOnUnknownAvailability: boolean;
     objective: SelectionObjective;
     fleetContextCeilingTokens: number;
+    /** Operator-verified local run-log root; absent means honest fleet fallback. */
+    contextRunLogRoot: string | null;
+    /** Agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
+    agentEnvContextTokens: number;
     compactionRatio: number;
   };
   models: ModelEntry[];
@@ -84,7 +91,7 @@ export interface ResolvedConfig {
    * up by name.
    */
   tierLabelIds: Partial<Record<Tier, string>>;
-  /** TOG-2137, Defect 2. Label id for `operator`, applied to escalation issues. Optional. */
+  /** Label id for `operator`, applied to escalation issues. Optional. */
   operatorLabelId: string | null;
   profiles: { windowDays: number; minSamples: number; maxAgeDays: number };
   quality: { t1EscalationCeiling: number; t2EscalationCeiling: number; silentFailureWeight: number };
@@ -94,11 +101,11 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
-    /** TOG-2481 port of `AVOID`/`AVOID_LANE`. */
+    /** Port of `AVOID`/`AVOID_LANE`. */
     avoid: { defaultThreshold: number; perLane: Record<string, number> };
-    /** TOG-2481 port of `LANE_CAP_PER_ACCOUNT`. */
+    /** Port of `LANE_CAP_PER_ACCOUNT`. */
     laneCapPerAccount: Record<string, number>;
-    /** TOG-2481 port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
+    /** Port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
     fiveHourWindowName: string;
     /** Named weekly allowance window reported in the shadow stream's per-lane snapshot (reporting only). */
     weeklyWindowName: string;
@@ -122,22 +129,56 @@ export interface ResolvedConfig {
     stopOnFirstNFailures: number;
     stopWindow: number;
   };
-  shadowEmit: { enabled: boolean; maxRecords: number };
+  shadowEmit: { enabled: boolean; maxRecords: number; shardMaxRecords: number; retentionShards: number };
+  formatCompatibility?: FormatCompatibility;
+  accountAdmissionShadow: { enabled: boolean };
   aaSync: { enabled: boolean };
-  /** TOG-3996 models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
+  /** Default-off free-list sync. Absent/disabled = legacy behavior exactly. */
+  aaFreeSync: {
+    enabled: boolean;
+    apiKeySecretRef: SecretRef | null;
+    bindings: Array<{
+      candidateId: string;
+      modelId: string;
+      laneId: string;
+      evaluatedEffort: string;
+      aaSlug: string;
+      observationalOnly?: boolean;
+    }>;
+    maxSnapshotAgeHours: number;
+  };
+  /** Default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
+  acceptedWork: { enabled: boolean };
+  /** models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
   priceSync: { enabled: boolean };
-  /** TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706). */
+  /** Absorption of the standalone `dispatch` plugin. */
   dispatch: {
     wakeEnabled: boolean;
     idleMinutes: number;
     maxWakesPerFiring: number;
     focusProjectIds: readonly string[];
   };
-  /** TOG-3210. See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
+  /** See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
   wakeScopedFloor: {
     enabled: boolean;
     wakeReasons: readonly string[];
     floorTier: Tier;
+  };
+  /**
+   * The run-scoped decision flag. Off (default):
+   * `onResolveRunModel` answers `keep` and every legacy pin path runs exactly as
+   * before. On: the handler decides each run's model from hot caches and the
+   * creation/assignment pins, `labelOnlyPass`/`balancePass` pin writes and the
+   * `repinPass`/`agent.run.failed` re-pins are retired. Labels stay.
+   */
+  runResolve: {
+    enabled: boolean;
+    /** Hot snapshot (config-derived reads, lane ledger, scores) is refreshed once older than this. */
+    snapshotTtlMs: number;
+    /** Hard cap on waiting for an in-flight classification (never starts one). */
+    classifierWaitMs: number;
+    /** `retryAfterMs` for a `defer` answer. */
+    deferRetryMs: number;
   };
 }
 
@@ -206,10 +247,14 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   const classification = record(root.classification);
   const earnIn = record(root.earnIn);
   const shadowEmit = record(root.shadowEmit);
+  const accountAdmissionShadow = record(root.accountAdmissionShadow);
   const aaSync = record(root.aaSync);
+  const aaFreeSync = record(root.aaFreeSync);
+  const acceptedWork = record(root.acceptedWork);
   const priceSync = record(root.priceSync);
   const dispatch = record(root.dispatch);
   const wakeScopedFloor = record(root.wakeScopedFloor);
+  const runResolve = record(root.runResolve);
 
   const models: ModelEntry[] = Array.isArray(root.models)
     ? root.models.flatMap((entry) => {
@@ -327,6 +372,14 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       holdOnUnknownAvailability: bool(selection.holdOnUnknownAvailability, false),
       objective: selection.objective === "cost-per-accepted-card" ? "cost-per-accepted-card" : "list-price",
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
+      contextRunLogRoot: typeof selection.contextRunLogRoot === "string" && selection.contextRunLogRoot.trim()
+        ? selection.contextRunLogRoot.trim() : null,
+      // Unset resolves to the fleet ceiling, so behaviour is
+      // unchanged until the operator sets it (1M to release Muse's window).
+      agentEnvContextTokens: num(
+        selection.agentEnvContextTokens,
+        num(selection.fleetContextCeilingTokens, 1_000_000),
+      ),
       compactionRatio: num(selection.compactionRatio, 0.75),
     },
     models,
@@ -417,12 +470,44 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       stopOnFirstNFailures: num(earnIn.stopOnFirstNFailures, 2),
       stopWindow: num(earnIn.stopWindow, 8),
     },
+    accountAdmissionShadow: { enabled: bool(accountAdmissionShadow.enabled, false) },
+    formatCompatibility: resolveFormatCompatibility(root.formatCompatibility),
     shadowEmit: {
       enabled: bool(shadowEmit.enabled, false),
       maxRecords: num(shadowEmit.maxRecords, 5000),
+      shardMaxRecords: Math.max(2, Math.floor(num(shadowEmit.shardMaxRecords, 200))),
+      retentionShards: Math.max(1, Math.floor(num(shadowEmit.retentionShards, 48))),
     },
     aaSync: {
       enabled: bool(aaSync.enabled, true),
+    },
+    aaFreeSync: {
+      enabled: bool(aaFreeSync.enabled, false),
+      apiKeySecretRef: secretRef(aaFreeSync.apiKeySecretRef),
+      bindings: Array.isArray(aaFreeSync.bindings)
+        ? aaFreeSync.bindings.flatMap((entry) => {
+            const b = record(entry);
+            if (
+              typeof b.candidateId !== "string" || b.candidateId.length === 0 ||
+              typeof b.modelId !== "string" || b.modelId.length === 0 ||
+              typeof b.laneId !== "string" || b.laneId.length === 0 ||
+              typeof b.evaluatedEffort !== "string" || b.evaluatedEffort.length === 0 ||
+              typeof b.aaSlug !== "string" || b.aaSlug.length === 0
+            ) return [];
+            return [{
+              candidateId: b.candidateId,
+              modelId: b.modelId,
+              laneId: b.laneId,
+              evaluatedEffort: b.evaluatedEffort,
+              aaSlug: b.aaSlug,
+              ...(typeof b.observationalOnly === "boolean" ? { observationalOnly: b.observationalOnly } : {}),
+            }];
+          })
+        : [],
+      maxSnapshotAgeHours: num(aaFreeSync.maxSnapshotAgeHours, 49),
+    },
+    acceptedWork: {
+      enabled: bool(acceptedWork.enabled, false),
     },
     priceSync: {
       enabled: bool(priceSync.enabled, true),
@@ -441,6 +526,12 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         ? wakeScopedFloor.wakeReasons.filter((r): r is string => typeof r === "string" && r.length > 0)
         : [],
       floorTier: tier(wakeScopedFloor.floorTier, "T3"),
+    },
+    runResolve: {
+      enabled: bool(runResolve.enabled, false),
+      snapshotTtlMs: Math.min(Math.max(num(runResolve.snapshotTtlMs, 45_000), 5_000), 300_000),
+      classifierWaitMs: Math.min(Math.max(num(runResolve.classifierWaitMs, 1_000), 0), 1_000),
+      deferRetryMs: Math.min(Math.max(num(runResolve.deferRetryMs, 5_000), 1_000), 60_000),
     },
   };
 }
@@ -483,12 +574,37 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   ) {
     errors.push("selection.fleetContextCeilingTokens must be a positive number");
   }
+  if (
+    !Number.isFinite(config.selection.agentEnvContextTokens) ||
+    config.selection.agentEnvContextTokens < 1
+  ) {
+    errors.push("selection.agentEnvContextTokens must be a positive number");
+  }
+
+  if (config.selection.contextRunLogRoot && !isAbsolute(config.selection.contextRunLogRoot)) {
+    errors.push("selection.contextRunLogRoot must be an absolute path");
+  }
 
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
   }
-  for (const t of TIERS) {
-    if (!config.models.some((model) => model.enabled && model.tier === t)) {
+  // Enforce preflight: selection.mode=enforce pins cards onto a
+  // tier's models, so a tier with zero enabled rows must refuse at
+  // config-resolve time — enforce can never pin onto an unserved tier.
+  // Advise mode never writes a pin, so it keeps the historical warning only.
+  // Disabled selection writes nothing, so it skips the enforce gate (re-start
+  // re-runs validation, so enabling later cannot slip an empty tier through).
+  const emptyTiers = TIERS.filter(
+    (t) => !config.models.some((model) => model.enabled && model.tier === t),
+  );
+  if (config.selection.enabled && config.selection.mode === "enforce") {
+    for (const t of emptyTiers) {
+      errors.push(
+        `selection.mode is enforce but tier ${t} has no enabled models; enforce cannot pin onto an unserved tier`,
+      );
+    }
+  } else {
+    for (const t of emptyTiers) {
       warnings.push(`no enabled model at tier ${t}`);
     }
   }
@@ -544,6 +660,30 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     );
   }
 
+  // The free-list sync never writes, but a misconfigured one
+  // produces a silently empty or misleading diff — fail loudly here instead.
+  if (config.aaFreeSync.enabled) {
+    const secretError = validateSecretRefShape(config.aaFreeSync.apiKeySecretRef, "aaFreeSync.apiKeySecretRef");
+    if (secretError) errors.push(secretError);
+    if (!config.aaFreeSync.apiKeySecretRef) {
+      errors.push("aaFreeSync.enabled is true but no aaFreeSync.apiKeySecretRef is configured; the free list cannot be fetched");
+    }
+    if (config.aaFreeSync.bindings.length === 0) {
+      warnings.push(
+        "aaFreeSync.enabled is true but no aaFreeSync.bindings are curated; the job fetches the snapshot but every diff will report unbound-only",
+      );
+    }
+    const seen = new Set<string>();
+    for (const b of config.aaFreeSync.bindings) {
+      const key = `${b.modelId} ${b.laneId} ${b.evaluatedEffort}`;
+      if (seen.has(key)) errors.push(`duplicate aaFreeSync binding: ${key}`);
+      seen.add(key);
+    }
+    if (!Number.isFinite(config.aaFreeSync.maxSnapshotAgeHours) || config.aaFreeSync.maxSnapshotAgeHours < 1) {
+      errors.push("aaFreeSync.maxSnapshotAgeHours must be a positive number of hours");
+    }
+  }
+
   if (config.wakeScopedFloor.enabled && config.wakeScopedFloor.wakeReasons.length === 0) {
     warnings.push(
       "wakeScopedFloor.enabled is true but wakeReasons is empty; no decision will ever qualify until an operator names the actual PAPERCLIP_WAKE_REASON values for cheap wakes (e.g. monitor ticks)",
@@ -561,7 +701,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
   }
 
-  // TOG-2137, Defect 6. A model row's `laneId` that does not resolve to a
+  // A model row's `laneId` that does not resolve to a
   // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
   // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
   // has: `laneVerdictFor` degrades a typo'd or renamed lane id to

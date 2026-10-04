@@ -1,17 +1,18 @@
-import { SHADOW_EXPLANATIONS_CAP } from "./constants.js";
+import { SHADOW_EXPLANATIONS_CAP, SHADOW_PICK_WHY_MAX_CHARS } from "./constants.js";
+import { PUBLIC_FORMAT_IDENTIFIERS } from "./format-compatibility.js";
 import { slotFactorFor, type LaneLedger, type OperatorOverrideEntry } from "./engine/pacing.js";
 import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, SelectionDecision } from "./engine/types.js";
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * TOG-2137 / TOG-2138 / TOG-2504. `tog2138-decision-v1`, the paired
- * host/plugin-shadow agreement stream `ops/tog-2138/gate_harness.py`
- * correlates. TOG-2481 retired the separate host dispatcher, so both writer
+ * Versioned paired decisions, the
+ * host/plugin-shadow agreement stream the shadow gate harness
+ * correlates. The separate host dispatcher has been retired, so both writer
  * projections now come from the same authoritative `advise()` decision. This
  * module only builds records; `worker.ts` appends the pair via
  * `ctx.localFolders`.
  */
-export const SHADOW_SCHEMA_VERSION = "tog2138-decision-v1";
+export const SHADOW_SCHEMA_VERSION = PUBLIC_FORMAT_IDENTIFIERS.shadowSchemaVersion;
 export type DecisionWriter = "host" | "plugin-shadow";
 
 export type ShadowLaneState = "available" | "degraded" | "exhausted" | "unavailable";
@@ -66,7 +67,7 @@ export interface ShadowCandidate {
 }
 
 /**
- * TOG-3211. One rejected candidate's gate and operand — the machine-readable
+ * One rejected candidate's gate and operand — the machine-readable
  * counterpart to `Rejection.reason`, so a consumer can tell which of several
  * plausible gates actually excluded a model without parsing prose.
  */
@@ -100,13 +101,13 @@ export interface ShadowDecisionRecord {
   };
   candidates: ShadowCandidate[];
   /**
-   * TOG-3211. One entry per rejected candidate, capped at
+   * One entry per rejected candidate, capped at
    * `SHADOW_EXPLANATIONS_CAP` — see `explanationsTruncated` for the count of
    * any rejections that did not fit, so a capped list never reads as a
    * complete one.
    */
   explanations: ShadowExplanation[];
-  /** TOG-3211. Count of rejections dropped past `SHADOW_EXPLANATIONS_CAP`; 0 when nothing was cut. */
+  /** Count of rejections dropped past `SHADOW_EXPLANATIONS_CAP`; 0 when nothing was cut. */
   explanationsTruncated: number;
   operatorOverride: { id: string; expiresAt: string } | null;
   pickWhy: string;
@@ -323,8 +324,9 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
       usable: true,
       // This engine has no unproven/exploration-slot concept (unlike the
       // reference dispatcher's 10% EXPLORE lane for unproven T2/T3
-      // candidates) — TOG-2137 slices 2-5 do not add one, so every candidate
-      // is reported proven rather than guessing at an unmodeled distinction.
+      // candidates) — the planned follow-up slices do not add one, so every
+      // candidate is reported proven rather than guessing at an unmodeled
+      // distinction.
       proven: true,
       // Dollars for one run at the judged tier's measured volume — the number
       // this engine actually orders on (`expectedCostUsd`), not a $/Mtok rate.
@@ -334,6 +336,19 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
       blended: Number(candidate.expectedCostUsd.toFixed(6)),
     };
   });
+}
+
+/**
+ * Clamp the one unbounded free-text field so a single record can
+ * never be an oversized JSONL/RPC line by itself. Pure string cut with an
+ * explicit `...[truncated N chars]` tail — the marker makes the cut visible
+ * to the comparison stream instead of a silent truncation.
+ */
+export function boundPickWhy(trace: readonly string[]): string {
+  const full = trace.join("; ");
+  if (full.length <= SHADOW_PICK_WHY_MAX_CHARS) return full;
+  const cut = full.slice(0, SHADOW_PICK_WHY_MAX_CHARS);
+  return `${cut}...[truncated ${full.length - SHADOW_PICK_WHY_MAX_CHARS} chars]`;
 }
 
 function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): ShadowDecisionRecord {
@@ -366,7 +381,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     },
     laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
-    // TOG-3211: one entry per rejected candidate, naming the gate that
+    // One entry per rejected candidate, naming the gate that
     // rejected it and that gate's operand — `pickWhy`/`trace` only summarise
     // the outcome ("no model cleared the gates (112 rejected)"), which was
     // not reconstructable after the fact once the roster grew past what a
@@ -381,7 +396,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     operatorOverride: input.operatorOverride
       ? { id: input.operatorOverride.modelId, expiresAt: input.operatorOverride.expiresAt }
       : null,
-    pickWhy: decision.trace.join("; "),
+    pickWhy: boundPickWhy(decision.trace),
   };
 }
 
@@ -390,7 +405,7 @@ export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecor
 }
 
 /**
- * TOG-2504. The host projection is emitted from the same native-plugin
+ * The host projection is emitted from the same native-plugin
  * decision as the shadow projection. It is evidence about the authoritative
  * host choice, not a second actuator or an independently recomputed pick.
  */

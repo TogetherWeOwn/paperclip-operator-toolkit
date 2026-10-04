@@ -36,7 +36,7 @@ function statsWith(wOk: number, wBad: number): TierScoreStats {
   return { ...emptyTierScoreStats(), wOk, wBad };
 }
 
-describe("benchmark spec identity (TOG-2636 §2)", () => {
+describe("benchmark spec identity", () => {
   // Benchmark identity is load-bearing: three of the five have a near-homonym on
   // aa.ai's leaderboard that is a DIFFERENT measurement. This test is the guard
   // against a silent relabelling — the exact failure the synthesis had to
@@ -320,7 +320,7 @@ describe("applyDerivedTiers", () => {
     aaOmniscienceSignedIndex: 30,
   };
 
-  function score(modelId: string, derivedTier: Tier | null, specVersion = BENCHMARK_SPEC_VERSION): ModelScore {
+  function score(modelId: string, derivedTier: Tier | null, specVersion: string = BENCHMARK_SPEC_VERSION): ModelScore {
     return { ...buildModelScore(modelId, 48, {}, TIERS, BASKET), derivedTier, tierSpecVersion: specVersion };
   }
 
@@ -348,7 +348,7 @@ describe("applyDerivedTiers", () => {
   // A tier written under a superseded spec describes a rule this build no longer
   // implements. Ignore it until refreshScores rewrites it; never reinterpret it.
   it("ignores a tier written under a different spec version", () => {
-    const out = applyDerivedTiers(roster, { c: score("c", "T3", "tog2636-v0") });
+    const out = applyDerivedTiers(roster, { c: score("c", "T3", "benchmark-prior-v0") });
     expect(out.find((m) => m.id === "c")?.tier).toBe("T1");
   });
 
@@ -404,9 +404,64 @@ describe("applyDerivedTiers", () => {
       expect(out.map((m) => m.tier)).toEqual(["T1", "T1"]);
     });
   });
+
+  // The derived tier pools every tier's runs, so easy T3 wins
+  // out-voted glm-5.3's proven T2 failure and promoted it to T1. A promotion
+  // now stops at the hardest tier the model is still capable at.
+  describe("capability ceiling", () => {
+    const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
+    const PROVEN_PASS = stats({ n: 89, ok: 89, wOk: 89 });
+    const PROVEN_FAIL = stats({ n: 44, ok: 22, failInfra: 4, failModel: 18, wOk: 21.6, wBad: 18.4 });
+
+    function scored(
+      modelId: string,
+      byTier: Partial<Record<Tier, TierScoreStats>>,
+      derivedTier: Tier,
+    ): ModelScore {
+      const out = { ...buildModelScore(modelId, 48, byTier, TIERS, BASKET), derivedTier };
+      expect(out.priorBasis).toBe("blended");
+      return out;
+    }
+
+    it("refuses the glm-5.3 promotion past the T2 tier it measures failing", () => {
+      const glm = scored("glm", { T3: PROVEN_PASS, T2: PROVEN_FAIL }, "T1");
+      expect(glm.tiers.T1).toMatchObject({ capable: false, cappedBy: "T2" });
+      const withDisabled = [
+        { id: "glm", tier: "T2" as Tier, enabled: true },
+        { id: "glm", tier: "T1" as Tier, enabled: false },
+      ];
+      expect(applyDerivedTiers(withDisabled, { glm }).map((m) => m.tier)).toEqual(["T2", "T1"]);
+    });
+
+    it("promotes only as far as the ceiling", () => {
+      const a = scored("a", { T3: PROVEN_PASS, T1: PROVEN_FAIL }, "T1");
+      expect(a.tiers.T2.capable).toBe(true);
+      expect(applyDerivedTiers(roster, { a }).find((m) => m.id === "a")?.tier).toBe("T2");
+    });
+
+    it("retains the configured tier when nothing above it is capable", () => {
+      const a = scored("a", { T3: PROVEN_FAIL }, "T1");
+      expect(applyDerivedTiers(roster, { a }).find((m) => m.id === "a")?.tier).toBe("T3");
+    });
+
+    it("still applies a demotion, whatever the ceiling", () => {
+      const c = scored("c", { T3: PROVEN_PASS, T2: PROVEN_FAIL }, "T3");
+      expect(applyDerivedTiers(roster, { c }).find((m) => m.id === "c")?.tier).toBe("T3");
+    });
+
+    it("keeps today's promotion for a model with no adverse verdict", () => {
+      const a = scored("a", { T3: PROVEN_PASS }, "T1");
+      expect(applyDerivedTiers(roster, { a }).find((m) => m.id === "a")?.tier).toBe("T1");
+    });
+
+    it("refuses a promotion when the score carries no tier verdicts at all", () => {
+      const a = { ...score("a", "T1"), tiers: {} as ModelScore["tiers"] };
+      expect(applyDerivedTiers(roster, { a }).find((m) => m.id === "a")?.tier).toBe("T3");
+    });
+  });
 });
 
-describe("frozen tog2636-v1 capture", () => {
+describe("frozen benchmark capture", () => {
   it("carries no fabricated DeepSWE values", () => {
     // DeepSWE v1.1 published no overlapping rows at capture time. If a future
     // capture adds them this assertion should be updated deliberately, with a

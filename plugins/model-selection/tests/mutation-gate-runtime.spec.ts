@@ -7,9 +7,12 @@ import { describe, expect, it } from "vitest";
 const root = new URL("..", import.meta.url).pathname;
 const gate = new URL("../scripts/mutation-gate.mjs", import.meta.url).pathname;
 const runtime = new URL("../scripts/mutation-gate-runtime.mjs", import.meta.url).href;
-const ciJob = "model-selection suite";
+// The step runs in the sharded `model-selection mutants` matrix; the
+// required `model-selection suite` job only aggregates its verdict.
+const ciJob = "model-selection mutants";
 const ciStep = "Kill named selection mutants";
-const refusal = `run on CI (private runner) — cite the PR's "${ciJob}" job, step "${ciStep}"`;
+const requiredCheck = "model-selection suite";
+const refusal = `run on CI (standard runner) — cite the PR's "${ciJob}" shard jobs, step "${ciStep}"`;
 const workflow = new URL("../../../.github/workflows/ci.yml", import.meta.url).pathname;
 const manifest = new URL("../package.json", import.meta.url).pathname;
 
@@ -22,6 +25,15 @@ function jobBlock(text: string, key: string) {
   if (start === -1) return null;
   const end = lines.findIndex((line, index) => index > start && /^  \S/.test(line));
   return lines.slice(start + 1, end === -1 ? lines.length : end);
+}
+
+// The lines of one `- name: <name>` step inside a job block: from its name line
+// up to (not including) the next step. Returns null when no such step exists.
+function stepLines(block: string[], name: string) {
+  const start = block.indexOf(`      - name: ${name}`);
+  if (start === -1) return null;
+  const end = block.findIndex((line, index) => index > start && /^ {6}- /.test(line));
+  return block.slice(start, end === -1 ? block.length : end);
 }
 
 function deniedEnv() {
@@ -72,7 +84,7 @@ describe("mutation gate runtime controls", () => {
     expect(result).toBe(true);
   });
 
-  // TOG-3129. The `{ CI: "true" }` row is the one that matters: the refusal
+  // The `{ CI: "true" }` row is the one that matters: the refusal
   // above means CI is the ONLY context this gate ever runs in, and `ci.yml`
   // sets no VITEST_* for the `model-selection suite` job, so this bare
   // environment IS the real job env. It previously yielded `run --pool=forks`
@@ -93,6 +105,7 @@ describe("mutation gate runtime controls", () => {
         args: [
           "node_modules/vitest/vitest.mjs",
           "run",
+          "--cache=false",
           "--pool=forks",
           "--poolOptions.forks.maxForks=2",
           "--poolOptions.forks.minForks=1",
@@ -177,7 +190,7 @@ describe("mutation gate runtime controls", () => {
     // value through the environment therefore caps a pool that never runs, so
     // assert the flags that reach the CLI, not just the pass-through.
     //
-    // TOG-3129: `threads` is now the RESOLVED limit, not the caller's
+    // `threads` is now the RESOLVED limit, not the caller's
     // VITEST_MAX_THREADS. The run is `--pool=forks`, so a differing thread
     // budget could never take effect; carrying it forward only left two numbers
     // in the child env disagreeing about one budget. VITEST_MAX_FORKS wins and
@@ -186,6 +199,7 @@ describe("mutation gate runtime controls", () => {
       args: [
         "node_modules/vitest/vitest.mjs",
         "run",
+        "--cache=false",
         "--pool=forks",
         `--poolOptions.forks.maxForks=${env.VITEST_MAX_FORKS}`,
         "--poolOptions.forks.minForks=1",
@@ -196,7 +210,7 @@ describe("mutation gate runtime controls", () => {
     });
   });
 
-  // TOG-3129. `spawnSync` without `timeout` blocks forever, so a single wedged
+  // `spawnSync` without `timeout` blocks forever, so a single wedged
   // run could spend the job's entire `timeout-minutes` and take the job down
   // with no mutant named. Assert three things together, because any one alone
   // is satisfiable while the bound does nothing: the invocation carries a
@@ -311,7 +325,7 @@ describe("mutation gate runtime controls", () => {
     }
   });
 
-  // TOG-2789. The refusal sends the reader somewhere instead of running the
+  // The refusal sends the reader somewhere instead of running the
   // gate, so the pointer has to be true or the refusal is worse than no gate:
   // it costs the agent the local run AND the evidence. Three links are pinned —
   // the job name exists in ci.yml, a step by that name lives inside THAT job,
@@ -319,14 +333,15 @@ describe("mutation gate runtime controls", () => {
   // script. This asserts the wiring is present, not that it passes; a green
   // run of the step is what the citation is for.
   it("names a CI job and step that actually execute this gate", () => {
-    const block = jobBlock(readFileSync(workflow, "utf8"), "model-selection-suite");
-    expect(block, "ci.yml has no model-selection-suite job").not.toBeNull();
+    const block = jobBlock(readFileSync(workflow, "utf8"), "model-selection-mutants");
+    expect(block, "ci.yml has no model-selection-mutants job").not.toBeNull();
 
-    expect(block).toContain(`    name: ${ciJob}`);
+    expect(block).toContain("    name: " + ciJob + " (shard ${{ matrix.shard }}/${{ strategy.job-total }})");
 
-    const step = block!.indexOf(`      - name: ${ciStep}`);
-    expect(step, `no "${ciStep}" step inside the ${ciJob} job`).toBeGreaterThan(-1);
-    expect(block![step + 1]).toBe("        run: npm run test:mutants");
+    const step = stepLines(block!, ciStep);
+    expect(step, `no "${ciStep}" step inside the ${ciJob} job`).not.toBeNull();
+    expect(step).toContain("        run: npm run test:mutants");
+    expect(step).toContain("          MUTATION_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}");
 
     const scripts = JSON.parse(readFileSync(manifest, "utf8")).scripts as Record<string, string>;
     expect(scripts["test:mutants"]).toContain("scripts/mutation-gate.mjs");
@@ -335,7 +350,7 @@ describe("mutation gate runtime controls", () => {
     expect(refusal).toContain(ciStep);
   });
 
-  // TOG-2980 / TOG-3049. Mutants run from a scratch copy of the plugin, so a
+  // Mutants run from a scratch copy of the plugin, so a
   // spec that reads a repo file through one or more `../` segments finds
   // nothing there unless the gate stages it. That is not a benign skip: the
   // mutant loop reads any nonzero exit as a kill, so one ENOENT turns the
@@ -407,6 +422,124 @@ describe("mutation gate runtime controls", () => {
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
+  });
+
+  describe("gate run output redirection", () => {
+    // spawnSync buffers both streams against one shared 1MB default cap and
+    // reports the overflow as ENOBUFS after killing the child -- a shape
+    // identical to an outside kill. A verbose failing mutant run sat near that
+    // cap locally and over it on CI, dying deterministically on CI while
+    // passing locally. runGateCommand redirects to per-run files instead, so
+    // output volume can never fake a kill again.
+    it("completes a run whose combined output exceeds the 1MB buffer cliff", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('o'.repeat(600 * 1024)); process.stderr.write('e'.repeat(600 * 1024));"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "over-the-cliff",
+        });
+        console.log(JSON.stringify({
+          status: run.status,
+          signal: run.signal,
+          error: run.error?.code ?? null,
+          stdoutLength: run.stdout.length,
+          stderrLength: run.stderr.length,
+          stdoutHead: run.stdout.slice(0, 1),
+          stderrTail: run.stderr.slice(-1),
+        }));
+      `) as { status: number | null; signal: string | null; error: string | null; stdoutLength: number; stderrLength: number; stdoutHead: string; stderrTail: string };
+
+      // 600KB + 600KB would ENOBUFS through spawnSync's default buffer; here
+      // the run completes on its own with every byte captured.
+      expect(result.status).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.stdoutLength).toBe(600 * 1024);
+      expect(result.stderrLength).toBe(600 * 1024);
+      expect(result.stdoutHead).toBe("o");
+      expect(result.stderrTail).toBe("e");
+    });
+
+    it("tails very large output instead of loading it all", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { MUTATION_GATE_RUN_LOG_TAIL_BYTES, runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('e'.repeat(3 * 1024 * 1024)); process.stderr.write('ENDMARKER');"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "huge-output",
+        });
+        console.log(JSON.stringify({
+          status: run.status,
+          truncated: run.stderr.startsWith("[truncated"),
+          hasEnd: run.stderr.includes("ENDMARKER"),
+          stderrLength: run.stderr.length,
+          cap: MUTATION_GATE_RUN_LOG_TAIL_BYTES,
+        }));
+      `) as { status: number | null; truncated: boolean; hasEnd: boolean; stderrLength: number; cap: number };
+
+      // A wedged run spewing for the whole timeout must not OOM the gate, and
+      // the summary the gate scores ("Test Files") prints at the END of a
+      // completed run, so the tail is the part that matters.
+      expect(result.status).toBe(0);
+      expect(result.truncated).toBe(true);
+      expect(result.hasEnd).toBe(true);
+      expect(result.stderrLength).toBeLessThan(result.cap + 100);
+    });
+
+    it("still reports a nonzero exit through file redirection", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "console.log('Test Files  1 failed'); process.exit(3);"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "nonzero-exit",
+        });
+        const completed = run.signal === null && run.status !== null && run.stdout.includes("Test Files");
+        console.log(JSON.stringify({ status: run.status, completed, stdout: run.stdout.trim() }));
+      `) as { status: number | null; completed: boolean; stdout: string };
+
+      expect(result.status).toBe(3);
+      expect(result.completed).toBe(true);
+      expect(result.stdout).toContain("Test Files  1 failed");
+    });
+
+    it("wires the gate's runTests through runGateCommand, not spawnSync", () => {
+      const gateSource = readFileSync(gate, "utf8");
+      const runTests = gateSource.slice(gateSource.indexOf("function runTests("));
+      const body = runTests.slice(0, runTests.indexOf("\n}\n") + 3);
+      expect(body).toContain("runGateCommand(");
+      expect(body).not.toContain("spawnSync");
+      expect(body).toContain("timeout,");
+      expect(body).toContain("killSignal,");
+    });
   });
 
   it("runs one mutant callback at a time", () => {

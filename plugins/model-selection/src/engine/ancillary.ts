@@ -4,7 +4,7 @@ import { selectModel } from "./select.js";
 import type { QualitySignal, SelectionDecision, VolumeProfile } from "./types.js";
 
 /**
- * TOG-2137, Defect 3. Fixed-name ancillary env surfaces. `ANTHROPIC_DEFAULT_*`
+ * Fixed-name ancillary env surfaces. `ANTHROPIC_DEFAULT_*`
  * is deliberately NOT enumerated here — the CTO directive lists it separately
  * from `ANTHROPIC_DEFAULT_HAIKU_MODEL`, naming it as a family, not a single
  * key (an install may also carry e.g. `ANTHROPIC_DEFAULT_OPUS_MODEL`). See
@@ -16,7 +16,7 @@ import type { QualitySignal, SelectionDecision, VolumeProfile } from "./types.js
  * SSRF-blocked from reaching the host's own internal API even as a
  * workaround).
  *
- * TOG-3348: `runtimeConfig.modelProfiles.cheap` was a fifth ancillary surface
+ * `runtimeConfig.modelProfiles.cheap` was a fifth ancillary surface
  * here until Paperclip migration 0236 (v2026.916.0) deleted the column with
  * no replacement — there is no longer a distinct "cheap/recovery model"
  * concept on the host at all, so there is nothing left to read or report

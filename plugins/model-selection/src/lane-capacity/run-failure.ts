@@ -3,7 +3,7 @@ import type { LaneOutageOverride } from "../engine/pacing.js";
 import type { ModelEntry } from "../engine/types.js";
 
 /**
- * TOG-3012. Immediate lane feedback from a failed run.
+ * Immediate lane feedback from a failed run.
  *
  * The 2026-09-16 16:40Z Codex exhaustion cost 21 failed runs across 14 cards
  * before any pin moved. The router's *decision* was right — it picked Claude
@@ -43,13 +43,13 @@ import type { ModelEntry } from "../engine/types.js";
  *  - `All credentials ... are cooling down` without a model id, and
  *    `all upstream accounts` — older CLIProxy phrasings kept for the same
  *    class.
- *  - `no healthy managed <lane> capacity remains` — TOG-3652 (ported from
- *    TOG-3025/PR #331). CLIProxy emits it when its pool of managed upstream
- *    accounts for a lane has no healthy member left. The cause may be
- *    allowance exhaustion or a provider-side outage — the message even says
- *    "usually temporary". It belongs here because the list's real question
- *    is not "whose fault is it?" but "can this lane serve the next run?",
- *    and for the whole time this string is returned the answer is no.
+ *  - `no healthy managed <lane> capacity remains` — CLIProxy emits it when
+ *    its pool of managed upstream accounts for a lane has no healthy member
+ *    left. The cause may be allowance exhaustion or a provider-side outage —
+ *    the message even says "usually temporary". It belongs here because the
+ *    list's real question is not "whose fault is it?" but "can this lane
+ *    serve the next run?", and for the whole time this string is returned the
+ *    answer is no.
  *
  *    Measured before adding it (`heartbeat_runs`, 14 days to 2026-09-17):
  *    2,193 failed runs, 623 matched by the five phrases above, 56 carrying
@@ -64,6 +64,13 @@ import type { ModelEntry } from "../engine/types.js";
  *    No model id is embedded — CLIProxy names the lane in its own words
  *    ("OpenCode Go", "Z.ai"), not roster ids — so attribution runs through
  *    the `fallbackModelId` path: the model the failed run was going to use.
+ *  - `An active OpenCode Go subscription is required to use Go models` —
+ *    CLIProxy's 403 when the OpenCode Go plan has lapsed (probed
+ *    2026-09-20, re-probed 2026-09-26). Same shape as the managed-capacity
+ *    family: the lane in CLIProxy's own words, no roster
+ *    id, so attribution runs through the `fallbackModelId` path. Scoped to
+ *    the literal `subscription … required` adjacency — a bare 403, and a
+ *    `subscription ID required`-shaped missing-field error, do not match.
  */
 const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   /all credentials for model\s+\S+\s+are cooling down/i,
@@ -75,6 +82,7 @@ const LANE_EXHAUSTION_PHRASES: readonly RegExp[] = [
   // 2,193 either way, zero disagreements), and a bound keeps a future
   // multi-sentence error from matching across an unrelated clause.
   /no healthy managed .{0,60}capacity remains/i,
+  /subscription( is)? required/i,
 ];
 
 /**
@@ -171,10 +179,11 @@ export function mergeLaneOutage(
 /**
  * How long an auto-quarantine holds without further evidence.
  *
- * Sized against the two clocks that clear it. `pollLanes` runs every 5 minutes
- * and writes the lane's real verdict, and a recovered lane becomes serviceable
- * there — but the outage override is checked independently of the ledger, so
- * it needs an expiry of its own. 15 minutes is three poll cycles: long enough
+ * Sized against the two clocks that clear it. `pollLanes` runs every 2 minutes
+ * and writes the lane's real verdict, and a recovered lane
+ * becomes serviceable there — but the outage override is checked independently
+ * of the ledger, so it needs an expiry of its own. 15 minutes is seven poll
+ * cycles: long enough
  * that a lane genuinely out for the week is not re-probed every few minutes by
  * an unlucky card, short enough that a false positive on a healthy lane costs
  * at most one quarter-hour of traffic pushed up to Claude.

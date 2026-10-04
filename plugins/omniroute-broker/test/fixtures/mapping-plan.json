@@ -1,0 +1,314 @@
+[
+ {
+  "pattern": "deepseek-v4-flash",
+  "comboName": "pc/deepseek-v4-flash",
+  "priority": 1000,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-flash-high",
+  "comboName": "pc/deepseek-v4-flash-high",
+  "priority": 999,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-flash-max",
+  "comboName": "pc/deepseek-v4-flash-max",
+  "priority": 998,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-flash-vision-exp",
+  "comboName": "pc/deepseek-v4-flash-vision-exp",
+  "priority": 997,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-pro",
+  "comboName": "pc/deepseek-v4-pro",
+  "priority": 996,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-pro-high",
+  "comboName": "pc/deepseek-v4-pro-high",
+  "priority": 995,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-pro-low",
+  "comboName": "pc/deepseek-v4-pro-low",
+  "priority": 994,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-pro-max",
+  "comboName": "pc/deepseek-v4-pro-max",
+  "priority": 993,
+  "enabled": true
+ },
+ {
+  "pattern": "deepseek-v4-pro-medium",
+  "comboName": "pc/deepseek-v4-pro-medium",
+  "priority": 992,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5",
+  "comboName": "pc/glm-5",
+  "priority": 991,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5.1",
+  "comboName": "pc/glm-5.1",
+  "priority": 990,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5.2",
+  "comboName": "pc/glm-5.2",
+  "priority": 989,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5.2-high",
+  "comboName": "pc/glm-5.2-high",
+  "priority": 988,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5.2-max",
+  "comboName": "pc/glm-5.2-max",
+  "priority": 987,
+  "enabled": true
+ },
+ {
+  "pattern": "glm-5.3",
+  "comboName": "pc/glm-5.3",
+  "priority": 986,
+  "enabled": true
+ },
+ {
+  "pattern": "gpt-5.6-luna",
+  "comboName": "pc/gpt-5.6-luna",
+  "priority": 985,
+  "enabled": true
+ },
+ {
+  "pattern": "grok-4.5",
+  "comboName": "pc/grok-4.5",
+  "priority": 984,
+  "enabled": true
+ },
+ {
+  "pattern": "grok-4.5-high",
+  "comboName": "pc/grok-4.5-high",
+  "priority": 983,
+  "enabled": true
+ },
+ {
+  "pattern": "grok-4.5-low",
+  "comboName": "pc/grok-4.5-low",
+  "priority": 982,
+  "enabled": true
+ },
+ {
+  "pattern": "grok-4.5-medium",
+  "comboName": "pc/grok-4.5-medium",
+  "priority": 981,
+  "enabled": true
+ },
+ {
+  "pattern": "hy3",
+  "comboName": "pc/hy3",
+  "priority": 980,
+  "enabled": true
+ },
+ {
+  "pattern": "hy3-high",
+  "comboName": "pc/hy3-high",
+  "priority": 979,
+  "enabled": true
+ },
+ {
+  "pattern": "hy3-low",
+  "comboName": "pc/hy3-low",
+  "priority": 978,
+  "enabled": true
+ },
+ {
+  "pattern": "hy3-none",
+  "comboName": "pc/hy3-none",
+  "priority": 977,
+  "enabled": true
+ },
+ {
+  "pattern": "hy3-preview",
+  "comboName": "pc/hy3-preview",
+  "priority": 976,
+  "enabled": true
+ },
+ {
+  "pattern": "kimi-k2.5",
+  "comboName": "pc/kimi-k2.5",
+  "priority": 975,
+  "enabled": true
+ },
+ {
+  "pattern": "kimi-k2.6",
+  "comboName": "pc/kimi-k2.6",
+  "priority": 974,
+  "enabled": true
+ },
+ {
+  "pattern": "kimi-k2.7-code",
+  "comboName": "pc/kimi-k2.7-code",
+  "priority": 973,
+  "enabled": true
+ },
+ {
+  "pattern": "kimi-k3",
+  "comboName": "pc/kimi-k3",
+  "priority": 972,
+  "enabled": true
+ },
+ {
+  "pattern": "kimi-k3-max",
+  "comboName": "pc/kimi-k3-max",
+  "priority": 971,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2-omni",
+  "comboName": "pc/mimo-v2-omni",
+  "priority": 970,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2-pro",
+  "comboName": "pc/mimo-v2-pro",
+  "priority": 969,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2.5",
+  "comboName": "pc/mimo-v2.5",
+  "priority": 968,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2.5-high",
+  "comboName": "pc/mimo-v2.5-high",
+  "priority": 967,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2.5-max",
+  "comboName": "pc/mimo-v2.5-max",
+  "priority": 966,
+  "enabled": true
+ },
+ {
+  "pattern": "mimo-v2.5-pro",
+  "comboName": "pc/mimo-v2.5-pro",
+  "priority": 965,
+  "enabled": true
+ },
+ {
+  "pattern": "minimax-m2.5",
+  "comboName": "pc/minimax-m2.5",
+  "priority": 964,
+  "enabled": true
+ },
+ {
+  "pattern": "minimax-m2.7",
+  "comboName": "pc/minimax-m2.7",
+  "priority": 963,
+  "enabled": true
+ },
+ {
+  "pattern": "minimax-m3",
+  "comboName": "pc/minimax-m3",
+  "priority": 962,
+  "enabled": true
+ },
+ {
+  "pattern": "muse-spark-1.2-contributor",
+  "comboName": "pc/muse-spark-1.2-contributor",
+  "priority": 961,
+  "enabled": true
+ },
+ {
+  "pattern": "ox-alpha-free",
+  "comboName": "pc/ox-alpha-free",
+  "priority": 960,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.5-plus",
+  "comboName": "pc/qwen3.5-plus",
+  "priority": 959,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.6-plus",
+  "comboName": "pc/qwen3.6-plus",
+  "priority": 958,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.6-plus-high",
+  "comboName": "pc/qwen3.6-plus-high",
+  "priority": 957,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.6-plus-max",
+  "comboName": "pc/qwen3.6-plus-max",
+  "priority": 956,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-max",
+  "comboName": "pc/qwen3.7-max",
+  "priority": 955,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-max-high",
+  "comboName": "pc/qwen3.7-max-high",
+  "priority": 954,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-max-max",
+  "comboName": "pc/qwen3.7-max-max",
+  "priority": 953,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-plus",
+  "comboName": "pc/qwen3.7-plus",
+  "priority": 952,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-plus-high",
+  "comboName": "pc/qwen3.7-plus-high",
+  "priority": 951,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.7-plus-max",
+  "comboName": "pc/qwen3.7-plus-max",
+  "priority": 950,
+  "enabled": true
+ },
+ {
+  "pattern": "qwen3.8-max",
+  "comboName": "pc/qwen3.8-max",
+  "priority": 949,
+  "enabled": true
+ }
+]

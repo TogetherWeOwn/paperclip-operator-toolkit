@@ -6,7 +6,7 @@
  *
  *  1. `repositories` is NEVER empty. GitHub treats an omitted or empty
  *     `repositories` array as "every repo in the installation" — which is the
- *     exact 7-repo blast radius TOG-174 exists to remove. An empty scope must
+ *     exact 7-repo blast radius this broker exists to remove. An empty scope must
  *     raise, never mint.
  *  2. A caller can only ever NARROW the profile, never widen it. Requested
  *     permissions must be a subset of the profile at a level no higher than the
@@ -18,12 +18,12 @@
 const PERMISSION_LEVELS = ["read", "write", "admin"];
 
 /**
- * The default agent profile, per the operator's decision on TOG-174:
+ * The default agent profile, per the operator's decision:
  * `workflows` is deliberately excluded and granted per project instead, because
  * GitHub rejects an entire ref push when a branch touches `.github/workflows/**`
  * without it — so it is not a safe global default in either direction.
  *
- * `checks:read` + `statuses:read` were added by the TOG-247 decision, so that an
+ * `checks:read` + `statuses:read` were added by a later decision, so that an
  * agent that opens a PR can observe whether its own CI passed instead of
  * asserting it. Both are read-only and neither widens the repo ceiling.
  *
@@ -56,7 +56,7 @@ const CI_SOURCES = Object.freeze({
 });
 
 /**
- * CI sources deliberately NOT granted, and why (TOG-247).
+ * CI sources deliberately NOT granted, and why.
  *
  * This exists so the absence reads as a decision rather than a gap. Without it
  * the mint response lists `actions` under `blind`, someone reads that as a TODO,
@@ -67,7 +67,7 @@ const CI_SOURCES = Object.freeze({
  * (200, a 47 KB zip). `checks:read` alone gets 403 on the same endpoint. So
  * `actions:read` is a different KIND of increment from the other two: check-run
  * conclusions say pass/fail, but logs carry whatever CI printed, including an
- * accidentally echoed secret. Under TOG-191 every agent on this host shares uid
+ * accidentally echoed secret. Every agent on this host shares uid
  * 1000 and can read every other agent's environment, so a fleet-wide
  * log-download capability is a standing exfiltration path traded for a
  * convenience the conclusions already provide.
@@ -80,11 +80,11 @@ const WITHHELD_CI_SOURCES = Object.freeze({
     "withheld by decision: actions:read also grants workflow LOG download " +
     "(GET /actions/runs/{id}/logs), and logs carry whatever CI printed. " +
     "Check-run conclusions answer 'did my PR pass' without that. Do not add " +
-    "this to the default profile as a convenience — TOG-247.",
+    "this to the default profile as a convenience.",
 });
 
 /**
- * Report which CI sources this grant can actually read (TOG-247).
+ * Report which CI sources this grant can actually read.
  *
  * A minted token that cannot see CI is not, by itself, a problem — the operator
  * may well decide that humans verify before merge. The problem is a token that
@@ -273,9 +273,9 @@ export function narrowPermissions(profile, requested) {
  *
  * The three cases are genuinely different pieces of work by different owners:
  * attaching an issue to a project is an ordinary board edit any agent can do,
- * while setting `GH_APP_REPOS` is a project-env change. TOG-226 spent its first
- * pass working out which of these each refusal meant; the answer was always
- * present at the throw site, just not written down.
+ * while setting `GH_APP_REPOS` is a project-env change. Working out which of
+ * these each refusal meant once took a whole investigation pass; the answer was
+ * always present at the throw site, just not written down.
  */
 function noScopeMessage({ projectId, hasProjectEnv, workspaceRepoUrl }) {
   const why = !projectId

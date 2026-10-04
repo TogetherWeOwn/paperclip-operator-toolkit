@@ -135,7 +135,7 @@ const SEVERITY_ORDER: Readonly<Record<PriceDriftSeverity, number>> = {
  *
  * Reports; never mutates. A price change reorders the entire fleet's routing,
  * so the output is a diff for an operator to approve — the same posture the
- * thirteen CAP-061-marked rows were shipped disabled under, for the same
+ * thirteen pricing-pending rows were shipped disabled under, for the same
  * reason: an estimated price silently winning cost-sort over a proven model
  * is worse than a stale one.
  *

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { INDEXED_RUN_CONTEXT_EXPRESSIONS, LAST_RUN_CONTEXT_USAGE_SQL } from "../src/sql.js";
 
 /**
- * TOG-2862 regression gate for the `balancePass` RPC-wall timeout.
+ * Regression gate for the `balancePass` RPC-wall timeout.
  *
  * The defect was not a slow query in the abstract: it was a predicate —
  * `coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2` —
@@ -59,7 +59,7 @@ function contextPredicateExpressions(sql: string): string[] {
   return expressions;
 }
 
-describe("TOG-2862 last-run context lookup is index-matching", () => {
+describe("Last-run context lookup is index-matching", () => {
   const indexed = indexedContextExpressionsFromSchema();
 
   it("finds the schema's indexed context expressions", () => {
@@ -114,7 +114,7 @@ describe("TOG-2862 last-run context lookup is index-matching", () => {
 });
 
 /**
- * TOG-2893 review blocker 1: making the query index-matching must not change
+ * Review blocker: making the query index-matching must not change
  * WHICH run it attributes to a card.
  *
  * `coalesce(issueId, taskId) = $2` gives a non-null `issueId` precedence — a
@@ -166,7 +166,7 @@ const TRUTH_TABLE: Array<{ row: ContextRow; param: string }> = IDS.flatMap((issu
   IDS.flatMap((taskId) => ["A", "B"].map((param) => ({ row: { issueId, taskId }, param }))),
 );
 
-describe("TOG-2893 the index-matching rewrite preserves coalesce attribution", () => {
+describe("The index-matching rewrite preserves coalesce attribution", () => {
   const branches = branchConditions(LAST_RUN_CONTEXT_USAGE_SQL);
 
   it("parses two guarded branches out of the shipped SQL", () => {

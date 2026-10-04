@@ -245,7 +245,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("writes the adapter's own key alongside the model", () => {
     const patch = modelOverrideForContext({
       model: { ...opus, effort: "high" },
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentAdapterType: "claude_local",
       agentAdapterConfig: { model: "glm-5.3" },
@@ -260,7 +260,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("never emits a model paired with an effort that model does not offer", () => {
     const patch = modelOverrideForContext({
       model: { ...opus, effort: "max" },
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentAdapterType: "claude_local",
       agentAdapterConfig: {},
@@ -274,7 +274,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("overrides an inherited illegal effort even with no roster effort", () => {
     const patch = modelOverrideForContext({
       model: opus,
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentAdapterType: "claude_local",
       agentAdapterConfig: { effort: "max" },
@@ -286,7 +286,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("carries BOTH codex keys into the patch when it is clearing", () => {
     const patch = modelOverrideForContext({
       model: { id: "gpt-5.6-sol", contextWindow: 400_000 },
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentAdapterType: "codex_local",
       agentAdapterConfig: { reasoningEffort: "maximum" },
@@ -302,7 +302,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("leaves adapterConfig effort-free when the agent row is unreadable", () => {
     const patch = modelOverrideForContext({
       model: { ...opus, effort: "high" },
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentEnv: null,
     });
@@ -312,7 +312,7 @@ describe("the pin carries model and effort in one patch", () => {
   it("never reaches for modelProfile", () => {
     const patch = modelOverrideForContext({
       model: { ...opus, effort: "high" },
-      fleetCeilingTokens: 1_000_000,
+      agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentAdapterType: "claude_local",
       agentAdapterConfig: {},

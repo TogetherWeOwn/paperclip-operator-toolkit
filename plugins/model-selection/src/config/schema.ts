@@ -8,7 +8,7 @@ import { EFFORT_LADDER } from "../engine/effort.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
-/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA` (TOG-2379). */
+/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA`. */
 const SECRET_REF_SCHEMA = {
   type: ["object", "null"],
   format: "secret-ref",
@@ -54,12 +54,28 @@ export const SELECTION_CONFIG_SCHEMA = {
         /**
          * Which cost term orders candidates. `list-price` (default) is the
          * existing `expectedCostUsd` sort, byte-for-byte unchanged.
-         * `cost-per-accepted-card` is Slice 3 (TOG-2048 decision A) — computed
+         * `cost-per-accepted-card` is Slice 3 — computed
          * and shadow-diffed for 7 days before this ever flips in a live config.
          */
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
         /** Fleet-wide harness compaction ceiling. Models at/above it need no per-issue env override. */
         fleetContextCeilingTokens: { type: "integer", minimum: 1, default: 1000000 },
+        contextRunLogRoot: {
+          type: "string",
+          minLength: 1,
+          description: "Operator-verified absolute local run-log root. Unset or unreadable logs use the labelled fleet-ceiling fallback; no run totals are used as peaks.",
+        },
+        /**
+         * The agent-level context cap the per-pin
+         * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` stamp compares against. Split from
+         * `fleetContextCeilingTokens` (the admission ceiling, held at 200k for
+         * glm-5.3): a pin stamps
+         * `max(floor(window*ratio), min(window, 250000))` when its window is
+         * below THIS cap and inherits the agent env otherwise. Unset resolves
+         * to the fleet ceiling, so behaviour is unchanged until the operator
+         * sets it (1M to release Muse's 1,048,576 window).
+         */
+        agentEnvContextTokens: { type: "integer", minimum: 1, default: 1000000 },
         /** Fraction of a narrower model's context window where Claude Code should compact. */
         compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 },
       },
@@ -88,9 +104,9 @@ export const SELECTION_CONFIG_SCHEMA = {
           },
           contextWindow: { type: "integer", minimum: 1, default: 200000 },
           aaIndex: { type: ["number", "null"], default: null },
-          /** TOG-2438: explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
+          /** Explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
           aaSlug: { type: "string", minLength: 1 },
-          /** TOG-2438: snapshot date the roster's aaIndex above was curated from. Informational only. */
+          /** Snapshot date the roster's aaIndex above was curated from. Informational only. */
           aaIndexUpdatedAt: { type: ["string", "null"], format: "date", default: null },
           releasedAt: { type: "string", format: "date" },
           fallbackOnly: { type: "boolean", default: false },
@@ -101,10 +117,10 @@ export const SELECTION_CONFIG_SCHEMA = {
            * its deterministic counter and lane gates.
            */
           earnIn: { type: ["object", "null"], default: null },
-          /** TOG-2137: which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
+          /** Which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
           laneId: { type: "string", minLength: 1 },
           /**
-           * TOG-3995: reasoning effort to pin alongside this model. Omit to
+           * Reasoning effort to pin alongside this model. Omit to
            * leave effort to the agent row.
            *
            * The enum is the UNION of every adapter's vocabulary, so it rejects
@@ -138,7 +154,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-2137, Defect 2. Company label id for the `operator` label, applied to
+     * Company label id for the `operator` label, applied to
      * the escalation issue this plugin creates when a tier is fully
      * pace-exhausted. Same constraint as `tierLabelIds`: there is no label
      * surface in the plugin SDK, so the id cannot be resolved from the name —
@@ -176,7 +192,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-2137: lane-pace polling and pace-first within-tier ordering.
+     * Lane-pace polling and pace-first within-tier ordering.
      * `off` polls nothing. `shadow` (default) polls, records the lane ledger,
      * and includes the pace-ordering trace, but never lets pace change which
      * model is selected. `enforce` lets pace reorder candidates within a
@@ -204,7 +220,7 @@ export const SELECTION_CONFIG_SCHEMA = {
               },
               requestTimeoutMs: { type: "integer", minimum: 1, default: 5000 },
               maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
-              /** TOG-2379: resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
+              /** Resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
               apiKeySecretRef: SECRET_REF_SCHEMA,
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
@@ -267,9 +283,10 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
         idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
         /**
-         * TOG-2481 port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
+         * Port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
          * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
-         * excluded from NEW admission even while still serviceable —
+         * excluded from NEW admission only when its governing pace deviation
+         * also exceeds the pace engine's default 0.1 margin —
          * `defaultThreshold` is the blanket rule, `perLane` is how a specific
          * lane (e.g. codex, per the 2026-09-07 07:12Z owner rule) earns a
          * higher threshold than the default.
@@ -289,7 +306,7 @@ export const SELECTION_CONFIG_SCHEMA = {
           default: {},
         },
         /**
-         * TOG-2481 port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
+         * Port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
          * {"opencode-go": 2, "zai": 3}` (2026-09-06 17:1xZ / 2026-09-07
          * 12:32Z owner rules). Caps the number of ACTIVE (todo/in_progress)
          * cards a lane may hold per healthy account; unset entries have no
@@ -307,7 +324,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Named weekly allowance window reported in the shadow stream's per-lane snapshot. Reporting only — no gate reads it (the Z.ai weekly gate has its own `zai.weeklyWindowName`). */
         weeklyWindowName: { type: "string", minLength: 1, default: "weekly" },
         /**
-         * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+         * Port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
          * fallback rule (2026-09-07 03:15Z owner rule): `codexLaneId` names
          * which configured lane is Codex, so the T1-Go-fallback and Z.ai
          * long-run-agent-exclusion rules know which lane's avoid threshold/
@@ -317,7 +334,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Names which configured lane is OpenCode Go, for the T1-Go-fallback rule above. */
         opencodeGoLaneId: { type: "string", minLength: 1, default: "cliproxy-opencode-go" },
         /**
-         * TOG-2481 port of `zai_peak_now()` / `zai_weekly_pace_ok()`
+         * Port of `zai_peak_now()` / `zai_weekly_pace_ok()`
          * (2026-09-08 13:20Z owner rule). `laneId` names which configured
          * lane is the Z.ai lane so the peak-hour throttle and weekly-pacing
          * gate know which lane to apply to.
@@ -337,13 +354,12 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC (TOG-2481). Default
+     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC. Default
      * OFF: this section being absent, or `enabled: false`, means the plugin
      * writes no tier labels of its own — a company that only ever records tier
      * via explicit pins/labels sees no behavior change from this section
-     * existing. This is also the AC3 kill switch: there is deliberately no
-     * `~/paperclip-enterprise-company/.tier-dispatcher-disabled` file check
-     * anywhere in this plugin, only this config flag.
+     * existing. This is also the classification kill switch: there is no
+     * host-local sentinel-file check in this plugin, only this config flag.
      */
     classification: {
       type: "object",
@@ -355,7 +371,7 @@ export const SELECTION_CONFIG_SCHEMA = {
          * Called directly (mirroring paperclip-model-router's own upstream
          * call), never through model-router's `/invoke` route: the host's
          * `isPrivateIP()` block on `ctx.http.fetch()` makes a same-host
-         * `/invoke` hop unreachable from a plugin (TOG-2481 architecture note).
+         * `/invoke` hop unreachable from a plugin.
          */
         baseUrl: {
           type: "string",
@@ -381,7 +397,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** How many eligible issues one job run classifies. */
         batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 },
         /**
-         * TOG-3200. Re-examine a card whose `tier:*` label this plugin did not
+         * Re-examine a card whose `tier:*` label this plugin did not
          * write (provenance in `PLUGIN_STATE_KEYS.classifierLabeledIssues`).
          *
          * Defaults TRUE, deliberately: with it false the job is a one-shot
@@ -400,7 +416,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Slice 4 (TOG-2048 decision B): bounded T1 earn-in for unproven candidate
+     * Slice 4: bounded T1 earn-in for unproven candidate
      * models. Default OFF — this section being absent, or `enabled: false`,
      * must leave dispatch behavior byte-for-byte identical to today.
      */
@@ -424,27 +440,63 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-2137 / TOG-2504. Emits paired `host` and `plugin-shadow`
-     * `tog2138-decision-v1` JSONL records per `advise()` call to the
+     * Emits paired `host` and `plugin-shadow`
+     * versioned paired-decision JSONL records per `advise()` call to the
      * `shadowDecisions` local folder, for the 48h agreement stream
-     * `ops/tog-2138/gate_harness.py` correlates.
+     * the shadow gate harness correlates.
      * Off by default — same inert-install discipline as `selection.mode`:
      * installing this plugin must not start writing files an operator did
      * not ask for.
      */
+    formatCompatibility: {
+      type: "object",
+      title: "Private format compatibility",
+      description: "Exact v1 format identifiers supplied by a reviewed private deployment. Absent/null fields use generic public identities; this never relaxes payload validation.",
+      additionalProperties: false,
+      default: {},
+      properties: {
+        tierSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+        acceptedWorkSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+        shadowSchemaVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
+      },
+    },
     shadowEmit: {
       type: "object",
-      title: "TOG-2138 shadow decision emitter",
+      title: "Shadow decision emitter",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
-        /** The JSONL file is rewritten whole on every append; this caps its size by dropping the oldest records. */
+        /**
+         * Legacy single-file cap, kept for read compatibility with
+         * an existing `decisions.jsonl`. New writes go to hourly shards (see
+         * `shardMaxRecords`); this number no longer sizes any write.
+         */
         maxRecords: { type: "integer", minimum: 1, default: 5000 },
+        /**
+         * Each hourly shard file is rewritten whole on every
+         * append; this caps a shard by dropping its oldest records. Small on
+         * purpose: the whole-file atomic rewrite that timed out at 30 s on a
+         * ~38 MB single file stays a kilobyte-scale RPC payload per shard.
+         */
+        shardMaxRecords: { type: "integer", minimum: 2, default: 200 },
+        /**
+         * How many newest hourly shard files to keep. Whole old
+         * shards are deleted past this count. 48 covers the 48-hour agreement
+         * stream the gate harness correlates.
+         */
+        retentionShards: { type: "integer", minimum: 1, default: 48 },
       },
       default: {},
     },
+    accountAdmissionShadow: {
+      type: "object",
+      title: "Account admission shadow report (never enforces)",
+      additionalProperties: false,
+      properties: { enabled: { type: "boolean", default: false } },
+      default: {},
+    },
     /**
-     * TOG-2438: aa.ai Intelligence Index sync. A single kill switch — the
+     * Aa.ai Intelligence Index sync. A single kill switch — the
      * feed URL and thresholds are code constants, not operator-configurable
      * (this isn't a per-company data source the way pacing lanes are).
      */
@@ -458,7 +510,61 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-3996: models.dev price reconciliation. A kill switch and nothing
+     * Free-list sync/discovery/shadow. Default OFF — an absent
+     * section, or `enabled: false`, leaves dispatch byte-for-byte identical
+     * to today (no fetch, no snapshot, no evidence). Bindings are curated
+     * model x effective-effort rows (see `aa-free/sync.ts verifyBindings`);
+     * the secret ref reuses the existing company `ARTIFICIALANALYSIS_API_KEY`
+     * binding resolved at `aaFreeSync.apiKeySecretRef` — never printed,
+     * persisted or exported, never substituted.
+     */
+    aaFreeSync: {
+      type: "object",
+      title: "aa.ai free-list sync",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        apiKeySecretRef: SECRET_REF_SCHEMA,
+        bindings: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["candidateId", "modelId", "laneId", "evaluatedEffort", "aaSlug"],
+            properties: {
+              candidateId: { type: "string", minLength: 1 },
+              modelId: { type: "string", minLength: 1 },
+              laneId: { type: "string", minLength: 1 },
+              evaluatedEffort: { type: "string", minLength: 1 },
+              aaSlug: { type: "string", minLength: 1 },
+              observationalOnly: { type: "boolean" },
+            },
+          },
+          default: [],
+        },
+        /** Hours a snapshot stays fresh for shadow evidence. Bounded; stale yields no evidence. */
+        maxSnapshotAgeHours: { type: "number", minimum: 1, default: 49 },
+      },
+      default: {},
+    },
+    /**
+     * First-party accepted-work posterior producer. Default OFF —
+     * an absent section, or `enabled: false`, builds no overlay and stores
+     * nothing (no fetch, no state change). The producer only folds this
+     * company's own closed-card outcomes into a versioned posterior overlay;
+     * nothing reads it for routing in this slice.
+     */
+    acceptedWork: {
+      type: "object",
+      title: "First-party accepted-work posterior",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+      },
+      default: {},
+    },
+    /**
+     * Models.dev price reconciliation. A kill switch and nothing
      * else, for the same reason `aaSync` is — the feed URL and the
      * lane-to-provider map are code constants, because a wrong provider
      * produces a confidently wrong price and that is a code review's
@@ -477,15 +583,15 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-2481: absorbs the standalone `dispatch` plugin (TOG-747, design
-     * TOG-706) so the `plugins` table shows one dispatcher, not two. Mirrors
-     * that plugin's `instanceConfigSchema` field-for-field, including its
-     * defaults — `wakeEnabled: false` so absorbing it changes nothing live
-     * until an operator explicitly flips the wake gate.
+     * Absorbs the standalone `dispatch` plugin so the `plugins` table shows
+     * one dispatcher, not two. Mirrors that plugin's `instanceConfigSchema`
+     * field-for-field, including its defaults — `wakeEnabled: false` so
+     * absorbing it changes nothing live until an operator explicitly flips the
+     * wake gate.
      */
     dispatch: {
       type: "object",
-      title: "Stall-sweep dispatch (TOG-706/TOG-747)",
+      title: "Stall-sweep dispatch",
       additionalProperties: false,
       properties: {
         wakeEnabled: {
@@ -525,7 +631,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * TOG-3210. A monitor tick, continuation wake, or label-only pass
+     * A monitor tick, continuation wake, or label-only pass
      * re-checking an already-tiered card is correctly judged T1 (or T2) by
      * every rubric anchor — the classifier grades the card, not the wake, and
      * that is correct. What is actually cheap is the RE-CHECK, not the card:
@@ -535,14 +641,15 @@ export const SELECTION_CONFIG_SCHEMA = {
      * for the mechanism (the decision is forced advisory, so it can never be
      * written). One-key rollback, matching the `classification` pattern
      * above: `wakeScopedFloor.enabled: false` restores byte-identical
-     * pre-TOG-3210 behavior. Default ON, because — unlike `classification` —
-     * this section can never itself cause a write; `wakeReasons` defaults to
-     * empty, so it is a no-op until an operator names the actual
-     * `PAPERCLIP_WAKE_REASON` values their dispatcher sends for cheap wakes.
+     * behavior from before this section existed. Default ON, because — unlike
+     * `classification` — this section can never itself cause a write;
+     * `wakeReasons` defaults to empty, so it is a no-op until an operator names
+     * the actual `PAPERCLIP_WAKE_REASON` values their dispatcher sends for
+     * cheap wakes.
      */
     wakeScopedFloor: {
       type: "object",
-      title: "Wake-scoped floor (TOG-3210)",
+      title: "Wake-scoped floor",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true },
@@ -554,6 +661,30 @@ export const SELECTION_CONFIG_SCHEMA = {
         },
         /** The lower floor a matching wake reason gets. Only takes effect below the card's judged tier — never raises it. */
         floorTier: { type: "string", enum: [...TIERS], default: "T3" },
+      },
+      default: {},
+    },
+    /**
+     * Run-scoped model decision. Requires a host
+     * built with the `run.model.resolve` hook and a manifest built with
+     * `MODEL_SELECTION_RUN_RESOLVE=1`. Off by default: `onResolveRunModel`
+     * answers `keep` and every legacy pin path is unchanged. On: each issue run
+     * is decided at its start from hot caches, and the creation/assignment
+     * pins, `labelOnlyPass`/`balancePass` pin writes and the `repinPass` /
+     * `agent.run.failed` re-pins are retired. Tier labels stay.
+     */
+    runResolve: {
+      type: "object",
+      title: "Run-scoped model decision",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: false },
+        /** The hot snapshot is refreshed once older than this; stale data is served while it refreshes. */
+        snapshotTtlMs: { type: "integer", minimum: 5000, maximum: 300000, default: 45000 },
+        /** Longest wait for an already-in-flight classification. Capped at 1000: the hook never starts one. */
+        classifierWaitMs: { type: "integer", minimum: 0, maximum: 1000, default: 1000 },
+        /** `retryAfterMs` carried by a `defer` answer. */
+        deferRetryMs: { type: "integer", minimum: 1000, maximum: 60000, default: 5000 },
       },
       default: {},
     },

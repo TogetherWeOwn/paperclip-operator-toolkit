@@ -1,0 +1,8 @@
+title = "paperclip-operator-toolkit"
+
+[extend]
+useDefault = true
+
+# No line, path or value-wide suppressions. secret-scan.sh generates exact
+# immutable history-finding exceptions from the reviewed fingerprint registry.
+# New findings, including secrets on an old fixture line, remain detectable.

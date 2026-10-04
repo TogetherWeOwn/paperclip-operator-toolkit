@@ -9,9 +9,10 @@
  *    never placed in an error message.
  *  - NOTHING IS SHELLED OUT. The request is issued through `ctx.http.fetch`, so
  *    the credential exists only as an in-process string and never lands in
- *    /proc/<pid>/cmdline. This is the TOG-200 class of bug, and it is also why
- *    TOG-151's shell CLI had to go to the trouble of a 0600 `curl --config`
- *    file — a plugin does not have that problem and must not reintroduce it.
+ *    /proc/<pid>/cmdline. That is the class of bug a command line exposes, and it
+ *    is also why the earlier shell CLI had to go to the trouble of a 0600
+ *    `curl --config` file — a plugin does not have that problem and must not
+ *    reintroduce it.
  *  - The upstream response is returned to the CALLER of this module, which is
  *    responsible for scrubbing it (worker.js routes every read through
  *    redact.js). Nothing here forwards a response to an agent directly.
@@ -31,7 +32,7 @@ export class OmniRouteError extends Error {
  * ⚠️ Two address traps, both measured, both of which fail like something else:
  *
  *  1. PORTS. :20128 is the MANAGEMENT port; :20129 is the INFERENCE port. They
- *     are not interchangeable and a swap does not look like a swap — TOG-151
+ *     are not interchangeable and a swap does not look like a swap
  *     [RESOLVED-5] recorded `/api/combos` on :20129 returning
  *     404 {"error":"not_found","message":"API port only serves OpenAI-compatible
  *     routes."}. Confirmed again 2026-08-25.
@@ -45,8 +46,8 @@ export class OmniRouteError extends Error {
  *     -> 403 AUTH_001 (reached, rejected on credential) while
  *     `http://127.0.0.1:20128/...` -> connection refused.
  *
- *     So the default here is the alias, and it is NOT a "fix" of TOG-151's
- *     loopback default — that tool runs on the host and is correct as written.
+ *     So the default here is the alias, and it is NOT a "fix" of the earlier shell
+ *     CLI's loopback default — that tool runs on the host and is correct as written.
  *     Same service, two vantage points, two right answers.
  */
 export function normalizeBaseUrl(raw) {
@@ -139,7 +140,7 @@ export async function callManagement(fetchImpl, { baseUrl, method, path, body, r
  * Describe an upstream failure without echoing the body.
  *
  * A management response body may embed credentials, so it is never quoted. Both
- * of OmniRoute's error envelopes are understood — TOG-151 [RESOLVED-5] found the
+ * of OmniRoute's error envelopes are understood — the earlier shell CLI's [RESOLVED-5] found the
  * management port emits BOTH shapes: the auth middleware returns a nested
  * `{error:{code,message,correlation_id}}` while the route handlers return a flat
  * `{error: "..."}` on 400/500. Only the CODE and the correlation id are

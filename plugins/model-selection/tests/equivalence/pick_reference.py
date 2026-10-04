@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Ground-truth oracle for TOG-2481 task #10's equivalence harness.
+Ground-truth oracle for the pick() equivalence harness.
 
 This is NOT a rewrite-from-memory of `tier_dispatcher.py`'s `pick()` and its
 dependencies — every function body below is copied verbatim from
-`~/paperclip-enterprise-company/ops/tog-1926/tier_dispatcher.py` (confirmed
-present at that path in the example company workspace, read in full
-2026-09-14), with exactly one class of change: every place the original read
+the operator's original `tier_dispatcher.py` (read in full 2026-09-14),
+with exactly one class of change: every place the original read
 a file (`model-usage-v1.json`, `lane_outage.json`, `<lane>.json`,
 `model_scores.json`, `zai_pace_override.json`) or shelled out to `sql()` now
 reads the same-shaped data from the scenario JSON on stdin instead. No
 decision logic was altered. Where a line number is cited in a comment below,
 it refers to that file as read 2026-09-14.
 
-This script has no dependency on podman, a live Paperclip API, or
-`~/paperclip-enterprise-company/` — by design, since none of those exist in
-the plugin's own runtime or test environment (TOG-2481 AC3). It exists solely
+This script has no dependency on podman, a live Paperclip API, or the
+operator's original dispatcher checkout — by design, since none of those exist
+in the plugin's own runtime or test environment. It exists solely
 so `tests/equivalence/pick-parity.spec.ts` can diff a real Python evaluation
 of `pick()` against the TypeScript `selectModel()` engine on identical inputs,
 rather than a single-language "reimplementation matches itself" check.

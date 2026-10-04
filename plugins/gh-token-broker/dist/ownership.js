@@ -1,12 +1,12 @@
 /**
- * Who is allowed to mint against an issue (TOG-309).
+ * Who is allowed to mint against an issue.
  *
  * Kept free of I/O, like scope.js, so the authorization decision can be tested
  * directly rather than inferred from a route test.
  *
  * ## Why this moved out of the host
  *
- * Until TOG-309 the mint route carried `checkoutPolicy: "always-for-agent"` and
+ * Originally the mint route carried `checkoutPolicy: "always-for-agent"` and
  * the host's `issuesSvc.assertCheckoutOwner` was the whole gate. That function
  * requires all three of:
  *
@@ -32,7 +32,7 @@
  * legitimately holds a live checkout, and to keep the lifetime bound by refusing
  * the terminal and not-yet-started ones. It is NOT to make the helper retry a
  * refusal with the bigger credential — that would re-create exactly the PEM path
- * TOG-174 exists to remove.
+ * this broker exists to remove.
  *
  * The host cannot express that, so the gate moves here. The trade-off is stated
  * plainly: there is no longer a second, independent enforcement of the assignee
@@ -46,7 +46,7 @@
  *
  * `in_progress` — active work.
  * `in_review`   — the normal state for an agent acting on review feedback. This
- *                 is the state that TOG-309 measured as broken.
+ *                 is the state the host's gate was measured refusing.
  * `blocked`     — a blocked agent still has to push the branch that documents
  *                 what blocked it, and still gets woken to answer comments.
  *
@@ -103,7 +103,7 @@ function explainStatus(status) {
  *               claim or from the agent-key record, never from a header.
  *
  *               `runId` is NOT, and an earlier revision of this comment claimed
- *               it was (TOG-216). It is the signed `run_id` claim only when the
+ *               it was. It is the signed `run_id` claim only when the
  *               caller authenticated with an agent JWT; on the long-lived
  *               agent-key path it is the raw `X-Paperclip-Run-Id` header with no
  *               validation (`server/dist/middleware/auth.js:302` against `:256`),
@@ -130,7 +130,7 @@ export function assertMintOwnership(issue, actor) {
     throw new OwnershipError("Issue is not assigned to the calling agent.", 403);
   }
 
-  // WHEN. Lifecycle, not identity — widened by TOG-309, but still bounded.
+  // WHEN. Lifecycle, not identity — widened beyond the host's `in_progress`-only rule, but still bounded.
   if (!MINTABLE.has(issue.status)) {
     throw new OwnershipError(
       `Issue is ${issue.status}; tokens are minted only for ${MINTABLE_ISSUE_STATUSES.join(", ")} ` +

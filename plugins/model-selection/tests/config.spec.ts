@@ -10,8 +10,41 @@ describe("config resolution", () => {
     expect(config.selection.defaultTier).toBe("T1");
     expect(config.selection.holdOnUntrustedProfile).toBe(true);
     expect(config.selection.fleetContextCeilingTokens).toBe(1_000_000);
+    expect(config.selection.agentEnvContextTokens).toBe(1_000_000);
     expect(config.selection.compactionRatio).toBe(0.75);
     expect(config.models).toEqual([]);
+    expect(config.accountAdmissionShadow.enabled).toBe(false);
+  });
+
+  it("requires an explicit absolute context log root without changing the fleet ceiling", () => {
+    expect(resolveConfig({}).selection.contextRunLogRoot).toBeNull();
+    const configured = resolveConfig({ selection: { contextRunLogRoot: "/test/run-logs", fleetContextCeilingTokens: 200_000 } });
+    expect(configured.selection.contextRunLogRoot).toBe("/test/run-logs");
+    expect(configured.selection.fleetContextCeilingTokens).toBe(200_000);
+    expect(validateConfig(resolveConfig({ selection: { contextRunLogRoot: "relative/logs" } })).errors)
+      .toContain("selection.contextRunLogRoot must be an absolute path");
+  });
+
+  it("resolves an unset agent-env cap to the fleet ceiling", () => {
+    // Unset behaves exactly as before the split: the pin stamps against the
+    // fleet ceiling until the operator sets `agentEnvContextTokens`.
+    expect(resolveConfig({}).selection.agentEnvContextTokens).toBe(1_000_000);
+    expect(
+      resolveConfig({ selection: { fleetContextCeilingTokens: 200_000 } }).selection
+        .agentEnvContextTokens,
+    ).toBe(200_000);
+    expect(
+      resolveConfig({
+        selection: { fleetContextCeilingTokens: 200_000, agentEnvContextTokens: 1_000_000 },
+      }).selection.agentEnvContextTokens,
+    ).toBe(1_000_000);
+  });
+
+  it("rejects a non-positive agent-env cap", () => {
+    const { errors } = validateConfig(
+      resolveConfig({ selection: { agentEnvContextTokens: 0 } }),
+    );
+    expect(errors).toContain("selection.agentEnvContextTokens must be a positive number");
   });
 
   it("rejects an invalid context compaction ratio", () => {
@@ -34,6 +67,20 @@ describe("config resolution", () => {
     const config = resolveConfig({
       selection: { mode: "enforce" },
       models: [
+        {
+          id: "gpt-5.6-sol",
+          tier: "T1",
+          costPerMTokIn: 4,
+          costPerMTokOut: 20,
+          costPerMTokCacheRead: 0.4,
+        },
+        {
+          id: "glm-5.3",
+          tier: "T2",
+          costPerMTokIn: 3,
+          costPerMTokOut: 15,
+          costPerMTokCacheRead: 0.3,
+        },
         {
           id: "claude-opus-5",
           tier: "T3",
@@ -138,7 +185,7 @@ describe("config resolution", () => {
           {
             laneId: "lane-a",
             statusUrl: "https://status.example.com/lane-a",
-            apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+            apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
             windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
           },
         ],
@@ -146,7 +193,7 @@ describe("config resolution", () => {
     });
     expect(config.pacing.lanes[0]!.apiKeySecretRef).toEqual({
       type: "secret_ref",
-      secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4",
+      secretId: "5ec2e700-0000-4000-8000-000000000001",
     });
     expect(config.pacing.lanes[0]!.lane.accountKeyFields).toEqual([
       "account_key",
@@ -266,7 +313,7 @@ describe("config resolution", () => {
     expect(warnings.some((w) => w.includes("cache read is the largest cost line"))).toBe(true);
   });
 
-  describe("TOG-2137 Defect 6: a roster laneId must resolve to a configured lane", () => {
+  describe("A roster laneId must resolve to a configured lane", () => {
     const validLane = {
       laneId: "lane-t1",
       statusUrl: "https://example.test/status",
@@ -337,6 +384,131 @@ describe("config resolution", () => {
         }),
       );
       expect(errors.some((e) => e.includes("references laneId"))).toBe(false);
+    });
+  });
+
+  describe("AaFreeSync is default-off and fail-loud when enabled", () => {
+    const SECRET = { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" };
+    const BINDING = {
+      candidateId: "opus-high",
+      modelId: "claude-opus-5",
+      laneId: "lane-claude",
+      evaluatedEffort: "high",
+      aaSlug: "opus-high",
+    };
+
+    it("is disabled with no bindings and a 49h freshness bound out of the box", () => {
+      const config = resolveConfig(undefined);
+      expect(config.aaFreeSync.enabled).toBe(false);
+      expect(config.aaFreeSync.apiKeySecretRef).toBeNull();
+      expect(config.aaFreeSync.bindings).toEqual([]);
+      expect(config.aaFreeSync.maxSnapshotAgeHours).toBe(49);
+      expect(validateConfig(config).errors).toEqual([]);
+    });
+
+    it("resolves a well-formed section and drops malformed binding rows", () => {
+      const config = resolveConfig({
+        aaFreeSync: {
+          enabled: true,
+          apiKeySecretRef: SECRET,
+          bindings: [BINDING, { candidateId: "", modelId: "x" }, "junk", { ...BINDING, candidateId: "opus-max", evaluatedEffort: "max", aaSlug: "opus-max", observationalOnly: true }],
+          maxSnapshotAgeHours: 24,
+        },
+      });
+      expect(config.aaFreeSync.enabled).toBe(true);
+      expect(config.aaFreeSync.apiKeySecretRef).toMatchObject({ type: "secret_ref" });
+      expect(config.aaFreeSync.bindings).toEqual([BINDING, { ...BINDING, candidateId: "opus-max", evaluatedEffort: "max", aaSlug: "opus-max", observationalOnly: true }]);
+      expect(config.aaFreeSync.maxSnapshotAgeHours).toBe(24);
+      expect(validateConfig(config).errors).toEqual([]);
+    });
+
+    it("errors when enabled without a secret, with duplicate bindings, or a bad freshness bound", () => {
+      expect(validateConfig(resolveConfig({ aaFreeSync: { enabled: true, bindings: [BINDING] } })).errors)
+        .toContain("aaFreeSync.enabled is true but no aaFreeSync.apiKeySecretRef is configured; the free list cannot be fetched");
+      expect(validateConfig(resolveConfig({ aaFreeSync: { enabled: true, apiKeySecretRef: SECRET, bindings: [BINDING, BINDING] } })).errors)
+        .toContain("duplicate aaFreeSync binding: claude-opus-5 lane-claude high");
+      expect(validateConfig(resolveConfig({ aaFreeSync: { enabled: true, apiKeySecretRef: SECRET, maxSnapshotAgeHours: 0 } })).errors)
+        .toContain("aaFreeSync.maxSnapshotAgeHours must be a positive number of hours");
+    });
+
+    it("rejects a pasted credential and warns on zero bindings", () => {
+      const raw = resolveConfig({ aaFreeSync: { enabled: true, apiKeySecretRef: "sk-live-key" } });
+      expect(validateConfig(raw).errors.some((e) => e.includes("aaFreeSync.apiKeySecretRef") && e.includes("not a string"))).toBe(true);
+      const { errors, warnings } = validateConfig(
+        resolveConfig({ aaFreeSync: { enabled: true, apiKeySecretRef: SECRET } }),
+      );
+      expect(errors).toEqual([]);
+      expect(warnings.some((w) => w.includes("no aaFreeSync.bindings are curated"))).toBe(true);
+    });
+  });
+
+  describe("AcceptedWork is default-off", () => {
+    it("is disabled out of the box, with no validation errors", () => {
+      const config = resolveConfig(undefined);
+      expect(config.acceptedWork.enabled).toBe(false);
+      expect(validateConfig(config).errors).toEqual([]);
+    });
+
+    it("resolves an explicit enable and stays a pure kill switch", () => {
+      const config = resolveConfig({ acceptedWork: { enabled: true } });
+      expect(config.acceptedWork.enabled).toBe(true);
+      expect(validateConfig(config).errors).toEqual([]);
+      // A truthy non-boolean is not an enable: the producer must never start
+      // on an ambiguous value.
+      expect(resolveConfig({ acceptedWork: { enabled: "yes" } }).acceptedWork.enabled).toBe(false);
+    });
+  });
+
+  describe("Enforce preflight: refuse enforce while any tier has zero enabled rows", () => {
+    const row = (id: string, tier: string, enabled = true) => ({
+      id,
+      tier,
+      enabled,
+      releasedAt: "2026-06-01",
+      costPerMTokIn: 5,
+      costPerMTokOut: 25,
+      costPerMTokCacheRead: 0.5,
+    });
+
+    it("resolves enforce OK when every tier has an enabled row", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          selection: { mode: "enforce" },
+          models: [row("t1-model", "T1"), row("t2-model", "T2"), row("t3-model", "T3")],
+        }),
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it("refuses enforce with the empty tier named", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          selection: { mode: "enforce" },
+          models: [row("t1-model", "T1"), row("t3-model", "T3"), row("t2-off", "T2", false)],
+        }),
+      );
+      expect(errors.some((e) => e.includes("tier T2") && e.includes("no enabled models"))).toBe(true);
+    });
+
+    it("leaves advise mode on a warning when a tier is empty", () => {
+      const { errors, warnings } = validateConfig(
+        resolveConfig({
+          selection: { mode: "advise" },
+          models: [row("t1-model", "T1"), row("t3-model", "T3")],
+        }),
+      );
+      expect(errors).toEqual([]);
+      expect(warnings.some((w) => w.includes("no enabled model at tier T2"))).toBe(true);
+    });
+
+    it("skips the enforce gate when selection is disabled", () => {
+      const { errors } = validateConfig(
+        resolveConfig({
+          selection: { enabled: false, mode: "enforce" },
+          models: [row("t1-model", "T1"), row("t3-model", "T3")],
+        }),
+      );
+      expect(errors).toEqual([]);
     });
   });
 });

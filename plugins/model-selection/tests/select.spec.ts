@@ -94,9 +94,9 @@ describe("selection", () => {
   });
 
   it("records the gate that actually rejected a candidate, not another one that also applies", () => {
-    // TOG-3211 acceptance: `flaky` is BOTH disabled in the roster AND sitting
+    // Acceptance: `flaky` is BOTH disabled in the roster AND sitting
     // on a lane the pace ledger reports unserviceable — either fact alone
-    // would explain a rejection, and TOG-3200's by-hand reconstruction from
+    // would explain a rejection, and a by-hand reconstruction from
     // roster shape (which cannot see the `continue` order below) could
     // plausibly have picked either. `select.ts` checks `!model.enabled`
     // first and `continue`s immediately, so `lane-unserviceable` is never
@@ -232,7 +232,7 @@ describe("selection", () => {
     expect(decision.heldReason).toContain("not trusted");
   });
 
-  it("TOG-3037: writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
+  it("Writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -253,7 +253,7 @@ describe("selection", () => {
     expect(decision.trace.some((line) => line.includes("held-at-floor declined"))).toBe(true);
   });
 
-  it("TOG-3037: still holds at floor, unchanged, when the floor's lane is healthy", () => {
+  it("Still holds at floor, unchanged, when the floor's lane is healthy", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -405,7 +405,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("alpha");
   });
 
-  it("TOG-3406: same-price-family rule prefers the newer release for a same-price sibling pair", () => {
+  it("Same-price-family rule prefers the newer release for a same-price sibling pair", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, { id: "vendor-model-4-8", releasedAt: "2026-05-05" });
     const newer = model(t2, { id: "vendor-model-5", releasedAt: "2026-06-24" });
@@ -417,7 +417,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-5");
   });
 
-  it("TOG-3406: a provenBetter earn-in verdict lets the older same-price-family model win", () => {
+  it("A provenBetter earn-in verdict lets the older same-price-family model win", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, {
       id: "vendor-model-4-8",
@@ -433,7 +433,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-4-8");
   });
 
-  describe("TOG-2137 Defect 2: tier-exhaustion escalation", () => {
+  describe("Tier-exhaustion escalation", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -529,7 +529,7 @@ describe("selection", () => {
     });
   });
 
-  describe("TOG-2137 Defect 6: a pin or sticky model cannot hard-bypass capacity routing", () => {
+  describe("A pin or sticky model cannot hard-bypass capacity routing", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -589,7 +589,7 @@ describe("selection", () => {
   });
 });
 
-describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
+describe("pace-vs-objective composition", () => {
   // Two T1 candidates: `cheap-ahead` is the list-price winner AND has the best
   // (lowest) cost-per-accepted-card, but its lane is running `ahead` of pace.
   // `pricier-on-pace` costs 2x as much but its lane is `on` pace. This is
@@ -695,7 +695,7 @@ describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
   });
 });
 
-describe("lane avoid + lane outage gating (TOG-2481)", () => {
+describe("lane avoid + lane outage gating", () => {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
   const avoidedModel = model(t1, { id: "avoided-model", laneId: "codex" });
   const fallbackModel = model(t1, { id: "fallback-model", laneId: "lane-fresh" });
@@ -706,7 +706,7 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
       observedAt: "2026-09-10T12:00:00.000Z",
       state: "on",
       serviceable: true,
-      score: { utilization: 0.85, elapsed: 0.5, deviation: 0 },
+      score: { utilization: 0.85, elapsed: 0.5, deviation: 0.35 },
       accounts: [],
       knownAccountCount: 1,
       knownWeight: 1,
@@ -735,6 +735,39 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
     expect(
       decision.rejections.some((r) => r.stage === "lane-avoid" && r.modelId === "avoided-model"),
     ).toBe(true);
+  });
+
+  it("admits a threshold-reaching lane behind pace near reset without bypassing tier floors", () => {
+    const belowTier = model(MODELS.find((entry) => entry.tier === "T2")!, { id: "below-tier", laneId: "codex" });
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ state: "behind", score: { utilization: 0.75, elapsed: 0.83, deviation: -0.08 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-near-reset", labelNames: ["tier:T1"] },
+      config: config({
+        models: [belowTier, fallbackModel, avoidedModel],
+        pacingMode: "enforce",
+        laneLedger,
+        laneAvoidConfig: { defaultThreshold: 0.75, perLane: {} },
+      }),
+    });
+    expect(decision.modelId).toBe("avoided-model");
+    expect(decision.rejections.some((r) => r.stage === "lane-avoid")).toBe(false);
+    expect(decision.rejections.some((r) => r.stage === "tier-floor" && r.modelId === "below-tier")).toBe(true);
+  });
+
+  it("keeps exhaustion a hard stop even when the lane is not ahead of pace", () => {
+    const laneLedger: LaneLedger = {
+      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: laneVerdict({ state: "exhausted", serviceable: false, score: { utilization: 1, elapsed: 1, deviation: 0 } }) },
+    };
+    const decision = selectModel({
+      ...base,
+      descriptor: { issueId: "lane-exhausted-at-reset", labelNames: ["tier:T1"] },
+      config: config({ models: [avoidedModel, fallbackModel], pacingMode: "enforce", laneLedger, laneAvoidConfig: { defaultThreshold: 0.75, perLane: {} } }),
+    });
+    expect(decision.modelId).toBe("fallback-model");
+    expect(decision.rejections.some((r) => r.stage === "lane-unserviceable" && r.modelId === "avoided-model")).toBe(true);
   });
 
   it("2026-09-07 07:12Z owner rule: codex's own AVOID_LANE=0.99 keeps it admitted at 0.85 where the generic 0.8 threshold would have excluded it", () => {
@@ -812,7 +845,7 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
   });
 });
 
-describe("lane-has-room gating (TOG-2481 tier_dispatcher.py lane_has_room())", () => {
+describe("lane-has-room gating (tier_dispatcher.py lane_has_room())", () => {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
   const goModel = model(t1, { id: "go-model", laneId: "opencode-go", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
 
@@ -888,7 +921,7 @@ describe("T1 stays off opencode-go unless codex is at/over its avoid threshold (
           observedAt: "2026-09-07T03:15:00.000Z",
           state: "on",
           serviceable: true,
-          score: { utilization, elapsed: 0.5, deviation: 0 },
+          score: { utilization, elapsed: 0.5, deviation: utilization - 0.5 },
           accounts: [],
           knownAccountCount: 1,
           knownWeight: 1,
@@ -935,7 +968,7 @@ describe("T1 stays off opencode-go unless codex is at/over its avoid threshold (
     expect(
       decision.rejections.some((r) => r.modelId === goModel.id && r.reason.includes("Go fallback only")),
     ).toBe(false);
-    // codexModel itself is excluded by the pre-existing generic lane-avoid gate at 0.85 >= 0.8.
+    // Codex is above threshold AND ahead of its governing window's midpoint.
     expect(decision.rejections.some((r) => r.modelId === codexModel.id && r.stage === "lane-avoid")).toBe(true);
   });
 
@@ -1074,7 +1107,7 @@ describe("long-turn engineering agents stay off zai while codex has room (2026-0
   });
 });
 
-describe("wake-scoped floor (TOG-3210)", () => {
+describe("wake-scoped floor", () => {
   it("lowers the required tier for a matching wake reason without touching the judged tier", () => {
     const decision = selectModel({
       ...base,
@@ -1131,7 +1164,7 @@ describe("wake-scoped floor (TOG-3210)", () => {
     expect(decision.advisory).toBe(false);
   });
 
-  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-TOG-3210 behavior", () => {
+  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-wake-scoped-floor behavior", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },

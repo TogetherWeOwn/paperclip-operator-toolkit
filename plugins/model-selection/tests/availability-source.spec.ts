@@ -1,5 +1,5 @@
 /**
- * TOG-3132 AC-2/AC-5: the availability term's WRITER.
+ * Acceptance criteria 2 and 5: the availability term's WRITER.
  *
  * `availability.spec.ts` proves the reader excludes correctly given a document.
  * Every test here proves a document actually gets produced, and produced with

@@ -23,3 +23,31 @@ export function resolveConfiguredModelId(
   const directModelId = modelId.slice(OMNIROUTE_PROVIDER_PREFIX.length);
   return models.some((model) => model.id === directModelId) ? directModelId : null;
 }
+
+/**
+ * Roster id prefix for Devin rows (mirrors the price-sync
+ * `DEVIN_PREFIX`: Devin meters by subscription/ACU, not per token).
+ */
+const DEVIN_MODEL_PREFIX = "devin/";
+
+/** The adapter whose system banner Devin's content filter rejects. */
+export const ADAPTER_CLAUDE_LOCAL = "claude_local";
+
+/** Whether this roster id names a Devin model. Prefix match only — never a suffix guess. */
+export function isDevinModelId(modelId: string | null | undefined): boolean {
+  return typeof modelId === "string" && modelId.startsWith(DEVIN_MODEL_PREFIX);
+}
+
+/**
+ * Adapter-compatibility: `devin/*` models cannot serve a
+ * `claude_local` assignee. Devin's content filter rejects the Claude Code /
+ * Agent SDK system banner (Cognition ticket 71806) — measured 25 failed / 3
+ * succeeded runs on claude_local+devin. Devin works via opencode/codex
+ * adapters, so only this pair is excluded. An unknown adapter never excludes.
+ */
+export function isAdapterBlockedModel(
+  modelId: string | null | undefined,
+  adapterType: string | null | undefined,
+): boolean {
+  return adapterType === ADAPTER_CLAUDE_LOCAL && isDevinModelId(modelId);
+}

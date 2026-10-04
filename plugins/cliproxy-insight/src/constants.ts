@@ -40,7 +40,7 @@ export const JOB_KEYS = {
 } as const;
 
 /**
- * The two files the containment lane serves (TOG-952). Relative to `baseUrl`,
+ * The two files the containment lane serves. Relative to `baseUrl`,
  * which is the lane namespace, not the CLIProxy origin. Neither path is the
  * raw management API — `/v0/management/*` returns api-keys, config and
  * id_tokens in clear and is never reachable from here.
@@ -63,12 +63,11 @@ export const LANE_AUTH_HEADER = "x-api-key";
  *
  * v0.2.0 polled only `LANE_PATHS` — the two aggregate files the 2026-09-05
  * sanitizer design specified. The lane has since been rebuilt around the
- * TOG-2693 collector contract: one file per lane, each an
+ * per-lane collector contract: one file per lane, each an
  * `{schemaVersion, observedAt, staleAfterSeconds, records[]}` envelope, and
- * those are the files `model-selection`'s pacer polls in production
- * (`ops/model-selection/deploy-.../live-verification.json`). Measured 200s on
- * `claude.json` and `codex.json` 2026-09-17 00:54Z, and a 404 on `devin.json`
- * — the lane allowlist is explicit, so an unlisted name is simply not served.
+ * those are the files `model-selection`'s pacer polls in production.
+ * Measured 200s on `claude.json` and `codex.json` 2026-09-17 00:54Z, and a 404
+ * on `devin.json` — the lane allowlist is explicit, so an unlisted name is simply not served.
  *
  * This is a DEFAULT, not an allowlist: `laneFiles` is config, because adding a
  * lane on the host must not require a plugin release.
@@ -111,7 +110,7 @@ export const LANE_COOLDOWN_REASON_FIELDS = [
 /**
  * `health` values that mean the lane account is refusing work. `cooldown` is
  * deliberately NOT here: the Router's `normalizeCapacityPayload` maps it to
- * `degraded` → posture `avoid`, which is still selectable (measured, TOG-811
+ * `degraded` → posture `avoid`, which is still selectable (measured
  * 2026-09-17). Only `exhausted`/`unavailable` reach unserviceable.
  */
 export const LANE_UNSERVICEABLE_HEALTH = ["exhausted", "unavailable"] as const;
@@ -128,7 +127,7 @@ export const STATE_KEYS = {
   laneIndex: "cliproxy-insight:lane-index",
 } as const;
 
-/** Cap on retained cooldown-transition events per provider (TOG-811 design Q6). */
+/** Cap on retained cooldown-transition events per provider. */
 export const MAX_COOLDOWN_EVENTS_PER_PROVIDER = 200;
 
 /**

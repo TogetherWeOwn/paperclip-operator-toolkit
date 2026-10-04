@@ -2,7 +2,6 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-31
-- **Card:** TOG-768 (Stage 3 build), design TOG-734
 - **Upstream:** ADR-0002 (cost structure), ADR-0004 (tiers), ADR-0005 (quality floor)
 
 ## Context

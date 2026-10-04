@@ -151,7 +151,7 @@ function earnInTrace(decision: { trace: readonly string[] }): boolean {
   return decision.trace.some((line) => line.includes("free-lane earn-in"));
 }
 
-describe("free-lane earn-in helpers (TOG-3406 rule b)", () => {
+describe("free-lane earn-in helpers", () => {
   const models: ModelEntry[] = [freeModel("meta-free"), paidModel("opus-paid")];
   const candidates = [candidate("opus-paid", 2), candidate("meta-free", 0)];
 
@@ -245,9 +245,9 @@ describe("free-lane earn-in helpers (TOG-3406 rule b)", () => {
   });
 });
 
-describe("free-lane earn-in through selectModel (TOG-3406 rule b)", () => {
+describe("free-lane earn-in through selectModel", () => {
   it("2026-09-19 owner rule: an unproven model on a serviceable free lane wins its tier over a proven paid model", () => {
-    // This is the 21:12Z TOG-3399/3401 experiment inverted: without earn-in,
+    // This is the 21:12Z experiment inverted: without earn-in,
     // `applyPickOrdering`'s free-must-be-proven filter demotes meta-free to
     // the tail and the earned opus score wins. Earn-in promotes it back.
     const decision = selectModel({

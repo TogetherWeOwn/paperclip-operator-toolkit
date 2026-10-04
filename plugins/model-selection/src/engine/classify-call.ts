@@ -107,7 +107,7 @@ function extractText(protocol: ClassificationProtocol, parsed: unknown): string 
  * N lane GETs. This is a direct provider call — never a same-host hop into
  * `togetherweown.paperclip-model-router`'s own `/invoke` route, which is
  * unreachable from a plugin sandbox (`isPrivateIP()` blocks it unconditionally;
- * see TOG-2481 architecture note).
+ * architecture note).
  */
 export async function callClassifier(
   input: ClassificationCallInput,

@@ -1104,9 +1104,9 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("newer-model");
   });
 
-  it("TOG-3406: same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
+  it("Same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
     // config/reviewed-roster.json's claude-opus-4-8 releasedAt was fabricated
-    // to land AFTER claude-opus-5's real GA date (TOG-3406 root cause) — that
+    // to land AFTER claude-opus-5's real GA date — that
     // data bug is fixed separately in the roster file itself, since no
     // comparator can safely out-guess a wrong date from the id alone. This
     // exercises the named family rule against the now-correct chronology.
@@ -1125,7 +1125,7 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("claude-opus-5");
   });
 
-  it("TOG-3406: an explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
+  it("An explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
     const models = [
       model({
         id: "claude-opus-4-8",
@@ -1148,7 +1148,7 @@ describe("orderCandidatesByPace", () => {
   });
 });
 
-describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
+describe("Preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
   it("prefers a serviceable lane trailing its elapsed-fraction trajectory as its reset window nears close", () => {
     const trailingNearClose = verdict({
       state: "behind",
@@ -1308,7 +1308,7 @@ describe("hardStopExcluded", () => {
     expect(hardStopExcluded(unknownLedger, model({ laneId: "lane-a" }))).toBe(false);
   });
 
-  // TOG-3012. The 09-16 incident: codex measured exhausted at 16:55Z, the poll
+  // The 09-16 incident: codex measured exhausted at 16:55Z, the poll
   // then flapped, and because exclusion was read solely off `verdict` — which a
   // failed poll degrades to null — the lane became admissible again and 21 runs
   // launched onto it. Losing the reading must not erase the measurement.
@@ -1477,8 +1477,12 @@ describe("operator overrides", () => {
   });
 });
 
-describe("avoidThresholdFor / laneAvoidExcluded (tier_dispatcher.py AVOID/AVOID_LANE)", () => {
+describe("avoidThresholdFor / laneAvoidExcluded (pace-relative admission)", () => {
   const config: LaneAvoidConfig = { defaultThreshold: 0.8, perLane: { codex: 0.99 } };
+
+  function ledgerFor(score: LanePaceVerdict["score"], laneId = "lane-a"): LaneLedger {
+    return { [laneId]: { laneId, fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId, score }) } };
+  }
 
   it("falls back to the default threshold for a lane with no per-lane override", () => {
     expect(avoidThresholdFor(config, "zai")).toBe(0.8);
@@ -1486,44 +1490,70 @@ describe("avoidThresholdFor / laneAvoidExcluded (tier_dispatcher.py AVOID/AVOID_
 
   it("uses the per-lane threshold when one is configured", () => {
     expect(avoidThresholdFor(config, "codex")).toBe(0.99);
+    const codex = model({ laneId: "codex" });
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.9, elapsed: 0.5, deviation: 0.4 }, "codex"), codex, config)).toBe(false);
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.99, elapsed: 0.5, deviation: 0.49 }, "codex"), codex, config)).toBe(true);
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.99, elapsed: 0.99, deviation: 0 }, "codex"), codex, config)).toBe(false);
   });
 
-  it("2026-09-07 07:12Z owner rule: codex stays usable up to 0.99, not the generic 0.8 — parking it early moved ~25 T2 cards onto bare claude-sonnet-5", () => {
-    const ledger: LaneLedger = {
-      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "codex", score: { utilization: 0.9, elapsed: 0.9, deviation: 0 } }) },
-    };
-    expect(laneAvoidExcluded(ledger, model({ laneId: "codex" }), config)).toBe(false);
-    const exhaustedLedger: LaneLedger = {
-      codex: { laneId: "codex", fetchedAt: "t", error: null, observation: null, verdict: verdict({ laneId: "codex", score: { utilization: 0.99, elapsed: 0.99, deviation: 0 } }) },
-    };
-    expect(laneAvoidExcluded(exhaustedLedger, model({ laneId: "codex" }), config)).toBe(true);
+  it("keeps .75 utilization at .83 elapsed admitted with a .75 threshold and prefers it near reset", () => {
+    const ledger = ledgerFor({ utilization: 0.75, elapsed: 0.83, deviation: -0.08 });
+    expect(laneAvoidExcluded(ledger, model(), { defaultThreshold: 0.75, perLane: {} })).toBe(false);
+    expect(isPreferredNearReset(ledger["lane-a"]!.verdict)).toBe(true);
+    expect(orderCandidatesByPace(
+      [candidate({ modelId: "fresh" }), candidate()],
+      [model({ id: "fresh", laneId: "fresh" }), model()],
+      ledger,
+    ).map((entry) => entry.modelId)).toEqual(["m1", "fresh"]);
   });
 
-  it("2026-09-08 22:55Z owner rule: a lane the collector marks 'degraded' (>=0.9 utilization) stays usable until its OWN avoid threshold is crossed — this keys only on measured utilization, never on lane state/health", () => {
-    // Account-level health going "degraded" surfaces here only as elevated
-    // `score.utilization`, never as a distinct lane `state` this function
-    // reads — excluding on the health label itself (rather than the
-    // threshold) caused the Claude flood incident.
-    const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ state: "on", score: { utilization: 0.72, elapsed: 0.7, deviation: 0 } }) },
-    };
-    expect(laneAvoidExcluded(ledger, model({ laneId: "lane-a" }), config)).toBe(false);
+  it("excludes high utilization ahead of pace, including exactly at the utilization threshold", () => {
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.85, elapsed: 0.5, deviation: 0.35 }), model(), config)).toBe(true);
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.8, elapsed: 0.5, deviation: 0.3 }), model(), config)).toBe(true);
   });
 
-  it("excludes a default-threshold lane at or above 0.8 utilization", () => {
-    const ledger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: { utilization: 0.8, elapsed: 0.8, deviation: 0 } }) },
-    };
-    expect(laneAvoidExcluded(ledger, model({ laneId: "lane-a" }), config)).toBe(true);
+  it("requires both the utilization threshold and pace margin, not either alone", () => {
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.79, elapsed: 0.5, deviation: 0.29 }), model(), config)).toBe(false);
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.8, elapsed: 0.8, deviation: 0 }), model(), config)).toBe(false);
+    expect(laneAvoidExcluded(ledgerFor({ utilization: 0.85, elapsed: 0.8, deviation: 0.05 }), model(), config)).toBe(false);
   });
 
-  it("is fail-neutral: a model with no laneId, or a lane with no measured utilization, excludes nothing", () => {
+  it("uses a strict margin boundary on actual governing-window scores", () => {
+    function scoredLedger(utilization: number): LaneLedger {
+      const evaluated = evaluateLanePace({ observation: observation({ accounts: [account({ windows: [window({
+        utilization, allowanceWeight: 1, windowSeconds: 1000, resetsAt: "2026-09-08T12:05:00.000Z",
+      })] })] }) });
+      expect(evaluated.score?.elapsed).toBe(0.7);
+      return { "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: evaluated } };
+    }
+    const atMargin = scoredLedger(0.8);
+    expect(atMargin["lane-a"]!.verdict?.score?.deviation).toBe(0.1);
+    expect(laneAvoidExcluded(atMargin, model(), config)).toBe(false);
+    expect(laneAvoidExcluded(scoredLedger(0.801), model(), config)).toBe(true);
+  });
+
+  it("is fail-neutral for missing or unknown telemetry", () => {
     expect(laneAvoidExcluded({}, model({ laneId: null }), config)).toBe(false);
-    const noScoreLedger: LaneLedger = {
-      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: verdict({ score: null }) },
+    expect(laneAvoidExcluded({}, model(), config)).toBe(false);
+    expect(laneAvoidExcluded(ledgerFor(null), model(), config)).toBe(false);
+    const unknown: LaneLedger = {
+      "lane-a": { laneId: "lane-a", fetchedAt: "t", error: "poll failed", observation: null, verdict: null },
     };
-    expect(laneAvoidExcluded(noScoreLedger, model({ laneId: "lane-a" }), config)).toBe(false);
-    expect(laneAvoidExcluded({}, model({ laneId: "lane-a" }), config)).toBe(false);
+    expect(laneAvoidExcluded(unknown, model(), config)).toBe(false);
+  });
+
+  it.each([NaN, Infinity, -Infinity])("is fail-neutral for nonfinite pace metadata (%s)", (invalid) => {
+    for (const field of ["utilization", "elapsed", "deviation"] as const) {
+      const score = { utilization: 0.85, elapsed: 0.5, deviation: 0.35, [field]: invalid };
+      expect(laneAvoidExcluded(ledgerFor(score), model(), config)).toBe(false);
+    }
+  });
+
+  it("does not waive positive exhaustion even when no pace-relative avoidance applies", () => {
+    const ledger = ledgerFor({ utilization: 1, elapsed: 1, deviation: 0 });
+    ledger["lane-a"]!.verdict = verdict({ serviceable: false, state: "exhausted", score: { utilization: 1, elapsed: 1, deviation: 0 } });
+    expect(laneAvoidExcluded(ledger, model(), config)).toBe(false);
+    expect(hardStopExcluded(ledger, model())).toBe(true);
   });
 });
 
@@ -1945,5 +1975,86 @@ describe("laneHasRoom (tier_dispatcher.py lane_has_room())", () => {
     expect(laneHasRoom({ ...baseArgs, ledger, laneId: "zai", activePinsWeight: 1, nowMs: peakNowMs })).toBe(false);
     // ...but the same weight is fine outside peak, where the configured cap of 3 applies.
     expect(laneHasRoom({ ...baseArgs, ledger, laneId: "zai", activePinsWeight: 1, nowMs: baseArgs.nowMs })).toBe(true);
+  });
+});
+
+describe("Weekly-pace vs 5h backstop conflict (parity-gap slice)", () => {
+  const capPerAccount = { "opencode-go": 2, zai: 3 };
+  const baseArgs = {
+    ledger: {} as LaneLedger,
+    capPerAccount,
+    fiveHourWindowName: "five_hour",
+    zaiLaneId: "zai",
+    zaiWeeklyWindowName: "weekly",
+    zaiWeeklyDefaultMargin: 0.15,
+    zaiPaceOverrideMargin: null as number | null,
+    nowMs: Date.parse("2026-09-08T12:00:00.000Z"), // Tuesday, outside zai peak hours
+  };
+
+  // Week window 2026-09-07T00:00Z -> 2026-09-14T00:00Z. At baseArgs.nowMs
+  // (~21% elapsed) the weekly threshold is ~0.36, so 0.95 is exhausted and
+  // 0.10 has room — the same numbers the weekly-pace tests above use.
+  function zaiLedger(fiveHourUtilization: number, weeklyUtilization: number, weeklyResetsAt = "2026-09-14T00:00:00.000Z"): LaneLedger {
+    return {
+      zai: {
+        laneId: "zai",
+        fetchedAt: "t",
+        error: null,
+        verdict: verdict(),
+        observation: observation({
+          accounts: [
+            account({
+              windows: [
+                window({ name: "five_hour", utilization: fiveHourUtilization }),
+                window({ name: "weekly", role: "allowance", utilization: weeklyUtilization, resetsAt: weeklyResetsAt }),
+              ],
+            }),
+          ],
+        }),
+      },
+    };
+  }
+
+  function roomArgs(ledger: LaneLedger, nowMs: number = baseArgs.nowMs) {
+    return { ...baseArgs, ledger, laneId: "zai", activePinsWeight: 0, nowMs };
+  }
+
+  it("weekly-exhausted denies even though the 5h window has room — the weekly rule wins the conflict", () => {
+    const ledger = zaiLedger(0.1, 0.95);
+    // Isolate the conflict: the 5h backstop itself passes...
+    expect(laneNamedWindowUtilization(ledger, "zai", "five_hour")).toBeLessThan(0.5);
+    // ...but weekly pace fails, so the combined gate refuses.
+    expect(zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: baseArgs.nowMs })).toBe(false);
+    expect(laneHasRoom(roomArgs(ledger))).toBe(false);
+  });
+
+  it("5h-saturated denies even though weekly pace has room — the backstop wins the conflict", () => {
+    const ledger = zaiLedger(0.7, 0.1);
+    // Isolate the conflict: weekly pace passes...
+    expect(zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: baseArgs.nowMs })).toBe(true);
+    // ...but the 5h backstop trips, so the combined gate refuses.
+    expect(laneNamedWindowUtilization(ledger, "zai", "five_hour")).toBeGreaterThanOrEqual(0.5);
+    expect(laneHasRoom(roomArgs(ledger))).toBe(false);
+  });
+
+  it("positive control: admits only when BOTH gates pass — neither gate alone is an OR", () => {
+    const ledger = zaiLedger(0.1, 0.1);
+    expect(zaiWeeklyPaceOk({ ledger, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: baseArgs.nowMs })).toBe(true);
+    expect(laneNamedWindowUtilization(ledger, "zai", "five_hour")).toBeLessThan(0.5);
+    expect(laneHasRoom(roomArgs(ledger))).toBe(true);
+  });
+
+  it("weekly-reset boundary rollover flips the same utilization from admit to deny", () => {
+    // Same 0.80 weekly utilization, same 0.15 margin, 5h room and zero pins
+    // throughout — the only change is the reset rolling over to next week.
+    const beforeReset = zaiLedger(0.1, 0.8, "2026-09-14T00:00:00.000Z");
+    const beforeNowMs = Date.parse("2026-09-13T23:00:00.000Z"); // Sunday, 1h before reset
+    expect(zaiWeeklyPaceOk({ ledger: beforeReset, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: beforeNowMs })).toBe(true);
+    expect(laneHasRoom(roomArgs(beforeReset, beforeNowMs))).toBe(true);
+
+    const afterReset = zaiLedger(0.1, 0.8, "2026-09-21T00:00:00.000Z");
+    const afterNowMs = Date.parse("2026-09-14T00:30:00.000Z"); // Monday, 30min into the new week (outside 06:00-10:00 UTC peak)
+    expect(zaiWeeklyPaceOk({ ledger: afterReset, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: afterNowMs })).toBe(false);
+    expect(laneHasRoom(roomArgs(afterReset, afterNowMs))).toBe(false);
   });
 });

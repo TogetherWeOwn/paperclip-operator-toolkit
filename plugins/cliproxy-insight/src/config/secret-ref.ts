@@ -13,11 +13,11 @@
  * Net effect, before this file existed: a raw pasted key, or an object
  * carrying an extra literal-value field alongside a real reference, would be
  * accepted and persisted. This plugin's whole reason to exist is a management
- * key that can expose provider account credentials (TOG-811) — this is the
+ * key that can expose provider account credentials — this is the
  * earliest point at which that promise can be kept, since `onValidateConfig`
  * runs on every config write.
  *
- * Copied verbatim (TOG-811 design Q5) from
+ * Copied verbatim from
  * `paperclip-model-router/src/config/secret-ref.ts` (ADR-0004). The host gap
  * this defends against is host-wide, not router-specific, so the guard
  * transfers with zero adaptation.

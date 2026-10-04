@@ -80,7 +80,7 @@ function laneLedgerWith(laneId: string, utilization: number): LaneLedger {
   return { [laneId]: { laneId, fetchedAt: "t", error: null, observation: null, verdict } };
 }
 
-describe("applyPickOrdering (TOG-2481 tier_dispatcher.py pick())", () => {
+describe("applyPickOrdering (tier_dispatcher.py pick())", () => {
   it("is a no-op when every candidate is proven and priced above the free-must-be-proven floor", () => {
     const models: ModelEntry[] = [
       model(MODELS[0]!, { id: "a", laneId: "lane-a" }),
@@ -213,7 +213,7 @@ describe("applyPickOrdering (TOG-2481 tier_dispatcher.py pick())", () => {
   });
 });
 
-describe("capability-score gate (TOG-2481 tier_dispatcher.py model_scores.py capable())", () => {
+describe("capability-score gate (tier_dispatcher.py model_scores.py capable())", () => {
   it("excludes a model whose measured tier success rate is capable: false, even though it clears the static tier-floor", () => {
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
     const weakT1 = model(t1, { id: "weak-t1" });
@@ -267,5 +267,91 @@ describe("capability-score gate (TOG-2481 tier_dispatcher.py model_scores.py cap
     });
     expect(decision.outcome).toBe("selected");
     expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
+  });
+
+  // The glm-5.3 shape. Its T3 runs pass, its T2 runs measure a
+  // failing p=0.585, and it has no T1 runs, so the T1 verdict is the prior
+  // alone (capable: true). A model that fails T2 must not be fit for T1.
+  describe("monotone across tiers", () => {
+    const glmShaped = (modelId: string) =>
+      score(modelId, {
+        T3: { n: 89, ok: 89, capable: true, proven: true, p: 0.97 },
+        T2: { n: 44, ok: 22, failModel: 18, capable: false, proven: true, p: 0.585 },
+        T1: { capable: true, proven: false, p: 0.877 },
+      });
+
+    it("excludes it at T1, naming the easier tier it fails", () => {
+      const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "cap-score-mono-1", labelNames: ["tier:T1"] },
+        config: config({
+          models: [model(t1, { id: "glm-shaped" }), model(t1, { id: "strong-t1" })],
+          modelScores: {
+            "glm-shaped": glmShaped("glm-shaped"),
+            "strong-t1": score("strong-t1", { T1: { capable: true, proven: true, p: 0.95 } }),
+          },
+        }),
+      });
+      expect(decision.modelId).toBe("strong-t1");
+      const rejection = decision.rejections.find((r) => r.modelId === "glm-shaped");
+      expect(rejection?.stage).toBe("capability-score");
+      expect(rejection?.operand).toEqual({ kind: "capability-score", tier: "T1", p: 0.877, cappedBy: "T2" });
+      expect(rejection?.reason).toContain("fails the easier T2 tier (p=0.585)");
+    });
+
+    it("excludes it at T2 on its own measured verdict", () => {
+      const t2 = MODELS.find((entry) => entry.tier === "T2")!;
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "cap-score-mono-2", labelNames: ["tier:T2"] },
+        config: config({
+          models: [model(t2, { id: "glm-shaped" }), model(t2, { id: "strong-t2" })],
+          modelScores: { "glm-shaped": glmShaped("glm-shaped") },
+        }),
+      });
+      expect(decision.modelId).toBe("strong-t2");
+      const rejection = decision.rejections.find((r) => r.modelId === "glm-shaped");
+      expect(rejection?.stage).toBe("capability-score");
+      expect(rejection?.operand).toEqual({ kind: "capability-score", tier: "T2", p: 0.585 });
+      expect(rejection?.reason).toContain("measured T2 success rate (p=0.585)");
+    });
+
+    it("keeps a model with an empty T2 and a passing prior eligible at T1", () => {
+      const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "cap-score-mono-3", labelNames: ["tier:T1"] },
+        config: config({
+          models: [model(t1, { id: "prior-only" })],
+          modelScores: {
+            "prior-only": score("prior-only", {
+              T3: { n: 89, ok: 89, capable: true, proven: true, p: 0.97 },
+              T2: { capable: true, proven: false, p: 0.9 },
+              T1: { capable: true, proven: false, p: 0.877 },
+            }),
+          },
+        }),
+      });
+      expect(decision.modelId).toBe("prior-only");
+      expect(decision.rejections.some((r) => r.stage === "capability-score")).toBe(false);
+    });
+
+    it("lets a model's own proven T1 evidence override a failing T2", () => {
+      const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+      const glm = glmShaped("proven-t1");
+      const decision = selectModel({
+        ...base,
+        descriptor: { issueId: "cap-score-mono-4", labelNames: ["tier:T1"] },
+        config: config({
+          models: [model(t1, { id: "proven-t1" })],
+          modelScores: {
+            "proven-t1": { ...glm, tiers: { ...glm.tiers, T1: tierScore({ n: 23, ok: 20, capable: true, proven: true, p: 0.885 }) } },
+          },
+        }),
+      });
+      expect(decision.modelId).toBe("proven-t1");
+      expect(decision.rejections.some((r) => r.stage === "capability-score")).toBe(false);
+    });
   });
 });

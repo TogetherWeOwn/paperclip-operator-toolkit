@@ -8,11 +8,11 @@ import {
   RUBRIC,
 } from "../src/engine/classify.js";
 
-describe("RUBRIC (tier_dispatcher.py lines 316-322, amended by TOG-3200)", () => {
+describe("RUBRIC (tier_dispatcher.py lines 316-322, as amended)", () => {
   it("keeps the exclusion clause word for word", () => {
     // This sentence is a dated operator rule embedded directly in the rubric
     // text rather than in main()'s control flow. A rewrite that paraphrases it
-    // is a policy change, not a refactor. TOG-3200 left it untouched: the
+    // is a policy change, not a refactor. The amendment left it untouched: the
     // measured T1 skew came from the tie-break, not from exclusion — across
     // all 44 classifications this rubric ever produced, `exclusion` was never
     // once true.
@@ -22,7 +22,7 @@ describe("RUBRIC (tier_dispatcher.py lines 316-322, amended by TOG-3200)", () =>
   });
 
   it("keeps the three tier definitions unamended", () => {
-    // TOG-3200 adds anchors and bounds the tie-break. It does not move a tier
+    // The amendment adds anchors and bounds the tie-break. It does not move a tier
     // boundary — 72% of the audited T1 cards genuinely needed T1, so the
     // definitions themselves were not the defect.
     expect(RUBRIC).toContain(

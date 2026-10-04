@@ -1,5 +1,5 @@
 /**
- * dispatch — worker (TOG-747, implementing the TOG-706 design).
+ * dispatch — worker.
  *
  * One scheduled sweep, every 30 minutes. Per company:
  *
@@ -11,8 +11,8 @@
  *   5. report                               (metrics every firing, activity on
  *                                            a state change)
  *
- * Step 4 is off by default and stays off until the evidence gate in
- * docs/tog-706-dispatch-plugin-design.md step 3 passes. Steps 1-3 and 5 run
+ * Step 4 is off by default and stays off until the evidence gate documented
+ * in this package's README passes. Steps 1-3 and 5 run
  * identically either way — that is what makes the report-only week evidence for
  * the enabled behaviour rather than evidence for a different program.
  *

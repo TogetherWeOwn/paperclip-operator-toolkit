@@ -1,7 +1,7 @@
 /**
  * Plugin worker.
  *
- * Reads the sanitized CLIProxy telemetry lane (TOG-952) and turns it into
+ * Reads the sanitized CLIProxy telemetry lane and turns it into
  * durable Paperclip history. CLIProxy's own usage aggregation is in-memory and
  * resets on container restart; the lane's static files are overwritten every 2
  * minutes and keep no history either. Persisting them here is the deliverable.
@@ -58,6 +58,21 @@ function firstNumber(record: Record<string, unknown>, fields: readonly string[])
     if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return null;
+}
+
+/**
+ * The Paperclip tool gateway maps
+ * a plugin result to `structuredContent: result?.data ?? null`, and the
+ * Claude client rejects a null `structuredContent` — a tool call returning
+ * only `{ error }` (or no `data` at all) fails schema validation in Claude
+ * Code. The `get_provider_usage` handler therefore returns a plain-object
+ * `data` on EVERY path, including validation rejections, which use this
+ * `{ ok: false, error: <code> }` shape. The `error` field is unchanged — it
+ * stays the machine-readable failure signal; `data` is the record the
+ * gateway maps to `structuredContent`.
+ */
+function toolRejection(error: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ok: false, error, ...extra };
 }
 
 function resolveConfig(raw: unknown): ResolvedConfig {
@@ -137,9 +152,9 @@ const TIMED_OUT = Symbol("cliproxy-insight:timeout");
  * So passing `signal: controller.signal`, which is what this function used to
  * do, aborts nothing. Against a lane that accepts the connection and never
  * answers, the `await` never settles: the poll hangs, the scheduled job never
- * returns, and no subsequent firing runs. This was measured, not reasoned —
- * `deploy/worker_host_harness.mjs` scenario 2 drives the built worker against a
- * host that never replies and asserts the poll still returns. It failed at
+ * returns, and no subsequent firing runs. This was measured, not reasoned:
+ * a process-level harness that drives the built worker against a host that
+ * never replies asserted that the poll still returns, and it failed at
  * 6000ms with `requestTimeoutMs: 1000` before this change.
  *
  * Racing a timer is therefore the only mechanism available here. The caveat is
@@ -276,14 +291,14 @@ function firstString(record: Record<string, unknown>, fields: readonly string[])
 }
 
 /**
- * Parses one lane document (TOG-2693 collector contract).
+ * Parses one lane document.
  *
  * Refuses an unimplemented `schemaVersion` outright rather than best-effort
  * parsing it — same rule as `model-usage-v1.json` above, and for the same
  * reason: a future shape stored under v1 meaning is read back as v1 forever.
  * `records` is carried verbatim; this plugin is a historian, and dropping
  * fields it does not understand is how the next contract addition becomes
- * invisible (the nested-vs-flat defect, TOG-3131).
+ * invisible (the nested-vs-flat defect).
  */
 export function extractLaneDocument(
   body: unknown,
@@ -509,7 +524,7 @@ export function createPlugin() {
         const nowMs = Date.parse(polledAt);
 
         // One firing, never retried within it. A tight retry loop is how a
-        // poller gets itself IP-banned (TOG-811 recon, measured twice); the
+        // poller gets itself IP-banned; the
         // next scheduled firing IS the retry.
         const [laneResults, rates, modelUsage] = await Promise.all([
           Promise.all(
@@ -755,11 +770,14 @@ export function createPlugin() {
         async (params) => {
           const input = asRecord(params);
           const companyId = typeof input.companyId === "string" ? input.companyId : "";
-          if (!companyId) return { error: "companyId is required" };
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!companyId)
+            return { error: "companyId is required", data: toolRejection("companyId is required") };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
 
           const config = resolveConfig(await ctx.config.get(companyId));
-          if (!isConfiguredCompany(companyId)) return { error: "company is not configured" };
+          if (!isConfiguredCompany(companyId))
+            return { error: "company is not configured", data: toolRejection("company is not configured") };
           const nowMs = Date.now();
           const requested = typeof input.provider === "string" ? input.provider : null;
           const providers = requested ? [requested] : await readProviderIndex(companyId);
@@ -870,7 +888,7 @@ export function createPlugin() {
       }
       if (resolved.pollingEnabled && /127\.0\.0\.1|localhost|\[::1\]/i.test(resolved.baseUrl)) {
         errors.push(
-          "baseUrl points at loopback. CLIProxy binds host-loopback only (TOG-352) and is unreachable from any plugin worker; baseUrl must be the public HTTPS telemetry lane (TOG-952).",
+          "baseUrl points at loopback. CLIProxy binds host-loopback only and is unreachable from any plugin worker; baseUrl must be the public HTTPS telemetry lane.",
         );
       }
       // The management API is never a valid target for this plugin: it returns
@@ -878,7 +896,7 @@ export function createPlugin() {
       // than let a plausible-looking URL through.
       if (/\/v0\/management/i.test(resolved.baseUrl)) {
         errors.push(
-          "baseUrl points at the CLIProxy management API. That surface returns credentials in clear and is never read by this plugin — use the sanitized telemetry lane (TOG-952).",
+          "baseUrl points at the CLIProxy management API. That surface returns credentials in clear and is never read by this plugin — use the sanitized telemetry lane.",
         );
       }
       // Polling on with nothing to poll is a job that fires forever and reads

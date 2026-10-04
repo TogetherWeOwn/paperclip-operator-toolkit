@@ -1,7 +1,7 @@
 /**
  * The install gate. `pluginManifestV1Schema` is the host's real Zod schema
- * (`@paperclipai/shared/validators/plugin`) — the same one TOG-809 validated
- * model-selection's manifest against. A manifest that fails this never
+ * (`@paperclipai/shared/validators/plugin`) — the same one
+ * model-selection's manifest is validated against. A manifest that fails this never
  * reaches an operator's install screen.
  */
 

@@ -12,7 +12,12 @@ import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger } from "../src/engine/pacing.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
+import { budgetWindowId, type BudgetWindowObservation } from "../src/admission-budget.js";
+import type {
+  DecisionAdmissionShadowInput, AdmissionShadowReport, LaneSnapshotAdmissionShadowInput,
+} from "../src/admission-shadow.js";
 import { LANED_MODELS, MODELS, NO_ESCALATION, NOW, PROFILES, account, laneDoc, subCallPins } from "./fixtures.js";
+import { assistantUsage, contextLogFixture, runLog } from "./context-log-fixture.js";
 
 const COMPANY = "co-1";
 const ISSUE = "issue-1";
@@ -20,7 +25,7 @@ const AGENT = "agent-1";
 const TIER_LABEL_ID = "lbl-t1";
 const OTHER_LABEL_ID = "lbl-other";
 
-// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// Freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running. The two lane
 // tests below that stamp `new Date()` explicitly stay consistent — the stamp
@@ -104,7 +109,7 @@ async function boot(
   const setup = plugin.definition.setup;
   if (!setup) throw new Error("plugin definition has no setup handler");
   await setup(harness.ctx);
-  // TOG-2438 reopen: the worker tracks its known companies from
+  // The worker tracks its known companies from
   // `onConfigChanged` replays instead of `ctx.companies.list()` — mirror the
   // host's real startup config-delivery sequence (plugin-loader.ts step 5b)
   // so the scheduled jobs under test see this company.
@@ -117,6 +122,41 @@ async function boot(
     { profiles: PROFILES, signals: NO_ESCALATION },
   );
   return harness;
+}
+
+function admissionSnapshot(): DecisionAdmissionShadowInput {
+  const window: BudgetWindowObservation = {
+    providerId: "fixture-provider", poolId: "fixture-pool", kind: "weekly", startAt: NOW - 1000,
+    resetAt: NOW + 100_000, observedAt: NOW, sourceRevision: "fixture", schemaRevision: "v1",
+    unit: "allowance", quota: 100, consumed: 2, safetyHeadroom: 1, planWeight: 1, dataState: "known",
+  };
+  const windowId = budgetWindowId(window);
+  return {
+    enabled: true, cohortId: "fixture-cohort", maxAgeMs: 500,
+    accounts: [{ accountId: "fixture-account", providerId: "fixture-provider", windowIds: [windowId] }],
+    windows: [window], holds: [],
+    bindings: MODELS.map(model => ({ modelId: model.id, binding: {
+      bindingKey: `binding:${model.id}`, lane: "fixture-lane", accountId: "fixture-account", providerId: "fixture-provider",
+      windowIds: [windowId], canStart: true, activeSlots: 0, maxSlots: 2, cooldownUntil: null,
+      estimate: { revision: "fixture", durationMs: 100, windows: [{ windowId, unit: "allowance", upperBurn: 1 }] },
+    } })),
+  };
+}
+
+/** The lane-snapshot alternative: identity comes from the committed lane table, never the caller. */
+function laneSnapshotShadow(): LaneSnapshotAdmissionShadowInput {
+  return {
+    enabled: true, cohortId: "fixture-cohort", maxAgeMs: 60_000,
+    laneQuotaSnapshot: { schemaVersion: 1, observedAt: new Date(NOW - 1000).toISOString(), records: [{
+      lane: "claude-lane-1", observationQuality: "live",
+      five_hour_utilization: 0.4, five_hour_resets_at: new Date(NOW + 3_600_000).toISOString(),
+      seven_day_utilization: 0.99, seven_day_resets_at: new Date(NOW + 86_400_000).toISOString(),
+    }] },
+    bindings: MODELS.map(model => ({ modelId: model.id, binding: {
+      bindingKey: `binding:${model.id}`, lane: "fixture-lane", accountId: "claude-acct-1", providerId: "claude",
+      windowIds: null, canStart: true, activeSlots: 0, maxSlots: 2, cooldownUntil: null, estimate: null,
+    } })),
+  };
 }
 
 const runCtx = { companyId: COMPANY, agentId: "agent-1", runId: "run-1" };
@@ -135,9 +175,111 @@ describe("worker", () => {
     expect(result.success).toBe(true);
   });
 
-  // TOG-2988: the derived tier has to reach `selectModel`, not just sit on the
+  it.each(["advise", "enforce", "sticky", "held", "exhausted", "hard-stop-repin"].flatMap(
+    scenario => ["explicit", "lane-snapshot"].map(variant => [scenario, variant] as const),
+  ))(
+    "keeps complete legacy decisions and actuation golden-identical with account shadow on/off (%s, %s input)",
+    async (scenario, variant) => {
+      const models = MODELS.map(model => ({ ...model,
+        laneId: scenario === "hard-stop-repin" && model.id === "claude-opus-5" ? "dead-lane" : "fixture-lane",
+        enabled: scenario === "exhausted" ? false : model.enabled }));
+      if (scenario === "hard-stop-repin") models.push({ ...models.find(m => m.id === "claude-opus-5")!, id: "healthy-t1", laneId: "fixture-lane" });
+      const config = baseConfig({ models,
+        pacing: { mode: scenario === "hard-stop-repin" ? "enforce" : "off" },
+        selection: { enabled: true, mode: scenario === "advise" ? "advise" : "enforce", stickyModelWithinIssue: true } });
+      const seed = scenario === "sticky" || scenario === "hard-stop-repin"
+        ? issue({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } }, checkoutRunId: null, executionRunId: null }) : issue();
+      const run = async (enabled?: boolean) => {
+        const h = await boot({ ...config, ...(enabled === undefined ? {} : { accountAdmissionShadow: { enabled } }) }, seed);
+        if (scenario === "hard-stop-repin") await h.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+          { "dead-lane": { laneId: "dead-lane", fetchedAt: new Date(NOW).toISOString(), error: null, observation: null,
+            verdict: { laneId: "dead-lane", observedAt: new Date(NOW).toISOString(), state: "exhausted", serviceable: false,
+              score: null, accounts: [], knownAccountCount: 1, knownWeight: 1, serviceableAccountCount: 0,
+              urgentResetAt: null, reason: "fixture exhausted" } } });
+        if (scenario === "held") await h.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.volumeProfiles }, { profiles: [], signals: NO_ESCALATION });
+        const params = { issueId: ISSUE, admissionShadow: variant === "explicit" ? admissionSnapshot() : laneSnapshotShadow() };
+        const advice = await h.executeTool(TOOL_NAMES.advise, params, runCtx);
+        const applied = await h.executeTool(TOOL_NAMES.apply, params, runCtx);
+        return { h, advice, applied, finalIssue: await h.ctx.issues.get(ISSUE, COMPANY) };
+      };
+      const omitted = await run();
+      const off = await run(false);
+      const on = await run(true);
+      for (const actual of [off, on]) {
+        expect(JSON.stringify(actual.advice)).toBe(JSON.stringify(omitted.advice));
+        expect(JSON.stringify(actual.applied)).toBe(JSON.stringify(omitted.applied));
+        expect(actual.finalIssue).toEqual(omitted.finalIssue);
+        expect(actual.h.activity).toEqual(omitted.h.activity);
+      }
+      const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+      expect(await omitted.h.ctx.state.get(key)).toBeNull();
+      expect(await off.h.ctx.state.get(key)).toBeNull();
+      const stored = await on.h.ctx.state.get(key) as { report: AdmissionShadowReport };
+      expect(stored.report).toMatchObject({ governsHostStarts: false, claimsReservations: false, selectedOrServedAccount: null });
+      if (variant === "lane-snapshot") {
+        const rows = stored.report.observationAdapter!.rows;
+        expect(rows).toHaveLength(9);
+        expect(rows.filter(r => r.laneId === "claude-lane-1").map(r => r.state)).toEqual(["known", "known"]);
+        expect(rows.filter(r => r.laneId !== "claude-lane-1").every(r => r.reasons.includes("lane-absent-from-snapshot"))).toBe(true);
+        expect(stored.report.evaluations[0]!.bindings.every(b => b.proposal === "unknown" && b.allowedStarts === null)).toBe(true);
+      } else expect(stored.report.observationAdapter).toBeUndefined();
+      if (scenario === "enforce" || scenario === "advise") {
+        expect(stored.report.evaluations[0]!.bindings.length).toBeGreaterThan(0);
+        expect((omitted.advice as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+      }
+      if (scenario === "enforce") expect(on.finalIssue?.assigneeAdapterOverrides).not.toBeNull();
+      if (scenario === "hard-stop-repin") expect(on.finalIssue?.assigneeAdapterOverrides?.adapterConfig?.model).toBe("healthy-t1");
+      if (scenario === "sticky" || scenario === "exhausted") {
+        expect(stored.report.evaluations[0]!.bindings).toEqual([]);
+        expect(stored.report.accounts[0]!.infeasibilityReasons).toContain("no-observed-eligible-account-binding");
+      }
+    },
+  );
+
+  it("isolates malformed account shadow and report storage failures from actual apply", async () => {
+    const config = baseConfig({ selection: { enabled: true, mode: "enforce" },
+      models: MODELS.map(model => ({ ...model, laneId: "fixture-lane" })), accountAdmissionShadow: { enabled: true } });
+    const baseline = await boot(config);
+    const expected = await baseline.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+    for (const failure of ["malformed", "storage", "bad-lane-snapshot"]) {
+      const h = await boot(config);
+      if (failure === "storage") {
+        const original = h.ctx.state.set.bind(h.ctx.state);
+        vi.spyOn(h.ctx.state, "set").mockImplementation(async (key, value) => {
+          if (key.stateKey === PLUGIN_STATE_KEYS.admissionShadowReport) throw new Error("fixture-storage-failure");
+          return original(key, value);
+        });
+      }
+      const result = await h.executeTool(TOOL_NAMES.apply, {
+        issueId: ISSUE, admissionShadow: failure === "malformed" ? { enabled: true }
+          : failure === "bad-lane-snapshot" ? { ...laneSnapshotShadow(), maxAgeMs: 0 } : admissionSnapshot(),
+      }, runCtx);
+      expect(result).toEqual(expected);
+      expect(await h.ctx.issues.get(ISSUE, COMPANY)).toEqual(await baseline.ctx.issues.get(ISSUE, COMPANY));
+      expect(h.activity).toEqual(baseline.activity);
+    }
+  });
+
+  it("reads account shadow without invoking advice, alarms, override writes or another company", async () => {
+    const h = await boot(baseConfig());
+    const update = vi.spyOn(h.ctx.issues, "update");
+    const get = vi.spyOn(h.ctx.issues, "get");
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, runCtx) as { data: { ok: boolean } }).data.ok).toBe(false);
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+    const snapshot = { issueId: ISSUE, evaluatedAt: NOW, report: { mode: "shadow-only" } };
+    await h.ctx.state.set(key, snapshot);
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, runCtx) as { data: unknown }).data).toEqual(snapshot);
+    expect((await h.executeTool(TOOL_NAMES.admissionShadowReport, {}, { ...runCtx, companyId: "other-company" }) as { data: unknown }).data).not.toEqual(snapshot);
+    expect(update).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(h.activity).toEqual([]);
+  });
+
+  // The derived tier has to reach `selectModel`, not just sit on the
   // stored score. Unit-testing `applyDerivedTiers` directly leaves the wiring
-  // uncovered — the same gap TOG-2373 found for the shadow emitter — so these
+  // uncovered — the same gap found earlier for the shadow emitter — so these
   // two drive the real advise path and read the model actually chosen.
   it("selects on the derived tier, not the roster's configured tier", async () => {
     // claude-sonnet-5 is configured T2. Promoted to T1 by its score, it becomes
@@ -168,10 +310,64 @@ describe("worker", () => {
     expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
   });
 
+  it("reads only the configured stored tier alias through the advise path", async () => {
+    const alias = "legacy-benchmark-v1";
+    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
+    const stored = { modelScores: [{ ...promotedSonnet(), tierSpecVersion: alias }] };
+    await h.ctx.state.set(key, stored);
+    const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-sonnet-5");
+    expect(await h.ctx.state.get(key)).toEqual(stored);
+    await h.ctx.state.set(key, { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "unconfigured-benchmark-v1" }] });
+    const unknown = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((unknown as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
+  });
+
+  it("persists the configured score identifier without rewriting its algorithm fields", async () => {
+    const alias = "legacy-benchmark-v1";
+    const baseline = await boot(baseConfig());
+    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
+    await baseline.runJob("refreshScores");
+    await h.runJob("refreshScores");
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
+    const canonical = await baseline.ctx.state.get(key) as { modelScores: ModelScore[]; cardLedger: unknown; computedAt: string };
+    const stored = await h.ctx.state.get(key) as typeof canonical;
+    expect(stored.modelScores.length).toBeGreaterThan(0);
+    expect(stored).toEqual({ ...canonical, modelScores: canonical.modelScores.map((score) => ({ ...score, tierSpecVersion: alias })) });
+  });
+
+  it("round-trips the configured posterior identifier through refresh and the read-only report", async () => {
+    const alias = "legacy-posterior-v1";
+    const h = await boot(baseConfig({ acceptedWork: { enabled: true }, formatCompatibility: { acceptedWorkSpecVersion: alias } }));
+    await h.runJob("refreshScores");
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay };
+    const stored = await h.ctx.state.get(key) as { specVersion: string; cohorts: unknown[] };
+    expect(stored.specVersion).toBe(alias);
+    const report = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
+    expect((report as { data: { specVersion: string; cohorts: unknown[] } }).data).toMatchObject({ specVersion: alias, cohorts: stored.cohorts });
+    expect(await h.ctx.state.get(key)).toEqual(stored);
+    await h.ctx.state.set(key, { ...stored, specVersion: "unconfigured-posterior-v1" });
+    const unknown = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
+    expect((unknown as { data: { ok: boolean } }).data.ok).toBe(false);
+  });
+
+  it("serializes both shadow projections with only the configured format change", async () => {
+    const alias = "legacy-paired-decision-v1";
+    const h = await boot(baseConfig({ shadowEmit: { enabled: true }, formatCompatibility: { shadowSchemaVersion: alias } }));
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    const shard = `decisions-${new Date(NOW).toISOString().slice(0, 13).replace("T", "-")}Z.jsonl`;
+    const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, shard);
+    const records = text.trim().split("\n").map((line) => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+    expect(records.map((record) => record.schema)).toEqual([alias, alias]);
+  });
+
   it("keeps the configured tier when the stored tier came from another spec version", async () => {
     await harness.ctx.state.set(
       { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores },
-      { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "tog2636-v0" }] },
+      { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "benchmark-prior-v0" }] },
     );
     const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
     expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
@@ -193,25 +389,61 @@ describe("worker", () => {
     expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
   });
 
-  it("includes cached input from the last issue run and skips a narrow candidate", async () => {
+  it.each([
+    { peak: 150_000, selected: "narrow" },
+    { peak: 400_000, selected: "wide" },
+  ])("routes cumulative 2.7M usage by actual peak $peak, not by totals or ceiling", async ({ peak, selected }) => {
     const t1 = MODELS.find((model) => model.tier === "T1")!;
     const narrow = { ...t1, id: "narrow", contextWindow: 200_000, costPerMTokIn: 0.1 };
     const wide = { ...t1, id: "wide", contextWindow: 1_000_000 };
-    const enforcing = await boot(
-      baseConfig({ selection: { enabled: true, mode: "enforce" }, models: [narrow, wide] }),
-    );
-    enforcing.ctx.db.query = async (sql: string) =>
-      sql.includes("usage_json->>'inputTokens'")
-        ? ([{ input_tokens: 100_000, cached_input_tokens: 300_000 }] as never)
+    const repeatedTurns = peak === 150_000 ? 25 : 22;
+    const fixture = await contextLogFixture(runLog([
+      ...Array.from({ length: repeatedTurns }, () => assistantUsage(20_000, 70_000, 10_000)),
+      assistantUsage(20_000, peak - 30_000, 10_000),
+      assistantUsage(2_700_000 - repeatedTurns * 100_000 - peak),
+      { type: "result", usage: { input_tokens: 2_700_000 } },
+    ]));
+    try {
+      const enforcing = await boot(baseConfig({
+        selection: { enabled: true, mode: "enforce", fleetContextCeilingTokens: 200_000, contextRunLogRoot: fixture.root },
+        models: [narrow, wide],
+      }));
+      enforcing.ctx.db.query = async (sql: string) => sql.includes("log_ref")
+        ? ([{ ...fixture.row, input_tokens: 2_700_000, cached_input_tokens: 2_000_000 }] as never)
         : ([] as never);
+      const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
+      const decision = (result as {
+        data: { decision: { modelId: string; trace: string[]; rejections: Array<{ modelId: string; stage: string }> } };
+      }).data.decision;
+      expect(decision.modelId).toBe(selected);
+      expect(decision.trace).toContain(
+        `context: source=last-run-peak tokens=${peak} run=run-prev evidence=local-file/claude-assistant-usage`,
+      );
+      expect(decision.rejections.some((entry) => entry.modelId === "narrow" && entry.stage === "context-window"))
+        .toBe(peak > 200_000);
+    } finally { await fixture.cleanup(); }
+  });
 
-    const result = await enforcing.executeTool(TOOL_NAMES.apply, { issueId: ISSUE }, runCtx);
-    const decision = (result as {
-      data: { decision: { modelId: string; rejections: Array<{ modelId: string; stage: string }> } };
-    }).data.decision;
-    expect(decision.modelId).toBe("wide");
-    expect(decision.rejections).toContainEqual(
-      expect.objectContaining({ modelId: "narrow", stage: "context-window" }),
+  it("labels missing peak evidence as a conservative fleet fallback, never a run measurement", async () => {
+    const advising = await boot(baseConfig({ selection: { fleetContextCeilingTokens: 200_000 } }));
+    advising.ctx.db.query = async (sql: string) => sql.includes("log_ref")
+      ? ([{ id: "run-prev", input_tokens: 2_700_000, cached_input_tokens: 2_000_000 }] as never)
+      : ([] as never);
+    const result = await advising.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+    expect((result as { data: { trace: string[] } }).data.trace).toContain(
+      "context: source=fleet-ceiling-fallback tokens=200000 run=run-prev evidence=log-root-unconfigured",
+    );
+  });
+
+  it("keeps explicit requirements authoritative even if the history read fails", async () => {
+    const advising = await boot(baseConfig({ selection: { fleetContextCeilingTokens: 200_000 } }));
+    advising.ctx.db.query = async (sql: string) => {
+      if (sql.includes("log_ref")) throw new Error("history unavailable");
+      return [] as never;
+    };
+    const result = await advising.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, requiredContextTokens: 300_000 }, runCtx);
+    expect((result as { data: { trace: string[] } }).data.trace).toContain(
+      "context: source=explicit tokens=300000 run=none evidence=history-read-failed",
     );
   });
 
@@ -254,7 +486,7 @@ describe("worker", () => {
       adapterConfig: {
         model: narrowT3.id,
         env: {
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
           ...subCallPins(narrowT3.id),
         },
       },
@@ -294,8 +526,10 @@ describe("worker", () => {
         model: "claude-opus-5",
         env: {
           KEEP_ME: { type: "plain", value: "yes" },
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "150000" },
-          ...subCallPins("claude-opus-5"),
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
+          // T3 pick on the fixtures roster is haiku, so the cheap keys land there,
+          // not on the T1 pin.
+          ...subCallPins("claude-opus-5", "claude-haiku-4-5-20251001"),
         },
       },
     });
@@ -352,7 +586,7 @@ describe("worker", () => {
     // to lose. Contrast the unreadable-agent case, where env is left alone
     // entirely (`context.spec.ts`, "writes no env at all when ... unknown").
     expect(after?.assigneeAdapterOverrides).toEqual({
-      adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5") },
+      adapterConfig: { model: "claude-opus-5", env: subCallPins("claude-opus-5", "claude-haiku-4-5-20251001") },
     });
     expect(new Set(after?.labelIds ?? [])).toEqual(new Set([OTHER_LABEL_ID, TIER_LABEL_ID]));
     expect(enforcing.activity[0]?.metadata?.tierSource).toBe("capability-exclusion");
@@ -398,11 +632,11 @@ describe("worker", () => {
 
   it("resolves a legacy wrapped pin before checking the pinned lane hard stop", async () => {
     // Fixture roster carries exactly one T1 row (claude-opus-5). Pinning it
-    // while its lane is a serviceability hard stop is therefore the TOG-2137
-    // Defect 2 dead end, not an ordinary pace reorder: T2/T3 are below the
+    // while its lane is a serviceability hard stop is therefore the
+    // tier-exhausted dead end, not an ordinary pace reorder: T2/T3 are below the
     // required tier, so there is nowhere to escalate to, and the correct
     // outcome is `tier-exhausted` (no write) — same as an unwrapped pin would
-    // get. What THIS test actually guards is TOG-2426 composition: the raw
+    // get. What THIS test actually guards is wrapped-pin composition: the raw
     // `cliproxy/`-wrapped pin must still resolve to `claude-opus-5` and reach
     // its lane's hard-stop check (proven by the trace below), not silently
     // fail to match and skip the hard stop entirely.
@@ -526,7 +760,7 @@ describe("worker", () => {
   });
 
   it("reads lane evidence from heartbeat_runs and will not pin a lane proven dead", async () => {
-    // TOG-3132. The sibling test above proves the AVAILABILITY term is plumbed.
+    // The sibling test above proves the AVAILABILITY term is plumbed.
     // It cannot prove this one: `devin/*` publishes no quota contract at all,
     // which is why the availability term passed it and it took 0-for-69. The
     // only end-to-end proof that the run-outcome term reaches `selectModel` is
@@ -734,18 +968,18 @@ describe("worker", () => {
     expect(stored?.cardLedger["claude-opus-5:T1"]?.foreignRunShare).toBe(1);
   });
 
-  // TOG-4022. `usage_json.costUsd` is the serving CLI's own figure and the
+  // `usage_json.costUsd` is the serving CLI's own figure and the
   // claude-local adapter stamps `provider: "anthropic"` unconditionally
   // (execute.ts:1235-1236), so a CLIProxy lane serving somebody else's model
   // records an Anthropic-priced cost — measured 93.7x over for
   // muse-spark-1.3-contributor. These two drive the whole refreshScores path,
   // because the guard lives in the worker's row mapping and a unit test of the
   // predicate alone would still pass if the call site were removed.
-  describe("TOG-4022: provider-misattributed closing-run costs", () => {
+  describe("Provider-misattributed closing-run costs", () => {
     const MUSE = "muse-spark-1.3-contributor";
     const rosterWithMuse = [
       ...MODELS,
-      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "TOG-4022 fixture" },
+      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "Fixture" },
     ];
 
     async function ledgerForProvider(provider: string) {
@@ -824,10 +1058,12 @@ describe("worker", () => {
       runCtx,
     );
     expect((result as { content: string }).content).toContain("not a configured roster entry");
-    expect((result as { data: unknown }).data).toBeNull();
+    // Rejections still carry a plain-object data (never null), so the
+    // gateway's structuredContent mapping never yields null.
+    expect((result as { data: unknown }).data).toEqual({ ok: false, error: "unknown-model", modelId: "cliproxy/not-in-roster" });
   });
 
-  // TOG-2379: a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
+  // A lane's apiKeySecretRef is resolved inside the pollLaneCapacity
   // job, before the poll, never inside poll.ts itself.
   describe("pollLaneCapacity secret resolution", () => {
     const laneConfig = (apiKeySecretRef?: Record<string, unknown>) =>
@@ -855,7 +1091,7 @@ describe("worker", () => {
 
     it("resolves the secret and sends it as X-Api-Key when ctx.secrets.resolve succeeds", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -876,7 +1112,7 @@ describe("worker", () => {
       await secretHarness.runJob("pollLaneCapacity");
 
       expect(seenHeaders).toMatchObject({ "X-Api-Key": "resolved-lane-key" });
-      // TOG-2500: the host's plugin-secrets-handler.ts binds config_secret_bindings
+      // The host's plugin-secrets-handler.ts binds config_secret_bindings
       // rows by the lane's array INDEX (pacing.lanes.<n>.apiKeySecretRef), not by
       // laneId — a laneId-keyed resolve path reads back nothing after any config
       // write, since syncSecretRefsForTarget(replaceAll: true) drops non-matching rows.
@@ -888,7 +1124,7 @@ describe("worker", () => {
       expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
     });
 
-    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N (TOG-2500)", async () => {
+    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N", async () => {
       const multiLaneConfig = baseConfig({
         pacing: {
           mode: "enforce",
@@ -901,7 +1137,7 @@ describe("worker", () => {
             {
               laneId: "lane-b",
               statusUrl: "https://status.example.com/lane-b",
-              apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+              apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
               windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
             },
           ],
@@ -930,7 +1166,7 @@ describe("worker", () => {
 
     it("records lane-secret-unavailable and never calls http.fetch when ctx.secrets.resolve throws", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -977,7 +1213,123 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137 Defect 2: tier-exhausted operator alarm", () => {
+  // Per-tier lane-poll outcome counters: the `pollLaneCapacity` job
+  // increments them from the same results it merges into the lane ledger, and
+  // `model_selection_tier_outcomes` reads them back. Read-only end to end —
+  // nothing here may change which model a decision selects.
+  describe("Tier poll outcomes", () => {
+    const LANED = MODELS.map((entry) => ({
+      ...entry,
+      laneId: entry.id === "claude-haiku-4-5-20251001" ? "lane-zai" : "lane-claude",
+    }));
+    // `free: true` lanes are the deterministic served-fixture: the pace
+    // engine returns `serviceable: true` for them by construction
+    // (`pace.ts` free-lane branch), with no document-shape or clock
+    // dependence — so these tests measure the counters, not the verdict.
+    const tierConfig = () =>
+      baseConfig({
+        models: LANED,
+        pacing: {
+          mode: "enforce",
+          lanes: [
+            {
+              laneId: "lane-zai",
+              statusUrl: "https://status.example.com/lane-zai",
+              free: true,
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+            {
+              laneId: "lane-claude",
+              statusUrl: "https://status.example.com/lane-claude",
+              free: true,
+              windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
+            },
+          ],
+        },
+      });
+
+    async function outcomesFor(h: Awaited<ReturnType<typeof boot>>) {
+      return h.ctx.state.get({
+        scopeKind: "company",
+        scopeId: COMPANY,
+        stateKey: PLUGIN_STATE_KEYS.tierPollOutcomes,
+      }) as Promise<Record<string, unknown> | null>;
+    }
+
+    it("accumulates per-tier counters from a live lane poll without changing selection", async () => {
+      const h = await boot(tierConfig());
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async () =>
+        new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+
+      const before = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      await h.runJob("pollLaneCapacity");
+      const after = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+      // The acceptance invariant: the counters move, the selection does not.
+      expect((after as { data: { modelId: string } }).data.modelId).toBe(
+        (before as { data: { modelId: string } }).data.modelId,
+      );
+
+      const stored = await outcomesFor(h);
+      const tiers = (stored?.tiers ?? {}) as Record<string, { polls: number; succeeded: number; failed: number }>;
+      // lane-zai serves T3 alone; lane-claude serves T1 + T2.
+      expect(tiers.T3).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T2).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T1).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+
+    it("counts a failing lane as failed for exactly the tiers it serves", async () => {
+      const h = await boot(tierConfig());
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async (url: unknown) => {
+        if (String(url).includes("lane-zai")) return new Response("nope", { status: 404 }) as never;
+        return new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      };
+
+      await h.runJob("pollLaneCapacity");
+
+      const stored = await outcomesFor(h);
+      const tiers = (stored?.tiers ?? {}) as Record<string, { polls: number; succeeded: number; failed: number }>;
+      expect(tiers.T3).toMatchObject({ polls: 1, succeeded: 0, failed: 1 });
+      expect(tiers.T2).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+      expect(tiers.T1).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+
+    it("tierOutcomes tool answers zeroes before any poll and counters after", async () => {
+      const h = await boot(tierConfig());
+      const empty = (await h.executeTool(TOOL_NAMES.tierOutcomes, {}, runCtx)) as {
+        content: string;
+        data: { updatedAt: null; tiers: Record<string, { polls: number }> };
+      };
+      expect(typeof empty.content).toBe("string");
+      expect(empty.data.updatedAt).toBeNull();
+      expect(empty.data.tiers.T3!.polls).toBe(0);
+
+      h.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
+      h.ctx.http.fetch = async () =>
+        new Response(
+          JSON.stringify({ observedAt: new Date().toISOString(), records: [{ health: "ok", utilization: 0.1 }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ) as never;
+      await h.runJob("pollLaneCapacity");
+
+      const filled = (await h.executeTool(TOOL_NAMES.tierOutcomes, {}, runCtx)) as {
+        content: string;
+        data: { updatedAt: string | null; tiers: Record<string, { polls: number; succeeded: number; failed: number }> };
+      };
+      expect(typeof filled.content).toBe("string");
+      expect(typeof filled.data.updatedAt).toBe("string");
+      expect(filled.data.tiers.T3).toMatchObject({ polls: 1, succeeded: 1, failed: 0 });
+    });
+  });
+
+  describe("Tier-exhausted operator alarm", () => {
     function unserviceableVerdict(laneId: string): LanePaceVerdict {
       return {
         laneId,
@@ -1080,19 +1432,28 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137/2138: shadow decision emitter wiring in worker.ts", () => {
-    // Not exported from worker.ts (it's a local `const`); the QA-flagged gap
-    // is exactly that no test drove this path, so the filename is pinned here
-    // deliberately rather than imported.
-    const SHADOW_FILE = "decisions.jsonl";
+  describe("Shadow decision emitter wiring in worker.ts", () => {
+    // Emits land in the UTC-hour shard for the decision timestamp
+    // (`decisions-YYYY-MM-DD-HHZ.jsonl`), not in a single `decisions.jsonl`.
+    // The fixture clock is frozen at NOW (2026-09-10T12:00Z), so every advise()
+    // in these tests lands in `decisions-2026-09-10-12Z.jsonl`. The shard name
+    // is pinned here deliberately rather than imported — the emitter keeps it
+    // as a local `const`, and the QA-flagged gap this block covers is exactly
+    // that no test drove this path.
+    const SHADOW_SHARD = "decisions-2026-09-10-12Z.jsonl";
 
     async function readShadowLines(h: Awaited<ReturnType<typeof boot>>): Promise<string[]> {
-      const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_FILE);
+      const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, SHADOW_SHARD);
       return text.split("\n").filter((line) => line.trim().length > 0);
     }
 
+    async function listShards(h: Awaited<ReturnType<typeof boot>>): Promise<string[]> {
+      const listing = await h.ctx.localFolders.list(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions);
+      return listing.entries.filter((entry) => entry.kind === "file").map((entry) => entry.name).sort();
+    }
+
     it("writes a correlated host/plugin-shadow pair on advise() when shadowEmit.enabled is true", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
 
       const lines = await readShadowLines(h);
@@ -1117,8 +1478,8 @@ describe("worker", () => {
       await expect(readShadowLines(harness)).rejects.toThrow(/not found/i);
     });
 
-    it("caps the shadow log at config.shadowEmit.maxRecords, keeping the newest records", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 2 } }));
+    it("caps the shadow shard at config.shadowEmit.shardMaxRecords, keeping the newest records", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 2 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
@@ -1130,8 +1491,8 @@ describe("worker", () => {
       }
     });
 
-    it("keeps complete pairs when maxRecords is odd", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 3 } }));
+    it("keeps complete pairs when shardMaxRecords is odd", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 3 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
 
@@ -1141,23 +1502,52 @@ describe("worker", () => {
       expect(records[0].ts).toBe(records[1].ts);
     });
 
-    it("swallows a shadow-emit write failure — advise() still returns its decision, and the failure is logged", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+    it("Retention deletes whole old shards past retentionShards, newest pair intact", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
+      // Seed two shards from older hours directly — the emitter never writes
+      // outside the current hour, so retention is the only path that removes
+      // them.
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions-2020-01-01-00Z.jsonl", '{"writer":"host"}\n',
+      );
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions-2020-01-01-01Z.jsonl", '{"writer":"host"}\n',
+      );
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      // Current-hour shard holds the fresh pair; both seeded shards are gone.
+      expect(await listShards(h)).toEqual([SHADOW_SHARD]);
+      const records = (await readShadowLines(h)).map((line) => JSON.parse(line));
+      expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
+    });
+
+    it("Retention never touches the legacy single-file decisions.jsonl", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
+      await h.ctx.localFolders.writeTextAtomic(
+        COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl", '{"writer":"host","legacy":true}\n',
+      );
+      await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
+
+      const legacy = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl");
+      expect(legacy).toContain('"legacy":true');
+    });
+
+    it("A write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
       h.ctx.localFolders.writeTextAtomic = async () => {
         throw new Error("simulated local-folder I/O failure");
       };
 
       const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-      const decision = (result as { data: { modelId: string } }).data;
-      expect(decision.modelId).toBe("claude-opus-5");
+      expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
       expect(h.logs.some((l) => l.level === "warn" && l.message.includes("shadow decision emit failed"))).toBe(true);
 
       h.ctx.localFolders.writeTextAtomic = originalWrite;
     });
 
-    it("TOG-2373: a transient read failure after existing records aborts the emit instead of truncating history", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+    it("A transient read failure after existing records aborts the emit instead of truncating history", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       expect(await readShadowLines(h)).toHaveLength(4);
@@ -1183,8 +1573,8 @@ describe("worker", () => {
       ).toBe(true);
     });
 
-    it("TOG-2373: two overlapping emits both land instead of collapsing to one record", async () => {
-      const h = await boot(baseConfig({ shadowEmit: { enabled: true, maxRecords: 100 } }));
+    it("Two overlapping emits both land instead of collapsing to one record", async () => {
+      const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
 
       await Promise.all([
         h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx),
@@ -1198,7 +1588,7 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137 Defect 3: ancillary model pin drift", () => {
+  describe("Ancillary model pin drift", () => {
     function agentWith(overrides: Record<string, unknown>) {
       return {
         id: "agent-drift",

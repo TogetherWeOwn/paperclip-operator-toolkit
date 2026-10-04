@@ -1,9 +1,9 @@
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Issue } from "@paperclipai/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
+import { DISPATCH_SWEEP_JOB_BUDGET_MS, JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { wakeFailureCodeFor } from "../src/dispatch-reporting.js";
 import { createPlugin } from "../src/worker.js";
 
@@ -93,7 +93,7 @@ function withOrchestration(
 // becomes "however many months ago" when compared against the real Date.now().
 const NOW = Date.now();
 
-describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)", () => {
+describe("dispatch sweep", () => {
   it("does not wake anything when dispatch.wakeEnabled is false (report-only)", async () => {
     const card = issue("i1", { createdAt: new Date("2026-09-01T00:00:00.000Z") });
     const harness = await boot(baseConfig(), [card]);
@@ -252,7 +252,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
 
   it("anchors idle to the last finished run, not issue.createdAt, when a run exists", async () => {
     const card = issue("i1", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
-    // TOG-3585: the sibling running run keeps agent-1 busy, so the new
+    // The sibling running run keeps agent-1 busy, so the new
     // idle-assignee class cannot claim i1 — this test isolates the anchoring
     // rule (without it, i1 would wake via `actionable_idle_assignee` and the
     // assertion would prove nothing about anchoring).
@@ -407,8 +407,8 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(metadata.routingOwnersComplete).toBe(false);
   });
 
-  it("TOG-2533 fix 3/4: report-only would-have-woken note names the specific issue identifiers, not just a count", async () => {
-    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), identifier: "TOG-9001" } as never);
+  it("Fix 3/4: report-only would-have-woken note names the specific issue identifiers, not just a count", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), identifier: "EX-9001" } as never);
     const harness = await boot(baseConfig(), [card]);
     withOrchestration(harness, {});
 
@@ -420,12 +420,12 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     // goes red — the operator report loses the one piece of information a
     // human needs to act on (which specific card would have woken).
     const metadata = harness.activity[0]?.metadata as { notes: string[] };
-    expect(metadata.notes.some((n) => n.startsWith("report-only: would have woken") && n.includes("TOG-9001"))).toBe(
+    expect(metadata.notes.some((n) => n.startsWith("report-only: would have woken") && n.includes("EX-9001"))).toBe(
       true,
     );
   });
 
-  it("TOG-2533 fix 3/4: does not add a report-only would-have-woken note when nothing was picked", async () => {
+  it("Fix 3/4: does not add a report-only would-have-woken note when nothing was picked", async () => {
     const card = issue("i1", { status: "backlog" });
     const harness = await boot(baseConfig(), [card]);
     withOrchestration(harness, {});
@@ -436,7 +436,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(metadata.notes.some((n) => n.startsWith("report-only:"))).toBe(false);
   });
 
-  it("TOG-2533 fix 3/4: an issue whose orchestration read throws is counted and named in an unreadable-coverage note", async () => {
+  it("Fix 3/4: an issue whose orchestration read throws is counted and named in an unreadable-coverage note", async () => {
     const readable = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const unreadable = issue("i2", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-2" });
     const harness = await boot(
@@ -463,7 +463,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect((metadata as unknown as { counters: { woken: number } }).counters.woken).toBe(1);
   });
 
-  it("TOG-2533 fix 3/4: a partial-list routing-owners note is attached whenever the routing gap is non-empty", async () => {
+  it("Fix 3/4: a partial-list routing-owners note is attached whenever the routing gap is non-empty", async () => {
     const unassigned = issue("i1", { assigneeAgentId: null, projectId: "proj-a" });
     const harness = await boot(baseConfig(), [unassigned], []);
     withOrchestration(harness, {});
@@ -478,7 +478,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     ).toBe(true);
   });
 
-  it("TOG-2533 fix 3/4: a page-saturation note is attached when the issue list hits the page limit", async () => {
+  it("Fix 3/4: a page-saturation note is attached when the issue list hits the page limit", async () => {
     const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
     const cards = Array.from({ length: DISPATCH_ISSUE_PAGE_LIMIT }, (_, i) =>
       issue(`saturated-${i}`, { status: "done" }),
@@ -507,11 +507,11 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(manifest.capabilities).toContain("issues.wakeup");
   });
 
-  it("manifest declares issue.interactions.read (TOG-2572: needed for listInteractions)", () => {
+  it("manifest declares issue.interactions.read", () => {
     expect(manifest.capabilities).toContain("issue.interactions.read");
   });
 
-  it("TOG-2572 fix 1: refuses a card with a future monitor_next_check_at as refused_monitor_armed", async () => {
+  it("Fix 1: refuses a card with a future monitor_next_check_at as refused_monitor_armed", async () => {
     const armed = issue("i1", {
       createdAt: new Date(NOW - 60 * 60_000),
       monitorNextCheckAt: new Date(NOW + 48 * 60 * 60_000),
@@ -524,13 +524,13 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     await harness.runJob(JOB_KEYS.dispatchSweep);
 
     // Named mutant: "monitor-armed check removed". Without it this card falls
-    // through to `actionable` and gets woken — TOG-2426 verbatim.
+    // through to `actionable` and gets woken.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.refused_monitor_armed).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("TOG-2572 fix 1: a PAST monitor_next_check_at does not refuse the wake", async () => {
+  it("Fix 1: a PAST monitor_next_check_at does not refuse the wake", async () => {
     const lapsed = issue("i1", {
       createdAt: new Date(NOW - 60 * 60_000),
       monitorNextCheckAt: new Date(NOW - 60 * 60_000),
@@ -547,7 +547,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(metadata.counters.woken).toBe(1);
   });
 
-  it("TOG-2572 fix 2: refuses a card with a pending human_only interaction as parked_on_human_ask", async () => {
+  it("Fix 2: refuses a card with a pending human_only interaction as parked_on_human_ask", async () => {
     const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       asked,
@@ -573,14 +573,14 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     await harness.runJob(JOB_KEYS.dispatchSweep);
 
     // Named mutant: "human_only check removed". Without it this falls through
-    // to actionable — TOG-2319/2455/1677 verbatim: no agent run can advance a
-    // card an owner must personally resolve.
+    // to actionable: no agent run can advance a card an owner must
+    // personally resolve.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.parked_on_human_ask).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("TOG-2572 fix 2: refuses a card whose pending interaction is addressed to a different agent", async () => {
+  it("Fix 2: refuses a card whose pending interaction is addressed to a different agent", async () => {
     const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-1" });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       asked,
@@ -611,7 +611,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("TOG-2572 fix 2: a RESOLVED (non-pending) interaction does not park the card", async () => {
+  it("Fix 2: a RESOLVED (non-pending) interaction does not park the card", async () => {
     const resolved = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       resolved,
@@ -641,7 +641,7 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     expect(metadata.counters.woken).toBe(1);
   });
 
-  it("TOG-2572 fix 3: refuses an in_review card with no interaction naming the assignee as refused_in_review", async () => {
+  it("Fix 3: refuses an in_review card with no interaction naming the assignee as refused_in_review", async () => {
     const reviewing = issue("i1", { status: "in_review", createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       reviewing,
@@ -652,13 +652,13 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
 
     // Named mutant: "in_review reviewer check removed". Without it an
     // in_review card wakes on idle alone, same as any other status — the
-    // dispatcher.py behavior TOG-2572 asks to restore.
+    // dispatcher.py behavior this check restores.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.refused_in_review).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("TOG-2572 fix 3: wakes an in_review card when a pending interaction names the assignee as the reviewer", async () => {
+  it("Fix 3: wakes an in_review card when a pending interaction names the assignee as the reviewer", async () => {
     const reviewing = issue("i1", {
       status: "in_review",
       createdAt: new Date(NOW - 60 * 60_000),
@@ -730,9 +730,95 @@ describe("dispatch sweep (TOG-2481 absorption of the standalone dispatch plugin)
     const companyIds = harness.activity.map((entry) => (entry.metadata as { companyId: string }).companyId).sort();
     expect(companyIds).toEqual(["co-1", "co-2"]);
   });
+
+  it("Stops starting new gather RPCs when the job budget is reached, still emitting a partial summary", async () => {
+    const cards = [
+      issue("i1", { createdAt: new Date(NOW - 60 * 60_000) }),
+      issue("i2", { createdAt: new Date(NOW - 60 * 60_000) }),
+    ];
+    const harness = await boot(
+      baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }),
+      cards,
+    );
+    withOrchestration(harness, {});
+
+    // The job computes idle against Date.now(), so the mocked clock starts
+    // at the real now (both cards read idle) and jumps past the cooperative
+    // deadline once the first gather completes.
+    let nowMs = NOW;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let orchestrationCalls = 0;
+    const originalOrchestration = harness.ctx.issues.summaries.getOrchestration;
+    harness.ctx.issues.summaries.getOrchestration = (async (input: { issueId: string; companyId: string }) => {
+      orchestrationCalls += 1;
+      const result = await originalOrchestration(input);
+      nowMs = NOW + DISPATCH_SWEEP_JOB_BUDGET_MS + 1;
+      return result;
+    }) as never;
+    const warnLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
+    const originalWarn = harness.ctx.logger.warn.bind(harness.ctx.logger);
+    harness.ctx.logger.warn = ((message: string, metadata: Record<string, unknown>) => {
+      warnLogs.push({ message, metadata });
+      return originalWarn(message, metadata);
+    }) as typeof harness.ctx.logger.warn;
+    let wakeups = 0;
+    harness.ctx.issues.requestWakeup = (async () => {
+      wakeups += 1;
+      return { queued: true, runId: "r1" };
+    }) as typeof harness.ctx.issues.requestWakeup;
+    // The fix under test — a deadline crossed mid-gather must
+    // skip the second per-issue RPC, not just the next loop iteration.
+    let interactionsCalls = 0;
+    const originalListInteractions = harness.ctx.issues.listInteractions.bind(harness.ctx.issues);
+    harness.ctx.issues.listInteractions = (async (...args: [string, string]) => {
+      interactionsCalls += 1;
+      return originalListInteractions(...args);
+    }) as typeof harness.ctx.issues.listInteractions;
+
+    try {
+      await harness.runJob(JOB_KEYS.dispatchSweep);
+    } finally {
+      nowSpy.mockRestore();
+      harness.ctx.logger.warn = originalWarn;
+    }
+
+    // Named mutant: "deadline check removed". Without it both issues are
+    // gathered and the first pick is woken; with it no *new* gather RPC
+    // starts past the budget and no wake RPC fires.
+    //
+    // The clock jumps past the deadline while the first
+    // `getOrchestration` is in flight, so the mid-gather checkpoint trips
+    // before `listInteractions` — the first issue is dropped with an
+    // incomplete gather rather than completed without its interactions
+    // read (which would misreport "no pending interactions"). The second
+    // gather never starts.
+    expect(orchestrationCalls).toBe(1);
+    expect(interactionsCalls).toBe(0);
+    expect(wakeups).toBe(0);
+    const stopWarns = warnLogs.filter((entry) => entry.message.includes("stopped before the host RPC wall"));
+    expect(stopWarns).toHaveLength(1);
+    expect(stopWarns[0]?.metadata.budgetMs).toBe(DISPATCH_SWEEP_JOB_BUDGET_MS);
+    expect(stopWarns[0]?.metadata.gathered).toBe(0);
+    // Partial firing still emits metrics and a summary naming the coverage.
+    expect(harness.metrics.length).toBeGreaterThan(0);
+    expect(harness.activity).toHaveLength(1);
+    const metadata = harness.activity[0]?.metadata as {
+      counters: Record<string, number>;
+      pickedIssueIds: string[];
+      notes?: string[];
+    };
+    expect(metadata.counters.woken ?? 0).toBe(0);
+    expect(metadata.pickedIssueIds).toEqual([]);
+    expect(metadata.notes?.some((note) => note.includes("partial firing"))).toBe(true);
+    const completeLogs = (
+      harness.logs as Array<{ level: string; message: string; meta: Record<string, unknown> }>
+    ).filter((entry) => entry.message === "dispatch sweep complete");
+    expect(completeLogs).toHaveLength(1);
+    expect(completeLogs[0]?.meta.budgetExhausted).toBe(true);
+  });
 });
 
-describe("dispatch sweep TOG-3585: idle-assignee class, lane-down gate, coded wake failures", () => {
+describe("dispatch sweep: idle-assignee class, lane-down gate, coded wake failures", () => {
   const wakeConfig = { dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } };
 
   it("wakes a below-threshold card whose assignee holds no running run (actionable_idle_assignee)", async () => {

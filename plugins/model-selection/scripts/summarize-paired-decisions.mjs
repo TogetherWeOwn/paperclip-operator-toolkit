@@ -1,13 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const defaultGate = join(root, "ops/tog-2138/gate_harness.py");
+import { join } from "node:path";
 
 function fail(message) {
   console.error(`DATA GAP: ${message}`);
@@ -31,16 +27,36 @@ const startText = arg("--start");
 const endText = arg("--end");
 const outIndex = process.argv.indexOf("--out");
 const outPath = outIndex >= 0 ? process.argv[outIndex + 1] : null;
-const gateIndex = process.argv.indexOf("--gate-harness");
-const gatePath = gateIndex >= 0 ? process.argv[gateIndex + 1] : defaultGate;
+const gatePath = arg("--gate-harness");
+const reportSchema = process.argv.includes("--report-schema") ? arg("--report-schema") : "paired-decision-summary-v2";
+if (reportSchema.length > 80 || !/^[a-z0-9][a-z0-9._:-]*-v2$/.test(reportSchema)) {
+  fail("--report-schema must be an exact v2 identifier");
+}
 const startMs = parseUtc(startText, "--start");
 const endMs = parseUtc(endText, "--end");
 if (endMs <= startMs) fail("--end must be later than --start");
 if (endMs - startMs > 24 * 60 * 60 * 1000) fail("interval must be no longer than 24 hours");
 
+/**
+ * `--input` accepts a single JSONL file (legacy `decisions.jsonl`)
+ * or a directory of UTC-hour shards (`decisions-YYYY-MM-DD-HHZ.jsonl`). A
+ * directory reads every matching shard in lexical (= chronological) order and
+ * concatenates their lines; non-shard files are ignored.
+ */
+const SHARD_FILE_PATTERN = /^decisions-\d{4}-\d{2}-\d{2}-\d{2}Z\.jsonl$/;
 let source;
 try {
-  source = await readFile(inputPath, "utf8");
+  const inputStat = await stat(inputPath);
+  if (inputStat.isDirectory()) {
+    const names = (await readdir(inputPath)).filter((name) => SHARD_FILE_PATTERN.test(name)).sort();
+    if (names.length === 0) fail(`no shadow shards (decisions-YYYY-MM-DD-HHZ.jsonl) in ${inputPath}`);
+    const parts = [];
+    for (const name of names) parts.push(await readFile(join(inputPath, name), "utf8"));
+    source = parts.join("");
+    if (!source.endsWith("\n")) source += "\n";
+  } else {
+    source = await readFile(inputPath, "utf8");
+  }
   await readFile(gatePath, "utf8");
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -63,7 +79,7 @@ for (const [index, line] of source.split("\n").entries()) {
   }
 }
 
-const scratch = await mkdtemp(join(tmpdir(), "tog2504-summary-"));
+const scratch = await mkdtemp(join(tmpdir(), "paired-summary-"));
 try {
   const hostPath = join(scratch, "host.jsonl");
   const shadowPath = join(scratch, "shadow.jsonl");
@@ -113,7 +129,7 @@ try {
   }
 
   const report = {
-    schema: "tog2504-bounded-summary-v2",
+    schema: reportSchema,
     window: { start: startText, end: endText, maxHours: 24 },
     dataGap,
     denominators,

@@ -1,9 +1,9 @@
 /**
  * gh-token-broker — manifest.
  *
- * TOG-174. The App PEM currently projects into agent run environments as a plain
+ * The App PEM currently projects into agent run environments as a plain
  * env var, where any run that reads untrusted input can exfiltrate it (and, per
- * TOG-191, any same-uid process can read it out of /proc regardless of grants).
+ * Any same-uid process can read it out of /proc regardless of grants).
  *
  * This plugin moves minting to the control plane: the agent asks the host for a
  * token, the host resolves the PEM server-side, and only a narrow, repo-scoped,
@@ -35,12 +35,12 @@ export const manifest = {
     "database.namespace.migrate",
     // Derive scope server-side from the issue the caller actually holds.
     "issues.read",
-    // TOG-309. Held for its *side effects*, not as the gate: the host's
+    // Held for its *side effects*, not as the gate: the host's
     // assertCheckoutOwner clears a checkout lock left behind by a terminated run
     // before it evaluates anything, and adopts an unowned lock for the caller.
     // The broker calls it best-effort so that behaviour survives the move to
     // checkoutPolicy "none". A conflict from it is not fatal — its status term
-    // is precisely what TOG-309 widened.
+    // is precisely what ownership.js widens.
     "issues.checkout",
     "projects.read",
     "project.workspaces.read",
@@ -83,7 +83,7 @@ export const manifest = {
       // actor. Deliberately does nothing else — no secrets, no outbound calls —
       // so it is safe to leave installed.
       //
-      // TOG-216. It does NOT prove the runId is server-derived, and an earlier
+      // It does NOT prove the runId is server-derived, and an earlier
       // revision of this comment said it did. `actorType`, `agentId` and
       // `companyId` are host-derived on every auth path; `runId` is signed only
       // on the agent-JWT path and is an unvalidated request header on the
@@ -117,7 +117,7 @@ export const manifest = {
       //     unconditionally, but hardcodes status == in_progress, which refuses
       //     an agent working its own issue in in_review. Because the credential
       //     helper correctly treats the resulting 409 as definitive and will not
-      //     fall back to the org-admin PEM, that refusal kills git (TOG-309).
+      //     fall back to the org-admin PEM, that refusal kills git.
       //     The host cannot express a wider status set, and patching the control
       //     plane is not ours to do.
       //

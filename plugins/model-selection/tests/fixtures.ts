@@ -214,7 +214,7 @@ export function config(overrides: Partial<SelectionConfig> = {}): SelectionConfi
   };
 }
 
-// --- TOG-3132: lane availability fixtures ----------------------------------
+// --- lane availability fixtures ----------------------------------
 
 /**
  * The same three models, each pinned to the lane it actually serves on. Kept
@@ -287,17 +287,24 @@ export function account(
 }
 
 /**
- * TOG-3045. The sub-call surface pins every override write now carries, pointed
- * at the model that write pinned.
+ * The sub-call surface pins every override write now
+ * carries: the four main-lane keys at the pinned model, the two haiku-class
+ * keys at the resolved cheapest-healthy-T3 pick (defaulting to the pin, the
+ * same fallback the write itself applies).
  *
  * The key names are spelled out LITERALLY on purpose. Deriving them from
- * `ANCILLARY_MODEL_ENV_KEYS` would make every expectation here self-fulfilling:
- * dropping a key from the production constant would shrink the expected object
- * to match, and the suite would stay green through the regression.
+ * `ANCILLARY_MODEL_ENV_KEYS`/`PIN_LANE_MODEL_ENV_KEYS` would make every
+ * expectation here self-fulfilling: dropping a key from the production
+ * constant would shrink the expected object to match, and the suite would
+ * stay green through the regression.
  */
-export function subCallPins(modelId: string): Record<string, unknown> {
+export function subCallPins(modelId: string, cheapModelId: string = modelId): Record<string, unknown> {
   return {
-    ANTHROPIC_SMALL_FAST_MODEL: { type: "plain", value: modelId },
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: modelId },
+    PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: modelId },
+    CLAUDE_CODE_SUBAGENT_MODEL: { type: "plain", value: modelId },
+    ANTHROPIC_DEFAULT_OPUS_MODEL: { type: "plain", value: modelId },
+    ANTHROPIC_DEFAULT_SONNET_MODEL: { type: "plain", value: modelId },
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: cheapModelId },
+    ANTHROPIC_SMALL_FAST_MODEL: { type: "plain", value: cheapModelId },
   };
 }

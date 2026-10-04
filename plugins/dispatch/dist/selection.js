@@ -17,7 +17,7 @@
  * We mirror ALL FOUR so a refusal is COUNTED instead of being discovered by
  * calling requestWakeup and catching a string. Mirroring the server's denylist
  * rather than inventing an allowlist is the whole reason the first cut of the
- * TOG-706 probe undercounted the wakeable surface by 88%.
+ * design-phase probe undercounted the wakeable surface by 88%.
  */
 
 /** Statuses `requestWakeup` refuses outright (plugin-host-services.js:1876). */
@@ -74,7 +74,7 @@ export const SELECTION_COUNTERS = [
 ];
 
 /**
- * The three counters the retired script printed (TOG-686 output), preserved so
+ * The three counters the retired script printed, preserved so
  * a firing is diffable against pasted script output during the parallel week.
  *
  * `deadlocked_agents` has NO native equivalent. Per Q5 it is reported as null —

@@ -1,9 +1,10 @@
 import type { Tier } from "../constants.js";
 import type { ResolvedConfig } from "../config/resolve.js";
+import { enforceMonotoneCapability } from "../engine/scores.js";
 import type { EarnInState, ModelScore } from "../engine/types.js";
 
 /**
- * Bounded T1 earn-in (TOG-1917 §3, TOG-2048 decision B). Default OFF —
+ * Bounded T1 earn-in. Default OFF —
  * `planEarnIn` is a pure decision function; `worker.ts` never calls it unless
  * `config.earnIn.enabled === true`, and the shipped config keeps that false.
  *
@@ -44,7 +45,7 @@ export interface EarnInCandidateCard {
   status: string;
   /** True if a run is currently active on this card. */
   hasRunningRun: boolean;
-  /** `research` | `review` per TOG-1917 §3. Anything else is out of scope. */
+  /** `research` | `review` §3. Anything else is out of scope. */
   workClass: string;
   hasOperatorPin: boolean;
   hasExclusion: boolean;
@@ -112,7 +113,8 @@ export function planEarnIn(
   if (!modelScore) {
     return nothing(`no model score for ${card.modelId}; cannot judge capable/proven`);
   }
-  const t1 = modelScore.tiers.T1;
+  // The monotone verdict, so an unproven T1 above a failed T2 is not capable.
+  const t1 = enforceMonotoneCapability(modelScore.tiers).T1;
   if (t1.proven) {
     return nothing(`${card.modelId} is already proven at T1; not an earn-in candidate`);
   }

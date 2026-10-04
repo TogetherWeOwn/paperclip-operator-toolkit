@@ -6,7 +6,6 @@ import {
   REWORK_WEIGHT_REOPEN,
   SCORE_PRIOR_K,
   SCORE_PROVEN_N,
-  SCORE_THRESHOLDS,
   TIER_ORDER,
   type Tier,
 } from "../constants.js";
@@ -17,6 +16,7 @@ import {
   type PriorBasis,
 } from "./benchmark-prior.js";
 import { tierIndex } from "./cost.js";
+import { LEGACY_TIER_POLICY, type CompiledTierPolicy } from "./tier-policy.js";
 import type { CardLedgerEntry, ModelScore, TierScore, TierScoreStats } from "./types.js";
 
 /**
@@ -29,8 +29,8 @@ export function priorP(aaIndex: number | null): number {
 }
 
 /**
- * Blends the composite-index prior with the TOG-2636 five-benchmark basket
- * (TOG-2988). Replaces the TOG-2438 agentic sub-score average, which keyed off
+ * Blends the composite-index prior with the five-benchmark basket.
+ * Replaces the earlier agentic sub-score average, which keyed off
  * whatever aa.ai columns happened to be populated rather than a fixed basket.
  *
  * Falls back to the plain index prior when the basket misses its coverage gate,
@@ -54,17 +54,19 @@ const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse()
 /**
  * Tier from a posterior. T3 is the RESIDUAL bucket, not a fourth threshold.
  *
- * A model with `p < SCORE_THRESHOLDS.T3` clears no tier at all. It is labelled
+ * The cuts are the active tier policy's `scoreThresholds`, which
+ * for `legacy-model-selection-v1` are still `SCORE_THRESHOLDS`. A model with
+ * `p` under the T3 cut clears no tier at all. It is labelled
  * T3 and flagged `belowT3Floor` rather than dropped, because `tier` (the
  * roster's work-class bucket) and `capable` (the per-tier quality gate in
  * `select.ts`) are already separate concepts in this engine: flooring the LABEL
  * does not promote the model, since `summarize`'s `capable` still refuses to let
  * it win T3 work. Dropping it instead would contradict the owner's own live
- * TOG-2969 placement of `claude-haiku-4-5` at T3 on an index of 15.41.
+ * placement of `claude-haiku-4-5` at T3 on an index of 15.41.
  */
 export function tierForPosterior(
   p: number,
-  thresholds: Partial<Record<Tier, number>> = SCORE_THRESHOLDS,
+  thresholds: Partial<Record<Tier, number>> = LEGACY_TIER_POLICY.scoreThresholds,
 ): { tier: Tier; belowT3Floor: boolean } {
   // MOST CAPABLE FIRST. `TIER_ORDER` is ascending capability (`["T3","T2","T1"]`)
   // because `select.ts` compares tiers by index; walking it as-written would
@@ -103,7 +105,7 @@ export function deriveModelTier(
   benchmarkRow: BenchmarkRow | null | undefined,
   overallStats: TierScoreStats,
   priorK: number = SCORE_PRIOR_K,
-  thresholds: Partial<Record<Tier, number>> = SCORE_THRESHOLDS,
+  thresholds: Partial<Record<Tier, number>> = LEGACY_TIER_POLICY.scoreThresholds,
 ): DerivedTier {
   const { value: prior, basis } = blendedPrior(aaIndex, benchmarkRow);
   if (prior === null) {
@@ -139,6 +141,10 @@ function round(value: number, digits: number): number {
 /**
  * Ported from `model_scores.py` lines 133-146 (`summarize`). Pure: no I/O, no
  * global AA_INDEX/THRESH lookup — thresholds and prior are passed in.
+ *
+ * `thresholds` are CAPABILITY bars, not tier cuts. They default to the active
+ * tier policy's `capabilityThresholds`, which differ from `SCORE_THRESHOLDS` at
+ * T1 (0.8, the serving `t1cap080` bar, vs a 0.85 cut).
  */
 export function summarize(
   stats: TierScoreStats,
@@ -146,7 +152,8 @@ export function summarize(
   priorPValue: number,
   priorK: number = SCORE_PRIOR_K,
   provenN: number = SCORE_PROVEN_N,
-  thresholds: Partial<Record<Tier, number>> = SCORE_THRESHOLDS,
+  thresholds: Partial<Record<Tier, number>> = LEGACY_TIER_POLICY.capabilityThresholds,
+  vetoMargin: number = LEGACY_TIER_POLICY.capability.vetoMargin,
 ): TierScore {
   const nEff = stats.wOk + stats.wBad;
   const pObs = nEff > 0 ? stats.wOk / nEff : null;
@@ -157,7 +164,7 @@ export function summarize(
   let capable: boolean | null = null;
   if (thr !== undefined) {
     capable = p >= thr;
-    if (proven && pObs !== null && pObs < thr - 0.1) capable = false;
+    if (proven && pObs !== null && pObs < thr - vetoMargin) capable = false;
   }
 
   return {
@@ -183,13 +190,15 @@ export function buildModelScore(
   statsByTier: Partial<Record<Tier, TierScoreStats>>,
   tiers: readonly Tier[],
   benchmarkRow?: BenchmarkRow | null,
+  policy: CompiledTierPolicy = LEGACY_TIER_POLICY,
 ): ModelScore {
   const pp = blendedPriorP(aaIndex, benchmarkRow);
+  const { capabilityThresholds, scoreThresholds, capability } = policy;
   const tierScores = {} as Record<Tier, TierScore>;
   for (const tier of tiers) {
     const stats = statsByTier[tier];
     tierScores[tier] = stats
-      ? summarize(stats, tier, pp)
+      ? summarize(stats, tier, pp, capability.priorK, capability.provenN, capabilityThresholds, capability.vetoMargin)
       : {
           n: 0,
           ok: 0,
@@ -199,13 +208,15 @@ export function buildModelScore(
           nEff: 0,
           pObs: null,
           p: round(pp, 3),
-          capable: pp >= SCORE_THRESHOLDS[tier],
+          capable: pp >= capabilityThresholds[tier],
           proven: false,
           costPerSuccessUsd: null,
           medMin: null,
           rework: 0,
         };
   }
+
+  const monotoneTierScores = enforceMonotoneCapability(tierScores);
 
   const agg = emptyTierScoreStats();
   for (const tier of tiers) {
@@ -223,22 +234,89 @@ export function buildModelScore(
     (agg.okMins as number[]).push(...stats.okMins);
   }
 
-  // TOG-2988: the tier is cut from the OVERALL posterior — one number per model,
+  // The tier is cut from the OVERALL posterior — one number per model,
   // across all tiers — not from any per-tier `capable` gate. Conflating the two
   // is what produced equal-index models landing in different tiers.
-  const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg);
+  const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg, capability.priorK, scoreThresholds);
 
   return {
     modelId,
     aaIndex,
     priorP: round(pp, 3),
-    tiers: tierScores,
-    overall: summarize(agg, null, pp),
+    tiers: monotoneTierScores,
+    overall: summarize(agg, null, pp, capability.priorK, capability.provenN, capabilityThresholds, capability.vetoMargin),
     derivedTier: derivedTier.tier,
     belowT3Floor: derivedTier.belowT3Floor,
     priorBasis: derivedTier.basis,
     tierSpecVersion: derivedTier.specVersion,
   };
+}
+
+/**
+ * Capability is monotone in tier order: a tier with no PROVEN
+ * evidence of its own is no more capable than any easier tier.
+ *
+ * Each tier's `capable` is otherwise judged in isolation, and a tier with no
+ * stats falls back to `prior >= threshold`. That let `glm-5.3` — measured
+ * failing T2 (p=0.585, proven) — pass at the harder T1 on its prior alone,
+ * and be the T1 pick on ~38% of T1 decisions (2026-10-02 decisions window).
+ *
+ * Walks easy to hard. Once a tier fails on its OWN verdict, every harder tier
+ * without proven evidence of its own is forced `capable: false` and records
+ * that tier in `cappedBy`. A harder tier with proven evidence keeps its own
+ * verdict either way. A tier whose `capable` is already false keeps it. Pure
+ * and idempotent: a capped tier is never treated as an own-verdict failure,
+ * so re-applying it to stored scores (selection does, at read time) changes
+ * nothing.
+ */
+export function enforceMonotoneCapability(tiers: Readonly<Record<Tier, TierScore>>): Record<Tier, TierScore> {
+  const out = { ...tiers };
+  let adverse: Tier | null = null;
+  for (const tier of TIER_ORDER) {
+    const score = tiers[tier];
+    if (!score) continue;
+    if (adverse !== null && !score.proven && score.capable !== false) {
+      out[tier] = { ...score, capable: false, cappedBy: adverse };
+      continue;
+    }
+    if (score.capable === false && score.cappedBy === undefined) adverse = tier;
+  }
+  return out;
+}
+
+/**
+ * The capability verdict every consumer reads for (model, tier): the stored
+ * tier score with `enforceMonotoneCapability` applied. Applied at READ time as
+ * well as in `buildModelScore`, so scores persisted before this rule existed
+ * are held to the rule from the first selection after deploy, not from the
+ * next `refreshScores`.
+ */
+export function tierScoreFor(score: ModelScore | undefined, tier: Tier): TierScore | undefined {
+  if (!score?.tiers) return undefined;
+  return enforceMonotoneCapability(score.tiers)[tier];
+}
+
+/**
+ * The highest tier a promotion may reach: the hardest tier whose
+ * monotone capability verdict is not false. Undefined when the score carries
+ * no tier verdicts at all.
+ *
+ * Reads the monotone verdict, prior-only verdicts included, rather than
+ * requiring evidence AT the target tier. The rung walk only ever runs a model
+ * at its own rostered tier, so a T2 row never gathers T1 evidence; demanding
+ * it would freeze every T1 promotion. What it does forbid is the defect: a
+ * model with an adverse verdict at or below the target being promoted past
+ * it.
+ */
+function promotionCeiling(score: ModelScore): Tier | undefined {
+  if (!score.tiers) return undefined;
+  const tiers = enforceMonotoneCapability(score.tiers);
+  let ceiling: Tier | undefined;
+  for (const tier of TIER_ORDER) {
+    const verdict = tiers[tier];
+    if (verdict && verdict.capable !== false) ceiling = tier;
+  }
+  return ceiling;
 }
 
 /**
@@ -262,7 +340,8 @@ export function buildModelScore(
  * — a model id can hold two rows at different tiers and lanes — so a rewrite
  * keyed on the id alone rewrites placements nobody derived. Demotions apply to
  * every row; promotions are refused on an index-only basis and confined to the
- * model's top enabled rung (see the two notes inline).
+ * model's top enabled rung, and capped at the model's capability ceiling (see
+ * the three notes inline).
  */
 export function applyDerivedTiers<T extends RosterRow>(
   models: readonly T[],
@@ -286,8 +365,8 @@ export function applyDerivedTiers<T extends RosterRow>(
       //    model at all — only the aa.ai composite. That is enough to keep a
       //    model where it is, or to move it down, but not to hand it harder
       //    work: the two models this fires hardest on measure worst of the
-      //    whole capture on the agentic benchmarks we DO have (TOG-2988
-      //    review). Retain, and let a populated basket do the promoting.
+      //    whole capture on the agentic benchmarks we DO have (a review
+      //    finding). Retain, and let a populated basket do the promoting.
       if (score.priorBasis === "index-only") return model;
       // 2. A model listed at more than one rung is placed there deliberately
       //    (`gpt-5.6-sol` carries both T1 and T2 on the codex lane). The
@@ -297,6 +376,15 @@ export function applyDerivedTiers<T extends RosterRow>(
       //    given. Only the model's top rung moves up, so a promotion can never
       //    vacate a lower rung the operator listed it at.
       if (model.tier !== topRung(model.id)) return model;
+      // 3. Never past the hardest tier the model is still capable
+      //    at. The derived tier pools every tier's runs, so easy wins can
+      //    out-vote a proven failure at the tier just above them (`glm-5.3`:
+      //    89/89 at T3 lifting it to T1 while it measures p=0.585 at T2).
+      //    Promote only as far as the ceiling; a ceiling at or below the
+      //    configured tier retains it — this rule never demotes.
+      const ceiling = promotionCeiling(score);
+      if (ceiling === undefined || tierIndex(ceiling) <= tierIndex(model.tier)) return model;
+      if (tierIndex(derived) > tierIndex(ceiling)) return { ...model, tier: ceiling };
     }
 
     return { ...model, tier: derived };
@@ -341,7 +429,7 @@ function topConfiguredRungs(models: readonly RosterRow[]): (modelId: string) => 
 // captured signal against the run window it already has in hand — same
 // semantics (72h/48h closing-run match), different data source.
 
-// ---- quality (p) vs availability split — TOG-3230 ---------------------
+// ---- quality (p) vs availability split ---------------------------------
 //
 // p is a PURE QUALITY posterior: wOk / nEff where nEff = wOk + wBad.
 // INFRA_RE failures are excused (weight 0, failInfra++ only, no wBad) so
@@ -360,7 +448,7 @@ function topConfiguredRungs(models: readonly RosterRow[]): (modelId: string) => 
 const FREE_LANE_RE = /(-free$|^big-pickle$|-alpha$|-preview$)/;
 const MODEL_FAIL_RE = /flagged for possible cybersecurity|exceeded the adapter execution timeout|timeoutSec|refus/i;
 const INFRA_RE =
-  /503|502|529|Overloaded|429|exhausted|All credentials|circuit breaker|Stream idle timeout|Stream ended|stalled mid-stream|stopped arriving|mid-response|disabled Claude subscription|ECONN|process_lost|all upstream accounts|not supported for format|issue with the selected model|budget_paused|Missing required permissions|recovery backstop|sandbox gone|401|404/i;
+  /503|502|529|Overloaded|429|exhausted|All credentials|circuit breaker|Stream idle timeout|Stream ended|stalled mid-stream|stopped arriving|mid-response|disabled Claude subscription|ECONN|process_lost|all upstream accounts|not supported for format|issue with the selected model|budget_paused|Missing required permissions|recovery backstop|sandbox gone|401|404|subscription( is)? required/i;
 
 export function normModelId(modelId: string): string {
   return modelId.replace(/^(cliproxy\/|openrouter\/|opencode-go\/)/, "");
@@ -369,7 +457,7 @@ export function normModelId(modelId: string): string {
 /**
  * Ported from `model_scores.py`'s `classify()` (lines 50-55).
  *
- * INFRA_RE -> {kind:"infra", weight:0.0} is intentional (TOG-3230): infra
+ * INFRA_RE -> {kind:"infra", weight:0.0} is intentional: infra
  * is excluded from the quality posterior p and counted only as failInfra.
  * See the header above and scores.spec.ts's rawReplayCases / HOST_EVIDENCE
  * 75.7% regression for the invariant this preserves.
@@ -525,7 +613,7 @@ export interface CardRow {
 }
 
 /**
- * TOG-3997. Hard exclusions require outcome-independent observation: rejects
+ * Hard exclusions require outcome-independent observation: rejects
  * and accepts must both age 14 days. The reporting metric resolves rejects
  * early and is therefore insufficient, even when its denominator reaches 8.
  *
@@ -569,7 +657,7 @@ function validCount(value: number): boolean {
 }
 
 /**
- * TOG-1917 §2.2 card-level acceptance ledger. A card closed less than
+ * Card-level acceptance ledger. A card closed less than
  * `CARD_CENSOR_DAYS` ago and not yet rejected is `pending` — right-censored,
  * excluded from both the accepted and rejected counts (never assumed 1.0).
  */
@@ -620,7 +708,7 @@ export function buildCardLedger(
       modelId,
       tier,
       cardsClosed: rows.length,
-      // TOG-3997. Published so a consumer can tell "never accepted" from
+      // Published so a consumer can tell "never accepted" from
       // "not resolved yet". `cardsClosed` alone cannot: it counts the
       // censored rows, so a brand-new entrant reads as a long losing streak.
       cardsResolved: resolved.length,

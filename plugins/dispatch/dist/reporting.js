@@ -1,5 +1,5 @@
 /**
- * dispatch — the reporting contract (TOG-706 Q5).
+ * dispatch — the reporting contract.
  *
  * The thing being replaced wrote its counters to stdout on a host nobody can
  * read. So "report" here is the actual product of the plugin, not decoration

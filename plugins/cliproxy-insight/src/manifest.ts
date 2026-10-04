@@ -4,11 +4,11 @@ import { CLIPROXY_INSIGHT_CONFIG_SCHEMA } from "./config/schema.js";
 import { JOB_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TOOL_NAMES } from "./constants.js";
 
 /**
- * cliproxy-insight (TOG-811).
+ * cliproxy-insight.
  *
  * Turns CLIProxy's in-memory-only usage/cooldown telemetry into durable
  * Paperclip history. Polls the sanitized telemetry lane the operator stood up
- * on 2026-09-05 (TOG-952) — `request-rates.json` for per-provider success/
+ * on 2026-09-05 — `request-rates.json` for per-provider success/
  * failed counters and `model-usage-v1.json` for per-model capacity windows —
  * persists each observation, and surfaces it to the board UI and to agents.
  *
@@ -19,9 +19,9 @@ import { JOB_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TO
  * provider keys include `codex`/`codex-spark` — which the old hardcoded
  * six-provider allowlist would have silently discarded.
  *
- * **The owner-reserved gate this card carried no longer applies.** TOG-811
- * required owner approval to place the CLIProxy management key as a Paperclip
- * secret, because that key can read `/v0/management/auth-files` and return
+ * **The owner-reserved gate the original design carried no longer applies.**
+ * That design required owner approval to place the CLIProxy management key as a
+ * Paperclip secret, because that key can read `/v0/management/auth-files` and return
  * provider credentials in clear. The lane design removes the need: a host-side
  * collector holds the management key and publishes sanitized JSON, and the
  * only credential Paperclip holds is a lane bearer that can read two static
@@ -76,7 +76,7 @@ export const manifest: PaperclipPluginManifestV1 = {
         "Reads the sanitized telemetry lane and persists per-provider counters and per-model capacity windows. No-op (heartbeat metric only) while config.pollingEnabled is false or no secret is configured.",
       // The host collector republishes every 2 minutes. Polling at */5 keeps
       // history meaningfully fresh without ever retrying inside a firing —
-      // a tight retry loop is how a poller IP-bans itself (TOG-811 recon).
+      // a tight retry loop is how a poller IP-bans itself.
       schedule: "*/5 * * * *",
     },
   ],

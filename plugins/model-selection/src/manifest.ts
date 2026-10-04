@@ -2,6 +2,8 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 import { SELECTION_CONFIG_SCHEMA } from "./config/schema.js";
 import { JOB_KEYS, LOCAL_FOLDER_KEYS, PLUGIN_API_VERSION, PLUGIN_ID, PLUGIN_VERSION, ROUTE_KEYS, TOOL_NAMES } from "./constants.js";
+import { RUN_RESOLVE_ENV_KEYS } from "./engine/run-resolve.js";
+import { TIER_POLICY_TOOL_DESCRIPTION, TIER_POLICY_TOOL_DISPLAY_NAME, TIER_POLICY_TOOL_PARAMETERS } from "./tier-policy-tool.js";
 
 const DESCRIPTOR_SCHEMA = {
   type: "object",
@@ -29,10 +31,14 @@ const DESCRIPTOR_SCHEMA = {
       items: { type: "string", enum: ["tools", "structured-output", "vision", "long-context", "computer-use"] },
     },
     requiredContextTokens: { type: "integer", minimum: 1 },
+    admissionShadow: {
+      type: "object",
+      description: "Optional non-secret account/window snapshot. Only evaluated when accountAdmissionShadow.enabled is true; never changes the decision or applies admission.",
+    },
   },
 } as const;
 
-const manifest: PaperclipPluginManifestV1 = {
+const baseManifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: PLUGIN_API_VERSION,
   version: PLUGIN_VERSION,
@@ -60,25 +66,25 @@ const manifest: PaperclipPluginManifestV1 = {
     "api.routes.register",
     "jobs.schedule",
     "companies.read",
-    // TOG-2137: poll operator-configured lane-capacity status URLs.
+    // Poll operator-configured lane-capacity status URLs.
     "http.outbound",
-    // TOG-2379: resolve a lane's optional apiKeySecretRef before polling it.
+    // Resolve a lane's optional apiKeySecretRef before polling it.
     "secrets.read-ref",
     // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
     // for the card-level acceptance ledger, since `activity_log` is not an
-    // allowlisted table and cannot be queried directly (TOG-1917 §2.2).
+    // allowlisted table and cannot be queried directly.
     "events.subscribe",
-    // TOG-2137, Defect 2: raise a `tier-exhausted` alarm when every tier from
+    // Raise a `tier-exhausted` alarm when every tier from
     // the required floor through T1 is pace-exhausted — there is nowhere left
     // to escalate to, and this must reach an operator rather than fail
     // silently the way the reference dispatcher's `pick()` does. The alarm
     // reuses this instance's existing `Operator: <title>` + `operator`-label
-    // issue-creation convention (confirmed against 20+ live examples, e.g.
-    // TOG-2318/TOG-2324/TOG-2333), not a same-issue interaction card — an
-    // `Operator:` issue is a real, separately-triaged unit of work, and that
-    // is what a capacity dead end actually is.
+    // issue-creation convention (confirmed against 20+ live examples), not a
+    // same-issue interaction card — an `Operator:` issue is a real,
+    // separately-triaged unit of work, and that is what a capacity dead end
+    // actually is.
     "issues.create",
-    // TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706):
+    // Absorption of the standalone `dispatch` plugin:
     // the stall-sweep reads blocker relations and the orchestration summary
     // (which mirrors the server's own budget-invocation-block verdict, see
     // dispatch-selection.ts's BUDGET_RAIL_MIRROR_SOURCE), and wakes a stalled
@@ -87,7 +93,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.relations.read",
     "issues.orchestration.read",
     "issues.wakeup",
-    // TOG-2572: the sweep must not wake a card that has its own monitor
+    // The sweep must not wake a card that has its own monitor
     // wake scheduled (`monitorNextCheckAt`, read straight off the `Issue`
     // rows `issues.list` already returns) or a pending human-only ask —
     // neither of those is on `PluginIssueOrchestrationSummary`, so a
@@ -102,7 +108,7 @@ const manifest: PaperclipPluginManifestV1 = {
     // capability is declared and never exercised. It is NOT
     // `database.namespace.write` — this plugin never writes a row of its own.
     "database.namespace.migrate",
-    // TOG-2137. Append-only `tog2138-decision-v1` shadow-decision JSONL, the
+    // Append-only versioned shadow-decision JSONL, the
     // plugin-shadow half of the 48h host/plugin agreement stream. `ctx.db` is
     // scoped to `heartbeat_runs` reads only (above) and cannot hold an
     // append-only audit log a company operator can point external tooling at
@@ -117,7 +123,7 @@ const manifest: PaperclipPluginManifestV1 = {
       folderKey: LOCAL_FOLDER_KEYS.shadowDecisions,
       displayName: "Shadow decision log",
       description:
-        "Append-only tog2138-decision-v1 JSONL, one record per advise() call, for the TOG-2138 48h host/plugin-shadow agreement gate.",
+        "Append-only versioned paired-decision JSONL, one record per advise() call, for the 48h host/plugin-shadow agreement gate.",
       access: "readWrite",
     },
   ],
@@ -139,8 +145,8 @@ const manifest: PaperclipPluginManifestV1 = {
     migrationsDir: "./migrations",
     // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
     // signals are sourced from captured `ctx.events`, not a live join against a
-    // table this plugin isn't allowlisted to read (TOG-1917 §2.2 / TOG-2136).
-    // "agents" added for TOG-2481's classification job (join issues -> agents
+    // table this plugin isn't allowlisted to read.
+    // "agents" added for the classification job (join issues -> agents
     // to read the assignee's role/name for the classification prompt).
     coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations", "agents"],
   },
@@ -156,8 +162,8 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.pollLanes,
       displayName: "Poll lane capacity",
       description:
-        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
-      schedule: "*/5 * * * *",
+        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Runs every 2 minutes, inside the tightest publisher-declared freshness budget (180s live) — at 5 minutes, picks older than 180s read every lane UNKNOWN ~half the time. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+      schedule: "*/2 * * * *",
     },
     {
       jobKey: JOB_KEYS.refreshScores,
@@ -170,7 +176,7 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.refreshAaIndex,
       displayName: "Refresh aa.ai Intelligence Index",
       description:
-        "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate — never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt (TOG-2438). Every-6h cadence matches refreshScores's family (TOG-2438 reopen AC4) — aa.ai moves faster than a daily check surfaced.",
+        "Refresh the aa.ai leaderboard snapshot and log per-model index changes. A change that crosses a tier boundary is surfaced via the activity log as a prompt to re-evaluate — never applied automatically. A fetch/parse failure keeps the prior snapshot and records the failed attempt. Every-6h cadence matches refreshScores's family — aa.ai moves faster than a daily check surfaced.",
       schedule: "53 */6 * * *",
     },
     {
@@ -181,10 +187,17 @@ const manifest: PaperclipPluginManifestV1 = {
       schedule: "41 5 * * *",
     },
     {
+      jobKey: JOB_KEYS.refreshAaFreeSync,
+      displayName: "Refresh aa.ai free-list sync",
+      description:
+        "Fetch the official aa.ai FREE-tier legacy list (at most once a day; 429 honors Retry-After; 401/403 stops the source) and store the CAS snapshot plus a per-company reviewable diff of curated model x effort bindings. Report-only: it never writes a binding, pin, tier, or price. Off unless a company enables aaFreeSync.",
+      schedule: "23 6 * * *",
+    },
+    {
       jobKey: JOB_KEYS.classifyIssues,
       displayName: "Classify unlabeled issues",
       description:
-        "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) — the AC3 kill switch for TOG-2481.",
+        "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) — the kill switch for this ported job.",
       schedule: "*/10 * * * *",
     },
     {
@@ -212,8 +225,15 @@ const manifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.dispatchSweep,
       displayName: "Stall-sweep dispatch",
       description:
-        "TOG-2481 absorption of the standalone dispatch plugin (TOG-747/TOG-706): finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
+        "Absorption of the standalone dispatch plugin: finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
       schedule: "*/30 * * * *",
+    },
+    {
+      jobKey: JOB_KEYS.refreshRunResolve,
+      displayName: "Warm the run-scoped decision snapshot",
+      description:
+        "Reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
+      schedule: "* * * * *",
     },
   ],
   tools: [
@@ -288,10 +308,44 @@ const manifest: PaperclipPluginManifestV1 = {
       parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
     },
     {
+      name: TOOL_NAMES.admissionShadowReport,
+      displayName: "Account admission shadow report",
+      description: "Read the last opt-in bounded account admission shadow snapshot. No reservations, host start coverage or served-account proof; never invokes selection or actuation.",
+      parametersSchema: { type: "object", additionalProperties: false } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.aaFreeSyncReport,
+      displayName: "aa.ai free-list sync report",
+      description:
+        "The last free-list sync diff: which curated model x effort bindings verify against the snapshot, which break and why, which slugs are ambiguous, and which roster rows have no binding. Read-only; writes nothing.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.refreshAaFreeSyncNow,
+      displayName: "Refresh aa.ai free-list sync now",
+      description:
+        "Run the free-list fetch + per-company diff immediately instead of waiting for the daily tick. Same logic as the cron job, and just as report-only: it never writes a binding, pin, tier, or price.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.tierOutcomes,
+      displayName: "Tier poll outcomes",
+      description:
+        "Per-tier lane-poll success/fail counters: how many polls each tier's lanes served or missed. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.acceptedWorkReport,
+      displayName: "Accepted-work posterior report",
+      description:
+        "Per-cohort accepted-work posteriors: which served model x effort x task-class cohorts have mature accept/rework evidence, and what each cohort's posterior is. Read-only; writes nothing and never changes selection.",
+      parametersSchema: { type: "object" } as unknown as Record<string, unknown>,
+    },
+    {
       name: TOOL_NAMES.setLaneOutage,
       displayName: "Declare or clear a lane outage",
       description:
-        "TOG-2481 port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+        "Port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
       parametersSchema: {
         type: "object",
         required: ["until"],
@@ -307,7 +361,7 @@ const manifest: PaperclipPluginManifestV1 = {
       name: TOOL_NAMES.setZaiPaceOverride,
       displayName: "Set or clear the Z.ai weekly-pace margin override",
       description:
-        "TOG-2481 port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+        "Port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
       parametersSchema: {
         type: "object",
         required: ["until"],
@@ -316,6 +370,12 @@ const manifest: PaperclipPluginManifestV1 = {
           until: { type: "string" },
         },
       } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.tierPolicy,
+      displayName: TIER_POLICY_TOOL_DISPLAY_NAME,
+      description: TIER_POLICY_TOOL_DESCRIPTION,
+      parametersSchema: TIER_POLICY_TOOL_PARAMETERS as unknown as Record<string, unknown>,
     },
   ],
   apiRoutes: [
@@ -339,5 +399,42 @@ const manifest: PaperclipPluginManifestV1 = {
     },
   ],
 };
+
+/**
+ * The capability the fork's run-model hook requires of
+ * its one holder per company.
+ */
+export const RUN_MODEL_RESOLVE_CAPABILITY = "run.model.resolve";
+
+declare const __MODEL_SELECTION_RUN_RESOLVE__: boolean | undefined;
+
+/**
+ * Whether this build declares `run.model.resolve` + `modelRouting`. Inlined by
+ * `esbuild.config.mjs` from `MODEL_SELECTION_RUN_RESOLVE=1`, so the choice is
+ * made when the artifact is built and cannot drift with the host's runtime
+ * environment. Off by default: a host that predates the hook rejects an
+ * unknown capability at install, so the default artifact installs everywhere
+ * and the hook-enabled artifact is built deliberately for the fork.
+ */
+export const RUN_RESOLVE_IN_MANIFEST: boolean =
+  typeof __MODEL_SELECTION_RUN_RESOLVE__ === "boolean"
+    ? __MODEL_SELECTION_RUN_RESOLVE__
+    : process.env.MODEL_SELECTION_RUN_RESOLVE === "1";
+
+/**
+ * The manifest, with or without the run-model hook declaration. The extra keys
+ * are widened past the SDK's manifest type because the SDK this package builds
+ * against predates them; the fork host's own validator is the authority.
+ */
+export function buildManifest(runResolve: boolean): PaperclipPluginManifestV1 {
+  if (!runResolve) return baseManifest;
+  return {
+    ...baseManifest,
+    capabilities: [...baseManifest.capabilities, RUN_MODEL_RESOLVE_CAPABILITY],
+    modelRouting: { envKeys: [...RUN_RESOLVE_ENV_KEYS] },
+  } as unknown as PaperclipPluginManifestV1;
+}
+
+const manifest: PaperclipPluginManifestV1 = buildManifest(RUN_RESOLVE_IN_MANIFEST);
 
 export default manifest;

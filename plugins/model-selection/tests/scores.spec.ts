@@ -5,8 +5,11 @@ import {
   accumulateRunStats,
   buildCardLedger,
   buildModelScore,
+  emptyTierScoreStats,
+  enforceMonotoneCapability,
   foldReworkIntoStats,
   priorP,
+  tierScoreFor,
   summarize,
   type CardRow,
   type ReworkClosingRun,
@@ -19,7 +22,7 @@ function round3(value: number): number {
 }
 
 /**
- * Verbatim `rows` from TOG-1920 r2's frozen `host-evidence.json` (27 rows,
+ * Verbatim `rows` from a frozen `host-evidence.json` (27 rows,
  * copied from `model_scores.json`'s `models[mid]['tiers'][tier]`). `p`/`pObs`/
  * `nEff` are already rounded to 3/3/1 decimals in this fixture — see the
  * "Key design resolution" note in the governing plan for why the spot check
@@ -111,7 +114,7 @@ describe("summarize — exact-formula replay (acceptance criterion)", () => {
     expect(result.p).toBeCloseTo(0.671, 3);
     expect(round3(expectedP)).toBe(0.671);
     expect(result.proven).toBe(true); // ok+failModel+tmo = 4+4+0 = 8 >= PROVEN_N
-    expect(result.capable).toBe(false); // p=0.671 < T1 threshold 0.85
+    expect(result.capable).toBe(false); // p=0.671 < the 0.85 bar passed explicitly (the default T1 capability bar is 0.8)
     expect(result.n).toBe(4);
     expect(result.rework).toBe(4);
   });
@@ -201,7 +204,7 @@ describe("summarize — frozen host-evidence.json spot check (fixture fidelity)"
 });
 
 describe("accumulateRunStats -> summarize — raw-row replay of frozen host-evidence rows", () => {
-  // Reviewer ask (TOG-2136 code review, PR277): the spot check above derives
+  // Reviewer ask: the spot check above derives
   // wOk/wBad ALGEBRAICALLY from each row's target `p`, so it never actually
   // exercises `accumulateRunStats`'s recency-decay formula
   // (`Math.exp(-row.ageDays / 10.0)`, scores.ts) — a mutation to that constant
@@ -305,7 +308,7 @@ describe("accumulateRunStats -> summarize — raw-row replay of frozen host-evid
   });
 });
 
-describe("buildCardLedger — TOG-1917 §2.2 censor", () => {
+describe("buildCardLedger — censor", () => {
   const nowMs = Date.parse("2026-09-12T00:00:00.000Z");
   const dayMs = 24 * 60 * 60 * 1000;
 
@@ -360,7 +363,7 @@ describe("buildCardLedger — TOG-1917 §2.2 censor", () => {
     expect(entry.acceptRate).toBe(0.5); // 1 accepted / 2 resolved, pending row excluded
   });
 
-  // TOG-3997. `cardsClosed` is not the `acceptRate` denominator, and reading it
+  // `cardsClosed` is not the `acceptRate` denominator, and reading it
   // as one is how `gpt-6-astra:T1` looked like "0 accepted out of 25" on
   // 2026-09-22 when the truth was 0-of-ONE resolved. These publish the two
   // counts that make the difference readable to a consumer.
@@ -435,5 +438,72 @@ describe("foldReworkIntoStats — rework is soft evidence, never a raw observati
     const events: ReworkClosingRun[] = [{ modelId: "m1", tier: "T1", kind: "rejected" }];
     const folded = foldReworkIntoStats(existing, events);
     expect(folded.m1?.T1?.n).toBe(5);
+  });
+});
+
+describe("monotone tier capability", () => {
+  const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
+  // glm-5.3 on the 2026-10-02 decisions window: 89/89 at T3, measured failing
+  // T2 (p=0.585, proven), and no T1 runs of its own.
+  const T3_PROVEN_PASS = stats({ n: 89, ok: 89, wOk: 89 });
+  const T2_PROVEN_FAIL = stats({ n: 44, ok: 22, failInfra: 4, failModel: 18, wOk: 21.6, wBad: 18.4 });
+  const T1_PROVEN_PASS = stats({ n: 20, ok: 18, failModel: 2, wOk: 18, wBad: 2 });
+  const GLM_AA_INDEX = 44.86;
+  const TIERS: Tier[] = ["T1", "T2", "T3"];
+
+  it("excludes a glm-5.3-shaped model at T1 and T2: T3 proven-pass, T2 measured-fail, T1 empty", () => {
+    const score = buildModelScore("glm-5.3", GLM_AA_INDEX, { T3: T3_PROVEN_PASS, T2: T2_PROVEN_FAIL }, TIERS);
+    // The defect: an empty T1 alone passes on its prior.
+    expect(score.priorP).toBeGreaterThanOrEqual(0.8);
+    expect(score.tiers.T2).toMatchObject({ p: 0.585, proven: true, capable: false });
+    expect(score.tiers.T2.cappedBy).toBeUndefined();
+    expect(score.tiers.T1).toMatchObject({ n: 0, proven: false, capable: false, cappedBy: "T2" });
+    expect(score.tiers.T3).toMatchObject({ proven: true, capable: true });
+    expect(score.tiers.T3.cappedBy).toBeUndefined();
+    // Only `capable`/`cappedBy` move: p and the derived tier are untouched.
+    expect(score.tiers.T1.p).toBe(round3(score.priorP));
+    expect(score.derivedTier).toBe("T1");
+  });
+
+  it("keeps current behaviour for a model with an empty T2 and a passing prior", () => {
+    const score = buildModelScore("m", GLM_AA_INDEX, { T3: T3_PROVEN_PASS }, TIERS);
+    for (const tier of ["T2", "T1"] as const) {
+      expect(score.tiers[tier]).toMatchObject({ n: 0, proven: false, capable: true });
+      expect(score.tiers[tier].cappedBy).toBeUndefined();
+    }
+    expect(enforceMonotoneCapability(score.tiers)).toEqual(score.tiers);
+  });
+
+  it("lets a harder tier's own proven evidence stand over an easier failure", () => {
+    const score = buildModelScore("m", GLM_AA_INDEX, { T3: T3_PROVEN_PASS, T2: T2_PROVEN_FAIL, T1: T1_PROVEN_PASS }, TIERS);
+    expect(score.tiers.T2.capable).toBe(false);
+    expect(score.tiers.T1).toMatchObject({ proven: true, capable: true });
+    expect(score.tiers.T1.cappedBy).toBeUndefined();
+  });
+
+  it("caps an UNPROVEN harder tier even when it has a few runs of its own", () => {
+    const sparseT1 = stats({ n: 3, ok: 3, wOk: 3 });
+    const score = buildModelScore("m", GLM_AA_INDEX, { T2: T2_PROVEN_FAIL, T1: sparseT1 }, TIERS);
+    expect(score.tiers.T1).toMatchObject({ n: 3, proven: false, capable: false, cappedBy: "T2" });
+  });
+
+  it("names the nearest own-verdict failure, and caps every harder unproven tier above it", () => {
+    const score = buildModelScore("m", GLM_AA_INDEX, { T3: T2_PROVEN_FAIL }, TIERS);
+    expect(score.tiers.T3).toMatchObject({ capable: false });
+    expect(score.tiers.T3.cappedBy).toBeUndefined();
+    expect(score.tiers.T2).toMatchObject({ capable: false, cappedBy: "T3" });
+    expect(score.tiers.T1).toMatchObject({ capable: false, cappedBy: "T3" });
+  });
+
+  it("is idempotent, and re-applied at read time to scores stored before the rule existed", () => {
+    const capped = buildModelScore("glm-5.3", GLM_AA_INDEX, { T3: T3_PROVEN_PASS, T2: T2_PROVEN_FAIL }, TIERS);
+    expect(enforceMonotoneCapability(capped.tiers)).toEqual(capped.tiers);
+    // A stored score from before capability became monotone in tier order: T1
+    // still carries its isolated prior verdict.
+    const { cappedBy: _cappedBy, ...isolatedT1 } = capped.tiers.T1;
+    const stored = { ...capped, tiers: { ...capped.tiers, T1: { ...isolatedT1, capable: true } } };
+    expect(tierScoreFor(stored, "T1")).toMatchObject({ capable: false, cappedBy: "T2" });
+    expect(tierScoreFor(stored, "T3")).toEqual(capped.tiers.T3);
+    expect(tierScoreFor(undefined, "T1")).toBeUndefined();
   });
 });

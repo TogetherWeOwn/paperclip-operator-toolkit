@@ -1,7 +1,7 @@
 /**
  * Reasoning effort, paired with the model that makes it legal.
  *
- * TOG-3995. `effort` is not one field with one vocabulary. It is one *concept*
+ * `effort` is not one field with one vocabulary. It is one *concept*
  * that each adapter spells differently and admits a different set of values
  * for, and the legal set depends on the model — which only the selector knows.
  * So the selector is the only component that can write the pair coherently.

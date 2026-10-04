@@ -99,3 +99,8 @@ __pycache__/
 
 # TOG-1014 fork-disclosure audit: runtime parent cache, host-local
 verification/.tog-1014-fork-parents.cache
+
+# Build output for plugins that have a src/ tree. dist/ is rebuilt by CI and the
+# release process; it is not tracked.
+plugins/model-selection/dist/
+plugins/cliproxy-insight/dist/

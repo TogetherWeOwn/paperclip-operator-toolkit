@@ -2,10 +2,8 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-17
-- **Card:** TOG-3132
-- **Parent:** TOG-3108
-- **Related:** TOG-3107 (pacer serviceability), TOG-3133 (the collector), TOG-811
-  (producer-side cooldown contract), TOG-2137 (`tier-exhausted`)
+- **Related:** pacer serviceability, the lane collector, the producer-side
+  cooldown contract, and the `tier-exhausted` outcome
 
 ## Context
 
@@ -27,8 +25,8 @@ carries a pace engine: `LaneLedger`, `laneVerdictFor`, `hardStopExcluded`,
 
 Two other facts made a preference-shaped fix inadequate. `health: "cooldown"`
 reaches the router's *degraded* bucket, becomes an `avoid` posture, and stays
-selectable (TOG-811). And a pure cooldown record carries no utilization field,
-so the consumer collects zero evidence rows and fails open (TOG-1040). A lane
+selectable. And a pure cooldown record carries no utilization field,
+so the consumer collects zero evidence rows and fails open. A lane
 that is refusing every request was therefore both selectable and invisible.
 
 ## Decision
@@ -116,11 +114,12 @@ reporting a capacity outage as a config gap.
   `selectedOnUnknownLane` marks a winner chosen on an unreadable lane.
 - `model_selection.lane_excluded.{term}` and `model_selection.lane_unknown_selected`
   make both visible without reading the stream.
-- Out of scope, per the card: retry or fallback after a refusal, and *moving*
+- Out of scope for this change: retry or fallback after a refusal, and *moving*
   the floor or changing `agents.adapterConfig.model`.
-- **The floor decision itself is in scope, and is covered (AC-3).** TOG-3037
-  landed on `main` while this branch was open and added a second exit that hands
-  an untrusted-profile run back to the agent floor, testing that floor's lane
+- **The floor decision itself is in scope, and is covered (AC-3).** A
+  concurrent change landed on `main` while this branch was open and added a
+  second exit that hands an untrusted-profile run back to the agent floor,
+  testing that floor's lane
   against the pace predicates — all of which are gated on `paceActive`. The
   availability term is not gated on `pacingMode`, so it is evaluated there
   separately: a floor whose lane a published contract calls **unavailable** is

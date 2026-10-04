@@ -2,8 +2,6 @@
 
 - **Status:** accepted, corrected 2026-09-10
 - **Original date:** 2026-08-31
-- **Original card:** TOG-768
-- **Correction:** TOG-2134
 
 ## Context
 

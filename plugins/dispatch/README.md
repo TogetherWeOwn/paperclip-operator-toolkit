@@ -1,12 +1,12 @@
 # dispatch
 
-Finds work that has an owner and no reason to wake anyone — the TOG-180 gap — and
-**reports** it. Once an evidence gate passes, it also wakes it.
+Finds work that has an owner and no reason to wake anyone, and **reports** it.
+Once an evidence gate passes, it also wakes it.
 
-Built for **TOG-747**, implementing the design agreed in **TOG-706**
-(`docs/tog-706-dispatch-plugin-design.md`). Native replacement for `dispatcher.py`
-/ `paperclip-dispatcher.timer`: a host-side script outside any repo, unreadable
-from any agent container, whose stdout went nowhere durable.
+Implements the selection policy and evidence gate documented below. Native
+replacement for `dispatcher.py` / `paperclip-dispatcher.timer`: a host-side
+script outside any repo, unreadable from any agent container, whose stdout went
+nowhere durable.
 
 ---
 
@@ -15,7 +15,7 @@ from any agent container, whose stdout went nowhere durable.
 | | |
 |---|---|
 | Code | complete — 4 modules, hand-written `dist/` |
-| Tests | 43, `node --test`, no network and no host. Mutation-gated by `verification/tog-747-mutation-gate.sh`: 21 mutants, 21 killed, 0 survivors |
+| Tests | `node --test`, no network and no host. The toolkit's dispatch CI job also runs isolated mutation checks; cite the exact tested revision rather than a stale test count |
 | Manifest | validated against the **host's own** validators — `pluginManifestV1Schema` PASS, `validateManifestCapabilities` → `{allowed:true, missing:[], pluginId:"dispatch"}` |
 | Installed | **no** — install needs an operator (`/api/plugins` returns `403 Board access required` to an agent key) |
 | Wake action | **off**, and stays off. Enabling it is a separate, evidence-gated step — see "The gate" |
@@ -57,7 +57,7 @@ Three things about this are deliberate and easy to "tidy" wrongly:
 
 **The rails are a denylist, not an allowlist.** The server refuses exactly three
 statuses; everything else is wakeable by default, *including statuses that do not
-exist yet*. The first cut of the TOG-706 probe enumerated the statuses it believed
+exist yet*. The first cut of the design-phase probe enumerated the statuses it believed
 were runnable and undercounted the wakeable surface by 88%.
 
 **Rail 4 is the server's own verdict, not a reimplementation of it.**
@@ -75,7 +75,7 @@ reached through `getIssueRunSummaries` (`:861`). An issue with no run ever ancho
 on `createdAt` — a card created two days ago that has never once had a run is the
 most stalled thing on the board.
 
-## Reporting contract (TOG-706 Q5)
+## Reporting contract
 
 Two channels, deliberately different:
 
@@ -111,7 +111,7 @@ written.
 
 ## Known gap: the plugin cannot wake a routing owner
 
-TOG-706 Q2 says the plugin "reports the routing gap and wakes a principal holding
+Says the plugin "reports the routing gap and wakes a principal holding
 `tasks:assign`". **It reports. It cannot wake them**, and this is a host fact, not
 an omission:
 
@@ -220,8 +220,8 @@ that should stop an activation.
 
 ## The gate
 
-Do **not** flip `wakeEnabled` as part of installing this. Per the retirement plan
-(`docs/tog-706-dispatch-plugin-design.md`, steps 2–3):
+Do **not** flip `wakeEnabled` as part of installing this. Use a separately
+reviewed deployment retirement plan with these evidence requirements:
 
 1. Run both systems in parallel for a week. The host timer keeps running unmodified.
 2. Compare the plugin's report-only output against what the timer actually did.
@@ -251,12 +251,9 @@ directly against hand-built populations, and the harness covers the wiring:
 capability enforcement, company enumeration, the metric contract, the activity
 threshold, the state round-trip and the wake gate.
 
-Sensitivity is checked by mutation rather than asserted, and the check is a
-committed script rather than a run someone did once:
-
-```bash
-verification/tog-747-mutation-gate.sh     # from the repo root
-```
+The toolkit's dispatch CI job checks sensitivity with an isolated mutation
+gate, not just the unit suite. Use that job's exact-head evidence; a unit-suite
+pass alone does not establish mutation sensitivity or deployment readiness.
 
 It breaks one load-bearing behaviour at a time and requires the suite to go red
 for each: idle anchored on `updatedAt` or counting another issue's runs, rails 1
@@ -274,7 +271,7 @@ none: it aborts unless the baseline is green, reports a pattern that matched
 nothing as a `BROKEN GATE` instead of a pass, and runs `node --check` on every
 mutant so a syntax error is never miscounted as a caught mutation.
 
-## Constraints this build holds to (TOG-706, non-negotiable)
+## Constraints this build holds to
 
 - **No modification to PaperclipAI** — no patch, no file copied into `/app`, no
   host module.

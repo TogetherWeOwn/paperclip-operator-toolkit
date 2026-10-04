@@ -1,7 +1,7 @@
 /**
- * TOG-2636 §2 five-benchmark capability prior (TOG-2988).
+ * Five-benchmark capability prior.
  *
- * Supersedes the TOG-2438 agentic sub-score blend that used to live in
+ * Supersedes the earlier agentic sub-score blend that used to live in
  * `scores.ts` (`terminalbenchHard`/`tau2`/`ifbench`/`gpqa`/`hle` averaged at
  * `AGENTIC_PRIOR_BLEND = 0.3`). That blend averaged whatever aa.ai happened to
  * populate, which made a model's prior depend on aa.ai's column coverage rather
@@ -13,7 +13,7 @@
  * Each row below names a SPECIFIC published benchmark. Three of these have a
  * near-homonym on aa.ai's own leaderboard that is NOT the same measurement, and
  * silently substituting one for the other is precisely the relabelling the
- * TOG-2636 synthesis had to resolve a disagreement over:
+ * benchmark-selection synthesis had to resolve a disagreement over:
  *
  *   - `A` is **Mercor APEX 1.1** pass@1 — NOT aa.ai's `apexAgents` column.
  *   - `U` is aa.ai AutomationBench's **guardrail-adjusted partial** score
@@ -30,8 +30,10 @@
  * written under v2 and a re-tier can never silently rewrite history.
  */
 
+import { PUBLIC_FORMAT_IDENTIFIERS } from "../format-compatibility.js";
+
 /** Frozen spec identity. Bump on ANY change to identities, anchors, or weights. */
-export const BENCHMARK_SPEC_VERSION = "tog2636-v1";
+export const BENCHMARK_SPEC_VERSION = PUBLIC_FORMAT_IDENTIFIERS.tierSpecVersion;
 
 /**
  * One benchmark in the basket. `anchor` is the normalisation denominator — the

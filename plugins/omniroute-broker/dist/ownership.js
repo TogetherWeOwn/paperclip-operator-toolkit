@@ -1,13 +1,14 @@
 /**
- * omniroute-broker — who may ask for an operation (TOG-391).
+ * omniroute-broker — who may ask for an operation.
  *
  * Pure. Carried over from gh-token-broker's ownership.js, which arrived at this
- * shape the expensive way in TOG-309. Re-verified against the running host on
+ * shape the expensive way: the host's own gate refused legitimate callers.
+ * Re-verified against the running host on
  * 2026-08-25 before copying — see README "checkoutPolicy".
  *
  * ## Why the gate is here and not in the host's checkoutPolicy
  *
- * TOG-391's issue text says to use `checkoutPolicy: "always-for-agent"`. That
+ * The originating issue text says to use `checkoutPolicy: "always-for-agent"`. That
  * instruction is STALE, and following it would ship a known bug. Both halves
  * were re-confirmed against the live build at /app on 2026-08-25:
  *
@@ -26,7 +27,7 @@
  *             candidate.assigneeAgentId === actorAgentId &&
  *             sameRunLock(candidate.checkoutRunId, actorRunId))
  *     So an agent acting on review feedback, holding its own checkout while the
- *     issue sits in `in_review`, is refused 409. TOG-309 measured that against
+ *     issue sits in `in_review`, is refused 409. That was measured against
  *     the live GitHub broker: the 409 does not degrade, it kills the caller.
  *
  * Two of those three terms are authorization; the third is lifecycle:
@@ -106,7 +107,7 @@ export function assertOperationOwnership(issue, actor) {
     throw new OwnershipError("Issue is not assigned to the calling agent.", 403);
   }
 
-  // WHEN. Lifecycle, not identity — widened per TOG-309, still bounded.
+  // WHEN. Lifecycle, not identity — widened, still bounded.
   if (!OPERABLE.has(issue.status)) {
     throw new OwnershipError(
       `Issue is ${issue.status}; the broker operates only for ${OPERABLE_ISSUE_STATUSES.join(", ")} ` +

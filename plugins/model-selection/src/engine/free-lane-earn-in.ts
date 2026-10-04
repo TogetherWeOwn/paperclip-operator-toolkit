@@ -1,6 +1,48 @@
 import type { Tier } from "../constants.js";
 import { laneVerdictFor, type LaneLedger } from "./pacing.js";
-import type { Candidate, ModelEntry, ModelScore } from "./types.js";
+import { tierScoreFor } from "./scores.js";
+import type { Candidate, IssueDescriptor, ModelEntry, ModelScore } from "./types.js";
+
+/**
+ * Priorities that never take experimental earn-in traffic. Board
+ * values are `critical`/`high`/`medium`/`low`; `urgent` is carried because the
+ * dispatch sweep ranks it above all four. Compared case-insensitively —
+ * anything unrecognized is not protected.
+ */
+const EARN_IN_PROTECTED_PRIORITIES: ReadonlySet<string> = new Set(["critical", "high", "urgent"]);
+
+/**
+ * Review/gate cards never take experimental earn-in traffic. Judged
+ * on the raw card title — never inferred from anything else. Word-boundaried
+ * so "gateway" matches as its own word but prose merely containing "gate" as
+ * a substring of an unrelated word does not widen the guard.
+ */
+const REVIEW_GATE_TITLE_RE = /\b(review|reviews|reviewer|reviewing|gate|gates|gating|gateway)\b/i;
+
+export interface EarnInGuard {
+  protected: boolean;
+  reason: string | null;
+}
+
+/**
+ * Whether this card is protected from the free-lane earn-in
+ * reorder: critical/high-priority cards and review/gate cards. Pure, so both
+ * `freeEarnInCandidates` (enforcement) and `select.ts` (the trace line) read
+ * the same verdict.
+ */
+export function earnInGuardFor(
+  descriptor: Pick<IssueDescriptor, "priority" | "title"> | null | undefined,
+): EarnInGuard {
+  const priority = typeof descriptor?.priority === "string" ? descriptor.priority.trim().toLowerCase() : "";
+  if (EARN_IN_PROTECTED_PRIORITIES.has(priority)) {
+    return { protected: true, reason: `priority ${descriptor!.priority} never takes experimental earn-in traffic` };
+  }
+  const title = typeof descriptor?.title === "string" ? descriptor.title : "";
+  if (REVIEW_GATE_TITLE_RE.test(title)) {
+    return { protected: true, reason: "review/gate cards never take experimental earn-in traffic" };
+  }
+  return { protected: false, reason: null };
+}
 
 export interface FreeEarnInPick {
   candidate: Candidate;
@@ -14,7 +56,7 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * TOG-3406 rule (b), 2026-09-19 owner rule: a free subscription lane whose
+ * 2026-09-19 owner rule: a free subscription lane whose
  * credential is serviceable and under its per-account cap wins its tier over
  * a paid/earned model until it has enough observations to be judged —
  * otherwise a new subscription can never earn placement.
@@ -49,7 +91,12 @@ export function freeEarnInCandidates(
   ledger: LaneLedger,
   modelScores: Readonly<Record<string, ModelScore>> | undefined,
   requiredTier: Tier,
+  descriptor?: Pick<IssueDescriptor, "priority" | "title"> | null,
 ): FreeEarnInPick[] {
+  // Protected cards (critical/high priority, review/gate) never
+  // enter the reorder. Checked before any lane read so a protected card takes
+  // no experimental traffic regardless of lane state.
+  if (earnInGuardFor(descriptor).protected) return [];
   const picks: FreeEarnInPick[] = [];
   for (const candidate of candidates) {
     const model = modelOf(models, candidate);
@@ -57,7 +104,7 @@ export function freeEarnInCandidates(
     if (!laneId) continue;
     const verdict = laneVerdictFor(ledger, laneId);
     if (!verdict || verdict.state !== "free" || verdict.serviceable !== true) continue;
-    const tierScore = modelScores?.[candidate.modelId]?.tiers[requiredTier];
+    const tierScore = tierScoreFor(modelScores?.[candidate.modelId], requiredTier);
     if (tierScore?.proven) continue;
     if (tierScore?.capable === false) continue;
     picks.push({ candidate, laneId, observations: tierScore?.n ?? 0 });
@@ -77,8 +124,9 @@ export function freeEarnInWinner(
   ledger: LaneLedger,
   modelScores: Readonly<Record<string, ModelScore>> | undefined,
   requiredTier: Tier,
+  descriptor?: Pick<IssueDescriptor, "priority" | "title"> | null,
 ): FreeEarnInPick | null {
-  const picks = freeEarnInCandidates(candidates, models, ledger, modelScores, requiredTier);
+  const picks = freeEarnInCandidates(candidates, models, ledger, modelScores, requiredTier, descriptor);
   if (picks.length === 0) return null;
   const sorted = [...picks].sort((a, b) => {
     if (a.candidate.expectedCostUsd !== b.candidate.expectedCostUsd) {

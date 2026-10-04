@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { LANE_ID_OPENCODE_GO } from "../src/constants.js";
+import { classifyRunFailure } from "../src/engine/scores.js";
 import {
   AUTO_QUARANTINE_SECONDS,
   autoQuarantineFor,
@@ -32,12 +34,13 @@ const ROSTER: ModelEntry[] = [
   model("gpt-5.6-luna", "cliproxy-codex"),
   model("claude-sonnet-5", "cliproxy-claude"),
   model("glm-5.3", "cliproxy-zai"),
+  model("deepseek-v4-flash", LANE_ID_OPENCODE_GO),
   model("laneless-model", null),
 ];
 
 /**
  * The exact string the 2026-09-16 16:40Z outage wrote to
- * `heartbeat_runs.error`, copied from TOG-3012's own failed run. This is the
+ * `heartbeat_runs.error`, copied from a real failed run. This is the
  * one input the whole feature exists to recognise, so it is asserted verbatim
  * rather than paraphrased.
  */
@@ -46,13 +49,13 @@ const LIVE_429 =
   + "(last error: usage_limit_reached: The usage limit has been reached)";
 
 /**
- * TOG-3652 (ported from TOG-3025/PR #331). The managed-capacity family,
+ * The managed-capacity family,
  * verbatim from `heartbeat_runs.error`.
  *
  * Measured over the 14 days to 2026-09-17: 56 failed runs carried this family,
  * with ZERO overlap with the 623 matched by the original five phrases — so
  * before this was added, the quarantine could see none of them. The 63-minute
- * OpenCode Go episode these come from is what blocked TOG-3025 itself three
+ * OpenCode Go episode these come from is what blocked a single card three
  * times.
  */
 const LIVE_MANAGED_OPENCODE =
@@ -64,7 +67,7 @@ const LIVE_MANAGED_ZAI =
   "Internal error: API Error: 500 no healthy managed Z.ai capacity remains. "
   + "This is a server-side issue, usually temporary — try again in a moment.";
 
-describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", () => {
+describe("laneExhaustionFromRunFailure — managed-capacity family", () => {
   it("attributes the live OpenCode Go rejection to the failed run's own lane", () => {
     const verdict = laneExhaustionFromRunFailure({
       error: LIVE_MANAGED_OPENCODE,
@@ -109,6 +112,81 @@ describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", 
   it("refuses to guess a lane when nothing resolves — the phrase alone is not attribution", () => {
     expect(
       laneExhaustionFromRunFailure({ error: LIVE_MANAGED_OPENCODE, models: ROSTER }),
+    ).toBeNull();
+  });
+});
+
+describe("laneExhaustionFromRunFailure — subscription-lapsed 403 family", () => {
+  /**
+   * Verbatim from the 2026-09-20 host probe (re-probed 2026-09-26):
+   * `opencode-go/deepseek-v4-flash -> 403 "Upstream request failed: An active
+   * OpenCode Go subscription is required to use Go models."` The lane names
+   * itself in CLIProxy's own words, carries no roster id, and arrives as a 403
+   * — so attribution MUST come from the fallback, and the phrase must fire on
+   * the `error` text.
+   */
+  const LIVE_SUBSCRIPTION_403 =
+    'API Error: Request rejected (403) · Upstream request failed: An active OpenCode Go subscription is required to use Go models.';
+
+  it("attributes the live subscription 403 to the failed run's own Go lane", () => {
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_SUBSCRIPTION_403,
+      models: ROSTER,
+      fallbackModelId: "deepseek-v4-flash",
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict!.laneId).toBe(LANE_ID_OPENCODE_GO);
+    expect(verdict!.laneId).toBe("cliproxy-opencode-go");
+    expect(verdict!.modelId).toBe("deepseek-v4-flash");
+    // CLIProxy names the lane in its own words ("OpenCode Go"), which is not a
+    // roster id — so attribution MUST come from the fallback, not the text.
+    expect(verdict!.modelFromErrorText).toBe(false);
+  });
+
+  it("folds the subscription verdict into an auto-quarantine on the Go lane", () => {
+    const at = Date.parse("2026-09-26T04:30:00.000Z");
+    const verdict = laneExhaustionFromRunFailure({
+      error: LIVE_SUBSCRIPTION_403,
+      models: ROSTER,
+      fallbackModelId: "deepseek-v4-flash",
+    });
+    expect(verdict).not.toBeNull();
+    const addition = autoQuarantineFor(verdict!, at);
+    expect(addition.lanes).toEqual([LANE_ID_OPENCODE_GO]);
+    expect(addition.until).toBe(new Date(at + AUTO_QUARANTINE_SECONDS * 1_000).toISOString());
+    const merged = mergeLaneOutage(null, addition, new Date(at).toISOString());
+    expect(merged.lanes).toEqual([LANE_ID_OPENCODE_GO]);
+  });
+
+  it("classifies the subscription 403 as infra (weight 0), never model quality", () => {
+    expect(classifyRunFailure(LIVE_SUBSCRIPTION_403, null, "deepseek-v4-flash")).toEqual({
+      kind: "infra",
+      weight: 0,
+    });
+  });
+
+  /**
+   * The discriminator. A bare 403 and a missing-field-shaped `required` are
+   * both 403-adjacent failures that must NOT evacuate a lane: the first is an
+   * authn-shaped rejection with no exhaustion evidence, the second is a
+   * per-request shape error on a healthy lane. If this test ever fails, the
+   * phrase has been loosened past the `subscription … required` adjacency and
+   * the quarantine will start evacuating healthy lanes.
+   */
+  it("does NOT quarantine on a bare 403 or an unrelated required-field 403", () => {
+    for (const error of [
+      "API Error: Request rejected (403) · Forbidden",
+      "API Error: Request rejected (403) · subscription ID required: pass your account identifier",
+    ]) {
+      expect(
+        laneExhaustionFromRunFailure({ error, models: ROSTER, fallbackModelId: "deepseek-v4-flash" }),
+      ).toBeNull();
+    }
+  });
+
+  it("refuses to guess a lane when nothing resolves — the phrase alone is not attribution", () => {
+    expect(
+      laneExhaustionFromRunFailure({ error: LIVE_SUBSCRIPTION_403, models: ROSTER }),
     ).toBeNull();
   });
 });

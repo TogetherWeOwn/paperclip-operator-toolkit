@@ -1,5 +1,5 @@
 /**
- * The writer for the availability term (TOG-3132, AC-2).
+ * The writer for the availability term.
  *
  * WHY THIS FILE EXISTS
  *
@@ -21,11 +21,10 @@
  * from the observation means one field mapping, applied once, for both
  * consumers.
  *
- * The one thing the observation does not carry is the `subscription-pool`
- * cooldown, because no lane document publishes it yet. It is passed through
- * from the raw record when present (matched on `account_key`) so the cooldown
- * term goes live the moment a publisher emits it, rather than needing this
- * file changed again.
+ * Counts-only evidence and per-model cooldowns are validated in the observation
+ * and carried without deriving allowance windows or freezing cooldown expiry.
+ * The legacy singular account cooldown is passed through from the raw record
+ * when present (matched on `account_key`).
  *
  * PER-LANE AGE IS PRESERVED THROUGH A SINGLE-STAMP DOCUMENT
  *
@@ -155,9 +154,10 @@ export function availabilityDocumentFrom(input: {
 
   for (const result of input.results) {
     const observation = result.observation;
-    if (!observation) continue;
+    if (!observation || observation.error !== null) continue;
     const laneObservedAtMs = parseMs(observation.observedAt);
     if (laneObservedAtMs === null) continue;
+    if (observation.accounts.some((account) => account.countsOnly) && laneObservedAtMs - stampMs > 60_000) continue;
 
     for (const account of observation.accounts) {
       const remaining = remainingFreshnessSeconds(account, observation, laneObservedAtMs, stampMs);
@@ -172,8 +172,19 @@ export function availabilityDocumentFrom(input: {
         provider: result.laneId,
         account_key: account.accountKey,
         stale_after_seconds: remaining,
-        windows: windowsOf(account),
-        ...(health === null ? {} : { health }),
+        ...(account.countsOnly ? {
+          observationQuality: "counts-only",
+          requests_today: account.countsOnly.requestsToday,
+          requests_lifetime: account.countsOnly.requestsLifetime,
+          governing_window: "daily",
+          window_seconds: { daily: account.countsOnly.dailySeconds },
+          day_resets_at: account.countsOnly.dayResetsAt,
+          health: account.health,
+        } : {
+          windows: windowsOf(account),
+          ...(health === null ? {} : { health }),
+        }),
+        ...(account.modelCooldowns ? { model_cooldowns: account.modelCooldowns } : {}),
         ...(cooldown && typeof cooldown === "object" && !Array.isArray(cooldown) ? { cooldown } : {}),
       });
     }
