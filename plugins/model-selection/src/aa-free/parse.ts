@@ -1,6 +1,6 @@
 /**
  * `aa-free-v1`: parser for the official FREE-tier legacy list
- * `GET /api/v2/data/llms/models` (TOG-11549 design D1).
+ * `GET /api/v2/data/llms/models`.
  *
  * Fail-closed: returns `null` on any structural mismatch, never throws. Every
  * observed field is kept as its own observation; null is unknown, never zero.

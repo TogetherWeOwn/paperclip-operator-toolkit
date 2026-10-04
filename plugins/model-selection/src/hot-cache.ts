@@ -1,6 +1,6 @@
 /**
- * TOG-11793. A small stale-while-revalidate cache for the run-scoped decision
- * path (TOG-11780 §6): data on that path is served from memory, refreshed off
+ * A small stale-while-revalidate cache for the run-scoped decision
+ * path: data on that path is served from memory, refreshed off
  * it, and served STALE when a refresh fails — never fetched inline on a warm
  * hit, and never allowed to hold the caller past its budget on a cold one.
  *

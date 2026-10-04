@@ -18,7 +18,7 @@ import { repinAllowed, type RepinGateContext } from "../engine/pacing.js";
  *    largest cost line (ADR-0002). If the tier turns out wrong, that is a
  *    finding for the NEXT issue's labelling, not a reason to re-pin this one.
  *
- *    One narrow exception (TOG-12305): an override whose env carries secret
+ *    One narrow exception: an override whose env carries secret
  *    refs the current assignee does not carry. The host checks every
  *    `secret_ref` against the RUN's agent, so such a pin fails every wake as
  *    `configuration_incomplete` — there is no warm session left to protect.
@@ -33,7 +33,7 @@ export interface ApplyPlan {
   /**
    * The selected model id. The caller builds the full env-preserving override.
    *
-   * TOG-3045 — if you came here looking for the sub-call surface pins
+   * If you came here looking for the sub-call surface pins
    * (`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`), they are
    * NOT here. This function is pure and never sees an env map. All five override
    * write paths build their patch through `modelOverrideForContext`
@@ -54,13 +54,13 @@ export interface ApplyPlan {
   /** Why we are or are not writing. Always populated. */
   reason: string;
   /**
-   * TOG-12305. True when this write only rebuilds the env of an existing pin:
+   * True when this write only rebuilds the env of an existing pin:
    * `modelId` is the model the override ALREADY pins, never the decision's.
    */
   envRepairOnly: boolean;
 }
 
-/** TOG-12305. What `planEnvRepair` needs to know about an existing pin. */
+/** What `planEnvRepair` needs to know about an existing pin. */
 export interface EnvRepairContext {
   /** The model the existing override pins, or null when it pins none. */
   pinnedModelId: string | null;
@@ -80,14 +80,14 @@ export interface ApplyContext {
   /** Issue status. We do not re-pin work that is already finished. */
   status: string;
   /**
-   * TOG-2137. Present only when this decision was reached under
+   * Present only when this decision was reached under
    * `pacing.mode: enforce` and is a candidate for a pace-driven repin of an
    * issue that already carries an override. Absent entirely for a plain
    * (non-pacing) re-pin attempt, which keeps the pre-2137 refusal below.
    */
   paceRepin?: RepinGateContext;
   /**
-   * TOG-12305. Present when the caller read the existing pin; lets a declined
+   * Present when the caller read the existing pin; lets a declined
    * plan fall back to a same-model env repair. Absent: no repair is planned.
    */
   envRepair?: EnvRepairContext;
@@ -118,7 +118,7 @@ export function planApply(
 }
 
 /**
- * TOG-12305. A same-model env-only rewrite of an existing pin whose env carries
+ * A same-model env-only rewrite of an existing pin whose env carries
  * secret refs the current assignee does not carry, or null when none applies.
  *
  * Why this is safe against rule 2: the model does not change, so
@@ -190,7 +190,7 @@ export function tierLabelName(tier: Tier): string {
 }
 
 /**
- * TOG-12431: the single gate for every router-owned model/env pin write.
+ * The single gate for every router-owned model/env pin write.
  *
  * `planApply` refuses advisory decisions, and the engine marks a decision
  * advisory exactly when this is false — but the five scheduled/event pin

@@ -14,17 +14,18 @@ import {
 } from './expiry-week-fixtures.js';
 
 /**
- * TOG-14523: expiry-week scenario pack proving 98-100% window landing.
+ * Expiry-week scenario pack proving 98-100% window landing.
  *
- * Parent TOG-14507 under epic TOG-13439. Fixtures + unit tests only: the
+ * Fixtures + unit tests only: the
  * pacer logic under test (`AdmissionSimulator` + `evaluateBudgets`) already
  * exists. No live dispatch, no enforcement change, no credentials.
  *
- * NON-GOALS (owned elsewhere): TOG-13926 tie-break; TOG-13803 backstop
- * conflict; TOG-13934 pacing.lanes wire-up; TOG-14347 snapshot.
+ * NON-GOALS (owned elsewhere): the use-before-expiry tie-break; the
+ * weekly-pace vs 5h-backstop conflict; the pacing.lanes wire-up; the joint
+ * snapshot assembly.
  */
 
-describe('TOG-14523 expiry week: varied burn positions land at 98-100%', () => {
+describe('Expiry week: varied burn positions land at 98-100%', () => {
   it.each([
     { start: 10, landing: 0.98 },
     { start: 50, landing: 0.98 },
@@ -60,7 +61,7 @@ describe('TOG-14523 expiry week: varied burn positions land at 98-100%', () => {
   });
 });
 
-describe('TOG-14523 expiry week: behind-pace lanes catch up before reset', () => {
+describe('Expiry week: behind-pace lanes catch up before reset', () => {
   it.each([
     { start: 20, landing: 0.98, starts: 13 },
     { start: 30, landing: 0.98, starts: 17 },
@@ -76,7 +77,7 @@ describe('TOG-14523 expiry week: behind-pace lanes catch up before reset', () =>
   });
 });
 
-describe('TOG-14523 expiry week: reset boundary retires holds and opens fresh', () => {
+describe('Expiry week: reset boundary retires holds and opens fresh', () => {
   it('closes the old week with no carried debt and admits immediately in the new one', () => {
     const plan = VARIED_BURN_ACCOUNTS[0]!;
     const account = expiryWeekAccount(plan, EXPIRY_WEEK_NOW);

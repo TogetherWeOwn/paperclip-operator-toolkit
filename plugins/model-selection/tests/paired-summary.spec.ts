@@ -14,7 +14,7 @@ function record(writer: "host" | "plugin-shadow", overrides: Record<string, unkn
     schema: "tog2138-decision-v1",
     writer,
     issueId: "issue-1",
-    issueIdentifier: "TOG-1",
+    issueIdentifier: "EX-1",
     ts: "2026-09-14T12:00:00Z",
     trigger: "new-card",
     tier: "T2",
@@ -38,7 +38,7 @@ function record(writer: "host" | "plugin-shadow", overrides: Record<string, unkn
 }
 
 // Remove every scratch dir when the file finishes; unremoved they pile up in the
-// shared runner /tmp (TOG-12483).
+// shared runner /tmp.
 const scratchDirs: string[] = [];
 afterAll(() => {
   for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true });
@@ -62,7 +62,7 @@ function run(lines: unknown[]) {
   return { ...result, report, out };
 }
 
-// TOG-13566: --input also accepts a directory of UTC-hour shards.
+// --input also accepts a directory of UTC-hour shards.
 function runShardDir(files: Record<string, unknown[]>) {
   const dir = scratch();
   const shards = join(dir, "shards");

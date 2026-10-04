@@ -152,7 +152,7 @@ function countHostCalls(harness: Awaited<ReturnType<typeof boot>>["harness"]) {
   return counts;
 }
 
-describe("onResolveRunModel on the worker (TOG-11793)", () => {
+describe("onResolveRunModel on the worker", () => {
   describe("posture", () => {
     it("answers keep when the flag is off, and routes nothing", async () => {
       const { resolve, harness } = await boot(config({ runResolve: { enabled: false } }));
@@ -422,7 +422,7 @@ describe("onResolveRunModel on the worker (TOG-11793)", () => {
     });
   });
 
-  describe("latency (TOG-11780 §6: p99 <= 250 ms)", () => {
+  describe("latency", () => {
     it("holds p99 well under budget on warm caches across a mixed sticky/switch workload", async () => {
       const { resolve, harness } = await boot(config());
       const first = decide(await resolve(params()));
@@ -483,7 +483,7 @@ describe("onResolveRunModel on the worker (TOG-11793)", () => {
   });
 });
 
-describe("retiring the legacy pin writers once the flag is on (TOG-11793)", () => {
+describe("retiring the legacy pin writers once the flag is on", () => {
   const idleRow = (id: string) => ({ id, identifier: id, status: "in_progress" });
   const agentFloorRow = () => agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } });
 
@@ -590,7 +590,7 @@ describe("retiring the legacy pin writers once the flag is on (TOG-11793)", () =
   });
 });
 
-describe("manifest declaration (TOG-11793)", () => {
+describe("manifest declaration", () => {
   it("the default artifact declares neither the capability nor modelRouting, so it installs on a host without the hook", () => {
     expect(manifest.capabilities).not.toContain(RUN_MODEL_RESOLVE_CAPABILITY);
     expect(manifest).not.toHaveProperty("modelRouting");

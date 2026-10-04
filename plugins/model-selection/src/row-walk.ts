@@ -1,5 +1,5 @@
 /**
- * TOG-11688: the one hard-return-by-deadline row walk shared by every
+ * The one hard-return-by-deadline row walk shared by every
  * row-walking scheduled pass (classifyIssues, labelOnlyPass, repinPass,
  * balancePass).
  *
@@ -180,7 +180,7 @@ function updatedAtMs(row: unknown): number | null {
  * The scan mark after a walk over `rows` (fetched `updated_at asc`, read
  * back with `updated_at > mark`), or `null` to leave the mark where it is.
  *
- * - Every row settled and the fetch drained: the firing start (TOG-3585).
+ * - Every row settled and the fetch drained: the firing start.
  * - Otherwise the mark is a CURSOR: it moves past the settled prefix and
  *   stops before the first row that is unsettled, abandoned or unreached.
  *   The old rule — creep to the OLDEST examined row — re-read every examined

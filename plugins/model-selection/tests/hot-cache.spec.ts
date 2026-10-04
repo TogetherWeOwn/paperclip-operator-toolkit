@@ -18,7 +18,7 @@ const deferred = <T>() => {
   return { promise, resolve, reject };
 };
 
-describe("HotCache (TOG-11793)", () => {
+describe("HotCache", () => {
   it("serves a fresh entry without running the loader again", async () => {
     const time = clock();
     const cache = new HotCache<string>({ ttlMs: 1000, maxEntries: 10, now: time.now });

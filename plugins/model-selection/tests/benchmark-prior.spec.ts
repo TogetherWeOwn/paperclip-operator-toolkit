@@ -36,7 +36,7 @@ function statsWith(wOk: number, wBad: number): TierScoreStats {
   return { ...emptyTierScoreStats(), wOk, wBad };
 }
 
-describe("benchmark spec identity (TOG-2636 §2)", () => {
+describe("benchmark spec identity", () => {
   // Benchmark identity is load-bearing: three of the five have a near-homonym on
   // aa.ai's leaderboard that is a DIFFERENT measurement. This test is the guard
   // against a silent relabelling — the exact failure the synthesis had to
@@ -405,10 +405,10 @@ describe("applyDerivedTiers", () => {
     });
   });
 
-  // TOG-12768. The derived tier pools every tier's runs, so easy T3 wins
+  // The derived tier pools every tier's runs, so easy T3 wins
   // out-voted glm-5.3's proven T2 failure and promoted it to T1. A promotion
   // now stops at the hardest tier the model is still capable at.
-  describe("capability ceiling (TOG-12768)", () => {
+  describe("capability ceiling", () => {
     const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
     const PROVEN_PASS = stats({ n: 89, ok: 89, wOk: 89 });
     const PROVEN_FAIL = stats({ n: 44, ok: 22, failInfra: 4, failModel: 18, wOk: 21.6, wBad: 18.4 });

@@ -1,14 +1,16 @@
-// TOG-11543 frozen copy of the SERVING tier/capability evaluator. Do not edit.
+// Frozen copy of the SERVING tier/capability evaluator. Do not edit.
 //
-// Source: /paperclip/plugin-packages-root/model-selection-0.4.0-main5a9be61-t1cap080/dist/worker.js
+// Source: dist/worker.js of the serving model-selection-0.4.0-main5a9be61-t1cap080 build
+//   (path supplied at test time via TIER_POLICY_SERVING_WORKER)
 //   sha256 dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099
 //   (= main 5a9be61 + the operator's 2026-10-01 T1_CAPABILITY_THRESHOLD 0.8 carry-forward)
 // Line ranges copied byte-for-byte: 93,93, 281,285, 1464,1508, 1580,1701, 1896,1902
 // sha256 of the concatenated slices (one trailing newline): 34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65
 //
 // tier-policy-replay.spec.ts re-hashes the region between the markers below and,
-// where the serving artifact is readable, re-extracts it from worker.js. The
-// only lines outside the markers are this header and the export list.
+// where the serving artifact is readable (TIER_POLICY_SERVING_WORKER set),
+// re-extracts it from worker.js. The only lines outside the markers are this
+// header and the export list.
 // BEGIN SERVING SLICES
 var TIER_ORDER = ["T3", "T2", "T1"];
 // operator 2026-10-01 (owner-approved): T1 capability bar 0.85 -> 0.80 (t1cap080 carry-forward)

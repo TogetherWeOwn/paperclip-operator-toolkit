@@ -3,17 +3,18 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
- * TOG-2481 task #9: `tier_roster.json` (read by the still-running
- * `tier_dispatcher.py`/`model_scores.py` under
- * `~/paperclip-enterprise-company/ops/tog-1926/`) is superseded by this
+ * `tier_roster.json` (read by the still-running
+ * `tier_dispatcher.py`/`model_scores.py` of the operator's original
+ * dispatcher) is superseded by this
  * plugin's own checked-in `config/reviewed-roster.json`. This spec is the
  * permanent proof of that claim, not a one-off diff script run by hand.
  *
  * `tests/fixtures/tier_roster.snapshot.json` is a frozen copy of the host
  * file as read on 2026-09-14, the day this consolidation was verified. It is
  * deliberately NOT re-read live from the host path: this plugin must not
- * depend on `~/paperclip-enterprise-company/` at test time any more than it
- * does at run time (that dependency is exactly what TOG-2481's AC3 forbids).
+ * depend on the operator's original dispatcher host at test time any more than
+ * it does at run time (that dependency is exactly what the consolidation
+ * forbids).
  * The snapshot exists only so a future change to `reviewed-roster.json` that
  * silently drops a canonical model or an owner's dated rule fails CI, per the
  * issue's instruction to "preserve them as tests, not just code."
@@ -46,7 +47,7 @@ function canonicalId(id: string): string {
   return id.replace(/^cliproxy\//, "");
 }
 
-describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersedes tier_roster.json", () => {
+describe("roster consolidation: reviewed-roster.json supersedes tier_roster.json", () => {
   it("carries every canonical model id from the legacy roster", () => {
     const reviewedIds = new Set(reviewed.models.map((m) => canonicalId(m.id)));
     const missing = legacy.models.map((m) => canonicalId(m.id)).filter((id) => !reviewedIds.has(id));
@@ -86,10 +87,10 @@ describe("roster consolidation (TOG-2481 task #9): reviewed-roster.json supersed
       if (!reviewedModel) continue;
       if (legacyModel.enabled === reviewedModel.enabled) continue;
       // A deliberate disable is explained when the reviewed note carries a
-      // dated DISABLED marker citing the authorizing issue (e.g. TOG-3213).
+      // dated DISABLED marker recording when and why it was disabled.
       // The note-substring test above separately enforces the legacy note is kept.
       const note = reviewedModel.note ?? "";
-      if (reviewedModel.enabled === false && /DISABLED \d{4}-\d{2}-\d{2} TOG-\d+/.test(note)) continue;
+      if (reviewedModel.enabled === false && /DISABLED \d{4}-\d{2}-\d{2}\b/.test(note)) continue;
       unexplained.push(`${key}: legacy=${legacyModel.enabled} reviewed=${reviewedModel.enabled}`);
     }
     expect(unexplained).toEqual([]);

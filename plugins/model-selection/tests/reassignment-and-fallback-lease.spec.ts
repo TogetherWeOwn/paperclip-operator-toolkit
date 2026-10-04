@@ -15,7 +15,7 @@ import type { ModelEntry } from "../src/engine/types.js";
 import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
-// TOG-12234 (TOG-11780 §5, §7 items 3-4): an agent-to-agent reassignment
+// An agent-to-agent reassignment
 // re-homes the pin's env, and a pin on a fallback-only model is stamped,
 // indexed and released once a regular model can take the card again.
 
@@ -188,7 +188,7 @@ function leaseCard(id: string, stamp: PinProvenance | null, overrides: Partial<I
   });
 }
 
-describe("TOG-12234 reassignment re-homes the pin env", () => {
+describe("Reassignment re-homes the pin env", () => {
   it("rebuilds the pin from the new assignee's env before a queued run starts", async () => {
     const { harness } = await boot([card(ISSUE, { assigneeAdapterOverrides: aPin(normal) })], undefined, {
       liveRuns: QUEUED_UNSTARTED,
@@ -403,7 +403,7 @@ describe("TOG-12234 reassignment re-homes the pin env", () => {
   });
 });
 
-describe("TOG-12234 fallback lease", () => {
+describe("Fallback lease", () => {
   it("stamps and indexes the fallback pin the repin pass writes", async () => {
     const { harness } = await boot([card(ISSUE, {
       status: "in_progress", assigneeAgentId: AGENT_A, assigneeAdapterOverrides: { adapterConfig: { model: incumbent } },
@@ -531,14 +531,14 @@ describe("TOG-12234 fallback lease", () => {
   });
 });
 
-// TOG-12431 (review of the reviewer-rebased head): the three writers this
+// The three writers this
 // feature adds — the re-home rebuild, the re-home clear, and the fallback
 // lease release — take the same single gate as the five scheduled/event pin
 // sites. Advisory installs walk their rows and log their decisions, but
-// write no override: writing here reintroduced exactly the TOG-12427 defect
+// write no override: writing here reintroduced exactly the defect
 // #482 closed. Both non-enforcing postures are covered, because both
 // conjuncts of the gate are load-bearing.
-describe("TOG-12431 advisory installs gate the re-home and lease writers", () => {
+describe("Advisory installs gate the re-home and lease writers", () => {
   const ADVISORY_SELECTIONS: Array<{ name: string; selection: Record<string, unknown> }> = [
     { name: "advise", selection: { enabled: true, mode: "advise" } },
     // Disabled wins even when mode says enforce: both conjuncts are load-bearing.
@@ -556,10 +556,10 @@ describe("TOG-12431 advisory installs gate the re-home and lease writers", () =>
 
       await reassign(harness, AGENT_A, AGENT_B);
 
-      // The TOG-12427 defect: this update fired in advisory installs.
+      // The defect: this update fired in advisory installs.
       expect(writes).toEqual([]);
       // Nothing was written, so the previous assignee's env is still there —
-      // enforcement (or the TOG-12305 repair path, with its own advisory
+      // enforcement (or the pin-env repair path, with its own advisory
       // check) is what re-homes it.
       const after = await override(harness);
       expect(after?.adapterConfig?.model).toBe(normal);

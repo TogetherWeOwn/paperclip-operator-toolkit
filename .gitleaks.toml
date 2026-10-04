@@ -1,0 +1,19 @@
+title = "paperclip-operator-toolkit"
+
+[extend]
+useDefault = true
+
+# Test fixtures use obviously synthetic values. Each is listed by literal value,
+# not by path, so a real secret pasted into a test file still fails the scan.
+[[allowlists]]
+description = "Synthetic test fixtures"
+regexTarget = "line"
+regexes = [
+  '''sk-live-abc123''',
+  '''idempotencyKey: 'boundary-attempt-1\'''',
+  '''sk-1b0033d7ecfa83d4-ebc99a-bbbbbbbb''',
+  '''canary-key-9f3a2b''',
+  '''tog196-test-signing-secret''',
+  '''Bearer wrong-bearer''',
+  '''STUB_API_STATUS=""''',
+]

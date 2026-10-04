@@ -13,7 +13,7 @@ import {
 } from "./cohort.js";
 
 /**
- * TOG-12972. First-party accepted-work posterior overlay (shadow-only).
+ * First-party accepted-work posterior overlay (shadow-only).
  *
  * Folds accepted-work observations — served model x effective effort x task
  * class -> accept/rework counts — into a versioned posterior overlay consumed

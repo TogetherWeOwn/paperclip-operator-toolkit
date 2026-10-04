@@ -4,7 +4,7 @@ import { tierScoreFor } from "./scores.js";
 import type { Candidate, IssueDescriptor, ModelEntry, ModelScore } from "./types.js";
 
 /**
- * TOG-8108. Priorities that never take experimental earn-in traffic. Board
+ * Priorities that never take experimental earn-in traffic. Board
  * values are `critical`/`high`/`medium`/`low`; `urgent` is carried because the
  * dispatch sweep ranks it above all four. Compared case-insensitively —
  * anything unrecognized is not protected.
@@ -12,7 +12,7 @@ import type { Candidate, IssueDescriptor, ModelEntry, ModelScore } from "./types
 const EARN_IN_PROTECTED_PRIORITIES: ReadonlySet<string> = new Set(["critical", "high", "urgent"]);
 
 /**
- * TOG-8108. Review/gate cards never take experimental earn-in traffic. Judged
+ * Review/gate cards never take experimental earn-in traffic. Judged
  * on the raw card title — never inferred from anything else. Word-boundaried
  * so "gateway" matches as its own word but prose merely containing "gate" as
  * a substring of an unrelated word does not widen the guard.
@@ -25,7 +25,7 @@ export interface EarnInGuard {
 }
 
 /**
- * TOG-8108. Whether this card is protected from the free-lane earn-in
+ * Whether this card is protected from the free-lane earn-in
  * reorder: critical/high-priority cards and review/gate cards. Pure, so both
  * `freeEarnInCandidates` (enforcement) and `select.ts` (the trace line) read
  * the same verdict.
@@ -56,7 +56,7 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * TOG-3406 rule (b), 2026-09-19 owner rule: a free subscription lane whose
+ * 2026-09-19 owner rule: a free subscription lane whose
  * credential is serviceable and under its per-account cap wins its tier over
  * a paid/earned model until it has enough observations to be judged —
  * otherwise a new subscription can never earn placement.
@@ -93,7 +93,7 @@ export function freeEarnInCandidates(
   requiredTier: Tier,
   descriptor?: Pick<IssueDescriptor, "priority" | "title"> | null,
 ): FreeEarnInPick[] {
-  // TOG-8108: protected cards (critical/high priority, review/gate) never
+  // Protected cards (critical/high priority, review/gate) never
   // enter the reorder. Checked before any lane read so a protected card takes
   // no experimental traffic regardless of lane state.
   if (earnInGuardFor(descriptor).protected) return [];

@@ -1,5 +1,5 @@
 /**
- * The lane-evidence term (TOG-3132, second failure shape).
+ * The lane-evidence term.
  *
  * WHY THE AVAILABILITY TERM IS NOT ENOUGH
  *
@@ -16,7 +16,7 @@
  *   * `qwen3.8-max` — 0 successes in 42 dispatches in the same 24h window, and
  *     named in no incident report at all.
  *
- * Both were re-derived for this module by `ops/tog-3132/lane_evidence2.js`.
+ * Both were re-derived for this module by the lane-evidence derivation script.
  *
  * THE KEY IS `usage_json->>'model'`, AND THAT HAD TO BE CHECKED
  *

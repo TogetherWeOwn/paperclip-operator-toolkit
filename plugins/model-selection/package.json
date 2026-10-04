@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "description": "Paperclip plugin: choose the cheapest fully-capable model for each harness run, from a recorded tier judgement and a volume-aware cost term.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22"

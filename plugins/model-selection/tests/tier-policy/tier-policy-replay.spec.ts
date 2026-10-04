@@ -1,5 +1,5 @@
 /**
- * TOG-11543 P1 zero-diff replay: the data-driven `legacy-model-selection-v1`
+ * Zero-diff replay: the data-driven `legacy-model-selection-v1`
  * evaluator against a frozen, hashed copy of the SERVING evaluator
  * (`serving-evaluator-t1cap080.js`, main 5a9be61 + the operator's T1 capability
  * 0.8 carry-forward).
@@ -14,7 +14,7 @@
  * Recorded-decision parity is NOT claimed: the tog2138 decision stream records
  * each candidate's verdict but not the stats and priors that produced it.
  *
- * TOG-12768 is the one deliberate departure from the frozen evaluator:
+ * Monotone capability is the one deliberate departure from the frozen evaluator:
  * capability is now monotone in tier order. The grid compares against the
  * serving output with `enforceMonotoneCapability` applied, and a positive
  * control proves the raw serving output differs ONLY in the verdicts that rule
@@ -54,7 +54,9 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "../fixtures.js";
 import * as serving from "./serving-evaluator-t1cap080.js";
 
 const FIXTURE_PATH = fileURLToPath(new URL("./serving-evaluator-t1cap080.js", import.meta.url));
-const SERVING_WORKER = "/paperclip/plugin-packages-root/model-selection-0.4.0-main5a9be61-t1cap080/dist/worker.js";
+// Path to the serving build's dist/worker.js (model-selection-0.4.0-main5a9be61-t1cap080).
+// Unset (the default, and always in CI): the byte-for-byte re-extraction test is skipped.
+const SERVING_WORKER = process.env.TIER_POLICY_SERVING_WORKER ?? "";
 const SERVING_WORKER_SHA256 = "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099";
 const SLICES_SHA256 = "34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65";
 const SLICE_RANGES: ReadonlyArray<readonly [number, number]> = [[93, 93], [281, 285], [1464, 1508], [1580, 1701], [1896, 1902]];
@@ -75,8 +77,9 @@ describe("frozen serving evaluator", () => {
     expect(sha256(fixtureSlices())).toBe(SLICES_SHA256);
   });
 
-  // The artifact only exists on the serving host; CI has no copy.
-  it.skipIf(!existsSync(SERVING_WORKER))("re-extracts byte-for-byte from the serving worker.js", () => {
+  // The artifact only exists on the serving host; CI has no copy. Skipped unless
+  // TIER_POLICY_SERVING_WORKER points at an existing worker.js.
+  it.skipIf(!SERVING_WORKER || !existsSync(SERVING_WORKER))("re-extracts byte-for-byte from the serving worker.js", () => {
     const worker = readFileSync(SERVING_WORKER);
     expect(sha256(worker)).toBe(SERVING_WORKER_SHA256);
     const lines = worker.toString("utf8").split("\n");
@@ -170,7 +173,7 @@ type BuildFn = (
   benchmarkRow?: BenchmarkRow | null,
 ) => ModelScore;
 
-/** The frozen serving evaluator held to the TOG-12768 monotone-capability rule. */
+/** The frozen serving evaluator held to the monotone-capability rule. */
 const servingMonotone: BuildFn = (id, idx, by, tiers, row) => {
   const score = serving.buildModelScore(id, idx, by, tiers, row) as ModelScore;
   return { ...score, tiers: enforceMonotoneCapability(score.tiers) };
@@ -218,7 +221,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     expect(new Set(scores.map((s) => s.priorBasis))).toEqual(new Set(["blended", "index-only", "unscored"]));
   });
 
-  it("TOG-12768 positive control: the raw serving output differs only in the verdicts the monotone rule caps", () => {
+  it("Positive control: the raw serving output differs only in the verdicts the monotone rule caps", () => {
     const { diffs } = replayBuildModelScore(buildModelScore, serving.buildModelScore as BuildFn);
     expect(diffs.length).toBeGreaterThan(0);
     let capped = 0;
@@ -257,7 +260,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     const { diffs } = replayBuildModelScore((id, idx, by, tiers, row) => buildModelScore(id, idx, by, tiers, row, old));
     expect(diffs.length).toBeGreaterThan(0);
     // Only the T1 capability verdict may move; the cut, the prior and p never do.
-    // TOG-12768: a T1 already capped by an easier tier stays false under the
+    // A T1 already capped by an easier tier stays false under the
     // 0.85 bar, and only its provenance moves — capped becomes its own verdict.
     let flipped = 0;
     for (const d of diffs) {

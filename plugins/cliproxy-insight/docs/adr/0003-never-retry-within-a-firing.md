@@ -2,7 +2,6 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-02
-- **Card:** TOG-811 design Q4
 
 ## Context
 

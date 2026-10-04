@@ -1,13 +1,13 @@
 import { EFFORT_LADDER } from "../engine/effort.js";
 
 /**
- * TOG-12972. First-party accepted-work cohort attribution.
+ * First-party accepted-work cohort attribution.
  *
  * The strongest quality signal we own is our own accepted work: independent
  * review verdicts, rework and accepted deliverables attributed to the
- * actually-served model x effective effort x task class (TOG-11540 §4.2,
- * TOG-11549 D2). This module is the attribution half of that producer: raw
- * post-hoc observations in, exact cohort keys out.
+ * actually-served model x effective effort x task class. This module is the
+ * attribution half of that producer: raw post-hoc observations in, exact
+ * cohort keys out.
  *
  * Three coordinates, each with a real `unknown` state. Unknown is never
  * inferred away:

@@ -40,7 +40,7 @@ const ROSTER: ModelEntry[] = [
 
 /**
  * The exact string the 2026-09-16 16:40Z outage wrote to
- * `heartbeat_runs.error`, copied from TOG-3012's own failed run. This is the
+ * `heartbeat_runs.error`, copied from a real failed run. This is the
  * one input the whole feature exists to recognise, so it is asserted verbatim
  * rather than paraphrased.
  */
@@ -49,13 +49,13 @@ const LIVE_429 =
   + "(last error: usage_limit_reached: The usage limit has been reached)";
 
 /**
- * TOG-3652 (ported from TOG-3025/PR #331). The managed-capacity family,
+ * The managed-capacity family,
  * verbatim from `heartbeat_runs.error`.
  *
  * Measured over the 14 days to 2026-09-17: 56 failed runs carried this family,
  * with ZERO overlap with the 623 matched by the original five phrases — so
  * before this was added, the quarantine could see none of them. The 63-minute
- * OpenCode Go episode these come from is what blocked TOG-3025 itself three
+ * OpenCode Go episode these come from is what blocked a single card three
  * times.
  */
 const LIVE_MANAGED_OPENCODE =
@@ -67,7 +67,7 @@ const LIVE_MANAGED_ZAI =
   "Internal error: API Error: 500 no healthy managed Z.ai capacity remains. "
   + "This is a server-side issue, usually temporary — try again in a moment.";
 
-describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", () => {
+describe("laneExhaustionFromRunFailure — managed-capacity family", () => {
   it("attributes the live OpenCode Go rejection to the failed run's own lane", () => {
     const verdict = laneExhaustionFromRunFailure({
       error: LIVE_MANAGED_OPENCODE,
@@ -116,9 +116,9 @@ describe("laneExhaustionFromRunFailure — managed-capacity family (TOG-3652)", 
   });
 });
 
-describe("laneExhaustionFromRunFailure — subscription-lapsed 403 family (TOG-4812)", () => {
+describe("laneExhaustionFromRunFailure — subscription-lapsed 403 family", () => {
   /**
-   * Verbatim from the 2026-09-20 host probe on TOG-3434 (re-probed 2026-09-26):
+   * Verbatim from the 2026-09-20 host probe (re-probed 2026-09-26):
    * `opencode-go/deepseek-v4-flash -> 403 "Upstream request failed: An active
    * OpenCode Go subscription is required to use Go models."` The lane names
    * itself in CLIProxy's own words, carries no roster id, and arrives as a 403

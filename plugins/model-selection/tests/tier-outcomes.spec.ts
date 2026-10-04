@@ -11,7 +11,7 @@ import {
 import type { ModelEntry } from "../src/engine/types.js";
 
 /**
- * TOG-4959. Per-tier lane-poll outcome counters: read-only telemetry, never
+ * Per-tier lane-poll outcome counters: read-only telemetry, never
  * a routing input. Every behavioural test here is a PAIR where it matters —
  * one shape that must increment and one that must not — because a counter
  * that increments unconditionally reads green while measuring nothing.

@@ -4,18 +4,17 @@ Mints least-privilege, repo-scoped GitHub App installation tokens for agent runs
 The App private key is resolved **inside the host process** and never enters an
 agent's address space.
 
-Built for **TOG-174**. Decision record: the operator's answers on interaction
-`803f518f` — control-plane broker, delivered as a plugin rather than a core
-patch, because `api.routes.register` + `secrets.read-ref` + `http.outbound`
+Design decision: a control-plane broker, delivered as a plugin rather than a
+core patch, because `api.routes.register` + `secrets.read-ref` + `http.outbound`
 supply every piece needed and we run a pinned image.
 
 ## Why
 
 `GH_APP_PRIVATE_KEY` currently projects into agent run environments as a plain
 env var. That key mints a token with ~81 permissions across all 7 org repos,
-including `organization_administration: write` and `members: write`. Per
-**TOG-191**, every same-uid process can also read it out of `/proc`, so the
-per-agent binding list is not a boundary.
+including `organization_administration: write` and `members: write`. Every
+same-uid process can also read it out of `/proc`, so the per-agent binding list
+is not a boundary.
 
 This broker inverts the flow: the agent asks the host for a token, and only a
 narrow, short-lived, repo-scoped token crosses back.
@@ -42,7 +41,7 @@ revision of this file said otherwise. See
 
 Read-only production preflight for the task-specific external mutation gate
 added after
-[`TOG-574`](../../docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md).
+an internal incident review.
 The request carries one signed immutable grant, the exact approval-record text,
 and the exact artifact bodies. The broker:
 
@@ -114,7 +113,7 @@ Response:
 }
 ```
 
-### `ciVisibility` — what the mint can and cannot see (TOG-247)
+### `ciVisibility` — what the mint can and cannot see
 
 The default profile grants `checks:read` and `statuses:read`, so a token minted
 from it **can** observe whether its own PR passed. It does **not** grant
@@ -154,7 +153,7 @@ Measured against the live installation, 2026-08-24:
 
 That last cell is the whole decision. `actions:read` also grants full workflow
 **log** download, and logs carry whatever CI printed, including an accidentally
-echoed secret; check-run *conclusions* do not. Under TOG-191 every agent on this
+echoed secret; check-run *conclusions* do not. Every agent on this
 host shares uid 1000 and can read every other agent's environment, so granting
 the fleet a log-download capability to answer "is my PR green" is a bad trade
 when the conclusions already answer it.
@@ -195,8 +194,8 @@ intersecting with it. That is deliberate: a project must be able to grant
 intersection would quietly make the second case impossible.
 
 > **Consequence, and it bites.** A project that pins `GH_APP_PERMISSIONS` does
-> **not** inherit later additions to the default profile. When TOG-247 added
-> `checks:read` and `statuses:read`, Ops Tooling was the one project with a pin
+> **not** inherit later additions to the default profile. When
+> `checks:read` and `statuses:read` were added, Ops Tooling was the one project with a pin
 > — so it would have stayed CI-blind while the six unpinned projects gained
 > visibility, in the very repo the issue was found in. Its pin was updated by
 > hand at the same time. **If you add a permission to the default profile, audit
@@ -222,7 +221,7 @@ never stringified. Scope is derived from operator-visible literals only; a secre
 value must never become a repo name. An underivable scope is a `409`, not a
 broad mint.
 
-### The repo pins (TOG-226)
+### The repo pins
 
 The App is installed on **eight** repos, so an unscoped token would grant all
 eight. Every project pins the subset its work actually touches:
@@ -249,7 +248,7 @@ An issue with no project has no `GH_APP_REPOS` to read and gets a `409`. That is
 the **correct** outcome for the large majority of them, which do no git work at
 all — the remedy is to attach the repo-bearing ones to a project, not to give the
 broker a company-wide default repo list, which would re-widen exactly the scope
-TOG-174 narrowed.
+this broker narrowed.
 
 Two derivation sources were considered and rejected on measurement:
 
@@ -273,7 +272,7 @@ whether the code they name is **in the installation**:
 | names a repo we hold | `paperclip-ops-tooling`, `two-bot` | **yes** — attach it to the project that pins that repo |
 | names the Paperclip control plane | `server/src/services/secrets.ts` | no — no token in this installation reaches it |
 | names an upstream vendor | `omniroute@3.8.49`, `open-sse/…` | no — same |
-| names an operator-side file | `/paperclip/operator-handoff/…` | no — not version-controlled here |
+| names an operator-side file | a handoff file on the operator's host | no — not version-controlled here |
 | no git work at all | a hiring issue | no |
 
 Scanning open project-less issues for git-ish words flags ~25 of 63; only a
@@ -283,27 +282,28 @@ treating them as a broker defect sends you looking for a fix that cannot exist.
 ### The residue regenerates — this is a standing check, not a migration
 
 The 2026-08-23 sweep drove the count to zero. Within five hours it was four
-again: TOG-289 and TOG-290 were filed project-less, and TOG-289 had already
+again: two issues were filed project-less, and one of them had already
 pushed a branch to `paperclip-ops-tooling`. Every issue filed without a project
 re-opens the gap, so a number measured once says nothing about the next unbind.
 
 `../../gh_scope_residue.sh` is that check as a command. It mints nothing — it
 reads the board, and optionally asks GitHub for `tog-<n>-*` branches using a
 token the caller already has. It is the board-side half of the pair; the
-configuration-side half is `gh-app-token.js scope-check` (TOG-238), which
+configuration-side half is `gh-app-token.js scope-check`, which
 reports whether an environment survives strict mode, also without minting.
 
 Two things about it are worth knowing before you trust a zero:
 
-- **Text scanning alone misses the case that motivated it.** TOG-289 names no
-  repository anywhere in its title or body and had a branch pushed. That is why
+- **Text scanning alone misses the case that motivated it.** One of those
+  issues named no repository anywhere in its title or body and had a branch
+  pushed. That is why
   there is a branch detector, and why a text-only run reports `partial` and
   exits `3` rather than `0`.
 - **No agent can run the full sweep.** Each agent's token is scoped to its own
   project's `GH_APP_REPOS`, so it can list branches in those repos and gets
   *Resource not accessible* on the rest — measured from an Ops Tooling run
   against `kofra`. A token that could read all eight is the org-wide blast
-  radius TOG-174 removes. So the full sweep belongs host-side, an agent runs
+  radius this broker removes. So the full sweep belongs host-side, an agent runs
   `--repos <its own>`, and the union of slices is the gate. Partial coverage
   never exits `0`.
 
@@ -316,11 +316,11 @@ Each is covered by a test in `test/broker.test.mjs`.
 
 | Invariant | Why it matters |
 |---|---|
-| Only the assignee, on a live checkout, can mint | Since `checkoutPolicy` became `none` (TOG-309) this is enforced solely by `assertMintOwnership`. Assignee and run lock are unchanged from the host gate; the status set is widened to the states that hold a checkout, and still refuses the terminal ones. |
+| Only the assignee, on a live checkout, can mint | Since `checkoutPolicy` became `none` this is enforced solely by `assertMintOwnership`. Assignee and run lock are unchanged from the host gate; the status set is widened to the states that hold a checkout, and still refuses the terminal ones. |
 | `repositories` is never empty | GitHub reads an omitted/empty array as **every repo in the installation** — the exact blast radius this issue exists to remove. An underivable scope raises `409`, it does not mint. |
 | Callers may only narrow | Requesting a repo outside scope, a permission outside the profile, or a higher level is refused with `403` rather than silently clamped. |
 | The PEM never leaves the host | Resolved at mint time, passed straight to the signer, never returned, logged, or persisted. Asserted directly in the mint test. |
-| Nothing is shelled out | The JWT and token exist only as in-process strings passed to `ctx.http.fetch`, so neither lands in `/proc/<pid>/cmdline` (the **TOG-200** class of bug). |
+| Nothing is shelled out | The JWT and token exist only as in-process strings passed to `ctx.http.fetch`, so neither lands in `/proc/<pid>/cmdline`. |
 | Internal errors are not echoed | Only our own error classes carry caller-visible text; anything else becomes `"Internal broker error."`. |
 
 ### ⚠️ `checkoutPolicy` is `none`, and the gate lives in the worker
@@ -341,7 +341,7 @@ It **skips `assertCheckoutOwner` in exactly the case an attacker would choose** 
 an issue the caller does not own. With that policy, any agent could mint a
 repo-scoped token for any project in the company by naming a stale issue in it.
 
-**`always-for-agent` is what this route used to be, and TOG-309 measured it
+**`always-for-agent` is what this route used to be, and it was measured
 breaking git.** It calls `assertCheckoutOwner` unconditionally, which is the
 right shape, but that function hardcodes:
 
@@ -418,7 +418,7 @@ A permissive answer from it cannot override a broker refusal. There is a test.
 
 ### What a mint record proves about `runId`
 
-**TOG-216. Read this before quoting the mint log as evidence of who minted.**
+**Read this before quoting the mint log as evidence of who minted.**
 
 Every mint writes an activity entry carrying `agentId`, `runId` and
 `checkoutRunId`. For a credential broker, "who minted this" is the entire value
@@ -485,12 +485,13 @@ which.
 #### Why the obvious fix is wrong
 
 Refusing when `checkoutRunId` is null — "make the lock mandatory, then `runId`
-is always corroborated" — **re-breaks TOG-309 exactly.** The host adopts an
+is always corroborated" — **re-breaks the `in_review` failure exactly.** The host adopts an
 unowned lock only for an issue in `in_progress`
 (`server/dist/services/issues.js`, `adoptUnownedCheckoutRun`), so an issue in
 `in_review` or `blocked` keeps a null lock however legitimate the caller is.
 Those are two of the three mintable statuses, and `in_review` is the state whose
-`409` killed git and caused TOG-309. Do not make the lock mandatory.
+`409` killed git, and it is the failure the plugin-side gate was written to fix.
+Do not make the lock mandatory.
 
 #### What would actually close it
 
@@ -506,8 +507,7 @@ Passing it through is a one-line host change:
 actorSource: actor.actorSource,   // add to the plugin API actor input
 ```
 
-**That is upstream-only.** We run a pinned image and do not fork it, the same
-wall that stopped TOG-154 and TOG-175. **When `actorSource` becomes available,
+**That is upstream-only.** We run a pinned image and do not fork it. **When `actorSource` becomes available,
 record it beside `runId` in the mint metadata** so every record states its own
 trust level instead of leaving a reader to assume the better of the two.
 
@@ -522,13 +522,12 @@ attributes the mint to the plugin. Read `details`.
 
 ### Git operations with no issue context
 
-**The broker does not mint, and that is a decision rather than a gap** (TOG-309
-asked for it to be settled here).
+**The broker does not mint, and that is a decision rather than a gap.**
 
 There is nothing to authorize and nothing to scope: the repository ceiling is
 derived from the issue's project, so with no issue there is no non-empty
 `repositories` list — and an empty list means *every repo in the installation*,
-the exact blast radius TOG-174 exists to remove. A caller with no issue also
+the exact blast radius this broker exists to remove. A caller with no issue also
 presents no assignee and no run lock, so all three ownership terms are vacuous.
 
 `gh-app-token.js` already fails closed here: with neither `GH_APP_BROKER_ISSUE`
@@ -554,9 +553,8 @@ Instance config for the plugin:
 Install is board-gated (`POST /api/plugins/install` returns
 `403 Board access required` to an agent token), so an operator has to do this.
 
-1. Install the package into the instance plugin root
-   (`/paperclip/.paperclip/plugins`), the same place `paperclip-plugin-discord`
-   and the others live.
+1. Install the package into the instance plugin root (the host's plugin install
+   directory), the same place `paperclip-plugin-discord` and the others live.
 2. Set the config above, binding `privateKeyRef` to the existing
    `GH_APP_PRIVATE_KEY` secret.
 3. Verify the de-risk probe first:
@@ -573,9 +571,9 @@ Install is board-gated (`POST /api/plugins/install` returns
    route cannot tell you which. See
    [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 4. Then mint against a real issue the caller holds and assert the acceptance
-   criterion from TOG-174 — no `organization_*` key in `permissions`, and
+   criterion — no `organization_*` key in `permissions`, and
    `repositories` a single repo rather than all 7.
-5. **The TOG-309 acceptance check.** Do step 4 again on an issue in `in_review`,
+5. **The `in_review` acceptance check.** Do step 4 again on an issue in `in_review`,
    and follow it with a real `git ls-remote` using the minted token. That is the
    exact case that returned `409 Issue run ownership conflict` before this
    change, and the case in which the helper kills git rather than degrading. A
@@ -590,13 +588,13 @@ every push here; see `.github/workflows/ci.yml`.
 ### On the instance (agent workspace, VPS)
 
 ```bash
-ln -s /paperclip/.paperclip/plugins/node_modules node_modules   # once, per checkout
+ln -s <instance-plugin-root>/node_modules node_modules   # once, per checkout
 node --test test/broker.test.mjs
 ```
 
 > **`NODE_PATH` does not work here, however much it looks like it should.**
 > `NODE_PATH` is a CommonJS resolution mechanism and the ESM loader ignores it
-> outright, so `NODE_PATH=/paperclip/.paperclip/plugins/node_modules node --test
+> outright, so `NODE_PATH=<instance-plugin-root>/node_modules node --test
 > test/broker.test.mjs` fails `ERR_MODULE_NOT_FOUND` on `@paperclipai/shared`
 > even though the package is sitting at exactly that path. This suite is `.mjs`.
 > The symlink is what makes local runs work; the env var only makes the failure
@@ -646,7 +644,7 @@ manifest that would be rejected at install time fails here first.
 
 ## Not solved by this plugin
 
-- **TOG-191** — the PEM stays readable via `/proc` for as long as
+- **Same-uid `/proc` readability** — the PEM stays readable via `/proc` for as long as
   `GH_APP_PRIVATE_KEY` is still bound to the 8 agents. This broker makes those
   bindings *removable*; it does not remove them. Unbinding is the follow-up.
 - **App-level narrowing** — the installation still declares ~81 permissions.

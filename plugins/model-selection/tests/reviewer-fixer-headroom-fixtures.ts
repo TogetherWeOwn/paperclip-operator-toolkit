@@ -1,7 +1,7 @@
 import type { HeadroomAssignment, ReviewerFixerHeadroomInput } from "../src/reviewer-fixer-headroom.js";
 
 /**
- * TOG-14458 fixtures: reviewer/fixer headroom readout inputs.
+ * Fixtures: reviewer/fixer headroom readout inputs.
  *
  * Pure builders only; no live state, no secrets. Clock is fixed so the
  * evaluatedAt assertion is deterministic.

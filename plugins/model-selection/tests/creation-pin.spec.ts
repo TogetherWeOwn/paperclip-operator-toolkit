@@ -11,7 +11,7 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 const COMPANY = "co-1";
 const AGENT = "agent-1";
 
-// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// Freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running. The quality
 // test below builds its cards relative to `Date.now()`, so it stays
@@ -114,7 +114,7 @@ async function boot(config: Record<string, unknown>, seedIssues: Issue[] = [], a
 /**
  * Stub the classification HTTP call; record every invocation. `onCall` runs
  * inside the call, before it answers — the window in which the classifier is
- * in flight (TOG-11794).
+ * in flight.
  */
 function stubClassifier(
   harness: Awaited<ReturnType<typeof boot>>,
@@ -153,16 +153,16 @@ function pinnedModel(of: Issue): string | null {
 }
 
 /**
- * TOG-3111 AC2 + the exposure-window cut: an `issue.created` event on an
+ * Exposure-window cut: an `issue.created` event on an
  * assigned, unlabelled, idle card must classify, label AND pin in the same
  * tick — not wait for the 10-minute pass that the card's own dispatch makes
  * missable (the passes' row queries exclude cards with running runs).
  */
-describe("TOG-3111 creation-time pin", () => {
+describe("Creation-time pin", () => {
   it("classifies, labels and pins an assigned unlabelled idle card on issue.created", async () => {
-    // TOG-8108: the pin notice names the card actually pinned (seeded
-    // identifier), never the hardcoded TOG-3111 of the card that built this path.
-    const card = issue("i1", { identifier: "TOG-9999" } as Partial<Issue>);
+    // The pin notice names the card actually pinned (seeded
+    // identifier), never a hardcoded identifier baked into the code path.
+    const card = issue("i1", { identifier: "EX-9999" } as Partial<Issue>);
     const harness = await boot(baseConfig(), [card]);
     const calls = stubClassifier(harness, "T2");
 
@@ -174,12 +174,12 @@ describe("TOG-3111 creation-time pin", () => {
     expect(pinnedModel(after as Issue)).toBe("claude-sonnet-5");
     const messages = harness.activity.map((entry) => entry.message);
     expect(messages.some((m) => m.includes("classified this issue as T2"))).toBe(true);
-    expect(messages.some((m) => m.includes("TOG-9999") && m.includes("claude-sonnet-5"))).toBe(true);
-    expect(messages.some((m) => m.includes("TOG-3111"))).toBe(false);
+    expect(messages.some((m) => m.includes("EX-9999") && m.includes("claude-sonnet-5"))).toBe(true);
+    expect(messages.some((m) => m.includes("EX-3111"))).toBe(false);
   });
 
   it("labels at the classifier's tier but never writes an override while a run holds the card", async () => {
-    // The exact first-turn race (TOG-3008): the card dispatched before the
+    // The exact first-turn race: the card dispatched before the
     // event landed. A label is safe — it resets nothing — but an override on
     // a live card would reset a warm session.
     const card = issue("i1", { checkoutRunId: "run-1" });
@@ -207,7 +207,7 @@ describe("TOG-3111 creation-time pin", () => {
   });
 
   it("does nothing on issue.created for a card that has no assignee yet", async () => {
-    // `issue.created` carries no assignee (TOG-3008 §3); the assignment arm
+    // `issue.created` carries no assignee; the assignment arm
     // below owns that card. The classifier must not even be called.
     const card = issue("i1", { assigneeAgentId: null });
     const harness = await boot(baseConfig(), [card]);
@@ -241,7 +241,7 @@ describe("TOG-3111 creation-time pin", () => {
     expect(harness.activity.some((entry) => entry.message.includes("issue.updated:assignment"))).toBe(true);
   });
 
-  it("does not re-decide the model on an agent-to-agent reassignment (TOG-12234 re-homes env only)", async () => {
+  it("does not re-decide the model on an agent-to-agent reassignment", async () => {
     const card = issue("i1");
     const harness = await boot(baseConfig(), [card]);
     const calls = stubClassifier(harness, "T2");
@@ -286,13 +286,13 @@ describe("TOG-3111 creation-time pin", () => {
   });
 
   /**
-   * TOG-11632. The assignment wake queues (and often claims) the run
+   * The assignment wake queues (and often claims) the run
    * between this path's classify and advise steps, so a pin gated on strict
    * idleness aborts nearly every pin. A queued-but-unstarted run is still
    * safe: Paperclip reads the override at run START. The gate reads the
    * card's live `heartbeat_runs` rows; `executionRunId` is not consulted.
    */
-  describe("TOG-11632 queued-but-unstarted run", () => {
+  describe("Queued-but-unstarted run", () => {
     /** Route `ctx.db.query` to the card's live-run rows; everything else reads empty. */
     function stubRunRows(
       harness: Awaited<ReturnType<typeof boot>>,
@@ -472,7 +472,7 @@ describe("TOG-3111 creation-time pin", () => {
     });
 
     it("keeps the live-runs lookup on the indexed context expressions with the coalesce guard", async () => {
-      // Same shape as LAST_RUN_CONTEXT_USAGE_SQL (TOG-2862/TOG-2893): bare
+      // Same shape as LAST_RUN_CONTEXT_USAGE_SQL: bare
       // indexed branches plus the `issueId is null` guard on the task branch.
       const { CREATION_PIN_LIVE_RUNS_SQL } = await import("../src/sql.js");
       expect(CREATION_PIN_LIVE_RUNS_SQL).toContain("context_snapshot->>'issueId' = $2");
@@ -498,14 +498,14 @@ describe("TOG-3111 creation-time pin", () => {
 });
 
 /**
- * TOG-11794 (TOG-11780 §7 item 2). The first pin is decided from data already
+ * The first pin is decided from data already
  * in hand — `resolveTier()`'s judgement — and written before the classifier
  * is called; the classifier only refines it, and only while the wake's run is
  * still unstarted. These cards have an assignee whose floor model is not on
  * the roster, so the heuristic tier is `selection.defaultTier` (T2) and its
  * pick (`claude-sonnet-5`) is not the floor: the first pin is a real write.
  */
-describe("TOG-11794 event-time first pin", () => {
+describe("Event-time first pin", () => {
   const OFF_ROSTER_AGENT = agentRow({ adapterConfig: { model: "muse-spark-1.3" } });
 
   function firstPinConfig() {
@@ -576,7 +576,7 @@ describe("TOG-11794 event-time first pin", () => {
   });
 
   it("re-pins to the classified tier while the run is still queued and unstarted", async () => {
-    const harness = await boot(firstPinConfig(), [issue("i1", { identifier: "TOG-9998" } as Partial<Issue>)], [OFF_ROSTER_AGENT]);
+    const harness = await boot(firstPinConfig(), [issue("i1", { identifier: "EX-9998" } as Partial<Issue>)], [OFF_ROSTER_AGENT]);
     stubLiveRuns(harness, () => QUEUED_UNSTARTED);
     stubClassifier(harness, "T1");
 
@@ -588,7 +588,7 @@ describe("TOG-11794 event-time first pin", () => {
     const repins = harness.activity.filter((entry) => entry.message.includes("re-pinned"));
     expect(repins).toHaveLength(1);
     expect(repins[0]?.message).toContain("claude-sonnet-5 -> claude-opus-5");
-    expect(repins[0]?.message).toContain("TOG-9998");
+    expect(repins[0]?.message).toContain("EX-9998");
     expect(repins[0]?.metadata).toMatchObject({ phase: "classified-repin", from: "claude-sonnet-5" });
   });
 
@@ -675,10 +675,10 @@ describe("TOG-11794 event-time first pin", () => {
 });
 
 /**
- * TOG-3111 AC3: a card the router cannot pin must be VISIBLE — one activity
+ * A card the router cannot pin must be VISIBLE — one activity
  * notice naming the outcome and the lane states — not a silent `continue`.
  */
-describe("TOG-3111 unpinnable-card visibility", () => {
+describe("Unpinnable-card visibility", () => {
   function exhaustedLedger(laneId: string) {
     return {
       [laneId]: {
@@ -796,7 +796,7 @@ describe("TOG-3111 unpinnable-card visibility", () => {
   });
 });
 
-describe("TOG-12431 creation-time pin in advisory selection", () => {
+describe("Creation-time pin in advisory selection", () => {
   // Same gate as the scheduled passes, on the event path: the classifier
   // still runs and the tier label still lands (labels are not pins), but no
   // override is written.
@@ -808,7 +808,7 @@ describe("TOG-12431 creation-time pin in advisory selection", () => {
 
   for (const { name, selection } of ADVISORY_SELECTIONS) {
     it(`classifies and labels but never pins on issue.created in ${name} mode`, async () => {
-      const card = issue("i1", { identifier: "TOG-9999" } as Partial<Issue>);
+      const card = issue("i1", { identifier: "EX-9999" } as Partial<Issue>);
       const harness = await boot(baseConfig({ selection }), [card]);
       const calls = stubClassifier(harness, "T2");
       const seen: Array<Record<string, unknown>> = [];

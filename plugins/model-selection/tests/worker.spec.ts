@@ -25,7 +25,7 @@ const AGENT = "agent-1";
 const TIER_LABEL_ID = "lbl-t1";
 const OTHER_LABEL_ID = "lbl-other";
 
-// TOG-4384: freeze the wall clock at the fixture NOW so the seeded PROFILES
+// Freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running. The two lane
 // tests below that stamp `new Date()` explicitly stay consistent — the stamp
@@ -109,7 +109,7 @@ async function boot(
   const setup = plugin.definition.setup;
   if (!setup) throw new Error("plugin definition has no setup handler");
   await setup(harness.ctx);
-  // TOG-2438 reopen: the worker tracks its known companies from
+  // The worker tracks its known companies from
   // `onConfigChanged` replays instead of `ctx.companies.list()` — mirror the
   // host's real startup config-delivery sequence (plugin-loader.ts step 5b)
   // so the scheduled jobs under test see this company.
@@ -277,9 +277,9 @@ describe("worker", () => {
     expect(h.activity).toEqual([]);
   });
 
-  // TOG-2988: the derived tier has to reach `selectModel`, not just sit on the
+  // The derived tier has to reach `selectModel`, not just sit on the
   // stored score. Unit-testing `applyDerivedTiers` directly leaves the wiring
-  // uncovered — the same gap TOG-2373 found for the shadow emitter — so these
+  // uncovered — the same gap found earlier for the shadow emitter — so these
   // two drive the real advise path and read the model actually chosen.
   it("selects on the derived tier, not the roster's configured tier", async () => {
     // claude-sonnet-5 is configured T2. Promoted to T1 by its score, it becomes
@@ -474,7 +474,7 @@ describe("worker", () => {
           KEEP_ME: { type: "plain", value: "yes" },
           CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
           // T3 pick on the fixtures roster is haiku, so the cheap keys land there,
-          // not on the T1 pin (TOG-3116).
+          // not on the T1 pin.
           ...subCallPins("claude-opus-5", "claude-haiku-4-5-20251001"),
         },
       },
@@ -578,11 +578,11 @@ describe("worker", () => {
 
   it("resolves a legacy wrapped pin before checking the pinned lane hard stop", async () => {
     // Fixture roster carries exactly one T1 row (claude-opus-5). Pinning it
-    // while its lane is a serviceability hard stop is therefore the TOG-2137
-    // Defect 2 dead end, not an ordinary pace reorder: T2/T3 are below the
+    // while its lane is a serviceability hard stop is therefore the
+    // tier-exhausted dead end, not an ordinary pace reorder: T2/T3 are below the
     // required tier, so there is nowhere to escalate to, and the correct
     // outcome is `tier-exhausted` (no write) — same as an unwrapped pin would
-    // get. What THIS test actually guards is TOG-2426 composition: the raw
+    // get. What THIS test actually guards is wrapped-pin composition: the raw
     // `cliproxy/`-wrapped pin must still resolve to `claude-opus-5` and reach
     // its lane's hard-stop check (proven by the trace below), not silently
     // fail to match and skip the hard stop entirely.
@@ -706,7 +706,7 @@ describe("worker", () => {
   });
 
   it("reads lane evidence from heartbeat_runs and will not pin a lane proven dead", async () => {
-    // TOG-3132. The sibling test above proves the AVAILABILITY term is plumbed.
+    // The sibling test above proves the AVAILABILITY term is plumbed.
     // It cannot prove this one: `devin/*` publishes no quota contract at all,
     // which is why the availability term passed it and it took 0-for-69. The
     // only end-to-end proof that the run-outcome term reaches `selectModel` is
@@ -914,18 +914,18 @@ describe("worker", () => {
     expect(stored?.cardLedger["claude-opus-5:T1"]?.foreignRunShare).toBe(1);
   });
 
-  // TOG-4022. `usage_json.costUsd` is the serving CLI's own figure and the
+  // `usage_json.costUsd` is the serving CLI's own figure and the
   // claude-local adapter stamps `provider: "anthropic"` unconditionally
   // (execute.ts:1235-1236), so a CLIProxy lane serving somebody else's model
   // records an Anthropic-priced cost — measured 93.7x over for
   // muse-spark-1.3-contributor. These two drive the whole refreshScores path,
   // because the guard lives in the worker's row mapping and a unit test of the
   // predicate alone would still pass if the call site were removed.
-  describe("TOG-4022: provider-misattributed closing-run costs", () => {
+  describe("Provider-misattributed closing-run costs", () => {
     const MUSE = "muse-spark-1.3-contributor";
     const rosterWithMuse = [
       ...MODELS,
-      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "TOG-4022 fixture" },
+      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "Fixture" },
     ];
 
     async function ledgerForProvider(provider: string) {
@@ -1004,12 +1004,12 @@ describe("worker", () => {
       runCtx,
     );
     expect((result as { content: string }).content).toContain("not a configured roster entry");
-    // TOG-4763: rejections still carry a plain-object data (never null), so the
+    // Rejections still carry a plain-object data (never null), so the
     // gateway's structuredContent mapping never yields null.
     expect((result as { data: unknown }).data).toEqual({ ok: false, error: "unknown-model", modelId: "cliproxy/not-in-roster" });
   });
 
-  // TOG-2379: a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
+  // A lane's apiKeySecretRef is resolved inside the pollLaneCapacity
   // job, before the poll, never inside poll.ts itself.
   describe("pollLaneCapacity secret resolution", () => {
     const laneConfig = (apiKeySecretRef?: Record<string, unknown>) =>
@@ -1037,7 +1037,7 @@ describe("worker", () => {
 
     it("resolves the secret and sends it as X-Api-Key when ctx.secrets.resolve succeeds", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -1058,7 +1058,7 @@ describe("worker", () => {
       await secretHarness.runJob("pollLaneCapacity");
 
       expect(seenHeaders).toMatchObject({ "X-Api-Key": "resolved-lane-key" });
-      // TOG-2500: the host's plugin-secrets-handler.ts binds config_secret_bindings
+      // The host's plugin-secrets-handler.ts binds config_secret_bindings
       // rows by the lane's array INDEX (pacing.lanes.<n>.apiKeySecretRef), not by
       // laneId — a laneId-keyed resolve path reads back nothing after any config
       // write, since syncSecretRefsForTarget(replaceAll: true) drops non-matching rows.
@@ -1070,7 +1070,7 @@ describe("worker", () => {
       expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
     });
 
-    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N (TOG-2500)", async () => {
+    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N", async () => {
       const multiLaneConfig = baseConfig({
         pacing: {
           mode: "enforce",
@@ -1083,7 +1083,7 @@ describe("worker", () => {
             {
               laneId: "lane-b",
               statusUrl: "https://status.example.com/lane-b",
-              apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+              apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
               windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
             },
           ],
@@ -1112,7 +1112,7 @@ describe("worker", () => {
 
     it("records lane-secret-unavailable and never calls http.fetch when ctx.secrets.resolve throws", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
+        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -1159,11 +1159,11 @@ describe("worker", () => {
     });
   });
 
-  // TOG-4959. Per-tier lane-poll outcome counters: the `pollLaneCapacity` job
+  // Per-tier lane-poll outcome counters: the `pollLaneCapacity` job
   // increments them from the same results it merges into the lane ledger, and
   // `model_selection_tier_outcomes` reads them back. Read-only end to end —
   // nothing here may change which model a decision selects.
-  describe("TOG-4959 tier poll outcomes", () => {
+  describe("Tier poll outcomes", () => {
     const LANED = MODELS.map((entry) => ({
       ...entry,
       laneId: entry.id === "claude-haiku-4-5-20251001" ? "lane-zai" : "lane-claude",
@@ -1275,7 +1275,7 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137 Defect 2: tier-exhausted operator alarm", () => {
+  describe("Tier-exhausted operator alarm", () => {
     function unserviceableVerdict(laneId: string): LanePaceVerdict {
       return {
         laneId,
@@ -1378,8 +1378,8 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137/2138: shadow decision emitter wiring in worker.ts", () => {
-    // TOG-13566: emits land in the UTC-hour shard for the decision timestamp
+  describe("Shadow decision emitter wiring in worker.ts", () => {
+    // Emits land in the UTC-hour shard for the decision timestamp
     // (`decisions-YYYY-MM-DD-HHZ.jsonl`), not in a single `decisions.jsonl`.
     // The fixture clock is frozen at NOW (2026-09-10T12:00Z), so every advise()
     // in these tests lands in `decisions-2026-09-10-12Z.jsonl`. The shard name
@@ -1448,7 +1448,7 @@ describe("worker", () => {
       expect(records[0].ts).toBe(records[1].ts);
     });
 
-    it("TOG-13566: retention deletes whole old shards past retentionShards, newest pair intact", async () => {
+    it("Retention deletes whole old shards past retentionShards, newest pair intact", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       // Seed two shards from older hours directly — the emitter never writes
       // outside the current hour, so retention is the only path that removes
@@ -1467,7 +1467,7 @@ describe("worker", () => {
       expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
     });
 
-    it("TOG-13566: retention never touches the legacy single-file decisions.jsonl", async () => {
+    it("Retention never touches the legacy single-file decisions.jsonl", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       await h.ctx.localFolders.writeTextAtomic(
         COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl", '{"writer":"host","legacy":true}\n',
@@ -1478,7 +1478,7 @@ describe("worker", () => {
       expect(legacy).toContain('"legacy":true');
     });
 
-    it("TOG-13566: a write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
+    it("A write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
       h.ctx.localFolders.writeTextAtomic = async () => {
@@ -1492,7 +1492,7 @@ describe("worker", () => {
       h.ctx.localFolders.writeTextAtomic = originalWrite;
     });
 
-    it("TOG-2373: a transient read failure after existing records aborts the emit instead of truncating history", async () => {
+    it("A transient read failure after existing records aborts the emit instead of truncating history", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
@@ -1519,7 +1519,7 @@ describe("worker", () => {
       ).toBe(true);
     });
 
-    it("TOG-2373: two overlapping emits both land instead of collapsing to one record", async () => {
+    it("Two overlapping emits both land instead of collapsing to one record", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
 
       await Promise.all([
@@ -1534,7 +1534,7 @@ describe("worker", () => {
     });
   });
 
-  describe("TOG-2137 Defect 3: ancillary model pin drift", () => {
+  describe("Ancillary model pin drift", () => {
     function agentWith(overrides: Record<string, unknown>) {
       return {
         id: "agent-drift",

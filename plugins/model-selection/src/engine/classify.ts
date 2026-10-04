@@ -5,7 +5,7 @@ import type { Tier } from "../constants.js";
  * Every word here is an operator-reviewed classification policy, not engine
  * code — changing it is a policy change, not a refactor.
  *
- * TOG-3200 (2026-09-17) amends it for the first time. The three tier
+ * A 2026-09-17 amendment changes it for the first time. The three tier
  * DEFINITIONS are unchanged. What is added is a block of per-class anchors and
  * a bound on the closing tie-break, both from measurement rather than taste:
  *

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-// TOG-3049 positive control. This spec sits one directory below the rest of
+// Positive control. This spec sits one directory below the rest of
 // tests/, so its read needs one more `../` than a top-level spec's to reach
 // the repo root. Without a nested case like this, the recursive,
 // depth-agnostic fixture scan in mutation-gate-runtime.spec.ts is

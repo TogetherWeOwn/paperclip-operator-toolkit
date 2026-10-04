@@ -27,7 +27,7 @@ export interface LaneSourceDefinition {
   lane: LanePaceDefinition;
   policy?: PacePolicy;
   /**
-   * Already-resolved secret value (TOG-2379), never a secret reference — the
+   * Already-resolved secret value, never a secret reference — the
    * caller resolves `apiKeySecretRef` via `ctx.secrets.resolve()` before
    * building this, so this module stays free of any SDK dependency. Sent as
    * `X-Api-Key`, matching the live Caddy matcher and paperclip-model-router's
@@ -55,7 +55,7 @@ export interface LanePollResult {
    * applied the lane's field mapping and is what everything downstream reads;
    * this is retained only so `availability-source.ts` can pass through fields
    * the pace normalizer has no use for — today that is the `subscription-pool`
-   * cooldown (TOG-3132 AC-2). Absent when the document carried no array there.
+   * cooldown. Absent when the document carried no array there.
    */
   rawRecords?: readonly unknown[];
   /** Null on a clean poll. Fail-neutral: an error here never throws upstream. */

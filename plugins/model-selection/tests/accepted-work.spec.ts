@@ -24,7 +24,7 @@ import {
 } from "../src/accepted-work/posterior.js";
 
 /**
- * TOG-12972. First-party accepted-work posterior producer (shadow-only).
+ * First-party accepted-work posterior producer (shadow-only).
  *
  * Every behavioural test here is a PAIR where the guard matters: one shape
  * that must attribute and one that must stay unknown — because an

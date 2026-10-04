@@ -1,5 +1,5 @@
 /**
- * TOG-11543 P1: tiers as data (TOG-11549 design D3/D4/D6).
+ * Tiers as data.
  *
  * Before this module the tier ladder was three hard-coded lookups: the tier CUT
  * (`SCORE_THRESHOLDS` in `tierForPosterior`/`deriveModelTier`/`tierImpliedByIndex`)

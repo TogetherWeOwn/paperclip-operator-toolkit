@@ -4,7 +4,7 @@ export const REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
        coalesce(error_code,'') as error_code,
        left(coalesce(error,''),200) as error,
        coalesce(usage_json->>'costUsd','') as cost_usd,
-       -- TOG-4022: see REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
+       -- See REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
        -- the score rows' okCost sample.
        coalesce(usage_json->>'provider','') as provider,
        extract(epoch from (finished_at - started_at))/60.0 as mins,
@@ -18,7 +18,7 @@ export const REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
    and finished_at is not null`;
 
 /**
- * TOG-2862. The most recent heartbeat run's context usage for ONE issue.
+ * The most recent heartbeat run's context usage for ONE issue.
  *
  * Deliberately two index-matching branches rather than the single
  * `coalesce(context_snapshot->>'issueId', context_snapshot->>'taskId') = $2`
@@ -96,7 +96,7 @@ export const INDEXED_RUN_CONTEXT_EXPRESSIONS = [
 ] as const;
 
 /**
- * TOG-11632. The live (queued or running) runs attributed to a card.
+ * The live (queued or running) runs attributed to a card.
  *
  * The creation pin may write under a queued-but-unstarted run, so it needs
  * every live run's `status`/`started_at`, not one run by id: this fork does
@@ -105,7 +105,7 @@ export const INDEXED_RUN_CONTEXT_EXPRESSIONS = [
  * like {@link LAST_RUN_CONTEXT_USAGE_SQL} — bare `context_snapshot->>'issueId'`
  * / `->>'taskId'` expressions with the same leading `company_id` and
  * `created_at desc` ordering, plus the `issueId is null` guard on the task
- * branch preserving `coalesce` attribution (TOG-2893). Alias-free after
+ * branch preserving `coalesce` attribution. Alias-free after
  * `from` for the host guard (`tests/sql-guard.spec.ts`).
  */
 export const CREATION_PIN_LIVE_RUNS_SQL = `select status as status,
@@ -137,7 +137,7 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
        usage_json->>'model' as model,
        coalesce(agent_id::text,'') as agent_id,
        coalesce(usage_json->>'costUsd','') as cost_usd,
-       -- TOG-4022: which provider's price table produced cost_usd. The Claude
+       -- Which provider's price table produced cost_usd. The Claude
        -- CLI lane stamps 'anthropic' for every model it serves, including the
        -- CLIProxy lanes serving Meta/Devin models, so cost_usd is only
        -- evidence once this column agrees with the model. See
@@ -151,7 +151,7 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
    and usage_json ? 'model'`;
 
 /**
- * TOG-3132: per-model run outcomes, the input to the lane-evidence term.
+ * Per-model run outcomes, the input to the lane-evidence term.
  * Aggregated to lanes in `worker.ts`, because the model -> lane map lives in
  * config and not in the database.
  *
@@ -175,8 +175,8 @@ export const LANE_EVIDENCE_RUNS_SQL = `select usage_json->>'model' as model,
  group by 1`;
 
 /**
- * TOG-11793. The host's record of one run's model decision
- * (`contextSnapshot.modelDecision`, TOG-11792), read by run id. The sticky
+ * The host's record of one run's model decision
+ * (`contextSnapshot.modelDecision`), read by run id. The sticky
  * rule's database fallback: the decision cache answers first, and this runs
  * only on a miss (worker restart, another instance's decision). Alias-free
  * after `from` for the host guard (`tests/sql-guard.spec.ts`).
@@ -188,7 +188,7 @@ export const PREVIOUS_RUN_DECISION_SQL = `select context_snapshot->'modelDecisio
  limit 1`;
 
 /**
- * TOG-11793. The models of live routed runs: the run-scoped analogue of the
+ * The models of live routed runs: the run-scoped analogue of the
  * `todo`/`in_progress` pinned-model read behind `activePinsWeightByLane`. With
  * pins retired the issue rows no longer name the model a lane is carrying, the
  * decided runs do. Read by the snapshot refresh only, never on the decision

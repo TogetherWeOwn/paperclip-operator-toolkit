@@ -78,10 +78,10 @@ async function readConfig(ctx, companyId) {
  * Every input here comes from the host, not from the request body.
  */
 /**
- * Ask the host to reconcile the checkout lock before we read it (TOG-309).
+ * Ask the host to reconcile the checkout lock before we read it.
  *
- * We are NOT using this as the gate — its status term is exactly what TOG-309
- * widened, so it refuses legitimate in_review callers. We call it for the two
+ * We are NOT using this as the gate — its status term is exactly what
+ * ownership.js widens, so it refuses legitimate in_review callers. We call it for the two
  * things it does *before* it evaluates anything: it clears a checkout lock whose
  * holding run has terminated, and it adopts an unowned lock for the caller.
  * Without this, an issue whose previous run crashed would keep a dead lock
@@ -501,7 +501,7 @@ async function handleMint(ctx, input) {
     metadata: {
       agentId: input.actor.agentId,
       runId: input.actor.runId ?? null,
-      // TOG-309. The gate now lives in the broker, so the audit trail has to
+      // The gate now lives in the broker, so the audit trail has to
       // record which lifecycle state and which lock the mint was authorised
       // under — otherwise a widened status set is invisible after the fact.
       issueStatus: ownership.status,
@@ -516,7 +516,7 @@ async function handleMint(ctx, input) {
 
   // Derived from what GitHub actually granted, not from what we asked for. If
   // the App's own ceiling is narrower than the profile, the caller must be told
-  // it is blind based on the real grant. (TOG-247)
+  // it is blind based on the real grant.
   const granted = result.permissions ?? scope.permissions;
 
   return json(200, {

@@ -1,5 +1,5 @@
 /**
- * The availability term (TOG-3132).
+ * The availability term.
  *
  * WHY THIS FILE EXISTS, MEASURED
  *
@@ -32,12 +32,12 @@
  *
  * Allowance records mirror those three conditions. Validated counts-only
  * records instead carry positive serviceability with unknown pace and no quota
- * windows (TOG-11601); the selector applies their exact-model cooldowns.
+ * windows; the selector applies their exact-model cooldowns.
  * Guessing counts-only from missing utilization would bypass the allowance gate.
  *
  * COOLDOWN EXCLUDES HERE — IT DOES NOT MERELY DOWN-RANK
  *
- * Measured on TOG-811 against the real `router/src/capacity/normalize.ts`:
+ * Measured against the real `router/src/capacity/normalize.ts`:
  * `health: "cooldown"` lands in that module's *degraded* bucket, `postureFor`
  * turns degraded into `avoid`, and an avoided lane stays selectable. A lane
  * publishing a cooldown would look handled and keep taking traffic. This
@@ -50,7 +50,7 @@
  *
  * The second half of that same result: a record carrying a cooldown and no
  * utilization window yields zero evidence in the router's normalizer, and a
- * consumer with zero evidence FAILS OPEN (TOG-1040). So the cooldown here is
+ * consumer with zero evidence FAILS OPEN. So the cooldown here is
  * evaluated on the record directly and independently of the windows. A record
  * with a live `cooldown` is unavailable whether or not it carries a single
  * usable window, and whether or not `health` reads `healthy`.

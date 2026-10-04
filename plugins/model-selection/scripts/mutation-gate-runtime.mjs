@@ -35,21 +35,21 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // `../../../` URL. Mutants run from a scratch copy rooted elsewhere, so any
 // such file that is not staged makes its spec throw ENOENT — and the mutant
 // loop scores every nonzero exit as a kill, so an unrunnable suite reports a
-// clean sweep while testing nothing (TOG-2980: an unmutated run from the copy
+// clean sweep while testing nothing (an unmutated run from the copy
 // exited 1 on `.github/workflows/ci.yml`, making `18/18 killed` meaningless).
 // This list is the fix; `isolated baseline` in mutation-gate.mjs is what keeps
 // it honest, because a new out-of-copy dependency fails there rather than
 // silently passing here.
 //
-// TOG-3030: that honesty has now been paid out once. `test/fixtures/orgdb/
+// That honesty has now been paid out once. `test/fixtures/orgdb/
 // schema.sql` is read by `context-lookup.spec.ts`, which did not exist on this
-// branch — it arrived from main in the merge-forward (TOG-870, #205). The gate
+// branch — it arrived from main in the merge-forward. The gate
 // went red on the isolated baseline at 21s, before the first mutant, rather
 // than inflating to a clean 20/20 on an unstaged fixture. Expect this list to
 // need an entry whenever main adds an out-of-plugin read; the
 // "stages every repo file the suite reads from outside the plugin" spec names
 // the missing path, so the fix is mechanical.
-// TOG-3049: `CONTRIBUTING.md` is read by tests/fixture-scan-control/
+// `CONTRIBUTING.md` is read by tests/fixture-scan-control/
 // nested-out-of-plugin-read.spec.ts, a spec deliberately nested one directory
 // under tests/ so the scan test proves it walks subdirectories and resolves
 // `../` depth relative to each spec's own location, not a fixed count.
@@ -64,7 +64,7 @@ export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATI
   for (const relativePath of fixtures) {
     const target = join(scratchRoot, relativePath);
     // Mirror the checkout: a fixture that is absent from this repository (the
-    // TOG-2138 gate harness stays in the private operations repo) stays absent
+    // gate harness stays in the private operations repo) stays absent
     // in the mutation tree, and the spec that reads it skips on its own.
     if (!existsSync(join(repoRoot, relativePath))) continue;
     await mkdir(dirname(target), { recursive: true });
@@ -123,7 +123,7 @@ export function selectMutationShard(items, shard) {
 // flags. Either alone would be fragile: the flags without the pool would cap an
 // idle pool again, and the env var without the flags depends on a config
 // default that is not ours to hold still.
-// TOG-3129: the default used to be conditional — `if (env.CI !== "true")` — so
+// The default used to be conditional — `if (env.CI !== "true")` — so
 // the cap applied everywhere EXCEPT the one context the refusal above permits.
 // `ci.yml` sets no VITEST_* for the `model-selection suite` job, and that job
 // runs on `[self-hosted, two-selfhosted]`, so bare `{ CI: "true" }` produced
@@ -132,7 +132,7 @@ export function selectMutationShard(items, shard) {
 // an explicit VITEST_MAX_FORKS/VITEST_MAX_THREADS still wins over it.
 export const MUTATION_GATE_DEFAULT_FORKS = 2;
 
-// TOG-3129. A single wedged run must not be able to spend the whole job budget.
+// A single wedged run must not be able to spend the whole job budget.
 // `spawnSync` with no `timeout` blocks forever, so one hung mutant consumed
 // `timeout-minutes` and the job died with an opaque "cancelled" and no mutant
 // name — the aggregate budget was the only bound on an individual run. Each run

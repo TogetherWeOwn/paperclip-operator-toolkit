@@ -4607,21 +4607,101 @@ jobs:
       # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access.
       # It is designed for the operator's environment, not for CI. The operator
       # must run it separately on the archive extract.
-      # The host loads dist/worker.js, not src/. dist/ is TRACKED here, so a PR
-      # that changes src/ without committing the rebuilt bundle merges green and
-      # deploys a no-op. The build step above cannot catch it: it rebuilds into
-      # the working tree and says nothing about whether the committed bytes
-      # match. This does. Build is deterministic (esbuild pinned in
-      # package-lock, relative sourcemap paths), so a diff here is a stale
-      # commit, never machine drift.
-      - name: Fail if the committed dist/ is stale
+
+  # The durable per-upstream-provider usage/cooldown telemetry plugin. It polls a
+  # sanitized lane read-only and persists what it sees. Its own job, like
+  # dispatch-suite: a failure should read as "the cliproxy-insight suite went
+  # red", not as one opaque "CI failed". Offline: no credential, network or host.
+  # Gated on EXIT STATUS, never on a test count.
+  cliproxy-insight-suite:
+    name: cliproxy-insight suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: plugins/cliproxy-insight
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: the version the instance runs plugins on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/cliproxy-insight/package-lock.json
+
+      # --include=dev is required: the SDK is a devDependency (the host supplies
+      # it at runtime) and npm implies --omit=dev when NODE_ENV is `production`.
+      - name: Install pinned host packages
+        run: npm ci --include=dev --ignore-scripts
+
+      - name: Verify the install actually landed
         run: |
           set -euo pipefail
-          if ! git diff --exit-code -- dist; then
-            echo "::error::plugins/model-selection/dist is stale — src/ changed without a rebuild. Run 'npm run build' in plugins/model-selection and commit dist/."
+          [ -d "node_modules/@paperclipai/plugin-sdk" ] || {
+            echo "::error::@paperclipai/plugin-sdk is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
             exit 1
-          fi
-          echo "dist ok: committed bundle matches src"
+          }
+          echo "install ok: plugin-sdk present"
+
+      # Typecheck first: a type error is a cheaper signal than a test failure.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: cliproxy-insight suite
+        run: npm test
+
+      # dist/ is build output and is not tracked; the release process builds it.
+      # This proves the bundle still builds.
+      - name: Verify the plugin builds
+        run: npm run build
+
+  # The plugin tree is published; it carries no internal tracker IDs, hostnames,
+  # private addresses or host-local paths. The self-test proves each pattern can
+  # actually fail the scan before the real tree is judged.
+  disclosure-scan:
+    name: disclosure scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disclosure scan self-test
+        run: bash scripts/test_disclosure_scan.sh
+
+      - name: Disclosure scan over plugins/
+        run: bash scripts/disclosure-scan.sh plugins
+
+  # Secret scan over the full history. Pinned binary, checksum-verified, no
+  # third-party action: the org-licensed action is not needed for a public repo.
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
+
+      # Scans every commit reachable from the checkout, not just the PR diff.
+      - name: gitleaks detect
+        run: gitleaks detect --source . --redact --no-banner --verbose
 
   # Runs only when something above failed and names the failed jobs. It needs
   # every suite so a red run always leaves a pointer; the sharded mutation
@@ -4639,6 +4719,9 @@ jobs:
       - omniroute-broker-suite
       - dispatch-suite
       - mcp-suite
+      - cliproxy-insight-suite
+      - disclosure-scan
+      - secret-scan
       - model-selection-impact
       - model-selection-mutants
       - model-selection-suite

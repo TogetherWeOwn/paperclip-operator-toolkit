@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — manifest (TOG-391).
+ * omniroute-broker — manifest.
  *
  * OmniRoute's management credential can register a provider AND read every
  * other key's plaintext, across every company on this box. No narrower
@@ -113,11 +113,11 @@ export const manifest = {
   //       It SKIPS assertCheckoutOwner in exactly the case an attacker would
   //       choose — an issue the caller does not own.
   //
-  //   "always-for-agent" — what TOG-391's issue text asks for. That instruction
+  //   "always-for-agent" — what the originating issue text asks for. That instruction
   //       is STALE. It calls assertCheckoutOwner unconditionally, and that
   //       function hardcodes the status term (server/dist/services/issues.js:6325
   //       requires status === "in_progress"), so it refuses an agent working its
-  //       own issue in in_review. TOG-309 measured that against the live GitHub
+  //       own issue in in_review. That was measured against the live GitHub
   //       broker and it killed the caller. The reference plugin has since moved
   //       OFF this policy for exactly this reason.
   //
@@ -141,7 +141,7 @@ export const manifest = {
       },
       managementKeyRef: {
         // Pinned to the host's secret-ref shape rather than left open. Per
-        // TOG-228, `format: "secret-ref"` validates NOTHING — the host registers
+        // `format: "secret-ref"` validates NOTHING — the host registers
         // it as `ajv.addFormat("secret-ref", {validate: () => true})` — so the
         // shape has to be pinned here or a pasted plaintext key would be
         // accepted and stored verbatim in the config row.

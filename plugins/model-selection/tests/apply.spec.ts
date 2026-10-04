@@ -89,7 +89,7 @@ describe("write policy", () => {
     expect(plan.reason).toContain("held-at-floor");
   });
 
-  it("TOG-12431: selectionWritesAllowed is true only for enabled + enforce", () => {
+  it("SelectionWritesAllowed is true only for enabled + enforce", () => {
     // The single gate every router-owned pin site checks. Both conjuncts
     // matter: advise mode computes without writing, and selection disabled
     // writes nothing regardless of mode.
@@ -99,7 +99,7 @@ describe("write policy", () => {
     expect(selectionWritesAllowed({ selection: { enabled: false, mode: "advise" } })).toBe(false);
   });
 
-  it("TOG-3210: never writes a wake-scoped decision, even in enforce mode — the card's real tier survives untouched", () => {
+  it("Never writes a wake-scoped decision, even in enforce mode — the card's real tier survives untouched", () => {
     const wakeScoped = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },

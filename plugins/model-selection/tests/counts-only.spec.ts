@@ -10,7 +10,7 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-// Identity-redacted operator projections, observed 2026-10-01 15:47Z (TOG-11601).
+// Identity-redacted operator projections, observed 2026-10-01 15:47Z.
 // The test clock/envelope is synthetic; envelope timestamp spelling was not supplied.
 function record(provider: "devin" | "xai", overrides: Record<string, unknown> = {}) {
   return {

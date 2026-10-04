@@ -1,7 +1,7 @@
 /**
- * omniroute-broker — audit discipline (TOG-391).
+ * omniroute-broker — audit discipline.
  *
- * Carries over TOG-151-omniroute_combo_cli.sh `[RESOLVED-8]`, which was written
+ * Carries over the earlier shell CLI's (`omniroute_combo_cli.sh`) `[RESOLVED-8]`, which was written
  * after a measured failure on v0.2.4: an unwritable log directory produced a
  * bare "Permission denied" AFTER the PUT had already been applied, with no
  * record written and nothing on screen saying the combo had changed. That is

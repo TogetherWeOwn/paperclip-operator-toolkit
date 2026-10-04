@@ -53,7 +53,7 @@ export function tierOfModel(modelId: string | null | undefined, models: readonly
 
 export interface ResolveTierOptions {
   /**
-   * TOG-2137, Defect 6. Whether a given model's lane is currently a
+   * Whether a given model's lane is currently a
    * serviceability hard stop (same check `hardStopExcluded` applies in
    * `select.ts`). When the model an issue is pinned to fails this check, the
    * pin can no longer win outright — a `pinnedModelId` that hard-bypasses

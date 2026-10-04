@@ -1,11 +1,11 @@
 # Run-scoped model decision (`onResolveRunModel`)
 
-TOG-11793, from TOG-11780 §4.3 and §6. The router decides each issue run's model
-at the run's start, from memory, instead of pinning the issue and racing the run.
+The router decides each issue run's model at the run's start, from memory,
+instead of pinning the issue and racing the run.
 
 ## What it is
 
-The fork host (TOG-11792) calls `onResolveRunModel` inside `executeRun`, before
+The fork host calls `onResolveRunModel` inside `executeRun`, before
 the adapter config merge, with a deadline (1500 ms by default). The plugin answers:
 
 | Answer | Meaning |
@@ -68,8 +68,8 @@ Two switches, both needed, and a build made for the fork host:
    artifact omits them: a host without the hook rejects an unknown capability at
    install, so the default build installs everywhere. The capability has one holder
    per company.
-2. **Config** `runResolve.enabled: true` and `selection.mode: "enforce"`. The
-   enforce gate is TOG-12431's; `runResolve` alone retires nothing.
+2. **Config** `runResolve.enabled: true` and `selection.mode: "enforce"`. Enabling
+   enforcement is a separate, gated decision; `runResolve` alone retires nothing.
 3. **Host** `experimental.requireRunModelDecision` (default off). Off, the host
    records the answer and runs on the default: use that to measure fidelity before
    requiring it.

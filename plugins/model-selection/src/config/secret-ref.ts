@@ -11,7 +11,7 @@
  * exactly as submitted.
  *
  * Ported from paperclip-model-router's `src/config/secret-ref.ts` (same
- * validator, same accepted shape — TOG-2379).
+ * validator, same accepted shape).
  */
 
 /** Fields the Paperclip secret picker may legitimately submit. */

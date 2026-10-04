@@ -58,7 +58,7 @@ function laneForNewModel(model, availableLaneIds) {
     [/^(?:gpt-|codex-)/, "cliproxy-codex"],
     [/^kimi-/, "cliproxy-kimi"],
     [/^glm-/, "cliproxy-zai"],
-    // TOG-14066 (MUSE slice of TOG-13513): the bridge MUSE choice is the
+    // The bridge MUSE choice is the
     // subscription Meta route. The bare `muse-*` form (no `-free` suffix) is
     // never a zero-cost Zen row — `isZeroCostZenModel` above already returned
     // for those — so it lands on the first `cliproxy-meta` lane the live

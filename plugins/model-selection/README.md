@@ -4,7 +4,7 @@ Chooses the cheapest fully-capable model for each harness run, keyed on a
 **recorded tier judgement** and ordered by a **volume-aware cost term** measured
 from this company's own runs.
 
-Built per TOG-768 against the TOG-734 design, ADR-0002/0004/0005/0008/0010 and
+Built against the original router design, ADR-0002/0004/0005/0008/0010 and
 the Round-4 record.
 
 ---
@@ -238,13 +238,13 @@ initial pins and idle repins.
 **This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T1"`,
 `holdOnUntrustedProfile: true`. Installing it changes no live selection variable.
 
-Per the TOG-768 constraint, enforcement must not be switched on until Stage 2
+Per the original shipping constraint, enforcement must not be switched on until Stage 2
 (`tier:T1/T2/T3` labels + narrow-slice rollout) is confirmed stable. **Never
 change two live selection variables in one measurement window** — if
 enforcement flips while the Stage 2 slice is still moving, neither result is
 readable.
 
-**Measured Stage 2 state as of 2026-08-31 (TOG-768 review):** the three company
+**Measured Stage 2 state as of 2026-08-31:** the three company
 labels `tier:T1` / `tier:T2` / `tier:T3` exist (created 07:38:46Z), but **0 of
 300 issues carry any tier label** — every issue returns an empty `labels` and
 `labelIds`. Stage 2 is *created*, not *rolled out*. Consequences, both by design:
@@ -284,8 +284,9 @@ UTC-hour shard in `shadow-decisions/` (`decisions-YYYY-MM-DD-HHZ.jsonl`): one
 tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
 timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
-the comparison stream without restoring the host `tier_dispatcher.py` retired
-by TOG-2481 or adding a second actuator.
+the comparison stream without restoring the host `tier_dispatcher.py` that was
+retired when the standalone host dispatcher was absorbed into this plugin, or
+adding a second actuator.
 
 Shards stay small on purpose: each hourly shard is rewritten whole on every
 append and capped at `shadowEmit.shardMaxRecords` (default 200, pair-aligned
@@ -302,9 +303,12 @@ A bounded interval can be split by writer without copying or changing records:
 cat shadow-decisions/decisions-*.jsonl > interval.jsonl
 jq -c 'select(.writer == "host")' interval.jsonl > host.jsonl
 jq -c 'select(.writer == "plugin-shadow")' interval.jsonl > shadow.jsonl
-python3 "$COMPANY_ROOT/ops/tog-2138/gate_harness.py" agreement \
+python3 "$GATE_HARNESS" agreement \
   --host host.jsonl --shadow shadow.jsonl --out agreement.json
 ```
+
+`$GATE_HARNESS` is the operator-held gate harness script; it is maintained
+privately and is not part of this repository.
 
 The agreement command deliberately remains nonzero until the separate
 48-hour/200-decision clean-window gate is satisfied. For a reproducible bounded
@@ -331,7 +335,8 @@ Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
 configuring its existing `shadow-decisions` local folder. Preserve the complete
 live config with a parsed read-merge-write and readback; do not use a textual
 `replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
-or secret references. TOG-2500 remains a prerequisite for any live config
+or secret references. Resolving lane secrets by config index (so that lane N's
+secret reference resolves correctly) remains a prerequisite for any live config
 write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
 shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
@@ -362,8 +367,8 @@ preserves the complete live `pacing` object (including secret references), and
 adds a provider lane to new rows only when the mapping is unambiguous. It refuses
 to write when fewer than 25 models are lane-bound, a live binding or pacing field
 changes, canonical rows collide, or an enabled model is outside pacing. The last
-guard deliberately blocks enabled Z.ai rows until TOG-2424 supplies a real Z.ai
-lane; assigning them to OpenCode Go would make capacity attribution false.
+guard deliberately blocks enabled Z.ai rows until a real Z.ai lane is
+supplied; assigning them to OpenCode Go would make capacity attribution false.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
 it is operator-supplied because the plugin genuinely cannot look one up. There is
@@ -375,7 +380,7 @@ additive information rather than a gate (ADR-0008).
 
 ---
 
-## Slices 2–4 (TOG-2136): scores, cost shadowing, bounded T1 earn-in
+## Slices 2–4: scores, cost shadowing, bounded T1 earn-in
 
 Approved decisions A and B, implemented **without changing production
 selection** — objective stays `list-price` and earn-in stays disabled until
@@ -405,7 +410,7 @@ rejection ("rework") signals are folded in as soft evidence (`failModel`/
 via captured `ctx.events` state, never a live `activity_log` read — that table
 is also outside the allowlist.
 
-Alongside `modelScores`, the same job builds the TOG-1917 §2.2 card-level
+Alongside `modelScores`, the same job builds the card-level
 acceptance ledger (`buildCardLedger`): each closed card is `pending` (excluded
 from both accepted/rejected) until 14 days past close (`CARD_CENSOR_DAYS`)
 unless it was rejected first, in which case it counts immediately. Both are
@@ -424,9 +429,8 @@ default.
 
 ### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
 
-`planEarnIn` / `recordEarnInOutcome` are pure decision functions — TOG-1917 §3
-/ TOG-2048 decision B — covered by `tests/earnIn.spec.ts` but **not called
-from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions, covered by
+`tests/earnIn.spec.ts` but **not called from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
 these functions, and the shipped config keeps `earnIn.enabled: false`
 regardless. Gates implemented, in order: enabled check → sticky stop state →
 T1-only → work-class allowlist (`research`/`review`) → todo status → excludes
@@ -445,13 +449,13 @@ safety/authority violation.
 
 ---
 
-## TOG-3111: the pin moves to card creation
+## The pin moves to card creation
 
 Owner directive (2026-09-16): *"a task should not start until the model router
 has set its model."* The scheduled passes (`*/10`) cannot honor that — their row
 queries **exclude cards with a running run**, and a dispatched card is running
-within ~0.2–0.3 s of creation (`docs/routing/TOG-3008-issue-created-pin-feasibility.md`),
-so a card's whole first turn happens before any pass can even see it. It lands
+within ~0.2–0.3 s of creation (measured in a pin-feasibility analysis that is
+maintained privately), so a card's whole first turn happens before any pass can even see it. It lands
 on the agent floor, which is exactly what the directive forbids.
 
 The plugin half (`src/worker.ts`, `tests/creation-pin.spec.ts`) adds two event
@@ -491,8 +495,7 @@ fire-and-forget and loses the same measured dispatch race — the handler runs a
 the passes were structurally missing gets labelled and pinned the moment it is
 idle (between turns), which shrinks the unpinned window from "the whole first
 turn" to "one turn at most" — and is the release mechanism the core-side
-dispatch gate needs once it lands (TOG-3111 half 1,
-`docs/upstream/paperclip-dispatch-gate-unpinned-issues.md`: defer
+dispatch gate needs once it lands (the proposed upstream dispatch gate defers
 issue-bound agent-assigned wakes until the card carries an
 `adapterConfig.model` pin).
 
@@ -548,9 +551,9 @@ scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ---
 
-## TOG-11793: the model is decided when the run starts
+## The model is decided when the run starts
 
-Pins race the run they are meant to steer (TOG-11780). With the fork's run-model
+Pins race the run they are meant to steer. With the fork's run-model
 hook installed, `onResolveRunModel` decides each issue run's model at its start, from
 hot caches only, under a sticky rule, and returns plain plugin-owned env. It is off
 by default (`runResolve.enabled`), needs `selection.mode: "enforce"`, and, once on,
@@ -608,7 +611,7 @@ npm run test:mutants  # CI/private runner only: 115 named mutants, one per accep
                        # cohort randomization, run/card conflation, rolling-clock
                        # injection, lane-posture bypass, per-tier lane collapse,
                        # disallowed activity_log read, shadow-pair wiring, earn-in
-                       # guards, TOG-3111 creation-pin wiring/guards/notice throttle
+                       # guards, creation-pin wiring/guards/notice throttle
 npm run build         # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce

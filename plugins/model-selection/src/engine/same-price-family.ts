@@ -23,8 +23,8 @@ function priceSignature(model: ModelEntry): string {
 
 /**
  * True when `a` and `b` are the trigger condition for the owner's
- * same-price-newer-model rule (memory `same-price-newer-model-rule`,
- * TOG-3406): two enabled roster rows in the same vendor family and tier,
+ * same-price-newer-model rule (memory `same-price-newer-model-rule`): two
+ * enabled roster rows in the same vendor family and tier,
  * priced identically.
  */
 export function sharesPriceFamily(a: ModelEntry, b: ModelEntry): boolean {
@@ -53,7 +53,7 @@ function provenBetterVerdict(model: ModelEntry): boolean {
 }
 
 /**
- * 2026-09-19 owner rule (memory `same-price-newer-model-rule`, TOG-3406):
+ * 2026-09-19 owner rule (memory `same-price-newer-model-rule`):
  * "at the same price the newer version wins unless the older one is
  * demonstrably better at the task." Returns negative when `a` should rank
  * ahead of `b`, positive when `b` should rank ahead of `a`, and exactly `0`

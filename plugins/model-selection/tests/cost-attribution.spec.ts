@@ -8,7 +8,7 @@ import { buildCardLedger, type CardRow } from "../src/engine/scores.js";
 import { REFRESH_SCORE_CLOSING_RUNS_SQL, REFRESH_SCORE_RUNS_SQL } from "../src/sql.js";
 
 /**
- * TOG-4022. The regression these guard is: `heartbeat_runs.usage_json` carries
+ * The regression these guard is: `heartbeat_runs.usage_json` carries
  * the *serving CLI's* cost figure plus a hardcoded `provider: "anthropic"`
  * from `claude-local`, so every CLIProxy-served non-Anthropic model lands an
  * Anthropic-priced cost that the card ledger then averages into

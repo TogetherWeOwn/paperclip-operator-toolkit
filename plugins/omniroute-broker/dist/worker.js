@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — worker (TOG-391).
+ * omniroute-broker — worker.
  *
  * The contract that makes this worth building: the OmniRoute management key is
  * resolved inside the host process via `ctx.secrets.resolve`, referenced exactly
@@ -73,9 +73,9 @@ async function readConfig(ctx, companyId) {
 }
 
 /**
- * Ask the host to reconcile the checkout lock before we read it (TOG-309).
+ * Ask the host to reconcile the checkout lock before we read it.
  *
- * NOT the gate — its status term is exactly what TOG-309 widened. We call it for
+ * NOT the gate — its status term is exactly what ownership.js widens. We call it for
  * two side effects it performs before evaluating anything: it clears a checkout
  * lock whose holding run has terminated, and it adopts an unowned lock for the
  * caller. Without it, an issue whose previous run crashed keeps a dead lock and

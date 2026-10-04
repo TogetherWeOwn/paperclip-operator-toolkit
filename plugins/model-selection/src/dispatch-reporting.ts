@@ -1,6 +1,6 @@
 /**
- * TOG-2481: absorbed from the standalone `dispatch` plugin (TOG-747, design
- * TOG-706) — the two-channel reporting contract, ported verbatim.
+ * Absorbed from the standalone `dispatch` plugin — the two-channel reporting
+ * contract, ported verbatim.
  *
  * Two channels, deliberately different cadences:
  *
@@ -19,7 +19,7 @@ import { LEGACY_COUNTERS, SELECTION_COUNTERS } from "./engine/dispatch-selection
 export const METRIC_PREFIX = "dispatch";
 
 /**
- * TOG-3585: a wake failure's machine-readable reason. The worker maps the
+ * A wake failure's machine-readable reason. The worker maps the
  * `requestWakeup` throw into one of these codes so the summary can count
  * failures per reason; the free-text `message` is preserved alongside for the
  * operator. `unknown` is the fallback — a failure with no recognised cause
@@ -42,7 +42,7 @@ export interface WakeFailure {
 export interface WakeOutcome {
   issueId: string;
   queued: boolean;
-  /** TOG-3585: structured failure, persisted in `dispatchLastFiring` and counted per reason. */
+  /** Structured failure, persisted in `dispatchLastFiring` and counted per reason. */
   error?: WakeFailure | string;
 }
 
@@ -53,22 +53,22 @@ export interface FiringSummary {
   pickedIssueIds: string[];
   parkedIssueIds: string[];
   budgetBlockedIssueIds: string[];
-  /** TOG-3585: picks the lane-down gate refused to wake, per firing. */
+  /** Picks the lane-down gate refused to wake, per firing. */
   laneDownSkippedIssueIds: string[];
-  /** TOG-3585: picks riding the new idle-assignee class, per firing. */
+  /** Picks riding the new idle-assignee class, per firing. */
   idleAssigneePickedIssueIds: string[];
   routingGapCount: number;
   routingOwnerIds: string[];
   routingOwnersComplete: boolean;
   wakeFailures: number;
-  /** TOG-3585: `wakeFailures` broken down by `WakeFailureCode`. 100 % of wake failures carry a reason. */
+  /** `wakeFailures` broken down by `WakeFailureCode`. 100 % of wake failures carry a reason. */
   wakeFailuresByReason: Record<string, number>;
-  /** TOG-3585: per-issue codes, so `dispatchLastFiring` names WHICH wake failed with WHAT. */
+  /** Per-issue codes, so `dispatchLastFiring` names WHICH wake failed with WHAT. */
   wakeFailureDetails: Array<{ issueId: string; code: WakeFailureCode; message: string }>;
 }
 
 /**
- * TOG-3585: map a `requestWakeup` throw to a stable code. Matches the server
+ * Map a `requestWakeup` throw to a stable code. Matches the server
  * rails the selection policy mirrors (assignee, status, blockers, budgets)
  * plus the two transport failures a sweep actually sees (429/rate-limit, RPC
  * timeout). Anything unrecognised is `unknown` — still counted, never dropped.
@@ -148,7 +148,7 @@ function canonicalise(summary: FiringSummary): Record<string, unknown> {
   const sortedReasons = Object.fromEntries(
     Object.entries(summary.wakeFailuresByReason ?? {}).sort(([a], [b]) => a.localeCompare(b)),
   );
-  // TOG-3585: failure details compare on (issue, code) only — messages carry
+  // Failure details compare on (issue, code) only — messages carry
   // request ids and timings that change every firing and would defeat the gate.
   const failureKeys = [...(summary.wakeFailureDetails ?? [])]
     .map((d) => `${d.issueId}:${d.code}`)
@@ -208,7 +208,7 @@ export async function emitMetrics(
   }
   await ctx.metrics.write(`${METRIC_PREFIX}.routing_gap`, summary.routingGapCount, tags);
   await ctx.metrics.write(`${METRIC_PREFIX}.wake_failures`, summary.wakeFailures, tags);
-  // TOG-3585: per-reason failure series, so "wake failures logged with a
+  // Per-reason failure series, so "wake failures logged with a
   // reason 100 %" is graphable. A reason that never fired this run still gets
   // its zero — same always-write contract as the selection counters above.
   const reasons: string[] = [
@@ -270,7 +270,7 @@ export async function logStateChange(
         }.`
       : " Unassigned (routing gap): 0.";
 
-  // TOG-3585: name the new class and the two failure surfaces inline, so the
+  // Name the new class and the two failure surfaces inline, so the
   // 7-day acceptance (idle-assignee picks per firing, failures with a reason,
   // lane-down skips) is readable without opening metadata.
   const idleAssigneePicks = summary.idleAssigneePickedIssueIds?.length ?? 0;

@@ -4,9 +4,9 @@ import type { BenchmarkRow } from "./benchmark-prior.js";
  * Frozen `tog2636-v1` benchmark vectors, keyed by roster model id.
  *
  * GENERATED, then committed — do not hand-edit. Source: Research A's
- * primary-source leaderboard captures (fetched 2026-09-15, TOG-2634), joined to
- * the roster by `ops/tog-2974/build-benchmark-table.mjs` and frozen here by
- * TOG-2988. Regenerate with that script and bump `BENCHMARK_SPEC_VERSION`
+ * primary-source leaderboard captures (fetched 2026-09-15), joined to
+ * the roster by the benchmark-table builder and frozen here by
+ * Regenerate with that script and bump `BENCHMARK_SPEC_VERSION`
  * whenever the capture is refreshed.
  *
  * ## Why this is frozen rather than read live from the aa.ai snapshot
@@ -20,11 +20,11 @@ import type { BenchmarkRow } from "./benchmark-prior.js";
  * different effort than the one the capture joined (e.g. `claude-opus-5-xhigh`
  * carries `terminalbenchV40: null` while the capture's matched row has a value).
  * A prior blended across two effort levels is not reproducible, which is the
- * churn this whole card exists to end. So the vector is taken whole, from one
+ * churn this design exists to end. So the vector is taken whole, from one
  * capture, under one version.
  *
  * The aa.ai composite index stays LIVE — that half of the blend is refreshed
- * every `refreshScores` run and is what TOG-2987 settled.
+ * every `refreshScores` run, which is the settled design.
  *
  * ## Absence
  *
@@ -72,5 +72,5 @@ export const FROZEN_BENCHMARK_ROWS: Readonly<Record<string, BenchmarkRow>> = {
   "zai/glm-5.3-flash": { terminalBenchV4Pass1: 0.328282828282828, mercorApex11Pass1: 0.528, automationBenchAaGuardrailAdjusted: 0.6036862782167782, aaOmniscienceSignedIndex: 7.46666666666667 },
 };
 
-/** The capture date every row above was fetched on (TOG-2634). Informational. */
+/** The capture date every row above was fetched on. Informational. */
 export const FROZEN_BENCHMARK_CAPTURED_AT = "2026-09-15";

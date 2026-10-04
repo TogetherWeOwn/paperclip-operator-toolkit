@@ -84,7 +84,7 @@ describe("mutation gate runtime controls", () => {
     expect(result).toBe(true);
   });
 
-  // TOG-3129. The `{ CI: "true" }` row is the one that matters: the refusal
+  // The `{ CI: "true" }` row is the one that matters: the refusal
   // above means CI is the ONLY context this gate ever runs in, and `ci.yml`
   // sets no VITEST_* for the `model-selection suite` job, so this bare
   // environment IS the real job env. It previously yielded `run --pool=forks`
@@ -190,7 +190,7 @@ describe("mutation gate runtime controls", () => {
     // value through the environment therefore caps a pool that never runs, so
     // assert the flags that reach the CLI, not just the pass-through.
     //
-    // TOG-3129: `threads` is now the RESOLVED limit, not the caller's
+    // `threads` is now the RESOLVED limit, not the caller's
     // VITEST_MAX_THREADS. The run is `--pool=forks`, so a differing thread
     // budget could never take effect; carrying it forward only left two numbers
     // in the child env disagreeing about one budget. VITEST_MAX_FORKS wins and
@@ -210,7 +210,7 @@ describe("mutation gate runtime controls", () => {
     });
   });
 
-  // TOG-3129. `spawnSync` without `timeout` blocks forever, so a single wedged
+  // `spawnSync` without `timeout` blocks forever, so a single wedged
   // run could spend the job's entire `timeout-minutes` and take the job down
   // with no mutant named. Assert three things together, because any one alone
   // is satisfiable while the bound does nothing: the invocation carries a
@@ -325,7 +325,7 @@ describe("mutation gate runtime controls", () => {
     }
   });
 
-  // TOG-2789. The refusal sends the reader somewhere instead of running the
+  // The refusal sends the reader somewhere instead of running the
   // gate, so the pointer has to be true or the refusal is worse than no gate:
   // it costs the agent the local run AND the evidence. Three links are pinned —
   // the job name exists in ci.yml, a step by that name lives inside THAT job,
@@ -350,7 +350,7 @@ describe("mutation gate runtime controls", () => {
     expect(refusal).toContain(ciStep);
   });
 
-  // TOG-2980 / TOG-3049. Mutants run from a scratch copy of the plugin, so a
+  // Mutants run from a scratch copy of the plugin, so a
   // spec that reads a repo file through one or more `../` segments finds
   // nothing there unless the gate stages it. That is not a benign skip: the
   // mutant loop reads any nonzero exit as a kill, so one ENOENT turns the

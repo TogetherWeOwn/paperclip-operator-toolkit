@@ -2,7 +2,6 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-02
-- **Card:** TOG-811 design Q5
 - **Precedent:** `paperclip-model-router/src/config/secret-ref.ts` (router ADR-0004)
 
 ## Context
@@ -23,7 +22,7 @@ accepted and persisted in clear by the host:
   credential riding alongside an otherwise-valid reference.
 
 This plugin's entire reason to exist is a management key that can expose
-provider account credentials (TOG-811's own framing). Accepting either shape
+provider account credentials (the originating design's own framing). Accepting either shape
 above would mean the plugin itself is the leak, at config-write time, before
 polling ever runs.
 

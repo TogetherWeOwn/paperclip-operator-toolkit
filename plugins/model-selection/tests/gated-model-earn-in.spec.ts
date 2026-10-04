@@ -133,7 +133,7 @@ function ledgerWith(verdicts: LanePaceVerdict[]): LaneLedger {
   return ledger;
 }
 
-describe("TOG-8108 defect 1: devin/* is ineligible on claude_local", () => {
+describe("Defect 1: devin/* is ineligible on claude_local", () => {
   it("identifies Devin rows by prefix only, never by suffix", () => {
     expect(isDevinModelId("devin/swe-2")).toBe(true);
     expect(isDevinModelId("devin/gpt-6-astra")).toBe(true);
@@ -246,7 +246,7 @@ describe("TOG-8108 defect 1: devin/* is ineligible on claude_local", () => {
   });
 });
 
-describe("TOG-8108 defect 2: earn-in never fires on protected cards", () => {
+describe("Defect 2: earn-in never fires on protected cards", () => {
   const models: ModelEntry[] = [freeModel("meta-free"), paidModel("opus-paid")];
   const candidates = [candidate("opus-paid", 2), candidate("meta-free", 0)];
   const unjudged: Record<string, ModelScore> = {
@@ -272,7 +272,7 @@ describe("TOG-8108 defect 2: earn-in never fires on protected cards", () => {
     for (const title of [
       "Review the router fix",
       "GATE: approve the release",
-      "Final review gating TOG-1234",
+      "Final review gating EX-1234",
     ]) {
       expect(earnInGuardFor({ priority: "low", title }).protected, title).toBe(true);
     }
@@ -319,7 +319,7 @@ describe("TOG-8108 defect 2: earn-in never fires on protected cards", () => {
   });
 });
 
-describe("TOG-8108 adapter x earn-in: earn-in never promotes a gated-out model", () => {
+describe("Adapter x earn-in: earn-in never promotes a gated-out model", () => {
   it("a devin row that the adapter gate rejected cannot win earn-in on claude_local", () => {
     // A devin subscription row on a serviceable free lane is exactly the shape
     // the free-lane reorder promotes — unless the adapter gate removed it
@@ -362,7 +362,7 @@ describe("TOG-8108 adapter x earn-in: earn-in never promotes a gated-out model",
   });
 });
 
-describe("TOG-8108 defect 3: the lane-capacity collector runs inside the freshness window", () => {
+describe("Defect 3: the lane-capacity collector runs inside the freshness window", () => {
   it("schedules pollLanes at 2 minutes, inside the tightest live freshness budget (180s)", () => {
     // The operator measured live publishers declaring stale_after_seconds=180
     // while the collector ran every 300s, so picks older than 180s read every

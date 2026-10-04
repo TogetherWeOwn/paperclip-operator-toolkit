@@ -11,7 +11,7 @@ import {
 import { NO_ESCALATION, PROFILES, config } from "./fixtures.js";
 
 /**
- * TOG-3012 rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
+ * Rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
  * the auto-quarantine path and assert that selection stops choosing the dead
  * lane.
  *
@@ -67,7 +67,7 @@ const ROSTER: ModelEntry[] = [
   model({ id: "claude-haiku-4-5-20251001", tier: "T3", laneId: CLAUDE_LANE, costPerMTokIn: 1, costPerMTokOut: 5, costPerMTokCacheRead: 0.1 }),
 ];
 
-/** `heartbeat_runs.error` from TOG-3012's own failed run 7503efd7. */
+/** `heartbeat_runs.error` from a real failed run (7503efd7) on the exhausted lane. */
 const LIVE_429 =
   "API Error: Request rejected (429) · All credentials for model gpt-5.6-sol are cooling down "
   + "(last error: usage_limit_reached: The usage limit has been reached)";
@@ -76,20 +76,20 @@ const INCIDENT_MS = Date.parse("2026-09-16T16:40:00.000Z");
 
 /** The 14 cards the incident actually touched, by the tier each one carried. */
 const AFFECTED_CARDS: { issueId: string; tier: "T1" | "T2" | "T3" }[] = [
-  { issueId: "TOG-2983", tier: "T1" },
-  { issueId: "TOG-2987", tier: "T1" },
-  { issueId: "TOG-2989", tier: "T1" },
-  { issueId: "TOG-2974", tier: "T2" },
-  { issueId: "TOG-2988", tier: "T2" },
-  { issueId: "TOG-2990", tier: "T2" },
-  { issueId: "TOG-2482", tier: "T2" },
-  { issueId: "TOG-2407", tier: "T2" },
-  { issueId: "TOG-3012", tier: "T1" },
-  { issueId: "TOG-3015", tier: "T2" },
-  { issueId: "TOG-2969", tier: "T3" },
-  { issueId: "TOG-1068", tier: "T3" },
-  { issueId: "TOG-1094", tier: "T3" },
-  { issueId: "TOG-2572", tier: "T3" },
+  { issueId: "EX-2983", tier: "T1" },
+  { issueId: "EX-2987", tier: "T1" },
+  { issueId: "EX-2989", tier: "T1" },
+  { issueId: "EX-2974", tier: "T2" },
+  { issueId: "EX-2988", tier: "T2" },
+  { issueId: "EX-2990", tier: "T2" },
+  { issueId: "EX-2482", tier: "T2" },
+  { issueId: "EX-2407", tier: "T2" },
+  { issueId: "EX-3012", tier: "T1" },
+  { issueId: "EX-3015", tier: "T2" },
+  { issueId: "EX-2969", tier: "T3" },
+  { issueId: "EX-1068", tier: "T3" },
+  { issueId: "EX-1094", tier: "T3" },
+  { issueId: "EX-2572", tier: "T3" },
 ];
 
 function pickFor(issueId: string, tier: string, laneOutageOverride: LaneOutageOverride | null) {
@@ -111,7 +111,7 @@ function laneOf(modelId: string | null): string | null {
   return ROSTER.find((entry) => entry.id === modelId)?.laneId ?? null;
 }
 
-describe("TOG-3012 rehearsal: an exhausted lane is evacuated from the first rejection", () => {
+describe("Rehearsal: an exhausted lane is evacuated from the first rejection", () => {
   /** Step 1-3 of the handler, as pure functions: rejection -> quarantine record. */
   const verdict = laneExhaustionFromRunFailure({ error: LIVE_429, models: ROSTER });
   const quarantine = verdict ? mergeLaneOutage(null, autoQuarantineFor(verdict, INCIDENT_MS), new Date(INCIDENT_MS).toISOString()) : null;
@@ -159,7 +159,7 @@ describe("TOG-3012 rehearsal: an exhausted lane is evacuated from the first reje
       profiles: PROFILES,
       signals: NO_ESCALATION,
       now: afterExpiry,
-      descriptor: { issueId: "TOG-2974", labelNames: ["tier:T2"] },
+      descriptor: { issueId: "EX-2974", labelNames: ["tier:T2"] },
       config: config({ models: ROSTER, pacingMode: "enforce", holdOnUntrustedProfile: false, laneOutageOverride: quarantine }),
     });
     expect(laneOf(decision.modelId)).toBe(CODEX_LANE);

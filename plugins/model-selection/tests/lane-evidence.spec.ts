@@ -12,7 +12,7 @@ import { selectModel } from "../src/engine/select.js";
 import { LANED_MODELS, NOW, NO_ESCALATION, PROFILES, config } from "./fixtures.js";
 
 /**
- * TOG-3132, second failure shape. Every behavioural test here is a PAIR: one
+ * Second failure shape. Every behavioural test here is a PAIR: one
  * lane state that must be excluded and one that must not. A gate with only the
  * failing half passes just as well when it excludes the entire roster, which is
  * how a term that has silently become "reject everything" still reads green.
@@ -22,7 +22,7 @@ import { LANED_MODELS, NOW, NO_ESCALATION, PROFILES, config } from "./fixtures.j
  * carries evidence, and falls to sonnet when it does not.
  *
  * The counts used below are the REAL ones, measured over 24h on 2026-09-17 by
- * `ops/tog-3132/lane_evidence2.js`. If the thresholds are ever retuned, these
+ * the lane-evidence derivation script. If the thresholds are ever retuned, these
  * numbers say out loud which live lane changes state.
  */
 
@@ -135,7 +135,7 @@ describe("evaluateLaneEvidence — the three states", () => {
 });
 
 /**
- * The zero-success rule (President's 2026-09-17 09:22Z ask on TOG-3132).
+ * The zero-success rule (President's 2026-09-17 09:22Z ask).
  *
  * Every case is a PAIR across the boundary the rule draws, because the rule is
  * only worth anything if it separates: one observation fewer, or one success
@@ -258,7 +258,7 @@ describe("selectModel — an unproven lane is not a dead lane", () => {
 });
 
 describe("selectModel — the cost-down guard (the 2026-09-17 08:10Z shape)", () => {
-  // TOG-3088 was moved off `claude-haiku-4-5-20251001` (12/12 at the time) onto
+  // A card was moved off `claude-haiku-4-5-20251001` (12/12 at the time) onto
   // `deepseek-v4-flash` (0/3) for `cost-down`. `balance_pass` runs with sticky
   // OFF, so the incumbent pin reaches the engine as `stickyModelId` while the
   // sticky branch is skipped — that is the path under test.

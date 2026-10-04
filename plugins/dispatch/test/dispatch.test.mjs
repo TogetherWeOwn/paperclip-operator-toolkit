@@ -1,5 +1,5 @@
 /**
- * dispatch — test suite (TOG-747, design TOG-706).
+ * dispatch — test suite.
  *
  * Run:  node --test test/dispatch.test.mjs
  * (Pass the FILE, not the directory — on Node 24 `node --test test/` resolves
@@ -61,7 +61,7 @@ const MIN = 60_000;
 /** An issue as the policy sees it. Only the fields the rails actually read. */
 const issue = (over = {}) => ({
   id: "issue-1",
-  identifier: "TOG-1",
+  identifier: "EX-1",
   companyId: COMPANY,
   projectId: "project-1",
   status: "in_progress",
@@ -97,7 +97,7 @@ const classify = (over = {}, idleMinutes = 120) => {
 // ───────────────────── the rails, in the server's own order ─────────────────
 
 test("the refused-status list is the server's denylist, not an allowlist of runnable statuses", () => {
-  // The first cut of the TOG-706 probe undercounted the wakeable surface by 88%
+  // The first cut of the design-phase probe undercounted the wakeable surface by 88%
   // because it enumerated statuses it believed were runnable. The server
   // refuses exactly three; every other status is wakeable BY DEFAULT, including
   // ones that do not exist yet.
@@ -426,7 +426,7 @@ test("a first firing always counts as a change, and a different pick set does to
   assert.equal(hasStateChanged(null, summary), true);
 
   const other = selectDispatch(
-    [entry({ issue: { id: "issue-2", identifier: "TOG-2" } })],
+    [entry({ issue: { id: "issue-2", identifier: "EX-2" } })],
     { ...OPTIONS, idleMinutes: 0 },
   );
   assert.equal(hasStateChanged(summary, summariseFiring(COMPANY, other, [])), true);

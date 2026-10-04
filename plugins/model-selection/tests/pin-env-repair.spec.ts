@@ -12,7 +12,7 @@ import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 /**
- * TOG-12305 / TOG-11869 Class B. An override env replaces the assignee env
+ * Stale secret-ref repair. An override env replaces the assignee env
  * wholesale, and the host refuses a run whose merged env names a secret ref the
  * run's agent holds no binding for. A pin that snapshotted such a ref failed
  * every wake as `configuration_incomplete` until a human cleared it.

@@ -94,9 +94,9 @@ describe("selection", () => {
   });
 
   it("records the gate that actually rejected a candidate, not another one that also applies", () => {
-    // TOG-3211 acceptance: `flaky` is BOTH disabled in the roster AND sitting
+    // Acceptance: `flaky` is BOTH disabled in the roster AND sitting
     // on a lane the pace ledger reports unserviceable — either fact alone
-    // would explain a rejection, and TOG-3200's by-hand reconstruction from
+    // would explain a rejection, and a by-hand reconstruction from
     // roster shape (which cannot see the `continue` order below) could
     // plausibly have picked either. `select.ts` checks `!model.enabled`
     // first and `continue`s immediately, so `lane-unserviceable` is never
@@ -232,7 +232,7 @@ describe("selection", () => {
     expect(decision.heldReason).toContain("not trusted");
   });
 
-  it("TOG-3037: writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
+  it("Writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -253,7 +253,7 @@ describe("selection", () => {
     expect(decision.trace.some((line) => line.includes("held-at-floor declined"))).toBe(true);
   });
 
-  it("TOG-3037: still holds at floor, unchanged, when the floor's lane is healthy", () => {
+  it("Still holds at floor, unchanged, when the floor's lane is healthy", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -405,7 +405,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("alpha");
   });
 
-  it("TOG-3406: same-price-family rule prefers the newer release for a same-price sibling pair", () => {
+  it("Same-price-family rule prefers the newer release for a same-price sibling pair", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, { id: "vendor-model-4-8", releasedAt: "2026-05-05" });
     const newer = model(t2, { id: "vendor-model-5", releasedAt: "2026-06-24" });
@@ -417,7 +417,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-5");
   });
 
-  it("TOG-3406: a provenBetter earn-in verdict lets the older same-price-family model win", () => {
+  it("A provenBetter earn-in verdict lets the older same-price-family model win", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, {
       id: "vendor-model-4-8",
@@ -433,7 +433,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-4-8");
   });
 
-  describe("TOG-2137 Defect 2: tier-exhaustion escalation", () => {
+  describe("Tier-exhaustion escalation", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -529,7 +529,7 @@ describe("selection", () => {
     });
   });
 
-  describe("TOG-2137 Defect 6: a pin or sticky model cannot hard-bypass capacity routing", () => {
+  describe("A pin or sticky model cannot hard-bypass capacity routing", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -589,7 +589,7 @@ describe("selection", () => {
   });
 });
 
-describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
+describe("pace-vs-objective composition", () => {
   // Two T1 candidates: `cheap-ahead` is the list-price winner AND has the best
   // (lowest) cost-per-accepted-card, but its lane is running `ahead` of pace.
   // `pricier-on-pace` costs 2x as much but its lane is `on` pace. This is
@@ -695,7 +695,7 @@ describe("pace-vs-objective composition (TOG-2136 + TOG-2137)", () => {
   });
 });
 
-describe("lane avoid + lane outage gating (TOG-2481)", () => {
+describe("lane avoid + lane outage gating", () => {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
   const avoidedModel = model(t1, { id: "avoided-model", laneId: "codex" });
   const fallbackModel = model(t1, { id: "fallback-model", laneId: "lane-fresh" });
@@ -845,7 +845,7 @@ describe("lane avoid + lane outage gating (TOG-2481)", () => {
   });
 });
 
-describe("lane-has-room gating (TOG-2481 tier_dispatcher.py lane_has_room())", () => {
+describe("lane-has-room gating (tier_dispatcher.py lane_has_room())", () => {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
   const goModel = model(t1, { id: "go-model", laneId: "opencode-go", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
 
@@ -1107,7 +1107,7 @@ describe("long-turn engineering agents stay off zai while codex has room (2026-0
   });
 });
 
-describe("wake-scoped floor (TOG-3210)", () => {
+describe("wake-scoped floor", () => {
   it("lowers the required tier for a matching wake reason without touching the judged tier", () => {
     const decision = selectModel({
       ...base,
@@ -1164,7 +1164,7 @@ describe("wake-scoped floor (TOG-3210)", () => {
     expect(decision.advisory).toBe(false);
   });
 
-  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-TOG-3210 behavior", () => {
+  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-wake-scoped-floor behavior", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },

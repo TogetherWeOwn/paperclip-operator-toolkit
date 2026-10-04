@@ -8,7 +8,7 @@ import {
 } from "./registry.js";
 
 /**
- * TOG-12206 P2: opt-in free-list sync/discovery/shadow.
+ * Opt-in free-list sync/discovery/shadow.
  *
  * Default-off at every layer: `config.aaFreeSync.enabled` is false unless an
  * operator sets it, the scheduled job returns before any network when no

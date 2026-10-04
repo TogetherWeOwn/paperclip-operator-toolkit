@@ -2,7 +2,7 @@
  * Company-scoped config. Every number that decides anything lives here.
  *
  * v0.2.0 re-points this plugin at the **containment lane**, not at CLIProxy.
- * The operator stood the lane up on 2026-09-05 (TOG-952): a host collector
+ * The operator stood the lane up on 2026-09-05: a host collector
  * reads the CLIProxy management API with the host-held key and publishes
  * sanitized static JSON at `https://router.example.net/telemetry/cliproxy/`,
  * gated on an `x-api-key` bearer we mint (`cliproxy-usage-lane-key`).
@@ -11,14 +11,14 @@
  * key is NOT placed in Paperclip and never was — the only credential here is
  * the lane bearer, which reads two sanitized files and can reach nothing else.
  * `/v0/management/*` is not routable through the lane at all. So the hard gate
- * in TOG-811 ("placing the management key is owner-reserved") is satisfied by
- * never placing that key, rather than by containing it.
+ * in the original design ("placing the management key is owner-reserved") is
+ * satisfied by never placing that key, rather than by containing it.
  *
  * v0.3.0 changes WHICH files are read, not where from. The lane now serves one
- * document per lane in the TOG-2693 collector contract (`claude.json`,
+ * document per lane in the per-lane collector contract (`claude.json`,
  * `zai.json`, …) — the same files `model-selection`'s pacer polls — and those
- * carry the per-account cooldown the owner asked for on 2026-09-17 00:44Z,
- * after a Z.ai cooldown nobody could see cost seven runs. The two v0.2.0
+ * carry the per-account cooldown that was requested after a Z.ai cooldown
+ * nobody could see cost seven runs. The two v0.2.0
  * aggregate files are now opt-in (`legacyAggregateFiles`).
  *
  * `pollingEnabled` still defaults false: installing is not enabling.
@@ -42,7 +42,7 @@ export const CLIPROXY_INSIGHT_CONFIG_SCHEMA = {
       type: "string",
       title: "Telemetry lane base URL",
       description:
-        "The Caddy-fronted sanitized telemetry namespace (TOG-952) — NEVER the CLIProxy management origin. Serves static JSON only; no management route is reachable through it. Public HTTPS, so the standard SSRF boundary applies unmodified.",
+        "The Caddy-fronted sanitized telemetry namespace — NEVER the CLIProxy management origin. Serves static JSON only; no management route is reachable through it. Public HTTPS, so the standard SSRF boundary applies unmodified.",
       default: "https://router.example.net/telemetry/cliproxy",
       minLength: 1,
     },
@@ -82,7 +82,7 @@ export const CLIPROXY_INSIGHT_CONFIG_SCHEMA = {
       type: "array",
       title: "Lane documents to poll",
       description:
-        "File names under baseUrl, one per lane, each an {schemaVersion, observedAt, records[]} document in the TOG-2693 collector contract — the same files model-selection's pacer polls. Names not on the lane's Caddy allowlist are simply not served (devin.json 404s today), so an unserved name costs one 404 per firing and nothing else. Empty disables lane polling.",
+        "File names under baseUrl, one per lane, each an {schemaVersion, observedAt, records[]} document in the per-lane collector contract — the same files model-selection's pacer polls. Names not on the lane's Caddy allowlist are simply not served (devin.json 404s today), so an unserved name costs one 404 per firing and nothing else. Empty disables lane polling.",
       default: [...DEFAULT_LANE_FILES],
       maxItems: 32,
       items: { type: "string", minLength: 1, maxLength: 128 },

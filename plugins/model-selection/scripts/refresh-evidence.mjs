@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// TOG-2438 AC3 evidence: run one real refreshAaIndex + refreshScores cycle
+// Evidence: run one real refreshAaIndex + refreshScores cycle
 // against the actual reviewed-roster.json, with a real fetch to aa.ai.
 // Read-only against the live system: uses the in-process test harness, never
 // touches the deployed plugin's runtime state.
 //
-// Usage: node --import tsx scripts/tog2438-refresh-evidence.mjs
+// Usage: node --import tsx scripts/refresh-evidence.mjs
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -82,7 +82,7 @@ const configAfter = await harness.ctx.config.get(COMPANY);
 const opus = configAfter.models.find((m) => m.id === "claude-opus-5");
 console.log("claude-opus-5 tier/enabled unchanged:", JSON.stringify({ tier: opus?.tier, enabled: opus?.enabled }));
 
-const outDir = join(root, ".tog2438-evidence");
+const outDir = join(root, ".refresh-evidence");
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, "snapshot.json"), JSON.stringify(snapshot, null, 2));
 writeFileSync(join(outDir, "activity.json"), JSON.stringify(harness.activity, null, 2));

@@ -25,7 +25,7 @@ describe("config resolution", () => {
       .toContain("selection.contextRunLogRoot must be an absolute path");
   });
 
-  it("resolves an unset agent-env cap to the fleet ceiling (TOG-11642)", () => {
+  it("resolves an unset agent-env cap to the fleet ceiling", () => {
     // Unset behaves exactly as before the split: the pin stamps against the
     // fleet ceiling until the operator sets `agentEnvContextTokens`.
     expect(resolveConfig({}).selection.agentEnvContextTokens).toBe(1_000_000);
@@ -185,7 +185,7 @@ describe("config resolution", () => {
           {
             laneId: "lane-a",
             statusUrl: "https://status.example.com/lane-a",
-            apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
+            apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
             windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
           },
         ],
@@ -193,7 +193,7 @@ describe("config resolution", () => {
     });
     expect(config.pacing.lanes[0]!.apiKeySecretRef).toEqual({
       type: "secret_ref",
-      secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4",
+      secretId: "5ec2e700-0000-4000-8000-000000000001",
     });
     expect(config.pacing.lanes[0]!.lane.accountKeyFields).toEqual([
       "account_key",
@@ -313,7 +313,7 @@ describe("config resolution", () => {
     expect(warnings.some((w) => w.includes("cache read is the largest cost line"))).toBe(true);
   });
 
-  describe("TOG-2137 Defect 6: a roster laneId must resolve to a configured lane", () => {
+  describe("A roster laneId must resolve to a configured lane", () => {
     const validLane = {
       laneId: "lane-t1",
       statusUrl: "https://example.test/status",
@@ -387,8 +387,8 @@ describe("config resolution", () => {
     });
   });
 
-  describe("TOG-12206 P2: aaFreeSync is default-off and fail-loud when enabled", () => {
-    const SECRET = { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" };
+  describe("AaFreeSync is default-off and fail-loud when enabled", () => {
+    const SECRET = { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" };
     const BINDING = {
       candidateId: "opus-high",
       modelId: "claude-opus-5",
@@ -442,7 +442,7 @@ describe("config resolution", () => {
     });
   });
 
-  describe("TOG-12972: acceptedWork is default-off", () => {
+  describe("AcceptedWork is default-off", () => {
     it("is disabled out of the box, with no validation errors", () => {
       const config = resolveConfig(undefined);
       expect(config.acceptedWork.enabled).toBe(false);
@@ -459,7 +459,7 @@ describe("config resolution", () => {
     });
   });
 
-  describe("TOG-14412 enforce preflight: refuse enforce while any tier has zero enabled rows", () => {
+  describe("Enforce preflight: refuse enforce while any tier has zero enabled rows", () => {
     const row = (id: string, tier: string, enabled = true) => ({
       id,
       tier,

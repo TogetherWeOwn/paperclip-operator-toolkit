@@ -16,16 +16,16 @@ import type { ModelEntry, ModelScore } from "./types.js";
 export const CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 
 /**
- * TOG-11642 (thrash incident 2026-09-19/20). Floor for the per-pin stamped
- * cap: Claude Code starts every run with ~45k fixed context, so a 128k stamp
- * thrashed autocompact and killed ~1 in 4 runs. Never stamp below 250k when
- * the window allows; a window under 250k gets its full window.
+ * Floor for the per-pin stamped cap (from the 2026-09-19/20 thrash
+ * incident): Claude Code starts every run with ~45k fixed context, so a 128k
+ * stamp thrashed autocompact and killed ~1 in 4 runs. Never stamp below 250k
+ * when the window allows; a window under 250k gets its full window.
  */
 export const MIN_STAMPED_CONTEXT_TOKENS = 250_000;
 
 /**
- * TOG-12234. Plugin-owned override env key that marks a pin on a
- * `fallbackOnly` model (TOG-11780 §5, §7 item 4). A fallback pin outlives the
+ * Plugin-owned override env key that marks a pin on a
+ * `fallbackOnly` model. A fallback pin outlives the
  * capacity gap that justified it: `stickyModelId = pinnedModelId` keeps it,
  * and nothing revisited it until the 24 h expiry. The stamp lets the fallback
  * lease pass find exactly these pins, through the index in plugin state,
@@ -121,14 +121,14 @@ export function estimateIssueContext(input: ContextEstimateInput): ContextEstima
 export type AdapterEnv = Record<string, unknown>;
 
 /**
- * TOG-3045. The sub-call model surfaces a pin must carry alongside the main
+ * The sub-call model surfaces a pin must carry alongside the main
  * model, or the evacuation is partial.
  *
- * TOG-3034 measured the fleet (`docs/routing/TOG-3012-lane-exhaustion-autoheal.md`
- * §#1b): 24 of 26 agents point both of these at the CLIProxy Codex lane. Repin
- * the main model away from an exhausted lane and leave these behind, and the
- * card's haiku-class sub-calls still resolve to the dead lane — a run that reads
- * as successfully evacuated and then fails on a sub-call.
+ * A fleet measurement found that 24 of 26 agents point both of these at the
+ * CLIProxy Codex lane. Repin the main model away from an exhausted lane and
+ * leave these behind, and the card's haiku-class sub-calls still resolve to
+ * the dead lane — a run that reads as successfully evacuated and then fails
+ * on a sub-call.
  *
  * Deliberately NOT in any list here:
  *
@@ -144,14 +144,14 @@ export const ANCILLARY_MODEL_ENV_KEYS = [
 ] as const;
 
 /**
- * TOG-3116. The main-lane sub-call surfaces: env keys whose value should track
+ * The main-lane sub-call surfaces: env keys whose value should track
  * the model the pin itself selected, not a cheaper pick.
  *
- * Measured 2026-09-17 on the 16:40Z Codex exhaustion (TOG-3116): 118 open cards
+ * Measured 2026-09-17 on the 16:40Z Codex exhaustion: 118 open cards
  * carried a live main-model pin plus all six sub-call keys still frozen on the
- * exhausted lane. TOG-3045 moved the two haiku-class keys and deferred these
- * four; the 00:0xZ board sweep showed the deferred four are the bulk of the
- * dead surface. They resolve to the pin's own model: `PAPERCLIP_ASSIGNED_MODEL`
+ * exhausted lane. An earlier change moved the two haiku-class keys and
+ * deferred these four; the 00:0xZ board sweep showed the deferred four are
+ * the bulk of the dead surface. They resolve to the pin's own model: `PAPERCLIP_ASSIGNED_MODEL`
  * and `CLAUDE_CODE_SUBAGENT_MODEL` are the run/subagent main models in all but
  * name, and `ANTHROPIC_DEFAULT_OPUS_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL` are
  * the harness's fallbacks for exactly the class of work the pin was chosen for.
@@ -210,7 +210,7 @@ export const ALL_MODEL_ENV_KEYS = [
 ] as const;
 
 /**
- * TOG-3116, remediation half. True when any model-valued sub-call env key on an
+ * Remediation half. True when any model-valued sub-call env key on an
  * existing override points at a model that is currently excluded — the "pin
  * healthy, sub-calls dead" state.
  *
@@ -278,7 +278,7 @@ function isSecretBinding(binding: unknown): boolean {
 }
 
 /**
- * TOG-12305. The secret a binding resolves through: `secret_ref` names a
+ * The secret a binding resolves through: `secret_ref` names a
  * company secret by `secretId`, `user_secret_ref` a user secret by `key`.
  * `version` is deliberately not part of it — the host's binding row is keyed
  * on the secret and the config path only (`secrets.ts` `getBinding`).
@@ -291,7 +291,7 @@ function secretBindingIdentity(binding: unknown): string | null {
 }
 
 /**
- * TOG-12305. Keys of an existing override env that bind a secret the
+ * Keys of an existing override env that bind a secret the
  * assignee's own env does not carry under the same key — sorted, so the
  * result is stable in a trace.
  *
@@ -299,9 +299,8 @@ function secretBindingIdentity(binding: unknown): string | null {
  * every `env.*` binding/declaration row for that agent with exactly the refs
  * in it, and the check looks each merged-env ref up by (secret, agent,
  * `env.<KEY>`) — so a ref the agent env does not carry at that key has no row,
- * and the run fails `configuration_incomplete` before a session starts
- * (TOG-11869 Class B). That happens to a pin snapshotted under an earlier
- * assignee (TOG-3235), or one whose secret was since unbound from the agent.
+ * and the run fails `configuration_incomplete` before a session starts. That happens to a pin snapshotted under an earlier
+ * assignee, or one whose secret was since unbound from the agent.
  *
  * Only refs the host would refuse are reported: a malformed ref fails the
  * host's schema parse and is never checked, and a `user_secret_ref` that is
@@ -330,7 +329,7 @@ export function staleOverrideSecretRefKeys(
 export interface ModelOverrideInput {
   model: Pick<ModelEntry, "id" | "contextWindow"> & Partial<Pick<ModelEntry, "effort">>;
   /**
-   * TOG-11642. The agent-level context cap the per-pin
+   * The agent-level context cap the per-pin
    * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` stamp compares against — split from the
    * admission ceiling (`fleetContextCeilingTokens`, held at 200k for glm-5.3),
    * which `estimateIssueContext` still takes separately. Stamp
@@ -343,7 +342,7 @@ export interface ModelOverrideInput {
   agentEnvContextTokens: number;
   compactionRatio: number;
   /**
-   * TOG-3995. The assignee agent's `adapterType`, or `null`/absent when UNKNOWN.
+   * The assignee agent's `adapterType`, or `null`/absent when UNKNOWN.
    *
    * Decides both which `adapterConfig` key carries effort and which values are
    * legal, so without it we write no effort at all — the same
@@ -351,7 +350,7 @@ export interface ModelOverrideInput {
    */
   agentAdapterType?: string | null;
   /**
-   * TOG-3995. The assignee agent's whole `adapterConfig`, or `null`/absent when
+   * The assignee agent's whole `adapterConfig`, or `null`/absent when
    * UNKNOWN. Only its effort key is read, under whichever name this adapter
    * uses; the pin needs it because the host merges per key, so an effort we do
    * not overwrite is an effort we have silently endorsed.
@@ -371,7 +370,7 @@ export interface ModelOverrideInput {
   agentEnv?: AdapterEnv | null;
   existingOverrideEnv?: AdapterEnv;
   /**
-   * Target for the two haiku-class sub-call keys (TOG-3116): the cheapest
+   * Target for the two haiku-class sub-call keys: the cheapest
    * healthy T3 model, resolved by `cheapestHealthyModelIdForTier` at the call
    * site. NOT the main pin — pinning `ANTHROPIC_SMALL_FAST_MODEL` to a T1
    * model would price every background haiku-class call at T1 rates.
@@ -383,7 +382,7 @@ export interface ModelOverrideInput {
    */
   cheapModelId?: string | null;
   /**
-   * TOG-12234. The fallback stamp to write under {@link PIN_PROVENANCE_ENV_KEY},
+   * The fallback stamp to write under {@link PIN_PROVENANCE_ENV_KEY},
    * or null/absent for a pin that is not a fallback. Absent never carries an
    * old stamp forward: a stamp describes one decision, and a new pin is a new
    * decision. A caller that keeps the decision (the reassignment rebuild)
@@ -415,7 +414,7 @@ const PLUGIN_OWNED_ENV_KEYS: readonly string[] = [CONTEXT_LIMIT_ENV_KEY];
  * of now. The existing override is not: it is a snapshot written by an earlier
  * repin, under whatever assignment held at the time. Spreading it wholesale
  * ratchets that snapshot onto every later pin — so reassigning a card injects
- * the previous assignee's secret refs (TOG-3235), and unbinding a secret never
+ * the previous assignee's secret refs, and unbinding a secret never
  * takes effect because the pin keeps re-supplying the dead ref. So when the
  * assignee env is KNOWN we rebuild from it and carry forward only the keys this
  * plugin owns; the assignee's own bindings come back from `agentEnv`, the source
@@ -423,11 +422,11 @@ const PLUGIN_OWNED_ENV_KEYS: readonly string[] = [CONTEXT_LIMIT_ENV_KEY];
  * cannot rebuild, so we fall back to preserving the existing override rather than
  * clobber bindings we cannot see — except the model-owned surfaces
  * (`CONTEXT_LIMIT_ENV_KEY`, `PIN_LANE_MODEL_ENV_KEYS`,
- * `ANCILLARY_MODEL_ENV_KEYS`, TOG-6895), which are re-derived against the new
+ * `ANCILLARY_MODEL_ENV_KEYS`), which are re-derived against the new
  * model below so a repin never leaves them pointing at the model it just
  * moved off.
  *
- * TOG-3995: the same per-key merge is why effort is decided HERE rather than at
+ * The same per-key merge is why effort is decided HERE rather than at
  * the six call sites. `model` and its effort have to leave as one patch, or the
  * steady state is a pinned model paired with an effort it never offered.
  * `effortPinForOverride` exposes the decision for a trace; the value itself is
@@ -490,14 +489,14 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
     delete env[CONTEXT_LIMIT_ENV_KEY];
   }
 
-  // TOG-3116: move every model-valued sub-call key off the lane the override
+  // Move every model-valued sub-call key off the lane the override
   // was frozen on. The main-lane keys follow the pin; the two haiku-class keys
   // follow the cheapest healthy T3 pick when one exists (a sub-call on a live
   // lane beats a cheap one on a dead lane, but a T1-priced background call is
   // its own defect), falling back to the pin when none does. Secret-bound
   // values are never touched — we cannot reconstruct what they resolve to.
   //
-  // TOG-8108: never write a `devin/*` value for a `claude_local` assignee.
+  // Never write a `devin/*` value for a `claude_local` assignee.
   // Devin's content filter rejects the Claude Code / Agent SDK system banner
   // (Cognition ticket 71806) — the main-model gate in `select.ts` excludes
   // this pair, so these writes must not reintroduce it through the side door.
@@ -505,7 +504,7 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
   // cheap pick falls back to the pin when IT is blocked (the pin cleared the
   // gate to be chosen at all). An unknown adapter still gets the write:
   // unknown never excludes.
-  // TOG-6895: the unknown-assignee rule matches what main already did for the
+  // The unknown-assignee rule matches what main already did for the
   // haiku-class keys — re-derive only keys the snapshot already carries, never
   // introduce new keys into a base we cannot see. Otherwise a repin off a dead
   // lane leaves the sub-calls resolving to it.
@@ -527,7 +526,7 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
     }
   }
 
-  // TOG-12234: the stamp follows this decision only. Dropped first so an
+  // The stamp follows this decision only. Dropped first so an
   // unknown-assignee carry cannot keep a stamp from an earlier pin. Written
   // only into an env that is being written anyway: with an unknown assignee
   // and no override env, a stamp-only env would replace the agent's whole

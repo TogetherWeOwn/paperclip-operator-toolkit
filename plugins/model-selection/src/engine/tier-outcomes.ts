@@ -2,7 +2,7 @@ import { TIERS, type Tier } from "../constants.js";
 import type { ModelEntry } from "./types.js";
 
 /**
- * TOG-4959. Per-tier lane-poll outcome counters — read-only telemetry.
+ * Per-tier lane-poll outcome counters — read-only telemetry.
  *
  * WHY THIS EXISTS. Tier rosters are audited by lane MEANS (utilization
  * averages per lane), not by OUTCOMES (did the tier's lanes actually serve).

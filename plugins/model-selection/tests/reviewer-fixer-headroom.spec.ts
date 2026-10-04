@@ -4,18 +4,17 @@ import { snapshotReviewerFixerHeadroom } from "../src/reviewer-fixer-headroom.js
 import { baseInput, fixer, reviewer } from "./reviewer-fixer-headroom-fixtures.js";
 
 /**
- * TOG-14458: pacer reviewer/fixer load headroom readout (read-only).
+ * Pacer reviewer/fixer load headroom readout (read-only).
  *
- * Parent TOG-13439 via fan-out TOG-14439; joint-controller input for
- * TOG-12456. Pure snapshot only: no admission change, no pacing change,
- * no reassignment.
+ * Joint-controller input. Pure snapshot only: no admission change, no
+ * pacing change, no reassignment.
  *
- * NON-GOALS (owned elsewhere): TOG-14347 GARM eligible-vs-queued snapshot
- * (pressure/host/quotas/hysteresis); TOG-14079 admission audit log;
- * TOG-14288 burn-down readout (done).
+ * NON-GOALS (owned elsewhere): the GARM eligible-vs-queued snapshot
+ * (pressure/host/quotas/hysteresis); the admission audit log; the
+ * burn-down readout.
  */
 
-describe("TOG-14458 reviewer/fixer headroom readout", () => {
+describe("Reviewer/fixer headroom readout", () => {
   it("reports healthy headroom when both roles have room", () => {
     const snap = snapshotReviewerFixerHeadroom(baseInput());
     expect(snap.reviewers.headroom).toBe(4);

@@ -6,8 +6,7 @@
  * these tests stub `globalThis.fetch` directly (vi.stubGlobal) rather than
  * mocking the SDK.
  *
- * The fixtures are shaped from the lane the operator measured on 2026-09-05
- * (TOG-811 comment, 02:50Z): providers `claude`, `codex`, `codex-spark`,
+ * The fixtures are shaped from the lane the operator measured on 2026-09-05: providers `claude`, `codex`, `codex-spark`,
  * `kimi`, `opencode-go`, with Kimi 429-exhausted at the time of measurement.
  */
 
@@ -231,7 +230,7 @@ describe("scheduled poll: never retry within a firing", () => {
 
       // Two calls: one per lane file, for the one configured company. A
       // poller that bans itself by retrying within a firing is the incident
-      // this discipline exists to prevent (TOG-811 recon, measured twice).
+      // this discipline exists to prevent.
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       expect(
         harness.metrics.some(
@@ -254,8 +253,8 @@ describe("scheduled poll: never retry within a firing", () => {
    * honour the signal, which is what the real bridge does; before the fix this
    * test times out instead of passing.
    *
-   * Found by `deploy/worker_host_harness.mjs`, which drives the built worker as
-   * a real child process over the real JSON-RPC protocol.
+   * Found by a process-level harness (not part of this tree) that drives the
+   * built worker as a real child process over the real JSON-RPC protocol.
    */
   it("bounds a lane that accepts the connection and never responds", async () => {
     // Never resolves, never rejects, and ignores AbortSignal entirely.
@@ -304,15 +303,15 @@ describe("scheduled poll: never retry within a firing", () => {
   it("does not leak the upstream error text into activity or metrics", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED 10.1.2.3:8317 sk-leaked-abc")),
+      vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED 192.0.2.3:8317 sk-example-abc")),
     );
     const { harness } = await harnessFor(ENABLED);
 
     await harness.runJob(JOB_KEYS.poll);
 
     const written = JSON.stringify({ a: harness.activity, m: harness.metrics });
-    expect(written).not.toContain("10.1.2.3");
-    expect(written).not.toContain("sk-leaked-abc");
+    expect(written).not.toContain("192.0.2.3");
+    expect(written).not.toContain("sk-example-abc");
   });
 
   it("one company's failure never aborts the sweep over the rest", async () => {
@@ -692,7 +691,7 @@ describe("onValidateConfig", () => {
     expect(result.errors?.join(" ")).toContain("laneApiKeySecretRef");
   });
 
-  it("rejects a baseUrl pointed at loopback (TOG-352: unreachable, and the wrong endpoint anyway)", async () => {
+  it("rejects a baseUrl pointed at loopback", async () => {
     const { plugin } = await harnessFor({});
     const result = await plugin.onValidateConfig!({
       ...ENABLED,
@@ -832,7 +831,7 @@ describe("pure helpers", () => {
  * v0.3.0: the per-lane documents the telemetry lane actually serves.
  *
  * The bodies below are the real published shapes, copied from
- * `ops/tog-3120/collector-evidence/{claude,codex,zai}.json` captured live at
+ * collector evidence files captured live at
  * 2026-09-17T00:23:15Z — not invented fixtures. The cooldown fields are the
  * quota contract v4 additions (`cliproxy_quota_contract.py` @ `10864210`).
  */
@@ -1158,7 +1157,7 @@ describe("laneCooldown / extractLaneDocument (pure)", () => {
   /**
    * `exhausted` is unserviceable; `cooldown` is NOT accepted as a health value
    * because the Router maps it to `degraded` → posture `avoid`, which still
-   * selects the lane (measured on TOG-811, 2026-09-17).
+   * selects the lane.
    */
   it("accepts exhausted/unavailable health but not cooldown health", () => {
     expect(laneCooldown({ health: "exhausted" }, NOW)?.reason).toBe("health_exhausted");

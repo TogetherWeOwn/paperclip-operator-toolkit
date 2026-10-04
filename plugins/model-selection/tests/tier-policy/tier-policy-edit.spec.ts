@@ -1,5 +1,5 @@
 /**
- * TOG-11543 P2 (TOG-12490): the `model_selection_tier_policy` edit path.
+ * The `model_selection_tier_policy` edit path.
  * Every P1 guard must hold through the tool, plus the D4 request gates
  * (expectedRevision, reason, immutable id, referenced/default remove). This
  * build is proposal-only: no outcome is ever `accepted` and nothing persists.
@@ -27,7 +27,7 @@ import {
 
 const SEED = LEGACY_MODEL_SELECTION_V1;
 const ACTOR = { agentId: "agent-1", runId: "run-1" };
-const REASON = "TOG-12490 test";
+const REASON = "Test";
 
 const PREDICATE: MetricRule = { kind: "capability-predicate", decisionBinding: CAPABILITY_PRIOR_BINDING, policyRevision: LEGACY_EVALUATOR_ID };
 

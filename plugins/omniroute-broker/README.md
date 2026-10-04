@@ -4,12 +4,11 @@ Performs a **fixed set of narrow OmniRoute management operations** on behalf of
 agent runs. The management credential is resolved inside the host process and
 never enters an agent's address space.
 
-Built for **TOG-391**, to unblock **TOG-352** (register the CLIProxy as a
-provider). Modelled directly on `gh-token-broker` (TOG-174/TOG-309), which is
+Built to unblock registering the CLIProxy as a provider. Modelled directly on `gh-token-broker`, which is
 the working reference for this shape on this instance.
 
 > **This Ops Tooling directory is the authoritative copy.** The broker moved
-> here from `paperclip-model-router` under TOG-537 because it is an operation
+> here from `paperclip-model-router` because it is an operation
 > broker, not model-routing product code. Model Router is not a fallback source
 > and must contain no active OmniRoute broker, bridge test or calibration hook.
 >
@@ -32,7 +31,7 @@ the working reference for this shape on this instance.
 
 ---
 
-## Verification of the claims TOG-391 was built on
+## Verification of the claims this broker was built on
 
 The issue instructed that every inherited fact be re-derived rather than
 trusted. Done, on 2026-08-25. **Two claims were wrong.** Both corrections
@@ -45,7 +44,7 @@ changed the build.
 | 3 | `manage` grants `/api/keys/[id]/reveal`, i.e. other keys' plaintext | ✅ **confirmed**, with one mitigation the issue did not know about | See below. |
 | 4 | `gh-token-broker` is the right template | ✅ **confirmed** | Read in full. Invariants carried over module by module. |
 | 5 | `required-for-agent-in-progress` skips the ownership check | ✅ **confirmed verbatim against the running build** — but the issue's *prescribed fix* is stale | See "checkoutPolicy". |
-| 6 | `TOG-151-omniroute_combo_cli.sh` solves the audit-logging problem | ✅ **confirmed and reused** | `[RESOLVED-8]`, carried into `dist/audit.js`. |
+| 6 | The earlier shell CLI (`omniroute_combo_cli.sh`) solves the audit-logging problem | ✅ **confirmed and reused** | `[RESOLVED-8]`, carried into `dist/audit.js`. |
 | 7 | OmniRoute bills Claude to OpenRouter PAYG | 🟡 **partially confirmed — I could not close it** | See "What I could not verify". |
 
 ### Claim 2 — the claim the whole design rests on
@@ -60,8 +59,8 @@ src/shared/constants/managementScopes.ts
                                      MANAGEMENT_API_KEY_SCOPES = Set{"manage","admin"}
 ```
 
-The `oma_`-prefixed CLI access token — flagged **UNVERIFIED** in TOG-151
-`[RESOLVED-2]`, which explicitly said *"Read what it grants before switching"* —
+The `oma_`-prefixed CLI access token — flagged **UNVERIFIED** in the earlier
+shell CLI's `[RESOLVED-2]` note, which explicitly said *"Read what it grants before switching"* —
 is real, and this is that read. It is a 3-level hierarchy, not a single
 all-or-nothing `manage` bit.
 
@@ -143,9 +142,9 @@ if (policy === "required-for-agent-in-progress") {
 It skips the ownership check in exactly the case an attacker would choose. Never
 use it.
 
-**But TOG-391 instructs `checkoutPolicy: "always-for-agent"`, and that
+**But the originating issue instructs `checkoutPolicy: "always-for-agent"`, and that
 instruction is out of date.** The reference plugin has since moved OFF that
-policy (TOG-309), because `assertCheckoutOwner` hardcodes the status term —
+policy, because `assertCheckoutOwner` hardcodes the status term —
 `/app/server/dist/services/issues.js:6325`:
 
 ```js
@@ -183,7 +182,7 @@ up by exact string equality in a deny-by-default table (`dist/verbs.js`).
 If the broker forwarded caller-supplied method+path it would be the management
 key with extra steps, and a caller could reach `GET /api/keys/<id>/reveal`.
 
-Exact equality, no substrings or prefixes, is TOG-151's `gate_allowlist` rule,
+Exact equality, no substrings or prefixes, is the earlier shell CLI's `gate_allowlist` rule,
 adopted after Claude turned out to be reachable through 351 ids of which 14
 contained neither "claude" nor "anthropic".
 
@@ -208,15 +207,15 @@ cannot choose it by picking a route or setting a field.
 `PAID_TRAFFIC_KEYS` (`priority`, `weight`, `enabled`, `billing`, `quota`, …) is
 escalated single → dual. It matches on **key presence, not value** — disabling
 the provider that currently serves paid traffic is exactly as consequential as
-enabling one. Like TOG-151's Claude tripwire it is one-way: it can only ever
+enabling one. Like the shell CLI's Claude tripwire it is one-way: it can only ever
 require **more** approval, never less.
 
 ### Mapping verbs — why they are tighter than combos
 
 A combo is inert configuration. The **mapping** is the object that actually moves
 traffic, because it is what a bare model id resolves through. Without these verbs
-the broker covers TOG-178's phase 5 (`POST /api/combos` ×52) and not its phase 6
-(`POST /api/model-combo-mappings` ×52) — i.e. it would land 52 combos that carry
+the broker covers the combo-creation phase of the 52-combo rollout (`POST /api/combos`
+×52) and not its mapping phase (`POST /api/model-combo-mappings` ×52) — i.e. it would land 52 combos that carry
 zero traffic, and route policy is pinned at install, so escaping that needs a
 second board-gated action.
 
@@ -233,7 +232,7 @@ with no opt-out flag**:
 |---|---|
 | Body keys allowlisted to `pattern`, `comboId`, `priority`, `enabled`, `description` | Exactly the shipped route's zod contract. Deny-by-default, as everywhere else here. |
 | No `*` or `?` in `pattern` | OmniRoute glob-matches case-insensitively, so one `*` can capture ids nobody enumerated — including ids that do not exist yet. |
-| `pattern` must not match `/(claude\|sonnet\|opus\|haiku\|fable\|mythos\|prism)/i` | Matched on **family**, not on the substring `claude`: TOG-237 was a bypass a `claude` check cleared, and 14 `aug/` ids contain no `claude` at all. `mythos` and `prism` are **not** family words — see the structural-limit note below for why they are enumerated, and why quoting this rule without them (as this table did until TOG-291) understates the guard. |
+| `pattern` must not match `/(claude\|sonnet\|opus\|haiku\|fable\|mythos\|prism)/i` | Matched on **family**, not on the substring `claude`: an earlier bypass was one a `claude` check cleared, and 14 `aug/` ids contain no `claude` at all. `mythos` and `prism` are **not** family words — see the structural-limit note below for why they are enumerated, and why quoting this rule without them (as this table once did) understates the guard. |
 | `priority` must be an explicit integer | The route defaults it to `0`. Mappings resolve `priority DESC`, so an omitted priority silently loses to every existing mapping — a routing decision nobody made. |
 
 The guard is wired into `buildRequest()`, **not** into the operate handler, because
@@ -244,13 +243,14 @@ unchecked on approval. There is a test for exactly that.
 **This makes the broker path strictly narrower than the operator path it
 replaces** — a hand-run `apply.sh` trusts its input file and enforces none of the
 above. Verified, not asserted: all **52** real patterns in
-`/paperclip/operator-handoff/TOG-178-mapping-plan.json` pass the guard (0 refused),
+the operator's mapping plan (an operator-side file that is not version-controlled
+here; the test uses a committed copy) pass the guard (0 refused),
 and their priorities are explicit integers `1000…949`. That check is a test.
 
 **Known limitation, accepted deliberately.** The family rule is an absolute
-refusal, not an escalation, so the TOG-153 class of work — pinning bare Claude ids
+refusal, not an escalation, so work that pins bare Claude ids
 to the subscription lane, whose patterns are both wildcarded (`claude-opus*`) and
-Claude-family — **cannot** go through this broker at any approval level. Claude
+Claude-family, **cannot** go through this broker at any approval level. Claude
 routing stays an explicit operator action. That is the intended trade; it is
 recorded here so nobody rediscovers it as a bug.
 
@@ -274,9 +274,9 @@ A fixture certifies the fixture. Run
 (it needs `OMNIROUTE_API_KEY`) before trusting any calibration claim; it imports
 this guard from `dist/` so a copy cannot drift and then certify itself. Live
 result after the fix: **352/352 blocked, 0
-escaped**, and all 52 TOG-178 patterns still pass unchanged.
+escaped**, and all 52 planned mapping patterns still pass unchanged.
 
-⚠️ **And the fixture was worse than incomplete — it was circular (TOG-291).** The
+⚠️ **And the fixture was worse than incomplete — it was circular.** The
 trimmed fixture stored the `aug/` ids as bare `{id}` records with no `name`. The
 calibration script's "Claude-bearing" net counts a family-name match as
 Claude-bearing, so with no other evidence in the record the guard was scoring its
@@ -291,29 +291,30 @@ the whole check rests on, and a separate test pins it.
 
 Be precise about how thin that evidence is. Only **three** entries carry a `name`,
 because only three are written down anywhere a reviewer can check: `aug/prism-a`
-and `aug/prism-b` (`TOG-152-combo-spec.md`, `TOG-151-claude-surface.json`) and
-`aug/opus4.8` (`TOG-151-omniroute_combo_cli.sh`). The other `aug/` ids are stored
+and `aug/prism-b` (an operator-side combo spec and Claude-surface corpus, neither
+version-controlled here) and `aug/opus4.8` (the earlier shell CLI,
+`omniroute_combo_cli.sh`). The other `aug/` ids are stored
 with **no** name rather than a plausible one reconstructed from the id — a guessed
 name is the same circularity in disguise, since the id is what the guard already
 reads. A live run sees all 14 real names and is worth strictly more; this fixture
 proves the loop is broken only for the one id that can prove it.
 
-**No name-shaped regex is a sound Claude-containment control on this instance
-(TOG-291).** Against the 351-id corpus in
-`/paperclip/operator-handoff/TOG-151-claude-surface.json`, `claude|anthropic`
+**No name-shaped regex is a sound Claude-containment control on this
+instance.** Against the 351-id operator-side Claude-surface corpus (not
+version-controlled here), `claude|anthropic`
 misses **14** ids and `(claude|sonnet|opus|haiku|fable)` misses `aug/prism-a`; it
 is not sound in the other direction either, since `aug/prism-b` matches on `prism`
 and carries no Claude. This guard is a name-shaped rule **because it structurally
 cannot be anything else** — it only ever holds the caller's pattern string. Where a
 check *can* see ids or resolve a model, it must audit against the corpus instead;
 `omniroute_combo_cli.sh`'s `claude_suspicion_reason()` (0 misses on the corpus) and
-TOG-178's phase 8 are the reference implementations. The corpus is itself a
+phase 8 of the rollout plan are the reference implementations. The corpus is itself a
 snapshot and carries its own warning against hard-coding — the durable form is a
 live read.
 
 **Accepted over-block:** `aug/prism-b` is `"Prism (GPT + Kimi)"`, carries no
-Claude, and is refused anyway — the two are indistinguishable by id. TOG-178
-names neither, so the cost against real intent is zero. Blocking a non-Claude
+Claude, and is refused anyway — the two are indistinguishable by id. The 52-pattern
+rollout plan names neither, so the cost against real intent is zero. Blocking a non-Claude
 model is a recoverable annoyance; passing Claude traffic is the failure this
 guard exists to prevent.
 
@@ -341,7 +342,7 @@ live upstream credentials in ordinary responses, so `GET /api/providers` — an
 "ungated read" — is a credential disclosure unless scrubbed.
 
 `dist/redact.js` uses a **per-resource field allowlist**, not a denylist of
-secret-looking names. A denylist is wrong for the reason TOG-151 already paid
+secret-looking names. A denylist is wrong for the reason the earlier shell CLI already paid
 for: the thing being filtered has more spellings than you can enumerate
 (`apiKey`, `api_key`, `key`, `token`, `secret`, `clientSecret`, …) and a miss is
 silent. A field OmniRoute adds tomorrow is invisible until someone adds it here
@@ -352,7 +353,7 @@ response if anything credential-shaped survived. Not redundant: it catches an
 *allowlisted* field whose **value** carries a credential (a `baseUrl` with a key
 in the query string is the real case).
 
-### Audit — TOG-151 `[RESOLVED-8]`, carried over
+### Audit — the shell CLI's `[RESOLVED-8]`, carried over
 
 1. **Prove the audit path by using it, before the mutation** — `preflight()`
    writes a real record. A permission probe is not a proof.
@@ -393,7 +394,7 @@ never touches the secret.
 | The caller supplies no method and no path | Otherwise the broker is the management key with extra steps, and `/api/keys/:id/reveal` is reachable. |
 | Unknown verb ⇒ `404`, never a pass-through | Deny-by-default. Exact equality, no prefix matching. |
 | The credential is resolved once, as late as possible, and rides in a header | Never in a URL, never in state, never in an error message. |
-| **Nothing is shelled out** | The call is `ctx.http.fetch`, so the key never lands in `/proc/<pid>/cmdline` — the TOG-200 class. It is also why TOG-151's shell CLI needed a `0600 curl --config` file; a plugin must not reintroduce that problem. |
+| **Nothing is shelled out** | The call is `ctx.http.fetch`, so the key never lands in `/proc/<pid>/cmdline` — the class of bug a command line exposes. It is also why the earlier shell CLI needed a `0600 curl --config` file; a plugin must not reintroduce that problem. |
 | A transport error's message is never echoed | The caught error can quote `init`, which holds the `Authorization` header. Only the error *name* propagates. |
 | An upstream `401`/`403` becomes `503` | It means the **broker's** credential is wrong. Returning 403 would tell the agent "you are not allowed" — false, and the kind of misleading refusal that costs a run. |
 | Reads are scrubbed by allowlist, output re-checked | A provider record embeds the upstream credential in the clear. |
@@ -405,11 +406,11 @@ never touches the secret.
 not look like a swap — `/api/combos` on `:20129` returns
 `404 {"error":"not_found","message":"API port only serves OpenAI-compatible routes."}`.
 
-⚠️ **Host, and this corrects a note in TOG-391 and in my own memory.** The right
+⚠️ **Host, and this corrects an earlier note.** The right
 address depends on where you are:
 
 - from the **host**: published ports are on loopback; `omniroute` does not
-  resolve. TOG-151's `127.0.0.1` default is correct **for that tool**.
+  resolve. The shell CLI's `127.0.0.1` default is correct **for that tool**.
 - from a **container** (where this worker runs): `127.0.0.1` is the worker
   itself and is refused; the podman alias **`omniroute` resolves and answers**.
 
@@ -423,8 +424,8 @@ http://127.0.0.1:3456/                -> connection refused
 ```
 
 **This overturns the prior note that OmniRoute is unreachable from agent
-containers.** That note tested `host.containers.internal`, `localhost` and
-`172.17.0.1` — but never the bare service alias. The catalogue **is** readable
+containers.** That note tested the container runtime's host alias, `localhost` and
+the container bridge gateway address — but never the bare service alias. The catalogue **is** readable
 from an agent run.
 
 ## Install
@@ -432,13 +433,13 @@ from an agent run.
 Board-gated; an operator must do it. Install only from this repository or from a
 staged copy whose `dist/` fingerprint the calibration command above matched.
 
-1. Install this directory into the instance plugin root
-   (`/paperclip/.paperclip/plugins/omniroute-broker`).
+1. Install this directory into the instance plugin root (the host's plugin
+   install directory) as `omniroute-broker`.
 2. Config: `managementBaseUrl` = `http://omniroute:20128`, and bind
    `managementKeyRef` to the OmniRoute management key **as a secret ref**, never
    the key itself.
    > The schema pins `{type:"secret_ref", secretId:<uuid>}` with
-   > `additionalProperties:false`. Per TOG-228 the host registers
+   > `additionalProperties:false`. The host registers
    > `format:"secret-ref"` as `validate: () => true` — it checks **nothing** — so
    > a pasted plaintext key would otherwise be accepted and stored verbatim in
    > the config row.
@@ -447,7 +448,7 @@ staged copy whose `dist/` fingerprint the calibration command above matched.
    curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
      "$PAPERCLIP_API_URL/api/plugins/omniroute-broker/api/whoami?companyId=$PAPERCLIP_COMPANY_ID"
    ```
-4. Then `providers.list` (read, scrubbed), then the TOG-352 `providers.create`.
+4. Then `providers.list` (read, scrubbed), then the CLIProxy `providers.create`.
 
 ## Tests
 

@@ -3,16 +3,15 @@
 Turns CLIProxy's in-memory-only per-upstream usage/cooldown telemetry into
 durable Paperclip history. Read-only, forever.
 
-Built per TOG-811 against dispatch (`wakeEnabled`) and model-selection
+Built against dispatch (`wakeEnabled`) and model-selection
 (`mode: "advise"`) rollout conventions.
 
 | | |
 |---|---|
 | Version | **0.3.1** — bounded single-company scheduled polling; retains per-lane cooldown state |
 | Code | manifest, config schema, secret-ref guard, worker (poll job, one agent tool, one API route) |
-| Tests | 95 vitest (all 82 existing + 13 scope cases; `it.each` rows count separately), 9 rebuilt-worker checks, 9 stock-runtime integration scenario groups. Two pre-repair scenarios reproduce the exact operator rejection. No live DB, credentials or lane requests. See [contract evidence](deploy/COMPANY-SCOPE-CONTRACT.md). |
-| Manifest | validated against the **host's own** `pluginManifestV1Schema` — PASS, `pluginId: "togetherweown.cliproxy-insight"`. `validateManifestCapabilities` could not be run standalone here — it lives at `/app/server/dist/services/plugin-capability-validator.js` and resolves internal `@paperclipai/shared` source paths that only exist inside the live server process. Every declared feature was hand-checked against the capabilities list instead, and that check caught one real gap (`activity.log.write`) |
-| Installed | **0.3.1: no**. Operator installed 0.3.0 on 2026-09-23, then disabled it after the scheduled scope failure. Keep it disabled pending reviewed replacement through TOG-3152. |
+| Tests | 95 vitest cases (all 82 existing + 13 scope cases; `it.each` rows count separately). No live DB, credentials or lane requests. Process-level and stock-runtime harnesses are maintained privately with the operator material. |
+| Manifest | validated against the **host's own** `pluginManifestV1Schema` — PASS, `pluginId: "togetherweown.cliproxy-insight"`. `validateManifestCapabilities` could not be run standalone here — it lives in the host server's plugin capability validator and resolves internal `@paperclipai/shared` source paths that only exist inside the live server process. Every declared feature was hand-checked against the capabilities list instead, and that check caught one real gap (`activity.log.write`) |
 | Polling | **off** by default; installing is not enabling |
 
 ---
@@ -43,19 +42,19 @@ the scoped config await, before reading stored state.
 
 Capabilities: remove `companies.read`; add none. No migrations, no new state
 shape, no secret grant changes. The six lane defaults and no-retry bounds stay
-unchanged. The old nine-check wire harness is retained but is not authorization
-evidence: [stock contract harness](deploy/stock_contract_harness.mjs) additionally
-runs the actual installed scheduler, worker manager and SDK authorization gate.
-See [contract and limits](deploy/COMPANY-SCOPE-CONTRACT.md) and
-[upgrade/rollback packet](deploy/UPGRADE-0.3.1.md). Local tests do not establish a
-successful live canary or the seven-day acceptance metric.
+unchanged. A process-level wire harness is not authorization evidence on its own;
+a stock contract harness that runs the actual installed scheduler, worker manager
+and SDK authorization gate is the stronger check. Both, together with the
+contract-and-limits note and the upgrade/rollback packet, are maintained privately
+with the operator material. Local tests do not establish a successful live canary
+or the seven-day acceptance metric.
 
 ## What changed in 0.3.0, and why it matters
 
 v0.2.0 polled two aggregate files that the 2026-09-05 sanitizer design
 specified: `request-rates.json` and `model-usage-v1.json`. It was never
 installed, and while it sat unreleased the lane was rebuilt around the
-**TOG-2693 collector contract** — one document per lane
+**per-lane collector contract** — one document per lane
 (`claude.json`, `codex.json`, `kimi.json`, `opencode-go.json`, `zai.json`,
 `antigravity.json`), each an `{schemaVersion, observedAt, staleAfterSeconds,
 records[]}` envelope. Those are the files `model-selection`'s pacer polls in
@@ -67,14 +66,13 @@ So 0.3.0 re-points at the per-lane documents and makes the aggregates opt-in
 namespace, same bearer, same read-only static JSON. Only which filenames the
 plugin asks for.
 
-The second change is the one the owner asked for on 2026-09-17 00:44Z, after a
-Z.ai cooldown nobody could see cost seven agent runs: **a cooldown is lane
-state, not a percentage.** Each record is read for a cooldown instant and, when
+The second change was prompted by a Z.ai cooldown that nobody could see and that
+cost seven agent runs: **a cooldown is lane state, not a percentage.** Each record is read for a cooldown instant and, when
 one is active, the lane account is reported as cooling on both read surfaces
 and a transition event is appended to its rolling log. Three details are
 load-bearing, and each is a defect observed elsewhere in this system:
 
-- **Flat keys first, then nested.** The producer at `8a5b98de` published the
+- **Flat keys first, then nested.** An earlier producer revision published the
   cooldown *only* as a nested `cooldown: {until}` object, which a flat-key
   reader never sees — producer correct, validator green, pacer still
   dispatching into a cooled-down credential. This reads all six flat aliases
@@ -120,12 +118,12 @@ it never decides what gets stored.
 
 ## The owner-reserved gate is dissolved, not merely satisfied
 
-TOG-811 held that placing the CLIProxy management key as a Paperclip secret
-was owner-reserved, because that key can read `/v0/management/auth-files` and
-returns provider credentials in clear.
+The original design held that placing the CLIProxy management key as a Paperclip
+secret was an owner-reserved decision, because that key can read
+`/v0/management/auth-files` and returns provider credentials in clear.
 
 The lane design removes the need for that decision. A host-side collector
-holds the management key (`~/secure-drop/cliproxy.env`, never in Caddy's
+holds the management key (in an operator-held env file, never in Caddy's
 environment) and publishes sanitized static JSON. The only credential
 Paperclip holds is `cliproxy-usage-lane-key`, a lane bearer that can read an
 allowlisted set of static files and reach nothing else — `/v0/management/*` is not routable
@@ -198,10 +196,11 @@ embed URLs and connection IDs.
 
 ## Rollout
 
-For 0.3.1, follow the [immutable replacement packet](deploy/UPGRADE-0.3.1.md)
-through TOG-4170 → TOG-811 → the existing TOG-3152 host card. Require independent
-exact-head review, green CI and non-author merge before operator authorization.
-Keep the installed plugin disabled until that replacement is authorized.
+0.3.1 replaces an installed 0.3.0 as an immutable package swap. The operator
+runbook and the upgrade/rollback packet are maintained privately. Require
+independent exact-head review, green CI and non-author merge before operator
+authorization. Keep an installed 0.3.0 disabled until that replacement is
+authorized.
 
 Reuse the existing telemetry secret reference and reviewed scoped binding;
 create no secret or grant. Configure exactly **one** company. Multi-company
@@ -217,7 +216,6 @@ lane design above does not authorize new host work.
 npm run verify                        # typecheck + tests + build
 npm test                              # 95 cases across 4 files; includes it.each rows
 npm run build                         # esbuild → dist/manifest.js, dist/worker.js
-node deploy/worker_host_harness.mjs   # 9 checks against the BUILT worker
 ```
 
 `tests/worker.spec.ts` boots the plugin through the SDK's in-memory harness
@@ -225,10 +223,10 @@ and drives the scheduled job, the agent tool, and the API route end to end.
 
 ### Why there is a second harness
 
-`deploy/worker_host_harness.mjs` spawns `dist/worker.js` as a **real child
-process** and speaks the real newline-delimited JSON-RPC protocol to it, so
-every `ctx.*` call arrives as a wire message. It needs no credential, no
-network and no host.
+A process-level harness, maintained privately with the operator material rather
+than in this tree, spawns `dist/worker.js` as a **real child process** and
+speaks the real newline-delimited JSON-RPC protocol to it, so every `ctx.*` call
+arrives as a wire message. It needs no credential, no network and no host.
 
 It exists because the vitest harness and the plugin share an assumption: the
 in-memory `ctx.http.fetch` forwards `init` to the global `fetch`, so an
@@ -281,13 +279,14 @@ as literals.
 
 ### What has NOT been verified
 
-- Version 0.3.1 has not been installed. The operator installed 0.3.0, observed
-  scheduled company-scope failures, then disabled it on 2026-09-23.
+- Version 0.3.1 has not been verified on a live host. Its predecessor, 0.3.0,
+  failed scheduled company scope against the stock scheduler; see "What changed
+  in 0.3.1".
 - `validateManifestCapabilities` could not be run standalone — see the status
   table.
 - **No successful live scheduled poll is verified.** The repaired scheduled
-  path is exercised by the stock-runtime harness using fixture service adapters,
-  not the live lane or database. Host activation, canary, rollback and seven-day
+  path is exercised only by a stock-runtime harness (maintained privately) using
+  fixture service adapters, not the live lane or database. Host activation, canary, rollback and seven-day
   acceptance remain outstanding. `poll_ok` with `null` counters is the signal
   that a field alias is missing.
 - **No lane has been observed cooling through this plugin.** The cooldown
@@ -298,12 +297,10 @@ as literals.
 
 The lane payload itself is **no longer** unverified, and the note that used to
 sit here — that a 401 gates every path so the namespace cannot be read — was
-wrong twice over. The lane's current shape (TOG-1006) puts the key in the same
+wrong twice over. The lane's current shape puts the key in the same
 matcher as the path and does not claim the namespace, so a request without the
 bearer falls through to the site's ordinary 404 page. A keyless 404 is the
 designed response, not evidence the route is gone; reading it as deletion cost
-this card one wrong conclusion and one unnecessary operator card (TOG-3134,
-cancelled). **With** the bearer, `claude.json` and `codex.json` returned 200 on
-2026-09-17 00:54Z, and the fixtures in the lane test block are copied from
-those bodies (`ops/tog-3120/collector-evidence/`, committed at `73573d21`),
-not invented.
+one wrong conclusion and one unnecessary operator escalation. **With** the
+bearer, `claude.json` and `codex.json` returned 200 on 2026-09-17, and the
+fixtures in the lane test block are copied from those bodies, not invented.

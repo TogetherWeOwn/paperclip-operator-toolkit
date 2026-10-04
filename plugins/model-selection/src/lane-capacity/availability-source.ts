@@ -1,5 +1,5 @@
 /**
- * The writer for the availability term (TOG-3132, AC-2).
+ * The writer for the availability term.
  *
  * WHY THIS FILE EXISTS
  *

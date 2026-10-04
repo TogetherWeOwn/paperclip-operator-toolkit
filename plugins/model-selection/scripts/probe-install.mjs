@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Probe whether togetherweown.model-selection is installed, and in which mode.
 //
-// Why this exists (TOG-813): a bare 404 from the plugin API is ambiguous. The host
+// Why this exists: a bare 404 from the plugin API is ambiguous. The host
 // returns 404 for BOTH "plugin not installed" and "plugin installed but exposes no
 // scoped API routes", and it does so BEFORE auth -- so an unauthenticated caller sees
 // the same status as an authorized one. The only reliable discriminator is the error
@@ -26,7 +26,7 @@ const COMPANY = process.env.PAPERCLIP_COMPANY_ID;
 const PLUGIN_ID = "togetherweown.model-selection"; // src/constants.ts:1
 const ADVISE = "/advise"; // src/manifest.ts:118 -- NOT /invoke (that is paperclip-model-router)
 
-// Known-installed ids, from /paperclip/.paperclip/plugins/package.json. None declare
+// Known-installed ids, from the host's installed-plugins manifest. None declare
 // apiRoutes, so each must answer "does not expose scoped API routes".
 const INSTALLED_CONTROLS = [
   "paperclip-plugin-discord",
@@ -126,7 +126,7 @@ async function main() {
   console.log("  MODE IS NOT VERIFIED BY THIS PROBE. selection.mode defaults to");
   console.log('  "advise" (src/config/schema.ts:27) and is only non-default if the');
   console.log("  operator set plugin_config at install. Confirm mode separately");
-  console.log("  against the install record before closing TOG-813 criterion 3.");
+  console.log("  against the install record before treating the install as verified.");
   process.exit(0);
 }
 

@@ -1104,9 +1104,9 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("newer-model");
   });
 
-  it("TOG-3406: same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
+  it("Same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
     // config/reviewed-roster.json's claude-opus-4-8 releasedAt was fabricated
-    // to land AFTER claude-opus-5's real GA date (TOG-3406 root cause) — that
+    // to land AFTER claude-opus-5's real GA date — that
     // data bug is fixed separately in the roster file itself, since no
     // comparator can safely out-guess a wrong date from the id alone. This
     // exercises the named family rule against the now-correct chronology.
@@ -1125,7 +1125,7 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("claude-opus-5");
   });
 
-  it("TOG-3406: an explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
+  it("An explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
     const models = [
       model({
         id: "claude-opus-4-8",
@@ -1148,7 +1148,7 @@ describe("orderCandidatesByPace", () => {
   });
 });
 
-describe("TOG-2137 Defect 5: preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
+describe("Preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
   it("prefers a serviceable lane trailing its elapsed-fraction trajectory as its reset window nears close", () => {
     const trailingNearClose = verdict({
       state: "behind",
@@ -1308,7 +1308,7 @@ describe("hardStopExcluded", () => {
     expect(hardStopExcluded(unknownLedger, model({ laneId: "lane-a" }))).toBe(false);
   });
 
-  // TOG-3012. The 09-16 incident: codex measured exhausted at 16:55Z, the poll
+  // The 09-16 incident: codex measured exhausted at 16:55Z, the poll
   // then flapped, and because exclusion was read solely off `verdict` — which a
   // failed poll degrades to null — the lane became admissible again and 21 runs
   // launched onto it. Losing the reading must not erase the measurement.
@@ -1978,7 +1978,7 @@ describe("laneHasRoom (tier_dispatcher.py lane_has_room())", () => {
   });
 });
 
-describe("TOG-13803 weekly-pace vs 5h backstop conflict (parity-gap slice of TOG-13439 deliverable 2)", () => {
+describe("Weekly-pace vs 5h backstop conflict (parity-gap slice)", () => {
   const capPerAccount = { "opencode-go": 2, zai: 3 };
   const baseArgs = {
     ledger: {} as LaneLedger,

@@ -25,21 +25,21 @@ export function resolveConfiguredModelId(
 }
 
 /**
- * TOG-8108. Roster id prefix for Devin rows (mirrors the price-sync
+ * Roster id prefix for Devin rows (mirrors the price-sync
  * `DEVIN_PREFIX`: Devin meters by subscription/ACU, not per token).
  */
 const DEVIN_MODEL_PREFIX = "devin/";
 
-/** TOG-8108. The adapter whose system banner Devin's content filter rejects. */
+/** The adapter whose system banner Devin's content filter rejects. */
 export const ADAPTER_CLAUDE_LOCAL = "claude_local";
 
-/** TOG-8108. Whether this roster id names a Devin model. Prefix match only — never a suffix guess. */
+/** Whether this roster id names a Devin model. Prefix match only — never a suffix guess. */
 export function isDevinModelId(modelId: string | null | undefined): boolean {
   return typeof modelId === "string" && modelId.startsWith(DEVIN_MODEL_PREFIX);
 }
 
 /**
- * TOG-8108. Adapter-compatibility: `devin/*` models cannot serve a
+ * Adapter-compatibility: `devin/*` models cannot serve a
  * `claude_local` assignee. Devin's content filter rejects the Claude Code /
  * Agent SDK system banner (Cognition ticket 71806) — measured 25 failed / 3
  * succeeded runs on claude_local+devin. Devin works via opencode/codex

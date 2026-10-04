@@ -1,6 +1,6 @@
 /**
- * TOG-5007 (TOG-4713 D1d). cliproxy-insight is the one plugin beyond
- * model-selection's TOG-4763 fix that registers agent tools. The Paperclip
+ * Cliproxy-insight is the one plugin, beyond model-selection (which already
+ * received the same fix), that registers agent tools. The Paperclip
  * tool gateway maps a plugin result to
  * `structuredContent: result?.data ?? null`, and the Claude client rejects a
  * null `structuredContent` — every tool call that returned only `{error}`
@@ -9,8 +9,8 @@
  * `get_provider_usage` is that plugin's only tool, and its two rejection
  * paths (missing `companyId`, unconfigured company) returned `{error}`
  * with no `data`. Every path — success and rejection alike — must therefore
- * return a plain-object `data`, mirroring the `tool-result-data.spec.ts`
- * contract TOG-4763 established for model-selection.
+ * return a plain-object `data`, mirroring the contract that
+ * model-selection's own `tool-result-data.spec.ts` established.
  */
 
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
@@ -40,7 +40,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-describe("TOG-5007: get_provider_usage carries plain-object data on every path", () => {
+describe("get_provider_usage carries plain-object data on every path", () => {
   it("registers exactly the TOOL_NAMES registry (this test covers every tool by construction)", async () => {
     const harness = await harnessFor({ pollingEnabled: false });
     for (const name of Object.values(TOOL_NAMES)) {

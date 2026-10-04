@@ -36,7 +36,7 @@ import type {
 } from "./types.js";
 
 /**
- * TOG-11793 (TOG-11780 §4.3, §6): the run-scoped model decision.
+ * The run-scoped model decision.
  *
  * Everything in this file is pure. The worker owns every read and hands this
  * module a frozen view of the hot caches, so the decision itself performs no
@@ -44,7 +44,7 @@ import type {
  * which is what the p99 <= 250 ms budget in §6 depends on.
  *
  * The wire types below mirror the fork's `ResolveRunModelParams` /
- * `ResolveRunModelResult` (TOG-11792, `packages/plugins/sdk/src/protocol.ts`).
+ * `ResolveRunModelResult` (`packages/plugins/sdk/src/protocol.ts`).
  * They are declared here because the SDK this package builds against
  * (2026.824.1) predates the hook; the host's own validator is the authority.
  */

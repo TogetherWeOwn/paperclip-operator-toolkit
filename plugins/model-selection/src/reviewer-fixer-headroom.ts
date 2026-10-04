@@ -1,9 +1,9 @@
 /**
- * TOG-14458: pacer reviewer/fixer load headroom readout (read-only).
+ * Pacer reviewer/fixer load headroom readout (read-only).
  *
- * Parent TOG-13439 via fan-out TOG-14439; joint-controller input for the
- * TOG-12456 research (preserve reviewer/fixer capacity while scaling
- * admission). Pure snapshot only: no admission change, no pacing change.
+ * Joint-controller input for the research on preserving reviewer/fixer
+ * capacity while scaling admission. Pure snapshot only: no admission change,
+ * no pacing change.
  *
  * WHAT IT IS:
  * - A point-in-time headroom readout over per-agent assignment data: each
@@ -26,11 +26,11 @@
  *   assigned or pending load is a bottleneck.
  *
  * NON-GOALS (owned elsewhere, do NOT duplicate):
- * - TOG-14347 joint GARM eligible-vs-queued snapshot (pressure, host
+ * - The joint GARM eligible-vs-queued snapshot (pressure, host
  *   budgets, quotas, hysteresis live there; this probe reports headroom
  *   only and owns no hysteresis bands or cooldowns).
- * - TOG-14079 admission audit log.
- * - TOG-14288 burn-down trajectory (done).
+ * - The admission audit log.
+ * - The burn-down trajectory (done).
  */
 
 export const REVIEWER_FIXER_HEADROOM_SCHEMA = "tog14458-reviewer-fixer-headroom-v1";
@@ -199,8 +199,8 @@ export function snapshotReviewerFixerHeadroom(input: ReviewerFixerHeadroomInput)
     limitations: [
       "Caller-declared assignments are not certified production evidence.",
       "Headroom is a point-in-time count, not a merge-throughput or lead-time measure.",
-      "Raw review/fix counts are never the admission objective; completed merges / lead time are owned by the joint controller (TOG-12456).",
-      "Hysteresis and cooldown are owned by TOG-14347; this probe reports headroom only and cannot flap-guard on its own.",
+      "Raw review/fix counts are never the admission objective; completed merges / lead time are owned by the joint controller.",
+      "Hysteresis and cooldown are owned by the joint GARM snapshot; this probe reports headroom only and cannot flap-guard on its own.",
     ],
   };
 }

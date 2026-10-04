@@ -78,7 +78,7 @@ describe("single explicitly configured company", () => {
     await expect(harness.runJob(JOB_KEYS.poll)).resolves.toBeUndefined();
     await plugin.onConfigChanged!(ENABLED, { companyId: A });
     await expect(harness.runJob(JOB_KEYS.poll)).resolves.toBeUndefined();
-    // TOG-5007: the refusal now also carries plain-object `data` so the
+    // The refusal now also carries plain-object `data` so the
     // gateway's `structuredContent: result?.data ?? null` mapping never yields
     // null. The `error` signal is unchanged.
     expect(await harness.executeTool(TOOL_NAMES.getProviderUsage, { companyId: A }))
@@ -113,7 +113,7 @@ describe("single explicitly configured company", () => {
     const { harness, plugin } = await setup();
     const config = vi.spyOn(harness.ctx.config, "get");
     const state = vi.spyOn(harness.ctx.state, "get");
-    // TOG-5007: refusal carries plain-object `data` for the gateway mapping; `error` unchanged.
+    // Refusal carries plain-object `data` for the gateway mapping; `error` unchanged.
     expect(await harness.executeTool(TOOL_NAMES.getProviderUsage, { companyId: B }))
       .toEqual({ error: "company is not configured", data: { ok: false, error: "company is not configured" } });
     const response = await plugin.onApiRequest!({
@@ -133,7 +133,7 @@ describe("single explicitly configured company", () => {
       await expect(plugin.onConfigChanged!(ENABLED, { companyId: B })).rejects.toThrow("exactly one");
       return ENABLED;
     });
-    // TOG-5007: refusal carries plain-object `data` for the gateway mapping; `error` unchanged.
+    // Refusal carries plain-object `data` for the gateway mapping; `error` unchanged.
     expect(await harness.executeTool(TOOL_NAMES.getProviderUsage, { companyId: A }))
       .toEqual({ error: "company is not configured", data: { ok: false, error: "company is not configured" } });
     expect(config).toHaveBeenCalledTimes(1);

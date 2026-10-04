@@ -10,7 +10,7 @@ import type { QualitySignal, VolumeProfile } from "../src/engine/types.js";
 import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 
 /**
- * TOG-14066 (MUSE slice of TOG-13513): the fleet-quota-balancer's MUSE choice
+ * The fleet-quota-balancer's MUSE choice
  * (`muse-spark-1.3-contributor`, xhigh pinned at the agent row, not in the
  * roster) had no enabled roster row, so no bridge minute could be expressed
  * by the selector. This spec is the agreement proof for the single added row:
@@ -57,7 +57,7 @@ function freeVerdict(laneId: string): LanePaceVerdict {
   };
 }
 
-describe("TOG-14066 bridge MUSE agreement", () => {
+describe("Bridge MUSE agreement", () => {
   it("carries an enabled T3 row for the bridge MUSE model", () => {
     const row = resolved.models.find((m) => m.id === MUSE);
     expect(row).toBeDefined();
@@ -110,7 +110,7 @@ describe("TOG-14066 bridge MUSE agreement", () => {
       },
     };
     const decision = selectModel({
-      descriptor: { issueId: "tog-14066-muse", labelNames: ["tier:T3"] },
+      descriptor: { issueId: "ex-14066-muse", labelNames: ["tier:T3"] },
       config: {
         enforcementEnabled: false,
         defaultTier: resolved.selection.defaultTier,

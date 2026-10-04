@@ -19,7 +19,7 @@ function provenFor(
 }
 
 /**
- * TOG-2481 port of `tier_dispatcher.py` `pick()`'s post-capability-gate
+ * Port of `tier_dispatcher.py` `pick()`'s post-capability-gate
  * ordering: the 2026-09-06 14:2xZ "cheapest capable model" rule, its
  * 2026-09-06 16:2xZ free/stealth-must-be-proven carve-out, its 2026-09-05
  * least-utilized-lane spread tiebreak within a 20% cost band, and its 10%
@@ -44,7 +44,7 @@ export function applyPickOrdering(
   requiredTier: Tier,
   issueId: string,
   /**
-   * TOG-2481 port of `tier_dispatcher.py` `pick(..., explore=False)`:
+   * Port of `tier_dispatcher.py` `pick(..., explore=False)`:
    * `label_only_pass`/`repin_pass`/`balance_pass`'s pinned-branch call sites
    * all suppress the explore roll (they are re-affirming or replacing an
    * already-chosen pin, not seeding new evidence). Defaults to `true` so

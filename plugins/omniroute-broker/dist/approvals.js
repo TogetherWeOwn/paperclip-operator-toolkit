@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — the two-key protocol (TOG-391).
+ * omniroute-broker — the two-key protocol.
  *
  * Pure w.r.t. decisions: every function here takes the stored record and the
  * caller and returns a verdict. Persistence lives in worker.js

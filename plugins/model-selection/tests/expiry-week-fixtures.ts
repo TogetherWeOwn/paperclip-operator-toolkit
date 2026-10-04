@@ -7,9 +7,9 @@ import {
 import { AdmissionSimulator } from '../src/admission-simulator.js';
 
 /**
- * TOG-14523 fixture set: expiry-week scenario pack proving 98-100% window landing.
+ * Expiry-week scenario pack proving 98-100% window landing.
  *
- * Parent TOG-14507 under epic TOG-13439. Fixtures + driver only: every
+ * Fixtures + driver only: every
  * behavioral target (`AdmissionSimulator`, `evaluateBudgets`) already exists.
  * No live dispatch, no enforcement change, no credentials.
  *
@@ -23,10 +23,9 @@ import { AdmissionSimulator } from '../src/admission-simulator.js';
  * - crossing the weekly reset retires holds without carrying debt: the next
  *   week opens fresh at zero and admits immediately.
  *
- * NON-GOALS (owned elsewhere, do NOT duplicate): TOG-13926 use-before-expiry
- * tie-break (blocked); TOG-13803 weekly-pace vs 5h-backstop conflict
- * (blocked); TOG-13934 pacing.lanes wire-up (in_progress); TOG-14347 joint
- * snapshot assembly (in_review).
+ * NON-GOALS (owned elsewhere, do NOT duplicate): the use-before-expiry
+ * tie-break; the weekly-pace vs 5h-backstop conflict; the pacing.lanes
+ * wire-up; the joint snapshot assembly.
  */
 
 export const EXPIRY_WEEK_QUOTA = 100;

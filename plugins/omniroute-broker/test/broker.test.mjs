@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — test suite (TOG-391).
+ * omniroute-broker — test suite.
  *
  * No network, no credential, no host. That is what makes it CI-able, the same
  * property that got gh-token-broker's 46 tests into CI.
@@ -19,8 +19,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
-/** The committed TOG-178 plan. CI and a fresh clone must exercise the same corpus. */
-const TOG_178_PLAN = new URL("../../../tests/fixtures/tog178/TOG-178-mapping-plan.json", import.meta.url);
+/** The committed mapping plan. CI and a fresh clone must exercise the same corpus. */
+const MAPPING_PLAN = new URL("./fixtures/mapping-plan.json", import.meta.url);
 
 import {
   APPROVAL,
@@ -97,7 +97,7 @@ test("an unknown verb is refused, not forwarded", () => {
 });
 
 test("verb lookup is exact equality, not prefix or substring", () => {
-  // The TOG-151 lesson: substring matching on a namespace is how 14 Claude ids
+  // The earlier shell CLI's lesson: substring matching on a namespace is how 14 Claude ids
   // containing neither "claude" nor "anthropic" slipped a filter.
   assert.throws(() => resolveVerb("providers"), (e) => e.status === 404);
   assert.throws(() => resolveVerb("PROVIDERS.LIST"), (e) => e.status === 404);
@@ -240,7 +240,7 @@ test("assertPlainJson rejects prototype-polluting and oversized bodies", () => {
   assert.deepEqual(assertPlainJson(null), {});
 });
 
-// ───────────────────────── ownership (TOG-309 shape) ───────────────────────
+// ───────────────────────── ownership ───────────────────────
 
 test("a non-assignee is refused", () => {
   assert.throws(
@@ -256,7 +256,7 @@ test("a board actor is refused", () => {
   );
 });
 
-test("in_review and blocked are operable — the TOG-309 widening", () => {
+test("in_review and blocked are operable — the widened status gate", () => {
   for (const status of OPERABLE_ISSUE_STATUSES) {
     const result = assertOperationOwnership(issueRow({ status }), actor(AGENT_A, RUN_A));
     assert.equal(result.status, status);
@@ -769,7 +769,7 @@ test("the manifest declares no capability it does not need, and none that hands 
 });
 
 test("the config schema pins the secret-ref shape rather than trusting format: secret-ref", () => {
-  // TOG-228: the host registers `secret-ref` as a format that validates nothing,
+  // The host registers `secret-ref` as a format that validates nothing,
   // so a pasted plaintext key would otherwise be accepted and stored verbatim.
   const ref = manifest.instanceConfigSchema.properties.managementKeyRef;
   assert.equal(ref.type, "object");
@@ -797,7 +797,7 @@ const MAPPING_OK = Object.freeze({
   comboId: "combo-123",
   priority: 100,
   enabled: true,
-  description: "TOG-178 phase 6.",
+  description: "Phase 6.",
 });
 
 test("every mapping verb exists and targets the mapping route", () => {
@@ -860,7 +860,7 @@ test("mappings.create refuses wildcard patterns", () => {
 
 test("mappings.create refuses the protected model families, by family and not by substring", () => {
   // Each of these carries a family name but NOT necessarily the substring
-  // "claude" — the TOG-237 bypass class. Mythos is not in today's live catalogue,
+  // "claude" — the bypass class a substring check on `claude` clears. Mythos is not in today's live catalogue,
   // so this unit case makes the new Claude family fail closed on first appearance.
   for (const pattern of ["aug/opus-5", "sonnet-5", "haiku-4-5", "fable-5", "mythos-5", "claude-opus-5"]) {
     assert.throws(
@@ -880,7 +880,7 @@ test("mappings.create refuses blended ids whose Claude-ness is not in the id", (
   //
   // prism-b is "Prism (GPT + Kimi)" and carries no Claude. It is refused anyway,
   // because the two are indistinguishable by id. That over-block is deliberate:
-  // TOG-178 names neither, so it costs nothing addressable.
+  // The 52-pattern rollout plan names neither, so it costs nothing addressable.
   for (const pattern of ["aug/prism-a", "aug/prism-b"]) {
     assert.throws(
       () => buildRequest(resolveVerb("mappings.create"), { body: { ...MAPPING_OK, pattern } }),
@@ -910,7 +910,7 @@ test("mappings.create refuses a body key the shipped route does not accept", () 
   );
 });
 
-test("a conforming TOG-178-shaped mapping is accepted and forwarded verbatim", () => {
+test("a conforming mapping is accepted and forwarded verbatim", () => {
   const request = buildRequest(resolveVerb("mappings.create"), { body: MAPPING_OK });
   assert.equal(request.method, "POST");
   assert.equal(request.path, "/api/model-combo-mappings");
@@ -933,12 +933,12 @@ test("mappings.delete substitutes its id and takes no body constraint", () => {
   assert.equal(request.path, "/api/model-combo-mappings/m-42");
 });
 
-test("the guard accepts all 52 real TOG-178 mapping patterns", { skip: existsSync(TOG_178_PLAN) ? false : "plan file not present" }, () => {
+test("the guard accepts all 52 real planned mapping patterns", { skip: existsSync(MAPPING_PLAN) ? false : "plan file not present" }, () => {
   // The point of the guard is to be strictly narrower than the operator path
   // WITHOUT blocking the work it exists to enable. That is an empirical claim
   // about a specific 52-row plan, so it is tested against the real file rather
   // than against a restatement of it.
-  const plan = JSON.parse(readFileSync(TOG_178_PLAN, "utf8"));
+  const plan = JSON.parse(readFileSync(MAPPING_PLAN, "utf8"));
   assert.equal(plan.length, 52);
   for (const mapping of plan) {
     assertMappingCreate({
@@ -946,7 +946,7 @@ test("the guard accepts all 52 real TOG-178 mapping patterns", { skip: existsSyn
       comboId: "resolved-at-runtime",
       priority: mapping.priority,
       enabled: true,
-      description: `TOG-178 exact-pattern mapping -> ${mapping.comboName}`,
+      description: `Exact-pattern mapping -> ${mapping.comboName}`,
     });
   }
 });

@@ -22,7 +22,7 @@ function round3(value: number): number {
 }
 
 /**
- * Verbatim `rows` from TOG-1920 r2's frozen `host-evidence.json` (27 rows,
+ * Verbatim `rows` from a frozen `host-evidence.json` (27 rows,
  * copied from `model_scores.json`'s `models[mid]['tiers'][tier]`). `p`/`pObs`/
  * `nEff` are already rounded to 3/3/1 decimals in this fixture — see the
  * "Key design resolution" note in the governing plan for why the spot check
@@ -204,7 +204,7 @@ describe("summarize — frozen host-evidence.json spot check (fixture fidelity)"
 });
 
 describe("accumulateRunStats -> summarize — raw-row replay of frozen host-evidence rows", () => {
-  // Reviewer ask (TOG-2136 code review, PR277): the spot check above derives
+  // Reviewer ask: the spot check above derives
   // wOk/wBad ALGEBRAICALLY from each row's target `p`, so it never actually
   // exercises `accumulateRunStats`'s recency-decay formula
   // (`Math.exp(-row.ageDays / 10.0)`, scores.ts) — a mutation to that constant
@@ -308,7 +308,7 @@ describe("accumulateRunStats -> summarize — raw-row replay of frozen host-evid
   });
 });
 
-describe("buildCardLedger — TOG-1917 §2.2 censor", () => {
+describe("buildCardLedger — censor", () => {
   const nowMs = Date.parse("2026-09-12T00:00:00.000Z");
   const dayMs = 24 * 60 * 60 * 1000;
 
@@ -363,7 +363,7 @@ describe("buildCardLedger — TOG-1917 §2.2 censor", () => {
     expect(entry.acceptRate).toBe(0.5); // 1 accepted / 2 resolved, pending row excluded
   });
 
-  // TOG-3997. `cardsClosed` is not the `acceptRate` denominator, and reading it
+  // `cardsClosed` is not the `acceptRate` denominator, and reading it
   // as one is how `gpt-6-astra:T1` looked like "0 accepted out of 25" on
   // 2026-09-22 when the truth was 0-of-ONE resolved. These publish the two
   // counts that make the difference readable to a consumer.
@@ -441,7 +441,7 @@ describe("foldReworkIntoStats — rework is soft evidence, never a raw observati
   });
 });
 
-describe("monotone tier capability (TOG-12768)", () => {
+describe("monotone tier capability", () => {
   const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
   // glm-5.3 on the 2026-10-02 decisions window: 89/89 at T3, measured failing
   // T2 (p=0.585, proven), and no T1 runs of its own.
@@ -498,7 +498,8 @@ describe("monotone tier capability (TOG-12768)", () => {
   it("is idempotent, and re-applied at read time to scores stored before the rule existed", () => {
     const capped = buildModelScore("glm-5.3", GLM_AA_INDEX, { T3: T3_PROVEN_PASS, T2: T2_PROVEN_FAIL }, TIERS);
     expect(enforceMonotoneCapability(capped.tiers)).toEqual(capped.tiers);
-    // A pre-TOG-12768 stored score: T1 still carries its isolated prior verdict.
+    // A stored score from before capability became monotone in tier order: T1
+    // still carries its isolated prior verdict.
     const { cappedBy: _cappedBy, ...isolatedT1 } = capped.tiers.T1;
     const stored = { ...capped, tiers: { ...capped.tiers, T1: { ...isolatedT1, capable: true } } };
     expect(tierScoreFor(stored, "T1")).toMatchObject({ capable: false, cappedBy: "T2" });

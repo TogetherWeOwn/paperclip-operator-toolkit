@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — response scrubbing (TOG-391).
+ * omniroute-broker — response scrubbing.
  *
  * Pure. No I/O.
  *
@@ -17,10 +17,10 @@
  * credential disclosure unless it is scrubbed. The issue's own warning is
  * blunt about it: "Never log, cache, comment or forward a management response."
  *
- * ## Deny-by-default, like TOG-151's gate_allowlist
+ * ## Deny-by-default, like the earlier shell CLI's gate_allowlist
  *
  * A denylist of secret-looking field names is the obvious approach and it is
- * wrong, for the reason TOG-151 already paid for: the thing you are filtering
+ * wrong, for the reason the earlier shell CLI already paid for: the thing you are filtering
  * has more spellings than you can enumerate, and a miss is silent. OmniRoute
  * alone spells upstream credentials `apiKey`, `api_key`, `key`, `token`,
  * `secret`, `password`, `credential`, `bearer`, `authorization`, `cookie`,
@@ -120,7 +120,7 @@ export const FIELD_ALLOWLIST = Object.freeze({
 
 /**
  * Envelope keys that may carry a list of resources. OmniRoute is not uniform:
- * `/api/combos` returns `{combos,total}` (TOG-151 [RESOLVED-3]), `/v1/models`
+ * `/api/combos` returns `{combos,total}`, `/v1/models`
  * returns `{object,data}`, and some routes return a bare array.
  */
 const LIST_KEYS = Object.freeze(["data", "providers", "combos", "models", "mappings", "items", "results"]);
@@ -131,7 +131,7 @@ const LIST_KEYS = Object.freeze(["data", "providers", "combos", "models", "mappi
  * These are the credential prefixes actually in play on this box — OmniRoute
  * inference keys (`sk-`), OmniRoute CLI access tokens (`oma_`), GitHub App
  * installation tokens (`ghs_`), and the CLIProxy key class (`tc-`) — plus a
- * generic high-entropy bearer shape. Broad on purpose: like TOG-151's Claude
+ * generic high-entropy bearer shape. Broad on purpose: like the shell CLI's Claude
  * tripwire it can only ever REFUSE MORE, never allow more.
  */
 const SECRET_VALUE_PATTERNS = Object.freeze([
@@ -277,7 +277,8 @@ export function assertNoResidualSecret(value, path = "$", depth = 0) {
  * the same treatment as a response — otherwise the broker's own audit trail
  * becomes the disclosure channel. Unlike `redactResponse` this MASKS rather than
  * refusing, because an audit record must still be written: losing the record of
- * a mutation that already happened is the TOG-151 [RESOLVED-8] failure.
+ * a mutation that already happened is the failure the shell CLI's [RESOLVED-8]
+ * rule addresses.
  */
 export function maskForAudit(value, depth = 0) {
   if (depth > 8) return "[truncated]";

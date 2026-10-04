@@ -1,5 +1,5 @@
 /**
- * TOG-12490. The `model_selection_tier_policy` tool declaration, shared by the
+ * The `model_selection_tier_policy` tool declaration, shared by the
  * manifest and the worker registration so the two cannot drift. Kept free of
  * runtime imports: the manifest bundle loads it.
  */
@@ -21,7 +21,7 @@ export const EDITABLE_TIER_FIELDS = [
 export const TIER_POLICY_TOOL_DISPLAY_NAME = "Tier policy: add, edit, remove, validate, diff";
 
 export const TIER_POLICY_TOOL_DESCRIPTION =
-  "Prepare a tier-policy change as data (TOG-11549 D4): add, edit (name, order, entry rules, efforts, evidence, " +
+  "Prepare a tier-policy change as data: add, edit (name, order, entry rules, efforts, evidence, " +
   "fallbackOnly/sTier, legacy thresholds) or remove a tier, or validate/diff a candidate policy. add/edit/remove need " +
   "expectedRevision (must equal the base revision) and a reason. Returns proposalOnly or rejected with issues, a diff " +
   "keyed by tier id, the dry-run impact and an audit id. Prepare/validate/diff only: writes nothing and never changes " +

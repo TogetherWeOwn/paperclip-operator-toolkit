@@ -75,7 +75,7 @@ function decide(cardLedger: Record<string, CardLedgerEntry>, models: ModelEntry[
   });
 }
 
-describe("card-accept-rate gate (TOG-3997 §1)", () => {
+describe("card-accept-rate gate", () => {
   it("never picks a zero-accept model over a proven one, whatever the cost delta", () => {
     const decision = decide({
       "zero-accept:T1": zeroAcceptRow(),
@@ -126,7 +126,7 @@ describe("card-accept-rate gate (TOG-3997 §1)", () => {
   });
 });
 
-describe("card-accept-rate gate fails open (TOG-3997 §3)", () => {
+describe("card-accept-rate gate fails open", () => {
   it("never excludes a pending row, however many cards it has closed", () => {
     // `muse-spark-1.3-contributor:T1` read 109 cards closed and `pending:
     // true` on 2026-09-22. A pending row's acceptRate is a PRIOR, not a
@@ -172,7 +172,7 @@ describe("card-accept-rate gate fails open (TOG-3997 §3)", () => {
     });
   });
 
-  it("never excludes a pre-TOG-3997 row that has no cardsResolved field", () => {
+  it("never excludes a legacy row that has no cardsResolved field", () => {
     // `plugin_state` is untyped JSON written by whichever build last ran the
     // refresh pass, so a row written before this change carries only
     // `cardsClosed` — which counts precisely the censored cards the gate must
@@ -304,7 +304,7 @@ describe("symmetric maturity and bounded re-entry", () => {
   });
 });
 
-describe("a null costPerAcceptedCard sorts last, never first (TOG-3997 §2)", () => {
+describe("a null costPerAcceptedCard sorts last, never first", () => {
   function candidate(modelId: string, expectedCostUsd: number): Candidate {
     return {
       modelId,

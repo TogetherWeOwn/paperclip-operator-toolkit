@@ -1,5 +1,5 @@
 /**
- * Negative controls for the four P1 defects the TOG-2859 review reproduced at
+ * Negative controls for the four P1 defects the review reproduced at
  * `af17915c9a64e7c98dc7c40afc7f3080c1a2a81f` (adverse-verdict addenda 1 and 2).
  *
  * Every test in this file FAILS on that SHA. They are kept together, and named

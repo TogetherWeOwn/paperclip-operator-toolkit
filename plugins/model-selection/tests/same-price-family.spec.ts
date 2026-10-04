@@ -59,7 +59,7 @@ describe("sharesPriceFamily", () => {
   });
 });
 
-describe("compareSamePriceFamily — TOG-3406 owner rule (same-price-newer-model-rule)", () => {
+describe("compareSamePriceFamily — owner rule (same-price-newer-model-rule)", () => {
   it("returns 0 (no opinion) for a pair that isn't a same-price-family match", () => {
     const a = model({ id: "claude-opus-4-8" });
     const b = model({ id: "gpt-5.6-sol" });
@@ -86,7 +86,7 @@ describe("compareSamePriceFamily — TOG-3406 owner rule (same-price-newer-model
     const older = model({
       id: "claude-opus-4-8",
       releasedAt: "2026-05-05",
-      earnIn: { verdict: "provenBetter", evidence: "TOG-9999 eval" },
+      earnIn: { verdict: "provenBetter", evidence: "Eval" },
     });
     const newer = model({ id: "claude-opus-5", releasedAt: "2026-06-24" });
     expect(compareSamePriceFamily(older, newer)).toBeLessThan(0);

@@ -63,7 +63,7 @@ describe("profile trust", () => {
   });
 
   it("trusts a profile exactly at the 14-day threshold", () => {
-    // TOG-4384: the guard is `age > PROFILE_MAX_AGE_MS`, so a profile aged
+    // The guard is `age > PROFILE_MAX_AGE_MS`, so a profile aged
     // exactly 14 days is still trusted — the fail-closed edge, not past it.
     const atThreshold: VolumeProfile[] = [
       { ...t1, computedAt: new Date(NOW - PROFILE_MAX_AGE_MS).toISOString() },
@@ -72,7 +72,7 @@ describe("profile trust", () => {
   });
 
   it("fails closed one millisecond past the 14-day threshold", () => {
-    // TOG-4384: `age > PROFILE_MAX_AGE_MS` rejects anything older, so the
+    // `age > PROFILE_MAX_AGE_MS` rejects anything older, so the
     // seeded PROFILES (computedAt = NOW - 1h) only stay trusted while `now`
     // stays near NOW — the regression this freeze exists to pin.
     const justStale: VolumeProfile[] = [

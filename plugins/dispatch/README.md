@@ -1,12 +1,12 @@
 # dispatch
 
-Finds work that has an owner and no reason to wake anyone — the TOG-180 gap — and
-**reports** it. Once an evidence gate passes, it also wakes it.
+Finds work that has an owner and no reason to wake anyone, and **reports** it.
+Once an evidence gate passes, it also wakes it.
 
-Built for **TOG-747**, implementing the design agreed in **TOG-706**
-(`docs/tog-706-dispatch-plugin-design.md`). Native replacement for `dispatcher.py`
-/ `paperclip-dispatcher.timer`: a host-side script outside any repo, unreadable
-from any agent container, whose stdout went nowhere durable.
+Implements the design in `docs/tog-706-dispatch-plugin-design.md`. Native
+replacement for `dispatcher.py` / `paperclip-dispatcher.timer`: a host-side
+script outside any repo, unreadable from any agent container, whose stdout went
+nowhere durable.
 
 ---
 
@@ -57,7 +57,7 @@ Three things about this are deliberate and easy to "tidy" wrongly:
 
 **The rails are a denylist, not an allowlist.** The server refuses exactly three
 statuses; everything else is wakeable by default, *including statuses that do not
-exist yet*. The first cut of the TOG-706 probe enumerated the statuses it believed
+exist yet*. The first cut of the design-phase probe enumerated the statuses it believed
 were runnable and undercounted the wakeable surface by 88%.
 
 **Rail 4 is the server's own verdict, not a reimplementation of it.**
@@ -75,7 +75,7 @@ reached through `getIssueRunSummaries` (`:861`). An issue with no run ever ancho
 on `createdAt` — a card created two days ago that has never once had a run is the
 most stalled thing on the board.
 
-## Reporting contract (TOG-706 Q5)
+## Reporting contract
 
 Two channels, deliberately different:
 
@@ -111,7 +111,7 @@ written.
 
 ## Known gap: the plugin cannot wake a routing owner
 
-TOG-706 Q2 says the plugin "reports the routing gap and wakes a principal holding
+Says the plugin "reports the routing gap and wakes a principal holding
 `tasks:assign`". **It reports. It cannot wake them**, and this is a host fact, not
 an omission:
 
@@ -274,7 +274,7 @@ none: it aborts unless the baseline is green, reports a pattern that matched
 nothing as a `BROKEN GATE` instead of a pass, and runs `node --check` on every
 mutant so a syntax error is never miscounted as a caught mutation.
 
-## Constraints this build holds to (TOG-706, non-negotiable)
+## Constraints this build holds to
 
 - **No modification to PaperclipAI** — no patch, no file copied into `/app`, no
   host module.

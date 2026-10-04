@@ -17,7 +17,7 @@ import { legacyBody } from "./aa-free/fixture.js";
 import { MODELS, NOW, PROFILES, NO_ESCALATION } from "./fixtures.js";
 
 /**
- * TOG-13976: bridge-model roster resolution gaps (parent epic TOG-13513).
+ * Bridge-model roster resolution gaps.
  *
  * The 60s bridge timer chooses one of three models the reviewed roster (on
  * main) carries no enabled row for: the MUSE form with a parenthesized effort
@@ -31,7 +31,7 @@ import { MODELS, NOW, PROFILES, NO_ESCALATION } from "./fixtures.js";
  * figures, no network. Every input is inline; nothing reads the live board.
  */
 
-// Bridge ids exactly as the bridge timer logs them (TOG-13513 description).
+// Bridge ids exactly as the bridge timer logs them.
 const MUSE_BRIDGE = "muse-spark-1.3-contributor(xhigh)";
 const MUSE_BARE = "muse-spark-1.3-contributor";
 const SONNET_BRIDGE = "claude-sonnet-5-5";

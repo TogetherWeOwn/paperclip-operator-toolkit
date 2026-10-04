@@ -1,5 +1,5 @@
 /**
- * dispatch — manifest (TOG-747, implementing the TOG-706 design).
+ * dispatch — manifest.
  *
  * Replaces `dispatcher.py` / `paperclip-dispatcher.timer`: a host-side script,
  * outside any repo, unreadable from any agent container, whose stdout went

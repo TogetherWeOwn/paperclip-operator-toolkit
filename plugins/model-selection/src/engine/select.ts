@@ -65,7 +65,7 @@ export interface SelectionConfig {
   /** Keep the model already used on this issue (ADR-0008, Round 4). */
   stickyWithinIssue: boolean;
   /**
-   * TOG-2137. `off`: no pace involvement at all (skips the hard stop too —
+   * `off`: no pace involvement at all (skips the hard stop too —
    * an operator can fully disable this feature). `shadow` (default): the
    * hard stop and pace ordering both run and are recorded in the trace, but
    * `pacingApplied` on the decision tells the caller not to treat the result
@@ -78,7 +78,7 @@ export interface SelectionConfig {
   laneLedger?: LaneLedger;
   slotFloorFraction?: number;
   /**
-   * TOG-2137. A live (non-expired) operator override for this issue: "route
+   * A live (non-expired) operator override for this issue: "route
    * to this model regardless of pace." It bypasses pace-preference ordering
    * and the ahead-of-line slot throttle for THIS model only — it never
    * bypasses a capability gate, a tier floor, the untrusted-profile hold, or
@@ -91,7 +91,7 @@ export interface SelectionConfig {
    */
   operatorOverrideModelId?: string | null;
   /**
-   * TOG-2481 port of `tier_dispatcher.py`'s `AVOID` / `AVOID_LANE`. A lane at
+   * Port of `tier_dispatcher.py`'s `AVOID` / `AVOID_LANE`. A lane at
    * or above its threshold is excluded from NEW admission (fail-neutral when
    * unset or when a lane has no measured utilization yet). Distinct from the
    * serviceability hard stop above: a lane can be "avoided" long before it is
@@ -99,26 +99,26 @@ export interface SelectionConfig {
    */
   laneAvoidConfig?: LaneAvoidConfig;
   /**
-   * TOG-2481 port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+   * Port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
    * fallback rule and its Z.ai-long-run-agent exclusion (2026-09-07 03:15Z /
    * 2026-09-08 22:15Z owner rules). Names which configured lane is Codex/
    * OpenCode Go so both rules key on this company's actual lane ids rather
    * than a bare `"codex"`/`"opencode-go"` string. Absent falls back to the
-   * same constants every other unconfigured TOG-2481 addition uses.
+   * same constants every other unconfigured ported addition uses.
    */
   codexLaneId?: string;
   opencodeGoLaneId?: string;
   zaiLaneId?: string;
   /**
-   * TOG-2481 port of `tier_dispatcher.py`'s `lane_outage()` /
+   * Port of `tier_dispatcher.py`'s `lane_outage()` /
    * `lane_outage.json` — an operator-declared outage the telemetry cannot
    * see. Gated the same as the hard stop — only when `paceActive`.
    */
   laneOutageOverride?: LaneOutageOverride | null;
   /**
-   * TOG-2481 port of `tier_dispatcher.py`'s `lane_has_room()` and its
+   * Port of `tier_dispatcher.py`'s `lane_has_room()` and its
    * `LANE_CAP_PER_ACCOUNT` / Z.ai peak-hour / weekly-pacing rules. Absent
-   * disables the gate entirely (fail-open, matching every other TOG-2481
+   * disables the gate entirely (fail-open, matching every other ported
    * pacing addition — a company that never configures this sees no change).
    * Gated the same as the hard stop — only when `paceActive`.
    */
@@ -135,7 +135,7 @@ export interface SelectionConfig {
   };
   /**
    * Which cost term orders candidates. Defaults to "list-price" — unchanged
-   * behavior. Composition with pacing (TOG-2137): objective reordering runs
+   * behavior. Composition with pacing: objective reordering runs
    * strictly AFTER pace ordering / the ahead-of-line slot throttle and never
    * bypasses either. Pace encodes hard capacity/serviceability reality
    * (a lane can only take so much traffic right now); objective encodes a
@@ -148,16 +148,16 @@ export interface SelectionConfig {
    */
   objective?: SelectionObjective;
   /**
-   * TOG-2481 port of `tier_dispatcher.py` `model_scores.py`'s Bayesian
+   * Port of `tier_dispatcher.py` `model_scores.py`'s Bayesian
    * (model, tier) success scores, keyed by model id. Drives both the
    * `capability-score` gate below and `applyPickOrdering`'s
    * proven/free-must-be-proven/explore-fraction logic. Absent disables both —
-   * fail-open, matching every other TOG-2481 addition: a company with no
+   * fail-open, matching every other ported addition: a company with no
    * scored history yet sees no change from this engine.
    */
   modelScores?: Readonly<Record<string, ModelScore>>;
   /**
-   * TOG-2481 port of `tier_dispatcher.py` `pick(..., explore=False)`. Defaults
+   * Port of `tier_dispatcher.py` `pick(..., explore=False)`. Defaults
    * to `true` (unchanged `advise`/`apply` behavior). The new
    * `labelOnlyPass`/`repinPass`/`balancePass` jobs set this `false` for their
    * pinned-branch calls, matching every Python call site that re-affirms or
@@ -165,9 +165,9 @@ export interface SelectionConfig {
    */
   allowExplore?: boolean;
   /**
-   * TOG-3132 AC-4. When true, a model whose lane availability is UNKNOWN is
-   * excluded rather than merely recorded. Defaults to FALSE, and that
-   * asymmetry is deliberate: the agent floor is itself a cliproxy lane
+   * When true, a model whose lane availability is UNKNOWN is excluded rather
+   * than merely recorded. Defaults to FALSE, and that asymmetry is
+   * deliberate: the agent floor is itself a cliproxy lane
    * (`the-agent-floor-is-itself-on-cliproxy`), so a dead telemetry feed that
    * excluded every candidate would not fall back to a known-good path — it
    * would move the whole fleet to an unmeasured one. Either way the UNKNOWN
@@ -176,10 +176,10 @@ export interface SelectionConfig {
    */
   holdOnUnknownAvailability?: boolean;
   /**
-   * TOG-3210. Monitor ticks, continuation wakes, and label-only passes
+   * Monitor ticks, continuation wakes, and label-only passes
    * re-check an already-tiered card; the card is correctly judged T1 by
    * every rubric anchor, but the RE-CHECK itself is cheap. Absent/disabled:
-   * byte-identical to pre-TOG-3210 behavior. When enabled and
+   * byte-identical to the behavior before this gate existed. When enabled and
    * `descriptor.wakeReason` is on `wakeReasons`, the gate/ladder walk below
    * starts from `floorTier` instead of `judgement.tier` for THIS decision
    * only — `judgement.tier` itself (what the label/pin encode) is never
@@ -205,10 +205,10 @@ export interface SelectInput {
   profiles: readonly VolumeProfile[];
   signals: readonly QualitySignal[];
   now: number;
-  /** TOG-1917 §2.2 card ledger, keyed `${modelId}:${tier}`. Only consulted for the shadow diff / non-default objective. */
+  /** Card ledger, keyed `${modelId}:${tier}`. Only consulted for the shadow diff / non-default objective. */
   cardLedger?: Readonly<Record<string, CardLedgerEntry>>;
   /**
-   * TOG-3132: the availability term. Read per decision from the published
+   * The availability term. Read per decision from the published
    * quota-contract document (`worker.ts` `readAvailability`), never cached in
    * config — both measured failure shapes were transient (Z.ai's cooldown
    * ~4 minutes, Claude's window recovered inside two hours), so a value held
@@ -217,7 +217,7 @@ export interface SelectInput {
    */
   availability?: AvailabilitySnapshot;
   /**
-   * TOG-3132, second failure shape: run-outcome evidence per lane, from
+   * Second failure shape: run-outcome evidence per lane, from
    * `heartbeat_runs`. Distinct from `availability`, which can only speak about
    * lanes that publish a quota contract — `devin/*` publishes none and still
    * refused 74 of 74 dispatches at the provider level, so the availability
@@ -249,7 +249,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
   const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
 
-  // ---- TOG-3132: the availability term ------------------------------------
+  // ---- the availability term ------------------------------------
   //
   // Independent of `pacingMode`, and deliberately so. `hardStopExcluded` above
   // is the PACE engine's verdict: it only fires on a lane that was polled AND
@@ -355,7 +355,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return false;
   }
 
-  // ---- TOG-3132: the lane-evidence term -----------------------------------
+  // ---- the lane-evidence term -----------------------------------
   // The availability term above can only see lanes that publish a quota
   // contract. This one sees what actually happened when the fleet dispatched
   // to a lane, which is the only signal that catches a provider-level refusal
@@ -445,7 +445,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
 
-  // TOG-3210: a wake-scoped floor never raises the required tier and never
+  // A wake-scoped floor never raises the required tier and never
   // touches `judgement` — it only ever supplies a lower starting rung for the
   // gate/ladder walk below, for this one decision. Computed here, ahead of
   // `base`/the sticky block, so both use it consistently.
@@ -512,7 +512,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // Sticky beats cost, but it does not beat the required tier: an issue already
   // pinned to a lower-capability model must not stay there after a stronger
   // recorded judgement supersedes it. It also does not beat the serviceability
-  // hard stop (TOG-2137, Defect 6): staying sticky to a model whose lane is
+  // hard stop: staying sticky to a model whose lane is
   // exhausted/unavailable would silently wedge the issue there with no path
   // to escalate, the same failure `hardStopExcluded` exists to prevent for
   // every other candidate below — sticky is a preference for continuity, not
@@ -534,7 +534,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         operand: { kind: "tier-floor", tier: incumbent.tier, requiredTier },
       });
     } else if (incumbent && isAdapterBlockedModel(incumbent.id, descriptor.agentAdapterType)) {
-      // TOG-8108: staying sticky to an adapter-incompatible model would wedge
+      // Staying sticky to an adapter-incompatible model would wedge
       // the issue on a lane that refuses every dispatch at the provider level.
       trace.push(
         `sticky ${incumbent.id} declined: incompatible with the ${descriptor.agentAdapterType} adapter — re-selecting instead of wedging this issue on a refusing lane`,
@@ -607,7 +607,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
   }
 
-  // TOG-3997. Read once, here, because the ledger now feeds two consumers with
+  // Read once, here, because the ledger now feeds two consumers with
   // opposite standing: the `card-accept-rate` GATE in the loop below (live on
   // shipped config) and the shadow-diff/objective ordering far downstream
   // (inert unless `objective` is switched off its default).
@@ -621,7 +621,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster", operand: { kind: "disabled" } });
       continue;
     }
-    // TOG-8108. Adapter-compatibility: `devin/*` cannot serve a `claude_local`
+    // Adapter-compatibility: `devin/*` cannot serve a `claude_local`
     // assignee — Devin's content filter rejects the Claude Code / Agent SDK
     // system banner (Cognition ticket 71806; measured 25 failed / 3 succeeded
     // runs on claude_local+devin). An exclusion, never a down-rank, and an
@@ -656,14 +656,14 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // TOG-2481 port of `tier_dispatcher.py` `model_scores.py`'s `capable()`:
+    // Port of `tier_dispatcher.py` `model_scores.py`'s `capable()`:
     // a model can clear the static roster `tier-floor` above and still be
     // measurably failing this tier's actual work. `capable` is a tri-state
     // (`true`/`false`/`null` for "not enough evidence either way") — only an
     // explicit `false` excludes; fail-open when `config.modelScores` is unset,
     // when this model has no recorded score, or when the tier verdict is
     // `null`, so a company with no scored history yet sees no change.
-    // TOG-12768: read through `tierScoreFor`, so a tier with no proven
+    // Read through `tierScoreFor`, so a tier with no proven
     // evidence of its own cannot pass where an easier tier failed.
     const modelScore = config.modelScores?.[model.id];
     const score = tierScoreFor(modelScore, requiredTier);
@@ -683,7 +683,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // TOG-3997. `capability-score` above measures whether RUNS succeed; this
+    // `capability-score` above measures whether RUNS succeed; this
     // measures whether the CARDS those runs closed stayed closed. A model can
     // pass the first and fail this one: `gpt-6-astra` read a 98.0% run success
     // rate over 296 runs on 2026-09-22 while every resolved T1 card attributed
@@ -728,7 +728,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // Serviceability hard stop (TOG-2137): a lane that is exhausted or
+    // Serviceability hard stop: a lane that is exhausted or
     // unavailable excludes its model outright, same as a missing capability
     // — never merely deprioritized. `paceActive` gates this off entirely in
     // `pacing.mode: off`, and `hardStopExcluded` itself is fail-neutral: an
@@ -750,19 +750,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // TOG-3132 AC-1: the availability term excludes, exactly as a missing
-    // capability does, and never merely down-ranks. Measured on TOG-811, the
-    // down-ranking alternative is not a weaker version of this — it is a
-    // no-op: the router's `normalizeHealth` buckets `health: "cooldown"` as
-    // degraded, `postureFor` turns degraded into `avoid`, and an avoided lane
-    // stays selectable. It looks handled and keeps taking traffic.
+    // The availability term excludes, exactly as a missing capability does,
+    // and never merely down-ranks. As measured, the down-ranking alternative
+    // is not a weaker version of this — it is a no-op: the router's
+    // `normalizeHealth` buckets `health: "cooldown"` as degraded, `postureFor`
+    // turns degraded into `avoid`, and an avoided lane stays selectable. It looks handled and keeps taking traffic.
     if (!clearsLane(model)) continue;
-    // TOG-3132 second failure shape. Same exclusion discipline, different
+    // Second failure shape. Same exclusion discipline, different
     // instrument: `clearsLane` reads the published contract, this reads what
     // dispatches to the lane actually did. `devin/*` passes the first and
     // fails this one.
     if (!clearsEvidence(model)) continue;
-    // TOG-2481: lane avoid threshold and operator-declared outage, ported from
+    // Lane avoid threshold and operator-declared outage, ported from
     // `tier_dispatcher.py`'s `AVOID`/`AVOID_LANE` and `lane_outage.json`. Both
     // are gated the same as the hard stop above (`paceActive` only) and, like
     // it, are never waived by an operator override.
@@ -784,7 +783,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // TOG-2481 port of `tier_dispatcher.py`'s `lane_has_room()`: a per-account
+    // Port of `tier_dispatcher.py`'s `lane_has_room()`: a per-account
     // active-card cap (opencode-go, zai), Z.ai peak-hour throttle, Z.ai
     // weekly-pacing gate, and the 5h-window new-admission stop. This gates
     // NEW admission only — it never touches an issue already pinned to the
@@ -903,7 +902,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
   }
 
-  // TOG-8108: say what the adapter-compatibility gate did on every decision,
+  // Say what the adapter-compatibility gate did on every decision,
   // including nothing — the same AC-6 discipline as the availability and
   // evidence terms above, so `decisions.jsonl` answers "why did this
   // claude_local card not get devin" without re-deriving it.
@@ -916,7 +915,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   }
 
   if (qualified.length === 0) {
-    // TOG-2137, Defect 2. Distinguish a genuine capacity dead end from an
+    // Distinguish a genuine capacity dead end from an
     // ordinary config/capability gap. If every model from `requiredTier`
     // through the T1 ceiling that survived the disabled/capability/context
     // gates was excluded ONLY by the pace serviceability hard stop, there is
@@ -929,7 +928,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       const rejectedModel = config.models.find((entry) => entry.id === rejection.modelId);
       return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
     });
-    // `lane-availability` counts here alongside `lane-unserviceable` (TOG-3132):
+    // `lane-availability` counts here alongside `lane-unserviceable`:
     // both are capacity, and which of the two inputs saw the outage first is an
     // implementation detail. Routing a wholly-unserviceable tier to
     // `no-eligible-model` would report a capacity outage as a config gap and
@@ -1007,7 +1006,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return candidates;
   }
 
-  // TOG-2137, Defect 2. Walk the tier ladder one rung at a time, starting at
+  // Walk the tier ladder one rung at a time, starting at
   // the required tier — never pool every qualifying tier into one flat cost
   // race. A candidate one tier up must never win merely for being cheaper
   // than a candidate that was actually available at the required tier; it is
@@ -1045,7 +1044,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (left.expectedCostUsd !== right.expectedCostUsd) {
       return left.expectedCostUsd - right.expectedCostUsd;
     }
-    // TOG-3406 owner rule: same vendor family, tier, and price — the newer
+    // Owner rule: same vendor family, tier, and price — the newer
     // release wins outright unless the older one carries an explicit
     // earn-in verdict proving it's better. Checked before the plain
     // newest-release fallback, which stays as the tiebreak for a same-price
@@ -1061,12 +1060,12 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return left.modelId.localeCompare(right.modelId);
   });
 
-  // TOG-2481 port of `tier_dispatcher.py` `pick()`'s own ordering rules —
+  // Port of `tier_dispatcher.py` `pick()`'s own ordering rules —
   // free-must-be-proven, the 20% cost-band least-utilized-lane tiebreak, and
   // the 10% T2/T3 explore fraction — layered directly on top of the cost
   // sort, before pace ordering runs. Fail-open when `config.modelScores` is
   // unset: a company with no scored history yet gets the plain cost order,
-  // unchanged from pre-TOG-2481 behavior.
+  // unchanged from the behavior before this port.
   if (config.modelScores) {
     const pickResult = applyPickOrdering(
       candidates,
@@ -1085,7 +1084,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     );
   }
 
-  // Pace ordering (TOG-2137): pace state, deviation, cost, release date, id —
+  // Pace ordering: pace state, deviation, cost, release date, id —
   // computed and traced whenever pacing is not `off`, but only allowed to
   // change the winner in `enforce`. `orderCandidatesByPace` partitions by
   // tier (in cost-sort order) before comparing anything, so this can never
@@ -1099,7 +1098,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}`
         : `pace ordering (${pacingMode}) agrees with cost ordering`,
     );
-    // TOG-2137, Defect 5. Preferred-near-reset is the gas-pedal counterpart
+    // Preferred-near-reset is the gas-pedal counterpart
     // to the hard stop and slot throttle, both of which only ever hold a
     // lane back — this is traced separately so the 48h comparison stream can
     // tell a "trailing lane preferred" reorder apart from an ordinary
@@ -1111,14 +1110,14 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
 
-  // Ahead-of-line slot throttling (TOG-2137, enforce only): a candidate whose
+  // Ahead-of-line slot throttling: a candidate whose
   // lane is `ahead` is capped at `slotFloorFraction` of traffic rather than
   // excluded — the floor never reaches zero while the lane is serviceable
   // (serviceability itself was already enforced above as a hard stop, not
   // here). Throttled-out candidates fall through to the next in order rather
   // than producing no-eligible-model.
   //
-  // Ordering composition (TOG-2136 + TOG-2137): pace answers "what can we
+  // Ordering composition: pace answers "what can we
   // serve right now" (hard stop above, and this throttle) and, in `enforce`,
   // "what should we prefer right now" (the reorder above). `objective`
   // answers a separate question — "which of the survivors is cheapest per
@@ -1171,11 +1170,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const paceOnlyWinner = orderedCandidates[paceWinnerIndex]!;
   const pacingApplied = paceEnforced && paceOnlyWinner.modelId !== candidates[0]!.modelId;
 
-  // TOG-3406 rule (b), 2026-09-19 owner rule: a free subscription lane whose
+  // 2026-09-19 owner rule: a free subscription lane whose
   // credential is serviceable and under its per-account cap wins its tier over
   // a paid/earned model until it has enough observations to be judged —
-  // otherwise a new subscription can never earn placement (21:12Z TOG-3399/
-  // 3401 experiment: unproven Meta rows lost to earned opus-4-8 on every rung
+  // otherwise a new subscription can never earn placement (21:12Z
+  // experiment: unproven Meta rows lost to earned opus-4-8 on every rung
   // because cost-0 does not outrank an earned score).
   //
   // Placement is deliberately POST-pace, after the `pacingApplied` measurement
@@ -1198,7 +1197,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // random 10% sampling roll, while this is a deterministic owner rule about
   // who wins the tier. Sticky continuity is unaffected — a sticky incumbent
   // returns before this runs.
-  // TOG-8108: earn-in never fires on protected cards (critical/high
+  // Earn-in never fires on protected cards (critical/high
   // priority, review/gate). The picker itself enforces the guard; this trace
   // line says which side of it this decision fell on, so `decisions.jsonl`
   // answers "why did this card not earn-in" without re-deriving it.
@@ -1233,7 +1232,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
 
   // `objective` never affects `candidates`/`winner` unless explicitly switched
   // away from the default. Shipped config always leaves this at "list-price"
-  // (TOG-2136 hard constraint) — the alternate ordering above only feeds the
+  // — the alternate ordering above only feeds the
   // shadow-diff record, observed for 7 days before any enforcement proposal.
   const objective = config.objective ?? "list-price";
   // Earn-in already sits at orderedCandidates[0] and clears the slot throttle
@@ -1264,7 +1263,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // availability. And the floor is frequently never a candidate above: a
   // fleet-wide floor model is usually below `requiredTier` for a T1/T2 card,
   // so it never reached the `qualified` loop and its lane was never tested
-  // against `ledger`/`laneOutageOverride` at all (TOG-3037). Test it here,
+  // against `ledger`/`laneOutageOverride` at all. Test it here,
   // on the exact same predicates, before handing the run back to a lane that
   // might already be dead. `winner` already cleared every gate above
   // (including serviceability), so it is always a safe explicit fallback.
@@ -1272,11 +1271,11 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const reason = `volume profile for ${requiredTier} is not trusted (${profileVerdict.reason})`;
     const floorModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
     const floorModel = floorModelId ? config.models.find((model) => model.id === floorModelId) : undefined;
-    // TOG-3132 AC-3: the floor still exists, so the availability term is
-    // encoded here too. The pace predicates above are gated on `paceActive`;
-    // the availability term deliberately is not — it is supplied by
-    // `input.availability`, not by `pacing.mode`, so a floor on a lane that a
-    // published contract calls unavailable is dead whether or not pacing runs.
+    // The floor still exists, so the availability term is encoded here too.
+    // The pace predicates above are gated on `paceActive`; the availability
+    // term deliberately is not — it is supplied by `input.availability`, not
+    // by `pacing.mode`, so a floor on a lane that a published contract calls
+    // unavailable is dead whether or not pacing runs.
     // UNKNOWN is not dead: consistent with `isLaneUnserviceable`, a blind
     // instrument is not grounds to discard a recorded human judgement.
     const floorLaneRead = floorModel ? laneRead(floorModel) : null;

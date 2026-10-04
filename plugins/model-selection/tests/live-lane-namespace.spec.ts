@@ -8,7 +8,7 @@ import type { LanePaceObservation, LanePaceVerdict } from "../src/lane-capacity/
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 /**
- * TOG-2533: the live company config never sets `pacing.codexLaneId` /
+ * The live company config never sets `pacing.codexLaneId` /
  * `pacing.opencodeGoLaneId` / `pacing.avoid.perLane` / `pacing.laneCapPerAccount`
  * / `pacing.fiveHourWindowName` at all — every one of these rules must fire
  * correctly from CODE DEFAULTS ALONE under the real deployed lane ids
@@ -19,7 +19,7 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
  * enforcement work on the real deployment rather than on a bare-string test
  * fixture that happens to match a stale default.
  */
-describe("live lane/window vocabulary (2026-09-14 TOG-2533: cliproxy-* lane ids, five-hour window)", () => {
+describe("live lane/window vocabulary", () => {
   const resolved = resolveConfig(undefined);
 
   it("resolves the canonical live lane ids and window name from defaults alone", () => {

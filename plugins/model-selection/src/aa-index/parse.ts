@@ -8,7 +8,7 @@
  * closed (returns `null`) rather than throwing, so a structural change never
  * wedges the caller; it only ever fails to produce a fresh snapshot.
  *
- * TOG-2438 scope expansion: aa.ai publishes one record per (model × effort
+ * Scope expansion: aa.ai publishes one record per (model × effort
  * level) — `gpt-5-6-sol`, `gpt-5-6-sol-low`, `-medium`, `-high`, `-xhigh`,
  * `-non-reasoning`. Each is a distinct slug with its own price/speed
  * trade-off, so this parser keeps every row as its own record — it never

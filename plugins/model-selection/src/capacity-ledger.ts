@@ -1,7 +1,7 @@
 /**
- * Durable aggregate reservation ledger — TOG-13264.
+ * Durable aggregate reservation ledger
  *
- * First mergeable slice of the TOG-12456 "durable store" contract (plan rev 7):
+ * First mergeable slice of the "durable store" contract:
  * one aggregate compare-and-swap (CAS) per allocation domain, executed as a
  * single conditional UPDATE and validated in agent-testdb/CI only.
  *
@@ -27,13 +27,13 @@
  * What this is NOT:
  * - Not a migration, not a live writer, not enforcement. DDL here is the
  *   test/proof artifact; runtime migration, grants and any production
- *   cutover need their own reviewed path (TOG-12456 final-decision).
+ *   cutover need their own reviewed path.
  * - Not a second admission evaluator. Debit vectors come from the accepted
  *   pure evaluator (`admission-budget.ts`); see `debitsFromBudgetBinding`.
  *   The in-memory `AdmissionSimulator` remains a simulation-only fixture and
  *   must not be promoted to storage.
  *
- * Runtime SQL limits respected (per the TOG-12456 capacity-evidence survey):
+ * Runtime SQL limits respected:
  * exactly one statement per call, single SELECT or INSERT/UPDATE/DELETE,
  * `$n` binds only, no BEGIN/COMMIT, no multi-statement batch, no mutation
  * CTE. Table namespace is a validated identifier, never interpolated input.

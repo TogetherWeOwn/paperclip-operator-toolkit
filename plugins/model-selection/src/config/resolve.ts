@@ -25,7 +25,7 @@ import { validateSecretRefShape } from "./secret-ref.js";
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
-/** Mirrors paperclip-model-router's `SecretRef` (TOG-2379). */
+/** Mirrors paperclip-model-router's `SecretRef`. */
 export interface SecretRef {
   type: "secret_ref";
   secretId: string;
@@ -41,7 +41,7 @@ export interface LaneSourceConfig {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy: PacePolicy;
-  /** TOG-2379: resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
+  /** Resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
 }
 
@@ -62,7 +62,7 @@ export interface ClassificationConfig {
   t3ConfidenceFloor: number;
   t2ConfidenceFloor: number;
   batchSize: number;
-  /** TOG-3200: re-examine a `tier:*` label this plugin did not write. Defaults on. */
+  /** Re-examine a `tier:*` label this plugin did not write. Defaults on. */
   reclassifyForeignLabels: boolean;
 }
 
@@ -73,13 +73,13 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
-    /** TOG-3132: exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
+    /** Exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
     holdOnUnknownAvailability: boolean;
     objective: SelectionObjective;
     fleetContextCeilingTokens: number;
     /** Operator-verified local run-log root; absent means honest fleet fallback. */
     contextRunLogRoot: string | null;
-    /** TOG-11642: agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
+    /** Agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
     agentEnvContextTokens: number;
     compactionRatio: number;
   };
@@ -90,7 +90,7 @@ export interface ResolvedConfig {
    * up by name.
    */
   tierLabelIds: Partial<Record<Tier, string>>;
-  /** TOG-2137, Defect 2. Label id for `operator`, applied to escalation issues. Optional. */
+  /** Label id for `operator`, applied to escalation issues. Optional. */
   operatorLabelId: string | null;
   profiles: { windowDays: number; minSamples: number; maxAgeDays: number };
   quality: { t1EscalationCeiling: number; t2EscalationCeiling: number; silentFailureWeight: number };
@@ -100,11 +100,11 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
-    /** TOG-2481 port of `AVOID`/`AVOID_LANE`. */
+    /** Port of `AVOID`/`AVOID_LANE`. */
     avoid: { defaultThreshold: number; perLane: Record<string, number> };
-    /** TOG-2481 port of `LANE_CAP_PER_ACCOUNT`. */
+    /** Port of `LANE_CAP_PER_ACCOUNT`. */
     laneCapPerAccount: Record<string, number>;
-    /** TOG-2481 port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
+    /** Port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
     fiveHourWindowName: string;
     /** Named weekly allowance window reported in the shadow stream's per-lane snapshot (reporting only). */
     weeklyWindowName: string;
@@ -131,7 +131,7 @@ export interface ResolvedConfig {
   shadowEmit: { enabled: boolean; maxRecords: number; shardMaxRecords: number; retentionShards: number };
   accountAdmissionShadow: { enabled: boolean };
   aaSync: { enabled: boolean };
-  /** TOG-12206 P2: default-off free-list sync. Absent/disabled = legacy behavior exactly. */
+  /** Default-off free-list sync. Absent/disabled = legacy behavior exactly. */
   aaFreeSync: {
     enabled: boolean;
     apiKeySecretRef: SecretRef | null;
@@ -145,25 +145,25 @@ export interface ResolvedConfig {
     }>;
     maxSnapshotAgeHours: number;
   };
-  /** TOG-12972: default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
+  /** Default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
   acceptedWork: { enabled: boolean };
-  /** TOG-3996 models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
+  /** models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
   priceSync: { enabled: boolean };
-  /** TOG-2481 absorption of the standalone `dispatch` plugin (TOG-747/TOG-706). */
+  /** Absorption of the standalone `dispatch` plugin. */
   dispatch: {
     wakeEnabled: boolean;
     idleMinutes: number;
     maxWakesPerFiring: number;
     focusProjectIds: readonly string[];
   };
-  /** TOG-3210. See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
+  /** See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
   wakeScopedFloor: {
     enabled: boolean;
     wakeReasons: readonly string[];
     floorTier: Tier;
   };
   /**
-   * TOG-11793 (TOG-11780 §4.3). The run-scoped decision flag. Off (default):
+   * The run-scoped decision flag. Off (default):
    * `onResolveRunModel` answers `keep` and every legacy pin path runs exactly as
    * before. On: the handler decides each run's model from hot caches and the
    * creation/assignment pins, `labelOnlyPass`/`balancePass` pin writes and the
@@ -372,7 +372,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
       contextRunLogRoot: typeof selection.contextRunLogRoot === "string" && selection.contextRunLogRoot.trim()
         ? selection.contextRunLogRoot.trim() : null,
-      // TOG-11642: unset resolves to the fleet ceiling, so behaviour is
+      // Unset resolves to the fleet ceiling, so behaviour is
       // unchanged until the operator sets it (1M to release Muse's window).
       agentEnvContextTokens: num(
         selection.agentEnvContextTokens,
@@ -585,7 +585,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
   }
-  // TOG-14412 enforce preflight: selection.mode=enforce pins cards onto a
+  // Enforce preflight: selection.mode=enforce pins cards onto a
   // tier's models, so a tier with zero enabled rows must refuse at
   // config-resolve time — enforce can never pin onto an unserved tier.
   // Advise mode never writes a pin, so it keeps the historical warning only.
@@ -657,7 +657,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     );
   }
 
-  // TOG-12206 P2: the free-list sync never writes, but a misconfigured one
+  // The free-list sync never writes, but a misconfigured one
   // produces a silently empty or misleading diff — fail loudly here instead.
   if (config.aaFreeSync.enabled) {
     const secretError = validateSecretRefShape(config.aaFreeSync.apiKeySecretRef, "aaFreeSync.apiKeySecretRef");
@@ -698,7 +698,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
   }
 
-  // TOG-2137, Defect 6. A model row's `laneId` that does not resolve to a
+  // A model row's `laneId` that does not resolve to a
   // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
   // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
   // has: `laneVerdictFor` degrades a typo'd or renamed lane id to

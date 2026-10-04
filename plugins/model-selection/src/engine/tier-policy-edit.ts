@@ -1,6 +1,6 @@
 /**
- * TOG-11543 P2 (TOG-12490): add, edit and remove tiers as data, through the
- * `model_selection_tier_policy` tool (TOG-11549 D4).
+ * Add, edit and remove tiers as data, through the
+ * `model_selection_tier_policy` tool.
  *
  * This build is the D4 fallback branch: prepare, validate and diff only. The
  * plugin SDK has no compare-and-set primitive, and nothing yet proves that the
@@ -44,7 +44,7 @@ export const MAX_REASON_LENGTH = 2000;
 
 export const PROPOSAL_ONLY_NOTE =
   "proposalOnly: nothing was written and routing is unchanged. Activation needs a persistence path " +
-  "proven to enforce expectedRevision against one authoritative revision (TOG-11549 D4).";
+  "proven to enforce expectedRevision against one authoritative revision.";
 
 export interface TierPolicyEditActor {
   agentId: string | null;

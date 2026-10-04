@@ -1,5 +1,5 @@
 /**
- * dispatch — worker (TOG-747, implementing the TOG-706 design).
+ * dispatch — worker.
  *
  * One scheduled sweep, every 30 minutes. Per company:
  *

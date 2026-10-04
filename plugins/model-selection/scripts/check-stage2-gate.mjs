@@ -2,7 +2,7 @@
 /**
  * The Stage 2 gate, as a script rather than a judgement call.
  *
- * TOG-768's shipping constraint is "do not switch enforcement on until Stage 2
+ * The shipping constraint is "do not switch enforcement on until Stage 2
  * (tier:T1/T2/T3 labels + narrow-slice rollout) is confirmed stable". That
  * sentence is not checkable by reading it. This script turns it into a number:
  * how many issues actually carry a `tier:*` label, applied by a human or agent

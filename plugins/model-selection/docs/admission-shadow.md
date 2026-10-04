@@ -1,7 +1,6 @@
 # Bounded account admission shadow
 
-This is the shadow-only implementation of admission contract v1 (TOG-11544,
-TOG-11549 revision `2ce3dcf0-58d4-4953-afc6-99f839aecf46`). It does **not**
+This is the shadow-only implementation of admission contract v1. It does **not**
 enforce admission, reserve production allowance, select an upstream account,
 change an issue override or certify 98–100% end-of-week attainment.
 
@@ -106,7 +105,7 @@ issue overrides/labels and activity with the config omitted, off and on. They
 cover normal advice/enforcement, sticky incumbents, untrusted-profile holds,
 tier exhaustion, hard-stop repin and computation/storage failure isolation.
 
-## Lane quota observation adapter (TOG-12966)
+## Lane quota observation adapter
 
 `admission-observation.ts` turns a per-lane quota snapshot (the lane-document
 record shape: `lane`, `*_utilization`, `*_resets_at`, `observationQuality`

@@ -8,9 +8,9 @@ import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
 /**
- * TOG-5005 (TOG-4713 D2b, part 2). TOG-4883 covers the three MCP tools in the
- * separate `paperclip-model-router` repo; TOG-4763 covers the plain-object
- * `data` envelope for every tool here. This spec pins the FAIL-CLOSED shapes
+ * The three MCP tools in the
+ * separate `paperclip-model-router` repo and the plain-object
+ * `data` envelope for every tool here are covered elsewhere. This spec pins the FAIL-CLOSED shapes
  * for the remaining model-selection plugin tools in THIS repo: every
  * malformed input resolves (never throws) with a string `content` and a
  * plain-object `data` carrying a stable `{ ok: false, error: <code> }`
@@ -109,7 +109,7 @@ function cover(tool: string) {
   coveredTools.add(tool);
 }
 
-describe("TOG-5005: fail-closed error shapes for the remaining model-selection tools", () => {
+describe("Fail-closed error shapes for the remaining model-selection tools", () => {
   it("advise: missing, mistyped, and unknown issueId all fail closed as issue-not-found", async () => {
     cover(TOOL_NAMES.advise);
     const harness = await boot(baseConfig());

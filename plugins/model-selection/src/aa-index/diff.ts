@@ -19,7 +19,7 @@ export interface AaDiffRow {
   /** True when the fresh index implies a different tier than the previous one did. */
   crossesBoundary: boolean;
   /**
-   * Every numeric field (TOG-2438 scope expansion) whose value differs
+   * Every numeric field whose value differs
    * between the PREVIOUS fetched snapshot and the FRESH one for this slug —
    * price, speed, latency, context window, sub-benchmarks, etc. This is a
    * fetch-over-fetch comparison, independent of the roster's curated
@@ -60,7 +60,7 @@ function diffFields(previous: AaModelRecord | undefined, fresh: AaModelRecord): 
  * compare the roster's currently-recorded `aaIndex` against the fresh
  * `intelligenceIndex` (tier-boundary crossing, unchanged semantics), and
  * separately diff every numeric field between the previous fetched snapshot
- * and the fresh one (TOG-2438 scope expansion — `fieldDeltas`). Models with
+ * and the fresh one (the scope expansion behind `fieldDeltas`). Models with
  * no resolved slug, or whose slug is absent from the fresh snapshot, are
  * omitted entirely — "not tracked for drift this run" — never reported as a
  * zero-delta match.

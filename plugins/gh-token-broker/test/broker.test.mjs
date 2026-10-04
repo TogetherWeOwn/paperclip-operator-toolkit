@@ -65,7 +65,8 @@ test("the mint route resolves company from the issue", () => {
   assert.deepEqual(mint.companyResolution, { from: "issue", param: "issueId" });
 });
 
-// Regression guard, rewritten for TOG-309.
+// Regression guard, rewritten when the ownership gate moved from the host into
+// the plugin.
 //
 // "required-for-agent-in-progress" remains forbidden and always will be:
 // server/dist/routes/plugins.js short-circuits it with an early `return` when
@@ -75,7 +76,7 @@ test("the mint route resolves company from the issue", () => {
 //
 // The route is now "none" and the gate is assertMintOwnership in the worker,
 // because the host's own gate hardcodes status == in_progress and so refuses an
-// agent legitimately working its own issue in in_review (TOG-309). If you are
+// agent legitimately working its own issue in in_review. If you are
 // putting "always-for-agent" back, you are re-breaking that; widen
 // MINTABLE_ISSUE_STATUSES instead, or fix the host.
 test("the mint route never uses the policy that skips the ownership check", () => {
@@ -130,8 +131,9 @@ test("the CI-visibility permissions are read, never write", () => {
   assert.equal(DEFAULT_PERMISSION_PROFILE.statuses, "read");
 });
 
-// TOG-247 refused actions:read because it also grants workflow LOG download,
-// and logs carry whatever CI printed. This test is the guard on that decision:
+// The CI-visibility decision refused actions:read because it also grants
+// workflow LOG download, and logs carry whatever CI printed. This test is the
+// guard on that decision:
 // it is expected to fail loudly if someone adds the permission back for
 // convenience. If you are here because it failed, read WITHHELD_CI_SOURCES in
 // scope.js before changing it — the refusal is the point, not an oversight.
@@ -139,24 +141,24 @@ test("actions is excluded from the default profile, deliberately", () => {
   assert.equal(
     DEFAULT_PERMISSION_PROFILE.actions,
     undefined,
-    "actions:read also grants workflow log download; TOG-247 refused it",
+    "actions:read also grants workflow log download; the decision refused it",
   );
 });
 
 // ---------------------------------------------------------------------------
-// The pin registry (TOG-346).
+// The pin registry.
 //
 // `resolveScope` takes the profile as `projectPermissions ?? defaultPermissions`
 // — `??`, so a project's GH_APP_PERMISSIONS REPLACES this default rather than
-// extending it. TOG-296 pinned the last five unpinned projects so the hardened
+// extending it. The last five unpinned projects were pinned so the hardened
 // GH_APP_SCOPE_STRICT AND-gate could pass, which makes it 7 of 7: no project in
 // the company reaches DEFAULT_PERMISSION_PROFILE at mint time any more.
 //
 // So every test above this line asserts something about a value that is not
 // consulted in production. Editing the default is a no-op everywhere, and the
 // dangerous direction is REMOVAL — narrowing it for a security reason would
-// look shipped and change nothing. TOG-247 already paid the additive half of
-// that bill: a CI-visibility grant added to the default reached every project
+// look shipped and change nothing. An earlier addition already paid the
+// additive half of that bill: a CI-visibility grant added to the default reached every project
 // except the one repo it was written for, because that repo was the pinned one.
 //
 // permission_pins.txt is the fan-out list, and these tests are the tripwire on
@@ -285,7 +287,8 @@ function registered(projectId) {
 // decide per project whether the change should reach it, and run
 // `./gh_permission_pin_audit.sh --fanout-plan` for the value each project must
 // now carry. Do not "fix" this by deleting the assertion: the silence it
-// replaces is exactly what let TOG-247 ship to six of seven projects.
+// replaces is exactly what let the CI-visibility change ship to six of seven
+// projects.
 test("the pin registry's baseline is the default profile", { skip: REGISTRY_SKIP }, () => {
   assert.deepEqual(
     REGISTRY_BASELINE,
@@ -530,17 +533,17 @@ test("a project that grants workflows:write passes it through", () => {
 // tests pin the tagged form so that cannot recur.
 // ---------------------------------------------------------------------------
 
-const OPS_TOOLING_ID = "f2dc52a4-256f-4766-aec5-52a94ca387e2";
+const OPS_TOOLING_ID = "0b5e7001-0000-4000-8000-000000000042";
 
 /**
  * The Ops Tooling project's env, verbatim, as the API returned it 2026-08-25.
  *
- * This literal was stale until TOG-346 and nothing noticed: it was copied in
- * before TOG-247 added `checks`/`statuses` to the default, so the fixture named
+ * This literal was once stale and nothing noticed: it was copied in before
+ * `checks`/`statuses` were added to the default, so the fixture named
  * a five-permission pin while the live project carried seven. The suite stayed
  * green because it only ever asserted `workflows` and `contents` — a fixture
  * claiming to be "the live env" that had quietly stopped being it, which is a
- * small instance of the exact failure this card is about.
+ * small instance of silent drift.
  *
  * The test below now checks it against permission_pins.txt rather than against
  * a memory of what it used to say.
@@ -572,7 +575,7 @@ test("the live Ops Tooling env resolves its repo and keeps workflows:write", () 
   assert.equal(scope.profileSource, "project");
 });
 
-// The assertion that keeps the fixture above honest (TOG-346). Spot-asserting
+// The assertion that keeps the fixture above honest. Spot-asserting
 // two keys is how it drifted for a month; this compares the whole set against
 // the registry, so a change to the default or to the pin lands here too.
 test("the Ops Tooling fixture is the pin the registry registers for it", { skip: REGISTRY_SKIP }, () => {
@@ -586,7 +589,7 @@ test("the Ops Tooling fixture is the pin the registry registers for it", { skip:
 });
 
 // ---------------------------------------------------------------------------
-// TOG-226. Community Platform and Onboarding shipped with no env at all, so the
+// Community Platform and Onboarding shipped with no env at all, so the
 // broker refused for every issue on them — 47 and 8 issues respectively. Both do
 // real git work, so the fix was a repo pin, not a "does no git work" note. These
 // pin the values that were set, at the least-privilege width they were set to:
@@ -1016,10 +1019,10 @@ function disclosureBody(overrides = {}) {
       principalId: "github-app:4685085",
     },
     authorizingPrincipal: { principalClass: "owner", principalId: "test-owner" },
-    approvalRecord: { id: "approval-exact-1", source: "TOG-576 interaction", sha256: sha256(Buffer.from(approvalRecord)) },
+    approvalRecord: { id: "approval-exact-1", source: "Interaction", sha256: sha256(Buffer.from(approvalRecord)) },
     approvedAt: new Date(now - 60_000).toISOString(),
     expiresAt: new Date(now + 15 * 60_000).toISOString(),
-    allowedIssueId: "TOG-576",
+    allowedIssueId: "EX-576",
     allowedRunId: "run-abc",
     requiredPermissions: { security_advisories: "write" },
     ...overrides,
@@ -1056,7 +1059,7 @@ function disclosureConfig() {
 function disclosureCtx(overrides = {}) {
   return makeCtx({
     config: { get: async () => disclosureConfig() },
-    issues: issuesClient(issueRow({ id: ISSUE, identifier: "TOG-576" })),
+    issues: issuesClient(issueRow({ id: ISSUE, identifier: "EX-576" })),
     projects: {
       get: async () => ({
         id: PROJECT,
@@ -1100,7 +1103,7 @@ test("server-side disclosure preflight renders exact authority then consumes onc
   const preflight = await plugin.definition.onApiRequest(request("disclosure-preflight", { body }));
   assert.equal(preflight.status, 200, JSON.stringify(preflight.body));
   assert.equal(preflight.body.capability.authenticatingPrincipal.principalClass, "github_app");
-  assert.equal(preflight.body.authority.allowedIssueId, "TOG-576");
+  assert.equal(preflight.body.authority.allowedIssueId, "EX-576");
   assert.equal(preflight.body.authority.allowedRunId, "run-abc");
   assert.equal(preflight.body.mutation.approvalId, "approval-exact-1");
   assert.equal(preflight.body.mutation.artifacts[0].sha256, body.grant.artifacts[0].sha256);
@@ -1333,7 +1336,7 @@ test("an unexpected internal error does not echo its message to the caller", asy
 });
 
 // ---------------------------------------------------------------------------
-// Ownership gate (TOG-309)
+// Ownership gate
 //
 // checkoutPolicy is "none", so nothing behind this file enforces the assignee or
 // run-lock terms. These tests are the enforcement's only proof.
@@ -1388,10 +1391,10 @@ test("assertMintOwnership, in isolation, over the full status enum", () => {
   }
 });
 
-// The measured TOG-309 failure. An agent acting on review feedback holds its
+// The measured failure. An agent acting on review feedback holds its
 // checkout while the issue sits in in_review; the host refused it with 409, and
 // the helper (correctly) will not retry a 409 with the PEM, so git died.
-test("an in_review issue the agent holds mints — the case TOG-309 measured", async () => {
+test("an in_review issue the agent holds mints — the case the host gate refused", async () => {
   const { ctx } = makeCtx({ issues: issuesClient(issueRow({ status: "in_review" })) });
   await plugin.definition.setup(ctx);
 
@@ -1446,12 +1449,12 @@ test("minting is refused when another run of the same agent holds the checkout",
   assert.match(response.body.error, /held by a different run/);
 });
 
-// Deliberate, and load-bearing for TOG-309: the host adopts an unowned lock only
+// Deliberate, and load-bearing for the widened status gate: the host adopts an unowned lock only
 // for an `in_progress` issue, so a legitimate caller on `in_review` or `blocked`
 // arrives here with a null lock. Refusing it would re-create the 409 that killed
 // git.
 //
-// TOG-216 names the cost: in this branch the run-lock comparison is skipped, so
+// The cost: in this branch the run-lock comparison is skipped, so
 // the `runId` that lands in the mint audit entry is whatever the caller supplied
 // — proved on the agent-JWT path, merely asserted on the agent-key path. This
 // test pins that the mint succeeds. It does NOT license reading the recorded
@@ -1589,7 +1592,7 @@ test("an unknown routeKey is rejected", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// CI visibility (TOG-247)
+// CI visibility
 //
 // The broker cannot make an agent read CI status correctly, but it can refuse
 // to let one be blind and unaware of it. These assert that the mint response
@@ -1597,7 +1600,8 @@ test("an unknown routeKey is rejected", async () => {
 // it will not see until much later.
 // ---------------------------------------------------------------------------
 
-// Since the TOG-247 decision the default profile CAN observe CI. This is the
+// Since the decision to add checks:read and statuses:read, the default profile
+// CAN observe CI. This is the
 // acceptance test for that change: an agent minting with no overrides must be
 // able to answer "did my own PR pass" from check runs and commit statuses.
 test("the default profile can observe CI from checks and statuses", () => {
@@ -1616,7 +1620,7 @@ test("actions reports as withheld-by-decision, not as a blind spot", () => {
   assert.deepEqual(v.blind, [], "no source should read as an unclosed gap");
   assert.deepEqual(Object.keys(v.withheld), ["actions"]);
   assert.match(v.withheld.actions, /log/i, "the reason must name log download");
-  assert.match(v.withheld.actions, /TOG-247/);
+  assert.match(v.withheld.actions, /do not add/i);
 });
 
 // A grant that really is blind must still say so in the dangerous terms. This

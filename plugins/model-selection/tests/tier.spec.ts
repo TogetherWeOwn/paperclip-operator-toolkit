@@ -81,7 +81,7 @@ describe("tier judgement is recorded, never inferred", () => {
   });
 });
 
-describe("TOG-2137 Defect 6: a pin cannot hard-bypass capacity routing", () => {
+describe("A pin cannot hard-bypass capacity routing", () => {
   it("falls through to the tier label when the pinned model's lane is unserviceable", () => {
     const judgement = resolveTier(
       { issueId: "i1", labelNames: ["tier:T2"], pinnedModelId: "claude-opus-5" },

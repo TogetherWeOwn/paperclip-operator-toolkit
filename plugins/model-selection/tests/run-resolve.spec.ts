@@ -95,7 +95,7 @@ function decided(resolution: ReturnType<typeof resolveRunDecision>) {
   return resolution;
 }
 
-describe("run-scoped decision (TOG-11793)", () => {
+describe("run-scoped decision", () => {
   it("decides a first run from the tier label, recording the first decision", () => {
     const resolution = decided(resolveRunDecision(input()));
     expect(resolution.result.model).toBe("claude-sonnet-5");

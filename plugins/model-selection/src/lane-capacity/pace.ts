@@ -466,7 +466,7 @@ function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict
 }
 
 /**
- * TOG-3107. The serviceability windows this account holds at (or within the
+ * The serviceability windows this account holds at (or within the
  * pace margin of) 1.0 — i.e. the windows whose `resetsAt` is the earliest
  * relief this account can offer.
  *
@@ -476,8 +476,8 @@ function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict
  * the blown account for the whole storm. An any-account-serviceable roll-up
  * therefore overstates a lane whose provider behaves that way, so a tripped
  * serviceability window exhausts its own account (see `evaluateLanePace`)
- * (TOG-7648: the lane itself is condemned only when no account can still
- * serve), and the account reads `exhausted` until reset.
+ * (the lane itself is condemned only when no account can still serve), and
+ * the account reads `exhausted` until reset.
  *
  * Note this is strictly wider than the per-window `serviceable` flag set in
  * `scoredWindow`, which trips only at a hard `utilization >= 1`: the margin
@@ -505,7 +505,7 @@ export function evaluateLanePace(input: {
   policy?: PacePolicy;
 }): LanePaceVerdict {
   const marginMilli = toMilli(input.policy?.margin ?? DEFAULT_MARGIN);
-  // TOG-3107: a serviceability window at (or within the margin of) 1.0 trips.
+  // A serviceability window at (or within the margin of) 1.0 trips.
   // Default margin 0.1 → trip at >= 0.9; a lane-configured margin widens it.
   const tripCeilingMilli = SCALE - marginMilli;
   const urgentResetSeconds = input.policy?.urgentResetSeconds ?? DEFAULT_URGENT_RESET_SECONDS;
@@ -539,7 +539,7 @@ export function evaluateLanePace(input: {
     const accountStale = account.staleAfterSeconds != null &&
       (asOfMs - observedAtMs) / 1_000 > account.staleAfterSeconds;
     const accountServiceable = !accountStale && serviceable(account, windows, tripCeilingMilli);
-    // TOG-3107. Collected per account so the lane roll-up below can both detect
+    // Collected per account so the lane roll-up below can both detect
     // the trip and name the earliest relief it can offer.
     const tripped = trippedServiceabilityWindows(windows, tripCeilingMilli);
     const trippedResetsAt = tripped
@@ -553,7 +553,7 @@ export function evaluateLanePace(input: {
       window.allowanceWeight === null
     );
     if (!governing) {
-      // TOG-3107: a tripped serviceability window reads `exhausted` here too,
+      // A tripped serviceability window reads `exhausted` here too,
       // so the per-account output agrees with the lane roll-up below.
       const exhausted = account.health === "exhausted" || account.health === "unavailable" || tripped.length > 0;
       // The account declared a governing window that this snapshot cannot
@@ -696,11 +696,11 @@ export function evaluateLanePace(input: {
       ? 0
       : rawShare(entry) / shareDenominator,
   }));
-  // TOG-7648: a tripped serviceability window condemns the lane only when no
+  // A tripped serviceability window condemns the lane only when no
   // account can still serve (serviceableAccountCount == 0). A healthy sibling
   // keeps the lane open; the tripped account itself stays excluded —
   // serviceable:false, state:exhausted, recommendedShare 0 — so dispatch never
-  // rides it. TOG-3107's no-failover evidence is preserved at the account
+  // rides it. The no-failover evidence is preserved at the account
   // level, where the provider actually routes; the lane roll-up no longer
   // repeats it. With nothing serviceable left the lane is still poisoned, and
   // the tripped reset stays ahead of every other exit: it is the earliest

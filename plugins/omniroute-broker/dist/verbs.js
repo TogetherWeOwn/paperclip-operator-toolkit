@@ -1,5 +1,5 @@
 /**
- * omniroute-broker — the verb table and the approval policy (TOG-391).
+ * omniroute-broker — the verb table and the approval policy.
  *
  * Pure: no I/O, no host services, no network. The authorization decision is a
  * function of (verb, body, actor) alone so it can be unit-tested directly rather
@@ -17,7 +17,7 @@
  * So the caller never supplies a method or a path. The caller supplies a VERB
  * NAME, which is looked up here by EXACT STRING EQUALITY in a deny-by-default
  * table. No substrings, no prefixes, no regex, no normalisation — the same rule
- * TOG-151's gate_allowlist arrived at after Claude turned out to be reachable
+ * the earlier shell CLI's gate_allowlist arrived at after Claude turned out to be reachable
  * through 351 ids, 14 of which contained neither "claude" nor "anthropic".
  * An unknown verb is a 404, never a pass-through.
  */
@@ -199,7 +199,7 @@ export const VERBS = Object.freeze({
  * Body keys that indicate the operation changes which provider serves paid
  * traffic, or re-points billed capacity.
  *
- * This is TOG-151's SECONDARY TRIPWIRE pattern, and it has the same one-way
+ * This is the earlier shell CLI's SECONDARY TRIPWIRE pattern, and it has the same one-way
  * property: it can only ever require MORE approval, never less. A false positive
  * costs one extra approver. A false negative is caught by nothing, which is why
  * the list is deliberately broad and matched on the key's presence, not its
@@ -346,7 +346,7 @@ export const MAPPING_WILDCARD = /[*?]/;
 
 /**
  * Claude routing is this company's highest-stakes lever, and it is matched on the
- * FAMILY, not on the substring "claude": TOG-237 was a bypass that a `claude`
+ * FAMILY, not on the substring "claude": an earlier bypass was one that a `claude`
  * check cleared, and 13 `aug/` ids carry no "claude" at all. Moving Claude
  * traffic stays an explicit operator action with owner visibility; it is not
  * something the broker will do for two agents.
@@ -362,7 +362,7 @@ export const MAPPING_WILDCARD = /[*?]/;
  * "0 escaped" while this was open.
  *
  * Accepted over-block: `aug/prism-b` is `"Prism (GPT + Kimi)"` and carries no
- * Claude, but shares the token. TOG-178's 52 planned patterns name neither
+ * Claude, but shares the token. The 52 planned rollout patterns name neither
  * prism id, so refusing both costs nothing addressable today. Blocking a
  * non-Claude model is a recoverable annoyance; letting Claude traffic through
  * is the failure this guard exists to prevent.

@@ -9,11 +9,11 @@ import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
 /**
- * TOG-14461 — Router guard: advisory-mode pin-writer audit (read-only
+ * Router guard: advisory-mode pin-writer audit (read-only
  * inventory, propose-only; no behavior change).
  *
  * Static inventory (origin/main @09c584389; line numbers are `~` where the
- * file shifts often — the gate comment `TOG-12431` marks each site):
+ * file shifts often):
  *
  * Gate (single): `selectionWritesAllowed` (`actuate/apply.ts:~206`) =
  * `selection.enabled && selection.mode === "enforce"`. The engine marks a
@@ -30,9 +30,11 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
  *     Covered: `apply.spec.ts` (unit) + `worker.spec.ts` "writes nothing in
  *     advise mode even from the apply tool" (harness).
  *  2. creation-time pin — `worker.ts:~2258` (`writesAllowed`) / `~2260`.
- *     Covered: `creation-pin.spec.ts` TOG-12431 suite (advise + disabled).
+ *     Covered: `creation-pin.spec.ts` "Creation-time pin in advisory selection"
+ *     suite (advise + disabled).
  *  3. labelOnlyPass — `worker.ts:~4840` / `~4998`. Covered:
- *     `scheduled-passes.spec.ts` TOG-12431 suite (label-only case).
+ *     `scheduled-passes.spec.ts` "Advisory selection writes no model/env pins"
+ *     suite (label-only case).
  *  4. repinPass clear-on-blocked — `worker.ts:~5127` / `~5242`
  *     (`assigneeAdapterOverrides: null`). Covered: blocked-clear case.
  *  5. repinPass re-pin — `worker.ts:~5388`. Covered: demoted-pin case.
@@ -142,7 +144,7 @@ const failConfig = (harness: Awaited<ReturnType<typeof boot>>) =>
 
 const poisoned = () => ({ STALE: ref("former-assignee-secret"), KEEP: ref("agent-secret") });
 
-describe("TOG-14461 advisory pin-writer audit: the env-repair path writes no pin outside enforce", () => {
+describe("Advisory pin-writer audit: the env-repair path writes no pin outside enforce", () => {
   it("positive control: enforce mode heals the poisoned pin after configuration_incomplete", async () => {
     const harness = await boot(card(poisoned()), { enabled: true, mode: "enforce" });
     await failConfig(harness);

@@ -39,7 +39,7 @@ if (endMs <= startMs) fail("--end must be later than --start");
 if (endMs - startMs > 24 * 60 * 60 * 1000) fail("interval must be no longer than 24 hours");
 
 /**
- * TOG-13566. `--input` accepts a single JSONL file (legacy `decisions.jsonl`)
+ * `--input` accepts a single JSONL file (legacy `decisions.jsonl`)
  * or a directory of UTC-hour shards (`decisions-YYYY-MM-DD-HHZ.jsonl`). A
  * directory reads every matching shard in lexical (= chronological) order and
  * concatenates their lines; non-shard files are ignored.

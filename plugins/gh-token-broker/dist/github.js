@@ -1,7 +1,7 @@
 /**
  * GitHub App minting.
  *
- * Note on TOG-200: nothing here shells out. The App JWT and the minted token
+ * Nothing here shells out. The App JWT and the minted token
  * exist only as in-process strings passed to `ctx.http.fetch`, so neither ever
  * lands on a command line where `/proc/<pid>/cmdline` would expose it.
  */
