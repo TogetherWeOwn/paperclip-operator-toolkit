@@ -21,7 +21,8 @@ expect() { # name want command...
 }
 
 mkdir -p "$tmp/clean" "$tmp/empty"
-printf '%s\n' 'plain prose and 192.0.2.7 documentation address' >"$tmp/clean/a.md"
+printf '%s\n' 'plain prose and 192.0.2.7 documentation address' \
+  'T1CAP080 is a policy threshold, not a joined issue identifier' >"$tmp/clean/a.md"
 expect 'clean tree passes' 0 bash "$scan" --no-git "$tmp/clean"
 expect 'missing root refuses' 2 bash "$scan" --no-git "$tmp/missing"
 expect 'empty directory refuses' 2 bash "$scan" --no-git "$tmp/empty"

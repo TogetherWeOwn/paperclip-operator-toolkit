@@ -7,9 +7,9 @@ import stat
 import subprocess
 import sys
 
-TRACKER = re.compile(r"(TOG|PAP|CAP|LOOA)-?[0-9]+", re.IGNORECASE)
+TRACKER = re.compile(r"(TOG|PAP)-?[0-9]+|(CAP|LOOA)-[0-9]+", re.IGNORECASE)
 CONTENT = re.compile(
-    r"(TOG|PAP|CAP|LOOA)-?[0-9]+|infextion\.net|"
+    r"(TOG|PAP)-?[0-9]+|(CAP|LOOA)-[0-9]+|infextion\.net|"
     r"\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b|"
     r"\b172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}\b|"
     r"\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b|"
