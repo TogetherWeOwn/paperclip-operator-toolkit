@@ -283,10 +283,22 @@ server.listen(0, '127.0.0.1', () => {
 STUB
 
 PORTFILE="$TMP/port"
-COUNTS="$COUNTS" BODIES="$BODIES" PORTFILE="$PORTFILE" node "$TMP/stub.js" & STUB_PID=$!
-for _ in $(seq 1 50); do [[ -s "$PORTFILE" ]] && break; sleep 0.1; done
+STUB_ERR="$TMP/stub.err"
+COUNTS="$COUNTS" BODIES="$BODIES" PORTFILE="$PORTFILE" node "$TMP/stub.js" 2>"$STUB_ERR" & STUB_PID=$!
+# A cold node start on a loaded host can take longer than a few seconds, so wait
+# up to 30s; but stop at once if the stub died, since no port will ever appear.
+for _ in $(seq 1 300); do
+  [[ -s "$PORTFILE" ]] && break
+  kill -0 "$STUB_PID" 2>/dev/null || break
+  sleep 0.1
+done
 PORT="$(cat "$PORTFILE" 2>/dev/null)"
-[[ -n "$PORT" ]] || { echo "stub did not start" >&2; exit 2; }
+if [[ -z "$PORT" ]]; then
+  alive=no; kill -0 "$STUB_PID" 2>/dev/null && alive=yes
+  echo "stub did not start (still running: $alive; node $(node --version 2>&1))" >&2
+  sed -n 1,20p "$STUB_ERR" >&2
+  exit 2
+fi
 BASE_URL="http://127.0.0.1:$PORT"
 
 # A port nothing listens on, for the refused-connection case. Bound and closed

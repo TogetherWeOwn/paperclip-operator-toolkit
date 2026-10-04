@@ -135,6 +135,14 @@ esac
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(output.read_text().strip(), "heavy=" + expected)
 
+    def test_preflight_baseline_failure_is_reported_not_swallowed(self):
+        # The default step shell is `bash -e`: a bare baseline call exits with the
+        # suite's status before the diagnostic prints, which is how a red step
+        # once carried no output at all.
+        block = job(self.text, "long-mutation-gates")
+        self.assertIn('preflight_suite "$baseline" || base_rc=$?', block)
+        self.assertIn("the UNMUTATED preflight copy fails", block)
+
     def test_explicit_manual_full_run_is_declared(self):
         trigger = self.text.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertTrue("  workflow_dispatch:" in trigger, "explicit manual full-run trigger is missing")

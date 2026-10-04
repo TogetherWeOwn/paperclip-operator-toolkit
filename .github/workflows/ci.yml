@@ -3724,8 +3724,11 @@ jobs:
               test_agent_endpoint_preflight.sh "$limit" >"$output" 2>&1
           }
 
-          PREFLIGHT_SUITE_OUTPUT="$preflight_root/baseline.out" preflight_suite "$baseline"
-          base_rc=$?
+          # `|| base_rc=$?`, not a bare call: the default step shell is `bash -e`,
+          # which would exit here with the suite's status before the diagnostic
+          # below could print, leaving a red step with no output.
+          base_rc=0
+          PREFLIGHT_SUITE_OUTPUT="$preflight_root/baseline.out" preflight_suite "$baseline" || base_rc=$?
           if [[ $base_rc -ne 0 ]]; then
             echo "::error::the UNMUTATED preflight copy fails (rc=$base_rc) — this gate proves nothing"
             tail -25 "$preflight_root/baseline.out"
