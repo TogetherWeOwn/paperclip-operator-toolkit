@@ -299,10 +299,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `ready_for_review` is explicit because draft PRs skip the heavy suites
+    # (see the `changes` job): without it, marking a draft ready would start no
+    # run, and the draft's skipped-green `ci-ok` would let it merge untested.
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
-  # CI standard (TOG-14877): nightly full run catches regressions that slip
-  # past path-gated PR runs. Scheduled runs always run everything: the
-  # `changes` job forces docs_only=false on schedule events.
+  # CI standard: nightly full run catches regressions that slip past
+  # change-gated PR runs. Scheduled runs always run everything: the `changes`
+  # job reports heavy=true on every non-PR event.
   schedule:
     - cron: "23 4 * * *"
 
@@ -345,55 +349,97 @@ permissions:
 # cancel each other. Do not "simplify" this key to the PR number alone: that
 # would put a queue entry and its own still-running PR run in one group, and
 # cancel-in-progress would kill whichever the queue is waiting on.
+#
+# Only superseded PR runs are cancelled. A push-to-main, merge_group or nightly
+# run is the full-suite safety net and must run to completion: a newer main
+# push queues behind it instead of cancelling it.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # CI standard (TOG-14877): change detection. Native `git diff --name-only`
-  # against the merge base; no third-party action. Outputs docs_only so
-  # docs-only PRs skip the heavy suites while `ci-ok` stays green. Any
-  # non-docs change (including dependency manifests, .github/**, shared code
-  # or the filter itself) runs everything. Push-to-main, merge_group,
-  # schedule and dispatch always run everything.
+  # CI standard: change detection. Native `git diff` against the merge base; no
+  # third-party action. One output, `heavy`: the nine heavy suites run only
+  # when it is 'true'. Skipped suites count as success in `ci-ok`, so gating
+  # can never block a merge.
+  #
+  #   heavy=false  only for a non-draft PR whose every changed file is
+  #                documentation no suite reads, or for a draft PR.
+  #   heavy=true   everything else: dependency manifests, lockfiles, .github/**,
+  #                scripts, plugins, this filter, and every push-to-main,
+  #                merge_group, schedule and dispatch run.
+  #
+  # A doc is only "docs" if no suite reads it: this repo's suites read
+  # docs/liveness-reconciler.md, CONTRIBUTING.md and others, and a doc edit
+  # that breaks such a suite must fail the PR, not the next nightly. A changed
+  # doc whose basename appears in any tracked non-markdown file is treated as
+  # code. Reads built from computed names are the one gap; the push-to-main and
+  # nightly full runs catch those.
   changes:
     name: Change detection
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      docs_only: ${{ steps.detect.outputs.docs_only }}
+      heavy: ${{ steps.detect.outputs.heavy }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "non-PR event (${{ github.event_name }}): full run"
+          emit() { echo "heavy=$1" >> "$GITHUB_OUTPUT"; echo "heavy=$1 ($2)"; }
+          if [ "$EVENT" != "pull_request" ]; then
+            emit true "non-PR event $EVENT: full run"
             exit 0
           fi
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
-          merge_base="$(git merge-base "$base" "$head")"
-          files="$(git diff --name-only "$merge_base" "$head")"
-          echo "changed files:"; echo "$files"
+          if [ "$DRAFT" = "true" ]; then
+            emit false "draft PR: heavy suites wait for ready_for_review"
+            exit 0
+          fi
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          # --no-renames: a rename is a delete plus an add, so moving a script
+          # into docs/ lists the script's old path and is not docs-only.
+          files="$(git diff --no-renames --name-only "$merge_base" "$HEAD_SHA")"
+          echo "changed files:"
+          printf '%s\n' "$files"
           if [ -z "$files" ]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            emit true "empty diff: full run"
             exit 0
           fi
-          # Docs-only = every file is markdown or under docs/.
-          if echo "$files" | grep -vqE '(\.md$|^docs/)'; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          # 0 = a tracked non-markdown file names this doc (or the lookup
+          # failed): not docs-only. Only `git grep` exit 1 means "no match".
+          is_read_by_a_suite() {
+            local rc=0
+            git grep -qIF -e "$(basename -- "$1")" -- ':(exclude)*.md' || rc=$?
+            [ "$rc" -ne 1 ]
+          }
+          docs_only=true
+          # A here-string, not `echo | grep -q`: under pipefail the pipe form
+          # fails open once the list outgrows the pipe buffer (SIGPIPE).
+          while IFS= read -r f; do
+            case "$f" in
+              .github/*) docs_only=false; break ;;
+              *.md | docs/*) ;;
+              *) docs_only=false; break ;;
+            esac
+            if is_read_by_a_suite "$f"; then docs_only=false; break; fi
+          done <<<"$files"
+          if [ "$docs_only" = "true" ]; then
+            emit false "docs-only change nothing reads: heavy suites skipped"
           else
-            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            emit true "code, config or a doc a suite reads changed: full run"
           fi
 
   privilege-suites:
     name: Privilege ceiling suites
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     # This job used to be the one exception that needed a container daemon
     # (it declared a `postgres` service container). It now starts its own
     # ephemeral PostgreSQL cluster instead, so NO job in this workflow needs a
@@ -589,7 +635,7 @@ jobs:
   offline-suites:
     name: Offline suites
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     # Keep the exact job name above: branch protection matches the check-run
     # name. This tree runs on GitHub-hosted runners; the private fleet's
     # no-paid-fallback rule lives in the private repo with the fleet.
@@ -3134,7 +3180,7 @@ jobs:
   long-mutation-gates:
     name: Long mutation gates
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -3787,7 +3833,7 @@ jobs:
   runbook-gates:
     name: Operator runbook gates
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -3872,7 +3918,7 @@ jobs:
   broker-suite:
     name: gh-token-broker suite
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -3972,7 +4018,7 @@ jobs:
   omniroute-broker-suite:
     name: omniroute-broker suite
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -4033,7 +4079,7 @@ jobs:
   dispatch-suite:
     name: dispatch suite
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -4183,7 +4229,7 @@ jobs:
   mcp-suite:
     name: org-request-mcp suite
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -4492,7 +4538,7 @@ jobs:
   model-selection-suite:
     name: model-selection suite
     needs: [changes]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     # TOG-2789 + TOG-3132 + TOG-3649. This job is the ONLY place the mutation
     # gate runs (the gate refuses outside CI), and each mutant re-runs the full
@@ -4581,14 +4627,16 @@ jobs:
           fi
           echo "dist ok: committed bundle matches src"
 
-  # CI standard (TOG-14877): the single required aggregator. Branch
-  # protection requires only `ci-ok` (plus pr-lint), so docs-only gating
-  # can never block merges: skipped jobs count as success here.
+  # CI standard: the single required aggregator. Branch protection requires
+  # only `ci-ok` (plus pr-lint), so gating can never block merges: skipped
+  # jobs count as success here. `!cancelled()` keeps it running when a needed
+  # job failed (a plain `needs` would skip it and leave the check missing),
+  # while a superseded, cancelled run reports nothing.
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: always()
+    if: ${{ !cancelled() }}
     needs:
       - changes
       - privilege-suites
