@@ -2,15 +2,19 @@ import { copyFile, cp, mkdir, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 
-// The job and step that actually execute this gate on the private runner.
-// TOG-2789: the refusal first named `Offline suites`, which never runs this
-// plugin's mutants — that job runs the repo-level verification/*-mutation-gate.sh
-// set. An agent told to cite a job that cannot hold the evidence has no
-// alternative to running the gate locally, which is the storm this refusal
-// exists to stop. `mutation-gate-runtime.spec.ts` pins both names to ci.yml.
-export const MUTATION_GATE_CI_JOB = "model-selection suite";
+// The job and step that actually execute this gate on CI. The refusal names
+// the mutants matrix, not the required suite job: the suite job only
+// aggregates the shards' verdict and never runs the sweep itself, so an agent
+// told to cite the suite has no evidence to cite and falls back to running
+// the gate locally — the storm this refusal exists to stop.
+// `mutation-gate-runtime.spec.ts` pins both names to ci.yml.
+//
+// The sweep is sharded, so the step lives in the `model-selection mutants`
+// matrix (one job per shard) rather than in the required
+// `model-selection suite` job, which only aggregates their verdict.
+export const MUTATION_GATE_CI_JOB = "model-selection mutants";
 export const MUTATION_GATE_CI_STEP = "Kill named selection mutants";
-export const MUTATION_GATE_CI_MESSAGE = `run on CI (private runner) — cite the PR's "${MUTATION_GATE_CI_JOB}" job, step "${MUTATION_GATE_CI_STEP}"`;
+export const MUTATION_GATE_CI_MESSAGE = `run on CI (standard runner) — cite the PR's "${MUTATION_GATE_CI_JOB}" shard jobs, step "${MUTATION_GATE_CI_STEP}"`;
 
 export function mutationGateAllowed(env = process.env) {
   return env.CI === "true" || env.MUTATION_GATE_LOCAL === "1";
@@ -73,6 +77,37 @@ export async function runSequentially(items, run) {
   }
 }
 
+// `MUTATION_SHARD=i/N` splits the sweep across N independent jobs. Three
+// properties are the whole contract, and each has a spec:
+//   * COVERAGE: for any N, the N shards are pairwise disjoint and their union is
+//     the whole list — a mutant that falls between shards is a mutant nobody
+//     kills, which reads as a green sweep that tested less than it claims.
+//   * LOUD: unset means "not sharded" (the gate runs everything, as before), but
+//     a value that is present and malformed THROWS. A workflow expression that
+//     resolves empty must never degrade into "run everything" (silently serial
+//     again) or "run nothing" (silently green).
+//   * ROUND-ROBIN: `index % N == i - 1`, so a mutant block that is expensive
+//     because it was added together does not land on one shard.
+export function parseMutationShard(spec) {
+  if (spec === undefined || spec === null) return null;
+  const text = `${spec}`.trim();
+  const match = /^([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(text);
+  if (match === null) {
+    throw new Error(`invalid MUTATION_SHARD ${JSON.stringify(`${spec}`)}: expected "i/N" with 1 <= i <= N (e.g. "3/8")`);
+  }
+  const index = Number.parseInt(match[1], 10);
+  const total = Number.parseInt(match[2], 10);
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || index > total) {
+    throw new Error(`invalid MUTATION_SHARD ${JSON.stringify(text)}: shard index must satisfy 1 <= i <= N`);
+  }
+  return { index, total };
+}
+
+export function selectMutationShard(items, shard) {
+  if (shard === null || shard === undefined) return [...items];
+  return items.filter((_, position) => position % shard.total === shard.index - 1);
+}
+
 // Vitest 2.1.9 DOES read both variables — resolveConfig applies
 // VITEST_MAX_THREADS to poolOptions.threads/vmThreads and VITEST_MAX_FORKS to
 // poolOptions.forks/vmForks. What makes an env-only cap useless here is which
@@ -133,6 +168,13 @@ export function mutationGateVitestInvocation(env = process.env) {
   const args = [
     "node_modules/vitest/vitest.mjs",
     "run",
+    // No results cache. The gate scores each run from process exit/stdout,
+    // never from the cache — and a nested vitest resolving its results file
+    // through a root-owned shared install dies on write even when the tests
+    // themselves pass. `--cache=false` isolates the run without chowning
+    // shared node_modules and without waiving the suite; CI (writable
+    // workspace) is unaffected either way.
+    "--cache=false",
     "--pool=forks",
     `--poolOptions.forks.maxForks=${limit}`,
     "--poolOptions.forks.minForks=1",

@@ -9,7 +9,9 @@ import {
   copyMutationTree,
   mutationGateAllowed,
   mutationGateVitestInvocation,
+  parseMutationShard,
   runSequentially,
+  selectMutationShard,
   stageRepoFixtures,
 } from "./mutation-gate-runtime.mjs";
 
@@ -1583,6 +1585,57 @@ const mutants = [
     from: "              note: model.note,\n",
     to: "",
   },
+  // The shard split and the impact gate decide what the sweep covers
+  // and whether it may be skipped, so each is killed by a named spec in
+  // tests/mutation-gate-runtime.spec.ts or tests/mutation-impact.spec.ts.
+  {
+    name: "shard-selection-slices-overlap",
+    file: "scripts/mutation-gate-runtime.mjs",
+    from: "position % shard.total === shard.index - 1",
+    to: "position % shard.total <= shard.index - 1",
+  },
+  {
+    name: "shard-empty-spec-means-unsharded",
+    file: "scripts/mutation-gate-runtime.mjs",
+    from: "if (spec === undefined || spec === null) return null;",
+    to: "if (spec === undefined || spec === null || `${spec}`.trim() === \"\") return null;",
+  },
+  {
+    name: "impact-plugin-prefix-loses-trailing-slash",
+    file: "scripts/mutation-impact.mjs",
+    from: "Object.freeze([\"plugins/model-selection/\"])",
+    to: "Object.freeze([\"plugins/model-selection\"])",
+  },
+  {
+    name: "impact-unusable-base-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "if (resolved.base === undefined) return { impacted: true, reason: resolved.reason, matched: [] };",
+    to: "if (resolved.base === undefined) return { impacted: false, reason: resolved.reason, matched: [] };",
+  },
+  {
+    name: "impact-missing-base-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "return { impacted: true, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
+    to: "return { impacted: false, reason: `base ${base} is unavailable (force-push or fetch failure)`, matched: [] };",
+  },
+  {
+    name: "impact-failed-diff-reads-clean",
+    file: "scripts/mutation-impact.mjs",
+    from: "return { impacted: true, reason: `git diff ${base}..HEAD failed`, matched: [] };",
+    to: "return { impacted: false, reason: `git diff ${base}..HEAD failed`, matched: [] };",
+  },
+  {
+    name: "impact-diff-loses-nul-separation",
+    file: "scripts/mutation-impact.mjs",
+    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+    to: "[\"diff\", \"--name-only\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+  },
+  {
+    name: "impact-diff-collapses-renames",
+    file: "scripts/mutation-impact.mjs",
+    from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
+    to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
+  },
 ];
 
 /**
@@ -1602,9 +1655,37 @@ const mutantFilter = (process.env.MUTANTS ?? "")
   .split(",")
   .map((name) => name.trim())
   .filter((name) => name.length > 0);
-const selected = mutantFilter.length > 0
-  ? mutants.filter((mutant) => mutantFilter.includes(mutant.name))
-  : mutants;
+
+/**
+ * `MUTATION_SHARD=i/N` runs the i-th of N round-robin slices of the
+ * list, so CI can spread the ~300-mutant sweep over N jobs instead of one
+ * serial ~3h step. Everything else stays per shard — both baselines, the
+ * per-mutant deadline, the fork cap, every assertion — and a shard is never
+ * reported as the full pass: its summary names the slice and the total, and
+ * "all shards green" is the only thing that means the sweep passed. A set but
+ * malformed value, an empty slice, or sharding combined with `MUTANTS` is a
+ * BROKEN GATE, never a silent run of everything or of nothing.
+ */
+let shard = null;
+try {
+  shard = parseMutationShard(process.env.MUTATION_SHARD);
+} catch (error) {
+  process.stderr.write(`BROKEN GATE: ${error.message}\n`);
+  process.exit(1);
+}
+if (shard !== null && mutantFilter.length > 0) {
+  process.stderr.write("BROKEN GATE: MUTATION_SHARD and MUTANTS are mutually exclusive — a shard of a filtered list is not a slice of the sweep\n");
+  process.exit(1);
+}
+const selected = shard !== null
+  ? selectMutationShard(mutants, shard)
+  : mutantFilter.length > 0
+    ? mutants.filter((mutant) => mutantFilter.includes(mutant.name))
+    : mutants;
+if (shard !== null && selected.length === 0) {
+  process.stderr.write(`BROKEN GATE: shard ${shard.index}/${shard.total} selects no mutants (of ${mutants.length}) — a shard that runs nothing would report green\n`);
+  process.exit(1);
+}
 if (mutantFilter.length > 0) {
   const unknown = mutantFilter.filter((name) => !mutants.some((mutant) => mutant.name === name));
   if (unknown.length > 0) {
@@ -1722,6 +1803,10 @@ try {
 }
 
 if (brokenGate || failures > 0) process.exit(1);
+if (shard !== null) {
+  console.log(`mutation gate shard ${shard.index}/${shard.total}: ${selected.length}/${selected.length} killed (of ${mutants.length})`);
+  process.exit(0);
+}
 if (selected.length !== mutants.length) {
   console.log(`mutation gate PARTIAL: ${selected.length}/${mutants.length} mutants run, all killed — NOT a passing gate`);
   process.exit(0);
