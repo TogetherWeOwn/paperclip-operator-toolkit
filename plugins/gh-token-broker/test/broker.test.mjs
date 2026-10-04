@@ -30,6 +30,9 @@ const TEST_PEM = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
 const COMPANY = "11111111-1111-1111-1111-111111111111";
 const ISSUE = "22222222-2222-2222-2222-222222222222";
 const PROJECT = "33333333-3333-3333-3333-333333333333";
+// Synthetic installation identity; no fixture is an exported deployment grant.
+const EXAMPLE_APP_ID = "12345";
+const EXAMPLE_ORG = "example-org";
 
 // ---------------------------------------------------------------------------
 // Manifest
@@ -305,7 +308,7 @@ test("every registered pin resolves through the broker to the profile the regist
       // say that it did. `profileSource` is the field that tells the two apart,
       // so assert it rather than only the permissions.
       const scope = resolveScope({
-        projectEnv: { GH_APP_REPOS: { type: "plain", value: "nntune" } },
+        projectEnv: { GH_APP_REPOS: { type: "plain", value: "example-repo-a" } },
       });
       assert.equal(scope.profileSource, "default", project.where);
       assert.deepEqual(scope.permissions, { ...DEFAULT_PERMISSION_PROFILE }, project.where);
@@ -315,7 +318,7 @@ test("every registered pin resolves through the broker to the profile the regist
     const expected = applyDelta(REGISTRY_BASELINE, project.delta);
     const scope = resolveScope({
       projectEnv: {
-        GH_APP_REPOS: { type: "plain", value: "nntune" },
+        GH_APP_REPOS: { type: "plain", value: "example-repo-a" },
         GH_APP_PERMISSIONS: { type: "plain", value: canon(expected) },
       },
     });
@@ -360,23 +363,23 @@ test("a registry line the parser cannot read is refused, not skipped", () => {
   // same clean result on a file that registers nothing at all.
   const BASE = "baseline - - contents=write reviewed\n";
   assert.throws(
-    () => parseRegistry(`${BASE}nonsense 88f949ff-1111 x - why\n`),
+    () => parseRegistry(`${BASE}nonsense 00000000-0000-4000-8000-000000000003 x - why\n`),
     /unknown state "nonsense"/,
   );
   assert.throws(
-    () => parseRegistry("verbatim 88f949ff-1111 x - -\n"),
+    () => parseRegistry("verbatim 00000000-0000-4000-8000-000000000003 x - -\n"),
     /no baseline line/,
   );
   assert.throws(
-    () => parseRegistry(`${BASE}delta 88f949ff-1111 x +workflows=write -\n`),
+    () => parseRegistry(`${BASE}delta 00000000-0000-4000-8000-000000000003 x +workflows=write -\n`),
     /requires a note/,
   );
   assert.throws(
-    () => parseRegistry(`${BASE}delta 88f949ff-1111 x - why\n`),
+    () => parseRegistry(`${BASE}delta 00000000-0000-4000-8000-000000000003 x - why\n`),
     /state "delta" with no delta/,
   );
   assert.throws(
-    () => parseRegistry(`${BASE}verbatim 88f949ff-1111 x - -\nverbatim 88f949ff-1111 y - -\n`),
+    () => parseRegistry(`${BASE}verbatim 00000000-0000-4000-8000-000000000003 x - -\nverbatim 00000000-0000-4000-8000-000000000003 y - -\n`),
     /listed twice/,
   );
 });
@@ -386,9 +389,9 @@ test("a registry line the parser cannot read is refused, not skipped", () => {
 // ---------------------------------------------------------------------------
 
 test("parseRepoName handles https, ssh, bare and .git forms", () => {
-  assert.equal(parseRepoName("https://github.com/TogetherWeOwn/nntune.git"), "nntune");
-  assert.equal(parseRepoName("git@github.com:TogetherWeOwn/kofra.git"), "kofra");
-  assert.equal(parseRepoName("TogetherWeOwn/paperclip-model-router"), "paperclip-model-router");
+  assert.equal(parseRepoName("https://github.com/example-org/example-repo-a.git"), "example-repo-a");
+  assert.equal(parseRepoName("git@github.com:example-org/example-repo-b.git"), "example-repo-b");
+  assert.equal(parseRepoName("example-org/example-plugin"), "example-plugin");
   assert.equal(parseRepoName("routeware-shadow-api"), "routeware-shadow-api");
 });
 
@@ -399,7 +402,7 @@ test("parseRepoName rejects junk rather than guessing", () => {
 });
 
 test("parseRepoList splits and de-duplicates", () => {
-  assert.deepEqual(parseRepoList("nntune, kofra nntune"), ["nntune", "kofra"]);
+  assert.deepEqual(parseRepoList("example-repo-a, example-repo-b example-repo-a"), ["example-repo-a", "example-repo-b"]);
   assert.equal(parseRepoList(null), null);
   assert.equal(parseRepoList(""), null);
 });
@@ -436,19 +439,19 @@ test("an empty project repo list does not silently become all repos", () => {
 
 test("project GH_APP_REPOS wins over the workspace repo", () => {
   const scope = resolveScope({
-    projectEnv: { GH_APP_REPOS: "paperclip-ops-tooling" },
-    workspaceRepoUrl: "https://github.com/TogetherWeOwn/nntune.git",
+    projectEnv: { GH_APP_REPOS: "example-operator-tools" },
+    workspaceRepoUrl: "https://github.com/example-org/example-repo-a.git",
   });
-  assert.deepEqual(scope.repositories, ["paperclip-ops-tooling"]);
+  assert.deepEqual(scope.repositories, ["example-operator-tools"]);
   assert.equal(scope.repoSource, "project");
 });
 
 test("falls back to the issue's workspace repo when the project pins nothing", () => {
   const scope = resolveScope({
     projectEnv: {},
-    workspaceRepoUrl: "https://github.com/TogetherWeOwn/nntune.git",
+    workspaceRepoUrl: "https://github.com/example-org/example-repo-a.git",
   });
-  assert.deepEqual(scope.repositories, ["nntune"]);
+  assert.deepEqual(scope.repositories, ["example-repo-a"]);
   assert.equal(scope.repoSource, "workspace");
 });
 
@@ -471,8 +474,8 @@ test("a caller cannot request a repo outside the issue's scope", () => {
   assert.throws(
     () =>
       resolveScope({
-        projectEnv: { GH_APP_REPOS: "nntune" },
-        requestedRepositories: "kofra",
+        projectEnv: { GH_APP_REPOS: "example-repo-a" },
+        requestedRepositories: "example-repo-b",
       }),
     (error) => error instanceof ScopeError && error.status === 403,
   );
@@ -480,10 +483,10 @@ test("a caller cannot request a repo outside the issue's scope", () => {
 
 test("a caller may narrow to a subset of the allowed repos", () => {
   const scope = resolveScope({
-    projectEnv: { GH_APP_REPOS: "nntune,kofra" },
-    requestedRepositories: "kofra",
+    projectEnv: { GH_APP_REPOS: "example-repo-a,example-repo-b" },
+    requestedRepositories: "example-repo-b",
   });
-  assert.deepEqual(scope.repositories, ["kofra"]);
+  assert.deepEqual(scope.repositories, ["example-repo-b"]);
 });
 
 test("a caller cannot escalate a permission level", () => {
@@ -504,7 +507,7 @@ test("a caller cannot obtain workflows:write where the project does not grant it
   assert.throws(
     () =>
       resolveScope({
-        projectEnv: { GH_APP_REPOS: "nntune" },
+        projectEnv: { GH_APP_REPOS: "example-repo-a" },
         requestedPermissions: { workflows: "write" },
       }),
     (error) => error instanceof ScopeError && error.status === 403,
@@ -514,7 +517,7 @@ test("a caller cannot obtain workflows:write where the project does not grant it
 test("a project that grants workflows:write passes it through", () => {
   const scope = resolveScope({
     projectEnv: {
-      GH_APP_REPOS: "paperclip-ops-tooling",
+      GH_APP_REPOS: "example-operator-tools",
       GH_APP_PERMISSIONS: "contents=write,pull_requests=write,issues=write,metadata=read,workflows=write",
     },
   });
@@ -527,48 +530,41 @@ test("a project that grants workflows:write passes it through", () => {
 //
 // A project's `env` is an `AgentEnvConfig`, whose values are an `EnvBinding`
 // union: a bare string, or a tagged `plain` / `secret_ref` / `user_secret_ref`
-// object. Every earlier test in this file used the bare-string form, and every
-// GH-configured project in the company actually uses the tagged `plain` form —
-// so the suite was green while project scoping was inert in production. These
-// tests pin the tagged form so that cannot recur.
+// object. A suite that uses only bare strings can miss a tagged binding used
+// by a deployment. Ignoring the tagged form silently bypasses
+// project scoping; these synthetic fixtures pin that form without exporting
+// an installation's access inventory.
 // ---------------------------------------------------------------------------
 
-const OPS_TOOLING_ID = "0b5e7001-0000-4000-8000-000000000042";
+const SCOPED_PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 
 /**
- * The Ops Tooling project's env, verbatim, as the API returned it 2026-08-25.
- *
- * This literal was once stale and nothing noticed: it was copied in before
- * `checks`/`statuses` were added to the default, so the fixture named
- * a five-permission pin while the live project carried seven. The suite stayed
- * green because it only ever asserted `workflows` and `contents` — a fixture
- * claiming to be "the live env" that had quietly stopped being it, which is a
- * small instance of silent drift.
- *
- * The test below now checks it against permission_pins.txt rather than against
- * a memory of what it used to say.
+ * Synthetic scoped-project bindings: literal repo/permission pins and opaque
+ * secret references that must never be resolved to derive repository scope.
+ * This is not an API export or evidence of a deployment's permission registry.
+ * The optional registry check below remains skipped when operator data is absent.
  */
-const OPS_TOOLING_ENV = {
-  GH_APP_ID: { type: "secret_ref", secretId: "5e2ca78e", version: "latest" },
-  GH_APP_ORG: { type: "secret_ref", secretId: "237ae9ac", version: "latest" },
-  GH_APP_REPOS: { type: "plain", value: "paperclip-ops-tooling" },
+const SCOPED_PROJECT_ENV = {
+  GH_APP_ID: { type: "secret_ref", secretId: "00000000-0000-4000-8000-000000000011", version: "latest" },
+  GH_APP_ORG: { type: "secret_ref", secretId: "00000000-0000-4000-8000-000000000012", version: "latest" },
+  GH_APP_REPOS: { type: "plain", value: "example-operator-tools" },
   GH_APP_PERMISSIONS: {
     type: "plain",
     value:
       "contents=write,pull_requests=write,issues=write,metadata=read,workflows=write,checks=read,statuses=read",
   },
-  GH_APP_PRIVATE_KEY: { type: "secret_ref", secretId: "86b28441", version: "latest" },
+  GH_APP_PRIVATE_KEY: { type: "secret_ref", secretId: "00000000-0000-4000-8000-000000000013", version: "latest" },
   GH_APP_SCOPE_STRICT: { type: "plain", value: "1" },
 };
 
-test("the live Ops Tooling env resolves its repo and keeps workflows:write", () => {
+test("the synthetic scoped-project env resolves its repo and keeps workflows:write", () => {
   const scope = resolveScope({
-    projectEnv: OPS_TOOLING_ENV,
+    projectEnv: SCOPED_PROJECT_ENV,
     // Deliberately a different repo: if the tagged binding were ignored, scope
     // would silently fall through to this and the assertions below would fail.
-    workspaceRepoUrl: "https://github.com/TogetherWeOwn/nntune.git",
+    workspaceRepoUrl: "https://github.com/example-org/example-repo-a.git",
   });
-  assert.deepEqual(scope.repositories, ["paperclip-ops-tooling"]);
+  assert.deepEqual(scope.repositories, ["example-operator-tools"]);
   assert.equal(scope.repoSource, "project");
   assert.equal(scope.permissions.workflows, "write");
   assert.equal(scope.permissions.contents, "write");
@@ -578,42 +574,39 @@ test("the live Ops Tooling env resolves its repo and keeps workflows:write", () 
 // The assertion that keeps the fixture above honest. Spot-asserting
 // two keys is how it drifted for a month; this compares the whole set against
 // the registry, so a change to the default or to the pin lands here too.
-test("the Ops Tooling fixture is the pin the registry registers for it", { skip: REGISTRY_SKIP }, () => {
-  const line = registered(OPS_TOOLING_ID);
-  assert.ok(line, `${OPS_TOOLING_ID} is not in permission_pins.txt`);
+test("the synthetic scoped-project fixture is the pin the registry registers for it", { skip: REGISTRY_SKIP }, () => {
+  const line = registered(SCOPED_PROJECT_ID);
+  assert.ok(line, `${SCOPED_PROJECT_ID} is not in permission_pins.txt`);
   assert.equal(line.state, "delta");
   assert.equal(
-    canon(specToProfile(OPS_TOOLING_ENV.GH_APP_PERMISSIONS.value)),
+    canon(specToProfile(SCOPED_PROJECT_ENV.GH_APP_PERMISSIONS.value)),
     canon(applyDelta(REGISTRY_BASELINE, line.delta)),
   );
 });
 
 // ---------------------------------------------------------------------------
-// Community Platform and Onboarding shipped with no env at all, so the
-// broker refused for every issue on them — 47 and 8 issues respectively. Both do
-// real git work, so the fix was a repo pin, not a "does no git work" note. These
-// pin the values that were set, at the least-privilege width they were set to:
-// Onboarding touches only the Discord bot, so widening it to the other two repos
-// is a regression even though they sit in the same installation.
+// Synthetic projects exercise different least-privilege widths. One holds
+// three repositories and another holds only the bot repository. Membership in
+// the same installation must not silently widen the latter scope.
 // ---------------------------------------------------------------------------
 
-test("the live Community Platform env scopes to its three transferred repos", () => {
+test("the synthetic multi-repository project env scopes to its three transferred repos", () => {
   const scope = resolveScope({
-    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-web,two-bot,two-design" } },
-    projectId: "4c57214d",
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "example-web,example-bot,example-design" } },
+    projectId: "00000000-0000-4000-8000-000000000002",
     workspaceRepoUrl: null, // the project has no workspace; the pin is the only source
   });
-  assert.deepEqual(scope.repositories, ["two-web", "two-bot", "two-design"]);
+  assert.deepEqual(scope.repositories, ["example-web", "example-bot", "example-design"]);
   assert.equal(scope.repoSource, "project");
 });
 
-test("the live Onboarding env scopes to two-bot alone", () => {
+test("the synthetic bot-only project env scopes to example-bot alone", () => {
   const scope = resolveScope({
-    projectEnv: { GH_APP_REPOS: { type: "plain", value: "two-bot" } },
-    projectId: "88f949ff",
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "example-bot" } },
+    projectId: "00000000-0000-4000-8000-000000000003",
     workspaceRepoUrl: null,
   });
-  assert.deepEqual(scope.repositories, ["two-bot"]);
+  assert.deepEqual(scope.repositories, ["example-bot"]);
 });
 
 test("a project-less issue is told to attach a project, not to set env it has no project for", () => {
@@ -632,10 +625,10 @@ test("a project-less issue is told to attach a project, not to set env it has no
 
 test("a project without GH_APP_REPOS is named in the refusal", () => {
   assert.throws(
-    () => resolveScope({ projectEnv: {}, projectId: "88f949ff", workspaceRepoUrl: null }),
+    () => resolveScope({ projectEnv: {}, projectId: "00000000-0000-4000-8000-000000000003", workspaceRepoUrl: null }),
     (error) => {
       assert.equal(error.status, 409);
-      assert.match(error.message, /88f949ff/);
+      assert.match(error.message, /00000000-0000-4000-8000-000000000003/);
       assert.match(error.message, /has no env/);
       return true;
     },
@@ -647,7 +640,7 @@ test("a project whose GH_APP_REPOS is a secret_ref is told the binding must be a
     () =>
       resolveScope({
         projectEnv: { GH_APP_REPOS: { type: "secret_ref", secretId: "x" } },
-        projectId: "4c57214d",
+        projectId: "00000000-0000-4000-8000-000000000002",
         workspaceRepoUrl: null,
       }),
     (error) => {
@@ -665,7 +658,7 @@ test("the refusal never leaks a repo name it did not authorise", () => {
       resolveRepositories({
         projectRepos: null,
         workspaceRepoUrl: "https://github.com/",
-        projectId: "4c57214d",
+        projectId: "00000000-0000-4000-8000-000000000002",
         hasProjectEnv: true,
       }),
     (error) => error.status === 409 && /did not parse/.test(error.message),
@@ -674,21 +667,21 @@ test("the refusal never leaks a repo name it did not authorise", () => {
 
 test("a tagged plain GH_APP_REPOS is honoured, not ignored", () => {
   const scope = resolveScope({
-    projectEnv: { GH_APP_REPOS: { type: "plain", value: "kofra" } },
-    workspaceRepoUrl: "https://github.com/TogetherWeOwn/nntune.git",
+    projectEnv: { GH_APP_REPOS: { type: "plain", value: "example-repo-b" } },
+    workspaceRepoUrl: "https://github.com/example-org/example-repo-a.git",
   });
-  assert.deepEqual(scope.repositories, ["kofra"]);
+  assert.deepEqual(scope.repositories, ["example-repo-b"]);
   assert.equal(scope.repoSource, "project");
 });
 
 test("bare-string bindings remain supported alongside tagged ones", () => {
   const scope = resolveScope({
     projectEnv: {
-      GH_APP_REPOS: "kofra",
+      GH_APP_REPOS: "example-repo-b",
       GH_APP_PERMISSIONS: { type: "plain", value: "contents=read,metadata=read" },
     },
   });
-  assert.deepEqual(scope.repositories, ["kofra"]);
+  assert.deepEqual(scope.repositories, ["example-repo-b"]);
   assert.deepEqual(scope.permissions, { contents: "read", metadata: "read" });
 });
 
@@ -707,7 +700,7 @@ test("a malformed plain binding with a non-string value is treated as absent", (
   assert.throws(
     () =>
       resolveScope({
-        projectEnv: { GH_APP_REPOS: { type: "plain", value: { nested: "kofra" } } },
+        projectEnv: { GH_APP_REPOS: { type: "plain", value: { nested: "example-repo-b" } } },
         workspaceRepoUrl: null,
       }),
     (error) => error instanceof ScopeError && error.status === 409,
@@ -719,7 +712,7 @@ test("a project narrowing below the default profile is not widened back to it", 
   // profile were ignored, the caller would silently receive the broader default.
   const scope = resolveScope({
     projectEnv: {
-      GH_APP_REPOS: { type: "plain", value: "kofra" },
+      GH_APP_REPOS: { type: "plain", value: "example-repo-b" },
       GH_APP_PERMISSIONS: { type: "plain", value: "contents=read,metadata=read" },
     },
   });
@@ -730,7 +723,7 @@ test("a project narrowing below the default profile is not widened back to it", 
     () =>
       resolveScope({
         projectEnv: {
-          GH_APP_REPOS: { type: "plain", value: "kofra" },
+          GH_APP_REPOS: { type: "plain", value: "example-repo-b" },
           GH_APP_PERMISSIONS: { type: "plain", value: "contents=read,metadata=read" },
         },
         requestedPermissions: { contents: "write" },
@@ -748,7 +741,7 @@ test("a caller may weaken a permission", () => {
 test("empty requested sets are refused rather than treated as 'everything'", () => {
   assert.throws(() => narrowPermissions(DEFAULT_PERMISSION_PROFILE, {}), ScopeError);
   assert.throws(
-    () => resolveScope({ projectEnv: { GH_APP_REPOS: "nntune" }, requestedRepositories: "" }),
+    () => resolveScope({ projectEnv: { GH_APP_REPOS: "example-repo-a" }, requestedRepositories: "" }),
     ScopeError,
   );
 });
@@ -759,14 +752,14 @@ test("empty requested sets are refused rather than treated as 'everything'", () 
 
 test("createAppJwt produces a verifiable RS256 assertion within GitHub's 10-minute cap", () => {
   const now = 1_700_000_000;
-  const jwt = createAppJwt("4685085", TEST_PEM, now);
+  const jwt = createAppJwt(EXAMPLE_APP_ID, TEST_PEM, now);
   const [header, payload, signature] = jwt.split(".");
 
   const decodedHeader = JSON.parse(Buffer.from(header, "base64url").toString());
   const decodedPayload = JSON.parse(Buffer.from(payload, "base64url").toString());
 
   assert.equal(decodedHeader.alg, "RS256");
-  assert.equal(decodedPayload.iss, "4685085");
+  assert.equal(decodedPayload.iss, EXAMPLE_APP_ID);
   assert.ok(decodedPayload.iat < now, "iat should be backdated for clock skew");
   assert.ok(decodedPayload.exp - decodedPayload.iat <= 600, "must stay inside GitHub's 10-minute cap");
 
@@ -777,7 +770,7 @@ test("createAppJwt produces a verifiable RS256 assertion within GitHub's 10-minu
 });
 
 test("createAppJwt refuses a non-PEM secret instead of signing garbage", () => {
-  assert.throws(() => createAppJwt("4685085", "not-a-key"), /PEM/);
+  assert.throws(() => createAppJwt(EXAMPLE_APP_ID, "not-a-key"), /PEM/);
 });
 
 test("mintInstallationToken refuses an empty repository array", async () => {
@@ -798,21 +791,21 @@ test("mintInstallationToken sends repositories and permissions in the body", asy
         token: "ghs_fake",
         expires_at: "2026-08-23T18:00:00Z",
         permissions: { contents: "write" },
-        repositories: [{ name: "nntune" }],
+        repositories: [{ name: "example-repo-a" }],
       }),
     };
   };
 
   const result = await mintInstallationToken(fetchImpl, 42, "jwt", {
-    repositories: ["nntune"],
+    repositories: ["example-repo-a"],
     permissions: { contents: "write" },
   });
 
   assert.match(captured.url, /\/app\/installations\/42\/access_tokens$/);
-  assert.deepEqual(captured.body.repositories, ["nntune"]);
+  assert.deepEqual(captured.body.repositories, ["example-repo-a"]);
   assert.deepEqual(captured.body.permissions, { contents: "write" });
   assert.equal(result.token, "ghs_fake");
-  assert.deepEqual(result.repositories, ["nntune"]);
+  assert.deepEqual(result.repositories, ["example-repo-a"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -886,7 +879,7 @@ function makeCtx(overrides = {}) {
       error: (message, meta) => logs.push({ level: "error", message, meta }),
       debug: (message, meta) => logs.push({ level: "debug", message, meta }),
     },
-    config: { get: async () => ({ appId: "4685085", org: "TogetherWeOwn", privateKeyRef: { type: "secret_ref", secretId: "pem" }, installationId: 99 }) },
+    config: { get: async () => ({ appId: EXAMPLE_APP_ID, org: EXAMPLE_ORG, privateKeyRef: { type: "secret_ref", secretId: "pem" }, installationId: 99 }) },
     secrets: { resolve: async () => TEST_PEM },
     http: {
       fetch: async (url) => {
@@ -899,7 +892,7 @@ function makeCtx(overrides = {}) {
               expires_at: "2026-08-23T18:00:00Z",
               repository_selection: "selected",
               permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
-              repositories: [{ name: "nntune" }],
+              repositories: [{ name: "example-repo-a" }],
             }),
           };
         }
@@ -908,8 +901,8 @@ function makeCtx(overrides = {}) {
     },
     issues: issuesClient(),
     projects: {
-      get: async () => ({ id: PROJECT, env: { GH_APP_REPOS: "nntune" } }),
-      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
+      get: async () => ({ id: PROJECT, env: { GH_APP_REPOS: "example-repo-a" } }),
+      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/example-org/example-repo-a.git" }),
     },
     activity: { log: async (entry) => activity.push(entry) },
     db: {
@@ -1007,8 +1000,8 @@ function disclosureBody(overrides = {}) {
     destination: {
       provider: "github",
       apiOrigin: "https://api.github.com",
-      repository: "TogetherWeOwn/nntune",
-      endpoint: "/repos/TogetherWeOwn/nntune/private-vulnerability-reporting",
+      repository: "example-org/example-repo-a",
+      endpoint: "/repos/example-org/example-repo-a/private-vulnerability-reporting",
     },
     channel: "github-private-vulnerability-reporting",
     action: "POST",
@@ -1016,7 +1009,7 @@ function disclosureBody(overrides = {}) {
     authenticatingPrincipal: {
       principalClass: "github_app",
       credentialClass: "github_app_installation_token",
-      principalId: "github-app:4685085",
+      principalId: `github-app:${EXAMPLE_APP_ID}`,
     },
     authorizingPrincipal: { principalClass: "owner", principalId: "test-owner" },
     approvalRecord: { id: "approval-exact-1", source: "Interaction", sha256: sha256(Buffer.from(approvalRecord)) },
@@ -1043,8 +1036,8 @@ function disclosureBody(overrides = {}) {
 
 function disclosureConfig() {
   return {
-    appId: "4685085",
-    org: "TogetherWeOwn",
+    appId: EXAMPLE_APP_ID,
+    org: EXAMPLE_ORG,
     privateKeyRef: { type: "secret_ref", secretId: "pem" },
     installationId: 99,
     externalDisclosureAuthorizers: [{
@@ -1064,11 +1057,11 @@ function disclosureCtx(overrides = {}) {
       get: async () => ({
         id: PROJECT,
         env: {
-          GH_APP_REPOS: "nntune",
+          GH_APP_REPOS: "example-repo-a",
           GH_APP_PERMISSIONS: "metadata=read,security_advisories=write",
         },
       }),
-      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/TogetherWeOwn/nntune.git" }),
+      getWorkspaceForIssue: async () => ({ repoUrl: "https://github.com/example-org/example-repo-a.git" }),
     },
     ...overrides,
   });
@@ -1088,7 +1081,7 @@ test("server-side disclosure preflight renders exact authority then consumes onc
               expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
               repository_selection: "selected",
               permissions: { metadata: "read", security_advisories: "write" },
-              repositories: [{ name: "nntune" }],
+              repositories: [{ name: "example-repo-a" }],
             }),
           };
         }
@@ -1184,9 +1177,9 @@ test("signed destination rejects dot-segment and encoding substitutions", async 
   await plugin.definition.setup(ctx);
 
   for (const endpoint of [
-    "/repos/TogetherWeOwn/nntune/issues/123/../456/comments",
-    "/repos/TogetherWeOwn/nntune/issues/123/%2e%2e/456/comments",
-    "/repos/TogetherWeOwn/nntune/issues//456/comments",
+    "/repos/example-org/example-repo-a/issues/123/../456/comments",
+    "/repos/example-org/example-repo-a/issues/123/%2e%2e/456/comments",
+    "/repos/example-org/example-repo-a/issues//456/comments",
   ]) {
     const response = await plugin.definition.onApiRequest(
       request("disclosure-preflight", {
@@ -1194,7 +1187,7 @@ test("signed destination rejects dot-segment and encoding substitutions", async 
           destination: {
             provider: "github",
             apiOrigin: "https://api.github.com",
-            repository: "TogetherWeOwn/nntune",
+            repository: "example-org/example-repo-a",
             endpoint,
           },
         }),
@@ -1219,7 +1212,7 @@ test("submission refuses without the matching one-shot preflight confirmation", 
               expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
               repository_selection: "selected",
               permissions: { metadata: "read", security_advisories: "write" },
-              repositories: [{ name: "nntune" }],
+              repositories: [{ name: "example-repo-a" }],
             }),
           };
         }
@@ -1244,7 +1237,7 @@ test("mint returns a scoped token and never the private key", async () => {
   const response = await plugin.definition.onApiRequest(request("mint"));
   assert.equal(response.status, 200);
   assert.equal(response.body.token, "ghs_minted");
-  assert.deepEqual(response.body.repositories, ["nntune"]);
+  assert.deepEqual(response.body.repositories, ["example-repo-a"]);
 
   const serialized = JSON.stringify({ response, activity, logs });
   assert.ok(!serialized.includes("PRIVATE KEY"), "PEM marker leaked");
@@ -1257,7 +1250,7 @@ test("the audit entry records the grant but not the token", async () => {
   await plugin.definition.onApiRequest(request("mint"));
 
   assert.equal(activity.length, 1);
-  assert.deepEqual(activity[0].metadata.repositories, ["nntune"]);
+  assert.deepEqual(activity[0].metadata.repositories, ["example-repo-a"]);
   assert.equal(activity[0].metadata.runId, "run-abc");
   assert.ok(!JSON.stringify(activity[0]).includes("ghs_minted"), "token leaked into audit log");
 });
@@ -1661,7 +1654,7 @@ test("visibility is computed from what GitHub granted, not what was requested", 
           expires_at: "2026-08-23T18:00:00Z",
           // No `checks` key: the grant is narrower than the ask.
           permissions: { contents: "write", metadata: "read" },
-          repositories: [{ name: "nntune" }],
+          repositories: [{ name: "example-repo-a" }],
         }),
       }),
     },
@@ -1679,7 +1672,7 @@ test("visibility is computed from what GitHub granted, not what was requested", 
 test("the advisory changes no grant", async () => {
   // Belt and braces: describing CI visibility must never alter permissions.
   const before = resolveScope({
-    projectEnv: { GH_APP_REPOS: "paperclip-ops-tooling" },
+    projectEnv: { GH_APP_REPOS: "example-operator-tools" },
     workspaceRepoUrl: null,
   });
   describeCiVisibility(before.permissions);

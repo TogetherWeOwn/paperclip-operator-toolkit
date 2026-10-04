@@ -10,11 +10,11 @@ supply every piece needed and we run a pinned image.
 
 ## Why
 
-`GH_APP_PRIVATE_KEY` currently projects into agent run environments as a plain
-env var. That key mints a token with ~81 permissions across all 7 org repos,
-including `organization_administration: write` and `members: write`. Every
-same-uid process can also read it out of `/proc`, so the per-agent binding list
-is not a boundary.
+Projecting a GitHub App private key into agent environments gives those agents
+the App's full installation ceiling rather than the scope needed for their
+current task. Same-uid processes may also read environment data out of `/proc`,
+so a per-agent binding list alone is not a boundary. Keep the key in the broker
+and send back only short-lived task-scoped installation tokens.
 
 This broker inverts the flow: the agent asks the host for a token, and only a
 narrow, short-lived, repo-scoped token crosses back.
@@ -89,7 +89,7 @@ scope the server derived:
 
 ```jsonc
 {
-  "repositories": ["nntune"],                 // optional, must be within scope
+  "repositories": ["example-repo-a"],                 // optional, must be within scope
   "permissions": { "contents": "write" }      // optional, must be within profile
 }
 ```
@@ -100,7 +100,7 @@ Response:
 {
   "token": "ghs_…",
   "expiresAt": "2026-08-23T18:00:00Z",
-  "repositories": ["nntune"],
+  "repositories": ["example-repo-a"],
   "permissions": { "contents": "write", "…": "…" },
   "scope": { "repoSource": "project", "profileSource": "default" },
   "ciVisibility": {                            // advisory; see below
@@ -142,21 +142,20 @@ told it is blind based on the real grant.
 `blind` and `withheld` are separate fields on purpose. `blind` is a gap someone
 might reasonably close; `withheld` is a decision they should not.
 
-Measured against the live installation, 2026-08-24:
+Illustrative visibility outcomes for token profiles, not a live installation inventory:
 
 | token permissions | `check-runs` | `actions/runs` | `commits/{sha}/status` | `runs/{id}/logs` |
 |---|---|---|---|---|
 | `contents,pull_requests,issues,metadata` (the old default) | `403` | `403` | `403` | `403` |
-| … `+ workflows:write` (what Ops Tooling has) | `403` | `403` | `403` | `403` — `workflows` does not help |
+| … `+ workflows:write` | `403` | `403` | `403` | `403` — `workflows` does not help |
 | … `+ checks:read, statuses:read` (**the default**) | `200` | `403` | `200` | `403` |
-| … `+ actions:read, checks:read` | `200` | `200` | `403` | `200` — 47 KB zip |
+| … `+ actions:read, checks:read` | `200` | `200` | `403` | `200` — workflow log content |
 
 That last cell is the whole decision. `actions:read` also grants full workflow
 **log** download, and logs carry whatever CI printed, including an accidentally
-echoed secret; check-run *conclusions* do not. Every agent on this
-host shares uid 1000 and can read every other agent's environment, so granting
-the fleet a log-download capability to answer "is my PR green" is a bad trade
-when the conclusions already answer it.
+echoed secret; check-run *conclusions* do not. Agents sharing a host UID may also
+read one another's process environments, so granting log-download capability
+only to answer "is my PR green" is a bad trade when conclusions already answer it.
 
 The accepted cost, stated plainly: a red check shows as red with **no reason
 attached**, and whoever picks it up reproduces the failure locally. That is a
@@ -182,25 +181,21 @@ exits non-zero on `unknown`.
 Entirely server-side, from the issue the caller demonstrably holds:
 
 1. **Repositories** — `GH_APP_REPOS` on the issue's project, falling back to the
-   repo URL of the issue's primary workspace. All seven projects now pin it; see
-   the table below.
+   repo URL of the issue's primary workspace. Each deployment keeps its project
+   inventory and exact pins in private configuration.
 2. **Permissions** — `GH_APP_PERMISSIONS` on the project, falling back to the
    default profile: `contents:write`, `pull_requests:write`, `issues:write`,
    `metadata:read`, `checks:read`, `statuses:read`.
 
 A project's `GH_APP_PERMISSIONS` **replaces** the default profile rather than
 intersecting with it. That is deliberate: a project must be able to grant
-`workflows:write` (Ops Tooling does) *and* to narrow below the default, and
+`workflows:write` *and* to narrow below the default, and
 intersection would quietly make the second case impossible.
 
-> **Consequence, and it bites.** A project that pins `GH_APP_PERMISSIONS` does
-> **not** inherit later additions to the default profile. When
-> `checks:read` and `statuses:read` were added, Ops Tooling was the one project with a pin
-> — so it would have stayed CI-blind while the six unpinned projects gained
-> visibility, in the very repo the issue was found in. Its pin was updated by
-> hand at the same time. **If you add a permission to the default profile, audit
-> the pinned projects in the same change**, or the change is a silent no-op
-> exactly where someone already cared enough to pin.
+> A project that pins `GH_APP_PERMISSIONS` does **not** inherit later changes
+> to the default profile. **Audit pinned projects in the same change** whenever
+> the default changes. Otherwise a security removal or CI-visibility addition
+> can silently reach only projects that still inherit the default.
 
 `workflows:write` is deliberately **not** in the default profile and is granted
 per project. GitHub rejects an entire ref push when a branch touches
@@ -210,11 +205,10 @@ direction.
 ### Env binding shape
 
 Project `env` values are an `EnvBinding` union — a bare string, or a tagged
-`plain` / `secret_ref` / `user_secret_ref` object. **Every GH-configured project
-in this company uses the tagged `plain` form.** Reading only the bare-string case
-makes project scoping silently inert: repos fall through to the workspace URL and
-Ops Tooling loses `workflows:write`, while `profileSource` still reports
-`"default"` in the audit log.
+`plain` / `secret_ref` / `user_secret_ref` object. A deployment may use tagged
+`plain` values for repository and permission pins. Reading only the bare-string
+case makes those pins inert: repositories fall through to the workspace URL and
+permissions to the default, while the audit log still reports a default profile.
 
 `secret_ref` and `user_secret_ref` are treated as **absent**, never resolved and
 never stringified. Scope is derived from operator-visible literals only; a secret
@@ -223,24 +217,16 @@ broad mint.
 
 ### The repo pins
 
-The App is installed on **eight** repos, so an unscoped token would grant all
-eight. Every project pins the subset its work actually touches:
+An unscoped installation token may reach every repository selected for the App.
+Each project's pin must name only the repositories that its work needs. A
+bot-only project should not gain web or design repositories merely because they
+share an installation.
 
-| Project | `GH_APP_REPOS` |
-|---|---|
-| Ops Tooling | `paperclip-ops-tooling` |
-| Model Router Plugin | `paperclip-model-router` |
-| Routeware Shadow API | `routeware-shadow-api` |
-| NNTune | `nntune` |
-| Kofra | `kofra` |
-| Community Platform | `two-web,two-bot,two-design` |
-| Onboarding | `two-bot` |
-
-Community Platform and Onboarding shipped with no `env` at all, so the broker
-refused for all 55 issues on them. Both do real git work — Community Platform
-owns the three repos transferred out of the TWO-Gaming org, Onboarding owns the
-Discord bot — so the fix was a pin, not a "does no git work" note. Onboarding is
-pinned to `two-bot` alone; widening it to the other two would be a regression.
+Installation inventory, project IDs and exact repository/permission pins stay
+in private deployment configuration. The public tests use synthetic projects,
+repositories, App identity and opaque secret-reference IDs; they are not an
+export of live configuration or proof of the private pins registry. The held
+public revision and its verification limits are recorded in [DIVERGENCE.md](DIVERGENCE.md).
 
 ### Project-less issues
 
@@ -269,7 +255,7 @@ whether the code they name is **in the installation**:
 
 | class | example | is it residue? |
 |---|---|---|
-| names a repo we hold | `paperclip-ops-tooling`, `two-bot` | **yes** — attach it to the project that pins that repo |
+| names a repo in the installation | `example-operator-tools`, `example-bot` | **yes** — attach it to the project that pins that repo |
 | names the Paperclip control plane | `server/src/services/secrets.ts` | no — no token in this installation reaches it |
 | names an upstream vendor | `omniroute@3.8.49`, `open-sse/…` | no — same |
 | names an operator-side file | a handoff file on the operator's host | no — not version-controlled here |
@@ -301,9 +287,9 @@ Two things about it are worth knowing before you trust a zero:
   exits `3` rather than `0`.
 - **No agent can run the full sweep.** Each agent's token is scoped to its own
   project's `GH_APP_REPOS`, so it can list branches in those repos and gets
-  *Resource not accessible* on the rest — measured from an Ops Tooling run
-  against `kofra`. A token that could read all eight is the org-wide blast
-  radius this broker removes. So the full sweep belongs host-side, an agent runs
+  *Resource not accessible* on repositories outside that scope. A token that
+  could read every installation repository has the broad blast radius this
+  broker removes. So the full sweep belongs host-side, an agent runs
   `--repos <its own>`, and the union of slices is the gate. Partial coverage
   never exits `0`.
 
@@ -437,12 +423,11 @@ The board-key and unauthenticated paths take the header unvalidated too
 (`:190`, `:159`, `:128`), but neither can reach these routes — both are
 `auth: "agent"`.
 
-Measured against the live install on the agent-JWT path, which is how a normal
-run calls: omitting the run header entirely still returned the correct `runId`
-(so it is not header-derived), and a fabricated header returned `422
-agent_jwt_run_id_mismatch` (so it is checked rather than trusted). Those two
-results are specific to that path. The agent-key path is established by reading
-`auth.js:302`, not by that probe.
+Verify the agent-JWT path separately in the deployed host version: omitting the
+run header should retain the JWT-derived `runId`, while a mismatched header
+should refuse. Those checks establish only that auth path; they do not establish
+that a long-lived agent-key header is validated. The source pointers above are
+version-specific and must be rechecked before claiming current host behavior.
 
 **So `agentId` is proof and `runId` is not.** `agentId` comes from the JWT claim
 or from the agent-key record on every path; a caller cannot move it. A holder of
@@ -542,11 +527,11 @@ Instance config for the plugin:
 
 | Key | Required | Notes |
 |---|---|---|
-| `appId` | yes | `4685085` |
-| `org` | yes | `TogetherWeOwn` |
+| `appId` | yes | Your GitHub App ID; `12345` is a synthetic example only |
+| `org` | yes | Your repository owner; `example-org` is a placeholder |
 | `privateKeyRef` | yes | secret ref to the App PEM — **not** the PEM itself |
 | `installationId` | no | saves one lookup per mint |
-| `defaultPermissions` | no | overrides the built-in 4-permission profile |
+| `defaultPermissions` | no | Overrides the built-in default profile listed above |
 
 ## Install
 
@@ -572,7 +557,7 @@ Install is board-gated (`POST /api/plugins/install` returns
    [what a mint record proves about `runId`](#what-a-mint-record-proves-about-runid).
 4. Then mint against a real issue the caller holds and assert the acceptance
    criterion — no `organization_*` key in `permissions`, and
-   `repositories` a single repo rather than all 7.
+   `repositories` the intended subset rather than the full installation.
 5. **The `in_review` acceptance check.** Do step 4 again on an issue in `in_review`,
    and follow it with a real `git ls-remote` using the minted token. That is the
    exact case that returned `409 Issue run ownership conflict` before this
@@ -644,10 +629,10 @@ manifest that would be rejected at install time fails here first.
 
 ## Not solved by this plugin
 
-- **Same-uid `/proc` readability** — the PEM stays readable via `/proc` for as long as
-  `GH_APP_PRIVATE_KEY` is still bound to the 8 agents. This broker makes those
-  bindings *removable*; it does not remove them. Unbinding is the follow-up.
-- **App-level narrowing** — the installation still declares ~81 permissions.
-  That ceiling is a UI-only operation on the App settings page and remains
-  owner-owned. Until it is narrowed, describe the posture as *"the default mint
-  is one repo instead of seven,"* never as least privilege.
+- **Same-uid `/proc` readability** — the PEM remains exposed to same-uid processes
+  for as long as it is projected into agent environments. Installing this broker
+  does not remove those bindings; authorized deployment work must do that separately.
+- **App-level narrowing** — the App's installation ceiling is independent of the
+  broker's request profile. Review and narrow it through the deployment's existing
+  approval process. A scoped request is not proof that the whole installation is
+  least privilege.
