@@ -2,6 +2,9 @@
 """Pin the merged plugin sweep to change gating and the single aggregator."""
 from pathlib import Path
 import re
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
@@ -44,6 +47,46 @@ class PluginWiring(unittest.TestCase):
                      "model-selection-impact", "model-selection-mutants", "model-selection-suite"):
             with self.subTest(job=name):
                 self.assertIn(f"      - {name}\n", block)
+
+    def test_draft_ci_and_dependency_changes_admit_full_suites(self):
+        block = job(self.text, "changes")
+        script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        cases = [
+            (".github/workflows/ci.yml", "true", "true"),
+            ("plugins/model-selection/package-lock.json", "true", "true"),
+            ("plugins/dispatch/package.json", "true", "true"),
+            (".gitleaks.toml", "true", "true"),
+            ("docs/unreferenced.md", "true", "false"),
+            ("docs/unreferenced.md", "false", "false"),
+            ("plugins/model-selection/src/worker.ts", "false", "true"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "git"
+            executable.write_text('''#!/bin/bash
+case "$1" in
+  merge-base) printf '%s\\n' fixture-base ;;
+  diff) printf '%s\\n' "$FILES" ;;
+  grep) exit 1 ;;
+  *) exit 2 ;;
+esac
+''')
+            executable.chmod(0o755)
+            for files, draft, expected in cases:
+                with self.subTest(files=files, draft=draft):
+                    output = root / "output"
+                    output.write_text("")
+                    # No inherited credentials or shell startup hooks.
+                    env = {"PATH": f"{root}:/usr/bin:/bin", "EVENT": "pull_request",
+                           "DRAFT": draft, "BASE_SHA": "base", "HEAD_SHA": "head",
+                           "FILES": files, "GITHUB_OUTPUT": str(output)}
+                    result = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text().strip(), "heavy=" + expected)
+
+    def test_explicit_manual_full_run_is_declared(self):
+        trigger = self.text.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertTrue("  workflow_dispatch:" in trigger, "explicit manual full-run trigger is missing")
 
     def test_matrix_and_full_event_paths_survive_merge(self):
         block = job(self.text, "model-selection-mutants")

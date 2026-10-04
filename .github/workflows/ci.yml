@@ -304,6 +304,7 @@ on:
     # run, and the draft's skipped-green `ci-ok` would let it merge untested.
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
+  workflow_dispatch:
   # CI standard: nightly full run catches regressions that slip past
   # change-gated PR runs. Scheduled runs always run everything: the `changes`
   # job reports heavy=true on every non-PR event.
@@ -363,8 +364,8 @@ jobs:
   # when it is 'true'. Skipped suites count as success in `ci-ok`, so gating
   # can never block a merge.
   #
-  #   heavy=false  only for a non-draft PR whose every changed file is
-  #                documentation no suite reads, or for a draft PR.
+  #   heavy=false  for documentation no suite reads, or a draft PR that
+  #                changes no dependency, workflow or disclosure boundary.
   #   heavy=true   everything else: dependency manifests, lockfiles, .github/**,
   #                scripts, plugins, this filter, and every push-to-main,
   #                merge_group, schedule and dispatch run.
@@ -398,10 +399,6 @@ jobs:
             emit true "non-PR event $EVENT: full run"
             exit 0
           fi
-          if [ "$DRAFT" = "true" ]; then
-            emit false "draft PR: heavy suites wait for ready_for_review"
-            exit 0
-          fi
           merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
           # --no-renames: a rename is a delete plus an add, so moving a script
           # into docs/ lists the script's old path and is not docs-only.
@@ -410,6 +407,25 @@ jobs:
           printf '%s\n' "$files"
           if [ -z "$files" ]; then
             emit true "empty diff: full run"
+            exit 0
+          fi
+          # Dependencies, workflows and disclosure gates affect the whole tree,
+          # including drafts. Review can require their full CI before readiness.
+          while IFS= read -r f; do
+            case "$f" in
+              .github/* | .gitleaks.toml | package.json | */package.json | package-lock.json | */package-lock.json | \
+              pnpm-lock.yaml | */pnpm-lock.yaml | yarn.lock | */yarn.lock | \
+              Cargo.toml | */Cargo.toml | Cargo.lock | */Cargo.lock | go.mod | */go.mod | go.sum | */go.sum | \
+              pyproject.toml | */pyproject.toml | poetry.lock | */poetry.lock | requirements*.txt | */requirements*.txt | \
+              Gemfile | */Gemfile | Gemfile.lock | */Gemfile.lock | composer.json | */composer.json | composer.lock | */composer.lock | \
+              scripts/disclosure-scan* | scripts/secret-scan* | scripts/gitleaks* | scripts/test_disclosure* | scripts/test_secret*)
+                emit true "dependency, workflow or disclosure boundary changed"
+                exit 0
+                ;;
+            esac
+          done <<<"$files"
+          if [ "$DRAFT" = "true" ]; then
+            emit false "draft PR: unaffected heavy suites wait for ready_for_review"
             exit 0
           fi
           # 0 = a tracked non-markdown file names this doc (or the lookup

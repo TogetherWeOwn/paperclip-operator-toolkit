@@ -16,10 +16,13 @@ measurements refuse. `python3 scripts/test_plugin_ci_wiring.py` pins change gati
 the eight-shard sweep and aggregation into `ci-ok`. Neither self-test certifies the
 published tree; the real tree scan and independent exact-head review remain gates.
 
-The CI change detector and draft handling follow the main branch's existing policy.
-Full-suite verification of a draft is available through `workflow_dispatch` on its
-branch without marking it ready. Record the tested head SHA; a later push invalidates
-that evidence. Every plugin job runs on the standard hosted runner.
+The CI change detector preserves docs-only/draft savings, but dependencies,
+lockfiles, `.github` and disclosure-boundary changes force the full suite even on
+a draft. This permits review-before-readiness without bypassing review or checks.
+A `workflow_dispatch` full-run trigger is also declared for explicit verification;
+its availability depends on the workflow revision registered on GitHub. Record
+the tested head SHA; a later push invalidates that evidence. Every plugin job runs
+on the standard hosted runner.
 
 ## Full-history secret scan
 
