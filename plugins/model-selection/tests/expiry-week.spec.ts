@@ -84,8 +84,9 @@ describe('Expiry week: reset boundary retires holds and opens fresh', () => {
     const windowId = budgetWindowId(account.window);
     const sim = new AdmissionSimulator(expiryWeekInput([account], EXPIRY_WEEK_NOW));
 
+    const attemptId = 'boundary-attempt-1';
     const allocation = sim.reserve({
-      idempotencyKey: 'boundary-attempt-1',
+      idempotencyKey: attemptId,
       bindingKey: plan.bindingKey,
       estimate: structuredClone(account.binding.estimate!),
     });
