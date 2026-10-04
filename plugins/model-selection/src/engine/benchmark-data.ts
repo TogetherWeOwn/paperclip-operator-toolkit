@@ -1,7 +1,7 @@
 import type { BenchmarkRow } from "./benchmark-prior.js";
 
 /**
- * Frozen `tog2636-v1` benchmark vectors, keyed by roster model id.
+ * Frozen versioned benchmark vectors, keyed by roster model id.
  *
  * GENERATED, then committed — do not hand-edit. Source: Research A's
  * primary-source leaderboard captures (fetched 2026-09-15), joined to

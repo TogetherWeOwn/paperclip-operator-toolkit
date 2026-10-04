@@ -108,7 +108,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
     // capability is declared and never exercised. It is NOT
     // `database.namespace.write` — this plugin never writes a row of its own.
     "database.namespace.migrate",
-    // Append-only `tog2138-decision-v1` shadow-decision JSONL, the
+    // Append-only versioned shadow-decision JSONL, the
     // plugin-shadow half of the 48h host/plugin agreement stream. `ctx.db` is
     // scoped to `heartbeat_runs` reads only (above) and cannot hold an
     // append-only audit log a company operator can point external tooling at
@@ -123,7 +123,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       folderKey: LOCAL_FOLDER_KEYS.shadowDecisions,
       displayName: "Shadow decision log",
       description:
-        "Append-only tog2138-decision-v1 JSONL, one record per advise() call, for the 48h host/plugin-shadow agreement gate.",
+        "Append-only versioned paired-decision JSONL, one record per advise() call, for the 48h host/plugin-shadow agreement gate.",
       access: "readWrite",
     },
   ],

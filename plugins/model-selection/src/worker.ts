@@ -3998,7 +3998,7 @@ export function createPlugin() {
               return typeof live === "number" ? live : model.aaIndex;
             };
             // The five-benchmark basket, superseding the earlier
-            // agentic sub-score average. Frozen `tog2636-v1` vectors —
+            // agentic sub-score average. Frozen versioned vectors —
             // three of the five benchmarks are not aa.ai columns at all, and
             // mixing live aa.ai rows with the capture would blend effort levels
             // (see `benchmark-data.ts`). The composite index half stays live.

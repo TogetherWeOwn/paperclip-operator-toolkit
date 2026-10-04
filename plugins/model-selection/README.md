@@ -279,7 +279,7 @@ Order of operations:
 ### Paired host/plugin decision evidence
 
 `shadowEmit.enabled` is off by default. When enabled, every authoritative
-`advise()` decision appends two `tog2138-decision-v1` records to the current
+`advise()` decision appends two versioned paired-decision records to the current
 UTC-hour shard in `shadow-decisions/` (`decisions-YYYY-MM-DD-HHZ.jsonl`): one
 tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
@@ -319,12 +319,20 @@ npm run decisions:summary -- \
   --input shadow-decisions \
   --start 2026-09-14T00:00:00Z \
   --end 2026-09-15T00:00:00Z \
+  --gate-harness "$GATE_HARNESS" \
   --out summary-24h.json
 ```
 
 `--input` accepts a single JSONL file (legacy `decisions.jsonl`) or a
 directory of UTC-hour shards; a directory reads every matching shard in
-lexical (= chronological) order and ignores non-shard files.
+lexical (= chronological) order and ignores non-shard files. `--gate-harness`
+is required: there is no host-local or private-repository default path.
+
+Public contract tests always exercise argument refusal and partitioning with a
+synthetic report-shape harness. To run the separate deployment integration block,
+set `PAIRED_DECISION_GATE_HARNESS` to a reviewed harness path before running
+`npm test -- tests/paired-summary.spec.ts`. Without that explicit path, those
+integration tests skip; this is not proof of the 48-hour clean-window gate.
 
 That command exits nonzero on empty, missing-writer, malformed, or unpaired
 data. It reports the earliest actual correlated pair as `observationStart` and

@@ -461,7 +461,7 @@ describe("applyDerivedTiers", () => {
   });
 });
 
-describe("frozen tog2636-v1 capture", () => {
+describe("frozen benchmark capture", () => {
   it("carries no fabricated DeepSWE values", () => {
     // DeepSWE v1.1 published no overlapping rows at capture time. If a future
     // capture adds them this assertion should be updated deliberately, with a

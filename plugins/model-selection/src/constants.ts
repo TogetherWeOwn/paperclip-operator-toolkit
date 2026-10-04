@@ -422,7 +422,7 @@ export type PacingMode = (typeof PACING_MODES)[number];
 
 export const LOCAL_FOLDER_KEYS = {
   /**
-   * Append-only `tog2138-decision-v1` JSONL records, one per
+   * Append-only versioned paired-decision JSONL records, one per
    * `advise()` call, for the 48h host/plugin-shadow agreement stream
    * the shadow gate harness correlates against. Plugin-owned path —
    * never the harness's own directory, which belongs to that shadow harness.

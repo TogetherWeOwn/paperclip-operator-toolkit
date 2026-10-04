@@ -3,7 +3,7 @@
 Finds work that has an owner and no reason to wake anyone, and **reports** it.
 Once an evidence gate passes, it also wakes it.
 
-Implements the design in `docs/tog-706-dispatch-plugin-design.md`. Native
+Implements the selection policy and evidence gate documented below. Native
 replacement for `dispatcher.py` / `paperclip-dispatcher.timer`: a host-side
 script outside any repo, unreadable from any agent container, whose stdout went
 nowhere durable.
@@ -15,7 +15,7 @@ nowhere durable.
 | | |
 |---|---|
 | Code | complete — 4 modules, hand-written `dist/` |
-| Tests | 43, `node --test`, no network and no host. Mutation-gated by `verification/tog-747-mutation-gate.sh`: 21 mutants, 21 killed, 0 survivors |
+| Tests | `node --test`, no network and no host. The toolkit's dispatch CI job also runs isolated mutation checks; cite the exact tested revision rather than a stale test count |
 | Manifest | validated against the **host's own** validators — `pluginManifestV1Schema` PASS, `validateManifestCapabilities` → `{allowed:true, missing:[], pluginId:"dispatch"}` |
 | Installed | **no** — install needs an operator (`/api/plugins` returns `403 Board access required` to an agent key) |
 | Wake action | **off**, and stays off. Enabling it is a separate, evidence-gated step — see "The gate" |
@@ -220,8 +220,8 @@ that should stop an activation.
 
 ## The gate
 
-Do **not** flip `wakeEnabled` as part of installing this. Per the retirement plan
-(`docs/tog-706-dispatch-plugin-design.md`, steps 2–3):
+Do **not** flip `wakeEnabled` as part of installing this. Use a separately
+reviewed deployment retirement plan with these evidence requirements:
 
 1. Run both systems in parallel for a week. The host timer keeps running unmodified.
 2. Compare the plugin's report-only output against what the timer actually did.
@@ -251,12 +251,9 @@ directly against hand-built populations, and the harness covers the wiring:
 capability enforcement, company enumeration, the metric contract, the activity
 threshold, the state round-trip and the wake gate.
 
-Sensitivity is checked by mutation rather than asserted, and the check is a
-committed script rather than a run someone did once:
-
-```bash
-verification/tog-747-mutation-gate.sh     # from the repo root
-```
+The toolkit's dispatch CI job checks sensitivity with an isolated mutation
+gate, not just the unit suite. Use that job's exact-head evidence; a unit-suite
+pass alone does not establish mutation sensitivity or deployment readiness.
 
 It breaks one load-bearing behaviour at a time and requires the suite to go red
 for each: idle anchored on `updatedAt` or counting another issue's runs, rails 1

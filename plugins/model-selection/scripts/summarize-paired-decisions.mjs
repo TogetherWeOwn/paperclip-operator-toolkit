@@ -3,11 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const defaultGate = join(root, "ops/tog-2138/gate_harness.py");
+import { join } from "node:path";
 
 function fail(message) {
   console.error(`DATA GAP: ${message}`);
@@ -31,8 +27,7 @@ const startText = arg("--start");
 const endText = arg("--end");
 const outIndex = process.argv.indexOf("--out");
 const outPath = outIndex >= 0 ? process.argv[outIndex + 1] : null;
-const gateIndex = process.argv.indexOf("--gate-harness");
-const gatePath = gateIndex >= 0 ? process.argv[gateIndex + 1] : defaultGate;
+const gatePath = arg("--gate-harness");
 const startMs = parseUtc(startText, "--start");
 const endMs = parseUtc(endText, "--end");
 if (endMs <= startMs) fail("--end must be later than --start");
@@ -80,7 +75,7 @@ for (const [index, line] of source.split("\n").entries()) {
   }
 }
 
-const scratch = await mkdtemp(join(tmpdir(), "tog2504-summary-"));
+const scratch = await mkdtemp(join(tmpdir(), "paired-summary-"));
 try {
   const hostPath = join(scratch, "host.jsonl");
   const shadowPath = join(scratch, "shadow.jsonl");

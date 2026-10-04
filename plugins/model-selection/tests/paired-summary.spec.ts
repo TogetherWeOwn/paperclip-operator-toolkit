@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 const script = new URL("../scripts/summarize-paired-decisions.mjs", import.meta.url).pathname;
-const gate = new URL("../../../ops/tog-2138/gate_harness.py", import.meta.url).pathname;
+const gate = process.env.PAIRED_DECISION_GATE_HARNESS ?? "";
 const start = "2026-09-14T00:00:00Z";
 const end = "2026-09-15T00:00:00Z";
 
@@ -45,7 +45,7 @@ afterAll(() => {
 });
 
 function scratch() {
-  const dir = mkdtempSync(join(tmpdir(), "tog2504-summary-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "paired-summary-test-"));
   scratchDirs.push(dir);
   return dir;
 }
@@ -77,9 +77,43 @@ function runShardDir(files: Record<string, unknown[]>) {
   return { ...result, report };
 }
 
-// Public tree has no ops/ gate harness (stays private): skip the block
-// rather than failing it. Upstream runs these; the seed adapted them.
-describe.skipIf(!existsSync(gate))("bounded paired decision summary", () => {
+describe("public paired-summary harness contract", () => {
+  it("requires an explicitly injected gate harness", () => {
+    const dir = scratch();
+    const input = join(dir, "decisions.jsonl");
+    writeFileSync(input, "");
+    const result = spawnSync(process.execPath, [script, "--input", input, "--start", start, "--end", end], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--gate-harness is required");
+  });
+
+  it("partitions input for an injected synthetic harness without claiming the full gate", () => {
+    const dir = scratch();
+    const input = join(dir, "decisions.jsonl");
+    const injected = join(dir, "synthetic-harness.py");
+    writeFileSync(input, [record("host", { schema: "decision-pair-v1" }), record("plugin-shadow", { schema: "decision-pair-v1" })].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    // Report-shape test double only, not the deployment's policy/clean-window gate.
+    writeFileSync(injected, `import json, pathlib, sys
+args = sys.argv
+assert args[1] == "agreement"
+def records(flag):
+    return [json.loads(line) for line in pathlib.Path(args[args.index(flag) + 1]).read_text().splitlines() if line]
+host, shadow = records("--host"), records("--shadow")
+assert len(host) == len(shadow) == 1
+assert host[0]["writer"] == "host" and shadow[0]["writer"] == "plugin-shadow"
+report = {"denominators": {"hostRecords": len(host), "shadowRecords": len(shadow), "comparablePairs": 1, "nonComparable": 0}}
+pathlib.Path(args[args.index("--out") + 1]).write_text(json.dumps(report))
+sys.exit(7)
+`);
+    const result = spawnSync(process.execPath, [script, "--input", input, "--start", start, "--end", end, "--gate-harness", injected], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ dataGap: false, cleanWindowGateEvaluated: false, fullCleanWindowGateExit: 7 });
+  });
+});
+
+// Deployment integration is optional and uses only an explicit operator path.
+// A skipped block is not evidence that the deployment's harness passed.
+describe.skipIf(!existsSync(gate))("bounded paired decision summary (deployment integration)", () => {
   it("accepts one correlated pair without claiming the 48h clean window", () => {
     const result = run([record("host"), record("plugin-shadow")]);
     expect(result.status).toBe(0);

@@ -11,7 +11,7 @@
  * absent/sparse/mature/vetoed stats. A positive control proves the grid would
  * see the old source's T1 0.85 bar, so a zero here is a finding, not a void.
  *
- * Recorded-decision parity is NOT claimed: the tog2138 decision stream records
+ * Recorded-decision parity is NOT claimed: the paired decision stream records
  * each candidate's verdict but not the stats and priors that produced it.
  *
  * Monotone capability is the one deliberate departure from the frozen evaluator:

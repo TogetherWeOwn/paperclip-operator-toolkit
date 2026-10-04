@@ -358,9 +358,8 @@ export const SELECTION_CONFIG_SCHEMA = {
      * OFF: this section being absent, or `enabled: false`, means the plugin
      * writes no tier labels of its own — a company that only ever records tier
      * via explicit pins/labels sees no behavior change from this section
-     * existing. This is also the AC3 kill switch: there is deliberately no
-     * `~/paperclip-enterprise-company/.tier-dispatcher-disabled` file check
-     * anywhere in this plugin, only this config flag.
+     * existing. This is also the classification kill switch: there is no
+     * host-local sentinel-file check in this plugin, only this config flag.
      */
     classification: {
       type: "object",
@@ -442,7 +441,7 @@ export const SELECTION_CONFIG_SCHEMA = {
     },
     /**
      * Emits paired `host` and `plugin-shadow`
-     * `tog2138-decision-v1` JSONL records per `advise()` call to the
+     * versioned paired-decision JSONL records per `advise()` call to the
      * `shadowDecisions` local folder, for the 48h agreement stream
      * the shadow gate harness correlates.
      * Off by default — same inert-install discipline as `selection.mode`:

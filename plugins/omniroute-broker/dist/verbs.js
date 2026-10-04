@@ -357,7 +357,7 @@ export const MAPPING_WILDCARD = /[*?]/;
  * id-shaped. `aug/prism-a` is `"name": "Prism (Claude + Gemini)"`: a blended
  * model whose Claude-ness lives in `name` and leaves no trace in the id. An
  * id-shaped rule cannot derive that; the token has to be enumerated. Found live
- * on 2026-08-25 by `preflight:tog473` against the real 1432-id catalogue — the
+ * during a full catalogue calibration — the
  * earlier 480-id fixture did not contain it, so a fixture-only run certified
  * "0 escaped" while this was open.
  *

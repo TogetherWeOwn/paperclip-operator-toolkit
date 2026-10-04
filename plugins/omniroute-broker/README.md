@@ -7,15 +7,14 @@ never enters an agent's address space.
 Built to unblock registering the CLIProxy as a provider. Modelled directly on `gh-token-broker`, which is
 the working reference for this shape on this instance.
 
-> **This Ops Tooling directory is the authoritative copy.** The broker moved
-> here from `paperclip-model-router` because it is an operation
-> broker, not model-routing product code. Model Router is not a fallback source
-> and must contain no active OmniRoute broker, bridge test or calibration hook.
+> **This package is the public implementation source.** Deployment bindings,
+> management credentials and activation approvals remain private. Consume a
+> pinned toolkit revision rather than an unreviewed copy in another repository.
 >
-> If an operator stages a copy anywhere else, run
-> `TOG473_BROKER_DIR=<that directory> node scripts/tog473-mapping-guard-calibration.mjs`
-> from the Ops Tooling root before installing it. The check fails on any
-> `dist/` divergence rather than certifying one copy and installing another.
+> Before installing a staged copy, use the consuming deployment's separately
+> reviewed calibration and byte-comparison gates. They must reject any authored
+> `dist/` divergence: testing one copy does not certify a different installed copy.
+> The package unit suite is not proof that those deployment gates passed.
 
 ---
 
@@ -269,12 +268,10 @@ the same way — it will not announce itself.
 ⚠️ **How it was found, because the method matters more than the fix.** This
 escaped a 480-id catalogue fixture, which reported "350/350 blocked, 0 escaped"
 — green, and wrong. The live catalogue is **1432** ids and contains the bypass.
-A fixture certifies the fixture. Run
-`node scripts/tog473-mapping-guard-calibration.mjs` from Ops Tooling **live**
-(it needs `OMNIROUTE_API_KEY`) before trusting any calibration claim; it imports
-this guard from `dist/` so a copy cannot drift and then certify itself. Live
-result after the fix: **352/352 blocked, 0
-escaped**, and all 52 planned mapping patterns still pass unchanged.
+A fixture certifies only that fixture. Current deployment calibration requires
+a separately reviewed read-only catalogue collector and evidence tied to the
+exact broker bytes being installed. Do not infer a current live result from the
+historical counts above or from this package's offline unit suite.
 
 ⚠️ **And the fixture was worse than incomplete — it was circular.** The
 trimmed fixture stored the `aug/` ids as bare `{id}` records with no `name`. The
@@ -453,12 +450,12 @@ staged copy whose `dist/` fingerprint the calibration command above matched.
 ## Tests
 
 ```bash
-node --test plugins/omniroute-broker/test/broker.test.mjs
-node --test test_tog473_mapping_guard.mjs
+node --test test/broker.test.mjs
 ```
 
-Run these from the Ops Tooling root. Pass the broker test **file**, not the
-directory — on Node 24 `node --test test/` resolves
+Run this from the package directory. Additional repository/deployment calibration
+is outside this package and requires its own exact-revision evidence. Pass the
+broker test **file**, not the directory — on Node 24 `node --test test/` resolves
 `test` as a module specifier and dies before running anything.
 
 ## What I could not verify, and what it would take

@@ -532,7 +532,7 @@ export interface ModelScore {
   /** How the prior behind `derivedTier` was reached. */
   priorBasis?: "blended" | "index-only" | "unscored";
   /**
-   * Benchmark spec version the tier was cut under (e.g. `tog2636-v1`). A tier
+   * Benchmark spec version the tier was cut under. A tier
    * written under one version stays distinguishable from one written under the
    * next, so a re-tier can never silently rewrite history.
    */

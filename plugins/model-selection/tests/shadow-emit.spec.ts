@@ -46,7 +46,7 @@ function observation(): LanePaceObservation {
 const MODELS_WITH_LANES = MODELS.map((m) => ({ ...m, laneId: "lane-a" }));
 
 describe("paired decision records", () => {
-  it("produces every field the tog2138-decision-v1 schema requires", () => {
+  it("produces every field the paired-decision schema requires", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T3"] },

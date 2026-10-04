@@ -97,7 +97,7 @@ export const manifest = {
         type: "boolean",
         title: "Enable the wake action",
         description:
-          "OFF until the evidence gate in docs/tog-706-dispatch-plugin-design.md step 3 passes. While off, the sweep runs the real selection policy and reports what it WOULD have woken, and calls requestWakeup zero times.",
+          "OFF until the evidence gate documented in this package's README passes. While off, the sweep runs the real selection policy and reports what it WOULD have woken, and calls requestWakeup zero times.",
         default: false,
       },
       idleMinutes: {

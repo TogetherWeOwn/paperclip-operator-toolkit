@@ -54,7 +54,6 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // under tests/ so the scan test proves it walks subdirectories and resolves
 // `../` depth relative to each spec's own location, not a fixed count.
 export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
-  "ops/tog-2138/gate_harness.py",
   ".github/workflows/ci.yml",
   "test/fixtures/orgdb/schema.sql",
   "CONTRIBUTING.md",
@@ -63,9 +62,9 @@ export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
 export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATION_TREE_REPO_FIXTURES) {
   for (const relativePath of fixtures) {
     const target = join(scratchRoot, relativePath);
-    // Mirror the checkout: a fixture that is absent from this repository (the
-    // gate harness stays in the private operations repo) stays absent
-    // in the mutation tree, and the spec that reads it skips on its own.
+    // Mirror the checkout. The isolated baseline must establish whether the
+    // suite can run with the available repository fixtures; absence must not
+    // manufacture successful mutant kills.
     if (!existsSync(join(repoRoot, relativePath))) continue;
     await mkdir(dirname(target), { recursive: true });
     await copyFile(join(repoRoot, relativePath), target);
