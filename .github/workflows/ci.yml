@@ -4815,9 +4815,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
 
-      # Scans every commit reachable from the checkout, not just the PR diff.
+      - name: Secret suppression positive controls
+        run: python3 scripts/test_secret_scan.py
+
+      # Scans full history with exact immutable fixture exceptions, not line
+      # suppressions. A new secret beside a fixture marker remains a finding.
       - name: gitleaks detect
-        run: gitleaks detect --source . --redact --no-banner --verbose
+        run: bash scripts/secret-scan.sh
 
   # Runs only when something above failed and names the failed jobs. It needs
   # every suite so a red run always leaves a pointer; the sharded mutation

@@ -20,3 +20,23 @@ The CI change detector and draft handling follow the main branch's existing poli
 Full-suite verification of a draft is available through `workflow_dispatch` on its
 branch without marking it ready. Record the tested head SHA; a later push invalidates
 that evidence. Every plugin job runs on the standard hosted runner.
+
+## Full-history secret scan
+
+Run `bash scripts/secret-scan.sh` with checksum-verified gitleaks 8.30.1 installed.
+Shallow clones refuse. The first pass scans without ignores; it then materializes
+native gitleaks exceptions for the exact reviewed historical fixture fingerprints
+and rescans. Exceptions are keyed by commit, path, rule and line, not the line's
+contents, a file path alone, or a whole commit. A changed finding receives a new
+fingerprint and remains red. Inline allow comments are disabled in both passes.
+
+`scripts/gitleaks-history-fixtures.json` contains SHA-256 hashes of eleven
+independently inspected pre-existing synthetic/negative-test findings. Hashing
+keeps obsolete fixture naming out of the public registry; it does not broaden
+what is ignored. Never add a new hash merely to make CI green: inspect the exact
+finding and obtain independent review first. No live secret exception is approved.
+
+`GITLEAKS=/path/to/gitleaks python3 scripts/test_secret_scan.py` exercises exact
+fingerprint matching and the real scanner. An unrelated synthetic canary still
+fails when a fixture marker or an inline allow comment appears on the same line.
+New findings fail; parse, Git and scanner errors are unmeasured, not clean.
