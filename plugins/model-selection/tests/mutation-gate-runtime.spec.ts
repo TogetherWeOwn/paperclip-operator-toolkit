@@ -664,6 +664,124 @@ describe("mutation gate runtime controls", () => {
     }
   });
 
+  describe("gate run output redirection", () => {
+    // spawnSync buffers both streams against one shared 1MB default cap and
+    // reports the overflow as ENOBUFS after killing the child -- a shape
+    // identical to an outside kill. A verbose failing mutant run sat near that
+    // cap locally and over it on CI, dying deterministically on CI while
+    // passing locally. runGateCommand redirects to per-run files instead, so
+    // output volume can never fake a kill again.
+    it("completes a run whose combined output exceeds the 1MB buffer cliff", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('o'.repeat(600 * 1024)); process.stderr.write('e'.repeat(600 * 1024));"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "over-the-cliff",
+        });
+        console.log(JSON.stringify({
+          status: run.status,
+          signal: run.signal,
+          error: run.error?.code ?? null,
+          stdoutLength: run.stdout.length,
+          stderrLength: run.stderr.length,
+          stdoutHead: run.stdout.slice(0, 1),
+          stderrTail: run.stderr.slice(-1),
+        }));
+      `) as { status: number | null; signal: string | null; error: string | null; stdoutLength: number; stderrLength: number; stdoutHead: string; stderrTail: string };
+
+      // 600KB + 600KB would ENOBUFS through spawnSync's default buffer; here
+      // the run completes on its own with every byte captured.
+      expect(result.status).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(result.stdoutLength).toBe(600 * 1024);
+      expect(result.stderrLength).toBe(600 * 1024);
+      expect(result.stdoutHead).toBe("o");
+      expect(result.stderrTail).toBe("e");
+    });
+
+    it("tails very large output instead of loading it all", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { MUTATION_GATE_RUN_LOG_TAIL_BYTES, runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('e'.repeat(3 * 1024 * 1024)); process.stderr.write('ENDMARKER');"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "huge-output",
+        });
+        console.log(JSON.stringify({
+          status: run.status,
+          truncated: run.stderr.startsWith("[truncated"),
+          hasEnd: run.stderr.includes("ENDMARKER"),
+          stderrLength: run.stderr.length,
+          cap: MUTATION_GATE_RUN_LOG_TAIL_BYTES,
+        }));
+      `) as { status: number | null; truncated: boolean; hasEnd: boolean; stderrLength: number; cap: number };
+
+      // A wedged run spewing for the whole timeout must not OOM the gate, and
+      // the summary the gate scores ("Test Files") prints at the END of a
+      // completed run, so the tail is the part that matters.
+      expect(result.status).toBe(0);
+      expect(result.truncated).toBe(true);
+      expect(result.hasEnd).toBe(true);
+      expect(result.stderrLength).toBeLessThan(result.cap + 100);
+    });
+
+    it("still reports a nonzero exit through file redirection", () => {
+      const result = probe(`
+        import { mkdtempSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { join } from "node:path";
+        import { runGateCommand } from ${JSON.stringify(runtime)};
+        const logDir = mkdtempSync(join(tmpdir(), "gate-output-test-"));
+        const run = runGateCommand({
+          command: process.execPath,
+          args: ["-e", "console.log('Test Files  1 failed'); process.exit(3);"],
+          cwd: ${JSON.stringify(root)},
+          env: process.env,
+          timeout: 60000,
+          killSignal: "SIGKILL",
+          logDir,
+          label: "nonzero-exit",
+        });
+        const completed = run.signal === null && run.status !== null && run.stdout.includes("Test Files");
+        console.log(JSON.stringify({ status: run.status, completed, stdout: run.stdout.trim() }));
+      `) as { status: number | null; completed: boolean; stdout: string };
+
+      expect(result.status).toBe(3);
+      expect(result.completed).toBe(true);
+      expect(result.stdout).toContain("Test Files  1 failed");
+    });
+
+    it("wires the gate's runTests through runGateCommand, not spawnSync", () => {
+      const gateSource = readFileSync(gate, "utf8");
+      const runTests = gateSource.slice(gateSource.indexOf("function runTests("));
+      const body = runTests.slice(0, runTests.indexOf("\n}\n") + 3);
+      expect(body).toContain("runGateCommand(");
+      expect(body).not.toContain("spawnSync");
+      expect(body).toContain("timeout,");
+      expect(body).toContain("killSignal,");
+    });
+  });
+
   it("runs one mutant callback at a time", () => {
     const result = probe(`
       import { runSequentially } from ${JSON.stringify(runtime)};

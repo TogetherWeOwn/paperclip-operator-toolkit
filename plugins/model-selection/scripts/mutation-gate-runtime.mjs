@@ -1,6 +1,7 @@
 import { copyFile, cp, mkdir, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 // The job and step that actually execute this gate on CI. The refusal names
 // the mutants matrix, not the required suite job: the suite job only
@@ -186,5 +187,73 @@ export function mutationGateVitestInvocation(env = process.env) {
     env: childEnv,
     timeout: MUTATION_GATE_RUN_TIMEOUT_MS,
     killSignal: "SIGKILL",
+  };
+}
+
+// How much of a run's captured output the gate keeps in memory for scoring
+// and failure printing. Full logs always land on disk; only the in-memory
+// copy is tailed.
+export const MUTATION_GATE_RUN_LOG_TAIL_BYTES = 1024 * 1024;
+
+let gateRunCounter = 0;
+
+function readLogTail(path) {
+  const fd = openSync(path, "r");
+  try {
+    const { size } = fstatSync(fd);
+    if (size <= MUTATION_GATE_RUN_LOG_TAIL_BYTES) return readFileSync(path, "utf8");
+    const length = MUTATION_GATE_RUN_LOG_TAIL_BYTES;
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, size - length);
+    return `[truncated ${size} bytes to the last ${length}]\n${buffer.toString("utf8")}`;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Run one gate command with stdout/stderr redirected to per-run log files,
+// never buffered through spawnSync.
+//
+// spawnSync buffers both streams against a single shared 1MB default cap and
+// reports the overflow as `error.code === "ENOBUFS"` after killing the child
+// with the configured kill signal — a shape (`status: null, signal:
+// SIGKILL`) identical to an outside kill or the per-run timeout. One mutant
+// whose failing specs print large assertion diffs sat at ~75% of that cap
+// locally and over it on CI, so the same healthy run died deterministically
+// at the same second on every CI attempt while passing locally. Redirecting
+// to files removes the cliff entirely: a run now only fails to complete when
+// it really was killed or wedged, which is what the retry and the BROKEN
+// GATE paths are for. The returned shape matches spawnSync's (`status`,
+// `signal`, `error`, `stdout`, `stderr`) plus the log paths, so existing
+// scoring keeps working unchanged.
+export function runGateCommand({ command, args, cwd, env, timeout, killSignal, logDir, label }) {
+  gateRunCounter += 1;
+  const tag = `${String(gateRunCounter).padStart(3, "0")}-${label}`;
+  mkdirSync(logDir, { recursive: true });
+  const stdoutPath = join(logDir, `${tag}.stdout.log`);
+  const stderrPath = join(logDir, `${tag}.stderr.log`);
+  const outFd = openSync(stdoutPath, "w");
+  const errFd = openSync(stderrPath, "w");
+  let result;
+  try {
+    result = spawnSync(command, args, {
+      cwd,
+      env,
+      timeout,
+      killSignal,
+      stdio: ["ignore", outFd, errFd],
+    });
+  } finally {
+    closeSync(outFd);
+    closeSync(errFd);
+  }
+  return {
+    status: result.status,
+    signal: result.signal,
+    error: result.error,
+    stdout: readLogTail(stdoutPath),
+    stderr: readLogTail(stderrPath),
+    stdoutPath,
+    stderrPath,
   };
 }

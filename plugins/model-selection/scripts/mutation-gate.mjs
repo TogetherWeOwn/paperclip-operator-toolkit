@@ -4,13 +4,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import {
   MUTATION_GATE_CI_MESSAGE,
   copyMutationTree,
   mutationGateAllowed,
   mutationGateVitestInvocation,
   parseMutationShard,
+  runGateCommand,
   runSequentially,
   selectMutationShard,
   stageRepoFixtures,
@@ -1695,29 +1695,41 @@ if (mutantFilter.length > 0) {
   }
 }
 
+// Per-run logs for the whole gate invocation (baselines plus every mutant).
+// Created up front so the baselines below already log to files; removed with
+// the mutation scratch copy when the gate finishes.
+const gateLogDir = await mkdtemp(join(tmpdir(), "mutation-gate-logs-"));
+let gateRunLabel = 0;
+
 function runTests(cwd = root) {
   const { args, env, timeout, killSignal } = mutationGateVitestInvocation();
-  return spawnSync(process.execPath, args, {
+  gateRunLabel += 1;
+  // Output goes to per-run files, never through the shared in-memory
+  // buffer: a verbose failing run can no longer be mistaken for a kill (see
+  // runGateCommand). The per-run wall-clock bound still applies — a wedged
+  // run is killed by `timeout` and scored BROKEN by `completed()` below.
+  return runGateCommand({
+    command: process.execPath,
+    args,
     cwd,
-    encoding: "utf8",
     env,
-    // TOG-3129: bound each run individually. Without this one wedged mutant
-    // spends the job's whole `timeout-minutes` and the job dies with no mutant
-    // name; `completed()` below turns the timeout kill into a BROKEN GATE that
-    // says which one.
     timeout,
     killSignal,
+    logDir: gateLogDir,
+    label: cwd === root ? `baseline-${gateRunLabel}` : `mutant-${gateRunLabel}`,
   });
 }
 
 /**
  * A vitest run that never reached its summary decided nothing. This host runs
  * several agent worktrees at once and a sibling run sweeping stray `vitest`
- * processes SIGKILLs ours mid-flight: `spawnSync` then reports `status: null`,
+ * processes SIGKILLs ours mid-flight: the run then reports `status: null`,
  * which is `!== 0`, which the loop below would otherwise read as "the mutant
  * was caught". That is a false green on the one gate whose whole job is to
  * prove the suite can catch things, so a run only counts when it printed a
- * summary and exited on its own.
+ * summary and exited on its own. (Output volume can no longer fake this
+ * shape: run output is file-redirected, so there is no buffer cap left whose
+ * overflow kill would read as an outside kill.)
  */
 function completed(result) {
   return result.signal === null &&
@@ -1870,6 +1882,7 @@ try {
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
+  await rm(gateLogDir, { recursive: true, force: true });
 }
 
 if (brokenGate || failures > 0) process.exit(1);
