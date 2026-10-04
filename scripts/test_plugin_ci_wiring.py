@@ -22,12 +22,63 @@ class PluginWiring(unittest.TestCase):
         self.text = WORKFLOW.read_text()
 
     def test_changed_heavy_jobs_are_gated(self):
-        for name in ("model-selection-impact", "cliproxy-insight-suite", "secret-scan"):
+        for name in ("model-selection-impact", "cliproxy-insight-suite"):
             with self.subTest(job=name):
                 block = job(self.text, name)
                 self.assertIn("needs: [changes]", block)
                 self.assertIn("if: needs.changes.outputs.heavy == 'true'", block)
                 self.assertIn("runs-on: ubuntu-latest", block)
+
+    def test_scans_are_always_on(self):
+        # Neither scan may sit behind the change gate: docs-only changes and
+        # draft PRs must still be scanned. Not a prefix match: any `needs:` or
+        # `if:` key at job level, in any spelling, is a re-gate.
+        for name in ("secret-scan", "disclosure-scan"):
+            with self.subTest(job=name):
+                block = job(self.text, name)
+                header = block.split("    steps:\n", 1)[0]
+                self.assertNotRegex(header, r"(?m)^    needs:")
+                self.assertNotRegex(header, r"(?m)^    if:")
+                self.assertNotIn("outputs.heavy", block)
+                self.assertIn("runs-on: ubuntu-latest", block)
+
+    def test_secret_scan_keeps_pinned_scanner_controls_and_full_history(self):
+        block = job(self.text, "secret-scan")
+        self.assertIn("fetch-depth: 0", block)
+        self.assertRegex(block, r"GITLEAKS_SHA256: '[0-9a-f]{64}'")
+        self.assertIn("sha256sum -c -", block)
+        self.assertIn("python3 scripts/test_secret_scan.py", block)
+        self.assertIn("bash scripts/secret-scan.sh", block)
+        # Controls run before the real scan so a broken scanner cannot read clean.
+        self.assertLess(block.index("test_secret_scan.py"), block.index("bash scripts/secret-scan.sh"))
+
+    def run_ci_ok(self, results):
+        """Render the aggregator's expressions from fixture job results and run it."""
+        block = job(self.text, "ci-ok")
+        script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        script = re.sub(r"\$\{\{ needs\.([a-z-]+)\.result \}\}", lambda m: results[m.group(1)], script)
+        for state in ("failure", "cancelled"):
+            flag = "true" if state in results.values() else "false"
+            script = script.replace("${{ contains(needs.*.result, '%s') }}" % state, flag)
+        self.assertNotIn("${{", script)
+        return subprocess.run(["/bin/bash", "-c", script], env={"PATH": "/usr/bin:/bin"},
+                              capture_output=True, text=True)
+
+    def test_ci_ok_refuses_a_skipped_or_failed_scan(self):
+        everything = ("changes", "privilege-suites", "offline-suites", "long-mutation-gates",
+                      "runbook-gates", "broker-suite", "omniroute-broker-suite", "dispatch-suite",
+                      "mcp-suite", "cliproxy-insight-suite", "disclosure-scan", "secret-scan",
+                      "model-selection-impact", "model-selection-mutants", "model-selection-suite")
+        gated = {n: "skipped" for n in everything}
+        gated.update({"changes": "success", "disclosure-scan": "success", "secret-scan": "success"})
+        self.assertEqual(self.run_ci_ok(gated).returncode, 0, "docs/draft skip with both scans green must pass")
+        for scan in ("secret-scan", "disclosure-scan"):
+            for bad in ("skipped", "failure", "cancelled"):
+                with self.subTest(scan=scan, result=bad):
+                    results = dict(gated, **{scan: bad})
+                    result = self.run_ci_ok(results)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(scan, result.stdout + result.stderr)
 
     def test_plugin_aggregator_runs_after_failed_impacted_sweep(self):
         block = job(self.text, "model-selection-suite")

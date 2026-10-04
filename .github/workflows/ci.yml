@@ -4785,7 +4785,8 @@ jobs:
 
   # The plugin tree is published; it carries no internal tracker IDs, hostnames,
   # private addresses or host-local paths. The self-test proves each pattern can
-  # actually fail the scan before the real tree is judged.
+  # actually fail the scan before the real tree is judged. Always on, like
+  # `secret-scan`: no `needs`, no `if`, and `ci-ok` requires `success`.
   disclosure-scan:
     name: disclosure scan
     runs-on: ubuntu-latest
@@ -4806,10 +4807,14 @@ jobs:
 
   # Secret scan over the full history. Pinned binary, checksum-verified, no
   # third-party action: the org-licensed action is not needed for a public repo.
+  #
+  # ALWAYS ON: no `needs`, no `if`. It is the one scan every change must pass,
+  # so it is deliberately outside the `changes` gate that skips the heavy suites
+  # for docs-only changes and draft PRs. A secret committed in a markdown file
+  # or a draft is still published. `ci-ok` requires this job's result to be
+  # exactly `success`, so re-gating it fails closed instead of reading as a skip.
   secret-scan:
     name: secret scan
-    needs: [changes]
-    if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -4902,6 +4907,14 @@ jobs:
             echo "::error::change detection did not succeed"
             exit 1
           fi
+          # The two scans are never change-gated. A skipped scan is not a pass:
+          # it means someone re-gated them, so refuse rather than read it green.
+          for scan in disclosure-scan:'${{ needs.disclosure-scan.result }}' secret-scan:'${{ needs.secret-scan.result }}'; do
+            if [ "${scan#*:}" != "success" ]; then
+              echo "::error::always-on scan ${scan%%:*} did not succeed (result: ${scan#*:})"
+              exit 1
+            fi
+          done
           failed="${{ contains(needs.*.result, 'failure') }}"
           cancelled="${{ contains(needs.*.result, 'cancelled') }}"
           if [ "$failed" = "true" ] || [ "$cancelled" = "true" ]; then
