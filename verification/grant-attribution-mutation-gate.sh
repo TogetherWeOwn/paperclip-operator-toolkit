@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =====================================================================================
-# tog-870-mutation-gate.sh — proof that test_grant_attribution.sh is not vacuous.
+# grant-attribution-mutation-gate.sh — proof that test_grant_attribution.sh is not vacuous.
 #
 # The suite it guards is 39 green assertions about an attribution resolver, which is
 # worth nothing until somebody breaks the resolver and watches them go red. Each
 # mutation below removes exactly ONE limb from a staged copy and asserts the NAMED case
 # reddens. The unmutated copy is asserted green FIRST, in the same staging directory:
 # "the mutated suite failed" is unattributable without it, because a staging error
-# produces the same red. That baseline is the check this repo added after TOG-253, where
-# two gates passed for months while proving nothing.
+# produces the same red. That baseline is the check this repo added after an
+# incident where two gates passed for months while proving nothing.
 #
 # WHY EACH LIMB HERE IS AT REAL RISK, which is the only justification for a mutation:
 #
@@ -43,7 +43,7 @@
 #  10.   THE DERIVED/DIRECT SPLIT. Counting an inference as a recorded fact is the
 #        precise failure this whole card is about.
 #
-#   ./verification/tog-870-mutation-gate.sh
+#   ./verification/grant-attribution-mutation-gate.sh
 #
 # Exit 0 = every mutation was detected by the case that claims to cover it.
 # =====================================================================================
@@ -303,7 +303,7 @@ PY
   }
 
   # W1. THE WHOLE POINT. Drop the column from the INSERT and every new grant is
-  #     anonymous again — the pre-TOG-870 state, which produced 25 unrecoverable rows.
+  #     anonymous again — the pre-fix state, which produced 25 unrecoverable rows.
   wmutate "granted_by_user_id dropped from the grants INSERT" \
     "INSERT INTO principal_permission_grants (company_id, principal_type, principal_id, permission_key, scope, granted_by_user_id)" \
     "INSERT INTO principal_permission_grants (company_id, principal_type, principal_id, permission_key, scope)" \
@@ -332,7 +332,7 @@ PY
   #     that reintroduces anonymous rows the first time a call site forgets the
   #     argument, and it fails silently and permanently.
   wmutate "a missing requesting agent defaulted instead of refused" \
-    '  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (TOG-870: an unattributed grant is unrecoverable)."' \
+    '  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (an unattributed grant is unrecoverable)."' \
     '  [[ -n "$requested_by" ]] || requested_by="00000000-0000-0000-0000-000000000000"' \
     "a missing requesting agent -> REFUSED" \
     "...and no write transaction reached the database"
