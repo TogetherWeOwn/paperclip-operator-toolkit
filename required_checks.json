@@ -1,0 +1,8 @@
+{
+  "branch": "main",
+  "required": [
+    {
+      "context": "ci-ok"
+    }
+  ]
+}

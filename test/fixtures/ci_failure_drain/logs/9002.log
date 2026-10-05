@@ -1,0 +1,7 @@
+2026-09-26T10:00:01Z Install pinned host packages
+2026-09-26T10:00:02Z install ok: both host packages present
+2026-09-26T10:00:03Z Broker suite
+2026-09-26T10:00:04Z TAP version 13
+2026-09-26T10:00:05Z not ok 1 - the broker refuses an unknown credential source
+2026-09-26T10:00:06Z   error: expected refusal, got issued token
+2026-09-26T10:00:07Z # failed 1 of 12 tests
