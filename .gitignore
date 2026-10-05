@@ -15,9 +15,9 @@ secure-drop/
 *.bak
 *.bak-*
 
-# gh-app-token.js writes its minted token here at 0600. The default location is
-# $PAPERCLIP_RUN_SCRATCH_DIR, but GH_APP_TOKEN_CACHE can point anywhere, and the
-# filename matched none of the patterns above — a LIVE token, one `git add -A`
+# The retired gh-app-token.js wrote its minted token here at 0600. The minter is
+# gone but old checkouts may still hold the file — and the filename matches none
+# of the patterns above, so keep it covered: a LIVE token, one `git add -A`
 # from being committed. (TOG-193)
 .gh-app-token.json
 .gh-app-token.*.json
@@ -39,7 +39,7 @@ secure-drop/
 # and pins absolute paths that mean nothing on anyone else's checkout.
 .claude/
 
-# Installed dependencies for plugins/gh-token-broker. package-lock.json IS
+# Installed dependencies for the plugins with npm trees. package-lock.json IS
 # tracked, so CI installs are reproducible without vendoring the tree. In the
 # agent workspace this path is a SYMLINK to the instance plugin root
 # (/paperclip/.paperclip/plugins/node_modules) — committing it would either

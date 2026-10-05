@@ -88,19 +88,16 @@ operator-run.
 | `opencode_shared_budget_probe.sh` | Whether the paid **OpenCode** budget is shared across lanes or throttled per lane (TOG-894 ask 2). **The discriminator is coincidence in time, not failure count** — both hypotheses eventually fail every lane, so counting cannot separate them; a shared pool makes distinct model *families* throttle in the **same round**. Classifies on the same routed-upstream `[provider/model] [status]:` prefix the platform's `GATEWAY_CAPACITY_THROTTLE_RE` uses, so a prefix-less `Missing API key` stays a real credential fault and the deterministic `gpt-5.6-luna` 500 never counts as capacity. Each round probes a **cross-provider** `cliproxy/*` control; rounds where it also failed are *excluded*, because a gateway blip otherwise reads as proof of sharing. A quiet window is exit `3` **INCONCLUSIVE**, never "healthy" — measured 2026-09-03, 80 calls, zero throttles. See [`docs/opencode-shared-budget-probe.md`](docs/opencode-shared-budget-probe.md). | `test_opencode_shared_budget_probe.sh` (offline) |
 | `org_access_review.sh` | Standing least-privilege audit. Read-only, non-zero exit on findings — cron/CI-able. | — |
 | `credential_chain_audit.sh` | Standing check that no agent uid can get code into git's credential-helper chain (TOG-310). Audits every config git reads, not just the helper, because git runs a helper named by any of them. `--staged` additionally checks scripts staged for an operator to root-run against their reviewed source here. | `test_credential_chain_audit.sh`, `test_credential_chain_pin_gate.sh` |
-| `gh_permission_pin_audit.sh` | Whether each project's `GH_APP_PERMISSIONS` is still the pin `permission_pins.txt` registers, and whether that registry's baseline is still the broker's `DEFAULT_PERMISSION_PROFILE`. A project's pin **replaces** the default rather than extending it, and all **7 of 7** projects pin one — so a change to the default reaches nothing, silently, and the dangerous direction is *removal* (TOG-346). `--fanout-plan` prints the spec each project must then carry. Read-only; exits `1` on drift and `3` when it could not measure, never `0`. | `test_gh_permission_pin_audit.sh` (offline), `plugins/gh-token-broker/test/` |
 | `gh_scope_residue.sh` | The board-side floor for project-less issues that already need a repository in this installation. Text plus optional pushed-branch evidence; neither is complete, so a zero is never proof. Mints nothing. | `test_gh_scope_residue.sh` (offline) |
 | `gh_scope_residue_monitor.sh` | The standing TOG-398 mechanism: run from a dedicated assigned issue's native Paperclip monitor wake, it executes the credential-free board detector, comments the measured floor, and re-arms the issue for six hours later (one hour after a failed measurement). It preserves the issue's execution policy outside `.monitor` and never calls a zero clean. | `test_gh_scope_residue_monitor.sh` (offline) |
 | `scripts/discord_job_health.js` | Which `paperclip-plugin-discord` scheduled jobs are actually delivering (TOG-676). Read-only. A `succeeded` job row is **never** evidence: `discord-daily-digest` is time-gated, so 23 of every 24 runs return at the hour gate having posted nothing, which is why a failure-count check reads green while the digest has never once posted (`discord_digest_sent` = 0 all-time against 1210 `discord_notifications_sent`). For gated jobs it scores the delivery metric against computed send opportunities instead. Exits `1` on a broken job and `5` when it could not measure — never `0` on no data. `DISCORD_JOB_HEALTH_SOURCE_CMD` swaps the database read for a fixture, which is what lets the suite run in CI. | `test_discord_job_health.sh` (offline), `verification/digest-delivery-detector-mutation-gate.sh` |
 | `discord_job_health_monitor.sh` | The standing clock for the above: run from a dedicated assigned issue's native Paperclip monitor wake, it executes the detector against **this installation**, comments the measured verdict, and re-arms the issue six hours later (one hour after a failed measurement). CI only ever runs the detector against a fixture — the workflow has no database — so without this nothing measured production on any clock. It preserves the issue's execution policy outside `.monitor`, never re-arms an unmeasurable result as healthy, and states in every failing comment that a failing digest is the **expected** state until a vendor release lands, so the alarm is not mistaken for a broken monitor and silenced. | `test_discord_job_health_monitor.sh` (offline), `verification/job-health-monitor-wrapper-mutation-gate.sh` |
 | `credential_chain_lockdown.sh` | The **operator-run** remediation for the above: root-owns the four links the audit reports. Refuses `--apply` until the runner confirms this copy matches `origin/main` — see below. | — |
 | `skills.sh` | Role-aware skill provisioning: who may author, who may equip whom. | — |
-| `gh_token.sh` | GitHub App JWT + installation-token minting, with down-scoping. `api` takes the JSON request body as argument 3; extra `curl` arguments go after `--`. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh`, `test_gh_token_api_body.sh` |
-| `external_disclosure.js` | Offline grant-construction and read-only preflight fixture. Production submit is disabled here; the host-authenticated `gh-token-broker` route proves the current run/session, renders capability and authority before mutation, consumes the short-lived confirmation once, and persists the redacted receipt. See [`docs/external-disclosure-grants.md`](docs/external-disclosure-grants.md) and the [TOG-574 incident review](docs/incidents/TOG-574-unauthorized-private-vendor-disclosure.md). | `node --test test/external-disclosure.test.mjs`, `plugins/gh-token-broker/test/broker.test.mjs` |
+| `gh_token.sh` | Host-operator GitHub App JWT + installation-token minting, with down-scoping. `api` takes the JSON request body as argument 3; extra `curl` arguments go after `--`. Agents authenticate through the Paperclip built-in GitHub connection, not this script. | `test_gh_token_argv.sh`, `test_gh_token_dispatch.sh`, `test_gh_token_api_body.sh` |
+| `external_disclosure.js` | Offline grant-construction and read-only preflight fixture. Production submit is disabled here; the host-authenticated route proves the current run/session, renders capability and authority before mutation, consumes the short-lived confirmation once, and persists the redacted receipt. | `node --test test/external-disclosure.test.mjs` |
 | `gh_access.sh` | Two-key GitHub eligibility policy. | — |
-| `gh-app-token.js` | The in-container git credential helper. Asks `gh-token-broker` for a scoped token per git call; the local PEM is the fallback. `scope-check` reports whether strict mode accepts an environment, without minting. | `test_gh_app_token.sh`, `test/gh-app-token.test.mjs` |
-| `gh-shim` | Canonical source for `/paperclip/.local/bin/gh`, which PATH-shadows the real `gh` and mints a fresh installation token per invocation via `gh-app-token.js` (TOG-113) so a long CI run cannot outlive a static `GH_TOKEN`. Never overrides an explicit `GH_TOKEN`/`GITHUB_TOKEN`, and — since TOG-1448 — never gates minting on `GH_APP_PRIVATE_KEY` being bound, since the helper already does its own broker-first/PEM-fallback selection. Deploy steps in [`GH-CREDENTIAL-CUTOVER.md`](GH-CREDENTIAL-CUTOVER.md#deploying-the-gh-shim). | `test_gh_shim.sh` (offline) |
-| `plugins/gh-token-broker` | Control-plane token broker. Resolves the App PEM host-side, so the signing key never enters an agent. | `plugins/gh-token-broker/test/` |
+| Retired: `gh-app-token.js`, `gh-shim`, `plugins/gh-token-broker`, `gh_permission_pin_audit.sh`, `gh_push_preflight.sh` | Removed. The per-call agent token stack is retired; agents authenticate to GitHub through the Paperclip built-in GitHub connection. The host-operator PEM path (`gh_token.sh`) remains for host automation. | — |
 | `plugins/omniroute-broker` | Narrow OmniRoute management-operation broker. Resolves the existing management credential host-side and exposes only exact allowlisted verbs; key mint, reveal and regeneration surfaces are absent. This Ops Tooling path is authoritative (TOG-537), not Model Router. | `plugins/omniroute-broker/test/broker.test.mjs`, `test-mapping-guard-calibration.mjs` |
 | `plugin_manifest_gate.sh` | Does activating a plugin package change what it is **allowed to do**? Compares the evaluated authorization surface — `capabilities`, and each route's `auth` / `checkoutPolicy` / `companyResolution` — against a reviewed git ref, so comments and formatting are invisible to it and a changed `auth` is not. Unrecognised manifest keys fail closed. Run it before any activation; see `docs/plugin-package-path.md` for why. | `test_plugin_manifest_gate.sh` |
 | `gh_ci_status.sh` | Four-state CI status reader. Reports `unknown` — never `pass` — when CI could not be observed, and `non-started` (exit 5) when GitHub reports `completed/failure` for jobs it never actually ran. That last one is an **escalation, not a red build**: there is nothing in the diff to fix, and no CI-enforced gate in this repo is being enforced while it lasts. | `test_gh_ci_status.sh` |
@@ -110,8 +107,6 @@ operator-run.
 | `omniroute_combo_cli.sh` | Constrained OmniRoute combo/mapping manager. Deny-by-default Claude containment. | `selftest` subcommand |
 | `lib/pcsql.sh` | The one place that decides how the tools above reach PostgreSQL. Sourced, never run. | `test_sql_backend.sh` |
 | `ROLLBACK.md` | Rollback procedures (company bootstrap). |
-| `GH-CREDENTIAL-CUTOVER.md` | Deploy/verify/rollback for the broker cutover, and the `GH_APP_PRIVATE_KEY` unbind sequence. |
-| `docs/plugin-package-path.md` | Why `gh-token-broker` shipping from an agent workspace makes deploying code and re-declaring authority the same write (TOG-349), and the operator steps to move it to a host-owned path. |
 | `docs/upstream/` | Six unfiled defect reports against the **Paperclip host**. No agent can reach an upstream tracker; filing them is an operator action. Newest — `agent-run-credential-isolation.md` — is the one that blocks TOG-393's design: agent runs share a uid and a PID namespace, so no two-agent control on this box is technical. |
 | `docs/adr-root-action-runner.md` | **Design only — ships no executable path.** Whether to build a gated root-action runner (TOG-393). Concludes: build a read-only *unprivileged* host phase; do **not** build an agent-approved root write path, because two keys between two agents is not implementable on this box — one agent's live credentials are readable from another's `/proc`. Read § 4 before proposing any host-side execution. |
 | `docs/teamclaude-big-model-stall.md` | Why teamclaude `:3456` stalls (TOG-378). **Read this before sending anything to that endpoint:** one non-Haiku request blocks the model endpoint for every agent on the box for ~60 s, and giving up early does not release it. |
@@ -120,11 +115,8 @@ operator-run.
 
 ```bash
 # Offline — no credentials, no network, no database. These are what CI runs.
-./test_gh_app_token.sh
-node --test test/gh-app-token.test.mjs   # pass the FILE, not the directory
 node --test test/external-disclosure.test.mjs
 ./test_gh_token_argv.sh
-./test_gh_shim.sh
 ./test_gh_ci_status.sh
 ./test_sibling_guard.sh
 ./test_agent_endpoint_preflight.sh
@@ -133,11 +125,9 @@ python3 -m unittest -v test_liveness_reconciler.py
 ./omniroute_combo_cli.sh selftest
 ./test_responsible_leader.sh
 ./test_credential_chain_audit.sh
-./test_gh_permission_pin_audit.sh
 ./test_plugin_manifest_gate.sh
 ./test_sql_backend.sh
 ./test_suite_preconditions.sh
-(cd plugins/gh-token-broker && npm ci --include=dev --ignore-scripts && npm test)
 node --test plugins/omniroute-broker/test/broker.test.mjs
 node --test test-mapping-guard-calibration.mjs
 
@@ -216,17 +206,12 @@ in this container. No mode bit substitutes for that: there is no directory here 
 edit the mirror can edit the manifest too. Its value is that a swap has to be loud, which is
 precisely what was missing when the live credential helper was silently replaced on 2026-08-24.
 
-`credential_chain_pins.txt` is the same kind of control for the helper itself, and it asks one
-question: **is the live build the one that is supposed to be running** — not "have we reviewed this
-build at some point". The difference is the whole control. The 03:32 swap installed `49cfcd95`, a
-build this repo had shipped and reviewed, so a flat known-good list scores that incident clean;
-downgrade *is* the attack. One `expected` line names the build that should be live, `reviewed` lines
-name superseded ones so the report can say which wrong build is running (`STALE`) rather than
-confusing it with a file nobody has ever seen (`DRIFT`). CI asserts the `expected` line is the
-sha256 of `gh-app-token.js` in the checkout, so changing the helper without repinning fails in the
-PR that changed it — the alternative is a detector that cries wolf on the correct state and gets
-muted. `test_credential_chain_pin_gate.sh` re-introduces each of those defects into throwaway copies
-and requires the named assertions to go red.
+`credential_chain_pins.txt` was the same kind of control for the retired `gh-app-token.js`
+helper, and it asked one question: **is the live build the one that is supposed to be running** —
+not "have we reviewed this build at some point". The helper is retired along with its pins file;
+the lesson stands for any future helper control: the 03:32 swap installed `49cfcd95`, a build this
+repo had shipped and reviewed, so a flat known-good list scores that incident clean; downgrade *is*
+the attack. A detector that cries wolf on the correct state gets muted.
 
 ## Non-negotiables
 
@@ -244,8 +229,10 @@ These are load-bearing and were each learned by breaking something:
   skipped auth check, and it is why the `api` grammar now REFUSES an ambiguous argument instead of
   guessing which slot it belongs to. `test_gh_token_api_body.sh` asserts the body reaches the
   request, byte for byte, and that the exit status is the request's (TOG-305).
-- **`gh-app-token.js` must never fall through to a mint.** It emits a live credential; an earlier
-  version minted a real org-admin token when invoked as `--help`. Unrecognised arguments are refused.
+- **Retired: the per-call agent minter is gone.** `gh-app-token.js` used to emit a live credential
+  per git call; an earlier version minted a real org-admin token when invoked as `--help`. Agents now
+  authenticate through the Paperclip built-in GitHub connection; only the host-operator `gh_token.sh`
+  path still mints, and its suites pin the same refusal discipline below.
 - **A catch-all arm refuses, and refusing means a non-zero exit.** `gh_token.sh` printed usage on
   *stdout* and exited **0** for any unrecognised subcommand until TOG-201, so
   `tok="$(gh_token.sh tokne)" && use "$tok"` proceeded with usage text in `$tok`. Usage errors now go
@@ -268,13 +255,11 @@ These are load-bearing and were each learned by breaking something:
   `GH_APP_SCOPE_STRICT=1` so an unscoped mint fails rather than silently returning a ceiling token.
   Strict mode requires both halves as of 2026-08-24 (TOG-238) — it used to accept either, so a
   permissions-only scope passed the check while still minting across every repo in the installation.
-  Narrowing *what* a token may do is not a substitute for narrowing *where* it may do it. On the
-  broker path the scope is derived server-side from the issue the caller holds, and a caller may
-  only narrow it.
-- **A safety gate must be keyed on the path taken, not the mode requested.** Strict mode gates the
-  PEM, so gating it on `GH_APP_TOKEN_SOURCE === 'pem'` looks right and isn't: the default `auto`
-  falls back to the PEM on a broker outage, which switched the gate off for the one path that mints
-  a ceiling token. It is asserted where the signing key is actually used.
+  Narrowing *what* a token may do is not a substitute for narrowing *where* it may do it.
+- **A safety gate must be keyed on the path taken, not the mode requested.** The retired minter's
+  strict mode gated the PEM path, so gating it on the requested source mode looked right and wasn't:
+  the default fell back to the PEM on a broker outage, which switched the gate off for the one path
+  that mints a ceiling token. A gate belongs where the signing key is actually used.
 - **A cached token is only valid for a credential we still hold.** Keying the cache on the App ID
   alone meant unbinding `GH_APP_PRIVATE_KEY` revoked nothing — the agent kept authenticating from
   cache. Entries carry a fingerprint of what minted them, and nothing is written outside per-run

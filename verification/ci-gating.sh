@@ -43,7 +43,6 @@ HEAVY = [
     "upgrade-offline",
     "long-mutation-gates",
     "runbook-gates",
-    "broker-suite",
     "omniroute-broker-suite",
     "dispatch-suite",
     "mcp-suite",
