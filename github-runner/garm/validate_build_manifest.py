@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCHEMA = "garm-isolated-build-manifest.v1"
 MAX_BYTES = 1024 * 1024
-ROLE = "isolated"
+ROLE = "isolated-private"
 DISTRIBUTION = "ubuntu-24.04"
 NODE_SERIES = "24"
 POSTGRES_FLAVOR = "16"
@@ -78,7 +78,7 @@ def validate(manifest, runner_env):
                        "status"}, "receipt")
     require(r["schema"] == SCHEMA, "schema")
     require(r["evidence_class"] == "synthetic", "evidence_class: synthetic only")
-    require(r["role"] == ROLE, "role: isolated only")
+    require(r["role"] == ROLE, "role: isolated-private only")
 
     base = obj(r["base"], {"distribution", "image_alias",
                            "base_image_fingerprint",

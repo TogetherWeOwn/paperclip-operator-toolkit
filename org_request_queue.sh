@@ -68,7 +68,7 @@ set -uo pipefail
 #   * SAFER ALTERNATIVES FIRST. A denial must additionally carry at least one
 #     alternative that still fully unblocks the work, or an explicit recorded
 #     finding that none exists; and granting a RISKY template requires the
-#     alternatives that were weighed and why each failed. See the TOG-388
+#     alternatives that were weighed and why each failed. See the safer-alternatives
 #     block below RISK_KEYS for what that control does and does not do.
 #   * One denial may be re-argued MAX_SUPERSEDE_CHAIN (5) times in total. The
 #     cap counts every amendment sharing a chain root, so it cannot be evaded
@@ -88,7 +88,7 @@ set -uo pipefail
 # TRANSPORT NOTE
 # --------------
 # This is the authorization core. Agents reach it through the host-side MCP
-# server (TOG-196), which is the only sanctioned transport. That server MUST
+# server, which is the only sanctioned transport. That server MUST
 # derive requester and reviewer identity from the authenticated agent principal
 # supplied by Paperclip's tool gateway, and MUST NOT accept either as a tool
 # argument — an identity the model can fill in voids every property above.
@@ -109,7 +109,7 @@ set -uo pipefail
 #                                  (--approve|--reject) --reason "..."
 #                                  # --reason is required on BOTH decisions
 #
-#     ...to DENY, additionally one of (safer-alternative-first, TOG-388):
+#     ...to DENY, additionally one of (safer-alternative-first):
 #                                  --alternative "<safer route that still
 #                                                 fully unblocks the work>"
 #                                                 # repeatable
@@ -162,7 +162,7 @@ REQUEST_TTL_DAYS="${REQUEST_TTL_DAYS:-7}"
 # A denial resubmitted this many times is not a disagreement resubmission fixes.
 MAX_SUPERSEDE_CHAIN="${MAX_SUPERSEDE_CHAIN:-5}"
 
-# --- telling the requester (TOG-254) ---------------------------------------
+# --- telling the requester ---------------------------------------
 # The transport that turns a notification into something the requester actually
 # receives. It reads one notification JSON object on stdin; exit 0 means
 # delivered. Unset is a supported, honest state — deliveries are recorded
@@ -225,18 +225,18 @@ AUDIT_AUTHORITY='["P3_AUDIT_RISK","P1_PRESIDENT_COO"]'
 REQUEST_EXTRA='{"P3_AUDIT_RISK":["E4_AUDIT_ANALYST"]}'
 
 # ===========================================================================
-# SAFER-ALTERNATIVE-FIRST REVIEW (TOG-388)
+# SAFER-ALTERNATIVE-FIRST REVIEW
 # ===========================================================================
-# The `Gated Autonomy` goal, quoting the owner's 2026-08-25 instruction:
+# The gated-autonomy policy, quoting the deployment owner's instruction:
 #
 #   "The responsible agent must then, when the ask is risky, propose safer
 #    alternatives that still FULLY unblock the work. Only when no safer
 #    alternative exists may the risky ask be granted — never lightly, never
 #    without recording which alternatives were considered and why each failed."
 #
-# TOG-194/TOG-198 already made a denial answerable: it carries a reason, it can
-# be answered with `comment`, and it can be amended with `--supersedes`. What
-# was missing is the THINKING. A denial could say "too risky" and stop, and an
+# An earlier change already made a denial answerable: it carries a reason, it
+# can be answered with `comment`, and it can be amended with `--supersedes`.
+# What was missing is the THINKING. A denial could say "too risky" and stop, and an
 # approval of a capability that touches credentials or CI could be granted with
 # nothing on the record but "approved — needed". Both are now refused.
 #
@@ -257,7 +257,7 @@ REQUEST_EXTRA='{"P3_AUDIT_RISK":["E4_AUDIT_ANALYST"]}'
 # control whose limits are undocumented gets trusted for more than it does.
 
 # Permission keys whose grant makes an ask RISKY. Chosen against the owner line
-# in the `Gated Autonomy` goal — real money, credentials, anything published
+# in the gated-autonomy policy — real money, credentials, anything published
 # outside the company, anything with no rollback — mapped onto this catalog:
 #
 #   tools:admin              administers the tool substrate for everyone; this
@@ -402,7 +402,7 @@ ceiling_for() { "$PROV" ceiling 2>/dev/null | awk -v t="$1" '$1==t{$1="";print}'
 # derive_leader calls this too, so the bypass also chose the approver: under a
 # pattern every ancestor looked able to create the template, which made the
 # requester's own manager the responsible leader for a template nobody was
-# entitled to. See TOG-255 and section 11 of test_responsible_leader.sh.
+# entitled to. See section 11 of test_responsible_leader.sh.
 may_create() {
   [[ -n "$1" && -n "$2" ]] || return 1
   local entry
@@ -515,9 +515,9 @@ reap_expired() {
 }
 
 # ===========================================================================
-# Telling the requester (TOG-254)
+# Telling the requester
 # ===========================================================================
-# TOG-198 asked how the requester LEARNS a request was decided. Until now the
+# How does the requester LEARN a request was decided? Until this section the
 # answer was "it polls", which for an expiry meant "it does not". Four terminal
 # transitions notify — approved, rejected, expired AND failed. `failed` is in
 # that list because a provisioner refusal ends the request just as finally as a
@@ -551,15 +551,16 @@ reap_expired() {
 
 # Has this request already had a notification queued FOR THIS AUDIENCE?
 #
-# Until TOG-317 the key was requestId alone, and the reasoning written here was
+# The key used to be requestId alone, and the reasoning written here was
 # that terminal states are final and one-shot. That was true while a request
 # produced exactly one notification. It now produces two, to two different
 # recipients: the LEADER at submit ("you have something to decide") and the
 # REQUESTER at the terminal transition ("it was decided"). Keyed on requestId
 # alone, the submit-time leader notice arrives first and then swallows the
-# requester's decision notice for the rest of the request's life — TOG-254's
-# entire feature deleted as a side effect of building this one, silently, with
-# every suite still green because each half works in isolation.
+# requester's decision notice for the rest of the request's life — the whole
+# requester-notification feature deleted as a side effect of building this
+# one, silently, with every suite still green because each half works in
+# isolation.
 #
 # The idempotency that actually mattered is unchanged, per audience: expiry is
 # reaped from READ paths, so `list` must not re-notify the requester on every
@@ -584,7 +585,7 @@ notify_body() {
   # The decision row itself, so the safer-alternatives record travels WITH the
   # decision instead of being something the requester has to go and look up.
   # An alternative the requester never receives is the same dead end as no
-  # alternative at all — that is the whole argument TOG-254 made about reasons,
+  # alternative at all — that is the whole argument made about reasons,
   # and it applies with more force to the part that says what to do next.
   local dec="${9:-}" exp_at=""
   printf 'Request %s (%s — "%s") is now %s.\n' "$rid" "$tpl" "$title" "$status"
@@ -625,7 +626,7 @@ notify_body() {
               printf 'This needs the error fixed and a fresh request:\n'
               printf '  ./org_request_queue.sh submit --requester %s --template %s --title "%s" --supersedes %s\n' \
                      "$role" "$tpl" "$title" "$rid";;
-    # TOG-317. The only non-terminal status here, and the only one addressed to
+    # The only non-terminal status here, and the only one addressed to
     # someone other than the requester. `$rv` is the derived LEADER rather than
     # a reviewer that has already acted, and `$reason` carries the requester's
     # rationale — a leader asked to decide with no statement of why is being
@@ -857,31 +858,33 @@ notify_deliver() {
 }
 
 # ===========================================================================
-# Telling the LEADER (TOG-317)
+# Telling the LEADER
 # ===========================================================================
-# `docs/responsible-leader.md` has asserted since TOG-194 that a dormant leader
+# `docs/responsible-leader.md` has always asserted that a dormant leader
 # is "NOT a skip — wake them", and that this is what makes the refusal to
-# auto-escalate on a timer defensible. Nothing did it. Measured on origin/main
-# at 4b26243: `submit` writes exactly one queue row (`request.submitted`), the
-# transport is never invoked, `notify` prints "(no notifications)" and exits 0,
-# and `inbox --for <LEADER>` — the pull half TOG-254 built precisely so that a
-# failed push is not a dead end — answers "(no decisions)". Both halves were
+# auto-escalate on a timer defensible. Nothing did it. Measured before this
+# section existed: `submit` writes exactly one queue row (`request.submitted`),
+# the transport is never invoked, `notify` prints "(no notifications)" and
+# exits 0, and `inbox --for <LEADER>` — the pull half, built precisely so that
+# a failed push is not a dead end — answers "(no decisions)". Both halves were
 # absent, and the CI gate that exists to catch an undelivered notification read
 # green, because a notification nobody queued is not an undelivered one.
 #
-# TOG-390 narrowed the gap without closing it: `announce_reachability` now
-# prints "IS DORMANT — it will NOT be woken" at submit. That is honest, and it
-# is addressed to the REQUESTER's terminal. The leader still learns nothing.
+# An earlier change narrowed the gap without closing it:
+# `announce_reachability` now prints "IS DORMANT — it will NOT be woken" at
+# submit. That is honest, and it is addressed to the REQUESTER's terminal. The
+# leader still learns nothing.
 #
 # WHAT THIS REUSES, AND THE ONE THING IT MAY NOT.
 # Outbox, transport seam, drain, exit-1-while-undelivered and the pull-side
-# `inbox` are all TOG-254's and are used unchanged. The one piece that could
-# NOT be reused is the address: `notifyIssue` is written by the REQUESTER, and
-# pointing the leader's "you have something to decide" notice at an issue the
+# `inbox` were built for requester notification and are used unchanged. The one
+# piece that could NOT be reused is the address: `notifyIssue` is written by the
+# REQUESTER, and pointing the leader's "you have something to decide" notice at an issue the
 # requester chose hands the least-privileged party in the flow the ability to
 # deliver the leader's summons somewhere the leader will never read — while the
 # queue records `notify.delivered`. That converts the delivery record into a
-# forgery of "the leader was told", which is the TOG-198 defect one layer up.
+# forgery of "the leader was told", which is the requester-notification defect
+# one layer up.
 # A shared issue address is not proof that each standing recipient reads it.
 # The legacy scalar remains useful for a single derived leader, but standing
 # recipients require an explicit role=issue binding whose UUID is verified when
@@ -1015,7 +1018,7 @@ deliver_leader_notifications() {
 # pull_only | queued. The LAST outcome row wins, so a drained retry supersedes
 # its failure.
 #
-# Grouped by [requestId, audience] since TOG-317. Grouped by requestId alone —
+# Grouped by [requestId, audience]. Grouped by requestId alone —
 # as it was — a request with both notifications would report ONE row: the
 # leader's queued payload paired with whichever outcome landed last, so the
 # requester's decision notice would vanish from `notify --list`, from `inbox`
@@ -1066,7 +1069,7 @@ cmd_submit() {
       # delivery address is interpolated into a URL by whatever transport ships
       # it, so an unvalidated one lets the least-privileged party in the flow
       # choose the route an operator-credentialed request takes. It did: see
-      # the TOG-198 review note in notify_paperclip_issue.sh. Validated here so
+      # the review note in notify_paperclip_issue.sh. Validated here so
       # a hostile address is never RECORDED, and again in the transport so a
       # restored or hand-edited queue is still refused.
       --notify-issue) notify_issue="$2"; shift 2;;
@@ -1149,8 +1152,8 @@ cmd_submit() {
   fi
 
   # Derive the decider BEFORE the append, so the routing decision becomes part
-  # of the durable record instead of a line of terminal output. Until TOG-390
-  # this was computed afterwards purely to print, which meant the queue held no
+  # of the durable record instead of a line of terminal output. It used to be
+  # computed afterwards purely to print, which meant the queue held no
   # answer to "who was this actually routed at?" — and any later check of
   # whether that agent could receive it had to re-derive from state that had
   # since moved. A routing decision nobody recorded is one nobody can audit.
@@ -1292,7 +1295,7 @@ cmd_who() {
 cmd_review() {
   local reviewer="" rid="" decision="" reason=""
   # The four safer-alternative flags are parsed by the SHARED contract in
-  # lib/reqrecord.sh (TOG-403), not inline here, so this flow and
+  # lib/reqrecord.sh, not inline here, so this flow and
   # capability_gate.sh cannot end up enforcing two versions of the owner's
   # model. Behaviour is unchanged; the definition moved.
   saferalt_reset
@@ -1318,7 +1321,7 @@ cmd_review() {
   # refusal cannot depend on who is asking.
   [[ -n "$reason" ]] || die "every decision must carry --reason: a denial so the requester can answer it, an approval so the record can answer 'why'."
 
-  # --- safer-alternative-first (TOG-388) -----------------------------------
+  # --- safer-alternative-first -----------------------------------
   # Argument-shape checks run BEFORE the request is read, for the same reason
   # the --reason check does: a refusal that depends on who is asking, or on
   # which request was named, is a refusal a reviewer can shop around.
@@ -1354,7 +1357,7 @@ cmd_review() {
   # header, notify_body, and section 8 of test_responsible_leader.sh.
   [[ "$cur" == "pending" ]] || die "request $rid is already '$cur'; decisions are final. To carry it forward: comment --request $rid --author <ROLE> --body \"...\", or submit ... --supersedes $rid."
 
-  # --- is this a RISKY ask? (TOG-388) --------------------------------------
+  # --- is this a RISKY ask? --------------------------------------
   # Derived from the template's own permission keys, never asked of the
   # reviewer. A reviewer-declared risk level is a checkbox the reviewer can
   # clear by declaring the ask safe, which makes the control optional for
@@ -1553,7 +1556,7 @@ cmd_review() {
     # it was the terminal state nobody had named. Notify BEFORE die(), or the
     # one path where the requester is most confused is the one that says least.
     emit_notification "$rid" failed "$out" "" "$reviewer"
-    die "provisioner rejected the approved request; queue marked failed (no partial state)."
+    die "provisioner rejected the approved request; queue marked failed; reconcile any retained agent before retrying."
   fi
   local new_id; new_id="$(grep -oE 'PROVISIONED [A-Z0-9_]+ -> [0-9a-f-]{36}' <<<"$out" | awk '{print $4}')"
   append_status_queue "$(jq -cn --arg id "$rid" --arg rv "$reviewer" --arg rvid "$rv_id" --arg rvt "$reviewer_title" \
@@ -1699,7 +1702,7 @@ cmd_thread() {
         (if (.override // null) != null then
            "\n        (standing-authority override; bypassed \(actor(.override.bypassedLeaderTitle; .override.bypassedLeaderAgentId; .override.bypassedLeader)))"
          else "" end) +
-        # The safer-alternatives record (TOG-388). `thread` is the view a
+        # The safer-alternatives record. `thread` is the view a
         # reviewer reads before deciding an amendment and the view an audit
         # reads afterwards, so what was OFFERED and what was RULED OUT has to
         # appear here. Rendering only reasons would leave the amendment looking
@@ -1736,7 +1739,7 @@ cmd_thread() {
 #
 # Deliberately DB-free and `column`-free so it can run anywhere — this is what
 # org_access_review.sh check 10 shells out to, and that has to work on a CI
-# runner and inside a container, not only on the VPS.
+# runner and inside a container, not only on the production host.
 #
 # Exit status: 1 when unacknowledged overrides exist, 0 when none. That is the
 # same cron/CI contract org_access_review.sh already uses. `die` still exits 2,
@@ -1849,7 +1852,7 @@ cmd_ack_override() {
 
 # --------------------------------------------------------------------------
 # risk-record — the safer-alternatives record, as a list somebody is expected to
-# read (TOG-388). Two decision shapes land here, and they are the two the owner
+# read. Two decision shapes land here, and they are the two the owner
 # said must never be taken lightly:
 #
 #   grant       a RISKY ask was approved. The record must show which safer
@@ -2015,7 +2018,7 @@ cmd_inbox() {
   # record, never by whoever is reading, so accepting either widens nothing.
   # What it stops is one agent's inbox being split in two by which door it
   # happened to submit through, which would make a decision unreadable to the
-  # very principal it was addressed to. (TOG-312)
+  # very principal it was addressed to.
   local rows; rows="$(notify_states | jq -c --arg w "$who" 'select(.role==$w or .agent==$w)')"
   if [[ "$json" == "yes" ]]; then printf '%s\n' "${rows:-}"; return 0; fi
   [[ -n "$rows" ]] || { echo "(no decisions for $who)"; return 0; }

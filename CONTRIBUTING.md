@@ -1,479 +1,115 @@
 # Contributing
 
-This repo holds operator tooling that mints live credentials and provisions real agents against a
-production company. Until 2026-08-23 it lived in one directory on one VPS with no version control,
-no review and no CI. Everything below exists because something here already went wrong once.
+This public MIT toolkit contains reusable operator scripts, tests and Paperclip
+plugins. Deployment-specific hosts, accounts, credentials, permission pins and
+service units belong in a private deployment repository, not here.
 
-## The non-negotiables
+## Non-negotiables
 
-These are restated from [README.md](README.md). They are not style preferences; each was learned by
-breaking something.
+- **No secrets in source control.** Keep credentials outside the checkout in
+  protected storage, and pass them by inherited environment or a protected
+  configuration file, never argv. Do not print tokens while probing a tool.
+- **Default to refusal.** Unknown commands, an unreadable authority source and
+  incomplete measurements must not become a successful credential operation or
+  a clean report. Distinguish a measured failure from an unmeasured result.
+- **Scope every credential mint on both axes.** Repository and permission
+  restrictions are independent. A project permission pin replaces a broker
+  default; changing that default alone does not update deployed project pins.
+  Review the actual grant surface, not just the edited constant.
+- **Back up before an authorized mutation, and verify the backup.** Exit zero
+  alone is not a restore proof. Check integrity and the relevant row or file
+  coverage. Never use production state as a test fixture.
+- **Test behavior and exit status, not prose.** A tool that prints a refusal
+  but exits zero is not refusing. A suite that also passes with the defect
+  restored is not proving the guard.
+- **Keep authority separate from execution.** Authentication, an accepted
+  review and a green build do not grant permission to deploy, rotate a
+  credential or change an operator's infrastructure.
 
-- **No secrets in this repo, ever.** Credentials live in `~/secure-drop/` at `0600` and are passed by
-  inherited environment, never on `argv` — `/proc/*/cmdline` is world-readable and every company on
-  this box shares the host. CI scans every tracked file for token-shaped strings and private key
-  material, and asserts that `.gitignore` still covers `*.env`, `*.pem`, `*.key`, `*.jsonl` and
-  `.gh-app-token.json`.
-- **`gh-app-token.js` must never fall through to a mint.** An earlier version printed a real
-  org-admin-capable installation token when invoked as `--help`. `test_gh_app_token.sh` now fails if
-  any unrecognised argument produces anything token-shaped.
-- **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
-  `GH_APP_SCOPE_STRICT=1` — which requires both halves, not either one (TOG-238). If you touch
-  `currentScope()`, re-run the mutation check in `test_gh_app_token.sh` §6: restore the old
-  `Object.keys(scope).length > 0` condition and confirm the suite goes red. A strict-mode test that
-  stays green against that mutation is asserting nothing.
-- **Changing `DEFAULT_PERMISSION_PROFILE` is a fan-out, not an edit.** A project's
-  `GH_APP_PERMISSIONS` **replaces** the broker default (`projectPermissions ?? defaultPermissions`),
-  and since TOG-296 all **7 of 7** projects pin one — so editing the default changes no grant
-  anywhere and nothing says so. Adding a permission that way disappoints; *removing* one for a
-  security reason looks shipped and does nothing. Update the `baseline` line in
-  `permission_pins.txt` in the same commit, then `./gh_permission_pin_audit.sh --fanout-plan` for
-  the value each project must now carry, and re-run the audit with no flags once they are applied.
-  Two suites go red if you skip this — `broker-suite` and `test_gh_permission_pin_audit.sh` — and
-  neither is satisfied by deleting the other.
-- **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
-- **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
-  shipped once. Tests pin exit codes; they must not pin human-readable message text, which drifts.
+## Branch and pull request contract
 
-## Before you implement, and again before you push: check for a sibling run
+Work on a feature branch. Never push to `main`. Squash merges only.
 
-**Run `./sibling_guard.sh <ISSUE-KEY>` twice — once before writing anything, once immediately before
-every `git push`. Treat a non-zero exit as a stop.**
+Use a Conventional Commits title: `type(scope): summary`, at most 100 characters,
+with no trailing period. The scope names the code area, not a tracker. Supported
+types are `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`,
+`revert`, `style` and `security`.
 
-```bash
-./sibling_guard.sh TOG-345                     # before you implement
-./sibling_guard.sh TOG-345 --phase=prepush     # immediately before every push
+Fill every section of [the PR template](.github/pull_request_template.md):
+
+1. Thinking Path: at least three real steps from the subsystem to the change.
+2. Linked Issues or Issue Description: describe the problem or link a public
+   GitHub issue.
+3. What Changed: one bullet per logical unit.
+4. Verification: commands, observed outcomes and anything not run.
+5. Risks: behavior changes, credential blast radius and rollback where relevant.
+6. Model Used: provider and exact model/version, or `None — human-authored`.
+7. Checklist: tick only statements established by evidence.
+
+Search for overlapping open and recent PRs before implementing. Reuse the
+existing branch when addressing feedback. Credit contributors whose work you
+build on. Address every finding or explain why it does not apply.
+
+This repository is public. Never include private tracker identifiers, private
+URLs, hostnames or credentials in filenames, source, branch names, commits, PR
+text, comments or reviews. Use a branch such as `fix/queue-refusal`. Keep private
+board-to-PR linkage in your private tracker. Run the public-text hygiene check
+before posting, and the disclosure and secret scans before publishing files.
+
+If running under Paperclip, run `sibling_guard.sh` for the current issue before
+implementing and immediately before each push. A nonzero result is not a pass.
+Run `gh_push_preflight.sh --issue <uuid>` alongside it to check the broker's
+repository scope and issue lifecycle. These checks are not publication approval.
+
+## Verification and CI
+
+Run the suites affected by the change. Representative offline entry points:
+
+```sh
+./test_sql_backend.sh
+./test_provisioned_cheap_profile.sh
+node --test mcp/test/org-request-mcp.test.mjs
+node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs
+python3 -m unittest -v test_platform_watchdog
+python3 scripts/test_plugin_ci_wiring.py
 ```
 
-| exit | meaning | what to do |
-|---|---|---|
-| 0 | clear — all three detectors ran, none found a sibling | carry on |
-| 1 | a sibling was found | read the report; do not implement or push |
-| 3 | **indeterminate** — a detector could not run | **not a pass.** Fix what it names, or proceed knowing you are unguarded |
-| 2 | usage error | fix the invocation |
-
-**Also check the push will get a credential — `./gh_push_preflight.sh`.** The broker derives
-the push credential's repository scope from the issue's project; an issue with no project 409s
-at `git push`, after the work is done (TOG-291, TOG-995). Run it before implementing and again
-before pushing, alongside the guard above:
-
-```bash
-./gh_push_preflight.sh --issue <uuid>   # 0 push can get a credential · 1 no scope / lifecycle refusal, message names the fix · 2 could not measure — not a pass
-```
-
-Full contract, oracle, and lifecycle terms: the header of `gh_push_preflight.sh` (TOG-918).
-
-**Why this is a required step and not a suggestion.** Two runs of one agent have implemented one
-issue end to end, independently, twice: TOG-253 (PRs #15 and #16) and TOG-258 (PRs #27 and #28). In
-both cases one PR merged and the other was closed as a duplicate. Each incident cost a full
-implementation and a full CI cycle.
-
-**Why "I checked" was not enough on TOG-258.** The losing run did check. It used the two signals a
-shell in this container makes obvious, and both of them lie:
-
-- `ps -eo pid,etime,args` **returns nothing in the agent container** — not even the calling process.
-  Sibling runs live in other containers. An empty process list carries no information at all, and
-  reads exactly like "no sibling running". This is the main trap, and the reason `sibling_guard.sh`
-  never consults the process table.
-- **Worktree file mtimes** were minutes old. That is normal for a live run parked on a CI poll or a
-  model call — which is precisely what it was. A `+` marker in `git worktree list` does not
-  discriminate either: a dead run leaves one behind.
-
-**Why once is not enough.** At the moment the losing run started, the winning run had not pushed
-anything. A correct start-time check would still have come back clear. The sibling landed *during*
-the loser's CI wait, so the check has to be repeated immediately before pushing — that is what
-`--phase=prepush` is for, and it adds the test that matters most at that point: is your work already
-an ancestor of `origin/main`?
-
-**Why three detectors.** None of them sees the whole picture:
-
-- **control-plane** — `GET /api/issues/{id}/runs`. The only *leading* signal: it reports a sibling
-  that has committed nothing, pushed nothing and opened nothing. Note that this route is **not
-  issue-exclusive** (measured 2026-08-25: a run holding the shared workspace's environment lease
-  appears in the run list of every issue in the company), so the guard filters on `agentId` and
-  reports a foreign agent's run without calling it a duplicate.
-- **local refs** — branch refs are shared across every worktree of one clone, so a sibling's commits
-  are visible the moment they commit. This is the only signal for work that is *finished but never
-  pushed*; on TOG-339 the complete fix sat as a local commit while the remote said nothing existed.
-- **remote** — pushed branch, open PR, and the already-landed ancestor test. Lagging, but the only
-  one that survives the sibling working in a different clone.
-
-**The checkout claim is not one of them, and does not make this unnecessary.** A `PATCH
-/api/issues/{id}` that 409s naming the holder is a real oracle for *another agent's* run. It does not
-cover this case: a newer run of the same agent takes the checkout from the older one and the older
-run keeps executing, so the newer run reads its own id and sees nothing wrong. That is half-blind in
-exactly the direction that produced TOG-258.
-
-**When the guard finds one.** Verify what already exists rather than re-implementing it. If a
-sibling's commit is correct, push *that exact SHA* — a late push from the sibling is then a no-op
-fast-forward rather than a conflict. Do not open a second PR for work an open PR already covers: diff
-against it and contribute the difference, or nothing.
-
-## Branch and review
-
-Work on a branch, open a pull request, never push to `main`.
-
-This is a private repo on the free plan, so **branch protection is unavailable**. Nothing on GitHub
-will stop a direct push to `main` or a self-merge. The discipline has to come from the process. That
-is a deliberate, recorded trade-off, not an oversight — if the plan changes, turn on branch
-protection and delete this paragraph.
-
-Keep changes narrow enough to review. A test-only change that also fixes three unrelated things is
-unreviewable; **if you find a bug while doing something else, file it rather than fixing it inline.**
-
-### Getting your PR approved — do not send it to the owner
-
-**Merging green, revertible work is not reserved to the owner.** It is not money, not a credential
-leaving our control, not goals or org structure, not a reversal of a stated preference, and not a
-public commitment. Six approvals of exactly this kind were queued to the owner and 65% of everything
-this company has ever asked a human died unanswered.
-
-Use the platform's built-in review path instead, which makes **another agent** the approver. All of
-steps 1-3 must happen in a single run of yours:
-
-```
-1. PATCH the issue status -> todo        # you must LEAVE in_review; arming is a transition
-2. POST a request_confirmation           # same agent, same run as step 3
-3. PATCH status -> in_review  + reviewInteractionId=<card>  + assigneeAgentId=THE REVIEWER
-4. the reviewer accepts or rejects, and merges
-```
-
-Two traps that cost this company weeks, both enforced in `routes/issues.js`:
-
-- **You can never approve your own card** (`:2975`), so step 3 must hand the issue to someone else.
-  That is the point, not a mistake.
-- **A confirmation left pending by a finished run can never be armed by anyone** — arming requires
-  `sourceRunId === actorRunId` (`:2360`). If your approval card is older than your current run, it is
-  dead: withdraw it and re-cut. It will not be rescued by waiting or by re-routing.
-
-The `PATCH` in step 3 returns `200` even when the card fails to bind. Verify it, do not assume it.
-Full mechanism, the verification query, and a worked example: **[`docs/interaction-routing.md`](docs/interaction-routing.md)**.
-
-**Formal GitHub reviews (`APPROVE` / `REQUEST_CHANGES`) are unavailable on agent-opened PRs.**
-Every agent mints its token from the same App installation, so on a PR the bot itself opened,
-GitHub sees reviewer and author as one identity and `POST .../pulls/{n}/reviews` returns
-`422 "Can not request changes on your own pull request"` (re-measured 2026-09-19: 422 on
-bot-authored PR #345; the identical call succeeds on a human-authored PR, so this is
-same-identity, not a missing scope — but ~60 of 64 open PRs here are bot-authored, so treat
-the formal review API as unavailable in practice). Record the verdict as a **PR comment plus
-the board card**; that is the authoritative record. And do not read "0 GitHub reviews" on a PR
-as "unreviewed" — check the card.
-
-### A card whose deliverable is a PR is not `done` until that PR is merged or closed
-
-Closing the card is not the delivery; landing the branch is. Measured 2026-09-05: this repo had
-**47 open PRs, none with a review or a requested reviewer**, and 27 of them belonged to cards that
-were already `done` or `cancelled` at that moment. Work was being marked complete on the board
-while it sat unmerged on a branch, and it stayed there — the oldest was 10 days and 171 commits
-behind `main`.
-
-So: **do not move a card to `done` while its PR is open.** Either land it or close it first, and
-say which in the closing comment:
-
-- **merged** — quote the squash-merge SHA, and confirm you verified at the *merge result*
-  (`main` + PR), not at the PR head. A branch cut days ago can be green against a base that no
-  longer exists.
-- **closed** — give the reason in one line, and say whether the work is superseded (name what
-  replaced it) or abandoned (say what would have to be true to revisit).
-
-A commit on an unpushed or unmerged branch has produced nothing durable. If the card must close
-before the PR can land — a blocked dependency, an operator step, a reviewer who is unavailable —
-leave the card open and `blocked`, naming the unblock owner.
-
-**One deliberate exception: an upstream staging PR.** A PR that exists to stage something filed
-*elsewhere* (`upstream draft` / `upstream report`) is a holding place, not a deliverable waiting to
-land. Its card is `done` when the report is filed, and the PR stays open by design. Name the PR and
-say so in the closing comment. Outside that one case, `done` with an open PR is wrong.
-
-**"I reviewed it and left it open" is not a second exception — it is the failure mode.** A review
-that requests changes is a completed *review*; the *fix* it waits on is still undelivered, and if
-no open card owns that fix, nothing will ever land it. Measured on this repo: the check-6 fix for
-`upstream-bundle-filing-gate.sh` exists only on `tog-1074-discord-report-revision` and
-`tog-1091-step1-rereview` — both 72 commits behind `main`, neither with an open PR — while all four
-owning cards (TOG-1074, TOG-1077, TOG-1091, TOG-1093) read `done`. Four green cards, one real fix,
-zero of it on `main`. When you leave a PR open pending a fix, open or name the card that owns the
-fix in the same comment; that card, not the review, is what keeps the work alive.
-
-**Stale is not the same as wrong.** Age alone does not justify closing a PR: of the 10-day-old
-branches in that backlog, two merged clean and passed their full suites at the merge result. Run
-the tests before you judge. Conversely, a PR whose diff runs *backwards* against `main` — deleting
-lines a later PR added — must be closed however green it looks.
-
-## Running the suites
-
-Three tiers, by what each suite needs to run: nothing, an API key, or the VPS.
-
-```bash
-# Offline — no credentials, no network, no database. These are what CI runs.
-./test_gh_app_token.sh              # credential-minter regression suite
-./test_gh_token_argv.sh             # gh_token.sh: no credential on argv
-./test_gh_token_dispatch.sh         # gh_token.sh: unknown subcommands refuse, non-zero
-./test_gh_token_api_body.sh         # gh_token.sh: `api` sends the body AS the body, not on argv
-./omniroute_combo_cli.sh selftest   # containment logic, fixture catalogue
-./test_responsible_leader.sh        # who may approve a provisioning request
-./test_sql_backend.sh               # lib/pcsql.sh dispatch, against fake podman/psql
-./test_agent_endpoint_preflight.sh  # model-endpoint cutover gate, against a stub front
-./test_tool_drift.sh                # tool_drift.sh: running-vs-reviewed detection
-./test_channel_drift.sh             # channel_drift.sh: staged-but-never-committed detection
-./test_cold_start_detector.sh       # cold_start_detector.sh: cold-with-headroom detection
-./test_orgdb_fixture.sh             # the privilege-suite org fixture, stub and schema_drift.sh
-./test_tog994_check9_symmetry.sh    # org_access_review.sh check 9 filters BOTH sides of its join
-./test_tog994_orphan_retire.sh      # org_orphan_retire.sh: what it refuses to delete
-./verification/tog-487-mutation-gate.sh   # ...and proof those refusals are not vacuous
-for f in *.sh lib/*.sh; do bash -n "$f"; done && for f in *.js; do node --check "$f"; done
-
-# Live org, no database — needs a Paperclip API key and COMPANY_ID, nothing else,
-# so they run from an agent container. Read-only against the company: their only
-# call is a GET of the agent roster.
-./acceptance_rehearsal.sh           # the authorization core against the real org
-./acceptance_transport.sh           # the same run through the real MCP server, over HTTP
-
-# Operator-only — need COMPANY_ID and the live Postgres via `podman exec paperclip-db`.
-# They create and delete real agents in that company as their method, so run them
-# on the VPS, before a release, and read the teardown output.
-#
-# Both now REFUSE TO RUN when the backend is unreachable, exiting 3 instead of
-# scoring themselves. Exit 3 means "could not run"; exit 1 means "ran and
-# failed". Do not read a 3 as a pass — and do not read it as a regression
-# either, it means you are not where you think you are. (TOG-402: before this,
-# an unreachable database gave test_request_queue.sh 15 undeserved passes,
-# because "requester not found" satisfied assertions naming the ceiling check.)
-export COMPANY_ID=<uuid>
-./test_privilege_ceilings.sh
-./test_request_queue.sh
-./org_access_review.sh --allow-active   # 0 findings expected
-```
-
-**Gate on exit status, never on a test count.** Counts drift as suites grow, and three places in
-this repo used to quote three different numbers for the same omniroute selftest. A count in a gate
-turns ordinary growth into a red build; a count in prose is just wrong a month later. Neither the
-docs nor CI assert one — if you add a suite, do not start.
-
-## Is the copy that runs the copy that is reviewed?
-
-Everything above tests what is *in this repo*. None of it tests whether that is what is actually
-running on the VPS, and the import that created this repo was a snapshot — a snapshot is only the
-source of truth until somebody edits the other copy.
-
-TOG-212 is the first case, and it taught something sharper than "the VPS drifted". The omniroute
-selftest reported 114 assertions here against 156 quoted elsewhere — later 181. The divergence was
-real, and the reviewed copy was not the one containing Claude routing. But the larger copy was never
-on the VPS. It was `/paperclip/operator-handoff/TOG-151-omniroute_combo_cli.sh` — v0.2.5, written by
-an agent as a *proposal* into the outbound handoff channel, and never landed in git until the import
-this paragraph documents.
-
-So drift has two directions here, not one, and the second is the one actually happening:
-
-- **Inbound** — somebody edits the running copy and the repo falls behind. This is the case the
-  tooling was built for. Measured 2026-08-24 it had not yet occurred: the one genuinely
-  operator-placed file in the channel, `REFERENCE-org_provisioner.sh` (root-owned, unlike every
-  agent-authored drop), was *behind* `main`, not ahead — the import took, and the repo then improved
-  on it.
-- **Outbound** — an agent writes a newer tool into the handoff channel, the operator installs it
-  from there, and nobody reviews it because it never becomes a PR. Measured the same day,
-  **9 of the 11 executables in that channel existed in no git repo at all.** Re-measured
-  2026-08-25 by `channel_drift.sh`, it was **11 of 14** — one new unversioned tool had arrived
-  overnight, and the first count had missed a `0644` `.mjs` that is run by `node` rather than by
-  `./`. The channel got worse in a day. **Hand cleanup loses to the arrival rate**, which is why
-  TOG-356's fix is a rule and not a tidy-up. Later the same day it was **3 of 12**, because TOG-371
-  landed the OmniRoute tools as PRs and the drops went green on content without anyone touching the
-  channel — the rule working in the intended direction. These counts move; run the check rather than
-  quote them.
-
-Read the drop channel's own `README.md` before treating anything in it as evidence of what runs:
-"Writing here is a proposal, not a deployment." A file there is an agent's outbound claim, not a
-reading of the VPS. Ownership tells you the direction: root-owned is the operator's, `node`-owned is
-an agent's.
-
-The 114-vs-156 gap was noticed by eye, from a number a human happened to quote in a different issue.
-That is not a detection mechanism.
-
-`tool_drift.sh` is. Run this whenever you have shell on the VPS, and before any release:
-
-```bash
-# 0. In a clone: which executables are we even looking for?
-./tool_drift.sh manifest --ref main > /tmp/tools.manifest
-
-# 1. On the VPS. Needs bash + coreutils only — no git, no clone, no network,
-#    no credential. `locate` finds the directory; do not guess it.
-./tool_drift.sh locate /tmp/tools.manifest
-./tool_drift.sh fingerprint <the top-ranked directory> > /tmp/vps.fp
-
-# 2. Bring /tmp/vps.fp to a clone, and compare against the ref you believe in.
-./tool_drift.sh compare /tmp/vps.fp --ref main
-```
-
-Exit `0` no drift · `2` refused · `3` drift found. It reports three things, and the middle one is
-the one that should stop you: **DRIFT** (same path, different content), **UNVERSIONED** (a tool at
-the source that was never imported at all), and **NOT DEPLOYED** (informational — the VPS has no
-reason to hold every test file; `--strict` makes it count).
-
-**Step 0 is not optional ceremony.** TOG-212 asked an operator to run step 1 "in the directory the
-tools run from"; they searched `/home/ubuntu`, found nothing, and the question stayed open for three
-days. The ask assumed the answer to the question it was asking. `locate` is that search, and it runs
-under the same no-git constraint as `fingerprint`.
-
-Three design points, all deliberate and all worth keeping:
-
-- **`compare` refuses rather than reporting a clean run it did not earn.** Fingerprint a directory
-  holding none of these tools and every counter lands on zero except not-deployed — which, before
-  TOG-357, fell through to `no drift` and exit `0`. Green, from a measurement that never happened,
-  on the base case: the operator who is in the wrong directory. It now exits `2` (refused: nothing
-  was measured) rather than `0` or `3`, and every run prints a `coverage:` line saying how many of
-  the ref's executables the fingerprint actually matched. **If that line reads `0 of N`, you are not
-  in the tooling directory and no other line in the report means anything.**
-
-- **It compares content, not counts or sizes.** A count collides and drifts innocently, which is
-  precisely why 114-vs-156 sat unnoticed. The fingerprint is the git blob hash, computed with
-  `sha1sum` so the VPS side needs no git, and the CI mutation gate fails if anyone "simplifies" it
-  back into a size check.
-- **There is no committed manifest of expected hashes.** `compare` reads the ref directly. A
-  committed manifest would be stale the first time anyone landed a PR, and a drift detector that
-  cries wolf gets muted — at which point it is indistinguishable from a deleted one.
-
-**CI cannot run the actual comparison** and never will: the thing to compare against is a directory
-no runner can reach. A green badge means the detector works, not that there is no drift. Only
-running step 1 on the VPS answers that.
-
-### And the outbound half — `channel_drift.sh`
-
-`tool_drift.sh` cannot answer the outbound question, and pointing it at the handoff channel — which
-is what TOG-356 originally proposed — does not work. `compare` matches on **path**, and channel drops
-are named for their issue, so every drop reports `UNVERSIONED` *including the compliant ones*; and
-`--strict` fails when the ref holds files the source does not, which the channel is designed to do
-(14 artifacts against 86 tracked blobs). It would be red forever, and a detector that cries wolf gets
-muted. So there is a second tool:
-
-```bash
-./channel_drift.sh check                  # /paperclip/operator-handoff vs main
-```
-
-The rule it enforces: **a runnable file staged for the operator must be byte-identical to a blob
-committed on `main`.** Content, not path — the repo may rename its own files; changing a byte breaks
-it. Runnable is a union of the exec bit, a script extension, and a shebang on line 1, because each
-of those alone has a hole the other two cover. Evidence documents are not runnable and are not
-covered. Exit `0` clean · `2` refused · `3` unversioned, stale, missing or tampered.
-
-There is a second, smaller rule alongside it (TOG-373). A short `REQUIRED_MIRRORS` table names files
-that must be **present** in the channel and byte-identical to one tracked path, runnable or not —
-today just the channel's own `README.md`, mirroring
-[`handoff-channel-README.md`](handoff-channel-README.md). Absence is a finding there rather than a
-silence, because that file is the one whose entire content is the rule above, and it is not runnable
-by any of the three tests, so the sweep would never have seen it. If the repo renames a canonical
-path without updating the table, the check **refuses** rather than rendering a verdict on a
-comparison it did not make.
-
-This one needs no operator to *run*: the channel and a clone are both visible from any agent
-container, so **run it on yourself before dropping a file.** Land the PR first, then drop the mirror,
-and quote the commit sha. Installing that README is the operator's step — it is root-owned in a
-`1777` directory, so no agent can — and the command is in
-[docs/operator-handoff-channel.md](docs/operator-handoff-channel.md), with the full rationale and the
-measurement.
-
-The same caveat applies as above and for the same reason: CI runs `test_channel_drift.sh`, which
-proves the detector works. It cannot run `check` — GitHub has no view of `/paperclip`.
-
-### And the schema half — `schema_drift.sh`
-
-The two privilege suites run against a small vendored fixture
-(`test/fixtures/orgdb/schema.sql`), which is a snapshot of the production schema. Snapshots rot, and
-a rotted one is worse than no fixture: the suites stay green while testing a shape the database no
-longer has. So the dump ships with a drift check.
-
-It is the same two-sided operation as the tools above — **fingerprint where production lives,
-compare in a clone** — and, like them, CI can only run the detector, never the comparison, because
-GitHub has no route to the VPS.
-
-```bash
-# 1. On the VPS. The default backend is podman, so this needs no arguments and
-#    no psql — the same 'podman exec paperclip-db' every operator tool uses.
-./schema_drift.sh fingerprint > /tmp/production-schema.fp
-
-# 2. In a clone, against a database loaded from test/fixtures/orgdb/schema.sql.
-PAPERCLIP_SQL_BACKEND=psql ./schema_drift.sh compare /tmp/production-schema.fp
-```
-
-The contract is columns (type, nullability, default) plus indexes on the tables named in the
-script's `TABLES` list — seven as of TOG-870, and derived from that one line rather than restated,
-because a count written down in a second place is a count that goes stale. It excludes
-foreign keys, non-index constraints and triggers on purpose: the fixture is query-compatible, not a
-replica, and widening the contract to things the fixture never claimed would make it red forever —
-the `channel_drift.sh` failure mode above.
-
-Two things are worth knowing before you trust an exit code. It reaches Postgres through
-[`lib/pcsql.sh`](lib/pcsql.sh) like every other tool here, which is load-bearing rather than tidy:
-this shipped calling `psql` directly, and `psql` is the one backend the operator half does not have,
-so `fingerprint` — the half that has to work on the VPS — was the half that refused. The worse
-direction is that a bare `psql` connects to whatever *that* psql defaults to, and every column it
-reports is real, so a fingerprint of some unrelated database on the same host is indistinguishable
-from a measurement of Paperclip. The table-count guard is the backstop, and the backend is now chosen
-explicitly instead of inherited from `PATH`.
-
-Second: **exit `2` means nothing was measured, and it is not a pass.** The backend is checked with a
-real `SELECT 1` round-trip rather than `command -v`, because a host with podman but no
-`paperclip-db`, or a psql pointed at a dead server, passes a binary check and then compares against
-nothing. Exit `0` match · `2` refused · `3` drift.
-
-`test_responsible_leader.sh` needs `jq` and nothing else. It fabricates the whole world it tests:
-a TSV org fixture read through the `ORG_SNAPSHOT` seam instead of the database, and a stub
-provisioner injected through `PROV`. The stub *extracts* the delegation ceiling from
-`org_provisioner.sh` rather than carrying a copy, so a ceiling change cannot leave the suite green
-against a stale fixture. Both seams are load-bearing — removing either takes the only CI coverage of
-the authorization logic with it.
-
-`acceptance_rehearsal.sh` reuses those same two seams, but fills `ORG_SNAPSHOT` from the live
-company instead of a fixture. That is the whole point of it: a fixture can only contain the cases
-its author thought of, and the org has shapes nobody would think to write down — agents with no
-`orgRoleId`, agents with no `permissionProfile` at all, a reporting graph nobody has checked for
-cycles. It cannot replace `test_request_queue.sh`, because it stubs the provisioner and never
-writes to the database, and it cannot run in CI, because it needs a company. Run it before
-declaring the request flow good in a given company, and after any org restructuring.
-
-`test_gh_app_token.sh` needs `node` and nothing else. It fabricates its whole credential environment:
-a throwaway RSA key generated per run, a stub GitHub API on `127.0.0.1`, and token-shaped canaries
-that are not real tokens. It invokes the tool under `env -i`, so a live `GH_APP_PRIVATE_KEY` exported
-in your shell cannot leak into a test run. Nothing it writes leaves `mktemp -d`.
-
-`test_sql_backend.sh` needs `bash` and nothing else. It tests a dispatcher — which command
-`lib/pcsql.sh` builds, and what lands on that command's `argv` — so it puts *recording fakes* for
-`podman` and `psql` on `PATH` rather than requiring either. Fake, do not skip: a suite that skips
-the psql path when `psql` is absent passes on every runner in the world while that path is broken.
-Both fakes are always present, so both backends always execute.
-
-If you touch `lib/pcsql.sh`, the two mutations CI runs against it are the ones to keep working:
-passing `$DATABASE_URL` to `psql` instead of decomposing it into `PG*` (which publishes the database
-password through `/proc/*/cmdline`), and auto-selecting the psql backend whenever `DATABASE_URL`
-happens to be set (which silently retargets the provisioner). Both are things a reasonable person
-would write. Neither may go green.
-
-## What "done" means for a change to a credential-handling tool
-
-`gh-app-token.js`, `gh_token.sh`, `gh_access.sh` and anything else that touches a secret. Meeting
-"the tests pass" is necessary and not sufficient.
-
-1. **The default is refusal.** Any input the tool does not explicitly recognise must be refused with
-   a non-zero exit. Never let an unhandled case reach the code that emits a credential — that is the
-   exact shape of the 2026-08-23 bug, and it was one missing `if`.
-2. **A new argument means a new test.** Adding a mode, flag or verb without adding a case to
-   `test_gh_app_token.sh` is not done. The fuzz section covers arguments nobody anticipated; it does
-   not cover a real mode you forgot to constrain.
-3. **The test must be able to fail.** Prove it by reintroducing the bug in a *throwaway copy* and
-   watching the suite go red. CI does this on every run — see the last step of
-   `.github/workflows/ci.yml`. A green suite that cannot fail is worse than no suite, because it is
-   believed.
-4. **Assert on shape and on behaviour, not on prose.** Match the credential *pattern*, and assert the
-   tool did not even *request* one from the API. Both survive rewording; a `grep "Refusing"` does not.
-5. **No credential on `argv`, and none in a log.** Check what you pass to `curl`, what you `echo`,
-   and what ends up in an error path. `omniroute_combo_cli.sh` writes its `Authorization` header into
-   a `curl --config` file for this reason — copy that pattern rather than inventing another.
-6. **Test without credentials.** If a change can only be tested against real GitHub, it is not
-   testable and it will stop being tested. The seams that make this possible today are `GH_API_URL`
-   and `GH_APP_TOKEN_CACHE`; they are load-bearing for the suite, so removing either breaks CI on
-   purpose.
-7. **State the blast radius in the PR.** If a token could be minted, printed, cached or widened by
-   the change, say so explicitly. If a credential was exposed at any point while developing, revoke
-   it first, confirm the revocation (`DELETE /installation/token`, then prove reuse returns 401), and
-   record that in the PR.
-8. **Keep CI honest.** If you add a suite CI cannot run, say so in `.github/workflows/ci.yml` and say
-   why. Silently narrowing what CI covers, while the badge stays green, is the failure this repo was
-   created to prevent.
+Read a suite's preconditions before running it. Host, database and live-company
+acceptance suites are not offline tests. Provisioning suites can create and
+remove real agents; do not point them at production merely to obtain a result.
+Use stubs or explicitly disposable CI services. A missing backend is an
+unmeasured result, never evidence of enforcement.
+
+The toolkit uses standard GitHub-hosted `ubuntu-latest` runners. Do not import
+private runner labels, infrastructure manifests or secret-bearing configuration.
+Heavy jobs use a job-level `changes` gate, not workflow-level PR `paths` filters
+on required-check producers. Dependency, lockfile and workflow changes run the
+full suite; `main` and nightly runs are full runs. Disclosure and secret scans
+stay always on. The single `ci-ok` aggregator must fail for failed/cancelled
+jobs or an unsuccessful required scan, while allowing intentional suite skips.
+Add new jobs to the aggregator and test their wiring.
+
+When editing a mutation-tested subject, update its gate anchors consistently.
+Run the unmutated suite first, then prove the intended assertion rejects the
+mutant. An import error, missing fixture or syntax failure is not a valid kill.
+Use temporary copies and restore them reliably; never strand a mutant in the
+checkout.
+
+## Review and delivery
+
+Keep a PR to one logical change. Obtain independent review of the exact head
+that will merge; a new push needs a new verdict on the same review record.
+Required CI must be green on that head. The approving reviewer, not the author,
+squash-merges through the repository's approved path.
+
+A public re-home also needs fresh independent disclosure review of the exact
+candidate: changed filenames and content, history, licenses, credentials and
+host-specific configuration. A previous slice's verdict does not cover it.
+
+Done means merged, not merely opened or approved. Record the merge SHA and
+verification. If a PR is superseded, close it with a public-safe comment naming
+its replacement. Do not leave an orphan PR while marking its task complete.
+
+Deployment is a separate deliverable with its own access, staging, rollback and
+production gates. Nothing in this contribution contract authorizes a host
+operation or changes an existing operator approval requirement.

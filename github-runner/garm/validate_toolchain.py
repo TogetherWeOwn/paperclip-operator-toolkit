@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCHEMA = "garm-isolated-toolchain.v1"
 MAX_BYTES = 1024 * 1024
-ROLE = "isolated"
+ROLE = "isolated-private"
 
 VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[.+-][A-Za-z0-9.-]+)?")
 FORBIDDEN_TOKENS = ("latest", "*", "main", "master", "stable", "tbd", "todo", "unknown", "unverified")
@@ -60,7 +60,7 @@ def validate(manifest):
                        "admission_authorized", "output_hold", "notes"},
             "manifest")
     require(m["schema"] == SCHEMA, "schema")
-    require(m["role"] == ROLE, "role: isolated only")
+    require(m["role"] == ROLE, "role: isolated-private only")
     require(m["evidence_class"] == "source-only", "evidence_class: source-only only")
     require(m["status"] == "synthetic-preparation-only", "status")
     text(m["notes"], "notes")

@@ -1,0 +1,17 @@
+{
+  "name": "gh-event-capture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic signed GitHub event capture, scoped reconciliation and offline decision controls",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node scripts/run-offline-tests.mjs",
+    "check": "node scripts/check-source.mjs",
+    "consume": "node src/consumer-cli.js",
+    "prepare-runtime": "node scripts/prepare-runtime.mjs"
+  },
+  "devDependencies": {}
+}

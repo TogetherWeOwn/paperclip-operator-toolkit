@@ -1,0 +1,160 @@
+{
+  "actions": {
+    "active_work_aborted": false,
+    "cache_removal": false,
+    "cap_change": false,
+    "credential_change": false,
+    "pool_change": false,
+    "provider_restart": false,
+    "routing_change": false,
+    "running_vm_profile_change": false,
+    "static_service_change": false,
+    "workflow_edit": false
+  },
+  "budget": {
+    "active_vms": 0,
+    "all_reservations_accounted": true,
+    "available_cpu": 4,
+    "available_disk_gib": 40,
+    "available_ram_mib": 8192,
+    "configured_max": 2,
+    "filesystems": [
+      {
+        "mount": "/",
+        "used_percent": 50
+      },
+      {
+        "mount": "/home",
+        "used_percent": 60
+      }
+    ],
+    "observed_at": "2026-10-03T03:25:00Z",
+    "pressure_clear": true,
+    "requested_cpu": 2,
+    "requested_disk_gib": 20,
+    "requested_ram_mib": 4096,
+    "requested_vms": 1,
+    "reserved_vms": 0,
+    "safe_max": 1
+  },
+  "cleanup": {
+    "host": "fixture-host-a",
+    "observed_at": "2026-10-03T03:28:00Z",
+    "pool": "fixture-host-a-pool",
+    "provider": "fixture-provider",
+    "registration_absent": true,
+    "run": "fixture-run-1",
+    "runner": "garm-fixture-1",
+    "vm": "fixture-vm-1",
+    "vm_absent": true
+  },
+  "evidence_class": "synthetic",
+  "image": {
+    "docker": false,
+    "fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "inputs_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "node24_runner_smoke": true,
+    "profile_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "rebuild_receipt_present": true,
+    "sudo": false,
+    "tool_versions": {
+      "cc": "1.0.0",
+      "node": "24.0.0",
+      "psql": "16.0.0",
+      "runner": "2.999.0"
+    }
+  },
+  "job": {
+    "artifacts_complete": true,
+    "completed_at": "2026-10-03T03:27:00Z",
+    "conclusion": "success",
+    "host": "fixture-host-a",
+    "image_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "mapping_verified": true,
+    "pool": "fixture-host-a-pool",
+    "provider": "fixture-provider",
+    "run": "fixture-run-1",
+    "runner": "garm-fixture-1",
+    "vm": "fixture-vm-1"
+  },
+  "probes": {
+    "docker_tcp_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "docker_unix_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "host_services_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "metadata_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "native_build": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "native_postgres": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "sibling_data_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "sudo_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    }
+  },
+  "role": "isolated-private",
+  "schema": "garm-rehearsal-receipt.v1",
+  "source": {
+    "bundle_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "target": {
+    "enabled_pools": [
+      {
+        "host": "fixture-host-a",
+        "pool": "fixture-host-a-pool",
+        "provider": "fixture-provider",
+        "selectors": [
+          "example-ephemeral",
+          "fixture-host-a-exclusive"
+        ]
+      },
+      {
+        "host": "fixture-host-b",
+        "pool": "fixture-host-b-pool",
+        "provider": "fixture-secondary-provider",
+        "selectors": [
+          "example-ephemeral"
+        ]
+      }
+    ],
+    "garm_version": "0.2.1",
+    "host": "fixture-host-a",
+    "inventory_complete": true,
+    "lxd_version": "5.21",
+    "pool": "fixture-host-a-pool",
+    "provider": "fixture-provider",
+    "provider_version": "0.1.3",
+    "selector": "fixture-host-a-exclusive"
+  },
+  "trust": {
+    "blocking_gate_unchanged": true,
+    "cancel_in_progress": false,
+    "db_target": "disposable-ci-service",
+    "public_pr_excluded": true,
+    "repository": "TogetherWeOwn/fixture-private",
+    "required_checks_verified": true,
+    "runner_group_verified": true,
+    "trusted_ref_policy_verified": true,
+    "visibility": "private"
+  }
+}

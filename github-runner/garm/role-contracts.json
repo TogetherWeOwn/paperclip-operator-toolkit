@@ -23,7 +23,7 @@
   "installed": false,
   "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to build or execute",
   "roles": {
-    "isolated": {
+    "isolated-private": {
       "docker": false,
       "required_probes_with_positive_controls": [
         "docker_tcp_denied",
@@ -43,7 +43,7 @@
       ],
       "sudo": false
     },
-    "privileged": {
+    "privileged-private": {
       "docker": true,
       "required_probes_with_positive_controls": [
         "ci_postgres",

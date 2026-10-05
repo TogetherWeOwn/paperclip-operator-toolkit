@@ -1,0 +1,40 @@
+name: Documentation issue
+description: Report incorrect, missing, or unclear documentation
+labels: [documentation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help improve the docs. Point us at what is wrong, missing, or confusing.
+  - type: dropdown
+    id: type
+    attributes:
+      label: Issue type
+      options:
+        - Incorrect information
+        - Missing documentation
+        - Unclear or confusing
+        - Outdated (no longer matches behavior)
+        - Typo or formatting
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where is the issue?
+      description: File path or section name.
+      placeholder: "e.g. CONTRIBUTING.md#branch-and-review, README.md#setup"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What is wrong?
+      description: Describe the documentation issue.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix
+      description: If you know what the correct information should be, include it here.

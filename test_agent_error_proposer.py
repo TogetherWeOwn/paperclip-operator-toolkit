@@ -138,7 +138,7 @@ class WriterAgreement(unittest.TestCase):
         # The detector proposes; the writer decides. If their benign checks
         # drift apart, benign agents stop resetting (missed recovery) or --
         # worse -- the proposer emits what the writer always refuses (noise
-        # the owning routine must triage). Shared fixtures must agree.
+        # the CEO routine must triage). Shared fixtures must agree.
         benign = {"subtype": "success",
                   "unmanagedBackgroundTask": {"terminalResultSeen": True}}
         non_benign = [

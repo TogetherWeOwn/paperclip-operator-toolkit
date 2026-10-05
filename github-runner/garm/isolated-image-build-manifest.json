@@ -1,7 +1,7 @@
 {
   "schema": "garm-isolated-build-manifest.v1",
   "evidence_class": "synthetic",
-  "role": "isolated",
+  "role": "isolated-private",
   "base": {
     "distribution": "ubuntu-24.04",
     "image_alias": null,

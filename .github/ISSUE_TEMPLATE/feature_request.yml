@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a new capability or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New tooling should solve a real operator pain. Check `README.md` and `CONTRIBUTING.md`
+        first, and search existing issues — a 60-second search saves hours later.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area affected
+      description: Which part of the tooling would this primarily live in?
+      options:
+        - Credential and token tooling
+        - Agent provisioning
+        - CI gates and checks
+        - Host checks and monitoring
+        - Quota and pacing
+        - Docs and runbooks
+        - Cross-cutting (multiple of the above)
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What are you trying to do that is currently difficult or impossible?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the capability you would like. How should it work?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about and why you ruled them out.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Examples from other tools, related issues, etc.

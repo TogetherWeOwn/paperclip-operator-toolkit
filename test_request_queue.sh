@@ -9,11 +9,11 @@
 # THIS SUITE NEEDS A COMPANY-SHAPED POSTGRES DATABASE and is not a purely
 # offline unit test: org_provisioner.sh has no ORG_SNAPSHOT path, and sections
 # 7/9/10 read SQL directly. CI supplies a throwaway schema/org fixture plus a
-# dumb recording CLI; the VPS run remains necessary for the real Paperclip API
-# contract. The two guards below still ensure an unavailable database never
-# scores itself green.
+# dumb recording CLI; a run against the production host remains necessary for
+# the real Paperclip API contract. The two guards below still ensure an
+# unavailable database never scores itself green.
 #
-# WHY A REFUSAL IS NOT ENOUGH TO PASS A CASE (TOG-402). The old helper was
+# WHY A REFUSAL IS NOT ENOUGH TO PASS A CASE. The old helper was
 #
 #   must_refuse() { ... if [[ $rc -ne 0 ]] && grep -q REFUSED <<<"$o"; then ok
 #
@@ -24,8 +24,8 @@
 # in an agent container with COMPANY_ID set and no podman: 15 of 31 assertions
 # went green against no database at all, including section 10's "no TESTQ
 # agents remain active", which is an ABSENCE claim and so the worst of them.
-# Same class as the vacuous mutation gates (TOG-253) and the neighbouring-gate
-# problem (TOG-349): a fail-closed default upstream satisfies an assertion that
+# Same class as the vacuous mutation gates and the neighbouring-gate
+# problem: a fail-closed default upstream satisfies an assertion that
 # names something downstream.
 #
 # Two guards, and both are needed — neither subsumes the other:
@@ -35,7 +35,7 @@
 #      gate's words, so a refusal from a different gate is a FAIL. Catches the
 #      single-case case, including a backend that dies mid-run, and survives a
 #      future section that is entirely refusals. Borrowed unchanged from
-#      test_capability_gate.sh:41 (TOG-387), which already solved this.
+#      test_capability_gate.sh:41, which already solved this.
 # And qnum() for scalar reads, because bash scores an empty string as 0, so
 # `[[ "$(q 'SELECT count(*)...')" -eq 0 ]]` reads a query that never ran as a
 # clean result. A check that measured nothing must not read green.
@@ -83,11 +83,13 @@ ERROR: test_request_queue.sh cannot reach the company database, so it did not ru
   This suite exercises org_request_queue.sh and org_provisioner.sh against live
   company state; there is no offline seam for it. Running anyway would report
   refusals produced by "requester not found" as if they were ceiling
-  enforcement. See the header, and TOG-402.
+  enforcement. See the header.
 
-  Backend selection: PAPERCLIP_SQL_BACKEND=${PAPERCLIP_SQL_BACKEND:-podman} (podman|psql)
+  Backend selection: PAPERCLIP_SQL_BACKEND=${PAPERCLIP_SQL_BACKEND:-podman} (podman|docker|psql)
     podman: needs podman on PATH and container \${PAPERCLIP_DB_CTR:-paperclip-db} running
+    docker: needs docker on PATH and container \${PAPERCLIP_DB_CTR:-paperclip-db} running (for hosts without podman)
     psql:   needs psql on PATH and DATABASE_URL or libpq PG* variables
+  CONTAINER_ENGINE overrides the binary the container backends invoke.
 EOF
   exit 3
 fi
@@ -195,7 +197,7 @@ if [[ -n "${DIR_ID:-}" ]]; then
   parent="$(q "SELECT COALESCE(p.metadata->>'orgRoleId',p.title,'ROOT') FROM agents a LEFT JOIN agents p ON p.id=a.reports_to WHERE a.id=:'text'::uuid;" "$DIR_ID")"
   [[ "$parent" == "T0" ]] && ok "director reports to the REQUESTER (T0), not the reviewer (A0)" \
                           || bad "director parent is '$parent', expected T0"
-  # The template set PLUS the TOG-984 assignment baseline. `tasks:assign` is
+  # The template set PLUS the assignment baseline. `tasks:assign` is
   # not part of C1_DIRECTOR_BUILDER and deliberately is not in TEMPLATES_JSON
   # (it would break org_request_queue.sh classify_risk's totality check); the
   # provisioner unions it in at the call site. See the ASSIGNMENT BASELINE
@@ -212,19 +214,19 @@ if [[ -n "${DIR_ID:-}" ]]; then
   [[ "$scope_errors" == "0" ]] \
     && ok "director has no NULL or foreign scope on a SELF permission" \
     || bad "director has $scope_errors SELF permission(s) with NULL or foreign scope"
-  # `tasks:assign` is EXCLUDED from this check because TOG-984 makes it
-  # company-wide on purpose, and it is the one key here that must be. The
-  # scope is not a provisioner choice: routes/agents.ts:2852 calls
+  # `tasks:assign` is EXCLUDED from this check because the assignment baseline
+  # makes it company-wide on purpose, and it is the one key here that must be.
+  # The scope is not a provisioner choice: routes/agents.ts:2852 calls
   # setPrincipalPermission with no scope argument, which defaults to NULL
   # (services/access.ts:661), so ANY agent with canAssignTasks=true holds it
   # company-wide. Demanding 0 here would have been unsatisfiable for an agent
-  # on the owner's baseline.
+  # on the company-wide baseline.
   #
   # It must not be narrowed to a subtree either, which is the tempting "fix":
   # authorization.ts:432-443 resolves a subtree-scoped grant by requiring the
   # TARGET to sit inside the actor's subtree and returns false otherwise. A
   # hand-back is upward or lateral, so its target is outside by construction —
-  # a subtree scope would reproduce the exact TOG-54/69/586 403 the owner
+  # a subtree scope would reproduce the exact hand-back 403 that the baseline
   # abolished, while this suite stayed green.
   #
   # The other three keys stay in the check: they are SELF permissions and a
@@ -234,7 +236,7 @@ if [[ -n "${DIR_ID:-}" ]]; then
   # template this suite provisions, so it can only be present if something
   # outside the provisioner put it there and apply_exact_grants failed to
   # replace it away — which is precisely what the exact-grant-replacement
-  # mutant in verification/tog-480-mutation-gate.sh seeds. Dropping
+  # mutant in the provisioner mutation gate under verification/ seeds. Dropping
   # `tasks:assign` from this list above costs the check nothing only because
   # this probe key still covers the DELETE; keep the two in sync.
   cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts','tools:use');" "$DIR_ID")"
@@ -243,7 +245,7 @@ if [[ -n "${DIR_ID:-}" ]]; then
   # the grant being ABSENT. An agent born without it cannot hand work back.
   bl="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND permission_key='tasks:assign' AND scope IS NULL;" "$DIR_ID")"
   [[ "$bl" == "1" ]] \
-    && ok "queue-provisioned agent is born on the TOG-984 assignment baseline (company-wide tasks:assign)" \
+    && ok "queue-provisioned agent is born on the assignment baseline (company-wide tasks:assign)" \
     || bad "expected exactly 1 company-wide tasks:assign grant, found '$bl'"
   dorm="$(q "SELECT CASE WHEN runtime_config->'heartbeat'->>'enabled'='false' AND runtime_config->'heartbeat'->>'wakeOnDemand'='false' THEN 'yes' ELSE 'no' END FROM agents WHERE id=:'text'::uuid;" "$DIR_ID")"
   [[ "$dorm" == "yes" ]] && ok "queue-provisioned agent is born dormant" || bad "queue-provisioned agent is not dormant"
