@@ -16,17 +16,22 @@ const SNAPSHOT: LaneQuotaSnapshot = JSON.parse(readFileSync(
   new URL('./fixtures/lane-quota-snapshot.synthetic-2026-10-03T0201Z.json', import.meta.url), 'utf8')).snapshot;
 const NOW = Date.parse('2026-10-03T02:01:30Z');
 const MAX_AGE = 300_000;
-const meta = (n: number): LaneAccountBinding => ({
-  laneId: `meta-lane-${n}`, accountId: `meta-acct-${n}`, poolId: `meta-pool-${n}`, providerId: 'meta',
-  windows: [
-    { kind: 'five-hour', utilizationField: 'five_hour_utilization', resetField: 'five_hour_resets_at' },
-    { kind: 'weekly', utilizationField: 'weekly_utilization', resetField: 'weekly_resets_at' },
-  ],
-});
-const BINDINGS: LaneAccountBinding[] = [
-  ...COMMITTED_LANE_ACCOUNT_BINDINGS,
-  ...[1, 2, 3, 4, 5, 6, 7, 8].map(meta),
-];
+// The committed table already carries the Meta lanes (live-document evidence
+// in tests/fixtures/meta-lane-evidence-20261003.json); the suite exercises it
+// directly so a drift between the table and the tests cannot hide.
+const BINDINGS: LaneAccountBinding[] = [...COMMITTED_LANE_ACCOUNT_BINDINGS];
+// Live host telemetry copy (unscoped, NOT a named-cohort acceptance run): the
+// eight observed Meta records with the capture provenance.
+const META_EVIDENCE = JSON.parse(readFileSync(
+  new URL('./fixtures/meta-lane-evidence-20261003.json', import.meta.url), 'utf8')) as {
+  provenance: { observedAt: string }; records: Array<Record<string, unknown>> };
+const META_OBSERVED_AT = Date.parse(META_EVIDENCE.provenance.observedAt);
+const META_SNAPSHOT: LaneQuotaSnapshot = {
+  schemaVersion: 1,
+  observedAt: META_EVIDENCE.provenance.observedAt,
+  staleAfterSeconds: 600,
+  records: META_EVIDENCE.records,
+};
 
 type Record_ = Record<string, unknown>;
 const adapt = (snapshot: LaneQuotaSnapshot = SNAPSHOT, patch: Record_ = {}) => adaptLaneQuotaSnapshot({
@@ -118,6 +123,31 @@ describe('lane quota snapshot -> shadow observation adapter', () => {
     expect(JSON.stringify(report)).not.toMatch(/average|fleet/i);
   });
 
+  it('reports the live Meta lane evidence with committed identities and keeps cached meta-lane-4 stale', () => {
+    const result = adaptLaneQuotaSnapshot({
+      snapshot: META_SNAPSHOT, now: META_OBSERVED_AT + 120_000, maxAgeMs: 600_000,
+      evidenceKind: 'synthetic-replay',
+    });
+    // Default bindings: identity comes only from the committed table.
+    expect(result.accounts.map(a => a.accountId)).toEqual(
+      COMMITTED_LANE_ACCOUNT_BINDINGS.map(b => b.accountId));
+    expect(result.unmappedLanes).toEqual([]);
+    // The live capture holds only Meta records: the other committed lanes are absent, not unmapped.
+    expect(result.missingLanes).toEqual(
+      ['claude-lane-1', 'claude-lane-2', 'codex-lane-1', 'codex-lane-2', 'codex-lane-3', 'zai-lane-1']);
+    // Live field names align with the committed Meta bindings.
+    expect(row(result, 'meta-lane-2', 'weekly')).toMatchObject({
+      state: 'known', freshness: 'fresh', utilization: 0.81,
+      resetAt: Date.parse('2026-10-05T00:00:00Z') });
+    expect(row(result, 'meta-lane-7', 'weekly')).toMatchObject({ state: 'known', utilization: 0.19 });
+    // meta-lane-4 was cached/unavailable at capture: stale, never certified fresh.
+    for (const kind of ['five-hour', 'weekly'] as const) {
+      expect(row(result, 'meta-lane-4', kind)).toMatchObject({
+        state: 'stale', freshness: 'cached', observationQuality: 'cached',
+        reasons: expect.arrayContaining(['cached-observation']) });
+    }
+  });
+
   it('marks cached Codex observations stale and reports no attainment for them', () => {
     const result = adapt();
     for (const n of [1, 2, 3]) {
@@ -173,6 +203,29 @@ describe('lane quota snapshot -> shadow observation adapter', () => {
   ])('marks a %s weekly reset invalid', (_name, reset, reason) => {
     const result = adapt(patched('claude-lane-2', { seven_day_resets_at: reset }));
     expect(row(result, 'claude-lane-2', 'weekly')).toMatchObject({ state: 'invalid', reasons: [reason] });
+  });
+
+  it('caps numeric epochs above 8.64e15 instead of throwing in toISOString', () => {
+    const badClock = adapt({ ...SNAPSHOT, observedAt: 9e15 });
+    expect(badClock.snapshotObservedAt).toBeNull();
+    expect(badClock.rows.every(r => r.state === 'invalid')).toBe(true);
+    expect(badClock.rows[0]!.reasons).toContain('missing-observed-at');
+    const badReset = adapt(patched('claude-lane-2', { seven_day_resets_at: 9e15 }));
+    expect(row(badReset, 'claude-lane-2', 'weekly')).toMatchObject({
+      state: 'invalid', reasons: ['reset-unparseable'], resetAt: null, reportedResetAt: null });
+    // Positive control: exactly 8.64e15 is the largest valid instant and parses.
+    const capped = adapt({ ...SNAPSHOT, observedAt: 8.64e15 });
+    expect(capped.snapshotObservedAt).toBe(8.64e15);
+    expect(capped.rows[0]!.reasons).toContain('observation-in-future');
+  });
+
+  it('snaps resets within half the grid onto the boundary and keeps resets outside it apart', () => {
+    const base = row(adapt(), 'claude-lane-2', 'weekly');
+    const near = row(adapt(patched('claude-lane-2', { seven_day_resets_at: '2026-10-03T09:59:31Z' })), 'claude-lane-2', 'weekly');
+    expect(near.windowId).toBe(base.windowId);
+    expect(near.reportedResetAt).toBe('2026-10-03T09:59:31.000Z');
+    const far = row(adapt(patched('claude-lane-2', { seven_day_resets_at: '2026-10-03T09:59:29Z' })), 'claude-lane-2', 'weekly');
+    expect(far.windowId).not.toBe(base.windowId);
   });
 
   it('keeps a reset exactly one window ahead valid and flags a future observation', () => {
@@ -247,9 +300,9 @@ describe('lane quota snapshot -> shadow observation adapter', () => {
   });
 
   it('counts a shared pool once and refuses to pick between disagreeing observations', () => {
-    const shared: LaneAccountBinding[] = [
-      { ...meta(1), poolId: 'meta-shared' }, { ...meta(2), poolId: 'meta-shared' },
-    ];
+    const committedMeta = (laneId: string): LaneAccountBinding =>
+      ({ ...COMMITTED_LANE_ACCOUNT_BINDINGS.find(b => b.laneId === laneId)!, poolId: 'meta-shared' });
+    const shared: LaneAccountBinding[] = [committedMeta('meta-lane-1'), committedMeta('meta-lane-2')];
     const aligned = SNAPSHOT.records.map(r => r.lane === 'meta-lane-2'
       ? { ...r, five_hour_utilization: 0, five_hour_resets_at: SNAPSHOT.records.find(x => x.lane === 'meta-lane-1')!.five_hour_resets_at,
         weekly_utilization: 0.04 } : r);
@@ -379,14 +432,15 @@ describe('decision report caller path', () => {
   });
 
   it('derives accounts and windows from the committed table and attaches the provenance rows', () => {
-    // The committed table has no Meta lanes: they are reported as unmapped, not guessed.
+    // The committed table carries the Meta lanes from live-document evidence,
+    // and the synthetic snapshot covers every committed lane: nothing unmapped, nothing missing.
     const report = reportDecisionAdmissionShadow(input() as never, NOW, eligible)!;
     expect(report.accounts.map(a => a.accountId)).toEqual(COMMITTED_LANE_ACCOUNT_BINDINGS.map(b => b.accountId));
     expect(report.observationAdapter).toMatchObject({ schema: 'lane-quota-observation-adapter-v1',
       evidenceKind: 'fresh-observations', snapshotObservedAt: Date.parse('2026-10-03T02:01:00Z'), maxAgeMs: MAX_AGE,
       unstableLaneCount: 0, missingLanes: [] });
-    expect(report.observationAdapter!.unmappedLanes).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map(n => `meta-lane-${n}`));
-    expect(report.observationAdapter!.rows).toHaveLength(2 * 2 + 3 + 2);
+    expect(report.observationAdapter!.unmappedLanes).toEqual([]);
+    expect(report.observationAdapter!.rows).toHaveLength(2 * 2 + 3 + 2 + 8 * 2);
     expect(report.limitations.join(' ')).toContain('advisory attainment only');
     expect(report.accounts.every(a => a.infeasibilityReasons.includes('no-observed-eligible-account-binding'))).toBe(true);
   });

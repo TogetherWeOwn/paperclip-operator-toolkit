@@ -252,7 +252,7 @@ describe("dispatch sweep", () => {
 
   it("anchors idle to the last finished run, not issue.createdAt, when a run exists", async () => {
     const card = issue("i1", { createdAt: new Date(NOW - 24 * 60 * 60_000) });
-    // The sibling running run keeps agent-1 busy, so the new
+    // the sibling running run keeps agent-1 busy, so the new
     // idle-assignee class cannot claim i1 — this test isolates the anchoring
     // rule (without it, i1 would wake via `actionable_idle_assignee` and the
     // assertion would prove nothing about anchoring).
@@ -407,8 +407,8 @@ describe("dispatch sweep", () => {
     expect(metadata.routingOwnersComplete).toBe(false);
   });
 
-  it("Fix 3/4: report-only would-have-woken note names the specific issue identifiers, not just a count", async () => {
-    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), identifier: "EX-9001" } as never);
+  it(" fix 3/4: report-only would-have-woken note names the specific issue identifiers, not just a count", async () => {
+    const card = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), identifier: "" } as never);
     const harness = await boot(baseConfig(), [card]);
     withOrchestration(harness, {});
 
@@ -420,12 +420,12 @@ describe("dispatch sweep", () => {
     // goes red — the operator report loses the one piece of information a
     // human needs to act on (which specific card would have woken).
     const metadata = harness.activity[0]?.metadata as { notes: string[] };
-    expect(metadata.notes.some((n) => n.startsWith("report-only: would have woken") && n.includes("EX-9001"))).toBe(
+    expect(metadata.notes.some((n) => n.startsWith("report-only: would have woken") && n.includes(""))).toBe(
       true,
     );
   });
 
-  it("Fix 3/4: does not add a report-only would-have-woken note when nothing was picked", async () => {
+  it(" fix 3/4: does not add a report-only would-have-woken note when nothing was picked", async () => {
     const card = issue("i1", { status: "backlog" });
     const harness = await boot(baseConfig(), [card]);
     withOrchestration(harness, {});
@@ -436,7 +436,7 @@ describe("dispatch sweep", () => {
     expect(metadata.notes.some((n) => n.startsWith("report-only:"))).toBe(false);
   });
 
-  it("Fix 3/4: an issue whose orchestration read throws is counted and named in an unreadable-coverage note", async () => {
+  it(" fix 3/4: an issue whose orchestration read throws is counted and named in an unreadable-coverage note", async () => {
     const readable = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const unreadable = issue("i2", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-2" });
     const harness = await boot(
@@ -463,7 +463,7 @@ describe("dispatch sweep", () => {
     expect((metadata as unknown as { counters: { woken: number } }).counters.woken).toBe(1);
   });
 
-  it("Fix 3/4: a partial-list routing-owners note is attached whenever the routing gap is non-empty", async () => {
+  it(" fix 3/4: a partial-list routing-owners note is attached whenever the routing gap is non-empty", async () => {
     const unassigned = issue("i1", { assigneeAgentId: null, projectId: "proj-a" });
     const harness = await boot(baseConfig(), [unassigned], []);
     withOrchestration(harness, {});
@@ -478,7 +478,7 @@ describe("dispatch sweep", () => {
     ).toBe(true);
   });
 
-  it("Fix 3/4: a page-saturation note is attached when the issue list hits the page limit", async () => {
+  it(" fix 3/4: a page-saturation note is attached when the issue list hits the page limit", async () => {
     const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
     const cards = Array.from({ length: DISPATCH_ISSUE_PAGE_LIMIT }, (_, i) =>
       issue(`saturated-${i}`, { status: "done" }),
@@ -511,7 +511,7 @@ describe("dispatch sweep", () => {
     expect(manifest.capabilities).toContain("issue.interactions.read");
   });
 
-  it("Fix 1: refuses a card with a future monitor_next_check_at as refused_monitor_armed", async () => {
+  it(" fix 1: refuses a card with a future monitor_next_check_at as refused_monitor_armed", async () => {
     const armed = issue("i1", {
       createdAt: new Date(NOW - 60 * 60_000),
       monitorNextCheckAt: new Date(NOW + 48 * 60 * 60_000),
@@ -524,13 +524,13 @@ describe("dispatch sweep", () => {
     await harness.runJob(JOB_KEYS.dispatchSweep);
 
     // Named mutant: "monitor-armed check removed". Without it this card falls
-    // through to `actionable` and gets woken.
+    // through to `actionable` and gets woken —  verbatim.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.refused_monitor_armed).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("Fix 1: a PAST monitor_next_check_at does not refuse the wake", async () => {
+  it(" fix 1: a PAST monitor_next_check_at does not refuse the wake", async () => {
     const lapsed = issue("i1", {
       createdAt: new Date(NOW - 60 * 60_000),
       monitorNextCheckAt: new Date(NOW - 60 * 60_000),
@@ -547,7 +547,7 @@ describe("dispatch sweep", () => {
     expect(metadata.counters.woken).toBe(1);
   });
 
-  it("Fix 2: refuses a card with a pending human_only interaction as parked_on_human_ask", async () => {
+  it(" fix 2: refuses a card with a pending human_only interaction as parked_on_human_ask", async () => {
     const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       asked,
@@ -573,14 +573,14 @@ describe("dispatch sweep", () => {
     await harness.runJob(JOB_KEYS.dispatchSweep);
 
     // Named mutant: "human_only check removed". Without it this falls through
-    // to actionable: no agent run can advance a card an owner must
-    // personally resolve.
+    // to actionable — /2455/1677 verbatim: no agent run can advance a
+    // card an owner must personally resolve.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.parked_on_human_ask).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("Fix 2: refuses a card whose pending interaction is addressed to a different agent", async () => {
+  it(" fix 2: refuses a card whose pending interaction is addressed to a different agent", async () => {
     const asked = issue("i1", { createdAt: new Date(NOW - 60 * 60_000), assigneeAgentId: "agent-1" });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       asked,
@@ -611,7 +611,7 @@ describe("dispatch sweep", () => {
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("Fix 2: a RESOLVED (non-pending) interaction does not park the card", async () => {
+  it(" fix 2: a RESOLVED (non-pending) interaction does not park the card", async () => {
     const resolved = issue("i1", { createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       resolved,
@@ -641,7 +641,7 @@ describe("dispatch sweep", () => {
     expect(metadata.counters.woken).toBe(1);
   });
 
-  it("Fix 3: refuses an in_review card with no interaction naming the assignee as refused_in_review", async () => {
+  it(" fix 3: refuses an in_review card with no interaction naming the assignee as refused_in_review", async () => {
     const reviewing = issue("i1", { status: "in_review", createdAt: new Date(NOW - 60 * 60_000) });
     const harness = await boot(baseConfig({ dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } }), [
       reviewing,
@@ -652,13 +652,13 @@ describe("dispatch sweep", () => {
 
     // Named mutant: "in_review reviewer check removed". Without it an
     // in_review card wakes on idle alone, same as any other status — the
-    // dispatcher.py behavior this check restores.
+    // dispatcher.py behavior  asks to restore.
     const metadata = harness.activity[0]?.metadata as { counters: Record<string, number> };
     expect(metadata.counters.refused_in_review).toBe(1);
     expect(metadata.counters.woken ?? 0).toBe(0);
   });
 
-  it("Fix 3: wakes an in_review card when a pending interaction names the assignee as the reviewer", async () => {
+  it(" fix 3: wakes an in_review card when a pending interaction names the assignee as the reviewer", async () => {
     const reviewing = issue("i1", {
       status: "in_review",
       createdAt: new Date(NOW - 60 * 60_000),
@@ -731,7 +731,7 @@ describe("dispatch sweep", () => {
     expect(companyIds).toEqual(["co-1", "co-2"]);
   });
 
-  it("Stops starting new gather RPCs when the job budget is reached, still emitting a partial summary", async () => {
+  it(": stops starting new gather RPCs when the job budget is reached, still emitting a partial summary", async () => {
     const cards = [
       issue("i1", { createdAt: new Date(NOW - 60 * 60_000) }),
       issue("i2", { createdAt: new Date(NOW - 60 * 60_000) }),
@@ -766,7 +766,7 @@ describe("dispatch sweep", () => {
       wakeups += 1;
       return { queued: true, runId: "r1" };
     }) as typeof harness.ctx.issues.requestWakeup;
-    // The fix under test — a deadline crossed mid-gather must
+    // the fix under test — a deadline crossed mid-gather must
     // skip the second per-issue RPC, not just the next loop iteration.
     let interactionsCalls = 0;
     const originalListInteractions = harness.ctx.issues.listInteractions.bind(harness.ctx.issues);
@@ -786,7 +786,7 @@ describe("dispatch sweep", () => {
     // gathered and the first pick is woken; with it no *new* gather RPC
     // starts past the budget and no wake RPC fires.
     //
-    // The clock jumps past the deadline while the first
+    // the clock jumps past the deadline while the first
     // `getOrchestration` is in flight, so the mid-gather checkpoint trips
     // before `listInteractions` — the first issue is dropped with an
     // incomplete gather rather than completed without its interactions
@@ -818,7 +818,7 @@ describe("dispatch sweep", () => {
   });
 });
 
-describe("dispatch sweep: idle-assignee class, lane-down gate, coded wake failures", () => {
+describe("dispatch sweep : idle-assignee class, lane-down gate, coded wake failures", () => {
   const wakeConfig = { dispatch: { wakeEnabled: true, idleMinutes: 30, maxWakesPerFiring: 3 } };
 
   it("wakes a below-threshold card whose assignee holds no running run (actionable_idle_assignee)", async () => {

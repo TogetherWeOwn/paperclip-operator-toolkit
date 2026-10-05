@@ -25,7 +25,7 @@ describe("config resolution", () => {
       .toContain("selection.contextRunLogRoot must be an absolute path");
   });
 
-  it("resolves an unset agent-env cap to the fleet ceiling", () => {
+  it("resolves an unset agent-env cap to the fleet ceiling ()", () => {
     // Unset behaves exactly as before the split: the pin stamps against the
     // fleet ceiling until the operator sets `agentEnvContextTokens`.
     expect(resolveConfig({}).selection.agentEnvContextTokens).toBe(1_000_000);
@@ -62,7 +62,7 @@ describe("config resolution", () => {
   });
 
   it("treats an absent tier label id as a supported configuration", () => {
-    // The label is additive information, not a gate (ADR-0008), so a missing id
+    // The label is additive information, not a gate , so a missing id
     // is a warning at most — never an error that blocks the override write.
     const config = resolveConfig({
       selection: { mode: "enforce" },
@@ -185,7 +185,7 @@ describe("config resolution", () => {
           {
             laneId: "lane-a",
             statusUrl: "https://status.example.com/lane-a",
-            apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
+            apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
             windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
           },
         ],
@@ -193,7 +193,7 @@ describe("config resolution", () => {
     });
     expect(config.pacing.lanes[0]!.apiKeySecretRef).toEqual({
       type: "secret_ref",
-      secretId: "5ec2e700-0000-4000-8000-000000000001",
+      secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4",
     });
     expect(config.pacing.lanes[0]!.lane.accountKeyFields).toEqual([
       "account_key",
@@ -313,7 +313,7 @@ describe("config resolution", () => {
     expect(warnings.some((w) => w.includes("cache read is the largest cost line"))).toBe(true);
   });
 
-  describe("A roster laneId must resolve to a configured lane", () => {
+  describe(" Defect 6: a roster laneId must resolve to a configured lane", () => {
     const validLane = {
       laneId: "lane-t1",
       statusUrl: "https://example.test/status",
@@ -387,8 +387,8 @@ describe("config resolution", () => {
     });
   });
 
-  describe("AaFreeSync is default-off and fail-loud when enabled", () => {
-    const SECRET = { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" };
+  describe(" P2: aaFreeSync is default-off and fail-loud when enabled", () => {
+    const SECRET = { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" };
     const BINDING = {
       candidateId: "opus-high",
       modelId: "claude-opus-5",
@@ -442,7 +442,7 @@ describe("config resolution", () => {
     });
   });
 
-  describe("AcceptedWork is default-off", () => {
+  describe("acceptedWork is default-off", () => {
     it("is disabled out of the box, with no validation errors", () => {
       const config = resolveConfig(undefined);
       expect(config.acceptedWork.enabled).toBe(false);
@@ -459,7 +459,7 @@ describe("config resolution", () => {
     });
   });
 
-  describe("Enforce preflight: refuse enforce while any tier has zero enabled rows", () => {
+  describe(" enforce preflight: refuse enforce while any tier has zero enabled rows", () => {
     const row = (id: string, tier: string, enabled = true) => ({
       id,
       tier,
@@ -488,6 +488,39 @@ describe("config resolution", () => {
         }),
       );
       expect(errors.some((e) => e.includes("tier T2") && e.includes("no enabled models"))).toBe(true);
+    });
+
+    it("an empty T0 is a warning in enforce, not a refusal, and T1 stays required", () => {
+      const withoutT0 = validateConfig(
+        resolveConfig({
+          selection: { mode: "enforce" },
+          models: [row("t1-model", "T1"), row("t2-model", "T2"), row("t3-model", "T3")],
+        }),
+      );
+      expect(withoutT0.errors).toEqual([]);
+      expect(withoutT0.warnings.some((w) => w.includes("no enabled model at tier T0") && w.includes("tier:T0"))).toBe(true);
+
+      // Positive control: the same roster minus T1 still refuses, so the
+      // exemption is T0's explicit-only admission, not a loosened gate.
+      const withoutT1 = validateConfig(
+        resolveConfig({
+          selection: { mode: "enforce" },
+          models: [row("t0-model", "T0"), row("t2-model", "T2"), row("t3-model", "T3")],
+        }),
+      );
+      expect(withoutT1.errors.some((e) => e.includes("tier T1") && e.includes("no enabled models"))).toBe(true);
+      expect(withoutT1.warnings.some((w) => w.includes("no enabled model at tier T0"))).toBe(false);
+    });
+
+    it("a roster that serves T0 resolves enforce with no T0 warning", () => {
+      const { errors, warnings } = validateConfig(
+        resolveConfig({
+          selection: { mode: "enforce" },
+          models: [row("t0-model", "T0"), row("t1-model", "T1"), row("t2-model", "T2"), row("t3-model", "T3")],
+        }),
+      );
+      expect(errors).toEqual([]);
+      expect(warnings.some((w) => w.includes("no enabled model at tier T0"))).toBe(false);
     });
 
     it("leaves advise mode on a warning when a tier is empty", () => {

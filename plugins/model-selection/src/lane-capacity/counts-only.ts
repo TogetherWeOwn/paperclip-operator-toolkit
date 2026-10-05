@@ -1,6 +1,6 @@
 import { recordOf } from "./value-normalization.js";
 
-/** Operator-observed producer contract, 2026-10-01;. */
+/** Operator-observed producer contract, 2026-10-01; see . */
 export interface CountsOnlyEvidence {
   requestsToday: number;
   requestsLifetime: number;

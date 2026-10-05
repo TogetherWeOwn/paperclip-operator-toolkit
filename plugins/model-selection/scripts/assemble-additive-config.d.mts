@@ -14,6 +14,14 @@ export interface AdditiveConfigCounts {
   guard: string;
 }
 
+export function validateBridgeConfig(live: Record<string, any>, artifact: Record<string, any>): void;
+
+export function assembleBridgeConfig(
+  roster: Record<string, unknown>,
+  live: Record<string, unknown>,
+  options?: { minimumLaneBoundModels?: number },
+): ReturnType<typeof assembleAdditiveConfig>;
+
 export function assembleAdditiveConfig(
   roster: Record<string, unknown>,
   live: Record<string, unknown>,

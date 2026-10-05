@@ -1,7 +1,7 @@
 # Run-scoped model decision (`onResolveRunModel`)
 
-The router decides each issue run's model at the run's start, from memory,
-instead of pinning the issue and racing the run.
+, from  §4.3 and §6. The router decides each issue run's model
+at the run's start, from memory, instead of pinning the issue and racing the run.
 
 ## What it is
 
@@ -68,8 +68,8 @@ Two switches, both needed, and a build made for the fork host:
    artifact omits them: a host without the hook rejects an unknown capability at
    install, so the default build installs everywhere. The capability has one holder
    per company.
-2. **Config** `runResolve.enabled: true` and `selection.mode: "enforce"`. Enabling
-   enforcement is a separate, gated decision; `runResolve` alone retires nothing.
+2. **Config** `runResolve.enabled: true` and `selection.mode: "enforce"`. The
+   enforce gate is 's; `runResolve` alone retires nothing.
 3. **Host** `experimental.requireRunModelDecision` (default off). Off, the host
    records the answer and runs on the default: use that to measure fidelity before
    requiring it.

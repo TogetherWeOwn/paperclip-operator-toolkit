@@ -37,7 +37,7 @@
  *
  * COOLDOWN EXCLUDES HERE — IT DOES NOT MERELY DOWN-RANK
  *
- * Measured against the real `router/src/capacity/normalize.ts`:
+ * Measured on  against the real `router/src/capacity/normalize.ts`:
  * `health: "cooldown"` lands in that module's *degraded* bucket, `postureFor`
  * turns degraded into `avoid`, and an avoided lane stays selectable. A lane
  * publishing a cooldown would look handled and keep taking traffic. This

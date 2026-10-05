@@ -1,0 +1,13 @@
+{
+  "_provenance": "SYNTHETIC. The 3 bridge rows re-express the committed reviewed roster (plugins/model-selection/config/reviewed-roster.json: muse-spark-1.3-contributor T3 enabled, claude-sonnet-5-5 T2 enabled, gpt-6.1-sol T1 enabled, all $0-or-list-price non-fallback rows) with the lane bindings the assembly infers (assemble-additive-config.mjs laneForNewModel: muse- -> cliproxy-meta, claude- -> cliproxy-claude, gpt- -> cliproxy-codex; pinned by meta-lane-rows.spec.ts and astra-lane-row.spec.ts). NOT a live reading, not a byte copy of any production document. No credentials, display names, or account keys — opaque lane ids and roster ids only. The suite pins every row against reviewed-roster.json, so roster drift is a red build, not silent staleness.",
+  "lanes": [
+    {"lane": "cliproxy-meta"},
+    {"lane": "cliproxy-claude"},
+    {"lane": "cliproxy-codex"}
+  ],
+  "models": [
+    {"id": "muse-spark-1.3-contributor", "tier": "T3", "enabled": true, "laneId": "cliproxy-meta"},
+    {"id": "claude-sonnet-5-5", "tier": "T2", "enabled": true, "laneId": "cliproxy-claude"},
+    {"id": "gpt-6.1-sol", "tier": "T1", "enabled": true, "laneId": "cliproxy-codex"}
+  ]
+}

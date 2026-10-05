@@ -31,6 +31,8 @@ describe("isImpacted", () => {
     ["plugin test", ["plugins/model-selection/tests/pacing.spec.ts"]],
     ["plugin lockfile", ["plugins/model-selection/package-lock.json"]],
     ["the gate itself", ["plugins/model-selection/scripts/mutation-gate.mjs"]],
+    // No ops/ case: the public tree stages no ops fixture (the paired-summary
+    // spec takes its harness path from PAIRED_DECISION_GATE_HARNESS).
     ["another staged repo fixture", ["test/fixtures/orgdb/schema.sql"]],
     ["CONTRIBUTING.md, which a spec reads", ["CONTRIBUTING.md"]],
     ["the workflow that wires the gate", [".github/workflows/ci.yml"]],

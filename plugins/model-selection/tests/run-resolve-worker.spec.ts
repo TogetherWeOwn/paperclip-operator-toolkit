@@ -6,7 +6,7 @@ import manifest, { buildManifest, RUN_MODEL_RESOLVE_CAPABILITY } from "../src/ma
 import { JOB_KEYS, PLUGIN_STATE_KEYS } from "../src/constants.js";
 import { RUN_RESOLVE_ENV_KEYS, type ResolveRunModelParams, type ResolveRunModelResult } from "../src/engine/run-resolve.js";
 import { createPlugin } from "../src/worker.js";
-import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
+import { LANED_MODELS, MODELS, NO_ESCALATION, NOW, PROFILES, account, laneDoc } from "./fixtures.js";
 import { stoppedLane } from "./run-resolve-helpers.js";
 
 const COMPANY = "co-1";
@@ -152,7 +152,7 @@ function countHostCalls(harness: Awaited<ReturnType<typeof boot>>["harness"]) {
   return counts;
 }
 
-describe("onResolveRunModel on the worker", () => {
+describe("onResolveRunModel on the worker ()", () => {
   describe("posture", () => {
     it("answers keep when the flag is off, and routes nothing", async () => {
       const { resolve, harness } = await boot(config({ runResolve: { enabled: false } }));
@@ -324,6 +324,109 @@ describe("onResolveRunModel on the worker", () => {
     });
   });
 
+  describe("quota document on the worker ()", () => {
+    // The pure matrix feeds `availabilityRaw` straight into the snapshot. This
+    // is the other half: the worker must LOAD the document the lane poller
+    // published into plugin state, and that load is the only thing that makes
+    // a quota exhaustion visible to an enforced run. LANED_MODELS puts haiku
+    // (the only T3 row) alone on `zai`; sonnet and opus share `claude`.
+    const availabilityKey = {
+      scopeKind: "company" as const,
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.laneAvailability,
+    };
+    const t3Card = () => issue(ISSUE, { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] });
+    const claudeAccounts = () => ["claude-a", "claude-b"].map((key) => account("claude", key));
+    const healthyDocument = () =>
+      laneDoc([...claudeAccounts(), ...["zai-a", "zai-b"].map((key) => account("zai", key))]);
+    const exhaustedZaiDocument = () =>
+      laneDoc([
+        ...claudeAccounts(),
+        ...["zai-a", "zai-b"].map((key) =>
+          account("zai", key, {
+            windows: [
+              {
+                name: "five_hour",
+                role: "serviceability",
+                utilization: 1,
+                resets_at: new Date(NOW + 60 * 60_000).toISOString(),
+                window_seconds: 18_000,
+                allowance_weight: 1,
+              },
+              {
+                name: "weekly",
+                role: "allowance",
+                utilization: 0.5,
+                resets_at: new Date(NOW + 48 * 60 * 60_000).toISOString(),
+                window_seconds: 604_800,
+                allowance_weight: 1,
+              },
+            ],
+          }),
+        ),
+      ]);
+    const settle = () => new Promise((done) => setTimeout(done, 20));
+
+    it("switches an incumbent off an exhausted lane once, logs why, and then serves warm with zero host reads", async () => {
+      const { resolve, harness } = await boot(config({ models: LANED_MODELS }), [t3Card()]);
+      await harness.ctx.state.set(availabilityKey, healthyDocument());
+
+      // Control: with a healthy document the T3 pick is haiku, then it sticks.
+      const first = decide(await resolve(params()));
+      expect(first.model).toBe("claude-haiku-4-5-20251001");
+      const second = decide(
+        await resolve(
+          params({ runId: "run-2", previous: { runId: "run-1", model: first.model, decisionId: first.decisionId } }),
+        ),
+      );
+      expect(second.model).toBe("claude-haiku-4-5-20251001");
+      expect(second.reason).toContain("sticky");
+      await vi.waitFor(() => expect(harness.activity.length).toBeGreaterThan(0));
+      expect(harness.activity.map((entry) => entry.metadata?.reason)).toEqual(["first-decision"]);
+
+      // The lane poller publishes an exhausted five-hour window on zai; the
+      // minute job is what makes new state visible to the hot path.
+      await harness.ctx.state.set(availabilityKey, exhaustedZaiDocument());
+      await harness.runJob(JOB_KEYS.refreshRunResolve);
+      const third = decide(
+        await resolve(
+          params({ runId: "run-3", previous: { runId: "run-2", model: second.model, decisionId: second.decisionId } }),
+        ),
+      );
+      expect(third.model).toBe("claude-sonnet-5");
+      expect(third.reason).toContain("unserviceable: lane-availability: quota");
+      expect(third.fallback).toBe(true);
+      expect(third.tier).toBe("T3");
+
+      await vi.waitFor(() =>
+        expect(harness.activity.filter((entry) => entry.metadata?.reason === "unserviceable")).toHaveLength(1),
+      );
+      const switched = harness.activity.find((entry) => entry.metadata?.reason === "unserviceable");
+      expect(switched?.entityId).toBe(ISSUE);
+      expect(switched?.metadata).toMatchObject({
+        from: "claude-haiku-4-5-20251001",
+        to: "claude-sonnet-5",
+        decisionId: third.decisionId,
+      });
+      expect(String(switched?.metadata?.detail)).toContain("lane-availability: quota");
+      expect(switched?.message).toContain("switched the run model");
+
+      // The next run sits on the escalated model: warm cache, no host read, and
+      // no second switch entry.
+      await settle();
+      const counts = countHostCalls(harness);
+      const fourth = decide(
+        await resolve(
+          params({ runId: "run-4", previous: { runId: "run-3", model: third.model, decisionId: third.decisionId } }),
+        ),
+      );
+      expect(fourth.model).toBe("claude-sonnet-5");
+      expect(counts).toEqual({ state: 0, issues: 0, agents: 0, db: 0, http: 0, config: 0 });
+      await settle();
+      expect(harness.activity.map((entry) => entry.metadata?.reason)).toEqual(["first-decision", "unserviceable"]);
+    });
+  });
+
   describe("classification in flight", () => {
     function slowClassifier(harness: Awaited<ReturnType<typeof boot>>["harness"], tier: "T1" | "T2" | "T3") {
       let release!: () => void;
@@ -422,7 +525,7 @@ describe("onResolveRunModel on the worker", () => {
     });
   });
 
-  describe("latency", () => {
+  describe("latency ( §6: p99 <= 250 ms)", () => {
     it("holds p99 well under budget on warm caches across a mixed sticky/switch workload", async () => {
       const { resolve, harness } = await boot(config());
       const first = decide(await resolve(params()));
@@ -483,7 +586,7 @@ describe("onResolveRunModel on the worker", () => {
   });
 });
 
-describe("retiring the legacy pin writers once the flag is on", () => {
+describe("retiring the legacy pin writers once the flag is on ()", () => {
   const idleRow = (id: string) => ({ id, identifier: id, status: "in_progress" });
   const agentFloorRow = () => agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } });
 
@@ -590,7 +693,7 @@ describe("retiring the legacy pin writers once the flag is on", () => {
   });
 });
 
-describe("manifest declaration", () => {
+describe("manifest declaration ()", () => {
   it("the default artifact declares neither the capability nor modelRouting, so it installs on a host without the hook", () => {
     expect(manifest.capabilities).not.toContain(RUN_MODEL_RESOLVE_CAPABILITY);
     expect(manifest).not.toHaveProperty("modelRouting");

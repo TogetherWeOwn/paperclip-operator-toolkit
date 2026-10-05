@@ -24,7 +24,7 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, subCallPins } from "./fixtures.js
 const COMPANY = "co-1";
 const AGENT = "agent-1";
 
-// Freeze the wall clock at the fixture NOW so the seeded PROFILES
+// freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running, and the
 // budget-exhaustion test below still owns Date.now via its own spy.
@@ -225,7 +225,7 @@ async function demoteOpus(harness: Awaited<ReturnType<typeof boot>>) {
 }
 
 /**
- * No pass may pay a `heartbeat_runs` read per scanned candidate.
+ * no pass may pay a `heartbeat_runs` read per scanned candidate.
  *
  * The incident was `balancePass` hitting the host's 300 s RPC wall on EVERY
  * run; the cause was one unindexed context lookup per candidate, doubled on
@@ -266,7 +266,7 @@ function stallPastBudget(budgetMs: number): Promise<void> {
 }
 
 /**
- * HARD RETURN harness. Production races each row body against the
+ *  HARD RETURN harness. Production races each row body against the
  * job deadline with a `setTimeout` armed at row start for the REMAINING
  * budget, so a test must move `Date` and timers together (a mocked-`Date`
  * jump leaves the race timer ~200 s out). Runs `jobKey` on that clock and
@@ -310,7 +310,7 @@ async function runJobPastDeadline(
 }
 
 /**
- * The stored scan mark in epoch ms, 0 when no mark was written
+ * the stored scan mark in epoch ms, 0 when no mark was written
  * (the pass then re-reads from the epoch). A row at `updated_at` T is re-read
  * next firing exactly when this is < T (`updated_at > mark`).
  */
@@ -321,10 +321,10 @@ async function storedScanMarkMs(harness: Awaited<ReturnType<typeof boot>>, state
   return stored?.at ? Date.parse(stored.at) : 0;
 }
 
-describe("scheduled passes", () => {
+describe("scheduled passes ( tier_dispatcher.py port)", () => {
   describe("labelOnlyPass", () => {
     // 2026-09-07 01:0xZ owner rule: a card with an inherited/cloned tier:*
-    // label but no pin (e.g. a cloned card that inherited tier:T1) is never seen
+    // label but no pin (e.g.  cloned 's tier:T1) is never seen
     // by classifyIssues (which only looks at unlabelled issues) and was
     // stranded on the agent floor. label_only_pass must pin it from the
     // existing label without re-classifying.
@@ -358,7 +358,7 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // Positive
+    //  (root cause #3, 2026-09-16 16:40Z incident). Positive
     // control: before this fix, `labelOnlyPass` gated on `tierFromLabels(...)`
     // alone and `continue`d when it was null, so a card with NO tier:* label
     // was never even handed to `advise()` — not "considered and left alone",
@@ -368,13 +368,13 @@ describe("scheduled passes", () => {
     // unconditional `continue` were restored, this assertion would fail back
     // to `null`.
     //
-    // Pin-anchored half of a pair: the mutant this test
+    // Pin-anchored half of the  pair: the mutant this test
     // exists to kill is the restored unconditional `continue`, which
     // leaves the override null — so anchor on the pin itself (a null
     // override throws on the property read) and on the sub-call
     // surfaces travelling with it. The whole-object sibling below
     // covers the full env shape instead.
-    it("pins a card with no tier label via the config-default fallback", async () => {
+    it("pins a card with no tier label via the config-default fallback (, pin-anchored)", async () => {
       const card = issue("i1", { labels: [], labelIds: [] });
       const harness = await boot(
         baseConfig({ selection: { enabled: true, mode: "enforce", holdOnUntrustedProfile: true, defaultTier: "T1" } }),
@@ -386,7 +386,7 @@ describe("scheduled passes", () => {
       await harness.runJob("labelOnlyPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      // The write payload was widened from model-only to model+env, so
+      //  widened the write payload from model-only to model+env, so
       // the original whole-object equality here no longer describes a correct
       // write. The mutant this test exists to kill is the restored
       // unconditional `continue`, which leaves the override null — so anchor
@@ -401,10 +401,10 @@ describe("scheduled passes", () => {
       expect(harness.activity[0]?.metadata?.fromLabel).toBe(false);
     });
 
-    // A user-assigned card (assignee_user_id set, e.g. Operator:*
+    // a user-assigned card (assignee_user_id set, e.g. Operator:*
     // cards) rejects issues.update with an agent override ("Issue can only
     // have one assignee"). The pass must skip it, not attempt the pin.
-    it("skips a user-assigned card even if it has a tier label", async () => {
+    it("skips a user-assigned card even if it has a tier label ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T1")],
         labelIds: ["lbl-T1"],
@@ -420,11 +420,11 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // One card's pin rejection must not abort the pass for the
+    // one card's pin rejection must not abort the pass for the
     // whole company (and must not skip the scan-mark advance, which used to
     // re-hit the same card on every firing). The stubbed update throws the
     // exact live error for i1; i2 must still pin and the watermark advance.
-    it("isolates a per-issue pin failure so the rest of the pass completes", async () => {
+    it("isolates a per-issue pin failure so the rest of the pass completes ()", async () => {
       const cards = [
         issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] }),
         issue("i2", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] }),
@@ -459,7 +459,7 @@ describe("scheduled passes", () => {
       expect(Date.parse(stored.at)).toBeGreaterThanOrEqual(before);
     });
 
-    // Positive
+    //  (root cause #3, 2026-09-16 16:40Z incident). Positive
     // control: before this fix, `labelOnlyPass` gated on `tierFromLabels(...)`
     // alone and `continue`d when it was null, so a card with NO tier:* label
     // was never even handed to `advise()` — not "considered and left alone",
@@ -468,7 +468,7 @@ describe("scheduled passes", () => {
     // `config.selection.defaultTier` (T1 here) to produce a pin; if the old
     // unconditional `continue` were restored, this assertion would fail back
     // to `null`.
-    it("pins a card with no tier label via the config-default fallback", async () => {
+    it("pins a card with no tier label via the config-default fallback ()", async () => {
       const card = issue("i1", { labels: [], labelIds: [] });
       const harness = await boot(
         baseConfig({ selection: { enabled: true, mode: "enforce", holdOnUntrustedProfile: true, defaultTier: "T1" } }),
@@ -514,7 +514,7 @@ describe("scheduled passes", () => {
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
     });
 
-    // The equality check alone (`pick === floor`, above) treats an
+    // the equality check alone (`pick === floor`, above) treats an
     // implicit NULL-override floor pin as a neutral no-op, but NULL is an
     // implicit pin to the floor lane — never tested for serviceability here.
     // If that lane is exhausted, this pass must write an EXPLICIT pin to a
@@ -579,8 +579,8 @@ describe("scheduled passes", () => {
       await harness.runJob("labelOnlyPass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      // The SHAPE of every write changed: the override now also
-      // carries the six sub-call env keys. The pin assertion is what this test
+      //  changed the SHAPE of every write: the override now also
+      // carries the six sub-call env keys. The pin assertion is what 
       // is about, so assert it directly rather than by whole-object equality,
       // and additionally require the env this write emits to be off the dead
       // lane — a stronger bar than the original `toEqual` gave.
@@ -591,6 +591,42 @@ describe("scheduled passes", () => {
       expect(JSON.stringify(labelOnlyCfg.env ?? {})).not.toContain("claude-opus-5");
       expect(harness.activity).toHaveLength(1);
       expect(harness.activity[0]?.message).toContain("floor lane unserviceable");
+    });
+
+    // Label-only sibling of the repin-path test below: this pass
+    // previously wrote whatever `advise()` returned with no guard at all, so
+    // a quarantine landing between select and write pinned straight into a
+    // dead lane. First two outage reads (pass start + advise) see nothing;
+    // the pre-write re-read sees the quarantine. The write must not happen.
+    it("does not write a label-only pin when a quarantine lands between select and write ()", async () => {
+      const modelsWithLane = MODELS.map((m) =>
+        m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m,
+      );
+      const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+      const harness = await boot(baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }), [card]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+      const quarantine = {
+        lanes: ["lane-opus"],
+        models: [],
+        until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        reason: "auto: run rejected on lane-opus with a lane-capacity error",
+      };
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let outageReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneOutage) {
+          outageReads += 1;
+          return outageReads <= 2 ? null : quarantine;
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("labelOnlyPass");
+
+      expect(outageReads).toBeGreaterThan(2);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
     });
 
     it("still elides when the floor's lane is healthy throughout (unchanged cost)", async () => {
@@ -616,12 +652,12 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // The 2026-09-27 incident — this pass walked all 100 fetched
+    // the 2026-09-27 incident — this pass walked all 100 fetched
     // rows with no elapsed-time budget and ran past the host's 300 s job RPC
     // wall (300061 ms / 300085 ms) while the worker kept walking rows it
     // could never report. Slow per-card API calls must stop STARTING new
     // rows once the cooperative budget is gone.
-    it("stops starting new rows once the job budget is exhausted", async () => {
+    it("stops starting new rows once the job budget is exhausted ()", async () => {
       const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
       const harness = await boot(baseConfig(), [card]);
       const infoLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
@@ -651,12 +687,12 @@ describe("scheduled passes", () => {
       expect(infoLogs[0]?.metadata.jobDurationMs).toBe(LABEL_ONLY_PASS_JOB_BUDGET_MS + 1);
     });
 
-    // Reopened defect (2026-09-28): the row in flight when the
+    //  /  (reopen 2026-09-28: the row in flight when the
     // budget trips must SKIP its write — completing it after the deadline is
-    // the orphaned-write half of the 11:00Z incident. The unreached rows
+    // the orphaned-write half of the 11:00Z incident). The unreached rows
     // must keep their watermark (no starvation), and the next firing must
     // resume everything from live state (no dropped work).
-    it("skips the in-flight row write, creeps the watermark, and resumes the rest next firing", async () => {
+    it("skips the in-flight row write, creeps the watermark, and resumes the rest next firing ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const newIso = "2026-01-02T00:00:00.000Z";
       const rowA = idleRow("i1", "in_progress", { updated_at: oldIso });
@@ -703,7 +739,7 @@ describe("scheduled passes", () => {
       expect(warnLogs.some((entry) => String(entry.message).includes("slow row write"))).toBe(true);
       // ... the unreached row was never started ...
       expect((await harness.ctx.issues.get("i2", COMPANY))?.assigneeAdapterOverrides ?? null).toBeNull();
-      // ... and the watermark stays below the unsettled row (the
+      // ... and the watermark stays below the unsettled row (: the
       // scan cursor stops before the first unsettled row), so the next
       // firing resumes both rows instead of starving them.
       expect(await storedScanMarkMs(harness, PLUGIN_STATE_KEYS.labelOnlyLastScanAt)).toBeLessThan(Date.parse(oldIso));
@@ -718,21 +754,21 @@ describe("scheduled passes", () => {
       });
     });
 
-    // The cooperative budget must leave headroom beneath the
+    // the cooperative budget must leave headroom beneath the
     // host's 300 s job RPC wall — a budget AT the wall is the incident again.
-    it("keeps the cooperative budget a full minute beneath the host 300 s RPC wall", () => {
+    it("keeps the cooperative budget a full minute beneath the host 300 s RPC wall ()", () => {
       expect(LABEL_ONLY_PASS_JOB_BUDGET_MS).toBeGreaterThan(0);
       expect(LABEL_ONLY_PASS_JOB_BUDGET_MS).toBeLessThanOrEqual(300_000 - 60_000);
     });
 
-    // Reopened defect (2026-09-28): the deployed build let one row spend
+    //  reopen (2026-09-28): the deployed build let  spend
     // ~98 s inside host calls AFTER the host's 300 s wall had fired, because
     // the job budget is only checked BETWEEN rows. Admission headroom: no
     // new row starts without a full LABEL_ONLY_PASS_ROW_TIMEOUT_MS of job
     // budget left, so admission stops with far more than the minute of host
     // headroom — and the row slice itself is well under the 98 s observed
     // slow row.
-    it("keeps the per-row admission slice beneath the observed 98 s slow row", () => {
+    it("keeps the per-row admission slice beneath the observed 98 s slow row ()", () => {
       expect(LABEL_ONLY_PASS_ROW_TIMEOUT_MS).toBeGreaterThan(0);
       expect(LABEL_ONLY_PASS_ROW_TIMEOUT_MS).toBeLessThan(98_000);
       expect(LABEL_ONLY_PASS_JOB_BUDGET_MS - LABEL_ONLY_PASS_ROW_TIMEOUT_MS).toBeLessThanOrEqual(
@@ -740,12 +776,12 @@ describe("scheduled passes", () => {
       );
     });
 
-    // Reopened defect (2026-09-28): a row admitted with budget left can still
-    // go slow INSIDE its host calls. The row must then
+    //  reopen (2026-09-28): a row admitted with budget left can still
+    // go slow INSIDE its host calls (the  case). The row must then
     // complete without committing an orphaned routing mutation: no pin, no
     // activity, but the watermark still covers the examined row so next
     // firing re-attempts it from live state.
-    it("skips the write (without starving the row) when the admitted row goes slow", async () => {
+    it("skips the write (without starving the row) when the admitted row goes slow ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const row = idleRow("i1", "in_progress", { updated_at: oldIso });
       const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
@@ -791,11 +827,11 @@ describe("scheduled passes", () => {
       });
     });
 
-    // Reopened defect (2026-09-28): admission headroom must stop STARTING
+    //  reopen (2026-09-28): admission headroom must stop STARTING
     // rows before the budget is gone — a row admitted with less than a full
-    // slice left is the slow-admitted-row shape again. With only half a slice of job
+    // slice left is the  shape again. With only half a slice of job
     // budget remaining at admission, the row never starts.
-    it("stops admitting rows without a full per-row slice of budget left", async () => {
+    it("stops admitting rows without a full per-row slice of budget left ()", async () => {
       const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
       const harness = await boot(baseConfig(), [card]);
       const infoLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
@@ -805,7 +841,7 @@ describe("scheduled passes", () => {
         return originalInfo(message, metadata);
       }) as typeof harness.ctx.logger.info;
       // The job starts with a live clock; the candidate fetch itself consumes
-      // all but half a row-slice of budget — the slow-admitted-row shape: budget left,
+      // all but half a row-slice of budget — the  shape: budget left,
       // but not a full slice. The row must never start.
       let nowMs = 0;
       const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
@@ -830,12 +866,12 @@ describe("scheduled passes", () => {
       expect((await harness.ctx.issues.get("i1", COMPANY))?.assigneeAdapterOverrides ?? null).toBeNull();
     });
 
-    // HARD RETURN: a row whose host calls outrun the remaining job
+    //  HARD RETURN: a row whose host calls outrun the remaining job
     // budget must not hold the job past the host's 300 s wall — the race
     // abandons it at the deadline (not examined, cursor unmoved), the
     // abandoned body that finishes later reaches the write gate and commits
     // nothing, and the next firing pins the row from live state.
-    it("abandons a slow row at the deadline without writing, and retries it next firing", async () => {
+    it("abandons a slow row at the deadline without writing, and retries it next firing ()", async () => {
       const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
       const harness = await boot(baseConfig(), [card]);
       harness.ctx.db.query = async () => [idleRow("i1", "in_progress", { updated_at: "2026-01-01T00:00:00.000Z" })] as never;
@@ -901,12 +937,12 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(1);
     });
 
-    // ADAPTIVE admission: row 1 burns 40 s (mocked) inside its host
+    //  ADAPTIVE admission: row 1 burns 40 s (mocked) inside its host
     // calls — tripping its own slice write gate but teaching the pass that
     // rows on THIS board cost 40 s — so row 2 (45 s left < 1.5x40 = 60 s
     // headroom) never starts. The fixed 30 s slice alone, or a 1.0x factor
     // (40 s), WOULD have admitted it.
-    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row", async () => {
+    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const newIso = "2026-01-02T00:00:00.000Z";
       const cards = [
@@ -1032,7 +1068,7 @@ describe("scheduled passes", () => {
     // even though it carried a live pin — a pin to a now-hard-stopped lane
     // would sit there forever with no label to trigger a repin. Same fixture
     // as the labelled hard-stop test above, minus the tier label.
-    it("re-pins an unlabelled but pinned card off a lane hard stop", async () => {
+    it("re-pins an unlabelled but pinned card off a lane hard stop ()", async () => {
       const modelsWithLane = withOpusAlt().map((m) => (m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m));
       const card = issue("i1", {
         labels: [],
@@ -1183,11 +1219,83 @@ describe("scheduled passes", () => {
       expect(changed).toBe(6);
     });
 
-    // Clear-on-blocked: a blocked card needs no lane
+    // The 2026-09-24 15:21:14Z defect, exactly: a scheduled repin
+    // pass whose per-issue advise() ran BEFORE the 15:20:27Z ledger flip and
+    // 15:20:46Z auto-quarantine wrote gpt-5.6-sol -> gpt-6-astra (same dead
+    // codex lane) AFTER both had landed. The post-select
+    // `isUsableAndCapable` guard re-read nothing — it reused the pass-start
+    // outage snapshot — so a decision computed on stale snapshots landed
+    // unchallenged. The write path must re-read the outage immediately
+    // before the write and skip a selected model the fresh snapshot
+    // excludes. First read (pass start + advise) sees no outage; every read
+    // after that sees the quarantine. The write must not happen.
+    it("does not write a repin when a quarantine lands between select and write ()", async () => {
+      const modelsWithLane = withOpusAlt().map((m) =>
+        m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m.id === "claude-opus-5-alt" ? { ...m, laneId: "lane-alt" } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }), [card]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+      await demoteOpus(harness);
+      const quarantine = {
+        lanes: ["lane-alt"],
+        models: [],
+        until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        reason: "auto: run rejected on lane-alt with a lane-capacity error",
+      };
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let outageReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneOutage) {
+          outageReads += 1;
+          // Pass-start + advise reads predate the quarantine; the pre-write
+          // re-read must see it.
+          return outageReads <= 2 ? null : quarantine;
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("repinPass");
+
+      // Non-vacuity: the quarantine really was published mid-pass.
+      expect(outageReads).toBeGreaterThan(2);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    // Positive control for the test above: the same card with no quarantine
+    // at any read still re-pins normally.
+    it("still re-pins when no quarantine lands mid-pass ( control)", async () => {
+      const modelsWithLane = withOpusAlt().map((m) =>
+        m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m.id === "claude-opus-5-alt" ? { ...m, laneId: "lane-alt" } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T1")],
+        labelIds: ["lbl-T1"],
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5" } },
+      });
+      const harness = await boot(baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }), [card]);
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+      await demoteOpus(harness);
+
+      await harness.runJob("repinPass");
+
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(1);
+      expect(harness.activity[0]?.message).toContain("re-pinned");
+    });
+
+    //  (a) clear-on-blocked: a blocked card needs no lane
     // reservation, so the pass clears the pin instead of re-pinning it.
     // The pin is healthy (no lane stop, no demotion) — on the old code the
     // usability `continue` fires and the pin survives.
-    it("clears the pin on a blocked card instead of re-pinning it", async () => {
+    it("clears the pin on a blocked card instead of re-pinning it ()", async () => {
       const card = issue("i1", {
         status: "blocked",
         labels: [tierLabel("T1")],
@@ -1206,9 +1314,9 @@ describe("scheduled passes", () => {
       expect(harness.activity[0]?.metadata).toMatchObject({ from: "claude-opus-5", modelId: null, reason: "clear-on-blocked" });
     });
 
-    // Clearing is a lifecycle behavior, not an operator
+    //  (a): clearing is a lifecycle behavior, not an operator
     // override — a blocked card carrying pin:operator keeps its pin.
-    it("keeps a blocked operator pin untouched", async () => {
+    it("keeps a blocked operator pin untouched ()", async () => {
       const card = issue("i1", {
         status: "blocked",
         labels: [tierLabel("T1"), operatorPinLabel()],
@@ -1225,12 +1333,12 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // 24h expiry, both directions. The alt is strictly
+    //  (b) 24h expiry, both directions. The alt is strictly
     // cheaper, so a re-validation that runs MUST move the pin while a
     // skipped one leaves it alone — the pair pins the `!pinExpired`
     // guard from both sides. No lane stop, no demotion: usability alone
     // would keep the pin in both cases.
-    it("re-validates an expired pin through advise even when the lane is healthy", async () => {
+    it("re-validates an expired pin through advise even when the lane is healthy ()", async () => {
       const cheapAlt = withOpusAlt({ costPerMTokIn: 1, costPerMTokOut: 5, costPerMTokCacheRead: 0.1 });
       const card = issue("i1", {
         labels: [tierLabel("T1")],
@@ -1252,10 +1360,10 @@ describe("scheduled passes", () => {
       expect(harness.activity[0]?.message).toContain("re-validated");
     });
 
-    // Missing entry = expired. A pin whose age cannot be
+    //  (b): missing entry = expired. A pin whose age cannot be
     // proven is re-validated, never kept on trust — fail-safe toward
     // re-validation. Kills the mutant that treats a missing entry as fresh.
-    it("treats a pin with no timestamp as expired", async () => {
+    it("treats a pin with no timestamp as expired ()", async () => {
       const cheapAlt = withOpusAlt({ costPerMTokIn: 1, costPerMTokOut: 5, costPerMTokCacheRead: 0.1 });
       const card = issue("i1", {
         labels: [tierLabel("T1")],
@@ -1273,7 +1381,7 @@ describe("scheduled passes", () => {
       expect(harness.activity[0]?.message).toContain("re-validated");
     });
 
-    it("leaves a fresh healthy pin alone without paying for re-validation", async () => {
+    it("leaves a fresh healthy pin alone without paying for re-validation ()", async () => {
       const cheapAlt = withOpusAlt({ costPerMTokIn: 1, costPerMTokOut: 5, costPerMTokCacheRead: 0.1 });
       const card = issue("i1", {
         labels: [tierLabel("T1")],
@@ -1294,11 +1402,11 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // An expired pin the fresh advise re-affirms is still
+    //  (b): an expired pin the fresh advise re-affirms is still
     // alive — re-stamped so the next pass does not pay for the same
     // re-validation again. The stamp is the observable proof advise ran:
     // the skip path never writes it.
-    it("re-stamps an expired pin that advise re-affirms", async () => {
+    it("re-stamps an expired pin that advise re-affirms ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T1")],
         labelIds: ["lbl-T1"],
@@ -1322,9 +1430,9 @@ describe("scheduled passes", () => {
       expect(stamped.i1).toBe(new Date(NOW).toISOString());
     });
 
-    // Clear and repin writes share the single write budget —
+    // clear and repin writes share the single write budget —
     // clears are not a side channel around REPIN_PASS_WRITE_LIMIT.
-    it("counts clears against REPIN_PASS_WRITE_LIMIT", async () => {
+    it("counts clears against REPIN_PASS_WRITE_LIMIT ()", async () => {
       const cards = Array.from({ length: 8 }, (_, i) =>
         issue(`i${i}`, {
           status: "blocked",
@@ -1346,19 +1454,19 @@ describe("scheduled passes", () => {
       expect(cleared).toBe(6);
     });
 
-    // This pass had NO job budget — it walked up to 400 fetched
+    // this pass had NO job budget — it walked up to 400 fetched
     // rows bounded only by the 6-write cap, and failed 2/24 firings at 301 s
     // over the last 4 h. The cooperative budget must sit well beneath the
     // host's 300 s job RPC wall.
-    it("keeps the cooperative budget well beneath the host 300 s RPC wall", () => {
+    it("keeps the cooperative budget well beneath the host 300 s RPC wall ()", () => {
       expect(REPIN_PASS_JOB_BUDGET_MS).toBeGreaterThan(0);
       expect(REPIN_PASS_JOB_BUDGET_MS).toBeLessThanOrEqual(300_000 - 60_000);
     });
 
-    // The admission slice must stay beneath the observed slow row
+    // the admission slice must stay beneath the observed slow row
     // (40-95 s in contended host RPC across the row-walking passes), with the
     // same headroom shape as the label-only pass.
-    it("keeps the per-row admission slice beneath the observed slow row", () => {
+    it("keeps the per-row admission slice beneath the observed slow row ()", () => {
       expect(REPIN_PASS_ROW_TIMEOUT_MS).toBeGreaterThan(0);
       expect(REPIN_PASS_ROW_TIMEOUT_MS).toBeLessThan(98_000);
       expect(REPIN_PASS_JOB_BUDGET_MS - REPIN_PASS_ROW_TIMEOUT_MS).toBeLessThanOrEqual(
@@ -1366,10 +1474,10 @@ describe("scheduled passes", () => {
       );
     });
 
-    // ADMISSION: with only half a row-slice of job budget left when
-    // the candidate fetch returns, the row never starts — same slow-admitted-row shape
+    //  ADMISSION: with only half a row-slice of job budget left when
+    // the candidate fetch returns, the row never starts — same  shape
     // as the label-only admission test.
-    it("stops admitting rows without a full per-row slice of budget left", async () => {
+    it("stops admitting rows without a full per-row slice of budget left ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T1")],
         labelIds: ["lbl-T1"],
@@ -1406,13 +1514,13 @@ describe("scheduled passes", () => {
       expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
     });
 
-    // ADAPTIVE admission: the fixed slice alone admits a row with
+    //  ADAPTIVE admission: the fixed slice alone admits a row with
     // 45 s of budget left that then costs the observed 95 s. Row 1 burns 40 s
     // (mocked) inside its host calls — tripping its own slice write-gate but
     // teaching the pass that rows on THIS board cost 40 s — so row 2 (45 s
     // left < 1.5x40 = 60 s headroom) never starts. examined stays 1: the
     // fixed 30 s check alone WOULD have admitted it.
-    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row", async () => {
+    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const newIso = "2026-01-02T00:00:00.000Z";
       const cards = [
@@ -1483,12 +1591,12 @@ describe("scheduled passes", () => {
       expect(await storedScanMarkMs(harness, PLUGIN_STATE_KEYS.repinLastScanAt)).toBeLessThan(Date.parse(oldIso));
     });
 
-    // HARD RETURN: a row whose advise outruns the remaining job
+    //  HARD RETURN: a row whose advise outruns the remaining job
     // budget must not hold the job past the host's 300 s wall — the race
     // abandons it at the deadline (not examined, cursor unmoved), the
     // abandoned body that finishes later commits nothing, and the next
     // firing retries the row from live state.
-    it("abandons a slow advise at the deadline without writing, and retries it next firing", async () => {
+    it("abandons a slow advise at the deadline without writing, and retries it next firing ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T1")],
         labelIds: ["lbl-T1"],
@@ -1554,11 +1662,11 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(1);
     });
 
-    // WRITE GATE: a row admitted with budget left can still go slow
+    //  WRITE GATE: a row admitted with budget left can still go slow
     // INSIDE its host calls. It must then complete without committing an
     // orphaned mutation — no pin, no activity — while the watermark still
     // covers it, so next firing re-attempts it from live state.
-    it("skips the write (without starving the row) when the admitted row goes slow", async () => {
+    it("skips the write (without starving the row) when the admitted row goes slow ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const card = issue("i1", {
         labels: [tierLabel("T1")],
@@ -1608,11 +1716,11 @@ describe("scheduled passes", () => {
       expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
     });
 
-    // The reactive `agent.run.failed` sweep carries NO job budget —
+    // the reactive `agent.run.failed` sweep carries NO job budget —
     // a lane rejection must sweep the full candidate set immediately. Even
     // with a fresh watermark that would make the scheduled job skip entirely,
     // the repin still lands end to end.
-    it("sweeps and repins with no job budget on the reactive path, watermark aside", async () => {
+    it("sweeps and repins with no job budget on the reactive path, watermark aside ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T1")],
         labelIds: ["lbl-T1"],
@@ -1686,7 +1794,7 @@ describe("scheduled passes", () => {
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
     });
 
-    // Scope decision: `balancePass`'s unpinned+labelled branch force-
+    //  scope decision: `balancePass`'s unpinned+labelled branch force-
     // pins to T1 unconditionally (see the rule above this describe block).
     // Extending that same force-T1 promotion to a bare unpinned+unlabelled
     // card would be a policy change well beyond the incident this fix targets
@@ -1706,7 +1814,7 @@ describe("scheduled passes", () => {
     });
 
     /**
-     * Remediation half. The 2026-09-17 board sweep found 149 of 175
+     * remediation half. The 2026-09-17 board sweep found 149 of 175
      * overridden open cards with a HEALTHY pin and sub-call env still frozen on
      * the exhausted Codex lane — and only 3 with a dead pin. Every other
      * balance-pass write reason reads off the pin, and the pass short-circuits
@@ -1735,9 +1843,10 @@ describe("scheduled passes", () => {
           },
         },
       });
-      // The agent itself binds ANTHROPIC_AUTH_TOKEN, so the
-      // known-env rebuild carries it and it survives byte-for-byte. A
-      // secret living ONLY on the pin snapshot would be dropped instead.
+      // the agent itself binds ANTHROPIC_AUTH_TOKEN, and the pin
+      // no longer copies it — the run resolves it from the base env under
+      // the per-key merge. A secret living ONLY on the pin snapshot is
+      // dropped instead of re-supplied.
       const harness = await boot(
         baseConfig({ models: modelsWithDeadLane, pacing: { mode: "enforce" } }),
         [card],
@@ -1778,15 +1887,104 @@ describe("scheduled passes", () => {
       expect(cfg.model).toBe("claude-opus-5");
       // Not one model-valued key may still name the exhausted lane's model.
       expect(JSON.stringify(cfg.env)).not.toContain("gpt-5.6-sol");
-      // The secret binding survives the wholesale-replace write byte-for-byte.
-      expect(cfg.env.ANTHROPIC_AUTH_TOKEN).toEqual({ type: "secret_ref", secretKey: "ANTHROPIC_AUTH_TOKEN" });
+      // The pin carries no copy of the agent's secret: the run resolves it
+      // from the base env under the per-key merge ().
+      expect(cfg.env).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
       expect(harness.activity[0]?.metadata?.envDrifted).toBe(true);
     });
 
-    // Same user-assigned skip as labelOnlyPass — a card with
+    /**
+     * worker wiring. A lane whose combined utilization has reached
+     * its configured `withdrawAtUtilization` is out for NEW dispatch, and a
+     * card whose sub-call env is frozen on that lane's model is the same
+     * "pin healthy, sub-calls on a lane we no longer send work to" state as the
+     * dead-lane case above. The lane is SERVICEABLE here (one account left), so
+     * only the withdrawal can explain the rewrite; the control run leaves the
+     * ceiling out and proves nothing else would.
+     */
+    describe("withdrawn lane ()", () => {
+      const sonnet = MODELS.find((m) => m.id === "claude-sonnet-5")!;
+      const models = [...MODELS, { ...sonnet, id: "gpt-5.6-sol", laneId: "cliproxy-codex" }];
+      const laneSource = (extra: Record<string, unknown>) => ({
+        laneId: "cliproxy-codex",
+        statusUrl: "https://status.example/codex",
+        windows: [{ name: "weekly", role: "allowance", utilizationFields: ["used"] }],
+        ...extra,
+      });
+      const spentLane = {
+        "cliproxy-codex": {
+          laneId: "cliproxy-codex",
+          fetchedAt: new Date(NOW).toISOString(),
+          observation: null,
+          error: null,
+          verdict: {
+            laneId: "cliproxy-codex",
+            observedAt: new Date(NOW).toISOString(),
+            state: "on",
+            serviceable: true,
+            score: { utilization: 0.99, elapsed: 0.9, deviation: 0.09 },
+            accounts: [],
+            knownAccountCount: 8,
+            knownWeight: 8,
+            serviceableAccountCount: 1,
+            urgentResetAt: null,
+            reason: "ok",
+          },
+          // What `mergeLedgerEntry` stores for 7 exhausted accounts and one at 0.85.
+          combinedUtilization: {
+            utilization: 0.98125,
+            accounts: 8,
+            resetsAt: new Date(NOW + 2 * 60 * 60 * 1000).toISOString(),
+            measuredAt: new Date(NOW).toISOString(),
+          },
+        },
+      };
+
+      async function runWith(laneExtra: Record<string, unknown>) {
+        const card = issue("i1", {
+          labels: [tierLabel("T1")],
+          labelIds: ["lbl-T1"],
+          assigneeAdapterOverrides: {
+            adapterConfig: { model: "claude-opus-5", env: subCallPins("gpt-5.6-sol", "gpt-5.6-sol") },
+          },
+        });
+        const harness = await boot(
+          baseConfig({ models, pacing: { mode: "enforce", lanes: [laneSource(laneExtra)] } }),
+          [card],
+          [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })],
+        );
+        harness.ctx.db.query = async () => [idleRow("i1")] as never;
+        await harness.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+          spentLane,
+        );
+        await harness.runJob("balancePass");
+        return harness;
+      }
+
+      it("moves a sub-call env off a lane at its withdrawal ceiling, without touching the pin", async () => {
+        const harness = await runWith({ withdrawAtUtilization: 0.98 });
+        const after = await harness.ctx.issues.get("i1", COMPANY);
+        const cfg = (after?.assigneeAdapterOverrides as { adapterConfig: { model: string; env: Record<string, unknown> } })
+          .adapterConfig;
+        expect(cfg.model).toBe("claude-opus-5");
+        expect(JSON.stringify(cfg.env)).not.toContain("gpt-5.6-sol");
+        expect(harness.activity[0]?.metadata?.envDrifted).toBe(true);
+      });
+
+      it("leaves the same card alone when no ceiling is configured", async () => {
+        const harness = await runWith({});
+        const after = await harness.ctx.issues.get("i1", COMPANY);
+        const cfg = (after?.assigneeAdapterOverrides as { adapterConfig: { env: Record<string, unknown> } }).adapterConfig;
+        expect(JSON.stringify(cfg.env)).toContain("gpt-5.6-sol");
+        expect(harness.activity).toHaveLength(0);
+      });
+    });
+
+    // same user-assigned skip as labelOnlyPass — a card with
     // assignee_user_id rejects issues.update with an agent override, so the
     // pass must skip it on the describe row, not attempt the write.
-    it("skips a user-assigned card even if it would otherwise balance", async () => {
+    it("skips a user-assigned card even if it would otherwise balance ()", async () => {
       const card = issue("i1", {
         labels: [tierLabel("T3")],
         labelIds: ["lbl-T3"],
@@ -1821,10 +2019,10 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // A pin rejection on one card must not abort the balance pass
+    // a pin rejection on one card must not abort the balance pass
     // for the whole company. i1's write throws the exact live error; i2 must
     // still re-pin.
-    it("isolates a per-issue pin failure so the rest of the pass completes", async () => {
+    it("isolates a per-issue pin failure so the rest of the pass completes ()", async () => {
       const cheapModels = withOpusAlt().map((m) =>
         m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
       );
@@ -1856,10 +2054,10 @@ describe("scheduled passes", () => {
       expect(warns).toHaveLength(1);
     });
 
-    // The unpinned+labelled branch has its own pin write site — a
+    // the unpinned+labelled branch has its own pin write site — a
     // rejection there must be isolated too, not abort the pass. Both cards
     // are unpinned T3-labelled (force-T1 branch); i1's write throws.
-    it("isolates a per-issue pin failure in the unpinned branch", async () => {
+    it("isolates a per-issue pin failure in the unpinned branch ()", async () => {
       const cards = ["i1", "i2"].map((id) =>
         issue(id, {
           labels: [tierLabel("T3")],
@@ -1890,7 +2088,7 @@ describe("scheduled passes", () => {
       expect(warns).toHaveLength(1);
     });
 
-    // Same gap as labelOnlyPass's floor-equality skip, in the
+    // same gap as labelOnlyPass's floor-equality skip, in the
     // unpinned branch. See the labelOnlyPass test of the same name for why
     // the race is forced via a `state.get` sequencing mock rather than a
     // single consistent ledger.
@@ -1946,8 +2144,8 @@ describe("scheduled passes", () => {
       await harness.runJob("balancePass");
 
       const after = await harness.ctx.issues.get("i1", COMPANY);
-      // See the labelOnlyPass twin: every write also carries the six sub-call env
-      // keys, so whole-object equality no longer describes the shape.
+      // See the labelOnlyPass twin:  added the six sub-call env keys to
+      // every write, so whole-object equality no longer describes the shape.
       // The claim under test is that a pin is WRITTEN rather than elided.
       const balanceCfg = (
         after?.assigneeAdapterOverrides as { adapterConfig: { model: string; env?: Record<string, unknown> } }
@@ -1961,7 +2159,7 @@ describe("scheduled passes", () => {
     // that already carries a pin but no label. Before this fix the pass
     // gated on `tierFromLabels(...)` alone, so this card was invisible to
     // cost-down rebalancing even though it has a real pin to evaluate.
-    it("re-pins a pinned-but-unlabelled card onto a cheaper candidate", async () => {
+    it("re-pins a pinned-but-unlabelled card onto a cheaper candidate ()", async () => {
       const cheapModels = withOpusAlt().map((m) =>
         m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
       );
@@ -2075,6 +2273,85 @@ describe("scheduled passes", () => {
       expect(harness.activity[0]?.metadata?.cheaper).toBe(true);
     });
 
+    // Balance sibling of the repin-path test: `balanceWriteStillSafe`
+    // guards the pin expectation, not a quarantine that landed after select.
+    // Same sequenced outage read — the cost-down write must not happen.
+    it("does not write a balance move when a quarantine lands between select and write ()", async () => {
+      const harness = await boot(
+        baseConfig({ models: twoLaneCostDown(), pacing: { mode: "enforce" } }),
+        [pinnedToOpus()],
+      );
+      harness.ctx.db.query = evidenceRows([
+        { model: "claude-opus-5", succeeded: 34, failed: 8 },
+        { model: "claude-opus-5-alt", succeeded: 34, failed: 8 },
+      ]);
+      const quarantine = {
+        lanes: ["lane-thin"],
+        models: [],
+        until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        reason: "auto: run rejected on lane-thin with a lane-capacity error",
+      };
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let outageReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneOutage) {
+          outageReads += 1;
+          return outageReads <= 2 ? null : quarantine;
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("balancePass");
+
+      expect(outageReads).toBeGreaterThan(2);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides).toEqual({ adapterConfig: { model: "claude-opus-5" } });
+      expect(harness.activity).toHaveLength(0);
+    });
+
+    // The unpinned+labelled branch has its own write site, so the
+    // pinned-branch test above cannot kill a guard missing here. Same
+    // sequenced outage read: pass-start + advise see nothing, the pre-write
+    // re-read sees the quarantine on the lane the T1 pick landed on.
+    it("does not write an unpinned T1 pin when a quarantine lands between select and write ()", async () => {
+      const modelsWithLane = MODELS.map((m) =>
+        m.id === "claude-opus-5" ? { ...m, laneId: "lane-opus" } : m,
+      );
+      const card = issue("i1", {
+        labels: [tierLabel("T3")],
+        labelIds: ["lbl-T3"],
+        assigneeAdapterOverrides: null,
+      });
+      const harness = await boot(
+        baseConfig({ models: modelsWithLane, pacing: { mode: "enforce" } }),
+        [card],
+        [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })],
+      );
+      harness.ctx.db.query = async () => [idleRow("i1")] as never;
+      const quarantine = {
+        lanes: ["lane-opus"],
+        models: [],
+        until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        reason: "auto: run rejected on lane-opus with a lane-capacity error",
+      };
+      const originalGet = harness.ctx.state.get.bind(harness.ctx.state);
+      let outageReads = 0;
+      harness.ctx.state.get = (async (input: ScopeKey) => {
+        if (input.stateKey === PLUGIN_STATE_KEYS.laneOutage) {
+          outageReads += 1;
+          return outageReads <= 2 ? null : quarantine;
+        }
+        return originalGet(input);
+      }) as typeof harness.ctx.state.get;
+
+      await harness.runJob("balancePass");
+
+      expect(outageReads).toBeGreaterThan(2);
+      const after = await harness.ctx.issues.get("i1", COMPANY);
+      expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
+      expect(harness.activity).toHaveLength(0);
+    });
+
     // balance_pass()'s `busier = (cur_u-new_u)>=0.25` rebalance rule.
     it("re-pins onto a far-less-busy lane even when cost is unchanged (busier >= 0.25)", async () => {
       const laned = withOpusAlt().map((m) => {
@@ -2121,12 +2398,12 @@ describe("scheduled passes", () => {
       expect(after?.assigneeAdapterOverrides).not.toEqual({ adapterConfig: { model: "claude-opus-5" } });
     });
 
-    // Pace-pull: `orderCandidatesByPace` ranks only NEW pins, so a
+    //  pace-pull: `orderCandidatesByPace` ranks only NEW pins, so a
     // pin that landed before its lane fell behind never moves until
     // PIN_MAX_AGE_MS expiry. The balance pass pulls such idle pins toward a
     // behind-pace lane — enforce mode only, strictly-better rank only, room
     // (including caps) required, recorded as `pace-pull`.
-    describe("pace-pull", () => {
+    describe("pace-pull ()", () => {
       const haiku = MODELS.find((m) => m.id === "claude-haiku-4-5-20251001")!;
       // Two same-price T3 candidates on different lanes: cost never decides
       // between them, so the winner is whoever pace (or the cost tie-break)
@@ -2481,13 +2758,13 @@ describe("scheduled passes", () => {
       expect(infoLogs[0]?.metadata.jobDurationMs).toBe(BALANCE_PASS_JOB_BUDGET_MS + 1);
     });
 
-    // Reopened defect (2026-09-28): same slow-admitted-row defect as the
+    //  reopen (2026-09-28): same slow-admitted-row defect as the
     // label-only pass — balance also failed at 300004 ms on 2026-09-28 11:00Z
     // because the job budget is only checked BETWEEN rows. Admission
     // headroom: no new row starts without a full
     // BALANCE_PASS_ROW_TIMEOUT_MS of job budget left — and the row slice
-    // itself is well under the 98 s observed slow row.
-    it("keeps the per-row admission slice beneath the observed 98 s slow row", () => {
+    // itself is well under the 98 s observed slow row ().
+    it("keeps the per-row admission slice beneath the observed 98 s slow row ()", () => {
       expect(BALANCE_PASS_ROW_TIMEOUT_MS).toBeGreaterThan(0);
       expect(BALANCE_PASS_ROW_TIMEOUT_MS).toBeLessThan(98_000);
       expect(BALANCE_PASS_JOB_BUDGET_MS - BALANCE_PASS_ROW_TIMEOUT_MS).toBeLessThanOrEqual(
@@ -2495,13 +2772,13 @@ describe("scheduled passes", () => {
       );
     });
 
-    // Reopened defect (2026-09-28): a row admitted with budget left can still
-    // go slow INSIDE its host calls. The row must then
+    //  reopen (2026-09-28): a row admitted with budget left can still
+    // go slow INSIDE its host calls (the  case). The row must then
     // complete without committing an orphaned routing mutation: no pin, no
     // activity — but the keyset cursor still advances past it, so the next
     // firing does NOT hot-loop on the slow row; its live state is re-read
     // when the cycle wraps.
-    it("skips the write (keeping the cursor) when the admitted row goes slow", async () => {
+    it("skips the write (keeping the cursor) when the admitted row goes slow ()", async () => {
       const card = issue("i1", { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] });
       const harness = await boot(baseConfig(), [card], [agentRow({ adapterConfig: { model: "claude-haiku-4-5-20251001" } })]);
       harness.ctx.db.query = async () => [idleRow("i1")] as never;
@@ -2549,7 +2826,7 @@ describe("scheduled passes", () => {
         scopeKind: "company",
         scopeId: COMPANY,
         stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
-      })).toEqual({ afterId: null });
+      })).toEqual({ afterId: null, retryPending: true });
 
       await harness.runJob("balancePass");
       expect((await harness.ctx.issues.get("i1", COMPANY))?.assigneeAdapterOverrides).toEqual({
@@ -2557,11 +2834,11 @@ describe("scheduled passes", () => {
       });
     });
 
-    // Reopened defect (2026-09-28): admission headroom must stop STARTING
+    //  reopen (2026-09-28): admission headroom must stop STARTING
     // rows before the budget is gone — a row admitted with less than a full
-    // slice left is the slow-admitted-row shape again. With only half a slice of job
+    // slice left is the  shape again. With only half a slice of job
     // budget remaining at admission, the row never starts.
-    it("stops admitting rows without a full per-row slice of budget left", async () => {
+    it("stops admitting rows without a full per-row slice of budget left ()", async () => {
       const card = issue("i1", { labels: [], labelIds: [] });
       const harness = await boot(baseConfig(), [card]);
       const infoLogs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
@@ -2570,7 +2847,7 @@ describe("scheduled passes", () => {
         infoLogs.push({ message, metadata });
         return originalInfo(message, metadata);
       }) as typeof harness.ctx.logger.info;
-      // Same slow-admitted-row shape as the label-only admission test: the job starts
+      // Same  shape as the label-only admission test: the job starts
       // with a live clock and the candidate fetch consumes all but half a
       // row-slice of budget. The row must never start.
       let nowMs = 0;
@@ -2596,12 +2873,12 @@ describe("scheduled passes", () => {
       expect((await harness.ctx.issues.get("i1", COMPANY))?.assigneeAdapterOverrides ?? null).toBeNull();
     });
 
-    // HARD RETURN: the id cursor passes every EXAMINED row and
+    //  HARD RETURN: the id cursor passes every EXAMINED row and
     // stops before an abandoned one. Row i1 stalls past the deadline: the job
     // returns by the budget, the abandoned body commits nothing when it later
     // reaches its write gate, the cursor stays on the PRIOR id (not i1), no
     // scan mark is written mid-cycle, and the next firing pins i1 first.
-    it("abandons a slow row at the deadline without moving the id cursor past it", async () => {
+    it("abandons a slow row at the deadline without moving the id cursor past it ()", async () => {
       const cards = [
         issue("i1", { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] }),
         issue("i2", { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] }),
@@ -2685,11 +2962,11 @@ describe("scheduled passes", () => {
       expect(await storedScanMarkMs(harness, PLUGIN_STATE_KEYS.balanceLastScanAt)).toBe(resumeStartedAt);
     });
 
-    // ADAPTIVE admission (same shape as the label-only test): row 1
+    //  ADAPTIVE admission (same shape as the label-only test): row 1
     // costs 40 s, so row 2 with 45 s left is refused. The id cursor passes
     // the examined (unsettled) row 1, and the budget-cut cycle writes no
     // scan mark, so a quiet board cannot skip row 2 next firing.
-    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row", async () => {
+    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row ()", async () => {
       const cards = [
         issue("i1", { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] }),
         issue("i2", { labels: [tierLabel("T3")], labelIds: ["lbl-T3"] }),
@@ -2742,7 +3019,7 @@ describe("scheduled passes", () => {
         scopeKind: "company",
         scopeId: COMPANY,
         stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
-      })).toEqual({ afterId: "i1" });
+      })).toEqual({ afterId: "i1", retryPending: true, unsettledInCycle: true });
       expect(await storedScanMarkMs(harness, PLUGIN_STATE_KEYS.balanceLastScanAt)).toBe(0);
     });
 
@@ -2773,7 +3050,7 @@ describe("scheduled passes", () => {
         scopeId: COMPANY,
         stateKey: PLUGIN_STATE_KEYS.balancePassCursor,
       })).toEqual({ afterId: cards[BALANCE_PASS_FETCH_LIMIT - 1]?.id });
-      // A capped page is mid-cycle — no scan mark yet.
+      // a capped page is mid-cycle — no scan mark yet.
       expect(await storedScanMarkMs(harness, PLUGIN_STATE_KEYS.balanceLastScanAt)).toBe(0);
 
       await harness.runJob("balancePass");
@@ -2804,7 +3081,7 @@ describe("scheduled passes", () => {
       expect(harness.activity).toHaveLength(0);
     });
 
-    // --- the pass must not pay a heartbeat_runs read per scanned
+    // --- : the pass must not pay a heartbeat_runs read per scanned
     // candidate. See `countContextQueries` above.
     it("reads no heartbeat context for candidates it cannot re-pin", async () => {
       // Twelve untiered cards: every one is rejected on already-read fields,
@@ -2822,7 +3099,7 @@ describe("scheduled passes", () => {
 
     it("reads the heartbeat context at most once per re-pinnable candidate", async () => {
       // Same shape as the cost-down test, which does reach `advise()` — before
-      // the fix this one card cost TWO context reads (describe, then advise
+      //  this one card cost TWO context reads (describe, then advise
       // re-describing it).
       const cheapModels = withOpusAlt().map((m) =>
         m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
@@ -3043,19 +3320,19 @@ describe("scheduled passes", () => {
       expect(calls).toHaveLength(2);
     });
 
-    // This pass hit 288 s max over the last 4 h — its rows
+    // this pass hit 288 s max over the last 4 h — its rows
     // (`ctx.issues.get` plus the classifier HTTP call) pay the same contended
     // host-RPC cost as every other row-walking pass. The cooperative budget
     // must sit well beneath the host's 300 s job RPC wall.
-    it("keeps the cooperative budget well beneath the host 300 s RPC wall", () => {
+    it("keeps the cooperative budget well beneath the host 300 s RPC wall ()", () => {
       expect(CLASSIFY_JOB_BUDGET_MS).toBeGreaterThan(0);
       expect(CLASSIFY_JOB_BUDGET_MS).toBeLessThanOrEqual(300_000 - 60_000);
     });
 
-    // The admission slice must stay beneath the observed slow row
+    // the admission slice must stay beneath the observed slow row
     // (40-95 s in contended host RPC across the row-walking passes), with the
     // same headroom shape as the label-only pass.
-    it("keeps the per-row admission slice beneath the observed slow row", () => {
+    it("keeps the per-row admission slice beneath the observed slow row ()", () => {
       expect(CLASSIFY_ROW_TIMEOUT_MS).toBeGreaterThan(0);
       expect(CLASSIFY_ROW_TIMEOUT_MS).toBeLessThan(98_000);
       expect(CLASSIFY_JOB_BUDGET_MS - CLASSIFY_ROW_TIMEOUT_MS).toBeLessThanOrEqual(
@@ -3063,10 +3340,10 @@ describe("scheduled passes", () => {
       );
     });
 
-    // ADMISSION: with only half a row-slice of job budget left when
-    // the candidate fetch returns, the row never starts — same slow-admitted-row shape
+    //  ADMISSION: with only half a row-slice of job budget left when
+    // the candidate fetch returns, the row never starts — same  shape
     // as the label-only admission test. The classifier is never even called.
-    it("stops admitting rows without a full per-row slice of budget left", async () => {
+    it("stops admitting rows without a full per-row slice of budget left ()", async () => {
       const card = issue("i1", { labels: [], labelIds: [] });
       const harness = await boot(classifyConfig(), [card]);
       const calls = stubClassifier(harness, { tier: "T2", confidence: 0.9 });
@@ -3100,13 +3377,13 @@ describe("scheduled passes", () => {
       expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual([]);
     });
 
-    // ADAPTIVE admission: the fixed slice alone admits a row with
+    //  ADAPTIVE admission: the fixed slice alone admits a row with
     // 45 s of budget left that then costs the observed 40 s. Row 1 burns 40 s
     // (mocked) inside its one live read — tripping its own slice write-gate but
     // teaching the pass that rows on THIS board cost 40 s — so row 2 (45 s
     // left < 1.5x40 = 60 s headroom) never starts. examined stays 1: the
     // fixed 30 s check alone WOULD have admitted it.
-    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row", async () => {
+    it("refuses a new row when the remaining budget cannot cover 1.5x the slowest row ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const newIso = "2026-01-02T00:00:00.000Z";
       const rowA = { ...classifyRow("i1"), updated_at: oldIso };
@@ -3169,12 +3446,12 @@ describe("scheduled passes", () => {
       expect((await harness.ctx.issues.get("i2", COMPANY))?.labelIds).toEqual(["lbl-T2"]);
     });
 
-    // HARD RETURN: a row whose host calls outrun the remaining job
+    //  HARD RETURN: a row whose host calls outrun the remaining job
     // budget must not hold the job past the host's 300 s wall — the race
     // abandons it at the deadline (not examined, cursor unmoved), the
     // abandoned body that finishes later writes no label, provenance or
     // activity, and the next firing retries the row from live state.
-    it("abandons a slow row at the deadline without writing, and retries it next firing", async () => {
+    it("abandons a slow row at the deadline without writing, and retries it next firing ()", async () => {
       const card = issue("i1", { labels: [], labelIds: ["lbl-other"] });
       const harness = await boot(classifyConfig(), [card]);
       stubClassifier(harness, { tier: "T2", confidence: 0.9 });
@@ -3232,11 +3509,11 @@ describe("scheduled passes", () => {
       expect((await harness.ctx.issues.get("i1", COMPANY))?.labelIds).toEqual(["lbl-other", "lbl-T2"]);
     });
 
-    // WRITE GATE: a row admitted with budget left can still go slow
+    //  WRITE GATE: a row admitted with budget left can still go slow
     // INSIDE its host calls. It must then complete without committing an
     // orphaned mutation — no label, no provenance, no activity — while the
     // watermark still covers it, so next firing re-attempts it from live state.
-    it("skips the write (without starving the row) when the admitted row goes slow", async () => {
+    it("skips the write (without starving the row) when the admitted row goes slow ()", async () => {
       const oldIso = "2026-01-01T00:00:00.000Z";
       const card = issue("i1", { labels: [], labelIds: ["lbl-other"] });
       const harness = await boot(classifyConfig(), [card]);
@@ -3280,7 +3557,7 @@ describe("scheduled passes", () => {
     });
   });
 
-  describe("Incremental scans", () => {
+  describe(" incremental scans", () => {
     function scanMarkKey(stateKey: string) {
       return { scopeKind: "company", scopeId: COMPANY, stateKey } as never;
     }
@@ -3332,7 +3609,7 @@ describe("scheduled passes", () => {
       // the first row is ever examined before the break fires. Pre-fix,
       // "drained" alone jumped the mark straight to the firing start,
       // silently starving row B (never examined) out of every future scan.
-      // The mark is a cursor — it stops at row A, so row B
+      // the mark is a cursor — it stops at row A, so row B
       // (`updated_at > mark`) is read next firing.
       const oldIso = "2026-01-01T00:00:00.000Z";
       const newIso = "2026-01-02T00:00:00.000Z";
@@ -3361,7 +3638,7 @@ describe("scheduled passes", () => {
       // limit) ever get examined before the break fires. Pre-fix this
       // drained fetch (8 rows, well under REPIN_PASS_FETCH_LIMIT) would have
       // jumped the mark to the firing start, starving cards 7 and 8.
-      // The mark is a cursor at the sixth (last settled) row, so
+      // the mark is a cursor at the sixth (last settled) row, so
       // cards 7 and 8 are read next firing — and the six repinned rows are
       // not re-walked, which the old creep-to-oldest rule did forever once a
       // deadline-bounded walk reached only a few rows per firing.
@@ -3426,10 +3703,10 @@ describe("scheduled passes", () => {
     });
 
     it("labelOnlyPass carries a capped fetch to the next firing through its row cap, not past it", async () => {
-      // A capped (limit-hit) fetch is the OTHER shape of the
+      // a capped (limit-hit) fetch is the OTHER shape of the
       // starvation bug — unfetched rows beyond the limit are always newer
       // than the fetched batch only when the fetch is oldest-first.
-      // The per-firing row cap now ends the walk long before the
+      // the per-firing row cap now ends the walk long before the
       // fetch limit, so the cursor stops at the last walked row: every row
       // carries an operator pin (settled at once), the walk stops at
       // LABEL_ONLY_PASS_MAX_ROWS_PER_FIRING, and the next firing reads from
@@ -3454,10 +3731,10 @@ describe("scheduled passes", () => {
     });
 
     it("classifyIssues, labelOnlyPass, and repinPass all issue their candidate-fetch SQL ordered oldest-first", async () => {
-      // The fixture-level ASC/DESC tests above are necessary but not
+      // the fixture-level ASC/DESC tests above are necessary but not
       // sufficient — every `db.query` stub ignores the SQL text, so a
       // regression that silently reverts a query back to `updated_at desc`
-      // leaves the whole suite green. Assert
+      // (the exact bug  found) leaves the whole suite green. Assert
       // directly on the issued SQL for all three watermarked passes so a DESC
       // reintroduction fails here even when nothing else catches it.
       const classifyQueries: string[] = [];
@@ -3593,8 +3870,8 @@ describe("scheduled passes", () => {
   });
 });
 
-describe("Advisory selection writes no model/env pins", () => {
-  // The defect: the passes wrote model pins in the default advisory
+describe(" advisory selection writes no model/env pins", () => {
+  // Parent : the passes wrote model pins in the default advisory
   // install, bypassing the quota guard. Every router-owned pin site is gated
   // on selection.enabled && mode=enforce; in any other posture the passes
   // still walk their rows and still log, but write no override. Both
@@ -3631,7 +3908,7 @@ describe("Advisory selection writes no model/env pins", () => {
 
       await harness.runJob("labelOnlyPass");
 
-      // The defect: this update fired in advisory installs.
+      // The  defect: this update fired in advisory installs.
       expect(overridePatches(seen)).toHaveLength(0);
       const after = await harness.ctx.issues.get("i1", COMPANY);
       expect(after?.assigneeAdapterOverrides ?? null).toBeNull();
@@ -3688,8 +3965,8 @@ describe("Advisory selection writes no model/env pins", () => {
     });
 
     it(`balancePass preserves a pinned card in ${name} mode but still logs the decision`, async () => {
-      // Same cost-down fixture as the per-issue pin-failure isolation test: enforce
-      // would move this card off claude-opus-5 onto the cheap alt.
+      // Same cost-down fixture as the  isolation test: enforce would
+      // move this card off claude-opus-5 onto the cheap alt.
       const cheapModels = withOpusAlt().map((m) =>
         m.id === "claude-opus-5" ? { ...m, costPerMTokIn: 100, costPerMTokOut: 500 } : m,
       );

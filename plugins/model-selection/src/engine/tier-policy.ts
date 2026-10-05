@@ -1,11 +1,11 @@
 /**
- * Tiers as data.
+ *  P1: tiers as data (design D3/D4/D6).
  *
  * Before this module the tier ladder was three hard-coded lookups: the tier CUT
  * (`SCORE_THRESHOLDS` in `tierForPosterior`/`deriveModelTier`/`tierImpliedByIndex`)
  * and the per-tier CAPABILITY gate (`summarize` and `buildModelScore`'s no-stats
  * branch). The two were the same table in source, but the serving build split
- * them: the operator's 2026-10-01 `t1cap080` carry-forward lowered the T1
+ * them: the operator's 2026-10-01 `t1baseline` carry-forward lowered the T1
  * capability bar to 0.8 and left the T1 cut at 0.85. Source never caught up.
  *
  * This module holds both tables as one versioned policy document. The only
@@ -338,7 +338,7 @@ export function validateTierPolicy(policy: TierPolicy, options: ValidateOptions 
 
 /**
  * The legacy evaluator is keyed by the fixed `Tier` union, so it accepts exactly
- * T1/T2/T3 in ascending capability order. Adding or deleting a tier needs an
+ * T3/T2/T1/T0 in ascending capability order. Adding or deleting a tier needs an
  * evaluator that is not keyed by that union. Renaming one is a `name` change.
  */
 function validateLegacyLadder(
@@ -472,12 +472,25 @@ export function compileTierPolicy(policy: TierPolicy, options: ValidateOptions =
 }
 
 /**
- * The serving T1 capability bar (operator carry-forward `t1cap080`, 2026-10-01).
+ * The serving T1 capability bar (operator carry-forward `t1baseline`, 2026-10-01).
  * Before this change source said 0.85 here; serving has run 0.8 since that date.
  */
 export const T1_CAPABILITY_THRESHOLD = 0.8;
 
-function legacyTier(id: Tier, name: string, order: number, capabilityThreshold: number): TierDefinition {
+/**
+ * The T0 capability bar (). T0 is the explicit-only rung above T1: its
+ * cut is `SCORE_THRESHOLDS.T0` (0.9) and its bar is the same, so a model has to
+ * clear the cut it is placed by. Dispatch admission lives in `engine/tier.ts`.
+ */
+export const T0_CAPABILITY_THRESHOLD = 0.9;
+
+function legacyTier(
+  id: Tier,
+  name: string,
+  order: number,
+  capabilityThreshold: number,
+  sourceRevision = "3da20ab13+t1baseline",
+): TierDefinition {
   return {
     id,
     name,
@@ -487,19 +500,20 @@ function legacyTier(id: Tier, name: string, order: number, capabilityThreshold: 
     evidence: { mode: "legacy", minIndependentTasks: 0, cohort: "legacy-model-id" },
     fallbackOnly: false,
     sTier: false,
-    legacy: { scoreThreshold: SCORE_THRESHOLDS[id], capabilityThreshold, sourceRevision: "3da20ab13+t1cap080" },
+    legacy: { scoreThreshold: SCORE_THRESHOLDS[id], capabilityThreshold, sourceRevision },
   };
 }
 
 /**
  * The migration baseline: exactly what the serving build evaluates. Tier cuts
- * are `SCORE_THRESHOLDS` (0.85/0.8/0.75); capability bars are the same except
- * T1 at 0.8. Replayed against the frozen serving evaluator in
- * `tests/tier-policy/tier-policy-replay.spec.ts`.
+ * are `SCORE_THRESHOLDS` (0.9/0.85/0.8/0.75); capability bars are the same except
+ * T1 at 0.8. T3/T2/T1 are replayed against the frozen serving evaluator in
+ * `tests/tier-policy/tier-policy-replay.spec.ts`; T0 (revision 2) has
+ * no serving ancestor and is asserted on its own.
  */
 export const LEGACY_MODEL_SELECTION_V1: TierPolicy = Object.freeze({
   schemaVersion: TIER_POLICY_SCHEMA_VERSION,
-  revision: 1,
+  revision: 2,
   evaluator: LEGACY_EVALUATOR_ID,
   decisionProfile: AA_FREE_PROFILE,
   optionalRichDecisionWeight: 0,
@@ -507,12 +521,13 @@ export const LEGACY_MODEL_SELECTION_V1: TierPolicy = Object.freeze({
     legacyTier("T3", "T3", 0, SCORE_THRESHOLDS.T3),
     legacyTier("T2", "T2", 1, SCORE_THRESHOLDS.T2),
     legacyTier("T1", "T1", 2, T1_CAPABILITY_THRESHOLD),
+    legacyTier("T0", "T0", 3, T0_CAPABILITY_THRESHOLD, ""),
   ]),
   defaultTierId: "T1",
   taskClassTierRefs: Object.freeze({}),
   legacyCompatibility: Object.freeze({
     sourceRevision: "3da20ab13",
-    servingBuild: "model-selection-0.4.0-main5a9be61-t1cap080",
+    servingBuild: "model-selection-0.4.0-main5a9be61-t1baseline",
     servingWorkerSha256: "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099",
     rosterSnapshotHash: null,
     baselineDecisionCorpusHash: null,

@@ -1,5 +1,5 @@
 /**
- * Add, edit and remove tiers as data, through the
+ * P2: add, edit and remove tiers as data, through the
  * `model_selection_tier_policy` tool.
  *
  * This build is the D4 fallback branch: prepare, validate and diff only. The

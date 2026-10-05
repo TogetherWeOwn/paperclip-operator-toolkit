@@ -32,12 +32,13 @@ function tierScore(overrides: Partial<ModelScore["tiers"]["T1"]> = {}): ModelSco
   };
 }
 
-function score(modelId: string, tiers: Partial<Record<"T1" | "T2" | "T3", Partial<ModelScore["tiers"]["T1"]>>>): ModelScore {
+function score(modelId: string, tiers: Partial<Record<"T0" | "T1" | "T2" | "T3", Partial<ModelScore["tiers"]["T1"]>>>): ModelScore {
   return {
     modelId,
     aaIndex: null,
     priorP: 0.8,
     tiers: {
+      T0: tierScore(tiers.T0),
       T1: tierScore(tiers.T1),
       T2: tierScore(tiers.T2),
       T3: tierScore(tiers.T3),
@@ -80,7 +81,7 @@ function laneLedgerWith(laneId: string, utilization: number): LaneLedger {
   return { [laneId]: { laneId, fetchedAt: "t", error: null, observation: null, verdict } };
 }
 
-describe("applyPickOrdering (tier_dispatcher.py pick())", () => {
+describe("applyPickOrdering ( tier_dispatcher.py pick())", () => {
   it("is a no-op when every candidate is proven and priced above the free-must-be-proven floor", () => {
     const models: ModelEntry[] = [
       model(MODELS[0]!, { id: "a", laneId: "lane-a" }),
@@ -213,7 +214,7 @@ describe("applyPickOrdering (tier_dispatcher.py pick())", () => {
   });
 });
 
-describe("capability-score gate (tier_dispatcher.py model_scores.py capable())", () => {
+describe("capability-score gate ( tier_dispatcher.py model_scores.py capable())", () => {
   it("excludes a model whose measured tier success rate is capable: false, even though it clears the static tier-floor", () => {
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
     const weakT1 = model(t1, { id: "weak-t1" });
@@ -269,10 +270,10 @@ describe("capability-score gate (tier_dispatcher.py model_scores.py capable())",
     expect(decision.modelId).toBe("claude-haiku-4-5-20251001");
   });
 
-  // The glm-5.3 shape. Its T3 runs pass, its T2 runs measure a
+  // the glm-5.3 shape. Its T3 runs pass, its T2 runs measure a
   // failing p=0.585, and it has no T1 runs, so the T1 verdict is the prior
   // alone (capable: true). A model that fails T2 must not be fit for T1.
-  describe("monotone across tiers", () => {
+  describe("monotone across tiers ()", () => {
     const glmShaped = (modelId: string) =>
       score(modelId, {
         T3: { n: 89, ok: 89, capable: true, proven: true, p: 0.97 },

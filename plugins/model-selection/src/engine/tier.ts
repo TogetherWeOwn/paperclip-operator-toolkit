@@ -1,4 +1,4 @@
-import { TIERS, TIER_LABEL_PREFIX, TIER_ORDER, type Tier } from "../constants.js";
+import { IMPLICIT_TIER_CEILING, TIERS, TIER_LABEL_PREFIX, TIER_ORDER, type Tier } from "../constants.js";
 import { resolveConfiguredModelId } from "./model-id.js";
 import type { IssueDescriptor, ModelEntry, TierJudgement } from "./types.js";
 
@@ -53,7 +53,7 @@ export function tierOfModel(modelId: string | null | undefined, models: readonly
 
 export interface ResolveTierOptions {
   /**
-   * Whether a given model's lane is currently a
+   * Defect 6. Whether a given model's lane is currently a
    * serviceability hard stop (same check `hardStopExcluded` applies in
    * `select.ts`). When the model an issue is pinned to fails this check, the
    * pin can no longer win outright — a `pinnedModelId` that hard-bypasses
@@ -65,7 +65,69 @@ export interface ResolveTierOptions {
   isLaneUnserviceable?: (model: ModelEntry) => boolean;
 }
 
+/**
+ * The most capable tier a decision may place a card on. Absent is
+ * the implicit ceiling: a judgement built before T0 existed never opted in.
+ */
+export function admittedTierCeiling(judgement: Pick<TierJudgement, "admittedCeiling">): Tier {
+  return judgement.admittedCeiling ?? IMPLICIT_TIER_CEILING;
+}
+
+function tierRank(tier: Tier): number {
+  return TIER_ORDER.indexOf(tier);
+}
+
+/**
+ * T0 admission (CTO-approved). Implicit dispatch is capped at
+ * `IMPLICIT_TIER_CEILING`; a card reaches T0 only on an EXPLICIT issue-level
+ * judgement — a `tier:T0` label, or a pin whose provenance is recorded as
+ * `explicit`. Everything this engine derives by itself (a router-written pin
+ * or label, sticky history, an agent pin/floor/default, capacity exhaustion,
+ * score derivation, explore, earn-in) can never create that opt-in, so a
+ * judgement that lands on T0 without one is clamped to the ceiling and says
+ * why. Exclusion is handled before this runs and already forces T1.
+ */
+function applyAdmission(raw: TierJudgement, descriptor: IssueDescriptor): TierJudgement {
+  if (raw.source === "capability-exclusion") return { ...raw, admittedCeiling: IMPLICIT_TIER_CEILING };
+
+  const explicitT0 =
+    raw.tier === "T0" &&
+    (tierFromLabels(descriptor.labelNames) === "T0" ||
+      (raw.source === "issue-override" && descriptor.pinProvenance === "explicit"));
+  if (explicitT0) return { ...raw, admittedCeiling: "T0" };
+
+  if (tierRank(raw.tier) > tierRank(IMPLICIT_TIER_CEILING)) {
+    return {
+      ...raw,
+      tier: IMPLICIT_TIER_CEILING,
+      detail:
+        `${raw.detail}; ${raw.tier} is not admitted implicitly — clamped to ${IMPLICIT_TIER_CEILING} ` +
+        `(${raw.tier} needs a ${TIER_LABEL_PREFIX}${raw.tier} label or an explicit-provenance pin)`,
+      admittedCeiling: IMPLICIT_TIER_CEILING,
+    };
+  }
+  return { ...raw, admittedCeiling: IMPLICIT_TIER_CEILING };
+}
+
+/**
+ * Whether the router may write this tier as a `tier:*` label. The
+ * router's own writes are never an opt-in, so it never mints a label above the
+ * implicit ceiling: `tier:T0` comes from a human or agent, not from this plugin.
+ */
+export function routerMayWriteTierLabel(tier: Tier): boolean {
+  return tierRank(tier) <= tierRank(IMPLICIT_TIER_CEILING);
+}
+
 export function resolveTier(
+  descriptor: IssueDescriptor,
+  models: readonly ModelEntry[],
+  configDefaultTier: Tier,
+  options?: ResolveTierOptions,
+): TierJudgement {
+  return applyAdmission(resolveRecordedTier(descriptor, models, configDefaultTier, options), descriptor);
+}
+
+function resolveRecordedTier(
   descriptor: IssueDescriptor,
   models: readonly ModelEntry[],
   configDefaultTier: Tier,
@@ -114,7 +176,7 @@ export function resolveTier(
   }
 
   // Step 3 — the tier:* label, the durable record that survives a remapping of
-  // which model backs each tier (ADR-0008).
+  // which model backs each tier .
   const labelTier = tierFromLabels(descriptor.labelNames);
   if (labelTier) {
     return { tier: labelTier, source: "issue-label", detail: `${TIER_LABEL_PREFIX}${labelTier} label on the issue` };
@@ -136,4 +198,25 @@ export function resolveTier(
     source: "config-default",
     detail: `no judgement and no recognised agent floor; config default ${configDefaultTier}`,
   };
+}
+
+/**
+ * The tier a scheduled pass (label-only, repin, balance, apply sweep) judges a
+ * card at. `resolveTier` supplies the exclusion, pin, floor and default
+ * fallbacks; during a repin the strongest recorded judgement survives a lane
+ * failure, so a stronger LABEL supersedes a stale weaker pin. T0 keeps the same
+ * boundary as `selectModel`: `resolveTier` already clamps anything above the
+ * implicit ceiling, and the label branch can only reach T0 through an explicit
+ * `tier:T0` label (the router never writes one). An exclusion forces T1 first,
+ * exactly as it does in `resolveTier`, so no label supersedes it.
+ */
+export function tierWithFallback(
+  descriptor: IssueDescriptor,
+  models: readonly ModelEntry[],
+  defaultTier: Tier,
+): Tier {
+  const judgement = resolveTier(descriptor, models, defaultTier);
+  if (judgement.source === "capability-exclusion") return judgement.tier;
+  const labelTier = tierFromLabels(descriptor.labelNames);
+  return labelTier && tierRank(labelTier) > tierRank(judgement.tier) ? labelTier : judgement.tier;
 }

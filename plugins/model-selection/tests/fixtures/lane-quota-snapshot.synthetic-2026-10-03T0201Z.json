@@ -1,5 +1,5 @@
 {
-  "_provenance": "SYNTHETIC. Reconstructed from a written description of the snapshot (real lane-document record shape from the cliproxy lane documents); NOT a byte copy of the 2026-10-03T02:01Z snapshot, which this run could not read. No emails, credentials or display names.",
+  "_provenance": "SYNTHETIC. Reconstructed from the  card text (real lane-document record shape from the cliproxy lane documents); NOT a byte copy of the 2026-10-03T02:01Z snapshot, which this run could not read. No emails, credentials or display names.",
   "snapshot": {
     "schemaVersion": 1,
     "observedAt": "2026-10-03T02:01:00Z",

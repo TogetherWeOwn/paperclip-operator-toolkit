@@ -94,9 +94,9 @@ describe("selection", () => {
   });
 
   it("records the gate that actually rejected a candidate, not another one that also applies", () => {
-    // Acceptance: `flaky` is BOTH disabled in the roster AND sitting
+    // acceptance: `flaky` is BOTH disabled in the roster AND sitting
     // on a lane the pace ledger reports unserviceable — either fact alone
-    // would explain a rejection, and a by-hand reconstruction from
+    // would explain a rejection, and 's by-hand reconstruction from
     // roster shape (which cannot see the `continue` order below) could
     // plausibly have picked either. `select.ts` checks `!model.enabled`
     // first and `continue`s immediately, so `lane-unserviceable` is never
@@ -232,7 +232,7 @@ describe("selection", () => {
     expect(decision.heldReason).toContain("not trusted");
   });
 
-  it("Writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
+  it(": writes an explicit pin instead of holding at floor when the floor's own lane is dead", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -253,7 +253,7 @@ describe("selection", () => {
     expect(decision.trace.some((line) => line.includes("held-at-floor declined"))).toBe(true);
   });
 
-  it("Still holds at floor, unchanged, when the floor's lane is healthy", () => {
+  it(": still holds at floor, unchanged, when the floor's lane is healthy", () => {
     const floor = model(MODELS.find((m) => m.tier === "T3")!, {
       id: "gpt-5.6-sol",
       laneId: "sol-lane",
@@ -405,7 +405,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("alpha");
   });
 
-  it("Same-price-family rule prefers the newer release for a same-price sibling pair", () => {
+  it(": same-price-family rule prefers the newer release for a same-price sibling pair", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, { id: "vendor-model-4-8", releasedAt: "2026-05-05" });
     const newer = model(t2, { id: "vendor-model-5", releasedAt: "2026-06-24" });
@@ -417,7 +417,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-5");
   });
 
-  it("A provenBetter earn-in verdict lets the older same-price-family model win", () => {
+  it(": a provenBetter earn-in verdict lets the older same-price-family model win", () => {
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const older = model(t2, {
       id: "vendor-model-4-8",
@@ -433,7 +433,7 @@ describe("selection", () => {
     expect(decision.modelId).toBe("vendor-model-4-8");
   });
 
-  describe("Tier-exhaustion escalation", () => {
+  describe(" Defect 2: tier-exhaustion escalation", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -529,7 +529,7 @@ describe("selection", () => {
     });
   });
 
-  describe("A pin or sticky model cannot hard-bypass capacity routing", () => {
+  describe(" Defect 6: a pin or sticky model cannot hard-bypass capacity routing", () => {
     const t3 = MODELS.find((entry) => entry.tier === "T3")!;
     const t2 = MODELS.find((entry) => entry.tier === "T2")!;
     const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -845,7 +845,7 @@ describe("lane avoid + lane outage gating", () => {
   });
 });
 
-describe("lane-has-room gating (tier_dispatcher.py lane_has_room())", () => {
+describe("lane-has-room gating)", () => {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
   const goModel = model(t1, { id: "go-model", laneId: "opencode-go", costPerMTokIn: 0.5, costPerMTokOut: 0.5 });
 
@@ -1164,7 +1164,7 @@ describe("wake-scoped floor", () => {
     expect(decision.advisory).toBe(false);
   });
 
-  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre-wake-scoped-floor behavior", () => {
+  it("one-key rollback: wakeScopedFloor.enabled false restores byte-identical pre- behavior", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T1"], wakeReason: "monitor" },

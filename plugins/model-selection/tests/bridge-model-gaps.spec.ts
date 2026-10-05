@@ -17,7 +17,7 @@ import { legacyBody } from "./aa-free/fixture.js";
 import { MODELS, NOW, PROFILES, NO_ESCALATION } from "./fixtures.js";
 
 /**
- * Bridge-model roster resolution gaps.
+ * bridge-model roster resolution gaps (parent epic ).
  *
  * The 60s bridge timer chooses one of three models the reviewed roster (on
  * main) carries no enabled row for: the MUSE form with a parenthesized effort

@@ -36,7 +36,7 @@ function paidModel(id: string, laneId = "lane-paid"): ModelEntry {
   return model(opus, { id, laneId, releasedAt: "2026-01-01" });
 }
 
-type TierKey = "T1" | "T2" | "T3";
+type TierKey = "T0" | "T1" | "T2" | "T3";
 
 function tierScore(overrides: Partial<ModelScore["tiers"]["T1"]> = {}): ModelScore["tiers"]["T1"] {
   return {
@@ -66,6 +66,7 @@ function score(
     aaIndex: null,
     priorP: 0.8,
     tiers: {
+      T0: tierScore(tiers.T0),
       T1: tierScore(tiers.T1),
       T2: tierScore(tiers.T2),
       T3: tierScore(tiers.T3),

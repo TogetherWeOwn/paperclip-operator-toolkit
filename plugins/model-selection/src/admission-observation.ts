@@ -60,7 +60,7 @@ export interface ObservationRow {
 
 export interface LaneObservationAdapterResult {
   schema: 'lane-quota-observation-adapter-v1';
-  /** Caller-declared provenance; the adapter does not certify it. */
+  /** Provenance label supplied with this call; the adapter does not certify it. */
   evidenceKind: 'synthetic-replay' | 'observed-replay' | 'fresh-observations';
   snapshotObservedAt: number | null;
   maxAgeMs: number;
@@ -87,10 +87,13 @@ export const WINDOW_MS: Record<ObservationWindowKind, number> = {
   weekly: 7 * 24 * 60 * 60 * 1000,
 };
 /**
- * Reported resets carry jitter of up to about a second around the provider's
- * real boundary (for example 09:59:59.666 and 19:00:00.443 for whole-minute
- * resets). The window id embeds the reset, so it is snapped to the nearest
- * minute to stay stable across polls; the exact instant stays on the row.
+ * Reported resets snap to the nearest minute for the window identity:
+ * `Math.round` pulls any instant within half the grid (30 s) onto the
+ * boundary. Observed provider jitter is only about a second around
+ * whole-minute boundaries (for example 09:59:59.666 and 19:00:00.443), but
+ * the grid itself cannot tell a genuinely different reset inside that 30 s
+ * band from jitter: both take the boundary's window id. The exact reported
+ * instant stays on the row as `reportedResetAt`.
  */
 export const RESET_IDENTITY_GRID_MS = 60_000;
 const MAX_BINDING_ACCOUNTS = 64;
@@ -123,9 +126,12 @@ export function validateLaneAccountBindings(bindings: readonly LaneAccountBindin
   }
 }
 
+/** Largest epoch `Date` accepts; `toISOString` throws a RangeError above it. */
+const MAX_EPOCH_MS = 8.64e15;
+
 /** Only an ISO-8601 instant with an explicit offset, or finite epoch milliseconds. */
 function epochMs(value: unknown): number | null {
-  if (finiteObserved(value)) return value >= 0 ? value : null;
+  if (finiteObserved(value)) return value >= 0 && value <= MAX_EPOCH_MS ? value : null;
   if (typeof value !== 'string' || !ISO_INSTANT.test(value)) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
@@ -189,7 +195,8 @@ export function adaptLaneQuotaSnapshot(input: LaneObservationAdapterInput): Lane
       const rawUtilization = record?.[window.utilizationField];
       const reportedReset = record?.[window.resetField];
       const reportedResetMs = epochMs(reportedReset);
-      // Provider jitter must not mint a new window identity.
+      // Provider jitter must not mint a new window identity. Resets within
+      // 30 s of a boundary share that boundary's identity by construction.
       const resetAt = reportedResetMs === null ? null
         : Math.round(reportedResetMs / RESET_IDENTITY_GRID_MS) * RESET_IDENTITY_GRID_MS;
       const startAt = resetAt === null ? null : resetAt - WINDOW_MS[window.kind];
@@ -268,7 +275,7 @@ export function adaptLaneQuotaSnapshot(input: LaneObservationAdapterInput): Lane
     limitations: [
       'Utilization fractions are advisory attainment only: no budget, headroom, plan weight or allowed-start claim.',
       'Lane-to-account identity is the committed table, not an observed served account.',
-      'Evidence kind is caller-declared; this adapter does not certify provenance or freshness beyond maxAgeMs.',
+      'Evidence kind is asserted, not certified: this adapter does not verify provenance or freshness beyond maxAgeMs.',
     ],
   };
 }

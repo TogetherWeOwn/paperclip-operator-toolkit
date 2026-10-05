@@ -15,7 +15,7 @@ import type { ModelEntry } from "../src/engine/types.js";
 import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
-// An agent-to-agent reassignment
+//  ( §5, §7 items 3-4): an agent-to-agent reassignment
 // re-homes the pin's env, and a pin on a fallback-only model is stamped,
 // indexed and released once a regular model can take the card again.
 
@@ -188,7 +188,7 @@ function leaseCard(id: string, stamp: PinProvenance | null, overrides: Partial<I
   });
 }
 
-describe("Reassignment re-homes the pin env", () => {
+describe(" reassignment re-homes the pin env", () => {
   it("rebuilds the pin from the new assignee's env before a queued run starts", async () => {
     const { harness } = await boot([card(ISSUE, { assigneeAdapterOverrides: aPin(normal) })], undefined, {
       liveRuns: QUEUED_UNSTARTED,
@@ -199,12 +199,45 @@ describe("Reassignment re-homes the pin env", () => {
     const after = await override(harness);
     expect(after?.adapterConfig?.model).toBe(normal);
     expect(after?.adapterConfig?.env).toMatchObject({
-      B_ONLY_TOKEN: { type: "secret_ref", key: "b_only_secret" },
-      SHARED: { type: "plain", value: "from-b" },
       PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: normal },
     });
+    // the rebuilt pin carries only plugin-owned keys. B's
+    // bindings stay on B's agent record and reach the run through the base
+    // env — the reassignment drops A's snapshot without snapshotting B's.
+    expect(after?.adapterConfig?.env).not.toHaveProperty("B_ONLY_TOKEN");
+    expect(after?.adapterConfig?.env).not.toHaveProperty("SHARED");
     expectNoAOnlyBinding(after);
     expect(harness.activity.some((entry) => entry.metadata?.action === "rebuild-env")).toBe(true);
+  });
+
+  it("vetoes the plain pin for a model surface only the NEW assignee binds to a secret", async () => {
+    // B binds two sub-call surfaces to secrets; A's old pin binds
+    // neither. The veto must read B's env, not A's pin env — read from the
+    // old pin env (the `rehome-rebuilds-from-old-env` mutant) the rebuild
+    // would write a plain value over B's live secret binding.
+    const bSecretBoundSurfaces = {
+      ANTHROPIC_SMALL_FAST_MODEL: { type: "secret_ref", key: "b_small_fast_secret" },
+      CLAUDE_CODE_SUBAGENT_MODEL: { type: "secret_ref", key: "b_subagent_secret" },
+    };
+    const { harness } = await boot(
+      [card(ISSUE, { assigneeAdapterOverrides: aPin(normal) })],
+      [agent(AGENT_A, A_ENV), agent(AGENT_B, { ...B_ENV, ...bSecretBoundSurfaces })],
+      { liveRuns: QUEUED_UNSTARTED },
+    );
+
+    await reassign(harness, AGENT_A, AGENT_B);
+
+    const after = await override(harness);
+    expect(after?.adapterConfig?.model).toBe(normal);
+    expect(after?.adapterConfig?.env).not.toHaveProperty("ANTHROPIC_SMALL_FAST_MODEL");
+    expect(after?.adapterConfig?.env).not.toHaveProperty("CLAUDE_CODE_SUBAGENT_MODEL");
+    // The unbound surfaces are still re-derived: the veto is per key.
+    expect(after?.adapterConfig?.env).toMatchObject({
+      PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: normal },
+    });
+    expect(JSON.stringify(after)).not.toContain("b_small_fast_secret");
+    expect(JSON.stringify(after)).not.toContain("b_subagent_secret");
+    expectNoAOnlyBinding(after);
   });
 
   it("carries a fallback pin's stamp to the new home, so the lease still finds it", async () => {
@@ -403,7 +436,7 @@ describe("Reassignment re-homes the pin env", () => {
   });
 });
 
-describe("Fallback lease", () => {
+describe(" fallback lease", () => {
   it("stamps and indexes the fallback pin the repin pass writes", async () => {
     const { harness } = await boot([card(ISSUE, {
       status: "in_progress", assigneeAgentId: AGENT_A, assigneeAdapterOverrides: { adapterConfig: { model: incumbent } },
@@ -443,7 +476,14 @@ describe("Fallback lease", () => {
     const after = await override(harness);
     expect([normal, incumbent]).toContain(after?.adapterConfig?.model);
     expect(readPinProvenance(after?.adapterConfig?.env)).toBeNull();
-    expect(after?.adapterConfig?.env).toMatchObject(A_ENV);
+    // the re-decided pin carries only plugin-owned keys. A's
+    // bindings stay on A's agent record and reach the run through the base
+    // env, not the pin.
+    expect(after?.adapterConfig?.env).not.toHaveProperty("A_ONLY_TOKEN");
+    expect(after?.adapterConfig?.env).not.toHaveProperty("SHARED");
+    expect(after?.adapterConfig?.env).toMatchObject({
+      PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: after?.adapterConfig?.model },
+    });
     expect(await index(harness)).toEqual({});
     expect(harness.activity.some((entry) => entry.metadata?.reason === "fallback-lease" && entry.metadata?.decisionId === "d-release")).toBe(true);
   });
@@ -531,14 +571,14 @@ describe("Fallback lease", () => {
   });
 });
 
-// The three writers this
+//  (review of the reviewer-rebased head): the three writers this
 // feature adds — the re-home rebuild, the re-home clear, and the fallback
 // lease release — take the same single gate as the five scheduled/event pin
 // sites. Advisory installs walk their rows and log their decisions, but
-// write no override: writing here reintroduced exactly the defect
+// write no override: writing here reintroduced exactly the  defect
 // #482 closed. Both non-enforcing postures are covered, because both
 // conjuncts of the gate are load-bearing.
-describe("Advisory installs gate the re-home and lease writers", () => {
+describe(" advisory installs gate the re-home and lease writers", () => {
   const ADVISORY_SELECTIONS: Array<{ name: string; selection: Record<string, unknown> }> = [
     { name: "advise", selection: { enabled: true, mode: "advise" } },
     // Disabled wins even when mode says enforce: both conjuncts are load-bearing.
@@ -556,10 +596,10 @@ describe("Advisory installs gate the re-home and lease writers", () => {
 
       await reassign(harness, AGENT_A, AGENT_B);
 
-      // The defect: this update fired in advisory installs.
+      // The  defect: this update fired in advisory installs.
       expect(writes).toEqual([]);
       // Nothing was written, so the previous assignee's env is still there —
-      // enforcement (or the pin-env repair path, with its own advisory
+      // enforcement (or the  repair path, with its own advisory
       // check) is what re-homes it.
       const after = await override(harness);
       expect(after?.adapterConfig?.model).toBe(normal);

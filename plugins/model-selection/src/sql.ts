@@ -4,7 +4,7 @@ export const REFRESH_SCORE_RUNS_SQL = `select usage_json->>'model' as model,
        coalesce(error_code,'') as error_code,
        left(coalesce(error,''),200) as error,
        coalesce(usage_json->>'costUsd','') as cost_usd,
-       -- See REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
+       -- see REFRESH_SCORE_CLOSING_RUNS_SQL. Same guard applies to
        -- the score rows' okCost sample.
        coalesce(usage_json->>'provider','') as provider,
        extract(epoch from (finished_at - started_at))/60.0 as mins,
@@ -137,7 +137,7 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
        usage_json->>'model' as model,
        coalesce(agent_id::text,'') as agent_id,
        coalesce(usage_json->>'costUsd','') as cost_usd,
-       -- Which provider's price table produced cost_usd. The Claude
+       -- which provider's price table produced cost_usd. The Claude
        -- CLI lane stamps 'anthropic' for every model it serves, including the
        -- CLIProxy lanes serving Meta/Devin models, so cost_usd is only
        -- evidence once this column agrees with the model. See
@@ -151,7 +151,7 @@ export const REFRESH_SCORE_CLOSING_RUNS_SQL = `select coalesce(context_snapshot-
    and usage_json ? 'model'`;
 
 /**
- * Per-model run outcomes, the input to the lane-evidence term.
+ * per-model run outcomes, the input to the lane-evidence term.
  * Aggregated to lanes in `worker.ts`, because the model -> lane map lives in
  * config and not in the database.
  *
@@ -176,7 +176,7 @@ export const LANE_EVIDENCE_RUNS_SQL = `select usage_json->>'model' as model,
 
 /**
  * The host's record of one run's model decision
- * (`contextSnapshot.modelDecision`), read by run id. The sticky
+ * (`contextSnapshot.modelDecision`, ), read by run id. The sticky
  * rule's database fallback: the decision cache answers first, and this runs
  * only on a miss (worker restart, another instance's decision). Alias-free
  * after `from` for the host guard (`tests/sql-guard.spec.ts`).

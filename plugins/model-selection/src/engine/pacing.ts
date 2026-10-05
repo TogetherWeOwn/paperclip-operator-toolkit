@@ -51,6 +51,16 @@ export interface LaneLedgerEntry {
   unserviceableSince?: string | null;
   /** The `verdict.reason` carried by the observation that set `unserviceableSince`. */
   unserviceableReason?: LanePaceVerdict["reason"] | null;
+  /**
+   * The lane's combined utilization (see `laneCombinedUtilization`),
+   * written only from a verdict a poll actually returned and carried across
+   * failed polls, for the same reason as `unserviceableSince`: a flapping poll
+   * must not move a withdrawn lane back to admissible. It is bounded by
+   * `resetsAt` instead of by age, because a window rollover is what makes the
+   * reading wrong, not the clock. `undefined` on an entry persisted before
+   * this field existed; read it through `?? null`.
+   */
+  combinedUtilization?: LaneCombinedUtilization | null;
   /** Retained across failed polls, bounded by source freshness AND cooldown expiry. */
   modelCooldownEvidence?: Array<{
     observedAt: string;
@@ -60,6 +70,68 @@ export interface LaneLedgerEntry {
 }
 
 export type LaneLedger = Record<string, LaneLedgerEntry>;
+
+/**. One lane-wide utilization reading, with the instant it stops being evidence. */
+export interface LaneCombinedUtilization {
+  /** Capacity-weighted mean account utilization, 0-1, unserviceable accounts counted as fully spent. */
+  utilization: number;
+  /** Accounts that contributed a reading. */
+  accounts: number;
+  /** Earliest governing-window reset among the contributors. At or after it the reading no longer describes the lane. */
+  resetsAt: string | null;
+  /** `fetchedAt` of the poll that produced the reading. */
+  measuredAt: string;
+}
+
+/**
+ * The lane's combined utilization: the capacity-weighted mean of its
+ * accounts' governing-window utilization, where an account the pace engine calls
+ * unserviceable counts as fully spent (1.0).
+ *
+ * That last clause is the point of the definition. `pace.ts` trips an account
+ * at `1 - margin`, so an exhausted account reads 0.99 and a plain mean of seven
+ * exhausted accounts and one at 0.85 is 0.9725 — under a 0.98 ceiling while
+ * one account with 15% left carries all of the lane. Counting the account as
+ * what it is for dispatch, a source of no more capacity, gives 0.98125. Against
+ * 579 recorded T1 decisions this reading crosses 0.98 in exactly the regime the
+ * live bridge withdraws the lane (0.9812 against the bridge's 0.98) and stays
+ * under it in the regime the bridge does not (0.9775 at most); the plain mean
+ * does neither (docs/lane-withdrawal.md).
+ *
+ * The live bridge's own definition has not been mirrored yet, so this is the
+ * best-supported reading, not a port. An account with no governing-window
+ * reading is left out of the mean (no evidence either way). Weights are the
+ * reported account weights when every contributor has one, equal otherwise —
+ * mixing reported and defaulted weights would skew the mean. Null when no
+ * account contributes: a free lane, or one nobody can read.
+ */
+export function laneCombinedUtilization(verdict: LanePaceVerdict, measuredAt: string): LaneCombinedUtilization | null {
+  const readings = verdict.accounts.flatMap((account) => {
+    const utilization = account.score?.utilization;
+    if (typeof utilization !== "number" || !Number.isFinite(utilization)) return [];
+    return [{
+      utilization: account.serviceable ? Math.min(1, Math.max(0, utilization)) : 1,
+      weight: typeof account.weight === "number" && Number.isFinite(account.weight) && account.weight > 0 ? account.weight : null,
+      resetAt: account.governingResetAt ?? null,
+    }];
+  });
+  if (readings.length === 0) return null;
+  const weighted = readings.every((reading) => reading.weight !== null);
+  let spent = 0;
+  let total = 0;
+  for (const reading of readings) {
+    const weight = weighted ? reading.weight! : 1;
+    spent += weight * reading.utilization;
+    total += weight;
+  }
+  const resets = readings.flatMap((reading) => (reading.resetAt && Number.isFinite(Date.parse(reading.resetAt)) ? [reading.resetAt] : []));
+  return {
+    utilization: spent / total,
+    accounts: readings.length,
+    resetsAt: resets.length > 0 ? resets.reduce((earliest, at) => (Date.parse(at) < Date.parse(earliest) ? at : earliest)) : null,
+    measuredAt,
+  };
+}
 
 /**
  * A running/queued issue's operator override, e.g. "route to this model
@@ -83,7 +155,7 @@ export type OperatorOverrideLedger = Record<string, OperatorOverrideEntry>;
  * "we don't know" rather than a fabricated one. One lane's failure has no
  * effect on any other lane's entry — callers merge one result at a time.
  *
- * That honesty is right for `verdict` and wrong as the ONLY record
+ * that honesty is right for `verdict` and wrong as the ONLY record
  * of serviceability, because it silently discards a measurement already
  * taken. `unserviceableSince` is the durable half — updated only from a
  * verdict this poll actually returned, carried forward untouched when the
@@ -124,6 +196,11 @@ export function mergeLedgerEntry(
     unserviceableReason = null;
   }
 
+  const combined =
+    (result.verdict ? laneCombinedUtilization(result.verdict, result.fetchedAt) : null) ??
+    previous?.combinedUtilization ??
+    null;
+
   return {
     ...ledger,
     [result.laneId]: {
@@ -134,6 +211,10 @@ export function mergeLedgerEntry(
       error: result.error,
       unserviceableSince,
       unserviceableReason,
+      // a verdict that yields no reading (free lane, unreadable
+      // accounts) is evidence of nothing, so the prior reading stands until its
+      // window resets; only a poll that measured the lane replaces it.
+      ...(combined ? { combinedUtilization: combined } : {}),
       modelCooldownEvidence: result.verdict
         ? cooldownEvidence(result.observation ?? null)
         : previous?.modelCooldownEvidence ?? cooldownEvidence(previous?.observation ?? null),
@@ -170,20 +251,20 @@ function paceStateOf(ledger: LaneLedger, model: ModelEntry | undefined): PaceSta
 }
 
 /**
- * The only lane states the balance pass pulls idle pins toward —
+ * the only lane states the balance pass pulls idle pins toward —
  * a lane trailing its fair-share pace should get volume routed to it before
  * its allowance window closes unused. Everything else (including `on`,
  * `ahead`, and `unknown`) is never a pace-pull target.
  */
 const PACE_PULL_STATES: ReadonlySet<PaceState> = new Set(["behind", "behind-urgent"]);
 
-/** Whether this model's lane is trailing pace. `unknown` (unobserved or lane-less) is never behind. */
+/** : whether this model's lane is trailing pace. `unknown` (unobserved or lane-less) is never behind. */
 export function isBehindPace(ledger: LaneLedger, model: ModelEntry | undefined): boolean {
   return PACE_PULL_STATES.has(paceStateOf(ledger, model));
 }
 
 /**
- * This model's lane rank in the new-pin preference order (lower =
+ * this model's lane rank in the new-pin preference order (lower =
  * more preferred). The balance-pass pace-pull gate requires the target's rank
  * to be strictly better (lower) than the pinned lane's, so a pull never moves
  * a card sideways between equally-behind lanes or backwards onto a
@@ -204,14 +285,14 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * Fraction of a governing window's duration (0-1) after
+ * Defect 5. Fraction of a governing window's duration (0-1) after
  * which a trailing lane is considered close enough to reset that its unused
  * allowance is at risk of being wasted. 0.8 = the last 20% of the window.
  */
 export const PREFERRED_ELAPSED_THRESHOLD = 0.8;
 
 /**
- * The pace engine was brake-only. `hardStopExcluded`
+ * Defect 5: the pace engine was brake-only. `hardStopExcluded`
  * excludes an exhausted lane and `slotFactorFor` throttles a lane running
  * `ahead` — both only ever hold a lane BACK. Nothing on the other side ever
  * PREFERS a lane, so a lane trailing its elapsed-fraction trajectory can
@@ -322,7 +403,7 @@ export function orderCandidatesByPace(
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
 
-      // Owner rule: same vendor family, tier, and price — the newer
+      //  owner rule: same vendor family, tier, and price — the newer
       // release wins outright unless the older one carries an explicit
       // earn-in verdict proving it's better. This runs before the plain
       // release-date fallback below because it is a strict same-family match
@@ -375,7 +456,7 @@ const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = n
  * the pace engine reports (malformed document, stale snapshot, no records,
  * unusable account identity): those are a verdict saying "I could not tell".
  *
- * What is NOT fail-neutral any more is a lane this plugin HAS
+ * what is NOT fail-neutral any more is a lane this plugin HAS
  * observed unserviceable and has since lost the reading for. `verdict` goes
  * null on every failed poll, and reading serviceability solely off `verdict`
  * meant a flapping poll silently readmitted a lane measured exhausted minutes
@@ -430,7 +511,7 @@ function unserviceableVerdict(verdict: LanePaceVerdict): boolean {
 
 /**
  * Deterministic per-issue coin flip in [0, 1), stable for a given input
- * string. Used for ahead-of-line slot throttling, and for the
+ * string. Used for ahead-of-line slot throttling, and for the 
  * T2/T3 explore-fraction roll (`applyPickOrdering` in `select.ts`), so the
  * same issue always lands on the same side of a cap/roll — no shared
  * counter, so no last-write-wins race between concurrent selections (see
@@ -535,6 +616,13 @@ export interface RepinGateContext {
 export interface LaneAvoidConfig {
   defaultThreshold: number;
   perLane: Record<string, number>;
+  /**
+   * Per-lane withdrawal ceiling, from `pacing.lanes[].withdrawAtUtilization`.
+   * A lane absent here is never withdrawn, which is the default. It rides in this
+   * config because every site that asks "may NEW work go to this lane" already
+   * receives it.
+   */
+  withdrawAt?: Readonly<Record<string, number>>;
 }
 
 export function avoidThresholdFor(config: LaneAvoidConfig, laneId: string): number {
@@ -561,6 +649,57 @@ export function laneAvoidExcluded(ledger: LaneLedger, model: ModelEntry, config:
   // Reuse its default deadband: threshold alone must not park a lane whose
   // remaining allowance is on pace (or at risk of expiring unused).
   return score.utilization >= avoidThresholdFor(config, model.laneId) && score.deviation > DEFAULT_MARGIN;
+}
+
+/**. A lane whose combined utilization is at or above its withdrawal ceiling. */
+export interface LaneWithdrawal {
+  laneId: string;
+  utilization: number;
+  ceiling: number;
+  accounts: number;
+}
+
+/** Utilization is compared at 1e-6, the same drift guard `pace.ts` applies in milli-units. */
+function atOrAbove(value: number, ceiling: number): boolean {
+  return Math.round(value * 1_000_000) >= Math.round(ceiling * 1_000_000);
+}
+
+/**
+ * Whether a lane is withdrawn from NEW dispatch, and why. The
+ * selector otherwise keeps a lane open while any one account can serve
+ * (`hardStopExcluded`) and prefers a trailing lane near its reset
+ * (`orderCandidatesByPace`), so a lane with 7 of 8 accounts exhausted still
+ * took every new dispatch. The live bridge withdraws the lane at a combined
+ * ceiling; this is that rule, with the ceiling read from config.
+ *
+ * Off unless the lane has a positive ceiling. Fail-neutral on a lane with no
+ * reading, like `hardStopExcluded` on an unpolled lane, but a reading taken
+ * before a failed poll still counts (see `LaneLedgerEntry.combinedUtilization`)
+ * until the earliest contributing window resets.
+ */
+export function laneWithdrawal(
+  ledger: LaneLedger,
+  laneId: string | null | undefined,
+  config: LaneAvoidConfig,
+  nowMs: number = Date.now(),
+): LaneWithdrawal | null {
+  if (!laneId) return null;
+  const ceiling = config.withdrawAt?.[laneId];
+  if (typeof ceiling !== "number" || !Number.isFinite(ceiling) || ceiling <= 0) return null;
+  const reading = ledger[laneId]?.combinedUtilization ?? null;
+  if (!reading) return null;
+  if (reading.resetsAt !== null && Date.parse(reading.resetsAt) <= nowMs) return null;
+  if (!atOrAbove(reading.utilization, ceiling)) return null;
+  return { laneId, utilization: reading.utilization, ceiling, accounts: reading.accounts };
+}
+
+export function laneWithdrawnExcluded(
+  ledger: LaneLedger,
+  model: ModelEntry,
+  config: LaneAvoidConfig,
+  nowMs: number = Date.now(),
+): boolean {
+  return laneWithdrawal(ledger, model.laneId, config, nowMs) !== null;
 }
 
 /**

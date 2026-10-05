@@ -11,7 +11,7 @@ export const TOOL_NAMES = {
   /** Record a time-boxed operator override: route this issue to a named model regardless of pace. */
   setOperatorOverride: "model_selection_set_operator_override",
   /**
-   * Report where an agent's ancillary model pins
+   * Defect 3. Report where an agent's ancillary model pins
    * (ANTHROPIC_SMALL_FAST_MODEL, CLAUDE_CODE_SUBAGENT_MODEL, every
    * ANTHROPIC_DEFAULT_* env var) disagree with the lane-aware T3
    * recommendation. Read-only, always advisory: there is no write path from
@@ -24,19 +24,19 @@ export const TOOL_NAMES = {
    * replacement; removed rather than kept as a frozen snapshot.
    */
   ancillaryDrift: "model_selection_ancillary_drift",
-  /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only. */
+  /** Per-model aa.ai configured vs. live index and tier-boundary drift. Read-only (). */
   aaDriftReport: "model_selection_aa_drift_report",
-  /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence. */
+  /** Manually run the aa.ai fetch + drift-surfacing sweep outside the cron cadence ( reopen AC4). */
   refreshAaIndexNow: "model_selection_refresh_aa_index_now",
-  /** The last models.dev price reconciliation, as an operator-approvable diff. Read-only. */
+  /** : the last models.dev price reconciliation, as an operator-approvable diff. Read-only. */
   priceDriftReport: "model_selection_price_drift_report",
-  /** Run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
+  /** : run the models.dev fetch + price reconciliation now instead of waiting for the daily tick. Still report-only. */
   reconcilePricesNow: "model_selection_reconcile_prices_now",
-  /** The last free-list sync diff (verified/broken/ambiguous/unbound), as an operator-reviewable report. Read-only. */
+  /**  P2: the last free-list sync diff (verified/broken/ambiguous/unbound), as an operator-reviewable report. Read-only. */
   aaFreeSyncReport: "model_selection_aa_free_sync_report",
-  /** Run the free-list fetch + diff immediately instead of waiting for the daily tick. Still report-only. */
+  /**  P2: run the free-list fetch + diff immediately instead of waiting for the daily tick. Still report-only. */
   refreshAaFreeSyncNow: "model_selection_refresh_aa_free_sync_now",
-  /** The first-party accepted-work posterior overlay, as an operator-reviewable report. Read-only. */
+  /** : the first-party accepted-work posterior overlay, as an operator-reviewable report. Read-only. */
   acceptedWorkReport: "model_selection_accepted_work_report",
   /**
    * Per-tier lane-poll outcome counters. Read-only: the
@@ -45,12 +45,12 @@ export const TOOL_NAMES = {
   tierOutcomes: "model_selection_tier_outcomes",
   /** Read the last explicitly enabled account shadow snapshot; never actuates. */
   admissionShadowReport: "model_selection_admission_shadow_report",
-  /** Port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
+  /**  port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
-  /** Port of `zai_pace_override()` / `zai_pace_override.json`. */
+  /**  port of `zai_pace_override()` / `zai_pace_override.json`. */
   setZaiPaceOverride: "model_selection_set_zai_pace_override",
   /**
-   * Add, edit, remove, validate or diff
+   *  (P2,  D4). Add, edit, remove, validate or diff
    * tier-policy tiers. Prepare/validate/diff only: returns `proposalOnly` or
    * `rejected`, never writes state or config, never changes routing.
    */
@@ -125,11 +125,11 @@ export const JOB_KEYS = {
   pollLanes: "pollLaneCapacity",
   /** Recompute per-model, per-tier Bayesian success scores and the card ledger. */
   refreshScores: "refreshScores",
-  /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift. */
+  /** Refresh the aa.ai Intelligence Index snapshot and surface tier-boundary drift (). */
   refreshAaIndex: "refreshAaIndex",
-  /** Reconcile roster prices against models.dev and report drift (never auto-applies). */
+  /** : reconcile roster prices against models.dev and report drift (never auto-applies). */
   reconcilePrices: "reconcilePrices",
-  /** Fetch the free AA legacy list (quota-gated) and store the CAS snapshot + per-company reviewable diff. Never writes pins/tiers/enabled. */
+  /**  P2: fetch the free AA legacy list (quota-gated) and store the CAS snapshot + per-company reviewable diff. Never writes pins/tiers/enabled. */
   refreshAaFreeSync: "refreshAaFreeSync",
   /** Ported from `tier_dispatcher.py` `main()`: classify unlabeled issues and write a tier:* label. */
   classifyIssues: "classifyIssues",
@@ -140,25 +140,42 @@ export const JOB_KEYS = {
   /** Ported from `tier_dispatcher.py`'s `balance_pass()`. */
   balancePass: "balancePass",
   /**
-   * Absorption of the standalone `dispatch` plugin: stall-sweep + wakeup,
-   * ported wholesale so the `plugins` table shows one dispatcher, not two.
+   *  absorption of the standalone `dispatch` plugin (/):
+   * stall-sweep + wakeup, ported wholesale so the `plugins` table shows one
+   * dispatcher, not two.
    */
   dispatchSweep: "dispatch-sweep",
-  /** Warm the run-scoped decision's hot snapshot once a minute. */
+  /** : warm the run-scoped decision's hot snapshot once a minute. */
   refreshRunResolve: "refreshRunResolveSnapshot",
 } as const;
 
 /**
- * Label names are the durable tier record (ADR-0008). The name encodes work
+ * Label names are the durable tier record. The name encodes work
  * kind, never a model id — `tier:T1` stays `tier:T1` when the model behind T1
  * changes.
  */
 export const TIER_LABEL_PREFIX = "tier:";
-export const TIERS = ["T1", "T2", "T3"] as const;
+export const TIERS = ["T0", "T1", "T2", "T3"] as const;
 export type Tier = (typeof TIERS)[number];
 
-/** T3 mechanical ... T1 most capable. Index order is load-bearing. */
-export const TIER_ORDER: readonly Tier[] = ["T3", "T2", "T1"];
+/**
+ * T3 mechanical ... T1 most capable, T0 above T1. Index order is load-bearing.
+ *
+ * T0 is an EXPLICIT-ONLY rung (): the algebraic order above is not
+ * admission authority. Implicit dispatch is capped at `IMPLICIT_TIER_CEILING`;
+ * only an issue-level T0 judgement (a `tier:T0` label, or a serviceable pin
+ * with established explicit provenance) lifts the cap for that issue. See
+ * `engine/tier.ts` `admittedTierCeiling`.
+ */
+export const TIER_ORDER: readonly Tier[] = ["T3", "T2", "T1", "T0"];
+
+/** The highest tier any dispatch may reach without an explicit issue-level T0 judgement. */
+export const IMPLICIT_TIER_CEILING: Tier = "T1";
+
+/** Whether dispatch may reach this tier with no explicit issue-level T0 judgement. */
+export function isImplicitlyAdmittedTier(tier: Tier): boolean {
+  return TIER_ORDER.indexOf(tier) <= TIER_ORDER.indexOf(IMPLICIT_TIER_CEILING);
+}
 
 /**
  * An operator-set label meaning "leave the model choice on this issue alone."
@@ -174,15 +191,15 @@ export const PLUGIN_STATE_KEYS = {
   /** Per-company lane pace verdicts and slot-throttle counters. */
   laneLedger: "laneLedger",
   /**
-   * Per-company published quota-contract document, the input to the
-   * availability term. Written by the collector; until that runs, every lane
-   * reads UNKNOWN — recorded and traced, and under the default policy not
-   * blocking.
+   * Per-company published quota-contract document, the input to the 
+   * availability term. Written by the collector (); until that runs,
+   * every lane reads UNKNOWN — recorded and traced, and under the default
+   * policy not blocking.
    */
   laneAvailability: "laneAvailability",
-  /** Per-issue operator overrides, each with an expiry. */
+  /** Per-issue operator overrides, each with an expiry (). */
   operatorOverrides: "operatorOverrides",
-  /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis. */
+  /** Per-issue timestamp of the last pace-driven repin, for the idle-repin hysteresis (). */
   paceRepinHistory: "paceRepinHistory",
   /** `ModelScore[]` written by the `refreshScores` job. */
   modelScores: "modelScores",
@@ -195,7 +212,7 @@ export const PLUGIN_STATE_KEYS = {
   /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
   earnInState: "earnInState",
   /**
-   * Per-issue timestamp of the last raised `tier-exhausted`
+   * Defect 2. Per-issue timestamp of the last raised `tier-exhausted`
    * operator alarm, so a decision that stays exhausted across repeated
    * `advise`/`apply` calls does not spam a fresh card every time — one open
    * card per continuous exhaustion streak. Cleared the first time the same
@@ -205,17 +222,17 @@ export const PLUGIN_STATE_KEYS = {
   tierExhaustedAlarms: "tierExhaustedAlarms",
   /**
    * Instance-scoped (aa.ai data is not company-specific): the last-fetched
-   * aa.ai snapshot `{fetchedAt, bySlug, lastAttemptAt, lastError}`.
+   * aa.ai snapshot `{fetchedAt, bySlug, lastAttemptAt, lastError}` ().
    * `bySlug` maps every aa.ai slug (one per model x effort-level) to its full
-   * `AaModelRecord` — not just the intelligence
+   * `AaModelRecord` (scope expansion) — not just the intelligence
    * index.
    */
   aaIndexSnapshot: "aaIndexSnapshot",
   /**
    * Instance-scoped: a bounded rolling history of past fetches, `{entries:
    * Array<{fetchedAt, bySlug}>}`, newest last, capped at
-   * `AA_SNAPSHOT_HISTORY_LIMIT` entries (so the raw snapshot per fetch is
-   * stored and history is queryable). Separate key from
+   * `AA_SNAPSHOT_HISTORY_LIMIT` entries (scope expansion — "store
+   * the raw snapshot per fetch so history is queryable"). Separate key from
    * `aaIndexSnapshot` so a plain drift read never has to load the whole
    * history.
    */
@@ -224,20 +241,20 @@ export const PLUGIN_STATE_KEYS = {
    * Instance-scoped: `{ids: string[]}`, the set of companies this worker has
    * ever seen a stored config for, persisted so a bare crash-restart (which
    * replays no `configChanged` calls, unlike a full plugin reload) doesn't
-   * reset scheduled jobs to iterating zero companies.
+   * reset scheduled jobs to iterating zero companies (reopen).
    */
   knownCompanies: "knownCompanies",
-  /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced. */
+  /** Per-company: which `(modelId, freshImpliedTier)` drift pairs have already been surfaced (). */
   aaDriftSurfaced: "aaDriftSurfaced",
   /**
-   * Per-company: the most recent models.dev price reconciliation
+   * per-company: the most recent models.dev price reconciliation
    * report (`{report, ranAt, error}`), so `priceDriftReport` can answer
    * without re-fetching a 4.8 MB catalogue on every read. The report is the
    * artifact — this job writes no price anywhere.
    */
   priceReconcileReport: "priceReconcileReport",
   /**
-   * Per-company: which `(modelId, field, feedPrice)` drift findings
+   * per-company: which `(modelId, field, feedPrice)` drift findings
    * have already been surfaced to the activity log, so a misprice nobody has
    * applied yet does not re-alarm on every daily tick. Same dedup shape and
    * rationale as `aaDriftSurfaced`; keyed on the FEED price so a second,
@@ -245,7 +262,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   priceDriftSurfaced: "priceDriftSurfaced",
   /**
-   * Instance-scoped (the free list is not company-specific):
+   *  P2, instance-scoped (the free list is not company-specific):
    * the last-good free-list snapshot `{fetchedAt, digest, snapshot,
    * lastAttemptAt, lastError, nextEligibleAt}`. A failed fetch keeps the
    * last good snapshot in place and records the attempt; the snapshot is
@@ -254,14 +271,14 @@ export const PLUGIN_STATE_KEYS = {
    */
   aaFreeSyncSnapshot: "aaFreeSyncSnapshot",
   /**
-   * Per-company: the most recent free-list sync diff
+   *  P2, per-company: the most recent free-list sync diff
    * (`{ranAt, digest, error, diff}`), so `aaFreeSyncReport` can answer
    * without re-fetching. The diff is the artifact — this job writes no
    * binding anywhere.
    */
   aaFreeSyncDiff: "aaFreeSyncDiff",
   /**
-   * Per-company: the first-party accepted-work posterior overlay
+   * per-company: the first-party accepted-work posterior overlay
    * (`{specVersion, computedAt, cohorts, unattributed}`), so
    * `acceptedWorkReport` can answer without re-reading runs. The overlay is
    * the artifact — nothing reads it for routing in this slice.
@@ -272,7 +289,7 @@ export const PLUGIN_STATE_KEYS = {
    * (ported from `tier_dispatcher.py` `main()`'s `excl` local). The tier:*
    * LABEL always records the confidence-demoted tier regardless of
    * exclusion; this flag is the only place exclusion survives past the
-   * classify job, for a later apply-sweep to supply as
+   * classify job, for a later apply-sweep (task #6/#7) to supply as
    * `descriptor.exclusion` and force the T1 model-pick bucket.
    */
   classificationExclusions: "classificationExclusions",
@@ -293,7 +310,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   classifierLabeledIssues: "classifierLabeledIssues",
   /**
-   * Port of `lane_outage.json` — an operator-declared outage the
+   *  port of `lane_outage.json` — an operator-declared outage the
    * telemetry cannot see. Runtime-settable (mirroring `operatorOverrides`),
    * not deploy-time config: the Python source is a hand-edited file read
    * fresh on every dispatcher run, and an outage is exactly the kind of
@@ -301,7 +318,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   laneOutage: "laneOutage",
   /**
-   * Port of `zai_pace_override.json` — an operator-declared
+   *  port of `zai_pace_override.json` — an operator-declared
    * temporary margin override for `zaiWeeklyPaceOk`, e.g. during a Codex
    * outage. Runtime-settable, same rationale as `laneOutage`.
    */
@@ -309,7 +326,7 @@ export const PLUGIN_STATE_KEYS = {
   /** Keyset cursor for the bounded balance-pass page, persisted per company. */
   balancePassCursor: "balancePassCursor",
   /**
-   * Per-pass high-water marks (`{at: ISOString}`) for the
+   * per-pass high-water marks (`{at: ISOString}`) for the
    * incremental scans. Each pass reads only issues updated since its own
    * mark and advances the mark past what it scanned. A pass whose scan finds
    * nothing logs a skip and still advances — an empty scan proves nothing
@@ -321,7 +338,7 @@ export const PLUGIN_STATE_KEYS = {
   repinLastScanAt: "repinLastScanAt",
   balanceLastScanAt: "balanceLastScanAt",
   /**
-   * Port of the `dispatch` plugin's `stateKey()` — the last-firing
+   *  port of the `dispatch` plugin's `stateKey()` — the last-firing
    * summary a sweep compares against to gate the activity-log line to state
    * changes only. Namespaced separately from the rest of this plugin's state
    * (`namespace: "dispatch"`, matching the original plugin's key exactly) so
@@ -329,7 +346,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   dispatchLastFiring: "dispatchLastFiring",
   /**
-   * Per-issue timestamp of the last "cannot pin — no eligible
+   *  AC3. Per-issue timestamp of the last "cannot pin — no eligible
    * model on any serviceable lane" activity notice, so a card that stays
    * unpinnable across repeated pass firings surfaces once per throttle window
    * instead of on every 10-minute tick. Same shape/rationale as
@@ -346,7 +363,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   pinPinnedAt: "pinPinnedAt",
   /**
-   * Per-company: per-tier lane-poll outcome counters
+   * per-company: per-tier lane-poll outcome counters
    * (`{tiers: {T1: {polls, succeeded, failed, lastAt}, ...}, updatedAt}`).
    * Written by the `pollLaneCapacity` job, read by the read-only
    * `model_selection_tier_outcomes` tool. Read-only telemetry: selection
@@ -354,7 +371,7 @@ export const PLUGIN_STATE_KEYS = {
    */
   tierPollOutcomes: "tierPollOutcomes",
   /**
-   * Per-company: index of issues whose pin carries a fallback
+   * per-company: index of issues whose pin carries a fallback
    * provenance stamp (`{issueId: {decisionId, decidedAt, checkedAt}}`).
    * Written next to every pin write and clear; read by the fallback lease
    * pass, which examines only these issues. The stamp on the issue is the
@@ -364,7 +381,7 @@ export const PLUGIN_STATE_KEYS = {
 } as const;
 
 /**
- * Minimum gap between repeated per-card "cannot pin" notices
+ *  AC3. Minimum gap between repeated per-card "cannot pin" notices
  * for the same issue. One hour: long enough that a sustained outage is still
  * visible on the card's activity feed, short enough that a pass every 10
  * minutes cannot flood it.
@@ -376,11 +393,11 @@ export const AA_LEADERBOARD_URL = "https://artificialanalysis.ai/leaderboards/mo
 /** Full-page HTML fetch, not a small JSON blob — generous but bounded. */
 export const AA_FETCH_TIMEOUT_MS = 10_000;
 export const AA_MAX_RESPONSE_BYTES = 8_000_000;
-/** How many past full-detail fetches `aaSnapshotHistory` retains. At the 6h cadence this is 7 days. */
+/** How many past full-detail fetches `aaSnapshotHistory` retains ( scope expansion). At the 6h cadence this is 7 days. */
 export const AA_SNAPSHOT_HISTORY_LIMIT = 28;
 
 /**
- * Models.dev's public catalogue — the reference the 2026-09-22
+ * models.dev's public catalogue — the reference the 2026-09-22
  * manual audit used to find 26 mispriced rows out of 117.
  *
  * These are LIST prices. Where this company is on a flat subscription (Meta
@@ -406,7 +423,7 @@ export const MODELS_DEV_MAX_RESPONSE_BYTES = 16_000_000;
 export const MODELS_DEV_FETCH_TIMEOUT_MS = 20_000;
 
 /**
- * D1 quota. The free legacy list is fetched at most once a
+ *  P2 (D1 quota). The free legacy list is fetched at most once a
  * day on the schedule, plus bounded transient retries. 429 honors
  * `Retry-After`; 401/403 stops the source for the day (no substitution).
  * Never conflate with the new `/language/models/free` 100/24h budget.
@@ -422,10 +439,10 @@ export type PacingMode = (typeof PACING_MODES)[number];
 
 export const LOCAL_FOLDER_KEYS = {
   /**
-   * Append-only versioned paired-decision JSONL records, one per
+   * Append-only `paired-decision-v1` JSONL records, one per
    * `advise()` call, for the 48h host/plugin-shadow agreement stream
-   * the shadow gate harness correlates against. Plugin-owned path —
-   * never the harness's own directory, which belongs to that shadow harness.
+   * `ops/gate_harness.py` correlates against. Plugin-owned path —
+   * never `ops/`, which is 's own directory.
    *
    * Lowercase-and-hyphen only: `pluginManifestV1Schema` rejects a `folderKey`
    * that doesn't match `^[a-z0-9][a-z0-9._:-]*$` (no camelCase).
@@ -435,9 +452,9 @@ export const LOCAL_FOLDER_KEYS = {
 
 /**
  * Cap on how many `rejections` entries a decision record's
- * `explanations` carries. A measurement showed up to 112 rejected candidates
- * in one decision on the roster at the time; this leaves headroom while still
- * keeping the record bounded as the roster grows, rather than letting it scale
+ * `explanations` carries.  measured up to 112 rejected candidates in
+ * one decision on today's roster; this leaves headroom while still keeping
+ * the record bounded as the roster grows, rather than letting it scale
  * unbounded with roster size. A decision with more rejections than this
  * reports the excess in `explanationsTruncated` instead of silently
  * dropping them.
@@ -468,7 +485,7 @@ export const DEFAULT_OPERATOR_OVERRIDE_TTL_SECONDS = 60 * 60;
 export const DEFAULT_IDLE_REPIN_HYSTERESIS_SECONDS = 5 * 60;
 
 /** Required smoothed success probability to be "capable" for a tier (model_scores.py THRESH). */
-export const SCORE_THRESHOLDS: Record<Tier, number> = { T1: 0.85, T2: 0.8, T3: 0.75 };
+export const SCORE_THRESHOLDS: Record<Tier, number> = { T0: 0.9, T1: 0.85, T2: 0.8, T3: 0.75 };
 /** Bayesian prior weight — pseudo-observations contributed by `priorP`. */
 export const SCORE_PRIOR_K = 6;
 /** Minimum weighted-outcome count before a (model, tier) verdict is "proven". */
@@ -542,7 +559,7 @@ export const CLASSIFY_FETCH_MULTIPLIER = 10;
 export const CLASSIFY_FETCH_LIMIT_MAX = 400;
 /**
  * Stop starting new classifications with 100 s left before the host's 300 s
- * job RPC wall. Was a 4-minute cooperative budget — but this
+ * job RPC wall (). Was a 4-minute cooperative budget — but this
  * pass hit 288 s max over the last 4 h, right at the wall: its rows
  * (`ctx.issues.get` plus the classifier HTTP call) pay the same contended
  * host-RPC cost as every other row-walking pass. 200 s caps the job at
@@ -551,7 +568,7 @@ export const CLASSIFY_FETCH_LIMIT_MAX = 400;
  */
 export const CLASSIFY_JOB_BUDGET_MS = 200 * 1000;
 /**
- * Per-row admission headroom for the classify pass. The classifier
+ * per-row admission headroom for the classify pass. The classifier
  * HTTP call defaults to 15 s (`resolve.ts`) but the row also pays a
  * `ctx.issues.get` read, and rows cost 40-95 s each in contended host RPC
  * across the row-walking passes — no new row starts unless this much job
@@ -564,7 +581,7 @@ export const CLASSIFY_ROW_TIMEOUT_MS = 30 * 1000;
 export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;
 /**
  * Stop starting new label-only pins with 100 s left before the host's 300 s
- * RPC wall. Was a 4-minute cooperative budget with the host's
+ * RPC wall (). Was a 4-minute cooperative budget with the host's
  * full minute of headroom — but the observed row costs (40-95 s each in
  * describeIssue + advise host RPC) mean an admitted row can still spend ~95 s
  * past admission and blow the wall: the timeout postmortem shows failures at
@@ -575,18 +592,18 @@ export const LABEL_ONLY_PASS_FETCH_LIMIT = 100;
  */
 export const LABEL_ONLY_PASS_JOB_BUDGET_MS = 200 * 1000;
 /**
- * Added 2026-09-28: per-row admission headroom for the label-only pass. The
- * 4-minute job budget above is only checked BETWEEN rows, so a row admitted
- * with 1 ms of budget left can still spend ~98 s in host calls and blow the
- * host's 300 s wall. No new row starts unless this much job budget remains —
- * admission stops at ~210 s elapsed, leaving the rest of the job budget plus
- * the full minute of host headroom. A row that goes slow anyway trips the
- * write gate in worker.ts (no routing mutation after the budget) instead of
- * an orphaned write.
+ *  (2026-09-28 reopen): per-row admission headroom for the label-only
+ * pass. The 4-minute job budget above is only checked BETWEEN rows, so a row
+ * admitted with 1 ms of budget left can still spend ~98 s in host calls
+ * (2026-09-28 11:04Z) and blow the host's 300 s wall. No new row
+ * starts unless this much job budget remains — admission stops at ~210 s
+ * elapsed, leaving the rest of the job budget plus the full minute of host
+ * headroom. A row that goes slow anyway trips the write gate in worker.ts
+ * (no routing mutation after the budget) instead of an orphaned write.
  */
 export const LABEL_ONLY_PASS_ROW_TIMEOUT_MS = 30 * 1000;
 /**
- * Per-firing row cap for the label-only pass. The candidate fetch
+ * per-firing row cap for the label-only pass. The candidate fetch
  * pulls 100 rows, and rows cost 40-95 s each in host RPC — without a cap the
  * pass can never drain inside any sub-wall budget, so the same backlog rows
  * are re-fetched (and re-timed-out on) every firing. Eight rows bound the
@@ -601,14 +618,14 @@ export const REPIN_PASS_FETCH_LIMIT = 400;
 export const REPIN_PASS_WRITE_LIMIT = 6;
 /**
  * Stop starting new repin work with 100 s left before the host's 300 s job
- * RPC wall. This pass had NO job budget at all — it walked up
+ * RPC wall (). This pass had NO job budget at all — it walked up
  * to 400 fetched rows bounded only by the 6-write cap, and failed 2/24
  * firings at 301 s over the last 4 h. 200 s caps the job at two-thirds of
  * the wall, leaving more than the slowest observed row of headroom.
  */
 export const REPIN_PASS_JOB_BUDGET_MS = 200 * 1000;
 /**
- * Per-row admission headroom for the repin pass — same
+ * per-row admission headroom for the repin pass — same
  * slow-admitted-row defect as the label-only and balance passes (a row
  * admitted with budget left spends 40-95 s in describeIssue + advise host
  * RPC and crosses the wall). No new row starts unless this much job budget
@@ -626,13 +643,13 @@ export const REPIN_PASS_ROW_TIMEOUT_MS = 30 * 1000;
  */
 export const PIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /**
- * The fallback
+ *  (: no pass may walk all open issues). The fallback
  * lease pass examines at most this many indexed issues per firing, least
  * recently checked first, so a large index rotates through over several
  * firings instead of stretching one past the host's 300 s job wall.
  */
 export const FALLBACK_LEASE_EXAMINE_LIMIT = 20;
-/** Re-pins per lease-pass firing; same cap as the repin pass. */
+/**. Re-pins per lease-pass firing; same cap as the repin pass. */
 export const FALLBACK_LEASE_WRITE_LIMIT = 6;
 /**
  * Hard ceiling on the fallback-pin index. Past it the oldest
@@ -644,14 +661,15 @@ export const FALLBACK_PIN_INDEX_MAX = 500;
 export const BALANCE_PASS_FETCH_LIMIT = 50;
 /**
  * Stop starting new balance work with 100 s left before the host's 300 s
- * RPC wall. Same evidence as the label-only pass: this pass also
+ * RPC wall (). Same evidence as the label-only pass: this pass also
  * failed at 300004 ms on 2026-09-28 11:00Z, and its rows pay the same
  * describeIssue + advise host-RPC cost. 200 s leaves more than the slowest
  * observed row of headroom for the in-flight row when the host fires.
  */
 export const BALANCE_PASS_JOB_BUDGET_MS = 200 * 1000;
 /**
- * Added 2026-09-28: per-row admission headroom for the balance pass — same slow-admitted-row defect as the label-only pass (balance also
+ *  (2026-09-28 reopen): per-row admission headroom for the balance
+ * pass — same slow-admitted-row defect as the label-only pass (balance also
  * failed at 300004 ms on 2026-09-28 11:00Z). Same semantics: no new row
  * starts unless this much job budget remains; a slow row trips the write
  * gate (no routing mutation after the budget, keyset cursor held) instead of
@@ -668,7 +686,7 @@ export const BALANCE_PASS_BUSIER_UTILIZATION_DELTA = 0.25;
 export const BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
 
 /**
- * Port of the `dispatch` plugin's `ISSUE_PAGE_LIMIT` — the sweep's
+ *  port of the `dispatch` plugin's `ISSUE_PAGE_LIMIT` — the sweep's
  * single-page `ctx.issues.list` fetch cap. A company with more open issues
  * than this per firing is a saturation condition the sweep notes rather than
  * paginating through, matching the standalone plugin's own behavior exactly.
@@ -676,7 +694,7 @@ export const BALANCE_PASS_PROBATION_PRICE_USD = 0.1;
 export const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
 
 /**
- * Stop starting new dispatch-sweep work with a full minute left
+ * stop starting new dispatch-sweep work with a full minute left
  * before the host's 300 s job RPC wall. The sweep had no job time budget and
  * hit the wall three firings running on 2026-09-28; classify and balance both
  * already carry this 4-minute cooperative deadline.
@@ -684,7 +702,7 @@ export const DISPATCH_ISSUE_PAGE_LIMIT = 1000;
 export const DISPATCH_SWEEP_JOB_BUDGET_MS = 4 * 60 * 1000;
 
 /**
- * Lookback for the lane-evidence aggregate over `heartbeat_runs`.
+ * lookback for the lane-evidence aggregate over `heartbeat_runs`.
  *
  * 24h is the window the 2026-09-17 measurement was taken over, and the
  * shortest one that made `devin/*` conclusive (0/74). Much shorter and a lane

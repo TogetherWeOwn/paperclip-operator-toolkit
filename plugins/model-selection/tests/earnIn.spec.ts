@@ -23,8 +23,8 @@ const EARN_IN_CONFIG: ResolvedConfig["earnIn"] = {
   stopWindow: 8,
 };
 
-const AVAILABLE_ALL: LanePostureByTier = { T1: "available", T2: "available", T3: "available" };
-const STARVED_T1_ONLY: LanePostureByTier = { T1: "saturated", T2: "available", T3: "available" };
+const AVAILABLE_ALL: LanePostureByTier = { T0: "available", T1: "available", T2: "available", T3: "available" };
+const STARVED_T1_ONLY: LanePostureByTier = { T0: "available", T1: "saturated", T2: "available", T3: "available" };
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -50,13 +50,14 @@ function card(overrides: Partial<EarnInCandidateCard> = {}): EarnInCandidateCard
 // gpt-5.6-luna/T1 fixture: proven=true in MODEL_SCORES, so it is NOT an
 // earn-in candidate as-is. Build an unproven-but-capable score for these
 // tests, mirroring the "unproven, capable" shape earn-in exists to admit.
-// T2 passes here: the MODEL_SCORES T2 row is a proven failure, and an
-// unproven T1 is capped by that T2 verdict (see the dedicated test below).
+// T2 passes here: the MODEL_SCORES T2 row is a proven failure, and 
+// caps an unproven T1 above it (see the dedicated test below).
 const UNPROVEN_CAPABLE_SCORE: ModelScore = {
   modelId: "gpt-5.6-luna",
   aaIndex: 43,
   priorP: 0.873,
   tiers: {
+    T0: MODEL_SCORES[1]!.tiers.T0,
     T1: {
       n: 3,
       ok: 3,
@@ -132,6 +133,12 @@ describe("planEarnIn — gates", () => {
     expect(decision.reason).toContain("disabled");
   });
 
+  it("refuses a T0 card — earn-in never carries work above the T1 ceiling", () => {
+    const decision = decide({ card: card({ tier: "T0" as never }) });
+    expect(decision.dispatch).toBe(false);
+    expect(decision.reason).toContain("never T0");
+  });
+
   it("refuses a non-T1 card outright", () => {
     const decision = decide({ card: card({ tier: "T2" as never }) });
     expect(decision.dispatch).toBe(false);
@@ -190,7 +197,7 @@ describe("planEarnIn — gates", () => {
     expect(decision.reason).toContain("not judged capable");
   });
 
-  it("Refuses a T1 earn-in for a model that fails the easier T2 tier on its own proven verdict", () => {
+  it("refuses a T1 earn-in for a model that fails the easier T2 tier on its own proven verdict", () => {
     const failsT2: ModelScore = {
       ...UNPROVEN_CAPABLE_SCORE,
       tiers: { ...UNPROVEN_CAPABLE_SCORE.tiers, T2: MODEL_SCORES[1]!.tiers.T2 },
@@ -316,7 +323,7 @@ describe("planEarnIn — per-tier lane posture (global-lane-check-passes-while-t
   });
 
   it("dispatches once the T1 lane specifically becomes available, independent of other tiers", () => {
-    const t3Starved: LanePostureByTier = { T1: "available", T2: "available", T3: "saturated" };
+    const t3Starved: LanePostureByTier = { T0: "available", T1: "available", T2: "available", T3: "saturated" };
     const decision = decide({ lanePostureByTier: t3Starved });
     expect(decision.dispatch).toBe(true);
   });

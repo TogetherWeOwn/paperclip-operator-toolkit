@@ -36,7 +36,7 @@ function statsWith(wOk: number, wBad: number): TierScoreStats {
   return { ...emptyTierScoreStats(), wOk, wBad };
 }
 
-describe("benchmark spec identity", () => {
+describe("benchmark spec identity ( §2)", () => {
   // Benchmark identity is load-bearing: three of the five have a near-homonym on
   // aa.ai's leaderboard that is a DIFFERENT measurement. This test is the guard
   // against a silent relabelling — the exact failure the synthesis had to
@@ -219,17 +219,19 @@ describe("blendedPrior", () => {
 });
 
 describe("tierForPosterior", () => {
-  // TIER_ORDER is ASCENDING capability (["T3","T2","T1"]). Walking it as-written
-  // matches T3's 0.75 before T1's 0.85 and labels every model T3. This is the
-  // regression guard for that.
+  // TIER_ORDER is ASCENDING capability (["T3","T2","T1","T0"]). Walking it
+  // as-written matches T3's 0.75 before T0's 0.90 and labels every model T3.
+  // This is the regression guard for that.
   it("returns the MOST capable tier the posterior clears", () => {
-    expect(tierForPosterior(0.95).tier).toBe("T1");
+    expect(tierForPosterior(0.95).tier).toBe("T0");
+    expect(tierForPosterior(0.89).tier).toBe("T1");
     expect(tierForPosterior(0.86).tier).toBe("T1");
     expect(tierForPosterior(0.82).tier).toBe("T2");
     expect(tierForPosterior(0.76).tier).toBe("T3");
   });
 
   it("treats each threshold as inclusive at its exact boundary", () => {
+    expect(tierForPosterior(SCORE_THRESHOLDS.T0).tier).toBe("T0");
     expect(tierForPosterior(SCORE_THRESHOLDS.T1).tier).toBe("T1");
     expect(tierForPosterior(SCORE_THRESHOLDS.T2).tier).toBe("T2");
     expect(tierForPosterior(SCORE_THRESHOLDS.T3).tier).toBe("T3");
@@ -259,10 +261,10 @@ describe("deriveModelTier", () => {
 
   it("cuts the tier from the posterior, not the bare prior", () => {
     // Local evidence must move the answer: 6 weighted failures against a 0.91
-    // prior drag the posterior below T1.
+    // prior drag the posterior below every cut.
     const noEvidence = deriveModelTier(48, FULL_ROW, emptyTierScoreStats());
     const withFailures = deriveModelTier(48, FULL_ROW, statsWith(0, 6));
-    expect(noEvidence.tier).toBe("T1");
+    expect(noEvidence.tier).toBe("T0");
     expect(noEvidence.p).toBe(0.9161);
     expect(withFailures.p).toBe(0.4581);
     expect(withFailures.tier).toBe("T3");
@@ -282,7 +284,7 @@ describe("deriveModelTier", () => {
 describe("buildModelScore tier derivation", () => {
   it("attaches the derived tier, flag, basis and version", () => {
     const score = buildModelScore("m", 48, {}, TIERS, FULL_ROW);
-    expect(score.derivedTier).toBe("T1");
+    expect(score.derivedTier).toBe("T0");
     expect(score.belowT3Floor).toBe(false);
     expect(score.priorBasis).toBe("blended");
     expect(score.tierSpecVersion).toBe(BENCHMARK_SPEC_VERSION);
@@ -408,7 +410,7 @@ describe("applyDerivedTiers", () => {
   // The derived tier pools every tier's runs, so easy T3 wins
   // out-voted glm-5.3's proven T2 failure and promoted it to T1. A promotion
   // now stops at the hardest tier the model is still capable at.
-  describe("capability ceiling", () => {
+  describe("capability ceiling ()", () => {
     const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
     const PROVEN_PASS = stats({ n: 89, ok: 89, wOk: 89 });
     const PROVEN_FAIL = stats({ n: 44, ok: 22, failInfra: 4, failModel: 18, wOk: 21.6, wBad: 18.4 });
@@ -461,7 +463,7 @@ describe("applyDerivedTiers", () => {
   });
 });
 
-describe("frozen benchmark capture", () => {
+describe("frozen benchmark-prior-v1 capture", () => {
   it("carries no fabricated DeepSWE values", () => {
     // DeepSWE v1.1 published no overlapping rows at capture time. If a future
     // capture adds them this assertion should be updated deliberately, with a

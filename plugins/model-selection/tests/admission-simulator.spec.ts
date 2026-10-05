@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { budgetWindowId, type BudgetInput, type BudgetWindowObservation } from '../src/admission-budget.js';
-import { AdmissionSimulator, type SimulatedAttempt, type SimulatedReconciliation } from '../src/admission-simulator.js';
+import { AdmissionSimulator, type SimulatedAttempt, type SimulatedReconciliation, type SimulatedReservation } from '../src/admission-simulator.js';
 
 function fixture(): BudgetInput {
   const windows: BudgetWindowObservation[] = [{
@@ -27,6 +27,34 @@ function reflection(input: BudgetInput, reservationId: string): SimulatedReconci
     unit: 'allowance', reflectedAmount: 10, consumed: 100, observedAt: 1_000,
     sourceRevision: 'fixture-2', usageWatermark: 1, attributionTrusted: true,
   };
+}
+
+function ownershipFixture(): BudgetInput {
+  const input = fixture();
+  input.windows[0]!.consumed = 40;
+  input.holds.push({ windowId: budgetWindowId(input.windows[0]!), unit: 'allowance', amount: 10 });
+  input.eligibleBindings[0]!.maxSlots = 2;
+  return input;
+}
+
+function corruptReservation(reservation: SimulatedReservation): void {
+  reservation.reservationId = 'caller-id';
+  reservation.idempotencyKey = 'caller-key';
+  reservation.bindingKey = 'caller-binding';
+  reservation.lane = 'caller-lane';
+  reservation.estimateRevision = 'caller-revision';
+  reservation.durationMs = 9_000;
+  reservation.state = 'cancelled-before-start';
+  reservation.slotHeld = false;
+  reservation.reconciliation = 'known';
+  Object.assign(reservation.amounts[0]!, {
+    windowId: 'caller-window', unit: 'caller-unit', reservedAmount: 0, remainingAmount: 0, windowClosed: true,
+  });
+  reservation.amounts.push({ ...reservation.amounts[0]! });
+}
+
+function partialReflection(input: BudgetInput, reservationId: string): SimulatedReconciliation {
+  return { ...reflection(input, reservationId), reflectedAmount: 4, consumed: 44 };
 }
 
 describe('simulation-only reservation lifecycle', () => {
@@ -185,5 +213,191 @@ describe('simulation-only reservation lifecycle', () => {
     expect(sim.reserve(req).reasons).toEqual(['estimate-mismatch']);
     input.eligibleBindings[0]!.estimate!.durationMs = 9_000;
     expect(new AdmissionSimulator(input).reserve(attempt(input)).reasons).toEqual(['reset-crossover-unsupported']);
+  });
+});
+
+describe('simulation-only object ownership', () => {
+  const constructorMutations: Array<[string, (input: BudgetInput) => void]> = [
+    ['clock', input => { input.now = 2_000; }],
+    ['freshness', input => { input.maxAgeMs = 0; }],
+    ['window observation', input => { input.windows[0]!.consumed = 100; input.windows[0]!.resetAt = 1_050; }],
+    ['windows array', input => { input.windows.length = 0; }],
+    ['existing hold', input => { input.holds[0]!.amount = 100; }],
+    ['holds array', input => { input.holds.push({ ...input.holds[0]! }); }],
+    ['binding gates', input => { input.eligibleBindings[0]!.maxSlots = 0; input.eligibleBindings[0]!.canStart = false; }],
+    ['bindings array', input => { input.eligibleBindings.length = 0; }],
+    ['binding window IDs', input => { input.eligibleBindings[0]!.windowIds![0] = 'caller-window'; }],
+    ['estimate metadata', input => { input.eligibleBindings[0]!.estimate!.revision = 'caller-revision'; input.eligibleBindings[0]!.estimate!.durationMs = 9_000; }],
+    ['estimate window', input => { input.eligibleBindings[0]!.estimate!.windows[0]!.upperBurn = 100; }],
+    ['estimate windows array', input => { input.eligibleBindings[0]!.estimate!.windows.length = 0; }],
+  ];
+
+  it.each(constructorMutations)('detaches constructor %s from established state', (_name, mutate) => {
+    const input = ownershipFixture();
+    const pristine = structuredClone(input);
+    const sim = new AdmissionSimulator(input);
+    const baseline = new AdmissionSimulator(pristine);
+    const request = attempt(pristine);
+    const first = baseline.reserve(request);
+    expect(first.admitted).toBe(true);
+    expect(sim.reserve(request)).toEqual(first);
+    expect(baseline.evaluate().windows[0]!).toMatchObject({ reserved: 20, safeBudget: 40 });
+    expect(baseline.evaluate().bindings[0]!.allowedStarts).toBe(1);
+
+    mutate(input);
+    expect(input).not.toEqual(pristine);
+    // Positive control: the mutation changes evaluation or estimate validation
+    // if it is actually supplied to a fresh simulator, rather than being ignored.
+    const changedControl = new AdmissionSimulator(input);
+    const pristineControl = new AdmissionSimulator(pristine);
+    expect({ evaluation: changedControl.evaluate(), allocation: changedControl.reserve(request) }).not.toEqual({
+      evaluation: pristineControl.evaluate(), allocation: pristineControl.reserve(request),
+    });
+
+    expect(sim.evaluate()).toEqual(baseline.evaluate());
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+    const next = attempt(pristine, 'next-logical-attempt');
+    expect(sim.reserve(next)).toEqual(baseline.reserve(next));
+    expect(sim.evaluate().windows[0]!).toMatchObject({ reserved: 30, safeBudget: 30 });
+    expect(sim.reserve(attempt(pristine, 'slot-control'))).toMatchObject({ admitted: false, reasons: ['active-slot-limit'] });
+  });
+
+  it.each(['fresh allocation', 'attempt replay'])('detaches returned %s and preserves its historical payload', exposure => {
+    const input = ownershipFixture();
+    const sim = new AdmissionSimulator(input);
+    const baseline = new AdmissionSimulator(input);
+    const request = attempt(input);
+    const first = baseline.reserve(request);
+    let returned = sim.reserve(request);
+    if (exposure === 'attempt replay') returned = sim.reserve(structuredClone(request));
+    expect(returned).toEqual(first);
+    expect(returned.reservation).not.toBe(first.reservation);
+
+    returned.admitted = false;
+    returned.reasons.push('caller-reason');
+    corruptReservation(returned.reservation!);
+    expect(returned).not.toEqual(first);
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.evaluate()).toEqual(baseline.evaluate());
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+
+    const id = first.reservation!.reservationId;
+    expect(sim.commit(id)).toEqual(baseline.commit(id));
+    // The attempt cache owns the original held allocation, not the live row.
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+    const next = attempt(input, 'next-logical-attempt');
+    expect(sim.reserve(next)).toEqual(baseline.reserve(next));
+    expect(sim.evaluate().windows[0]!).toMatchObject({ reserved: 30, safeBudget: 30 });
+    expect(sim.reserve(attempt(input, 'slot-control'))).toMatchObject({ admitted: false, reasons: ['active-slot-limit'] });
+  });
+
+  it('detaches snapshot rows, amount objects and arrays from reservations and attempt replay', () => {
+    const input = ownershipFixture();
+    const sim = new AdmissionSimulator(input);
+    const baseline = new AdmissionSimulator(input);
+    const request = attempt(input);
+    const first = baseline.reserve(request);
+    expect(sim.reserve(request)).toEqual(first);
+    const returned = sim.snapshot();
+    expect(returned).toEqual(baseline.snapshot());
+    corruptReservation(returned[0]!);
+    returned.push(structuredClone(returned[0]!));
+    expect(returned).not.toEqual(baseline.snapshot());
+
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.evaluate()).toEqual(baseline.evaluate());
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+    const next = attempt(input, 'next-logical-attempt');
+    expect(sim.reserve(next)).toEqual(baseline.reserve(next));
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.evaluate().windows[0]!).toMatchObject({ reserved: 30, safeBudget: 30 });
+    expect(sim.reserve(attempt(input, 'slot-control'))).toMatchObject({ admitted: false, reasons: ['active-slot-limit'] });
+  });
+
+  const reservationExposures: Array<{
+    name: string;
+    state: SimulatedReservation['state'];
+    remainingAmount: number;
+    slotHeld: boolean;
+    expose: (sim: AdmissionSimulator, input: BudgetInput, id: string) => SimulatedReservation;
+  }> = [
+    { name: 'commit', state: 'committed', remainingAmount: 10, slotHeld: true,
+      expose: (sim, _input, id) => sim.commit(id) },
+    { name: 'cancelBeforeStart', state: 'cancelled-before-start', remainingAmount: 0, slotHeld: false,
+      expose: (sim, _input, id) => sim.cancelBeforeStart(id) },
+    { name: 'finish', state: 'committed', remainingAmount: 10, slotHeld: false,
+      expose: (sim, _input, id) => { sim.commit(id); return sim.finish(id); } },
+    { name: 'reconcile', state: 'committed', remainingAmount: 6, slotHeld: true,
+      expose: (sim, input, id) => { sim.commit(id); return sim.reconcile(partialReflection(input, id)); } },
+    { name: 'reconciliation replay', state: 'committed', remainingAmount: 6, slotHeld: true,
+      expose: (sim, input, id) => {
+        sim.commit(id);
+        sim.reconcile(partialReflection(input, id));
+        return sim.reconcile(partialReflection(input, id));
+      } },
+  ];
+
+  it.each(reservationExposures)('detaches $name output from live state and historical replay', ({ expose, state, remainingAmount, slotHeld, name }) => {
+    const input = ownershipFixture();
+    const sim = new AdmissionSimulator(input);
+    const baseline = new AdmissionSimulator(input);
+    const request = attempt(input);
+    const first = baseline.reserve(request);
+    expect(sim.reserve(request)).toEqual(first);
+    const id = first.reservation!.reservationId;
+    const expected = expose(baseline, input, id);
+    const returned = expose(sim, input, id);
+    expect(expected).toMatchObject({ state, slotHeld, amounts: [{ remainingAmount }] });
+    expect(returned).toEqual(expected);
+    corruptReservation(returned);
+    expect(returned).not.toEqual(expected);
+
+    expect(sim.evaluate()).toEqual(baseline.evaluate());
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(expose(sim, input, id)).toEqual(expected);
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+    if (name === 'reconcile' || name === 'reconciliation replay') {
+      const later = { ...partialReflection(input, id), reconciliationId: 'reflection-2', usageWatermark: 2,
+        reflectedAmount: 2, consumed: 46 };
+      expect(sim.reconcile(later)).toEqual(baseline.reconcile(later));
+      expect(sim.snapshot()[0]!.amounts[0]!.remainingAmount).toBe(4);
+      // A later transition must not rewrite an earlier reconciliation result.
+      expect(sim.reconcile(partialReflection(input, id))).toEqual(expected);
+      expect(sim.evaluate().windows[0]!).toMatchObject({ reserved: 14, safeBudget: 40 });
+    }
+    const next = attempt(input, 'next-logical-attempt');
+    const allocated = sim.reserve(next);
+    expect(allocated.admitted).toBe(true);
+    expect(allocated).toEqual(baseline.reserve(next));
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.evaluate()).toEqual(baseline.evaluate());
+  });
+
+  it('detaches evaluation observations and nested readouts before another reserve or replay', () => {
+    const input = ownershipFixture();
+    const sim = new AdmissionSimulator(input);
+    const baseline = new AdmissionSimulator(input);
+    const request = attempt(input);
+    const first = baseline.reserve(request);
+    expect(sim.reserve(request)).toEqual(first);
+    const expected = baseline.evaluate();
+    const returned = sim.evaluate();
+    expect(returned).toEqual(expected);
+    returned.windows[0]!.raw.consumed = 100;
+    returned.windows[0]!.raw.resetAt = 1_050;
+    returned.windows[0]!.reserved = 0;
+    returned.windows[0]!.reasons.push('caller-reason');
+    returned.observations[0]!.consumed = 100;
+    returned.bindings[0]!.allowedStarts = 0;
+    returned.bindings[0]!.projections[0]!.windowId = 'caller-window';
+    expect(returned).not.toEqual(expected);
+
+    expect(sim.evaluate()).toEqual(expected);
+    expect(sim.snapshot()).toEqual(baseline.snapshot());
+    expect(sim.reserve(structuredClone(request))).toEqual(first);
+    const next = attempt(input, 'next-logical-attempt');
+    expect(sim.reserve(next)).toEqual(baseline.reserve(next));
+    expect(sim.evaluate().windows[0]!).toMatchObject({ reserved: 30, safeBudget: 30 });
   });
 });

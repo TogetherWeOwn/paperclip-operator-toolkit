@@ -109,6 +109,9 @@ export function reportDecisionAdmissionShadow(
   if ('laneQuotaSnapshot' in rawInput && rawInput.laneQuotaSnapshot !== undefined) {
     fields(rawInput, ['enabled', 'cohortId', 'maxAgeMs', 'laneQuotaSnapshot', 'holds', 'bindings']);
     fields(rawInput.laneQuotaSnapshot, ['schemaVersion', 'observedAt', 'staleAfterSeconds', 'observationQuality', 'records']);
+    // Hardcoded: a stored lane document carries no provenance of its own, so the
+    // lane-snapshot path always labels 'fresh-observations'. Fixture replays use
+    // the explicit accounts/windows path with their own evidenceKind.
     adapted = adaptLaneQuotaSnapshot({
       snapshot: rawInput.laneQuotaSnapshot, now, maxAgeMs: rawInput.maxAgeMs, evidenceKind: 'fresh-observations',
     });
