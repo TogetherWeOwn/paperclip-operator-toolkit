@@ -3075,6 +3075,14 @@ jobs:
       - name: codex countdown suite
         run: python3 -m unittest -v test_codex_countdown
 
+      # GARM provider latency and ready-time baselines over synthetic samples.
+      # Deterministic: record pins --now; check exits 0 ok, 2 breach, 3 unknown.
+      - name: garm provider latency baseline suite
+        run: python3 -m unittest -v test_garm_provider_latency_baseline
+
+      - name: garm ready time baseline suite
+        run: python3 -m unittest -v test_garm_ready_time_baseline
+
       # Stub GitHub and board APIs on loopback; asserts signature stability
       # and the propose/draft contract, not the host wrapper.
       - name: red-main poll suite
