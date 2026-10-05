@@ -3106,6 +3106,19 @@ jobs:
       - name: lost-probe mutation gate
         run: python3 verification/process-lost-mutation-gate.py
 
+      # Watchdog CLI contract plus its mutation gate: the CLI tests must fail
+      # when the detectors are broken. Offline: no credentials, no network.
+      - name: platform watchdog cli suite
+        run: python3 -m unittest -v test_platform_watchdog_cli
+
+      - name: watchdog cli mutation gate
+        run: python3 verification/platform-watchdog-cli-mutation-gate.py
+
+      # Public-fork provenance audit, hermetic self-test on synthetic
+      # identities and fixtures; runs its own consistency suite inside.
+      - name: fork provenance audit
+        run: ./verification/public-fork-disclosure-audit.sh --self-test
+
       # GARM offline checkers, each on its synthetic fixture. The
       # build-manifest checker cross-checks a pinned runner env, so the step
       # builds that file from the manifest's own values first; the cleanup
