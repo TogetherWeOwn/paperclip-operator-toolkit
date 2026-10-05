@@ -3179,6 +3179,7 @@ jobs:
           python3 validate_test_profile.py fixture-test-profile.json
           python3 validate_drain.py drain-contracts.json
           python3 check_first_pickup.py fixture-first-pickup-pass.json
+          python3 check_image_provenance.py image-digest-pins.json role-contracts.json isolated-image-profile.json fixture-privileged-private.json fixture-isolated-private.json fixture-isolated-profile.json
           rm -rf "$RUNNER_TEMP/job1" && mkdir -p "$RUNNER_TEMP/job1"
           printf 'synthetic-fixture' > "$RUNNER_TEMP/job1/.garm-job-fixture"
           touch "$RUNNER_TEMP/job1/tmp-residue1" "$RUNNER_TEMP/job1/keep.log"
