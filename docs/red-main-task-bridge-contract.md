@@ -51,6 +51,28 @@ search is needed to coalesce, so no duplicate cards. Incident cards stay the
 filing routine's to open — the timer is propose-only and never creates or
 touches one.
 
+## Comment-only writer (`post_rollup_comment.sh`)
+
+`post_rollup_comment TAG TITLE BODY_FILE` posts one comment on
+`PAPERCLIP_ROLLUP_PARENT_ID` and creates nothing. Its contract:
+
+- **Reads before writing.** It GETs the parent first and posts only when the
+  parent is open (`backlog,todo,in_progress,in_review,blocked`). A missing,
+  denied, misshapen or closed parent stops the write with zero comment POSTs.
+- **Never assumes delivery.** Transport failure or any non-2xx returns
+  non-zero with no success line; under the wrapper's `set -Eeuo pipefail`
+  that fails the tick for retry instead of recording a phantom delivery.
+- **At-least-once; the caller dedupes.** Every exit-0 call posted one
+  comment; identical repeats are not skipped. Duplicate suppression across
+  retry/restart is the caller's digest/cadence state, which must be recorded
+  only after this helper succeeds.
+- **First line is `TAG TITLE`** (bracketed tag, same convention as the
+  shared finding helper), so thread reads find proposals and filed-key
+  mirrors by substring. Empty bodies are refused up front.
+- **Zero company-wide calls** by construction; key and body never reach
+  `curl` argv. Pinned by `test_post_rollup_comment.sh` (26 cases, stub API
+  playing the deployed 403 semantics).
+
 ## Provisioning checklist (operator)
 
 1. Pre-create the rollup parent card (open status, assigned to the triage

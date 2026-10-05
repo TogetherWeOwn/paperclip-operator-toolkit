@@ -3230,6 +3230,11 @@ jobs:
       - name: red-main poll suite
         run: ./test_red_main_poll.sh
 
+      # Stub board API on loopback; asserts the comment-only rollup writer
+      # makes zero company-wide calls and never claims a refused delivery.
+      - name: red-main rollup writer suite
+        run: ./test_post_rollup_comment.sh
+
       # Synthetic cohorts: the counting rule, not any fleet's taxonomy.
       - name: runner capacity headroom suite
         run: ./test_runner_capacity_headroom.sh
