@@ -3120,9 +3120,9 @@ jobs:
             exit 1
           fi
 
-      # gh-event-capture declares engines >=22 and its runtime preflight refuses
-      # older Nodes, so its suites run on 24. The rest of this job stays on
-      # the pinned 20 it was validated against.
+      # gh-event-capture's suites run on 24 (validated there; the unit also
+      # supports the pinned 20). The rest of this job stays on the pinned
+      # 20 it was validated against.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

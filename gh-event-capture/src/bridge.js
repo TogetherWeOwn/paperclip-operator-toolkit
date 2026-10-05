@@ -17,6 +17,15 @@
 // work-product row synthesised for it.
 export const AGENT_LOGIN = 'togetherweown[bot]'
 
+import { trustedBridgePolicy } from './trusted-policy.js'
+
+// An explicit trusted policy wins where one is given (production boundaries
+// always give one); without one the historical agent login applies so older
+// suites that state no policy keep their meaning.
+function agentLoginOf(policy) {
+  return policy ? trustedBridgePolicy(policy).agentLogin : AGENT_LOGIN
+}
+
 // Case-insensitive: branch conventions are usually lowercase
 // (`task-3552-bridge`), and `check_suite` payloads carry only `head.ref` — no
 // title — so a case-sensitive match here would silently never fire on a real
@@ -28,10 +37,17 @@ const ISSUE_REF = /\b([A-Z][A-Z0-9]*)-(\d+)\b/i
 
 /**
  * @param {string | null | undefined} text
- * @returns {string | null} normalized `PREFIX-n`, or null when no reference is present
+ * @param {any} [policy] explicit trusted policy; scopes extraction to its
+ *   tracker prefix (case-insensitive, canonicalized to uppercase)
+ * @returns {string | null} normalized ref, or null when no reference is present
  */
-export function extractIssueRef(text) {
+export function extractIssueRef(text, policy = null) {
   if (typeof text !== 'string') return null
+  if (policy) {
+    const { trackerPrefix } = trustedBridgePolicy(policy)
+    const m = new RegExp(`\\b${trackerPrefix}-(\\d+)\\b`, 'i').exec(text)
+    return m ? `${trackerPrefix}-${m[1]}` : null
+  }
   const m = ISSUE_REF.exec(text)
   return m ? `${m[1].toUpperCase()}-${m[2]}` : null
 }
@@ -43,10 +59,12 @@ export function extractIssueRef(text) {
  * issue's number in prose.
  *
  * @param {{ head?: { ref?: string }, title?: string, body?: string }} pr
+ * @param {any} [policy] forwarded to {@link extractIssueRef}
  * @returns {string | null}
  */
-function issueRefOfPr(pr) {
-  return extractIssueRef(pr?.head?.ref) ?? extractIssueRef(pr?.title) ?? extractIssueRef(pr?.body)
+function issueRefOfPr(pr, policy = null) {
+  return extractIssueRef(pr?.head?.ref, policy) ?? extractIssueRef(pr?.title, policy) ??
+    extractIssueRef(pr?.body, policy)
 }
 
 const CREATE_ACTIONS = new Set(['opened', 'reopened'])
@@ -63,6 +81,7 @@ const SYNC_ACTIONS = new Set(['synchronize', 'edited', 'ready_for_review', 'conv
  * decide merge-wake on close.
  *
  * @param {any} payload  parsed webhook body, `event === 'pull_request'`
+ * @param {any} [policy] explicit trusted policy; also requires a Bot-type author
  * @returns {null | {
  *   issueRef: string, prNumber: number, url: string | null, title: string | null,
  *   headSha: string | null, kind: 'work_product_create' | 'work_product_update',
@@ -70,11 +89,12 @@ const SYNC_ACTIONS = new Set(['synchronize', 'edited', 'ready_for_review', 'conv
  *   action: string, wake: boolean,
  * }}
  */
-export function classifyPullRequestEvent(payload) {
+export function classifyPullRequestEvent(payload, policy = null) {
   const pr = payload?.pull_request
-  if (!pr || pr.user?.login !== AGENT_LOGIN) return null
+  if (!pr || pr.user?.login !== agentLoginOf(policy)) return null
+  if (policy && pr.user?.type !== 'Bot') return null
 
-  const issueRef = issueRefOfPr(pr)
+  const issueRef = issueRefOfPr(pr, policy)
   if (!issueRef) return null
 
   const base = {
@@ -117,15 +137,17 @@ export function classifyPullRequestEvent(payload) {
  *
  * @param {any} payload  parsed webhook body, `event === 'check_suite'`
  * @param {Array<any>} resolvedPullRequests full, author-verified PR records
+ * @param {any} [policy] explicit trusted policy; also requires a Bot-type author
  * @returns {Array<{
  *   issueRef: string, prNumber: number, headSha: string, conclusion: string | null,
  *   kind: 'check_suite_completed', wake: true,
  * }>}
  */
-export function classifyCheckSuiteEvent(payload, resolvedPullRequests = []) {
+export function classifyCheckSuiteEvent(payload, resolvedPullRequests = [], policy = null) {
   const suite = payload?.check_suite
   const repository = payload?.repository?.full_name
   if (!suite || suite.status !== 'completed' || !suite.head_sha || !repository) return []
+  const login = agentLoginOf(policy)
 
   // GitHub's slim check_suite.pull_requests entries do not carry an author.
   // The consumer must resolve them through GitHub or a verified PR record;
@@ -135,9 +157,10 @@ export function classifyCheckSuiteEvent(payload, resolvedPullRequests = []) {
   for (const ref of prs) {
     const pr = resolvedPullRequests.find((candidate) =>
       candidate?.number === ref?.number && candidate?.base?.repo?.full_name === repository &&
-      candidate?.head?.sha === suite.head_sha && candidate?.user?.login === AGENT_LOGIN)
+      candidate?.head?.sha === suite.head_sha && candidate?.user?.login === login &&
+      (!policy || candidate?.user?.type === 'Bot'))
     if (!pr) continue
-    const issueRef = issueRefOfPr(pr)
+    const issueRef = issueRefOfPr(pr, policy)
     if (!issueRef) continue
     out.push({
       issueRef,

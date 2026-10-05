@@ -2,14 +2,16 @@
   "name": "gh-event-capture",
   "version": "0.1.0",
   "private": true,
-  "description": "Generic signed GitHub event capture, scoped reconciliation and offline decision controls",
   "type": "module",
+  "description": "Generic signed GitHub event capture, scoped reconciliation and offline decision controls",
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "scripts": {
-    "test": "node scripts/run-offline-tests.mjs",
-    "check": "node scripts/check-source.mjs",
+    "test": "node --test test/capture.test.mjs test/bridge.test.mjs test/bridge-regressions.test.mjs test/closeout.test.mjs test/claim-store.test.mjs test/closeout-pending.test.mjs test/closeout-sweep.test.mjs test/consumer.test.mjs test/pr-task-index.test.mjs test/upstream-watcher.test.mjs test/github-adapter.test.mjs test/capture-adapter.test.mjs test/receipt-cycle.test.mjs test/paperclip-adapter.test.mjs test/consumer-runner.test.mjs test/sweep-store.test.mjs test/sweep-cycle.test.mjs test/pass-schedule.test.mjs test/runtime-health.test.mjs test/runtime-preparation.test.mjs test/discord-alert-hook.test.mjs test/gh-wrapper.test.mjs test/healthchecks-checkin.test.mjs",
+    "check": "node --check src/app.js && node --check src/verify.js && node --check src/record.js && node --check src/query.js && node --check src/rejection-counter.js && node --check src/store-d1.js && node --check src/store-memory.js && node --check src/worker.js && node --check src/bridge.js && node --check src/closeout.js && node --check src/consumer.js && node --check src/pr-task-index.js && node --check test/pr-task-index.test.mjs && node --check src/upstream-watcher.js && node --check test/upstream-watcher.test.mjs && node --check src/claim-store.js && node --check test/claim-store.test.mjs && node --check src/github-adapter.js && node --check src/capture-adapter.js && node --check src/receipt-store.js && node --check src/receipt-cycle.js && node --check src/paperclip-adapter.js && node --check src/consumer-runner.js && node --check src/consumer-config.js && node --check src/consumer-cli.js && node --check src/sweep-store.js && node --check src/sweep-cycle.js && node --check src/pass-schedule.js && node --check src/runtime-health.js && node --check src/runtime-files.js && node --check src/runtime-cli.js && node --check src/runtime-github.js && node --check src/trusted-policy.js && node --check scripts/prepare-runtime.mjs && node --check scripts/preflight-host.mjs && node --check scripts/discord-alert-hook.mjs && node --check scripts/gh-wrapper.mjs && node --check test/gh-wrapper.test.mjs && node --check scripts/healthchecks-checkin.mjs && node --check test/healthchecks-checkin.test.mjs && node --check scripts/check-source.mjs && node --check scripts/run-offline-tests.mjs && node --check src/closeout-pending.js && node --check src/closeout-sweep.js && node --check test/closeout-pending.test.mjs && node --check test/closeout-sweep.test.mjs",
+    "test:sweep-mutants": "node test/sweep-mutants.mjs",
+    "test:health-mutants": "node test/health-mutants.mjs",
     "consume": "node src/consumer-cli.js",
     "prepare-runtime": "node scripts/prepare-runtime.mjs"
   },

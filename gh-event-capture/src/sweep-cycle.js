@@ -70,7 +70,7 @@ function summary(sweep, now) {
 export async function runSweepCycle({ github, consumer, state, allowedRepositories,
   maxItems = 50, maxAttempts = 5, reviewIntervalMs = 600000,
   beforeItem = () => {}, isStopped = () => false, now = () => Date.now(), save,
-  afterRepository = null, beforeRepository = async () => {} }) {
+  afterRepository = null, beforeRepository = async () => {}, closeoutReview = null }) {
   const repos = repositories(allowedRepositories)
   requireValue(afterRepository === null || repos.includes(afterRepository), 'invalid repository scheduling cursor')
   const first = afterRepository === null ? 0 : (repos.indexOf(afterRepository) + 1) % repos.length
@@ -80,11 +80,16 @@ export async function runSweepCycle({ github, consumer, state, allowedRepositori
     consumer && typeof consumer.backfill === 'function' &&
     state && typeof state === 'object' && typeof save === 'function',
   'sweep cycle dependencies are incomplete')
+  // Shadow closeout wiring (S3b) is explicit opt-in, default off. When absent
+  // the review phase is exactly what it was: list, reconcile, finish.
+  requireValue(closeoutReview === null || (closeoutReview && typeof closeoutReview.runReview === 'function'),
+  'sweep cycle closeout review hook is invalid')
   const failures = []
   let processed = 0
   const poisonedNow = []
+  const closeoutShadow = {}
 
-  async function snapshot(repository, sweep, startedMs) {
+  async function snapshot(repository, sweep, startedMs, phase) {
     await beforeItem()
     const numbers = snapshotNumbers(await github.listOpenPullRequests(repository), repository)
     requireValue(isStopped() === false, 'sweep pass stopped')
@@ -96,6 +101,13 @@ export async function runSweepCycle({ github, consumer, state, allowedRepositori
     sweep.listedMs = startedMs
     sweep.lastCompleteMs = numbers.length === 0 ? startedMs : null
     await save()
+    // Shadow only, review phase only: log decisions and counters, never claim,
+    // comment or wake. A hook failure propagates loudly; the listing above is
+    // already persisted, so recovery resumes instead of re-listing.
+    if (phase === 'review' && closeoutReview !== null) {
+      await beforeItem()
+      closeoutShadow[repository] = await closeoutReview.runReview({ repository, numbers })
+    }
   }
   async function reconcile(repository, sweep, phase, number) {
     // A whole-pass stop must escape, not become a retriable per-PR failure.
@@ -144,10 +156,10 @@ export async function runSweepCycle({ github, consumer, state, allowedRepositori
     const quota = Math.ceil((limits.maxItems - used) / (repos.length - index))
     const entry = repoSweeps(state, repository)
     const startedMs = now()
-    if (entry.backfill.phase === 'pending') await snapshot(repository, entry.backfill, startedMs)
+    if (entry.backfill.phase === 'pending') await snapshot(repository, entry.backfill, startedMs, 'backfill')
     if (entry.backfill.phase === 'complete' && entry.review.phase !== 'draining' &&
       (entry.review.lastCompleteMs === null || startedMs - entry.review.lastCompleteMs >= limits.reviewIntervalMs)) {
-      await snapshot(repository, entry.review, startedMs)
+      await snapshot(repository, entry.review, startedMs, 'review')
     }
     for (const phase of ['backfill', 'review']) {
       const sweep = entry[phase]
@@ -174,5 +186,6 @@ export async function runSweepCycle({ github, consumer, state, allowedRepositori
   const deferred = backfillDeferred + Object.values(summaries).reduce((n, s) => n + s.review.remaining, 0)
   const pendingScans = Object.values(summaries).filter(s => s.backfill.phase === 'pending').length
   const ok = failures.length === 0 && deferred === 0 && poisonedTotal === 0 && pendingScans === 0
-  return { ok, processed, failures, deferred, backfillDeferred, pendingScans, poisonedTotal, poisonedNow, repos: summaries }
+  return { ok, processed, failures, deferred, backfillDeferred, pendingScans, poisonedTotal, poisonedNow,
+    repos: summaries, ...(closeoutReview === null ? {} : { closeoutShadow }) }
 }

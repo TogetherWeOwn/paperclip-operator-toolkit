@@ -245,3 +245,39 @@ test('sweep limits reject invalid and unbounded work before I/O', () => {
     assert.throws(() => sweepLimits(limits), /invalid sweep limits/)
   }
 })
+
+test('default run has no shadow hook: result carries no shadow key', async (t) => {
+  const h = await harness(t, { [repo]: [1, 2], [other]: [5] })
+  const result = await h.cycle()
+  assert.equal('closeoutShadow' in result, false)
+  assert.deepEqual(h.effects, [{ repository: repo, number: 1 }, { repository: repo, number: 2 },
+    { repository: other, number: 5 }])
+})
+
+test('opt-in shadow hook runs on review snapshots only, never backfill', async (t) => {
+  const h = await harness(t, { [repo]: [1, 2], [other]: [5] })
+  const calls = []
+  const closeoutReview = { async runReview({ repository, numbers }) {
+    calls.push({ repository, numbers })
+    return { stub: repository }
+  } }
+  await h.cycle({ closeoutReview })
+  // Backfill snapshots stay silent; the review snapshots follow once backfill completes.
+  assert.deepEqual(calls, [])
+  const result = await h.cycle({ closeoutReview })
+  assert.deepEqual(calls, [{ repository: repo, numbers: [1, 2] }, { repository: other, numbers: [5] }])
+  assert.deepEqual(result.closeoutShadow, { [other]: { stub: other }, [repo]: { stub: repo } })
+  // Live behaviour is unchanged: the same reconciliations ran.
+  assert.equal(h.effects.length, 6)
+  h.open[repo] = [1]
+  h.time = 999999
+  await h.cycle({ closeoutReview })
+  assert.equal(calls.length, 4)
+  assert.deepEqual(calls[2], { repository: repo, numbers: [1] })
+})
+
+test('shadow hook shape is validated before any I/O', async (t) => {
+  const h = await harness(t)
+  await assert.rejects(h.cycle({ closeoutReview: {} }), /review hook is invalid/)
+  assert.equal(h.lists.length, 0)
+})
