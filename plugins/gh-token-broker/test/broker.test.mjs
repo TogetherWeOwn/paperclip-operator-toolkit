@@ -778,7 +778,7 @@ test("mintInstallationToken refuses an empty repository array", async () => {
 test("mintInstallationToken sends repositories and permissions in the body", async () => {
   let captured = null;
   const fetchImpl = async (url, init) => {
-    captured = { url, body: JSON.parse(init.body) };
+    captured = { url, headers: init.headers, body: JSON.parse(init.body) };
     return {
       status: 201,
       ok: true,
@@ -797,6 +797,10 @@ test("mintInstallationToken sends repositories and permissions in the body", asy
   });
 
   assert.match(captured.url, /\/app\/installations\/42\/access_tokens$/);
+  assert.match(
+    captured.headers["User-Agent"],
+    /^paperclip-gh-token-broker\/[\d.]+ \(\+https:\/\/github\.com\/TogetherWeOwn\/paperclip-operator-toolkit\)$/,
+  );
   assert.deepEqual(captured.body.repositories, ["example-repo-a"]);
   assert.deepEqual(captured.body.permissions, { contents: "write" });
   assert.equal(result.token, "ghs_fake");
@@ -1672,4 +1676,9 @@ test("the advisory changes no grant", async () => {
   });
   describeCiVisibility(before.permissions);
   assert.deepEqual(before.permissions, { ...DEFAULT_PERMISSION_PROFILE });
+});
+
+test("package.json declares the MIT license", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.license, "MIT");
 });

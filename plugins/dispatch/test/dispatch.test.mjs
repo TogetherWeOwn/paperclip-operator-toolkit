@@ -26,6 +26,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 
 import { manifest } from "../dist/manifest.js";
@@ -780,4 +781,9 @@ test("the state-change line names the routing gap as needing a human", async () 
   assert.match(logged[0].message, /routing gap\): 1/);
   assert.match(logged[0].message, /needs a human/);
   assert.match(logged[0].message, /partial list/);
+});
+
+test("package.json declares the MIT license", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.license, "MIT");
 });

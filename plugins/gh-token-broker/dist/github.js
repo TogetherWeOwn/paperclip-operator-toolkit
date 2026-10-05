@@ -13,7 +13,7 @@ const GITHUB_API = "https://api.github.com";
 const API_HEADERS = {
   Accept: "application/vnd.github+json",
   "X-GitHub-Api-Version": "2022-11-28",
-  "User-Agent": "paperclip-gh-token-broker/0.1.0",
+  "User-Agent": "paperclip-gh-token-broker/0.1.0 (+https://github.com/TogetherWeOwn/paperclip-operator-toolkit)",
 };
 
 function base64url(input) {

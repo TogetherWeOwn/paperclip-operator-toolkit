@@ -950,3 +950,8 @@ test("the guard accepts all 52 real planned mapping patterns", { skip: existsSyn
     });
   }
 });
+
+test("package.json declares the MIT license", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.license, "MIT");
+});
