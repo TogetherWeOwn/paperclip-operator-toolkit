@@ -40,21 +40,47 @@ POST /api/agents/{triage-owner-agent-id}/keys
 ## Compatible finding writes
 
 Under a parent-bound key, a company-wide `POST .../issues` without
-`projectId`/`parentId` is refused. Finding writers must not use it. The two
-supported writes are:
+`projectId`/`parentId` is refused. Finding writers must not use it.
 
-- `POST /api/issues/{parent}/children` — a new card under the bound parent;
-- `POST /api/issues/{parent}/comments` — coalesce onto the rollup thread.
+**Live correction 2026-10-05 (retest): agent comment writes require a
+heartbeat run context the systemd timer does not have.** The deployed
+comment/update routes pass every agent write through the
+cross-issue-influence gate, which answers `403
+cross_issue_influence_run_context_required` when the caller carries no
+`X-Paperclip-Run-Id` run. A durable bridge key fired runless from systemd
+therefore reads the bound thread (`GET` parent and comments: `200`) but
+cannot append to it (`POST .../comments`: `403`) — even assigned, even on
+the bound card. That GET-200/POST-403 split is the run gate, not the
+boundary, and no key-scope widening inside `task_bridge` changes it: the
+gate fires before scope is even consulted.
 
-Prefer comments on the rollup parent (one thread per finding kind): no board
-search is needed to coalesce, so no duplicate cards. Incident cards stay the
-filing routine's to open — the timer is propose-only and never creates or
-touches one.
+Minimum supported contract under the EXISTING key, with no authority
+change:
+
+- The runless timer READS (bounded poller: parent plus comments) and
+  PROPOSES (exit codes, stdout drafts, journal) — it does not board-write.
+- The comment POST belongs to a RUNFUL routine: the CEO hourly routine,
+  running inside a heartbeat with its run JWT, posts drafts and `filed:`
+  mirrors onto the rollup thread with the same comment-only helper.
+- If a runless board write is wanted anyway (timer-posted comments or
+  child cards from systemd), that is a CEO/CISO design decision on the
+  install chain — never a broader key, server relaxation, or credential
+  substitution by inference. `POST .../children` was not live-probed and
+  is not claimed as a runless path.
+
+Incident cards stay the filing routine's to open — the timer never creates
+or touches one, with or without a run.
 
 ## Comment-only writer (`post_rollup_comment.sh`)
 
-`post_rollup_comment TAG TITLE BODY_FILE` posts one comment on
-`PAPERCLIP_ROLLUP_PARENT_ID` and creates nothing. Its contract:
+`post_rollup_comment TAG TITLE BODY_FILE` posts one comment on the rollup
+parent and creates nothing. The parent resolves at CALL time from
+`PAPERCLIP_ROLLUP_PARENT_ID` with fallback to `RED_MAIN_ROLLUP_PARENT_ID`
+(both must name the same bound card; the wrapper sources this file before
+exporting the alias, so a source-time requirement would exit 1 before any
+transport — live 2026-10-05). Refusals log the HTTP status plus the
+server's sanitized error/code, and a run-gate `403` names the
+heartbeat-run fix explicitly. Its contract:
 
 - **Reads before writing.** It GETs the parent first and posts only when the
   parent is open (`backlog,todo,in_progress,in_review,blocked`). A missing,
@@ -70,8 +96,9 @@ touches one.
   shared finding helper), so thread reads find proposals and filed-key
   mirrors by substring. Empty bodies are refused up front.
 - **Zero company-wide calls** by construction; key and body never reach
-  `curl` argv. Pinned by `test_post_rollup_comment.sh` (26 cases, stub API
-  playing the deployed 403 semantics).
+  `curl` argv. Pinned by `test_post_rollup_comment.sh` (40 cases, stub API
+  playing the deployed 403 and run-gate semantics, including the
+  RED_MAIN-only clean-env order).
 
 ## Live finding 2026-10-05: a bound root is not automatically readable
 
@@ -106,6 +133,12 @@ Operator retest protocol with the EXISTING key only (no new mint):
 - (c) If both still `403`, stop: the key's authority itself is insufficient
   and the change goes through the CEO/CISO chain -- never a broader
   standard/board/run-token substitute by inference.
+- (d) If both GETs answer `200` but the comment POST answers `403` naming
+  the heartbeat-run gate (`cross_issue_influence_run_context_required`),
+  stop: the thread, key and assignment are all correct and the runless
+  timer has reached its supported limit (read/propose). Board writes move
+  to the runful CEO routine; a runless-write change goes through the
+  CEO/CISO chain. Do not repeat the POST probe.
 
 Both scripts fail closed on any 403 (poller exits 3 with no fragment, writer
 posts nothing) and their 403 lines now name this fix.
@@ -119,10 +152,14 @@ posts nothing) and their 403 lines now name this fix.
    fallback transport and record the child UUID instead.
 2. Mint exactly one bridge key with the body above; record the key id, never
    the value, in one 0600 env file with `RED_MAIN_ROLLUP_PARENT_ID` set.
-3. Seeded checks before enabling: the offline suite
-   (`./test_red_main_poll.sh`, expect `89 passed, 0 failed`), a live
-   `snapshot`/`propose` against the parent thread, and one dry tick proving
-   zero company-wide calls and no draft for an already-mirrored tag.
+3. Seeded checks before enabling: the offline suites
+   (`./test_red_main_poll.sh`, expect `92 passed, 0 failed`;
+   `./test_post_rollup_comment.sh`, expect `40 passed, 0 failed`), a live
+   `snapshot`/`propose` against the parent thread with the runless key
+   (reads `200`, zero company-wide calls, no draft for an already-mirrored
+   tag), and one RUNFUL comment drill from the CEO routine's heartbeat
+   (the runless timer never POSTs: expect the named run-gate refusal, not
+   a phantom delivery, if one is attempted).
 4. The filing routine must check the full board for the dedupe tag before
    opening an incident card: the poller's bounded search covers the rollup
    thread, not the whole board.
