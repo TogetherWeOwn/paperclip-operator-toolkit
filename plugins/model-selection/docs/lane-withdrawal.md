@@ -21,7 +21,7 @@ a constant: the host moved the same rule from 0.95 to 0.98 inside a day.
 
 ## Why
 
-The shadow comparison (v2) found selector-vs-bridge T1 agreement at 100% while
+The shadow comparison ( v2) found selector-vs-bridge T1 agreement at 100% while
 the bridge picks MUSE and 0% whenever it withdraws MUSE. The selector keeps a lane open
 while one account can serve (`hardStopExcluded`), throttles only an `ahead` lane
 (`slotFactorFor`), and prefers a lane trailing pace near its reset
@@ -74,7 +74,7 @@ numbers. The bridge log's `meta_combined` agrees at the tail (0.981 at 22:01Z ag
 
 ### What is not known
 
-The live bridge script has not been mirrored (the captured copy
+The live bridge script has not been mirrored (`/paperclip/shared/host-bridge/fleet_quota_balancer.py`
 is dated 2026-10-03 18:12Z; the live reasons and `meta_combined` field are not in it). This
 definition is the best-supported reading of the evidence, not a port, and the margins are
 narrow: 0.0025 below the ceiling in the MUSE regime, 0.0012 above it in the withdrawal regime.
@@ -115,7 +115,7 @@ report is not met by this change alone.
 
 ## Applying it live (not done here)
 
-This change writes no live config. To turn it on, the flip vehicle (pattern: board
+This change writes no live config. To turn it on, the flip vehicle ( pattern: board
 config POST, second snapshot deep-equal, restore the `laneId` bindings the POST deletes,
 re-poll lanes, readback) adds `"withdrawAtUtilization": 0.98` to the `cliproxy-meta`
 `pacing.lanes` entry. Roll back by removing the key.

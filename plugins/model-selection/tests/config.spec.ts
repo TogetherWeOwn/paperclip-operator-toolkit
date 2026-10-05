@@ -25,7 +25,7 @@ describe("config resolution", () => {
       .toContain("selection.contextRunLogRoot must be an absolute path");
   });
 
-  it("resolves an unset agent-env cap to the fleet ceiling ()", () => {
+  it("resolves an unset agent-env cap to the fleet ceiling", () => {
     // Unset behaves exactly as before the split: the pin stamps against the
     // fleet ceiling until the operator sets `agentEnvContextTokens`.
     expect(resolveConfig({}).selection.agentEnvContextTokens).toBe(1_000_000);
@@ -62,7 +62,7 @@ describe("config resolution", () => {
   });
 
   it("treats an absent tier label id as a supported configuration", () => {
-    // The label is additive information, not a gate , so a missing id
+    // The label is additive information, not a gate (ADR-0008), so a missing id
     // is a warning at most — never an error that blocks the override write.
     const config = resolveConfig({
       selection: { mode: "enforce" },
@@ -442,7 +442,7 @@ describe("config resolution", () => {
     });
   });
 
-  describe("acceptedWork is default-off", () => {
+  describe(": acceptedWork is default-off", () => {
     it("is disabled out of the box, with no validation errors", () => {
       const config = resolveConfig(undefined);
       expect(config.acceptedWork.enabled).toBe(false);
@@ -490,7 +490,7 @@ describe("config resolution", () => {
       expect(errors.some((e) => e.includes("tier T2") && e.includes("no enabled models"))).toBe(true);
     });
 
-    it("an empty T0 is a warning in enforce, not a refusal, and T1 stays required", () => {
+    it(": an empty T0 is a warning in enforce, not a refusal, and T1 stays required", () => {
       const withoutT0 = validateConfig(
         resolveConfig({
           selection: { mode: "enforce" },
@@ -512,7 +512,7 @@ describe("config resolution", () => {
       expect(withoutT1.warnings.some((w) => w.includes("no enabled model at tier T0"))).toBe(false);
     });
 
-    it("a roster that serves T0 resolves enforce with no T0 warning", () => {
+    it(": a roster that serves T0 resolves enforce with no T0 warning", () => {
       const { errors, warnings } = validateConfig(
         resolveConfig({
           selection: { mode: "enforce" },

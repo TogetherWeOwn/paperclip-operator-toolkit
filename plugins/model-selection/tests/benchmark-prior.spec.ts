@@ -322,7 +322,7 @@ describe("applyDerivedTiers", () => {
     aaOmniscienceSignedIndex: 30,
   };
 
-  function score(modelId: string, derivedTier: Tier | null, specVersion: string = BENCHMARK_SPEC_VERSION): ModelScore {
+  function score(modelId: string, derivedTier: Tier | null, specVersion = BENCHMARK_SPEC_VERSION): ModelScore {
     return { ...buildModelScore(modelId, 48, {}, TIERS, BASKET), derivedTier, tierSpecVersion: specVersion };
   }
 
@@ -407,10 +407,10 @@ describe("applyDerivedTiers", () => {
     });
   });
 
-  // The derived tier pools every tier's runs, so easy T3 wins
+  // . The derived tier pools every tier's runs, so easy T3 wins
   // out-voted glm-5.3's proven T2 failure and promoted it to T1. A promotion
   // now stops at the hardest tier the model is still capable at.
-  describe("capability ceiling ()", () => {
+  describe("capability ceiling", () => {
     const stats = (partial: Partial<TierScoreStats>): TierScoreStats => ({ ...emptyTierScoreStats(), ...partial });
     const PROVEN_PASS = stats({ n: 89, ok: 89, wOk: 89 });
     const PROVEN_FAIL = stats({ n: 44, ok: 22, failInfra: 4, failModel: 18, wOk: 21.6, wBad: 18.4 });

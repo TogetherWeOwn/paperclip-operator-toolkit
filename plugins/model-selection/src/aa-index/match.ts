@@ -58,7 +58,7 @@ const EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh|non-reasoning)$/;
 
 /**
  * aa.ai publishes one record per (model x effort level), the effort encoded
- * as a slug suffix. Returns null for the
+ * as a slug suffix ( scope expansion). Returns null for the
  * base/default row — never fabricated for a slug with no such suffix.
  */
 export function effortSuffixOf(slug: string): string | null {

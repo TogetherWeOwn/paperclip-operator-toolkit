@@ -8,7 +8,7 @@ import { EFFORT_LADDER } from "../engine/effort.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
-/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA` (). */
+/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA`. */
 const SECRET_REF_SCHEMA = {
   type: ["object", "null"],
   format: "secret-ref",
@@ -54,7 +54,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /**
          * Which cost term orders candidates. `list-price` (default) is the
          * existing `expectedCostUsd` sort, byte-for-byte unchanged.
-         * `cost-per-accepted-card` is Slice 3 (decision A) — computed
+         * `cost-per-accepted-card` is Slice 3 ( decision A) — computed
          * and shadow-diffed for 7 days before this ever flips in a live config.
          */
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
@@ -66,7 +66,7 @@ export const SELECTION_CONFIG_SCHEMA = {
           description: "Operator-verified absolute local run-log root. Unset or unreadable logs use the labelled fleet-ceiling fallback; no run totals are used as peaks.",
         },
         /**
-         * The agent-level context cap the per-pin
+         * . The agent-level context cap the per-pin
          * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` stamp compares against. Split from
          * `fleetContextCeilingTokens` (the admission ceiling, held at 200k for
          * glm-5.3): a pin stamps
@@ -120,7 +120,7 @@ export const SELECTION_CONFIG_SCHEMA = {
           /** : which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
           laneId: { type: "string", minLength: 1 },
           /**
-           * reasoning effort to pin alongside this model. Omit to
+           * : reasoning effort to pin alongside this model. Omit to
            * leave effort to the agent row.
            *
            * The enum is the UNION of every adapter's vocabulary, so it rejects
@@ -142,7 +142,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      * absent from PLUGIN_DATABASE_CORE_READ_TABLES, so `ctx.db.query` against it
      * is rejected by `assertAllowedPublicRead`. Leaving this unset is a
      * supported configuration — the override is still written, just without the
-     * label, which is additive information rather than a gate .
+     * label, which is additive information rather than a gate (ADR-0008).
      */
     tierLabelIds: {
       type: "object",
@@ -154,7 +154,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Defect 2. Company label id for the `operator` label, applied to
+     * , Defect 2. Company label id for the `operator` label, applied to
      * the escalation issue this plugin creates when a tier is fully
      * pace-exhausted. Same constraint as `tierLabelIds`: there is no label
      * surface in the plugin SDK, so the id cannot be resolved from the name —
@@ -176,7 +176,7 @@ export const SELECTION_CONFIG_SCHEMA = {
     },
     quality: {
       type: "object",
-      title: "Quality floor ",
+      title: "Quality floor (ADR-0005)",
       additionalProperties: false,
       properties: {
         /**
@@ -192,7 +192,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * lane-pace polling and pace-first within-tier ordering.
+     * : lane-pace polling and pace-first within-tier ordering.
      * `off` polls nothing. `shadow` (default) polls, records the lane ledger,
      * and includes the pace-ordering trace, but never lets pace change which
      * model is selected. `enforce` lets pace reorder candidates within a
@@ -269,7 +269,7 @@ export const SELECTION_CONFIG_SCHEMA = {
                 },
               },
               /**
-               * withdraw the lane from NEW dispatch once its combined
+               * : withdraw the lane from NEW dispatch once its combined
                * utilization (capacity-weighted mean of its accounts' governing
                * window, an unserviceable account counting as fully spent) reaches
                * this fraction. Omit to never withdraw; 0 is rejected by
@@ -362,7 +362,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC (). Default
+     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC. Default
      * OFF: this section being absent, or `enabled: false`, means the plugin
      * writes no tier labels of its own — a company that only ever records tier
      * via explicit pins/labels sees no behavior change from this section
@@ -380,7 +380,7 @@ export const SELECTION_CONFIG_SCHEMA = {
          * Called directly (mirroring paperclip-model-router's own upstream
          * call), never through model-router's `/invoke` route: the host's
          * `isPrivateIP()` block on `ctx.http.fetch()` makes a same-host
-         * `/invoke` hop unreachable from a plugin (architecture note).
+         * `/invoke` hop unreachable from a plugin ( architecture note).
          */
         baseUrl: {
           type: "string",
@@ -406,7 +406,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** How many eligible issues one job run classifies. */
         batchSize: { type: "integer", minimum: 1, maximum: 200, default: 20 },
         /**
-         * Re-examine a card whose `tier:*` label this plugin did not
+         * . Re-examine a card whose `tier:*` label this plugin did not
          * write (provenance in `PLUGIN_STATE_KEYS.classifierLabeledIssues`).
          *
          * Defaults TRUE, deliberately: with it false the job is a one-shot
@@ -425,7 +425,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Slice 4 (decision B): bounded T1 earn-in for unproven candidate
+     * Slice 4 ( decision B): bounded T1 earn-in for unproven candidate
      * models. Default OFF — this section being absent, or `enabled: false`,
      * must leave dispatch behavior byte-for-byte identical to today.
      */
@@ -449,7 +449,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     *  /. Emits paired `host` and `plugin-shadow`
+     *  / . Emits paired `host` and `plugin-shadow`
      * `paired-decision-v1` JSONL records per `advise()` call to the
      * `shadowDecisions` local folder, for the 48h agreement stream
      * `ops/gate_harness.py` correlates.
@@ -464,20 +464,20 @@ export const SELECTION_CONFIG_SCHEMA = {
       properties: {
         enabled: { type: "boolean", default: false },
         /**
-         * Legacy single-file cap, kept for read compatibility with
+         * . Legacy single-file cap, kept for read compatibility with
          * an existing `decisions.jsonl`. New writes go to hourly shards (see
          * `shardMaxRecords`); this number no longer sizes any write.
          */
         maxRecords: { type: "integer", minimum: 1, default: 5000 },
         /**
-         * Each hourly shard file is rewritten whole on every
+         * . Each hourly shard file is rewritten whole on every
          * append; this caps a shard by dropping its oldest records. Small on
          * purpose: the whole-file atomic rewrite that timed out at 30 s on a
          * ~38 MB single file stays a kilobyte-scale RPC payload per shard.
          */
         shardMaxRecords: { type: "integer", minimum: 2, default: 200 },
         /**
-         * How many newest hourly shard files to keep. Whole old
+         * . How many newest hourly shard files to keep. Whole old
          * shards are deleted past this count. 48 covers the 48-hour agreement
          * stream the gate harness correlates.
          */
@@ -493,7 +493,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * aa.ai Intelligence Index sync. A single kill switch — the
+     * : aa.ai Intelligence Index sync. A single kill switch — the
      * feed URL and thresholds are code constants, not operator-configurable
      * (this isn't a per-company data source the way pacing lanes are).
      */
@@ -545,7 +545,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * first-party accepted-work posterior producer. Default OFF —
+     * : first-party accepted-work posterior producer. Default OFF —
      * an absent section, or `enabled: false`, builds no overlay and stores
      * nothing (no fetch, no state change). The producer only folds this
      * company's own closed-card outcomes into a versioned posterior overlay;
@@ -553,7 +553,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     acceptedWork: {
       type: "object",
-      title: "First-party accepted-work posterior ()",
+      title: "First-party accepted-work posterior",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
@@ -561,7 +561,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * models.dev price reconciliation. A kill switch and nothing
+     * : models.dev price reconciliation. A kill switch and nothing
      * else, for the same reason `aaSync` is — the feed URL and the
      * lane-to-provider map are code constants, because a wrong provider
      * produces a confidently wrong price and that is a code review's
@@ -580,7 +580,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * absorbs the standalone `dispatch` plugin (design
+     * : absorbs the standalone `dispatch` plugin (, design
      * ) so the `plugins` table shows one dispatcher, not two. Mirrors
      * that plugin's `instanceConfigSchema` field-for-field, including its
      * defaults — `wakeEnabled: false` so absorbing it changes nothing live
@@ -628,7 +628,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * A monitor tick, continuation wake, or label-only pass
+     * . A monitor tick, continuation wake, or label-only pass
      * re-checking an already-tiered card is correctly judged T1 (or T2) by
      * every rubric anchor — the classifier grades the card, not the wake, and
      * that is correct. What is actually cheap is the RE-CHECK, not the card:
@@ -645,7 +645,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     wakeScopedFloor: {
       type: "object",
-      title: "Wake-scoped floor ()",
+      title: "Wake-scoped floor",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true },
@@ -671,7 +671,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     runResolve: {
       type: "object",
-      title: "Run-scoped model decision ()",
+      title: "Run-scoped model decision",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },

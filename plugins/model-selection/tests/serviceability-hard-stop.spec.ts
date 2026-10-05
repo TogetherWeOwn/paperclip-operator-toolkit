@@ -14,7 +14,7 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
 }
 
 /**
- * The 2026-09-16 22:29-22:52Z storm: cliproxy-claude served 52
+ * . The 2026-09-16 22:29-22:52Z storm: cliproxy-claude served 52
  * 429'd runs while its lane verdict read `state:"on", serviceable:true` —
  * claude-lane-1's five_hour SERVICEABILITY window sat at 1.0 behind a
  * seven_day allowance at 0.84, and the pace engine only hard-stopped a lane
@@ -22,13 +22,13 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
  * lane (it kept routing to the blown account through the whole storm), so
  * the any-serviceable-account roll-up overstated the lane.
  *
- * The withdrawn engine fix, re-derived locally (no upstream
+ * The withdrawn engine fix, re-derived locally in  (no upstream
  * write or deployment): a serviceability window at, or within
  * the pace margin of, 1.0 poisons the lane — `state:"exhausted"`,
  * `serviceable:false`, `reason:"serviceability-window-exhausted"`,
  * `urgentResetAt` = the earliest tripped window's resetsAt.
  *
- * Owner-directed revision (operator update 22:40Z): the
+ *  revision (owner-directed, operator update 22:40Z on ): the
  * lane-level condemnation above fires ONLY when no account can still serve
  * (`serviceableAccountCount == 0`). The 52-run evidence stands, but it is a
  * claim about where the provider routes — cliproxy kept hitting the BLOWN
@@ -41,8 +41,8 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
  * lanes, margin boundaries) is unchanged.
  *
  * Every document below is live telemetry fetched 2026-09-16T23:13:12Z,
- * mid-incident, from the configured lane status URLs. Definitions and margins
- * mirror the live pacing config.
+ * mid-incident, from the configured lane status URLs (fetch evidence on the
+ *  card). Definitions and margins mirror the live pacing config.
  */
 const LIVE_OBSERVED_AT = "2026-09-16T23:13:12.071592Z";
 
@@ -105,7 +105,7 @@ const CLAUDE_LIVE = {
 };
 
 /**
- * Revision fixtures: every account blown, so `serviceableAccountCount == 0`
+ *  fixtures: every account blown, so `serviceableAccountCount == 0`
  * and the count-gated trip still fires. The live storm documents above keep a
  * healthy sibling and now SERVE — that is the fix, not a fixture rot.
  */
@@ -157,16 +157,16 @@ function ledgerOf(entries: Array<[string, LanePaceVerdict]>): LaneLedger {
 
 /**
  * The T1 roster as actually ENABLED on the live config
- * (the pre-deploy model-selection config snapshot taken before the 173055Z
- * payload, re-measured 2026-09-17): T1 exists on exactly two lanes.
+ * (`ops/model-selection/deploy-20260916T173055Z--final/model-selection-before.json`,
+ * re-measured 2026-09-17): T1 exists on exactly two lanes.
  *
  *   T1 cliproxy-claude : claude-opus-5, claude-fable-5-1
  *   T1 cliproxy-codex  : gpt-5.6-sol, gpt-6-astra
  *
- * zai and opencode-go carry T2/T3 rows only — zero enabled T1. The pending
- * 173055Z payload adds T1 on zai/opencode-go/antigravity and was not yet
- * applied when this was written, so `stormModels()` below describes the
- * POST-payload board, not today's.
+ * zai and opencode-go carry T2/T3 rows only — zero enabled T1.  (the
+ * 173055Z payload) adds T1 on zai/opencode-go/antigravity and was still `todo`
+ * when this was written, so `stormModels()` below describes the POST-2990
+ * board, not today's.
  */
 function liveT1Models(): ModelEntry[] {
   const t1 = MODELS.find((entry) => entry.tier === "T1")!;
@@ -193,7 +193,7 @@ function stormModels(): ModelEntry[] {
   ];
 }
 
-describe("Hard-stop boundaries and precedence", () => {
+describe(": hard-stop boundaries and precedence", () => {
   it.each([
     [0.899, 0.1, true],
     [0.9, 0.1, false],
@@ -249,7 +249,7 @@ describe("Hard-stop boundaries and precedence", () => {
   });
 });
 
-describe("A tripped serviceability window is a hard stop", () => {
+describe(": a tripped serviceability window is a hard stop", () => {
   it("reads the exact storm document (7d 0.84 + 5h 1.0) as not serviceable", () => {
     const verdict = liveVerdict(CLAUDE, { ...CLAUDE_LIVE, records: [CLAUDE_LIVE.records[0]] });
     expect(verdict.serviceable).toBe(false);
@@ -260,11 +260,11 @@ describe("A tripped serviceability window is a hard stop", () => {
   });
 
   it("lets the healthy peer account carry the lane while the tripped account stays excluded", () => {
-    // The count-gated predicate. The lane serves through the
+    // : the count-gated predicate. The lane serves through the
     // healthy sibling, and the tripped account is excluded at the account
     // level — serviceable:false, state:"exhausted", recommendedShare 0 — so
     // dispatch never rides it. That per-account exclusion is what carries
-    // the no-failover evidence now.
+    // 's no-failover evidence now.
     const verdict = liveVerdict(CLAUDE, CLAUDE_LIVE);
     expect(verdict.serviceable).toBe(true);
     expect(verdict.state).toBe("on");
@@ -276,7 +276,7 @@ describe("A tripped serviceability window is a hard stop", () => {
 
   it("still hard-stops when every account is tripped (serviceableAccountCount == 0)", () => {
     // The preserved half of the old assertion: with nothing left to serve,
-    // the count-gated trip fires exactly as specified.
+    // the count-gated trip fires exactly as  specified.
     const verdict = liveVerdict(CLAUDE, CLAUDE_ALL_TRIPPED);
     expect(verdict.serviceable).toBe(false);
     expect(verdict.state).toBe("exhausted");
@@ -301,9 +301,9 @@ describe("A tripped serviceability window is a hard stop", () => {
   });
 
   it("fallback proof: claude condemned + codex exhausted selects a live lane, never a 429 lane", () => {
-    // "condemned" now means every account blown
+    // : "condemned" now means every account blown
     // (serviceableAccountCount == 0), so this board uses CLAUDE_ALL_TRIPPED.
-    // The count-gated trip fires exactly as specified; the pick
+    // The count-gated trip fires exactly as  specified; the pick
     // lands on a live lane, never a 429 lane.
     const ledger = ledgerOf([
       ["cliproxy-claude", liveVerdict(CLAUDE, CLAUDE_ALL_TRIPPED)],
@@ -325,7 +325,7 @@ describe("A tripped serviceability window is a hard stop", () => {
     }
   });
 
-  it("Regression: one tripped account + healthy sibling serves at dispatch level", () => {
+  it(" regression: one tripped account + healthy sibling serves at dispatch level", () => {
     // The card's acceptance test, measured at the selectModel level: the
     // live storm board — claude-lane-1 at 5h 1.0, claude-lane-2 healthy —
     // now serves through the sibling, so the cheapest model storm-claude
@@ -391,16 +391,16 @@ describe("A tripped serviceability window is a hard stop", () => {
 });
 
 /**
- * Requirement 3, measured on the roster that is actually deployed.
+ *  requirement 3, measured on the roster that is actually deployed.
  *
- * A review raised this: with T1 enabled only on cliproxy-claude and
+ * 's review raised this: with T1 enabled only on cliproxy-claude and
  * cliproxy-codex, tripping both leaves T1 with no candidate at all, so the
  * `stormModels()` proofs above are green over a candidate set that cannot
- * exist until the pending payload lands (not yet applied as of 2026-09-17).
+ * exist until  lands (still `todo` as of 2026-09-17).
  *
  * The roster half of that is correct and re-measured here. The consequence is
  * not. The empty set is neither a 429 nor a silent dead end: every survivor
- * was rejected `lane-unserviceable`, so `selectModel` returns the
+ * was rejected `lane-unserviceable`, so `selectModel` returns the 
  * `tier-exhausted` outcome (`src/engine/select.ts:467`) rather than the
  * generic `no-eligible-model` — and that outcome is the one `worker.ts`
  * escalates to an `Operator:` card. `planApply` then refuses to write on any
@@ -410,10 +410,10 @@ describe("A tripped serviceability window is a hard stop", () => {
  *
  * So requirement 3 — "never a 429" — holds today through the FLOOR plus an
  * operator escalation, not through the pin. That makes it contingent on where
- * the floor points: Z.ai `glm-5.3` per the operator stopgap
+ * the floor points: Z.ai `glm-5.3` per the  operator stopgap
  * (verified in-run: `PAPERCLIP_ASSIGNED_MODEL=glm-5.3`). If the floor is
- * returned to claude-opus-5 before the pending payload is applied, this
- * fail-through lands back on the 429 lane and requirement 3 breaks — no test here can
+ * returned to claude-opus-5 before  is applied, this fail-through
+ * lands back on the 429 lane and requirement 3 breaks — no test here can
  * catch that, because the floor is not this plugin's to read. That is the
  * standing risk these cases exist to pin.
  *
@@ -422,8 +422,8 @@ describe("A tripped serviceability window is a hard stop", () => {
  * BEFORE it reaches the outcome gate — so a no-write assertion under the
  * default would pass without the gate under test ever running.
  */
-describe("Requirement 3 on the pre-2990 live roster", () => {
-  // "both T1 lanes tripped" now means every account blown
+describe(" requirement 3 on the pre-2990 live roster", () => {
+  // : "both T1 lanes tripped" now means every account blown
   // (serviceableAccountCount == 0), so the claude entry uses
   // CLAUDE_ALL_TRIPPED. A single tripped account beside a healthy sibling
   // SERVES under the count-gated predicate — that is the fix, proven in the

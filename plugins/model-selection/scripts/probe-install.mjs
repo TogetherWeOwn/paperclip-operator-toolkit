@@ -26,7 +26,7 @@ const COMPANY = process.env.PAPERCLIP_COMPANY_ID;
 const PLUGIN_ID = "togetherweown.model-selection"; // src/constants.ts:1
 const ADVISE = "/advise"; // src/manifest.ts:118 -- NOT /invoke (that is paperclip-model-router)
 
-// Known-installed ids, from the host's installed-plugins manifest. None declare
+// Known-installed ids, from /paperclip/.paperclip/plugins/package.json. None declare
 // apiRoutes, so each must answer "does not expose scoped API routes".
 const INSTALLED_CONTROLS = [
   "paperclip-plugin-discord",
@@ -126,7 +126,7 @@ async function main() {
   console.log("  MODE IS NOT VERIFIED BY THIS PROBE. selection.mode defaults to");
   console.log('  "advise" (src/config/schema.ts:27) and is only non-default if the');
   console.log("  operator set plugin_config at install. Confirm mode separately");
-  console.log("  against the install record before treating the install as verified.");
+  console.log("  against the install record before closing  criterion 3.");
   process.exit(0);
 }
 

@@ -14,7 +14,7 @@ import type {
  * 8,000/2,000 defaults and no cache-read term at all. That is a single-request
  * model. A harness run is multi-turn: on this company's own 7d data, an opus
  * run averages 510k input, 6.08M cache-read and 55.5k output tokens. Cache read
- * alone is ~12x the input volume and 44% of the bill .
+ * alone is ~12x the input volume and 44% of the bill (ADR-0002).
  *
  * So an engine built on the reference cost term orders candidates on the price
  * term (measured 5.2x spread) while being blind to the volume term (measured
@@ -103,7 +103,7 @@ export function runCost(
  * the penalty is the full cost of a run at the tier above, weighted by how
  * often that tier actually escalates on our own data.
  *
- * A silent quality failure counts 10x an escalation  — it is
+ * A silent quality failure counts 10x an escalation (ADR-0005) — it is
  * invisible by construction, which is exactly why it must be priced rather
  * than merely watched. `silentFailureCount` enters as an effective-rate bump
  * over the same sample.
@@ -115,7 +115,7 @@ export function escalationRisk(
   signals: readonly QualitySignal[],
   now: number,
   /**
-   * An escalation can only land on a tier the decision may use, so
+   * . An escalation can only land on a tier the decision may use, so
    * a tier at the ceiling has no escalation to price — a T1 card must not be
    * charged a T0 redo it can never be sent to. Defaults to the implicit
    * ceiling, the behaviour before T0 existed.

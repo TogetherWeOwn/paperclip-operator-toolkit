@@ -1,0 +1,44 @@
+{
+  "schema": "bridge-selector-matrix-v1",
+  "note": " fixture matrix. OFFLINE ONLY: synthetic per-minute snapshots, no live lanes, no roster rows, no wiring. Bridge choices mirror the fleet-quota-balancer vocabulary seen on the parent epic (MUSE headroom-first, PRIMARY, FALLBACK); the bridgeModelMap is the epic's mapping (bridge pins xhigh at the agent row, roster carries the bare id). Verdict paths are deliberately spread across minutes so the probe proves the predicate, not just the happy path: m1-m3 agree, m4 pace-intended (PI-1), m5 defect (DF-1 cross-tier reach), m6 unexplained, m7 stale-agreement (DF-2*), m8 non-comparable (fingerprint split).",
+  "bridgeModelMap": {
+    "MUSE": { "model": "muse-spark-1.3-contributor", "effort": "xhigh" },
+    "PRIMARY": { "model": "claude-sonnet-5-5" },
+    "FALLBACK": { "model": "gpt-6.1-sol" }
+  },
+  "defaults": {
+    "fingerprint": { "status": "todo", "hadOverride": false, "hadRunningRun": false, "pinOperator": false },
+    "hostAgeSeconds": 60,
+    "shadowAgeSeconds": 60,
+    "quality": "live",
+    "fiveHour": 0.2,
+    "weekly": 0.2,
+    "deviation": -0.1,
+    "pickWhy": "fixture probe selection",
+    "lanes": ["cliproxy-meta", "cliproxy-claude", "cliproxy-codex"],
+    "candidates": [
+      { "model": "muse-spark-1.3-contributor", "lane": "cliproxy-meta", "tier": "T3", "capable": true, "proven": true, "usable": true, "blended": 0.0 },
+      { "model": "claude-sonnet-5-5", "lane": "cliproxy-claude", "tier": "T2", "capable": true, "proven": true, "usable": true, "blended": 3.0 },
+      { "model": "gpt-6.1-sol", "lane": "cliproxy-codex", "tier": "T1", "capable": true, "proven": true, "usable": true, "blended": 4.0 }
+    ]
+  },
+  "minutes": [
+    { "ts": "2026-10-03T12:00:00Z", "bridge": "MUSE", "tier": "T3", "selector": "muse-spark-1.3-contributor" },
+    { "ts": "2026-10-03T12:01:00Z", "bridge": "PRIMARY", "tier": "T2", "selector": "claude-sonnet-5-5" },
+    { "ts": "2026-10-03T12:02:00Z", "bridge": "FALLBACK", "tier": "T1", "selector": "gpt-6.1-sol" },
+    {
+      "ts": "2026-10-03T12:03:00Z", "bridge": "MUSE", "tier": "T2", "selector": "claude-sonnet-5-5",
+      "deviations": { "cliproxy-meta": -0.1, "cliproxy-claude": -0.3, "cliproxy-codex": -0.1 }
+    },
+    { "ts": "2026-10-03T12:04:00Z", "bridge": "MUSE", "tier": "T2", "selector": "gpt-6.1-sol" },
+    { "ts": "2026-10-03T12:05:00Z", "bridge": "PRIMARY", "tier": "T1", "selector": "gpt-6.1-sol" },
+    {
+      "ts": "2026-10-03T12:06:00Z", "bridge": "MUSE", "tier": "T3", "selector": "muse-spark-1.3-contributor",
+      "shadowAgeSeconds": 600
+    },
+    {
+      "ts": "2026-10-03T12:07:00Z", "bridge": "PRIMARY", "tier": "T2", "selector": "claude-sonnet-5-5",
+      "shadowFingerprint": { "status": "in_progress", "hadOverride": false, "hadRunningRun": false, "pinOperator": false }
+    }
+  ]
+}

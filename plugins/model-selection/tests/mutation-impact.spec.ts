@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-// The impact gate decides whether CI may SKIP the ~300-mutant sweep,
+// . The impact gate decides whether CI may SKIP the ~300-mutant sweep,
 // so the property under test is asymmetric: a wrong "impacted" costs minutes, a
 // wrong "not impacted" turns a required check green on code that was never
 // mutation-tested. Every row that is not a positive proof of "unaffected" must
@@ -31,8 +31,7 @@ describe("isImpacted", () => {
     ["plugin test", ["plugins/model-selection/tests/pacing.spec.ts"]],
     ["plugin lockfile", ["plugins/model-selection/package-lock.json"]],
     ["the gate itself", ["plugins/model-selection/scripts/mutation-gate.mjs"]],
-    // No ops/ case: the public tree stages no ops fixture (the paired-summary
-    // spec takes its harness path from PAIRED_DECISION_GATE_HARNESS).
+    ["a staged repo fixture", ["ops/gate_harness.py"]],
     ["another staged repo fixture", ["test/fixtures/orgdb/schema.sql"]],
     ["CONTRIBUTING.md, which a spec reads", ["CONTRIBUTING.md"]],
     ["the workflow that wires the gate", [".github/workflows/ci.yml"]],

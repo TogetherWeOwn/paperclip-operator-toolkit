@@ -1,5 +1,5 @@
 /**
- * watchdog decision-log lag detector — emit vs observed (propose-only).
+ * : watchdog decision-log lag detector — emit vs observed (propose-only).
  *
  * Parent  (watchdog detector; complements in_progress  /
  * ). Executor: DevOps & Reliability Engineer.
@@ -28,17 +28,17 @@
  *   future callers can tighten/loosen without forking the module.
  *
  * NON-GOALS (owned elsewhere, do NOT duplicate):
- * - shadow-emit gap (blocked): missing records; this measures LAG
+ * -  shadow-emit gap (blocked): missing records; this measures LAG
  *   of present records, never completeness.
- * - quota-expiry (blocked): quota windows, not log freshness.
- * - run-stall (in_progress): run progress, not decision visibility.
- * - exit-143 probe (in_progress): OOM probe, not log lag.
- * - stale-review (blocked): review age, not decision-log age.
- * - /  proposal-delivery (blocked / in_progress):
+ * -  quota-expiry (blocked): quota windows, not log freshness.
+ * -  run-stall (in_progress): run progress, not decision visibility.
+ * -  exit-143 probe (in_progress): OOM probe, not log lag.
+ * -  stale-review (blocked): review age, not decision-log age.
+ * -  /  proposal-delivery (blocked / in_progress):
  *   proposal transport, not lag measurement.
- * - host-disk (done): disk pressure, not log freshness.
- * - red-main triage (done): CI triage, not log lag.
- * - supply-famine (in_progress): capacity famine, not log lag.
+ * -  host-disk (done): disk pressure, not log freshness.
+ * -  red-main triage (done): CI triage, not log lag.
+ * -  supply-famine (in_progress): capacity famine, not log lag.
  */
 
 export const DECISION_LOG_LAG_SCHEMA = "decision-log-lag-v1";

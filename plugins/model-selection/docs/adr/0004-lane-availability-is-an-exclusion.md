@@ -2,8 +2,10 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-17
-- **Related:** pacer serviceability, the lane collector, the producer-side
-  cooldown contract, and the `tier-exhausted` outcome
+- **Card:** 
+- **Parent:** 
+- **Related:**  (pacer serviceability),  (the collector), 
+  (producer-side cooldown contract),  (`tier-exhausted`)
 
 ## Context
 
@@ -114,12 +116,11 @@ reporting a capacity outage as a config gap.
   `selectedOnUnknownLane` marks a winner chosen on an unreadable lane.
 - `model_selection.lane_excluded.{term}` and `model_selection.lane_unknown_selected`
   make both visible without reading the stream.
-- Out of scope for this change: retry or fallback after a refusal, and *moving*
+- Out of scope, per the card: retry or fallback after a refusal, and *moving*
   the floor or changing `agents.adapterConfig.model`.
-- **The floor decision itself is in scope, and is covered (AC-3).** A
-  concurrent change landed on `main` while this branch was open and added a
-  second exit that hands an untrusted-profile run back to the agent floor,
-  testing that floor's lane
+- **The floor decision itself is in scope, and is covered (AC-3).** 
+  landed on `main` while this branch was open and added a second exit that hands
+  an untrusted-profile run back to the agent floor, testing that floor's lane
   against the pace predicates — all of which are gated on `paceActive`. The
   availability term is not gated on `pacingMode`, so it is evaluated there
   separately: a floor whose lane a published contract calls **unavailable** is

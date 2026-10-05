@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Selector-vs-bridge agreement (productized under ).
+ * Selector-vs-bridge agreement (, productized under ).
  *
  * Joins the selector's shadow stream (`writer: "plugin-shadow"` decisions of
  * schema paired-decision-v1) to the live host bridge's log
@@ -11,7 +11,7 @@
  * Read-only: it opens the shadow files and the bridge log for reading and
  * writes nothing. `host`-writer records are skipped on purpose: `host` and
  * `plugin-shadow` both project one `advise()` call, so their agreement says
- * nothing about the bridge (measured 100% on 2,494 pairs).
+ * nothing about the bridge ( measured 100% on 2,494 pairs).
  *
  * Models are compared by class, not by id, because the bridge sets a model and
  * the selector picks a roster row:
@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 
-export const DEFAULT_BRIDGE_LOG = "./fleet-quota-balancer.log";
+export const DEFAULT_BRIDGE_LOG = "/paperclip/shared/host-bridge/fleet-quota-balancer.log";
 const HOURLY_FILE = /^decisions-\d{4}-\d{2}-\d{2}-\d{2}Z\.jsonl$/;
 
 /** @param {string | null | undefined} model */
@@ -181,12 +181,10 @@ export async function shadowFiles(dir, includeLegacy) {
   return [...(includeLegacy ? ["decisions.jsonl"] : []), ...names].map((name) => join(dir, name));
 }
 
-// Fully env-provided: no hardcoded host prefix. Operators point
-// MODEL_SELECTION_SHADOW_DIR at the checkout, or set MODEL_SELECTION_STATE_ROOT.
 function defaultShadowDir(env) {
   if (env.MODEL_SELECTION_SHADOW_DIR) return env.MODEL_SELECTION_SHADOW_DIR;
   if (env.PAPERCLIP_COMPANY_ID) {
-    return `${env.MODEL_SELECTION_STATE_ROOT ?? "/var/lib"}/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
+    return `/paperclip/instances/default/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
   }
   return null;
 }

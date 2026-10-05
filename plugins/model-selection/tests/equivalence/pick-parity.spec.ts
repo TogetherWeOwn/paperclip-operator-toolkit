@@ -16,7 +16,7 @@ import type {
 import type { Tier } from "../../src/constants.js";
 
 /**
- * task #10: diff a real Python evaluation of `tier_dispatcher.py`'s
+ *  task #10: diff a real Python evaluation of `tier_dispatcher.py`'s
  * `pick()` (via `pick_reference.py`, a verbatim port with file/podman I/O
  * replaced by stdin JSON — see that file's docstring) against the TypeScript
  * `selectModel()` engine, on identical inputs, across >= 20 scenarios.
@@ -556,7 +556,7 @@ const SCENARIOS: ScenarioDef[] = [
     },
   },
   {
-    name: "zai-peak-hour-throttle-excludes-at-",
+    name: "zai-peak-hour-throttle-excludes-at-cap-1",
     tier: "T2",
     now: PEAK_NOW,
     models: [
@@ -604,7 +604,7 @@ const SCENARIOS: ScenarioDef[] = [
     lanes: { codex: { serviceable: false }, claude: { serviceable: false } },
   },
   {
-    // fix 2/4: no prior scenario ever set `fiveHourUtil`, so
+    //  fix 2/4: no prior scenario ever set `fiveHourUtil`, so
     // `lane_5h(lane) >= 0.5` (pick_reference.py:159) / the five-hour window
     // check inside `laneHasRoom()` (pacing.ts) was never exercised by this
     // harness. Named mutant: "5h stop dropped" — if that `>= 0.5` new-
@@ -622,7 +622,7 @@ const SCENARIOS: ScenarioDef[] = [
     lanes: { "opencode-go": { fiveHourUtil: 0.6 }, claude: {} },
   },
   {
-    // fix 2/4: proves the fallback ladder does NOT silently land on
+    //  fix 2/4: proves the fallback ladder does NOT silently land on
     // a lane that is itself over its own avoid threshold — every candidate
     // here (regular AND fallback-only) is over-avoid. Named mutant: "fallback
     // skips the avoid gate" — if the fallback-only branch of `select.ts`'s

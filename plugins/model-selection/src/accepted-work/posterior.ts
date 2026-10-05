@@ -13,7 +13,7 @@ import {
 } from "./cohort.js";
 
 /**
- * First-party accepted-work posterior overlay (shadow-only).
+ * . First-party accepted-work posterior overlay (shadow-only).
  *
  * Folds accepted-work observations — served model x effective effort x task
  * class -> accept/rework counts — into a versioned posterior overlay consumed
@@ -35,10 +35,8 @@ import {
  *   never lifts them, it only labels them.
  */
 
-import { PUBLIC_FORMAT_IDENTIFIERS } from "../format-compatibility.js";
-
 /** Frozen spec identity. Bump on ANY change to cohorting, censoring, or math. */
-export const ACCEPTED_WORK_SPEC_VERSION = PUBLIC_FORMAT_IDENTIFIERS.acceptedWorkSpecVersion;
+export const ACCEPTED_WORK_SPEC_VERSION = "accepted-work-posterior-v1";
 
 /** One closed card, attributed to its served cohort. Built by the worker. */
 export interface AcceptedWorkCardInput {
