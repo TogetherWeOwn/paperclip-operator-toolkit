@@ -46,7 +46,8 @@ async function consumerInputs(manifest, now) {
   return { ...input, githubExecutable }
 }
 export async function preflight(manifest, now) {
-  requireValue(Number(process.versions.node.split('.')[0]) >= 22)
+  // Public-tree floor is Node 20 (repo Offline CI pin); the tree uses no Node 22+ API.
+  requireValue(Number(process.versions.node.split('.')[0]) >= 20)
   await consumerInputs(manifest, now)
   await checkHook(manifest.alertHookFile)
 }

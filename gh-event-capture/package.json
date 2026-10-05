@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Self-hosted GitHub webhook capture for a GitHub org. A monitoring aid, not forensic evidence — read the README before relying on it.",
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "scripts": {
     "test": "node --test test/capture.test.mjs test/bridge.test.mjs test/bridge-regressions.test.mjs test/closeout.test.mjs test/claim-store.test.mjs test/closeout-pending.test.mjs test/closeout-sweep.test.mjs test/consumer.test.mjs test/pr-task-index.test.mjs test/upstream-watcher.test.mjs test/github-adapter.test.mjs test/capture-adapter.test.mjs test/receipt-cycle.test.mjs test/paperclip-adapter.test.mjs test/consumer-runner.test.mjs test/sweep-store.test.mjs test/sweep-cycle.test.mjs test/pass-schedule.test.mjs test/runtime-health.test.mjs test/discord-alert-hook.test.mjs test/gh-wrapper.test.mjs test/healthchecks-checkin.test.mjs",
