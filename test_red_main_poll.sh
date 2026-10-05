@@ -211,6 +211,9 @@ const paperclip = (req, res, url) => {
     if (!auth.startsWith('Bearer ') || auth.length < 12) { res.statusCode = 401; return res.end(JSON.stringify({ error: 'Unauthorized' })) }
     if (req.method === 'GET' && s) {
       if (iid === 'parent-denied') { res.statusCode = 403; return res.end(JSON.stringify({ error: 'Forbidden' })) }
+      // Live 2026-10-05: the bound-but-unassigned rollup root answers 403
+      // with the authorization-boundary error on BOTH single-issue routes.
+      if (iid === 'parent-outside-boundary') { res.statusCode = 403; return res.end(JSON.stringify({ error: "Issue is outside this actor's authorization boundary" })) }
       const issue = parentIssue(iid)
       if (!issue) { res.statusCode = 404; return res.end(JSON.stringify({ error: 'Not found' })) }
       res.statusCode = 200
@@ -218,6 +221,7 @@ const paperclip = (req, res, url) => {
     }
     if (req.method === 'GET' && c) {
       if (iid === 'parent-denied') { res.statusCode = 403; return res.end(JSON.stringify({ error: 'Forbidden' })) }
+      if (iid === 'parent-outside-boundary') { res.statusCode = 403; return res.end(JSON.stringify({ error: "Issue is outside this actor's authorization boundary" })) }
       const comments = parentComments(iid)
       if (!comments) { res.statusCode = 500; return res.end(JSON.stringify({ error: 'boom' })) }
       res.statusCode = 200
@@ -562,6 +566,16 @@ for parent in parent-denied parent-missing parent-badshape parent-comments-down;
 done
 bounded_propose parent-denied o/red-same-a
 [[ "$RC" -eq 3 && -z "$OUT" ]] && ok "propose drafts nothing when the parent thread is unreadable" || bad "propose drafts nothing when the parent thread is unreadable" "rc=$RC out=$OUT"
+hdr "Live 2026-10-05: bound-but-unassigned root is a boundary refusal (fail-closed)"
+# The deployed API answered 403 "outside this actor's authorization boundary"
+# on BOTH single-issue routes for the bound rollup root while it was
+# unassigned. That refusal must exit 3 with no fragment and name the fix
+# (assign the thread, or use an assigned descendant) -- never "no incident".
+bounded_snapshot parent-outside-boundary o/red-same-a
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "boundary-refused root exits 3 with no fragment" || bad "boundary-refused root exits 3 with no fragment" "rc=$RC out=$OUT err=$ERR"
+[[ "$ERR" == *"boundary refusal"* && "$ERR" == *"triage owner"* ]] && ok "the refusal names the boundary cause and the assignment fix" || bad "the refusal names the boundary cause and the assignment fix" "$ERR"
+bounded_propose parent-outside-boundary o/red-same-a
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "propose drafts nothing against a boundary-refused thread" || bad "propose drafts nothing against a boundary-refused thread" "rc=$RC out=$OUT"
 OUT="$(env -u INCIDENT_SOURCE_CMD PAPERCLIP_API_URL="$STUB_BASE" RED_MAIN_ROLLUP_PARENT_ID=parent-known RED_MAIN_API_KEY= PAPERCLIP_API_KEY= "$TOOL" snapshot o/red-same-a 2>/dev/null)"; RC=$?
 [[ "$RC" -eq 3 && -z "$OUT" ]] && ok "bounded mode without a credential is unknown, not 'no incident'" || bad "bounded mode without a credential is unknown, not 'no incident'" "rc=$RC out=$OUT"
 
