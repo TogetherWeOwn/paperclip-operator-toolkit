@@ -1454,7 +1454,7 @@ test("the listener is loopback-only and the address is not configurable", async 
   assert.match(source, /const BIND_ADDRESS = "127\.0\.0\.1"/);
   assert.ok(
     !/cfg\.(bind|host|address)/.test(source),
-    "the bind address became configurable; loopback-only is a non-negotiable of TOG-196",
+    "the bind address became configurable; loopback-only is a non-negotiable of the design",
   );
 });
 

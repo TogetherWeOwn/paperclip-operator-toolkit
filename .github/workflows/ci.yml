@@ -4000,6 +4000,14 @@ jobs:
           fi
           echo "stranded artifact correctly exits non-zero"
 
+      # The withdrawal rendering must be load-bearing, not decorative: this
+      # gate deletes each branch of it from a staging copy and proves the
+      # render goes wrong in the specific way that matters. It runs on a
+      # synthetic fixture because the real classification file is private
+      # operator data and is not published here.
+      - name: operator runbook — withdrawal rendering mutation gate
+        run: ./verification/runbook-withdrawal-render-gate.sh
+
       # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
       # abort skipped, never fail the build for it. This job is small, but it is
       # the one whose steps going dark caused TOG-1141 in the first place.

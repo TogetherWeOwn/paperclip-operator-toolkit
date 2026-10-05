@@ -16,6 +16,17 @@ the working reference for this shape on this instance.
 > `dist/` divergence: testing one copy does not certify a different installed copy.
 > The package unit suite is not proof that those deployment gates passed.
 
+Before installing a copy staged anywhere else, run the repository's
+calibration against it from the repo root — the check fails on any `dist/`
+divergence rather than certifying one copy and installing another:
+
+```bash
+MAPPING_GUARD_BROKER_DIR=<that directory> node scripts/mapping-guard-calibration.mjs
+```
+
+(A live catalogue read additionally needs `OMNIROUTE_API_KEY`; without it,
+point `MAPPING_GUARD_CATALOGUE_FIXTURE` at a saved `/v1/models` body.)
+
 ---
 
 ## Status
@@ -450,13 +461,18 @@ staged copy whose `dist/` fingerprint the calibration command above matched.
 ## Tests
 
 ```bash
-node --test test/broker.test.mjs
+node --test plugins/omniroute-broker/test/broker.test.mjs
+node --test test-mapping-guard-calibration.mjs
 ```
 
-Run this from the package directory. Additional repository/deployment calibration
-is outside this package and requires its own exact-revision evidence. Pass the
-broker test **file**, not the directory — on Node 24 `node --test test/` resolves
-`test` as a module specifier and dies before running anything.
+Run these from the repository root. The second command is the offline
+mapping-guard calibration mutation suite: it stages the committed catalogue
+and mapping plan, changes one input at a time, and requires the checker to
+tell a guard failure from a harness failure. Additional
+repository/deployment calibration is outside this package and requires its
+own exact-revision evidence. Pass the broker test **file**, not the
+directory — on Node 24 `node --test test/` resolves `test` as a module
+specifier and dies before running anything.
 
 ## What I could not verify, and what it would take
 
