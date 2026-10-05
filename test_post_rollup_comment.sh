@@ -25,6 +25,19 @@
 #  * A QUIET DEDUPE. The helper is at-least-once by contract (callers dedupe
 #    by digest): two identical calls must post two comments, proving no
 #    hidden skipping that could swallow a changed finding.
+#  * A SOURCE-ORDER FAILURE. The installed env carries only
+#    RED_MAIN_ROLLUP_PARENT_ID and the wrapper sources the helper before
+#    exporting the PAPERCLIP_ alias: sourcing must succeed and the post
+#    must target the RED_MAIN_ id (live 2026-10-05 retest, exit 1 before
+#    any transport). Neither name set is usage exit 2.
+#  * A DISCARDED REFUSAL REASON. The retest's helper threw away the POST
+#    body's error/code, leaving the 403 unexplained. Refusals now log the
+#    HTTP status plus the server's sanitized error/code, and a run-gate
+#    403 names the heartbeat-run fix explicitly.
+#  * A RUNLESS POST AS "DELIVERED". Deployed comment routes need a
+#    heartbeat run the systemd timer does not have: GETs answer 200 while
+#    the POST answers 403 cross_issue_influence_run_context_required. That
+#    split must fail closed with no success line, never a phantom delivery.
 #
 # Hermetic: no network beyond 127.0.0.1, no credentials, no board writes.
 # ===========================================================================
@@ -96,6 +109,12 @@ class H(http.server.BaseHTTPRequestHandler):
                     status, payload = 500, {"error": "boom"}
                 elif iid == "comments-forbidden":
                     status, payload = 403, {"error": "Forbidden"}
+                elif iid == "parent-runless":
+                    # Live 2026-10-05 22:28Z: GETs on the bound thread answer
+                    # 200 runless, but the comment POST needs a heartbeat run
+                    # the systemd timer does not have.
+                    status, payload = 403, {"error": "Agent issue comments and updates require a valid heartbeat run so cross-issue influence can be contained",
+                                            "details": {"code": "cross_issue_influence_run_context_required"}}
                 else:
                     try:
                         seq = sum(1 for _ in open(CALLS)) + 1
@@ -142,6 +161,28 @@ run_post() {
     PAPERCLIP_API_URL="http://127.0.0.1:$PORT" \
     PAPERCLIP_AGENT_API_KEY="$SENTINEL_KEY" \
     PAPERCLIP_ROLLUP_PARENT_ID="$parent" \
+    bash -c 'source "$0"; post_rollup_comment "$1" "$2" "$3"' \
+    "$HELPER" "$tag" "$title" "$WORK/body.txt" \
+    >"$WORK/out.txt" 2>"$WORK/err.txt" || rc=$?
+  echo "$rc"
+}
+
+# run_post_red_alias <parent-id> <tag> <title> <body-text>
+# Same as run_post but with the DOCUMENTED clean host env: only
+# RED_MAIN_ROLLUP_PARENT_ID is set (the private wrapper sources the helper
+# before exporting the PAPERCLIP_ alias, and the installed env file carries
+# only the RED_MAIN_ name). Sourcing must succeed and the post must target
+# the RED_MAIN_ id. Live 2026-10-05: the source-time requirement turned this
+# order into exit 1 before any transport.
+run_post_red_alias() {
+  local parent="$1" tag="$2" title="$3" text="$4" rc=0
+  printf '%s' "$text" > "$WORK/body.txt"
+  : > "$WORK/calls.jsonl"; : > "$WORK/argv.bin"
+  env -u BASH_ENV -u PAPERCLIP_ROLLUP_PARENT_ID \
+    PATH="$WORK/bin:$PATH" \
+    PAPERCLIP_API_URL="http://127.0.0.1:$PORT" \
+    PAPERCLIP_AGENT_API_KEY="$SENTINEL_KEY" \
+    RED_MAIN_ROLLUP_PARENT_ID="$parent" \
     bash -c 'source "$0"; post_rollup_comment "$1" "$2" "$3"' \
     "$HELPER" "$tag" "$title" "$WORK/body.txt" \
     >"$WORK/out.txt" 2>"$WORK/err.txt" || rc=$?
@@ -225,6 +266,56 @@ grep -q "triage owner" "$WORK/err.txt" \
 [[ "$(company_calls)" == "0" ]] \
   && ok "boundary-refused root: zero company-wide calls" \
   || bad "boundary-refused root: zero company-wide calls"
+
+hdr "Live 2026-10-05 retest: RED_MAIN-only env sources and posts (source-order fix)"
+# The installed env carries only RED_MAIN_ROLLUP_PARENT_ID and the wrapper
+# sources the helper before exporting the PAPERCLIP_ alias. Sourcing must
+# not fail and the post must target the RED_MAIN_ id.
+rc="$(run_post_red_alias parent-open "[red-main-poll]" "red-main drafts" "draft body line 1")"
+[[ "$rc" == "0" ]] && ok "RED_MAIN-only env: exit 0" || bad "RED_MAIN-only env: exit 0" "exit=$rc err=$(cat "$WORK/err.txt")"
+[[ "$(comment_posts)" == "1" ]] && ok "RED_MAIN-only env: exactly one comment POST" || bad "RED_MAIN-only env: exactly one comment POST" "posts=$(comment_posts)"
+python3 -c '
+import json,sys
+ok = any(json.loads(l)["p"] == "/api/issues/parent-open/comments" for l in open(sys.argv[1]))
+sys.exit(0 if ok else 1)' "$WORK/calls.jsonl" \
+  && ok "RED_MAIN-only env: POST targets the RED_MAIN_ id" \
+  || bad "RED_MAIN-only env: POST targets the RED_MAIN_ id" "$(cat "$WORK/calls.jsonl")"
+[[ "$(company_calls)" == "0" ]] \
+  && ok "RED_MAIN-only env: zero company-wide calls" \
+  || bad "RED_MAIN-only env: zero company-wide calls"
+rc=0
+env -u BASH_ENV -u PAPERCLIP_ROLLUP_PARENT_ID -u RED_MAIN_ROLLUP_PARENT_ID \
+  PATH="$WORK/bin:$PATH" \
+  PAPERCLIP_API_URL="http://127.0.0.1:$PORT" \
+  PAPERCLIP_AGENT_API_KEY="$SENTINEL_KEY" \
+  bash -c 'source "$0"; post_rollup_comment "[t]" "t" "$1"' \
+  "$HELPER" "$WORK/body.txt" >/dev/null 2>&1 || rc=$?
+[[ "$rc" == "2" ]] && ok "neither parent name set: usage exit 2" || bad "neither parent name set: usage exit 2" "exit=$rc"
+
+hdr "Live 2026-10-05 retest: runless POST is a named run-gate refusal"
+# Deployed semantics: GETs on the assigned bound thread answer 200 runless,
+# but the comment POST requires a heartbeat run the systemd timer does not
+# have. The writer must fail closed, claim nothing, name the run-context
+# fix, and surface the server code -- never discard the reason.
+rc="$(run_post parent-runless "[red-main-poll]" "t" "some finding")"
+# The refused attempt is logged by the stub (one POST tried) but the server
+# recorded nothing: exit is non-zero and no success is claimed. comments-down
+# and comments-forbidden above assert the same shape for the same reason.
+[[ "$rc" != "0" ]] \
+  && ok "run-gated post: non-zero exit (nothing recorded)" \
+  || bad "run-gated post: non-zero exit (nothing recorded)" "exit=$rc err=$(cat "$WORK/err.txt")"
+! grep -q "posted comment" "$WORK/err.txt" \
+  && ok "run-gated post: no success line" \
+  || bad "run-gated post: no success line" "$(cat "$WORK/err.txt")"
+grep -q "heartbeat run context" "$WORK/err.txt" \
+  && ok "run-gated post: names the run-context fix" \
+  || bad "run-gated post: names the run-context fix" "$(cat "$WORK/err.txt")"
+grep -q "cross_issue_influence_run_context_required" "$WORK/err.txt" \
+  && ok "run-gated post: surfaces the server code" \
+  || bad "run-gated post: surfaces the server code" "$(cat "$WORK/err.txt")"
+[[ "$(company_calls)" == "0" ]] \
+  && ok "run-gated post: zero company-wide calls" \
+  || bad "run-gated post: zero company-wide calls"
 
 hdr "A refused comment write is a failed tick, never a posted finding"
 for parent in comments-down comments-forbidden; do
