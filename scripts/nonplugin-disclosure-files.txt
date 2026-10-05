@@ -240,6 +240,7 @@ tests/fixtures/weekly-lanes-synthetic/claude-weekly-lanes.json
 tests/fixtures/weekly-lanes-synthetic/codex-weekly-lanes.json
 upstream_draft_pin_audit.sh
 verb-census.md
+verification/grant-attribution-mutation-gate.sh
 verification/platform-watchdog-cli-mutation-gate.py
 verification/platform-watchdog-gate.sh
 verification/process-lost-mutation-gate.py

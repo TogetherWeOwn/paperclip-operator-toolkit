@@ -1,299 +1,12 @@
 name: CI
 
-# WHAT THIS RUNS, AND WHAT IT DOES NOT.
-#
-# CI runs some of this repo's suites and not others. Read this before adding a
-# green badge anywhere: a CI that looks like it tests everything while testing
-# part of it is worse than one that says which part.
-#
-#   RUNS HERE (offline, no credentials, no database):
-#     test_gh_app_token.sh              the credential-minter regression suite
-#     test_gh_shim.sh                   gh-shim: mint without a bound PEM, preserve
-#                                       an explicit token, and fall through on a
-#                                       failed mint — TOG-1448/3412
-#     test_gh_token_argv.sh             gh_token.sh: no credential on argv
-#     test_gh_token_dispatch.sh         gh_token.sh: refuses unknown subcommands
-#     test_gh_token_api_body.sh         gh_token.sh: the request body reaches the
-#                                       REQUEST rather than curl's argv, so a
-#                                       `sha` head guard is actually sent and a
-#                                       guarded write is guarded — TOG-305
-#     test/external-disclosure.test.mjs immutable task/run/artifact/principal
-#                                       grants, one-shot consumption and redacted
-#                                       submission receipts — TOG-576
-#     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
-#     test_tog153_artifacts.sh          TOG-153 register/verify artifact contract:
-#                                       fail-loud argv, dedicated catch-all,
-#                                       .items envelope and verifier B4 — TOG-519
-#     test_responsible_leader.sh        who may approve a provisioning request
-#     test_provisioning_policy.sh       create-policy gates under widened ceilings
-#     test_request_record_integrity.sh  whether the RECORD of a decision can
-#                                       still say what was approved and why
-#     test_decision_notify.sh           whether the REQUESTER ever learns a
-#                                       request was decided, and that delivery
-#                                       cannot influence a decision — TOG-254
-#     test_leader_notify.sh             whether the derived LEADER is told, and
-#                                       all transport invocations are contained
-#                                       without disputing honest concurrent
-#                                       reviews — TOG-317
-#     test_queue_liveness.sh            whether a request is routed at an agent
-#                                       that can actually receive it, and
-#                                       whether a queue that has stopped
-#                                       deciding says so — TOG-390
-#     test_capability_gate.sh           who may decide a CAPABILITY request, and
-#                                       which four asks stop for the owner
-#                                       whatever any agent says — TOG-387
-#     test_tog825_verify_g4.sh          whether the host acceptance gate can read
-#                                       the current structured listening event,
-#                                       and refuses missing/contradictory evidence
-#                                       rather than scoring it green — TOG-825
-#     test_host_ops_broker.py           fixed read-only host verbs, executor
-#                                       previews, replay/expiry, signed evidence,
-#                                       and the disabled write gate — TOG-520
-#     test_host_ops_install.sh          the installer's service-identity, key and
-#                                       sudoers contracts — TOG-520
-#     test_interaction_route.sh         where an ask belongs — the owner, an
-#                                       agent, or an operator runbook; and
-#                                       whether it could be answered at all
-#                                       once created — TOG-389
-#     test_operator_runbook.sh          whether a capability-bound ask was
-#                                       filed as a decision, and whether the
-#                                       runbook still matches the live owner
-#                                       queue — TOG-434
-#     test_interaction_envelope_lint.sh whether the envelope you are about to
-#                                       POST says what you think it says: the
-#                                       server strips unknown keys silently and
-#                                       substitutes a default for the field they
-#                                       were meant to set — TOG-396
-#     test_sql_backend.sh               lib/pcsql.sh dispatch, against fake
-#                                       podman/psql binaries — see TOG-202
-#     test_suite_preconditions.sh       whether the two suites CI CANNOT run
-#                                       refuse to score themselves when they
-#                                       cannot reach a database, and whether
-#                                       their refusal assertions name the gate
-#                                       they claim to test — TOG-402
-#     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
-#                                       is the copy that is REVIEWED — TOG-212
-#     test_channel_drift.sh             channel_drift.sh: whether a runnable file
-#                                       staged for the operator was ever
-#                                       committed at all — TOG-356
-#     test_agent_endpoint_preflight.sh  agent_endpoint_preflight.sh: whether the
-#                                       model endpoint the agents are about to be
-#                                       pointed at can serve them — TOG-358, and
-#                                       whether it tells a dead endpoint apart
-#                                       from a dead model lane — TOG-361
-#     test_cliproxy_release_preflight.sh
-#                                       cliproxy_release_preflight.sh: whether the
-#                                       CLIProxy quota-controller release handoff
-#                                       still refuses to move session affinity off
-#                                       the owner's 15m, and refuses an unsupported
-#                                       CLIProxy build or an unbuildable source
-#                                       ref — TOG-4054
-#     test_quota_rotation_watch.sh      quota_rotation_watch.py: whether teamclaude
-#                                       stops sending traffic to a quota-spent
-#                                       account, and whether a watcher that
-#                                       measured nothing says so — TOG-425
-#     test_approval_timeout_probe.sh    approval_timeout_probe.sh: whether the
-#                                       deadline stamped on a tool-approval
-#                                       request is enforced by anything, or is
-#                                       only displayed to the approver — TOG-400
-#     test_interaction_triage.sh        interaction_triage.sh: who can actually
-#                                       resolve each pending interaction, and
-#                                       which are dead on the board — TOG-423
-#     test_quota_burn_derive.sh         quota_burn_derive.py: whether quota burn
-#                                       is DERIVED from the weekly series rather
-#                                       than read from a producer field that was
-#                                       absent a third of the time, and whether
-#                                       the jq copy of that formula inside
-#                                       quota_brake.sh still agrees with it —
-#                                       TOG-440
-#     test_gh_scope_residue_monitor.sh gh_scope_residue_monitor.sh: whether a
-#                                       scheduled text-only zero stays
-#                                       inconclusive, and every outcome re-arms
-#                                       the native Paperclip issue monitor —
-#                                       TOG-398
-#     test_gh_permission_pin_audit.sh   gh_permission_pin_audit.sh: whether a
-#                                       change to DEFAULT_PERMISSION_PROFILE
-#                                       that reaches none of the 7 pinned
-#                                       projects can still pass silently — and
-#                                       whether permission_pins.txt still
-#                                       describes this checkout's default —
-#                                       TOG-346
-#     test_gh_push_preflight.sh         gh_push_preflight.sh: whether an issue
-#                                       that can NEVER derive a repo scope is
-#                                       told so at start-of-work rather than at
-#                                       `git push`, and whether the check can
-#                                       report a pass it did not measure —
-#                                       TOG-918
-#     test_discord_job_health.sh        scripts/discord_job_health.js: whether a
-#                                       time-gated Discord job that throws NO
-#                                       error and still posts NOTHING can read
-#                                       green — the state the forbidden
-#                                       cross-company config workaround
-#                                       produces — TOG-676
-#     test_cold_start_detector.sh       cold_start_detector.sh: whether the company
-#                                       is STOPPED while the quota it was waiting
-#                                       for is already back — and whether a null
-#                                       five-hour reading is ever scored as
-#                                       headroom — TOG-487
-#     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
-#                                       diagnostics, bounded owned repair, and owner-HOLD refusal
-#                                       — TOG-586
-#     test_pacing_verdict.py            pacing_verdict.py: whether a sample older
-#                                       than the 120m cutoff can still be read as
-#                                       a live verdict. Every age case carries a
-#                                       FUTURE weekly_reset_utc on purpose — the
-#                                       acceptance fixture trips TWO independent
-#                                       guards at once, so a suite built on it
-#                                       alone proved neither — TOG-937/938/1030
-#     test_model_lane_probe.sh          model_lane_probe.sh: whether the cheap/
-#                                       small-fast lane is dead OR has come
-#                                       UNPINNED. A bare model id answers 200 and
-#                                       bills a PAYG leg, so status alone cannot
-#                                       see it. Covers both drifting surfaces —
-#                                       TOG-682
-#     test_breaker_cotenancy_probe.sh   breaker_cotenancy_probe.sh: how many
-#                                       lanes still let ONE out-of-credits model
-#                                       terminal-state every Claude id on the
-#                                       same connection. Alias lanes collapse to
-#                                       one finding; a short read is UNKNOWN,
-#                                       never clean — TOG-833
-#     test_stale_descriptor_sweep.sh    scripts/stale_descriptor_sweep.js:
-#                                       whether a card parked `blocked` is
-#                                       waiting on an interaction that will
-#                                       never resolve — routed to every reader,
-#                                       and stalled. Also whether the sweep
-#                                       REFUSES when it read nothing, rather
-#                                       than reporting a clean board — TOG-890.
-#                                       Also whether a card's LIVE ask is hosted
-#                                       on a DIFFERENT card, which dies silently
-#                                       when that card closes — TOG-908
-#     test_grant_attribution.sh         scripts/grant_attribution.js: who granted
-#                                       a permission, when the grants table's
-#                                       only grantor column is USER-typed and an
-#                                       agent actor is written as null. Recovers
-#                                       the grantor from activity_log, reports it
-#                                       as DERIVED, and refuses (exit 5) when it
-#                                       measured nothing rather than calling an
-#                                       empty read a perfect audit — TOG-870
-#     test_grant_write_attribution.sh   org_provisioner.sh: whether a grant can
-#                                       still be written with NO grantor. Its raw
-#                                       INSERT bypassed the API, so those rows
-#                                       have no activity_log row either and are
-#                                       unrecoverable. Both attribution facts now
-#                                       land in ONE transaction, and a missing
-#                                       requester REFUSES — never defaults — TOG-870
-#     syntax + secret scan              see the steps below
-#     plugins/gh-token-broker           see the `broker-suite` job below
-#     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
-#     plugins/dispatch                  see the `dispatch-suite` job below
-#     gh-event-capture                  PRIVATE — stays in the private repo (no
-#                                       `capture-suite` job in this tree)
-#     mcp/                              see the `mcp-suite` job below
-#
-#   RUN IN THE `privilege-suites` JOB BELOW:
-#     test_privilege_ceilings.sh
-#     test_request_queue.sh
-#   They create and delete agents in a throwaway Postgres service through the
-#   dumb recording CLI under test/fixtures/orgdb. No production credential is
-#   present. This proves the provisioner's POLICY; it does not prove the real
-#   Paperclip API contract. The operator's VPS pre-release run therefore stays
-#   mandatory, but is now specifically the create/update/terminate contract run.
-#
-#   AND, since TOG-402, test_suite_preconditions.sh proves rather more than
-#   that: it drives both of them through a stub backend and checks they refuse
-#   to run when the database is unreachable, and that their refusal assertions
-#   fail when the refusal comes from the wrong gate. CI still cannot verify what
-#   these two assert about the org; it can now verify that they do not lie when
-#   they cannot reach it. That distinction was the whole finding — an operator's
-#   pre-release run is the last gate before a provisioning change lands, and a
-#   partially-green run is more dangerous than a red one.
-#
-#   WHAT IS STILL MISSING, precisely (TOG-202). The first blocker is gone: as of
-#   lib/pcsql.sh the tools no longer hard-wire `podman exec paperclip-db`, so
-#   they CAN be pointed at a throwaway database with PAPERCLIP_SQL_BACKEND=psql.
-#   Three things still stand between that and a green run here, and the third
-#   was not obvious until someone read the provisioner:
-#     1. a schema dump, so a service container has tables to talk to;
-#     2. an org fixture — the suites reference P0/P1/O*/T*/F* rows by
-#        `metadata->>'orgRoleId'` and assume they already exist;
-#     3. A LIVE PAPERCLIP API SERVER. The suites drive org_provisioner.sh, which
-#        creates and terminates agents through `paperclipai agent create` /
-#        `terminate` against PAPERCLIP_API_URL, not through SQL. A Postgres
-#        service container alone does not make these suites run; it makes them
-#        fail later, at the first `pc agent create`, which is a worse failure
-#        mode than today's honest exclusion.
-#
-#   BLOCKER 3 IS ANSWERED (TOG-300). The call: a RECORDING STUB behind the
-#   CLI seam, not a live server. Three reasons, in order of weight.
-#
-#   First, the seam is already there and this was not known when the question
-#   was framed. org_provisioner.sh:91 honours PAPERCLIP_CLI and every API call
-#   goes through pc() at :98, so this is not "a design change to a tool that
-#   provisions real agents" — the change is confined to the test fixture. The
-#   tool is untouched. test_suite_preconditions.sh:64 already drives it this way.
-#
-#   Second, the API surface is exactly three calls, all in org_provisioner.sh:
-#   `agent create` (:389), `agent permissions:update` (:395), `agent terminate`
-#   (:437). Nothing else in the provisioner reaches the API.
-#
-#   Third, a live server needs the Paperclip image and an ADMIN credential on a
-#   GitHub runner. That is the same trade this file rejects eight lines above,
-#   arrived at from the other direction, and the image is not ours to publish.
-#
-#   WHAT THE STUB MUST NOT BECOME, because this is the way it fails. The suites
-#   would then assert on rows the stub itself wrote, so a stub that computes
-#   anything makes the suite grade the stub instead of the provisioner — the
-#   TOG-402 failure again, one level down. Two constraints follow, and they are
-#   the whole reason this is safe:
-#     * THE STUB IS DUMB. It stores the payload it was handed, verbatim, and
-#       derives nothing. Then `dormant()` asserting heartbeat.enabled=false is
-#       asserting that THE PROVISIONER SENT false, which is the policy coverage
-#       actually wanted here.
-#     * EVERY CEILING INVARIANT CARRIES A MUTATION GUARD, so a policy change in
-#       the provisioner reddens a NAMED test. Same pattern as the mutation jobs
-#       below. Without this, "make the stub agree" is the cheapest way to fix a
-#       red build, and it silently deletes the coverage.
-#
-#   WHAT THIS BUYS AND WHAT IT DOES NOT. It buys the provisioner's POLICY: the
-#   ceilings, the grant replacement, the refusals. It does NOT buy the API
-#   contract — if the server changes what `agent create` does with reportsTo,
-#   CI stays green and only the VPS run catches it. So the operator's
-#   pre-release pass does not go away; it stops being the only coverage and
-#   becomes specifically the API-contract coverage. Say so when it is wired in.
-#
-#   AND A FOURTH BLOCKER, found while answering the third: THE SCHEMA ROTS.
-#   Blocker 1's dump is platform schema (agents, principal_permission_grants,
-#   company_memberships, company_secret_bindings, budget_policies,
-#   heartbeat_runs) vendored into this repo. It is a snapshot, and nothing here
-#   moves when the platform migrates — so a fixture that has drifted goes green
-#   against a schema production no longer has. That is a muted suite again,
-#   one level further down. The dump therefore ships with a drift check, the
-#   same shape as tool_drift.sh and channel_drift.sh: fingerprint on the VPS,
-#   compare in a clone. Do not commit the dump without it.
-#
-#   The stub and fixture now exist. test_orgdb_fixture.sh tests their offline
-#   contract, and `privilege-suites` runs both suites against Postgres. The
-#   production comparison still cannot run here: schema_drift.sh fingerprints
-#   the VPS database and compares that fingerprint against a clone loaded from
-#   this fixture. Green CI proves the detector and fixture work, never that the
-#   deployed schema has not drifted.
-#
-#   NOT YET RUN HERE: org_access_review.sh. It is read-only and the required
-#   tables are now present, but its wider report semantics are outside TOG-480.
-#
-#   READ THIS BEFORE TRUSTING THE DRIFT SUITE'S GREEN (TOG-212). CI runs
-#   test_tool_drift.sh, which proves the DETECTOR works. It does NOT and cannot
-#   run the actual comparison, because the thing to compare against is a
-#   directory on the VPS that no runner can reach. A green badge here means
-#   "tool_drift.sh would notice drift", never "there is no drift". The real
-#   check is `tool_drift.sh fingerprint` on the VPS and `compare` in a clone,
-#   and it stays operator-initiated for exactly the same reason the two suites
-#   above do. Do not let this distinction quietly erode into a green badge that
-#   is read as a clean bill of health.
-#
-# This list deliberately carries no test counts. CI asserts EXIT STATUS and
-# never a count: counts drift as suites grow, and a gate that pins one turns
-# ordinary growth into a red build. Do not add them back.
+# CI proves source-level behavior using offline adapters and disposable database
+# fixtures, not live API compatibility, deployed configuration or rollout authority.
+# Heavy jobs use the changes job and job-level gates. Dependency/workflow changes,
+# main and nightly runs select the full suite; required checks have no paths filter.
+# Mandatory disclosure and full-history secret scans remain always on. Their
+# coverage and measurement failures are independent of the heavy-suite selection.
+# ci-ok is the single aggregator; failures and cancellations must not read green.
 
 on:
   push:
@@ -468,6 +181,11 @@ jobs:
       PGPASSWORD: postgres
       PGDATABASE: org_fixture
       PAPERCLIP_SQL_BACKEND: psql
+      # This fixture owns authorization, not Claude transport: the provisioner
+      # defaults to claude_local, whose write path requires operator-owned
+      # transport config, so these suites select an adapter with no transport
+      # gate. The dedicated transport suite covers claude_local explicitly.
+      ADAPTER_TYPE: codex_local
       COMPANY_ID: 00000000-0000-4000-8000-000000000480
       PAPERCLIP_API_URL: http://recording-stub.invalid
       PAPERCLIP_CLI: ${{ github.workspace }}/test/fixtures/orgdb/paperclipai
@@ -973,7 +691,7 @@ jobs:
       # baseline, and require the owning case to go red. Includes a rename
       # mutant, because an unanchored presence check passes on a rename.
       - name: grant attribution is load-bearing (mutation-gated)
-        run: ./verification/tog-870-mutation-gate.sh
+        run: ./verification/grant-attribution-mutation-gate.sh
 
       # The widened-catalog cases above are absence assertions: they also pass if
       # their setup never reaches the named gate. Delete each independent guard
@@ -4942,6 +4660,12 @@ jobs:
       - name: Disclosure scan over plugins/
         run: bash scripts/disclosure-scan.sh plugins
 
+      - name: Non-plugin disclosure wrapper self-test
+        run: python3 scripts/test_nonplugin_disclosure_scan.py
+
+      - name: Disclosure scan over registered non-plugin files
+        run: python3 scripts/nonplugin-disclosure-scan.py --manifest scripts/nonplugin-disclosure-files.txt
+
   # Secret scan over the full history. Pinned binary, checksum-verified, no
   # third-party action: the org-licensed action is not needed for a public repo.
   #
@@ -4981,6 +4705,197 @@ jobs:
       - name: gitleaks detect
         run: bash scripts/secret-scan.sh
 
+
+
+
+
+
+
+
+  # BEGIN ported-suites
+  # Offline suites for the scripts that were ported from the private tree. They
+  # are change-gated like every other heavy suite and aggregated by `ci-ok`.
+  ported-suites:
+    name: Ported suites
+    needs: [changes]
+    if: needs.changes.outputs.heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: agent_test
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: TogetherWeOwn/paperclip
+          ref: 742aa11d332611e8aff16bb9c87a21b527a1cab1
+          path: public-schema
+          sparse-checkout: packages/db/src/migrations
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SQL proof dependency
+        run: python3 -m pip install --isolated psycopg2-binary==2.9.10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: upgrade rehearsal offline suite
+        env:
+          PAPERCLIP_UPGRADE_MIGRATIONS_DIR: public-schema/packages/db/src/migrations
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: agent_test
+        run: ./paperclip-upgrade/test-offline.sh
+
+      - name: transport database proof
+        run: |
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture createdb --no-password toolkit_transport_fixture
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 test_provisioned_transport_db.py --init
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 -m unittest -v test_provisioned_transport_db
+
+      - name: Stop guard hook suite
+        run: node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs
+
+      - name: agent error proposer suite
+        run: python3 -m unittest -v test_agent_error_proposer
+
+      - name: ci failure drain suite
+        run: ./test_ci_failure_drain.sh
+
+      - name: ci homepc guard suite
+        run: python3 -m unittest -v test_ci_homepc_guard
+
+      - name: ci required checks audit suite
+        run: python3 -m unittest -v test_ci_required_checks_audit
+
+      - name: claude countdown suite
+        run: python3 -m unittest -v test_claude_countdown
+
+      - name: codex countdown suite
+        run: python3 -m unittest -v test_codex_countdown
+
+      - name: coolify capacity headroom suite
+        run: ./test_coolify_capacity_headroom.sh
+
+      - name: db idle transaction stall suite
+        run: ./test_db_idle_transaction_stall.sh
+
+      - name: dlq redrive suite
+        run: ./test_dlq_redrive.sh
+
+      - name: garm image lint suite
+        run: python3 -m unittest -v test_garm_image_lint
+
+      - name: garm image lint suite
+        run: ./test_garm_image_lint.sh
+
+      - name: garm provider latency baseline suite
+        run: python3 -m unittest -v test_garm_provider_latency_baseline
+
+      - name: garm ready time baseline suite
+        run: python3 -m unittest -v test_garm_ready_time_baseline
+
+      - name: gh override scope audit suite
+        run: ./test_gh_override_scope_audit.sh
+
+      - name: model pin cleanup suite
+        run: python3 -m unittest -v test_model_pin_cleanup
+
+      - name: pacer admission audit suite
+        run: python3 -m unittest -v test_pacer_admission_audit
+
+      - name: platform watchdog suite
+        run: python3 -m unittest -v test_platform_watchdog
+
+      - name: platform watchdog cli suite
+        run: python3 -m unittest -v test_platform_watchdog_cli
+
+      - name: process lost probe suite
+        run: python3 -m unittest -v test_process_lost_probe
+
+      - name: provisioned transport suite
+        run: python3 -m unittest -v test_provisioned_transport
+
+      - name: public comment hygiene gate suite
+        run: ./test_public_comment_hygiene_gate.sh
+
+      - name: recovery writer suite
+        run: python3 -m unittest -v test_recovery_writer
+
+      - name: red main poll suite
+        run: python3 -m unittest -v test_red_main_poll
+
+      - name: runner disk pressure suite
+        run: python3 -m unittest -v test_runner_disk_pressure
+
+      - name: runner disk triage suite
+        run: ./test_runner_disk_triage.sh
+
+      - name: transport db guards suite
+        run: python3 -m unittest -v test_transport_db_guards
+
+      - name: upstream draft pin audit suite
+        run: ./test_upstream_draft_pin_audit.sh
+
+      - name: protection rule source syntax
+        run: for source in protection-rule/src/*.js protection-rule/test/*.mjs; do env -i PATH="$PATH" node --check "$source" || exit; done
+
+      - name: protection rule offline suite
+        run: env -i PATH="$PATH" node --import ./protection-rule/test/offline-guard.mjs --test protection-rule/test/*.test.mjs
+
+      - name: capture source syntax
+        run: env -i PATH="$PATH" node gh-event-capture/scripts/check-source.mjs
+
+      - name: capture offline suite
+        run: env -i PATH="$PATH" node gh-event-capture/scripts/run-offline-tests.mjs
+
+      - name: runner profile validator suites
+        run: python3 -m unittest discover -v -s github-runner -p 'test_isolated_*.py'
+
+  # Mutation gates prove the suites above can fail. Kept in their own job so a
+  # slow gate never delays the fast suites.
+  ported-mutation-gates:
+    name: Ported mutation gates
+    needs: [changes]
+    if: needs.changes.outputs.heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: platform watchdog gate
+        run: ./verification/platform-watchdog-gate.sh
+
+      - name: process lost mutation gate
+        run: python3 ./verification/process-lost-mutation-gate.py
+  # END ported-suites
+
   # Runs only when something above failed and names the failed jobs. It needs
   # every suite so a red run always leaves a pointer; the sharded mutation
   # jobs are pinned here by the plugin's spec.
@@ -4998,6 +4913,8 @@ jobs:
       - omniroute-broker-suite
       - dispatch-suite
       - mcp-suite
+      - ported-suites
+      - ported-mutation-gates
       - cliproxy-insight-suite
       - disclosure-scan
       - secret-scan
@@ -5030,6 +4947,8 @@ jobs:
       - omniroute-broker-suite
       - dispatch-suite
       - mcp-suite
+      - ported-suites
+      - ported-mutation-gates
       - cliproxy-insight-suite
       - disclosure-scan
       - secret-scan
