@@ -3111,6 +3111,9 @@ jobs:
       - name: codex countdown suite
         run: python3 -m unittest -v test_codex_countdown
 
+      - name: muse countdown readout hostile suite
+        run: python3 -m unittest -v test_muse_countdown
+
       # GARM provider latency and ready-time baselines over synthetic samples.
       # Deterministic: record pins --now; check exits 0 ok, 2 breach, 3 unknown.
       - name: garm provider latency baseline suite
@@ -3207,6 +3210,12 @@ jobs:
       # Stop-guard classifier and installer suites on synthetic fixtures.
       - name: stop-guard suite
         run: node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs
+
+      # Per-prompt hook spawn guard on fabricated settings and hook bodies
+      # in mktemp; nothing reads the live fleet settings. Green here means
+      # the DETECTOR works, never that the fleet settings are clean.
+      - name: per-prompt hook spawn guard suite
+        run: ./test_hook_spawn_guard.sh
 
       # Differential proof that the compiled rewrite matches the reviewed
       # translator patch: structural check, 200k-case fuzz, negative control.
