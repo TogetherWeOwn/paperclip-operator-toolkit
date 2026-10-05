@@ -19,15 +19,15 @@ the Part B switchover after the acceptance gates below.
 | File | Role |
 | --- | --- |
 | `op_approval_executor.sh` | The executor. Installed root-owned, non-writable by group/other. |
-| `test_op_approval_executor.sh` | Offline refusal/regression suite (47 cases). Runs in CI. |
+| `test_op_approval_executor.sh` | Offline refusal/regression suite (54 cases). Runs in CI. |
 | `docs/runbooks/op-approval-executor.md` | This file. |
 
 Hashes below pin the reviewed revision. The approving reviewer re-checks
 them at the exact head that merges; a re-push re-pins.
 
 ```
-e8fe2a386949acd89885c839bc76685aaba970143cd59eeeb31d7e3a71956f08  op_approval_executor.sh
-14882749682480a94e7c1ea2418bad734e0f277b4552090bdc5d3d874743e197  test_op_approval_executor.sh
+f91c47e1fbe92e80a6aec9a09209d143b2eedff5e79ce15ebc03d6ef33320766  op_approval_executor.sh
+2afad60972a0f814cf77a510afdd07a6d232eaa529b79c38f18fafc8f0e5805f  test_op_approval_executor.sh
 ```
 
 ## Credential custody contract
@@ -81,11 +81,11 @@ or restarts a service.
 
 ```bash
 bash -n op_approval_executor.sh && bash -n test_op_approval_executor.sh
-./test_op_approval_executor.sh        # expect: 47 passed, 0 failed
+./test_op_approval_executor.sh        # expect: 54 passed, 0 failed
 sha256sum op_approval_executor.sh test_op_approval_executor.sh
 ```
 
-Expected: exit 0, `47 passed, 0 failed`, and hashes equal to the manifest
+Expected: exit 0, `54 passed, 0 failed`, and hashes equal to the manifest
 above. On the host (operator only, read-only):
 
 ```bash

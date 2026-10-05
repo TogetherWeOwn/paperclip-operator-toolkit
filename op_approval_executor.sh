@@ -69,7 +69,9 @@
 # ^[A-Za-z0-9_./:@+-]+$). No objects, arrays, numbers, or booleans.
 #
 # CLAIM / REPLAY. processed/<id>.claim/ (mkdir, atomic) guards concurrency;
-# processed/<id>.receipt.json marks done. A second execute with the same id
+# processed/<id>.receipt.json marks done. <id> is the request_id gated to
+# ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ before any path is built, so no request
+# can walk out of the processed dir. A second execute with the same id
 # exits 6 having run nothing. Uncertain side effects are never retried: a
 # failing or timing-out script records its receipt and exits 7, and the
 # operator re-runs by hand after reading the rollback line.
@@ -271,6 +273,15 @@ REQ_ID="$(jq -r '.request_id' -- "$REQ_REAL")"
 ACTION="$(jq -r '.action' -- "$REQ_REAL")"
 CARD="$(jq -r '.card_id' -- "$REQ_REAL")"
 
+# request_id becomes a FILENAME under the processed dir (receipt, claim,
+# supersede marker). Without a charset gate, `../escape` walks out of the
+# jail — proven live in review. Gate it here, before any path is built.
+if ! [[ "$REQ_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
+  emit_result "$(result refused request_id_rejected "" unknown)"
+  log_human "request_id charset rejected"
+  exit 3
+fi
+
 # ---- step 2: config loads ---------------------------------------------------------
 [[ -f "$ALLOWLIST" ]] || { emit_result "$(result refused allowlist_unavailable "" unknown)"; log_human "allowlist unavailable"; exit 2; }
 jq -e '.version == 1 and (.actions | objects)' -- "$ALLOWLIST" >/dev/null 2>&1 \
@@ -320,6 +331,10 @@ fi
 # script, so its ownership is checked first.
 check_root_owned_file "$ALLOWLIST" "allowlist" \
   || { emit_result "$(result refused allowlist_ownership "" unknown)"; exit 5; }
+# The approvers file decides WHOSE approval counts. A writable approvers
+# file is a writable authorization decision, so it gets the same check.
+check_root_owned_file "$APPROVERS_FILE" "approvers" \
+  || { emit_result "$(result refused approvers_ownership "" unknown)"; exit 5; }
 SCRIPT_REAL="$(within_dir_strict "$SCRIPTS_DIR" "$SCRIPT_REL")" \
   || { emit_result "$(result refused script_outside_scripts_dir "" unknown)"; log_human "script escapes scripts dir or is missing"; exit 5; }
 # The allowlist must NAME the canonical location: no aliasing around the dir.

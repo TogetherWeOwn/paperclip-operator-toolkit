@@ -187,6 +187,31 @@ cp "$d/req.json" "$Q/req-tamper.json"; cp "$d/app.json" "$Q/req-tamper.app.json"
 run_tool execute --request "$Q/req-tamper.json" --approval "$Q/req-tamper.app.json"
 expect "tampered request refuses (stale hash)" 3 refused request_tampered
 
+# request_id path traversal: the CONTENT id is hostile while the QUEUE
+# filename stays safe (never let the hostile id near a shell path).
+# Proven live in review: `../escape-test` escaped processed/ before the gate.
+trav() { # $1=hostile id $2=safe queue basename
+  local hid="$1" safe="$2"
+  local d="$TMP/t2o-$safe"; mkdir -p "$d"; mk_pair "$d" "$hid" "restart-queue-worker"
+  cp "$d/req.json" "$Q/$safe.json"; cp "$d/app.json" "$Q/$safe.app.json"
+  run_tool execute --request "$Q/$safe.json" --approval "$Q/$safe.app.json"
+  expect "traversal request_id '$hid' refuses" 3 refused request_id_rejected
+  rm -f "$Q/$safe.json" "$Q/$safe.app.json"
+}
+trav "../escape-test" "trav-dotdot"
+trav "a/b" "trav-slash"
+trav "/abs/path" "trav-abs"
+trav "-leading-dash" "trav-dash"
+trav "has space" "trav-space"
+# Exact escape locations: `..` lands beside the sandbox dirs, `a/b` and
+# `/abs/path` land under processed/ only if the jail held (they must not).
+leaked="$(ls -d "$TMP"/escape-test* "$P/a" "$P/abs" 2>/dev/null || true)"
+if [[ -n "$leaked" ]]; then
+  bad "traversal wrote outside the jail" "$leaked"
+else
+  ok "traversal wrote nothing outside the jail"
+fi
+
 # tampered args shape: approval args differ.
 d="$TMP/t2l"; mkdir -p "$d"; mk_pair "$d" "req-argm" "restart-queue-worker"
 jq '.args.queue = "other"' -- "$d/app.json" > "$d/app.json.tmp" && mv "$d/app.json.tmp" "$d/app.json"
@@ -308,6 +333,13 @@ d="$TMP/t5d"; mkdir -p "$d"; mk_pair "$d" "req-own" "restart-queue-worker"
 cp "$d/req.json" "$Q/req-own.json"; cp "$d/app.json" "$Q/req-own.app.json"
 OP_EXEC_REQUIRE_ROOT_OWNERSHIP=1 run_tool execute --request "$Q/req-own.json" --approval "$Q/req-own.app.json"
 expect "user-owned allowlist refuses when root ownership required" 5 refused allowlist_ownership
+
+# The approvers file decides whose approval counts, so it gets the same
+# root-ownership check. Group-writable approvers refuse even with the uid
+# check relaxed (req-own never got a receipt, so it is reusable here).
+cp "$APPROVERS" "$TMP/approvers-loose.txt"; chmod 664 "$TMP/approvers-loose.txt"
+OP_EXEC_APPROVERS="$TMP/approvers-loose.txt" run_tool execute --request "$Q/req-own.json" --approval "$Q/req-own.app.json"
+expect "group-writable approvers refuse" 5 refused approvers_ownership
 
 # ===========================================================================
 section "6. SHADOW preserved"
