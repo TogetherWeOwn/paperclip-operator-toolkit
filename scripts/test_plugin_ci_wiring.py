@@ -134,7 +134,7 @@ class PluginWiring(unittest.TestCase):
         self.assertNotIn("services:", block)
         self.assertIn("-U agent_test --auth-host=trust --auth-local=trust", block)
         self.assertIn("pg_ctl", block)
-        self.assertIn('echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"', block)
+        self.assertIn("transport-pgdata", block)
         self.assertIn("repository: TogetherWeOwn/paperclip", block)
         self.assertRegex(block, r"ref: [0-9a-f]{40}\n")
         self.assertIn("persist-credentials: false", block)
@@ -150,7 +150,7 @@ class PluginWiring(unittest.TestCase):
         block = job(self.text, "ported-suites")
         self.assertIn("name: transport database proof", block)
         proof = block.split("name: transport database proof", 1)[1].split("      - ", 1)[0]
-        clean = 'env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture '
+        clean = 'env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture '
         self.assertIn(clean + 'createdb --no-password toolkit_transport_fixture', proof)
         self.assertIn(clean + 'python3 test_provisioned_transport_db.py --init', proof)
         self.assertIn(clean + 'python3 -m unittest -v test_provisioned_transport_db', proof)

@@ -7,6 +7,7 @@ name: CI
 # Mandatory disclosure and full-history secret scans remain always on. Their
 # coverage and measurement failures are independent of the heavy-suite selection.
 # ci-ok is the single aggregator; failures and cancellations must not read green.
+# test_gh_push_preflight.sh — credential-preflight regression suite (runs in offline-suites).
 
 on:
   push:
@@ -4749,34 +4750,33 @@ jobs:
           node-version: '24'
 
       # Ephemeral PostgreSQL for the two database-backed steps below (same
-      # throwaway pattern as privilege-suites). The port is kernel-assigned:
-      # two jobs on one host must never choose the same number.
+      # throwaway pattern as privilege-suites). The port stays 5432 because
+      # the transport proof pins it (explicit disposable selection); this is
+      # safe because ubuntu-latest runners host one job each.
       - name: Start an ephemeral PostgreSQL cluster
         run: |
           set -euo pipefail
           PGBIN=/usr/lib/postgresql/16/bin
           PGDATA="$RUNNER_TEMP/transport-pgdata"
-          PGPORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
           rm -rf "$PGDATA"
           install -d -m 700 "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" -U agent_test --auth-host=trust --auth-local=trust >/dev/null
           "$PGBIN/pg_ctl" -D "$PGDATA" -w -l "$RUNNER_TEMP/transport-pg.log" \
-            -o "-p $PGPORT -h 127.0.0.1 -k $PGDATA" start >/dev/null
-          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+            -o "-p 5432 -h 127.0.0.1 -k $PGDATA" start >/dev/null
 
       - name: upgrade rehearsal offline suite
         env:
           PAPERCLIP_UPGRADE_MIGRATIONS_DIR: public-schema/packages/db/src/migrations
           PGHOST: localhost
-          PGPORT: ${{ env.PGPORT }}
+          PGPORT: '5432'
           PGUSER: agent_test
         run: ./paperclip-upgrade/test-offline.sh
 
       - name: transport database proof
         run: |
-          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture createdb --no-password toolkit_transport_fixture
-          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 test_provisioned_transport_db.py --init
-          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 -m unittest -v test_provisioned_transport_db
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture createdb --no-password toolkit_transport_fixture
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 test_provisioned_transport_db.py --init
+          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 -m unittest -v test_provisioned_transport_db
 
       - name: Stop guard hook suite
         run: node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs
