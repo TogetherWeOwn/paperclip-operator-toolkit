@@ -533,8 +533,7 @@ section "9. a withdrawal survives a source-side regeneration"
 #   -> 0 🛑 banners, test_operator_runbook.sh 79/0, test_omniroute_rehearsal.sh 73/0
 #
 # The NO-FORK stop sign was gone and nothing in CI noticed.
-# verification/tog-703-runbook-withdrawal-marker.sh asserts this property but
-# cannot run in CI — it measures from a host STAGING_DIR no runner can reach.
+# A former host-side marker gate asserted this property but could not run in CI — it measures from a host STAGING_DIR no runner can reach.
 # These assertions are the hermetic, source-level half of the same property.
 #
 # THE WITNESS IS `commands`, NOT `withdrawn`. Keying the rule on the presence of

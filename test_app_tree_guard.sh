@@ -138,13 +138,13 @@ if [ "$USERNS" = 1 ]; then
   grep -q "modified since image build: 0" <<<"$out" \
     && ok "a guarded run introduces no drift" || no "guarded run left drift"
 
-  # TOG-711 regression: the guarded command must NOT hold CAP_SYS_ADMIN over
+  # Mount-escape regression: the guarded command must NOT hold CAP_SYS_ADMIN over
   # the namespace that owns the read-only bind. A single unnested
-  # `mount -o remount,bind,rw` must not clear it. See repro_tog711_escape.sh
+  # `mount -o remount,bind,rw` must not clear it. See mount-escape-repro.sh
   # for the standalone, more detailed repro this mirrors.
-  "$HERE/repro_tog711_escape.sh" "$SUT" >/dev/null 2>&1
-  [ $? = 1 ] && ok "TOG-711: --exec is not escapable via a single remount,bind,rw" \
-             || no "TOG-711: --exec REGRESSED -- remount escape defeats the guard"
+  "$HERE/mount-escape-repro.sh" "$SUT" >/dev/null 2>&1
+  [ $? = 1 ] && ok "mount-escape: --exec is not escapable via a single remount,bind,rw" \
+             || no "mount-escape: --exec REGRESSED -- remount escape defeats the guard"
 
   # A cache path that is itself a SYMLINK into real code must NOT be bind-shadowed:
   # `[ -d ]` alone follows the link, so the guard would mount empty scratch over

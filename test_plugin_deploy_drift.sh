@@ -9,13 +9,13 @@
 # plugin host, no network, no credential, and nothing it writes leaves the temp
 # directory.
 #
-# THE FIXTURE IS THE REAL DEPLOYED ARTIFACT, NOT A STUB. tests/fixtures/tog723/
-# plugins-rows.tsv is the verbatim output of `pg_source.js plugins` against this
-# host on 2026-08-30 — all six rows, including the four registry installs whose
-# package_path is empty. The issue is explicit about why: a hand-written stub
-# that echoes the request back has passed over two real defects on this board.
-# Two properties of the real data are load-bearing here and neither would have
-# been in a stub:
+# THE FIXTURE IS A SCRUBBED SNAPSHOT, SHAPED LIKE THE REAL THING.
+# tests/fixtures/plugin-deploy/rows.tsv preserves the two load-bearing
+# properties of a real `pg_source.js plugins` capture — rows with an EMPTY
+# package_path, and manifests with database-reordered object keys — while
+# deploy paths, author identities and vendor endpoints are example values.
+# A stub with every column populated is green on a detector with the
+# double-tab bug still in it, so the properties matter more than the values:
 #
 #   1. Four rows have an EMPTY package_path. Tab is an IFS *whitespace*
 #      character, so `IFS=$'\t' read` collapses the resulting double tab and
@@ -54,7 +54,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="${PLUGIN_DEPLOY_DRIFT_SH:-$HERE/plugin_deploy_drift.sh}"
-FIXTURE="${TOG723_PLUGINS_FIXTURE:-$HERE/tests/fixtures/tog723/plugins-rows.tsv}"
+FIXTURE="${PLUGIN_DEPLOY_ROWS_FIXTURE:-$HERE/tests/fixtures/plugin-deploy/rows.tsv}"
 
 PASS=0; FAIL=0
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -239,7 +239,7 @@ fi
 
 # ---------------------------------------------------------------------------
 hdr "mutation 1 — a route present in the repo and NOT deployed must go red"
-# The live TOG-723 defect: origin/main declared disclosure-preflight and
+# The original defect this pins: origin/main declared disclosure-preflight and
 # disclose, the running host declared neither, and nothing noticed for days.
 # Dropping a route from the DEPLOYED side is not possible without editing the
 # fixture, so the equivalent is to ADD one to the repo side — same asymmetry,

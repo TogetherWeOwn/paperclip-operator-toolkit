@@ -375,7 +375,7 @@ SQL
 # to pass it — which is precisely how the original 25 were written.
 apply_exact_grants() {
   local agent_id="$1" grants_json="$2" requested_by="${3:-}" operator
-  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (TOG-870: an unattributed grant is unrecoverable)."
+  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (an unattributed grant is unrecoverable)."
   operator="$(resolve_operator_user_id)" || return 1
   PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="$agent_id" PGV_GRANTS="$grants_json" \
   PGV_A="$operator" PGV_B="$requested_by" \

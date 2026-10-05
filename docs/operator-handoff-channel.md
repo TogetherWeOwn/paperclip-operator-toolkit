@@ -21,7 +21,7 @@ mirrored: 2   stale: 1   unversioned: 11   exempt: 0
 ```
 
 **11 of 14**, not 9 of 11. The channel got worse in the intervening day, not better — one new
-unversioned tool arrived (`TOG-352-register-cliproxy.sh`), and the original count had also missed
+unversioned registration tool arrived, and the original count had also missed
 `TOG-196-identity-probe.mjs`, which is `0644` and so was never an "executable" by the `-x` test, but
 is still run: `node TOG-196-identity-probe.mjs`.
 

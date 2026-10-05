@@ -234,7 +234,7 @@ if [[ -n "${DIR_ID:-}" ]]; then
   # template this suite provisions, so it can only be present if something
   # outside the provisioner put it there and apply_exact_grants failed to
   # replace it away — which is precisely what the exact-grant-replacement
-  # mutant in verification/tog-480-mutation-gate.sh seeds. Dropping
+  # mutant in verification/postgres-policy-mutants-gate.sh seeds. Dropping
   # `tasks:assign` from this list above costs the check nothing only because
   # this probe key still covers the DELETE; keep the two in sync.
   cw="$(qnum "SELECT count(*) FROM principal_permission_grants WHERE company_id=:'company_id'::uuid AND principal_type='agent' AND principal_id=:'text' AND scope IS NULL AND permission_key IN ('agents:configure','tasks:assign_scope','tasks:manage_active_checkouts','tools:use');" "$DIR_ID")"

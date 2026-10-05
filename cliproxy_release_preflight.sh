@@ -23,7 +23,7 @@ set -uo pipefail
 #   6. the measured CLIProxy version is not on the supported list
 #   7. --source-ref is not the reviewed controller commit, in 40-hex
 #   8. --source-ref is not an ancestor of the trusted line, which is what
-#      systemd/build-cliproxy-quota-controller-bundle.sh itself requires
+#      the quota-controller bundle builder itself requires
 #   9. the rollback-state prerequisite for the requested mode is not met
 #
 # WHY THE MEASURED VALUES ARE ARGUMENTS AND NOT PROBES. Agents have no host
@@ -232,7 +232,7 @@ done
   || refuse "--source-ref $SOURCE_REF is not the reviewed controller commit $REVIEWED_SOURCE_REF"
 
 if [[ "$MODE" == "apply" ]]; then
-  # systemd/build-cliproxy-quota-controller-bundle.sh refuses to build a tar
+  # The quota-controller bundle builder refuses to build a tar
   # from a ref that is not an ancestor of its trusted line. Discovering that at
   # build time on the host is a wasted deploy window; discover it here.
   [[ "$(git --no-replace-objects cat-file -t "$SOURCE_REF" 2>/dev/null)" == commit ]] \
