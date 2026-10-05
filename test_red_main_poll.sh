@@ -36,6 +36,20 @@
 #    both subcommands must exit 3 and print no snapshot and no drafts — an
 #    `incidentExists: false` nobody measured manufactures a duplicate per
 #    tick (rule 3).
+#  * A BRIDGE-KEY 403 AS "NO INCIDENT". The deployed API refuses the
+#    company-wide issue list for least-privilege bridge keys whatever the
+#    query: that 403 must exit 3 with no fragment and must name the bounded
+#    parent-thread alternative, never read as "no incident".
+#  * AN UNBOUNDED READ WHERE A BOUNDED ONE EXISTS. With the rollup parent
+#    set, the sweep must make zero company-wide list calls and use only
+#    single-issue routes (parent, then comments); a filed-key mirror in the
+#    parent thread pins incidentExists:true and zero drafts, and a denied,
+#    missing, misshapen or comment-blind parent exits 3 with nothing.
+#  * AN UNBOUNDED KEY OR CREATE. A bridge scope with only an assignee
+#    allowlist is rejected by the key validator mock (a project or parent
+#    boundary is required), and a company-wide create without
+#    project/parent is refused by the scope mock — only a bound child or
+#    comment write is allowed.
 #  * A PHANTOM EMPTY-JOBS SIGNATURE. A fail verdict with zero failing check
 #    runs (external commit-status red) must key on the reader reason, never
 #    hash the empty set — two status-reds with different reasons must not
@@ -163,20 +177,52 @@ const floodBoard = () => {
   for (let i = 0; i < 1200; i++) rows.push(noiseCard(i, 'mentions red-main:v1 in passing'))
   return rows
 }
+// Rollup-parent fixtures for the bounded parent-thread read: the poller greps
+// the parent title plus every comment body for dedupe tags, so a filed-key
+// mirror or a prior draft posted as a comment counts as "known".
+const parentIssue = (id) => {
+  if (id === 'parent-missing') return null
+  if (id === 'parent-badshape') return { error: 'not an issue' }
+  return { id, title: 'Red-main findings rollup', status: 'in_progress' }
+}
+const parentComments = (id) => {
+  if (id === 'parent-comments-down') return null
+  if (id === 'parent-known') return [
+    { id: 'pc-1', body: 'routine mirror: filed [' + INCIDENT_TAG + '] Red main: o/red-same-a' },
+    { id: 'pc-2', body: 'unrelated rollup note' },
+  ]
+  return [{ id: 'pc-9', body: 'unrelated rollup note' }]
+}
 const paperclip = (req, res, url) => {
   const u = new URL(url, 'http://stub')
   const m = u.pathname.match(/^\/api\/companies\/([^/]+)\/issues$/)
   const c = u.pathname.match(/^\/api\/issues\/([^/]+)\/comments$/)
-  if (!m && !c) return false
+  const s = u.pathname.match(/^\/api\/issues\/([^/]+)$/)
+  if (!m && !c && !s) return false
   res.setHeader('Content-Type', 'application/json')
   const auth = req.headers.authorization || ''
   const cid = m ? m[1] : ''
+  const iid = s ? s[1] : (c ? c[1] : '')
   const chunks = []
   req.on('data', (d) => chunks.push(d))
   req.on('end', () => {
     const body = Buffer.concat(chunks).toString()
     logReq({ method: req.method, path: u.pathname, query: u.search, auth, body })
     if (!auth.startsWith('Bearer ') || auth.length < 12) { res.statusCode = 401; return res.end(JSON.stringify({ error: 'Unauthorized' })) }
+    if (req.method === 'GET' && s) {
+      if (iid === 'parent-denied') { res.statusCode = 403; return res.end(JSON.stringify({ error: 'Forbidden' })) }
+      const issue = parentIssue(iid)
+      if (!issue) { res.statusCode = 404; return res.end(JSON.stringify({ error: 'Not found' })) }
+      res.statusCode = 200
+      return res.end(JSON.stringify(issue))
+    }
+    if (req.method === 'GET' && c) {
+      if (iid === 'parent-denied') { res.statusCode = 403; return res.end(JSON.stringify({ error: 'Forbidden' })) }
+      const comments = parentComments(iid)
+      if (!comments) { res.statusCode = 500; return res.end(JSON.stringify({ error: 'boom' })) }
+      res.statusCode = 200
+      return res.end(JSON.stringify(comments))
+    }
     if (req.method === 'POST') {
       if (cid === 'co-wrap-fail') { res.statusCode = 500; return res.end(JSON.stringify({ error: 'boom' })) }
       if (m) {
@@ -192,6 +238,9 @@ const paperclip = (req, res, url) => {
     // GET list
     if (cid === 'co-down') { res.statusCode = 500; return res.end('[]') }
     if (cid === 'co-denied') { res.statusCode = 401; return res.end(JSON.stringify({ error: 'Unauthorized' })) }
+    // Measured deployed behaviour for least-privilege bridge keys: the
+    // company-wide list is unconditionally refused, whatever the query.
+    if (cid === 'co-bridge-denied') { res.statusCode = 403; return res.end(JSON.stringify({ error: 'Task bridge keys cannot use company-wide issue list APIs' })) }
     if (cid === 'co-shape') { res.statusCode = 200; return res.end(JSON.stringify({ error: 'not a list' })) }
     let rows = cid === 'co-window' ? windowBoard() : cid === 'co-flood' ? floodBoard() : (WRAP[cid] || [])
     const q = (u.searchParams.get('q') || '').toLowerCase()
@@ -403,13 +452,26 @@ ok "token never appears on stdout"
 STUB_BASE="http://127.0.0.1:$PORT"
 board_snapshot() { # <company> <repos...> -> OUT/RC/ERR through the live read path
   local co="$1"; shift
-  OUT="$(env -u INCIDENT_SOURCE_CMD PAPERCLIP_API_URL="$STUB_BASE" PAPERCLIP_COMPANY_ID="$co" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" snapshot "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
+  OUT="$(env -u INCIDENT_SOURCE_CMD -u RED_MAIN_ROLLUP_PARENT_ID PAPERCLIP_API_URL="$STUB_BASE" PAPERCLIP_COMPANY_ID="$co" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" snapshot "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
   return 0
 }
 board_propose() {
   local co="$1"; shift
-  OUT="$(env -u INCIDENT_SOURCE_CMD PAPERCLIP_API_URL="$STUB_BASE" PAPERCLIP_COMPANY_ID="$co" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" propose "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
+  OUT="$(env -u INCIDENT_SOURCE_CMD -u RED_MAIN_ROLLUP_PARENT_ID PAPERCLIP_API_URL="$STUB_BASE" PAPERCLIP_COMPANY_ID="$co" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" propose "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
   return 0
+}
+bounded_snapshot() { # <parent-id> <repos...> -> OUT/RC/ERR through the bounded parent-thread read
+  local parent="$1"; shift
+  OUT="$(env -u INCIDENT_SOURCE_CMD -u PAPERCLIP_COMPANY_ID PAPERCLIP_API_URL="$STUB_BASE" RED_MAIN_ROLLUP_PARENT_ID="$parent" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" snapshot "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
+  return 0
+}
+bounded_propose() {
+  local parent="$1"; shift
+  OUT="$(env -u INCIDENT_SOURCE_CMD -u PAPERCLIP_COMPANY_ID PAPERCLIP_API_URL="$STUB_BASE" RED_MAIN_ROLLUP_PARENT_ID="$parent" RED_MAIN_API_KEY=canary-board-key-000 "$TOOL" propose "$@" 2>"$WORK/err.txt")"; RC=$?; ERR="$(cat "$WORK/err.txt")"
+  return 0
+}
+company_list_calls() { # prints the count of company-wide list GETs in the stub log
+  jq -rs '[.[] | select(.method=="GET" and (.path | startswith("/api/companies/"))) ] | length' "$STUB_LOG" 2>/dev/null || echo "?"
 }
 
 hdr "A quiet incident card past the default board window is still found (rule 3b)"
@@ -456,6 +518,112 @@ OUT="$(env INCIDENT_SOURCE_CMD='echo {"issues":[{"title":"x"}]}' "$TOOL" snapsho
 [[ "$RC" -eq 0 ]] && ok "a wrapped {issues:[...]} body is still read" || bad "a wrapped {issues:[...]} body is still read" "rc=$RC out=$OUT"
 OUT="$(env -u INCIDENT_SOURCE_CMD PAPERCLIP_API_URL="$STUB_BASE" PAPERCLIP_COMPANY_ID=co-window RED_MAIN_API_KEY= PAPERCLIP_API_KEY= "$TOOL" snapshot o/red-same-a 2>/dev/null)"; RC=$?
 [[ "$RC" -eq 3 && -z "$OUT" ]] && ok "no board credential is unknown, not 'no incident'" || bad "no board credential is unknown, not 'no incident'" "rc=$RC out=$OUT"
+
+hdr "A bridge-key company-list denial is unknown, never 'no incident' (contract regression)"
+# The deployed API unconditionally refuses the company-wide issue list for
+# bridge keys, whatever the query. The poller must exit 3 with no fragment,
+# and must name the bounded alternative — never an incidentExists:false.
+board_snapshot co-bridge-denied o/red-same-a
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "HTTP 403 on the company list is unreadable: exit 3, no fragment" || bad "HTTP 403 on the company list is unreadable: exit 3, no fragment" "rc=$RC out=$OUT"
+[[ "$ERR" == *"403"* && "$ERR" == *"ROLLUP_PARENT"* ]] && ok "the denial names the 403 and the parent-thread alternative" || bad "the denial names the 403 and the parent-thread alternative" "$ERR"
+board_propose co-bridge-denied o/red-same-a
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "propose drafts nothing against a bridge-denied board" || bad "propose drafts nothing against a bridge-denied board" "rc=$RC out=$OUT"
+
+hdr "Bounded parent-thread read replaces the company list (bridge compatible)"
+: > "$STUB_LOG"
+bounded_snapshot parent-known o/red-same-a
+printf '%s' "$OUT" | jq -e '.redMains[0].incidentExists == true' >/dev/null 2>&1 \
+  && ok "bounded read finds the filed-key mirror in the parent thread (incidentExists:true)" \
+  || bad "bounded read finds the filed-key mirror in the parent thread (incidentExists:true)" "rc=$RC out=$OUT err=$ERR"
+[[ "$RC" -eq 1 ]] && ok "tracked red on the bounded read still exits 1" || bad "tracked red on the bounded read still exits 1" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains[0].boardRead == "parent-comments"' >/dev/null 2>&1 \
+  && ok "bounded entries say boardRead:parent-comments (dedupe scope is explicit)" \
+  || bad "bounded entries say boardRead:parent-comments (dedupe scope is explicit)" "$OUT"
+bounded_propose parent-known o/red-same-a
+[[ "$RC" -eq 0 && -z "$OUT" ]] && ok "propose drafts nothing: the bounded read saw the mirror (no duplicate)" || bad "propose drafts nothing: the bounded read saw the mirror (no duplicate)" "exit=$RC out=$OUT"
+[[ "$(company_list_calls)" == "0" ]] && ok "the bounded sweep makes zero company-wide list calls" || bad "the bounded sweep makes zero company-wide list calls" "calls=$(company_list_calls)"
+: > "$STUB_LOG"
+bounded_snapshot parent-clean o/red-same-a
+printf '%s' "$OUT" | jq -e '.redMains[0].incidentExists == false' >/dev/null 2>&1 \
+  && ok "bounded read with no mirror asserts incidentExists:false" \
+  || bad "bounded read with no mirror asserts incidentExists:false" "rc=$RC out=$OUT err=$ERR"
+bounded_propose parent-clean o/red-same-a
+[[ "$RC" -eq 1 && -n "$OUT" ]] && ok "bounded propose drafts the untracked incident (exit 1)" || bad "bounded propose drafts the untracked incident (exit 1)" "exit=$RC out=$OUT"
+[[ "$(company_list_calls)" == "0" ]] && ok "the untracked bounded sweep still makes zero company-wide list calls" || bad "the untracked bounded sweep still makes zero company-wide list calls" "calls=$(company_list_calls)"
+REQ_PATHS="$(jq -rs '[.[] | .method + " " + .path] | join("|")' "$STUB_LOG")"
+[[ "$REQ_PATHS" == *"GET /api/issues/parent-clean"* && "$REQ_PATHS" == *"GET /api/issues/parent-clean/comments"* ]] \
+  && ok "the bounded read uses only single-issue routes (parent, then comments)" \
+  || bad "the bounded read uses only single-issue routes (parent, then comments)" "$REQ_PATHS"
+
+hdr "A broken bounded read is unknown, never 'no incident' (fail-closed)"
+for parent in parent-denied parent-missing parent-badshape parent-comments-down; do
+  bounded_snapshot "$parent" o/red-same-a
+  [[ "$RC" -eq 3 && -z "$OUT" ]] && ok "$parent exits 3 with no fragment" || bad "$parent exits 3 with no fragment" "rc=$RC out=$OUT err=$ERR"
+done
+bounded_propose parent-denied o/red-same-a
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "propose drafts nothing when the parent thread is unreadable" || bad "propose drafts nothing when the parent thread is unreadable" "rc=$RC out=$OUT"
+OUT="$(env -u INCIDENT_SOURCE_CMD PAPERCLIP_API_URL="$STUB_BASE" RED_MAIN_ROLLUP_PARENT_ID=parent-known RED_MAIN_API_KEY= PAPERCLIP_API_KEY= "$TOOL" snapshot o/red-same-a 2>/dev/null)"; RC=$?
+[[ "$RC" -eq 3 && -z "$OUT" ]] && ok "bounded mode without a credential is unknown, not 'no incident'" || bad "bounded mode without a credential is unknown, not 'no incident'" "rc=$RC out=$OUT"
+
+hdr "Bridge scope needs a project or parent boundary (contract regression)"
+# Mock of the deployed key validator: a task_bridge scope is accepted only
+# with at least one project or parent boundary; an assignee allowlist alone
+# is rejected. The old installer body (assignees only) must fail this mock;
+# the repaired body (parent-bound) must pass it.
+OLD_BODY='{"name":"red-main-poll","scope":{"kind":"task_bridge","allowedAssigneeAgentIds":["00000000-0000-4000-8000-000000000000"]}}'
+NEW_BODY='{"name":"red-main-poll","scope":{"kind":"task_bridge","parentIssueIds":["11111111-1111-4111-8111-111111111111"],"allowedAssigneeAgentIds":["00000000-0000-4000-8000-000000000000"]}}'
+if python3 - "$OLD_BODY" "$NEW_BODY" <<'PY' 2>/dev/null; then
+import json, sys
+def accepted(body):
+    scope = json.loads(body)["scope"]
+    if scope.get("kind") != "task_bridge":
+        return True
+    bounds = [scope.get(k) for k in ("projectId", "parentIssueId")]
+    bounds += [x for k in ("projectIds", "parentIssueIds") for x in (scope.get(k) or [])]
+    return any(b for b in bounds if b)
+old_ok, new_ok = accepted(sys.argv[1]), accepted(sys.argv[2])
+sys.exit(0 if (not old_ok and new_ok) else 1)
+PY
+  ok "assignee-only bridge scope is rejected; parent-bound scope is accepted"
+else
+  bad "assignee-only bridge scope is rejected; parent-bound scope is accepted" "validator mock disagreed"
+fi
+
+hdr "Bridge creates must satisfy the key boundary (contract regression)"
+# Mock of the deployed create enforcement: under a parent-bound key, a
+# company-wide POST without projectId/parentId is refused; a child create
+# under the bound parent and a comment on it are allowed. The old helper
+# payload (bare company POST) must fail this mock; the bounded payloads pass.
+if python3 - <<'PY' 2>/dev/null; then
+import json
+BOUND = ["11111111-1111-4111-8111-111111111111"]
+def create_allowed(method, path, body):
+    if method == "POST" and path.startswith("/api/companies/") and path.endswith("/issues"):
+        proj = body.get("projectId") or (body.get("projectIds") or [None])[0]
+        par = body.get("parentId") or (body.get("parentIssueIds") or [None])[0]
+        if proj or (par in BOUND):
+            return True
+        return False
+    if method == "POST":
+        import re
+        m = re.match(r"^/api/issues/([^/]+)/(children|comments)$", path)
+        if m and m.group(1) in BOUND:
+            return True
+    return False
+old = create_allowed("POST", "/api/companies/co/issues",
+                     {"title": "x", "description": "y", "priority": "high",
+                      "assigneeAgentId": "00000000-0000-4000-8000-000000000000"})
+new_child = create_allowed("POST", "/api/issues/11111111-1111-4111-8111-111111111111/children",
+                           {"title": "x", "description": "y"})
+new_comment = create_allowed("POST", "/api/issues/11111111-1111-4111-8111-111111111111/comments",
+                             {"body": "x"})
+sys_exit = 0 if (not old and new_child and new_comment) else 1
+raise SystemExit(sys_exit)
+PY
+  ok "bare company POST is refused; bound child/comment writes are allowed"
+else
+  bad "bare company POST is refused; bound child/comment writes are allowed" "scope mock disagreed"
+fi
 
 hdr "Signature order is bytes, not the locale"
 # Names that a locale-aware sort would reorder (punctuation is ignored by
