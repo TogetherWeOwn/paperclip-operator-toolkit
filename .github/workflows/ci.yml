@@ -3838,6 +3838,12 @@ jobs:
           notify_mutation_check "notify-leader-uses-requester-fallback" \
             's/^if \[\[ -z "$ISSUE" && "$AUDIENCE" == "requester" \]\]; then/if [[ -z "$ISSUE" ]]; then/' || rc=1
 
+          # Drop the wake-budget size guard, so an oversized body posts anyway.
+          # This transport appends bytes to cards, so it must not be the thing
+          # that pushes a thread past the wake path's single-variable limit.
+          notify_mutation_check "notify-oversized-comment-refused" \
+            's/^if (( MSG_BYTES > MAX_COMMENT_BYTES )); then/if false; then/' || rc=1
+
           exit $rc
 
       # TOG-358. The preflight's whole job is to refuse to say "ok" about an
