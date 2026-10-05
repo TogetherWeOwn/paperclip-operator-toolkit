@@ -43,13 +43,13 @@ import type { ModelEntry } from "../engine/types.js";
  *  - `All credentials ... are cooling down` without a model id, and
  *    `all upstream accounts` — older CLIProxy phrasings kept for the same
  *    class.
- *  - `no healthy managed <lane> capacity remains` — CLIProxy emits it when
- *    its pool of managed upstream accounts for a lane has no healthy member
- *    left. The cause may be allowance exhaustion or a provider-side outage —
- *    the message even says "usually temporary". It belongs here because the
- *    list's real question is not "whose fault is it?" but "can this lane
- *    serve the next run?", and for the whole time this string is returned the
- *    answer is no.
+ *  - `no healthy managed <lane> capacity remains` —  (ported from
+ *    /PR #331). CLIProxy emits it when its pool of managed upstream
+ *    accounts for a lane has no healthy member left. The cause may be
+ *    allowance exhaustion or a provider-side outage — the message even says
+ *    "usually temporary". It belongs here because the list's real question
+ *    is not "whose fault is it?" but "can this lane serve the next run?",
+ *    and for the whole time this string is returned the answer is no.
  *
  *    Measured before adding it (`heartbeat_runs`, 14 days to 2026-09-17):
  *    2,193 failed runs, 623 matched by the five phrases above, 56 carrying
@@ -66,8 +66,8 @@ import type { ModelEntry } from "../engine/types.js";
  *    the `fallbackModelId` path: the model the failed run was going to use.
  *  - `An active OpenCode Go subscription is required to use Go models` —
  *    CLIProxy's 403 when the OpenCode Go plan has lapsed (probed
- *    2026-09-20, re-probed 2026-09-26). Same shape as the managed-capacity
- *    family: the lane in CLIProxy's own words, no roster
+ *    2026-09-20 on , re-probed 2026-09-26). Same shape as the
+ *    managed-capacity family: the lane in CLIProxy's own words, no roster
  *    id, so attribution runs through the `fallbackModelId` path. Scoped to
  *    the literal `subscription … required` adjacency — a bare 403, and a
  *    `subscription ID required`-shaped missing-field error, do not match.

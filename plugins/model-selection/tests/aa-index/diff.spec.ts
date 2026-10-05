@@ -111,9 +111,9 @@ describe("diffSnapshot", () => {
       freshIndex: 50,
       delta: null,
       previousImpliedTier: null,
-      freshImpliedTier: "T1",
+      freshImpliedTier: "T0",
       // No previous tier to compare against, so implied-tier "changed" from
-      // null to T1 — still worth surfacing as a first placement, not silently
+      // null to T0 — still worth surfacing as a first placement, not silently
       // dropped as "no prior to compare."
       crossesBoundary: true,
     });

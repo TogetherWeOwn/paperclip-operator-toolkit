@@ -58,7 +58,7 @@ function laneForNewModel(model, availableLaneIds) {
     [/^(?:gpt-|codex-)/, "cliproxy-codex"],
     [/^kimi-/, "cliproxy-kimi"],
     [/^glm-/, "cliproxy-zai"],
-    // The bridge MUSE choice is the
+    //  (MUSE slice of ): the bridge MUSE choice is the
     // subscription Meta route. The bare `muse-*` form (no `-free` suffix) is
     // never a zero-cost Zen row — `isZeroCostZenModel` above already returned
     // for those — so it lands on the first `cliproxy-meta` lane the live
@@ -331,6 +331,94 @@ export function assembleAdditiveConfig(roster, live, options = {}) {
   };
 }
 
+const BRIDGE_ADDITIONS = [
+  { id: "muse-spark-1.3-contributor", tier: "T3", laneId: "cliproxy-meta" },
+  { id: "claude-sonnet-5-5", tier: "T2", laneId: "cliproxy-claude" },
+];
+
+/** Validate the narrow +2 packet before output and again against operator readback. */
+export function validateBridgeConfig(live, artifact) {
+  if (!Array.isArray(live.models) || !Array.isArray(artifact.models)) {
+    throw new Error("bridge packet requires model arrays");
+  }
+  assertUniqueModels(live.models, "live config");
+  assertUniqueModels(artifact.models, "bridge artifact");
+  if (!isPlainObject(live.pacing) || !Array.isArray(live.pacing.lanes) ||
+      !isPlainObject(live.selection) || typeof live.selection.mode !== "string") {
+    throw new Error("bridge packet requires live pacing lanes and selection to preserve");
+  }
+  if (stableJson({ ...artifact, models: [] }) !== stableJson({ ...live, models: [] })) {
+    throw new Error("bridge packet changed live settings (including selection or pacing)");
+  }
+  const laneIds = new Set(live.pacing.lanes.map((lane) => lane?.laneId));
+  const beforeKeys = new Set(live.models.map(modelKey));
+  const artifactByKey = new Map(artifact.models.map((row) => [modelKey(row), row]));
+  for (const row of live.models) {
+    if (stableJson(artifactByKey.get(modelKey(row))) !== stableJson(row)) {
+      throw new Error(`bridge packet changed live row: ${row.id}:${row.tier}`);
+    }
+  }
+  const added = artifact.models.filter((row) => !beforeKeys.has(modelKey(row)));
+  if (added.length !== BRIDGE_ADDITIONS.length || artifact.models.length !== live.models.length + 2) {
+    throw new Error("bridge packet must add exactly the two approved model+tier rows");
+  }
+  for (const expected of BRIDGE_ADDITIONS) {
+    const row = added.find((model) => modelKey(model) === modelKey(expected));
+    if (!row || row.id !== expected.id || row.enabled !== true || row.laneId !== expected.laneId) {
+      throw new Error(`bridge packet missing approved enabled binding: ${expected.id}:${expected.tier}`);
+    }
+  }
+  const sol = artifactByKey.get(modelKey({ id: "gpt-6.1-sol", tier: "T1" }));
+  if (!sol || sol.enabled !== true || sol.laneId !== "cliproxy-codex" || !beforeKeys.has(modelKey(sol))) {
+    throw new Error("bridge packet requires the existing enabled Sol T1 Codex binding");
+  }
+  const uncovered = artifact.models.filter((row) => row.enabled === true &&
+    !(typeof row.laneId === "string" && row.laneId.length > 0 && laneIds.has(row.laneId)));
+  if (uncovered.length > 0) {
+    throw new Error(`bridge packet has enabled models outside pacing lanes: ${uncovered.map((row) => `${row.id}:${row.tier}`).join(", ")}`);
+  }
+}
+
+/**
+ * A full-roster refresh is not the approved bridge change: it also adds Zen
+ * rows and enables stale-disabled incumbents. Keep the live snapshot whole,
+ * infer only the two approved additions, and retain the enabled-lane guard.
+ */
+export function assembleBridgeConfig(roster, live, options = {}) {
+  const minimumLaneBoundModels = options.minimumLaneBoundModels ?? DEFAULT_MIN_LANE_BOUND_MODELS;
+  const rosterModels = Array.isArray(roster.models) ? roster.models : [];
+  assertUniqueModels(rosterModels, "roster");
+  if (!isPlainObject(live.pacing) || !Array.isArray(live.pacing.lanes) || !Array.isArray(live.models)) {
+    throw new Error("bridge packet requires a fresh live model and pacing snapshot");
+  }
+  const availableLaneIds = new Set(live.pacing.lanes.map((lane) => lane?.laneId));
+  const additions = BRIDGE_ADDITIONS.map((expected) => {
+    const row = rosterModels.find((model) => modelKey(model) === modelKey(expected));
+    if (!row || row.enabled !== true) {
+      throw new Error(`reviewed roster lacks enabled bridge row: ${expected.id}:${expected.tier}`);
+    }
+    return { ...row, id: expected.id, laneId: laneForNewModel(row, availableLaneIds) };
+  });
+  const config = { ...live, models: [...live.models, ...additions] };
+  validateBridgeConfig(live, config);
+  const before = countConfig(live);
+  const after = countConfig(config);
+  if (after.withLaneId < minimumLaneBoundModels) {
+    throw new Error(`bridge packet has ${after.withLaneId} lane-bound models; minimum is ${minimumLaneBoundModels}`);
+  }
+  return {
+    config,
+    counts: {
+      liveBefore: before,
+      artifactAfter: after,
+      preservedLaneBindings: before.withLaneId,
+      inferredLaneBindings: 2,
+      enabledWithoutLane: [],
+      guard: "block unless exactly +2 approved bridge rows, every live row and setting unchanged, existing Sol T1 enabled, and every enabled model has a configured pacing lane",
+    },
+  };
+}
+
 async function main() {
   const rosterPath = argument("roster");
   const livePath = argument("live");
@@ -339,7 +427,7 @@ async function main() {
   const minimumArg = argument("min-lane-bound");
   if (!rosterPath || !livePath || !outputPath || !countsPath) {
     throw new Error(
-      "usage: assemble-additive-config.mjs --roster <json> --live <json> --out <json> --counts <json> [--min-lane-bound 25]",
+      "usage: assemble-additive-config.mjs --roster <json> --live <json> --out <json> --counts <json> [--min-lane-bound 25] [--bridge-only]",
     );
   }
   const minimumLaneBoundModels = minimumArg
@@ -353,7 +441,8 @@ async function main() {
     readFile(resolve(rosterPath), "utf8").then(JSON.parse),
     readFile(resolve(livePath), "utf8").then(JSON.parse),
   ]);
-  const result = assembleAdditiveConfig(roster, live, { minimumLaneBoundModels });
+  const assemble = process.argv.includes("--bridge-only") ? assembleBridgeConfig : assembleAdditiveConfig;
+  const result = assemble(roster, live, { minimumLaneBoundModels });
   await Promise.all([
     writeFile(resolve(outputPath), `${JSON.stringify(result.config, null, 2)}\n`),
     writeFile(resolve(countsPath), `${JSON.stringify(result.counts, null, 2)}\n`),

@@ -5,9 +5,8 @@ import { EFFORT_LADDER } from "../engine/effort.js";
  *
  * The strongest quality signal we own is our own accepted work: independent
  * review verdicts, rework and accepted deliverables attributed to the
- * actually-served model x effective effort x task class. This module is the
- * attribution half of that producer: raw post-hoc observations in, exact
- * cohort keys out.
+ * actually-served model x effective effort x task class. This module is the attribution half of that producer: raw
+ * post-hoc observations in, exact cohort keys out.
  *
  * Three coordinates, each with a real `unknown` state. Unknown is never
  * inferred away:

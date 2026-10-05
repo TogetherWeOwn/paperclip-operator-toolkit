@@ -66,25 +66,25 @@ const baseManifest: PaperclipPluginManifestV1 = {
     "api.routes.register",
     "jobs.schedule",
     "companies.read",
-    // Poll operator-configured lane-capacity status URLs.
+    // poll operator-configured lane-capacity status URLs.
     "http.outbound",
-    // Resolve a lane's optional apiKeySecretRef before polling it.
+    // resolve a lane's optional apiKeySecretRef before polling it.
     "secrets.read-ref",
     // Capture issue.updated (reopen) / issue.comment.created (rejection) signals
     // for the card-level acceptance ledger, since `activity_log` is not an
     // allowlisted table and cannot be queried directly.
     "events.subscribe",
-    // Raise a `tier-exhausted` alarm when every tier from
+    // , Defect 2: raise a `tier-exhausted` alarm when every tier from
     // the required floor through T1 is pace-exhausted — there is nowhere left
     // to escalate to, and this must reach an operator rather than fail
     // silently the way the reference dispatcher's `pick()` does. The alarm
     // reuses this instance's existing `Operator: <title>` + `operator`-label
-    // issue-creation convention (confirmed against 20+ live examples), not a
-    // same-issue interaction card — an `Operator:` issue is a real,
-    // separately-triaged unit of work, and that is what a capacity dead end
-    // actually is.
+    // issue-creation convention (confirmed against 20+ live examples, e.g.
+    // ), not a same-issue interaction card — an
+    // `Operator:` issue is a real, separately-triaged unit of work, and that
+    // is what a capacity dead end actually is.
     "issues.create",
-    // Absorption of the standalone `dispatch` plugin:
+    // absorption of the standalone `dispatch` plugin:
     // the stall-sweep reads blocker relations and the orchestration summary
     // (which mirrors the server's own budget-invocation-block verdict, see
     // dispatch-selection.ts's BUDGET_RAIL_MIRROR_SOURCE), and wakes a stalled
@@ -93,7 +93,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
     "issue.relations.read",
     "issues.orchestration.read",
     "issues.wakeup",
-    // The sweep must not wake a card that has its own monitor
+    // the sweep must not wake a card that has its own monitor
     // wake scheduled (`monitorNextCheckAt`, read straight off the `Issue`
     // rows `issues.list` already returns) or a pending human-only ask —
     // neither of those is on `PluginIssueOrchestrationSummary`, so a
@@ -108,7 +108,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
     // capability is declared and never exercised. It is NOT
     // `database.namespace.write` — this plugin never writes a row of its own.
     "database.namespace.migrate",
-    // Append-only versioned shadow-decision JSONL, the
+    // Append-only `paired-decision-v1` shadow-decision JSONL, the
     // plugin-shadow half of the 48h host/plugin agreement stream. `ctx.db` is
     // scoped to `heartbeat_runs` reads only (above) and cannot hold an
     // append-only audit log a company operator can point external tooling at
@@ -123,7 +123,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       folderKey: LOCAL_FOLDER_KEYS.shadowDecisions,
       displayName: "Shadow decision log",
       description:
-        "Append-only versioned paired-decision JSONL, one record per advise() call, for the 48h host/plugin-shadow agreement gate.",
+        "Append-only paired-decision-v1 JSONL, one record per advise() call, for the  48h host/plugin-shadow agreement gate.",
       access: "readWrite",
     },
   ],
@@ -146,7 +146,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
     // NOT `issue_work_products`, `activity_log`, or `labels` — reopen/rejection
     // signals are sourced from captured `ctx.events`, not a live join against a
     // table this plugin isn't allowlisted to read.
-    // "agents" added for the classification job (join issues -> agents
+    // "agents" added for 's classification job (join issues -> agents
     // to read the assignee's role/name for the classification prompt).
     coreReadTables: ["heartbeat_runs", "issues", "issue_comments", "issue_relations", "agents"],
   },
@@ -162,7 +162,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.pollLanes,
       displayName: "Poll lane capacity",
       description:
-        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. Runs every 2 minutes, inside the tightest publisher-declared freshness budget (180s live) — at 5 minutes, picks older than 180s read every lane UNKNOWN ~half the time. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
+        "Poll operator-configured lane-capacity status URLs and refresh the pace ledger. : every 2 minutes, inside the tightest publisher-declared freshness budget (180s live) — at 5 minutes, picks older than 180s read every lane UNKNOWN ~half the time. Pace's own freshness budget is on the order of minutes, so this runs far more often than the volume-profile refresh.",
       schedule: "*/2 * * * *",
     },
     {
@@ -197,7 +197,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.classifyIssues,
       displayName: "Classify unlabeled issues",
       description:
-        "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) — the kill switch for this ported job.",
+        "Ported from tier_dispatcher.py main(): classify open, unlabeled, agent-assigned issues with the RUBRIC and write a tier:* label. Off by default (classification.enabled=false) — the AC3 kill switch for .",
       schedule: "*/10 * * * *",
     },
     {
@@ -225,14 +225,14 @@ const baseManifest: PaperclipPluginManifestV1 = {
       jobKey: JOB_KEYS.dispatchSweep,
       displayName: "Stall-sweep dispatch",
       description:
-        "Absorption of the standalone dispatch plugin: finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
+        " absorption of the standalone dispatch plugin: finds stalled, wakeable issues and requests a wake, spread across distinct assignees. Report-only until dispatch.wakeEnabled is set — same cadence and same default as the plugin it replaces.",
       schedule: "*/30 * * * *",
     },
     {
       jobKey: JOB_KEYS.refreshRunResolve,
       displayName: "Warm the run-scoped decision snapshot",
       description:
-        "Reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
+        ": reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
       schedule: "* * * * *",
     },
   ],
@@ -345,7 +345,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       name: TOOL_NAMES.setLaneOutage,
       displayName: "Declare or clear a lane outage",
       description:
-        "Port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
+        " port of lane_outage.json: declare a telemetry-invisible outage on named lanes/models until an ISO timestamp, or clear it by omitting both lanes and models.",
       parametersSchema: {
         type: "object",
         required: ["until"],
@@ -361,7 +361,7 @@ const baseManifest: PaperclipPluginManifestV1 = {
       name: TOOL_NAMES.setZaiPaceOverride,
       displayName: "Set or clear the Z.ai weekly-pace margin override",
       description:
-        "Port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
+        " port of zai_pace_override.json: temporarily widen (or tighten) the margin zaiWeeklyPaceOk allows above elapsed-week fraction, e.g. during a Codex outage. Clear by omitting margin.",
       parametersSchema: {
         type: "object",
         required: ["until"],

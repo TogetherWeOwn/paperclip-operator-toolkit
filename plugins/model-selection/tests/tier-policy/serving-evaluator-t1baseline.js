@@ -14,7 +14,7 @@
 // then applies that exact one-declaration normalization before comparison.
 // BEGIN SERVING SLICES
 var TIER_ORDER = ["T3", "T2", "T1"];
-// operator 2026-10-01 (owner-approved): T1 capability bar 0.85 -> 0.80 (t1cap080 carry-forward)
+// operator 2026-10-01 (owner-approved): T1 capability bar 0.85 -> 0.80 (t1baseline carry-forward)
 var T1_CAPABILITY_THRESHOLD = 0.8;
 var SCORE_THRESHOLDS = { T1: 0.85, T2: 0.8, T3: 0.75 };
 var SCORE_PRIOR_K = 6;

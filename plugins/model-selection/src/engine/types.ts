@@ -17,7 +17,7 @@ export interface ModelEntry {
   costPerMTokOut: number;
   /**
    * Cache-read rate. Separate from `costPerMTokIn` because cache read is 44%
-   * of the opus bill (ADR-0002) and folding it into input is exactly the
+   * of the opus bill  and folding it into input is exactly the
    * blindness the reference engine had.
    */
   costPerMTokCacheRead: number;
@@ -31,14 +31,14 @@ export interface ModelEntry {
   aaIndex: number | null;
   /**
    * Explicit aa.ai leaderboard slug override, for a model whose normalized
-   * id doesn't match aa.ai's slug automatically. Null/absent
+   * id doesn't match aa.ai's slug automatically (). Null/absent
    * falls back to normalized-id matching in `resolveAaSlug`.
    */
   aaSlug?: string | null;
-  /** ISO date the roster's `aaIndex` was curated from. Informational only — never read by selection. */
+  /** ISO date the roster's `aaIndex` was curated from (). Informational only — never read by selection. */
   aaIndexUpdatedAt?: string | null;
   /**
-   * Scope expansion: derived, read-only fields populated from the
+   *  scope expansion: derived, read-only fields populated from the
    * matched aa.ai snapshot record at the point a roster view/drift-report is
    * assembled (worker.ts) — never operator-curated, never schema-validated
    * config, and never read by `select.ts`/`cost.ts`. Null wherever aa.ai's
@@ -70,13 +70,13 @@ export interface ModelEntry {
   /** Slice-4 policy payload. Stored now, inactive until the earn-in engine ships. */
   earnIn: Record<string, unknown> | null;
   /**
-   * Which lane-capacity lane governs this model's pace. Optional —
+   * which lane-capacity lane governs this model's pace. Optional —
    * a model with no lane simply never enters pace ordering (`paceStateOf`
    * degrades to "unknown", the same as an unpolled lane).
    */
   laneId?: string | null;
   /**
-   * The reasoning effort to pin ALONGSIDE this model.
+   * the reasoning effort to pin ALONGSIDE this model.
    *
    * Optional. When present, the pin writes the adapter's effort key in the same
    * update as `adapterConfig.model`, clamped to what this model actually offers
@@ -118,7 +118,7 @@ export interface VolumeProfile {
 export interface QualitySignal {
   tier: Tier;
   escalationRate: number;
-  /** Human reopen/reject count in window. Weighted 10x (ADR-0005). */
+  /** Human reopen/reject count in window. Weighted 10x . */
   silentFailureCount: number;
   sampleCount: number;
   computedAt: string;
@@ -137,7 +137,7 @@ export interface CapabilityExclusion {
 /**
  * Where a tier judgement came from. Ordered most to least authoritative.
  * `agent-floor` is the always-valid fallback: a missing label is not a missing
- * decision (ADR-0008).
+ * decision .
  */
 export type TierSource =
   | "capability-exclusion"
@@ -150,7 +150,25 @@ export interface TierJudgement {
   tier: Tier;
   source: TierSource;
   detail: string;
+  /**
+   * The most capable tier this decision may place a card on. Set by
+   * `resolveTier` from RECORDED, explicit judgement only: `IMPLICIT_TIER_CEILING`
+   * (T1) unless the issue carries an explicit T0 opt-in. Roster rows above it
+   * are removed from the candidate pool before any gate runs, so a barred row
+   * can neither win nor inflate a count. Absent behaves as the implicit
+   * ceiling, which is what every judgement built before T0 existed means.
+   */
+  admittedCeiling?: Tier;
 }
+
+/**
+ * How the issue's model pin got there. Only `explicit` (a human or
+ * an agent that chose the model for THIS issue) can opt an issue into T0. A pin
+ * the router wrote, a pin inherited from the agent, or one whose origin nobody
+ * recorded must never create that opt-in: the worker does not populate this
+ * yet, so every pin is `unknown` today and T0 is reachable by `tier:T0` only.
+ */
+export type PinProvenance = "explicit" | "router" | "inherited" | "unknown";
 
 export interface IssueDescriptor {
   issueId: string;
@@ -158,6 +176,8 @@ export interface IssueDescriptor {
   labelNames?: readonly string[];
   /** Existing `assigneeAdapterOverrides.adapterConfig.model`, if pinned. */
   pinnedModelId?: string | null;
+  /**. Origin of `pinnedModelId`. Absent is `unknown`, which never admits T0. */
+  pinProvenance?: PinProvenance;
   /** Recorded capability-exclusion answer. Supplied, never guessed. */
   exclusion?: CapabilityExclusion;
   /** Assignee agent's `adapterConfig.model` — the tier floor. */
@@ -190,11 +210,11 @@ export interface IssueDescriptor {
    * Assignee agent's display name (`agents.name`), e.g. "Founding Engineer".
    * Ported from `tier_dispatcher.py`'s `agent` parameter — every SQL caller
    * there sources it from `coalesce(a.name,'')`, so this is a name string,
-   * never a role enum. Used only by `ZAI_LONG_RUN_AGENTS`.
+   * never a role enum. Used only by `ZAI_LONG_RUN_AGENTS` ().
    */
   agentName?: string | null;
   /**
-   * `fleet-default` means this selection keys traffic for the
+   *  AC-3. `fleet-default` means this selection keys traffic for the
    * fleet rather than one card, so a lane standing on a single serviceable
    * account is ineligible at any quota level — 09-17 00:39Z was 0.46 weekly
    * utilization and still a refusal, because the limiter is
@@ -234,7 +254,7 @@ export type Outcome =
   | "disabled"
   | "held-at-floor"
   /**
-   * Distinct from `no-eligible-model`: every tier from
+   * Defect 2. Distinct from `no-eligible-model`: every tier from
    * the required tier up to and including T1 had a candidate that would
    * otherwise qualify, but every one of them was excluded specifically by
    * the pace serviceability hard stop (`lane-unserviceable`) — a capacity
@@ -259,7 +279,7 @@ export interface Candidate extends CostBreakdown {
 export type RejectionOperand =
   | { kind: "disabled" }
   | { kind: "capability"; missing: string[] }
-  /** Adapter-compatibility: model id prefix + assignee adapter. */
+  /**. Adapter-compatibility: model id prefix + assignee adapter. */
   | { kind: "adapter"; modelId: string; adapterType: string }
   | { kind: "capability-score"; tier: Tier; p: number | null; cappedBy?: Tier }
   | { kind: "card-accept-rate"; tier: Tier; cardsResolved: number; cardsAccepted: number }
@@ -268,6 +288,8 @@ export type RejectionOperand =
   | { kind: "no-profile"; tier: Tier }
   | { kind: "lane-unserviceable"; laneId: string | null; verdict: string | null }
   | { kind: "lane-avoid"; laneId: string | null }
+  /**. Combined lane utilization at or above the lane's withdrawal ceiling. */
+  | { kind: "lane-withdrawn"; laneId: string; utilization: number; ceiling: number; accounts: number }
   | { kind: "lane-outage"; laneId: string | null }
   | { kind: "lane-no-room"; laneId: string }
   | { kind: "lane-availability"; laneId: string | null; term: string; state: "unavailable" | "unknown" }
@@ -277,16 +299,16 @@ export interface Rejection {
   modelId: string;
   /**
    * `tier-floor` keeps work off lower-capability roster rows. `capability-score`
-   * is the Bayesian-measured counterpart, ported from
+   * is 's Bayesian-measured counterpart, ported from
    * `tier_dispatcher.py`'s `capable(model_id, tier)`: a model can clear the
    * static `tier-floor` and still fail here once its own run history shows it
    * is not actually succeeding at that tier. `lane-avoid` and `lane-outage`
-   * are ports of `tier_dispatcher.py`'s `AVOID`/ `AVOID_LANE`
+   * are  ports of `tier_dispatcher.py`'s `AVOID`/ `AVOID_LANE`
    * threshold and `lane_outage.json` operator override, respectively — both
    * distinct from `lane-unserviceable` (the pace engine's own
    * exhausted/unavailable health check).
    *
-   * `lane-availability` is a fourth, independent capacity stage.
+   * `lane-availability` () is a fourth, independent capacity stage.
    * It is NOT a duplicate of `lane-unserviceable`: that one is the pace
    * engine's verdict, reached only when a lane is polled AND the poll
    * produced an account identity it could key on, and it is deliberately
@@ -296,7 +318,7 @@ export interface Rejection {
    * serviceable account COUNT, and an explicit staleness UNKNOWN. Both are
    * capacity, so both count toward `tier-exhausted`.
    *
-   * `card-accept-rate` is a QUALITY stage, a sibling of
+   * `card-accept-rate` () is a QUALITY stage, a sibling of
    * `capability-score` rather than of the lane stages: it fires when a
    * (model, tier) has had zero cards ACCEPTED across
    * `CARD_ZERO_ACCEPT_MIN_RESOLVED` mature, unexpired ones. It must stay out of
@@ -315,20 +337,22 @@ export interface Rejection {
     | "no-profile"
     | "lane-unserviceable"
     | "lane-avoid"
+    /** : the lane's combined utilization reached its configured withdrawal ceiling. */
+    | "lane-withdrawn"
     | "lane-outage"
     | "lane-no-room"
     | "lane-availability"
-    /** Run-outcome evidence — `proven-dead`, or the cost-down guard. */
+    /** : run-outcome evidence — `proven-dead`, or the cost-down guard. */
     | "lane-evidence";
   reason: string;
-  /** Structured counterpart to `reason` — see `RejectionOperand`. */
+  /**. Structured counterpart to `reason` — see `RejectionOperand`. */
   operand: RejectionOperand;
 }
 
 /**
  * One model's availability verdict, carried structurally so `decisions.jsonl`
  * can answer "why did this card not get opus" by the TERM rather than by
- * grepping prose out of the trace.
+ * grepping prose out of the trace (AC-6).
  */
 export interface AvailabilityNote {
   modelId: string;
@@ -348,13 +372,13 @@ export interface AvailabilityReport {
   /**
    * Models whose lane state could not be read. Present in the record because
    * an UNKNOWN that is not said has become a quiet pass — the one thing
-   * `pacing_verdict.py` forbids.
+   * `pacing_verdict.py` forbids (AC-4).
    */
   unknown: readonly AvailabilityNote[];
   /** True when the selected model's own lane state was UNKNOWN. */
   selectedOnUnknownLane: boolean;
   /**
-   * Second failure shape: models excluded by the RUN-OUTCOME term
+   *  second failure shape. Models excluded by the RUN-OUTCOME term
    * rather than the published contract — a lane that is `proven-dead`, or an
    * `unproven` one that would have taken a cost-down move off a proven-good
    * lane. Kept separate from `excluded` because the two answer different
@@ -380,7 +404,7 @@ export interface ShadowDiffRecord {
 }
 
 /**
- * Shadow-only v2 evidence for the selected model, resolved
+ *  P2: shadow-only v2 evidence for the selected model, resolved
  * AFTER selection from the last-good free-list snapshot. Never an input to
  * selection — `select.ts` never sets this; only the worker's `advise()`
  * attaches it, and only when `aaFreeSync` is enabled with curated bindings
@@ -443,7 +467,7 @@ export interface SelectionDecision {
   /** Null when there was nothing to compare. Never affects `modelId`. */
   shadowDiff: ShadowDiffRecord | null;
   /**
-   * The tier the ladder walk escalated AWAY FROM — set to
+   * Defect 2. The tier the ladder walk escalated AWAY FROM — set to
    * `judgement.tier` when `effectiveTier` ends up on a different (higher)
    * tier, null on an ordinary same-tier selection. The ladder walk climbs
    * exactly one tier at a time and never skips a tier, so this plus
@@ -466,7 +490,7 @@ export interface SelectionDecision {
    */
   wakeScopedTier: Tier | null;
   /**
-   * Shadow-only v2 evidence, attached by the worker's `advise()`
+   *  P2: shadow-only v2 evidence, attached by the worker's `advise()`
    * AFTER selection — never an input to it. Optional so the legacy path keeps
    * the decision shape byte-for-byte (key absent, not null) when v2 is off.
    */
@@ -504,7 +528,7 @@ export interface TierScore {
   capable: boolean | null;
   proven: boolean;
   /**
-   * Set when `capable` was forced false by monotonicity — this tier
+   * set when `capable` was forced false by monotonicity — this tier
    * has no proven evidence of its own and an easier tier (the one named) failed
    * on its own verdict. Absent when `capable` is this tier's own verdict.
    */
@@ -521,7 +545,7 @@ export interface ModelScore {
   tiers: Record<Tier, TierScore>;
   overall: TierScore;
   /**
-   * The tier this model's OVERALL posterior earns, or null when the
+   * the tier this model's OVERALL posterior earns, or null when the
    * model is unscored (no aa.ai composite index) and its configured tier must be
    * retained. Distinct from `tiers[T].capable`, which is a per-tier quality gate
    * — a model can be tiered T1 here and still fail `capable` for T1 work.
@@ -532,7 +556,7 @@ export interface ModelScore {
   /** How the prior behind `derivedTier` was reached. */
   priorBasis?: "blended" | "index-only" | "unscored";
   /**
-   * Benchmark spec version the tier was cut under. A tier
+   * Benchmark spec version the tier was cut under (e.g. `benchmark-v1`). A tier
    * written under one version stays distinguishable from one written under the
    * next, so a re-tier can never silently rewrite history.
    */
@@ -540,7 +564,7 @@ export interface ModelScore {
 }
 
 /**
- * Card-level acceptance ledger row, keyed by model+tier.
+ * Card-level acceptance ledger row ( §2.2), keyed by model+tier.
  * `pending` cards (closed <14d ago, no reopen/rejection observed yet) are
  * right-censored: never counted as accepted, never counted as rejected.
  */
@@ -550,7 +574,7 @@ export interface CardLedgerEntry {
   /**
    * EVERY closed card attributed to this (model, tier) inside
    * `CARD_LEDGER_WINDOW_DAYS` — right-censored ones included. This is NOT the
-   * denominator of `acceptRate`; `cardsResolved` is. Reading it as
+   * denominator of `acceptRate`; `cardsResolved` is. : reading it as
    * one is how `gpt-6-astra:T1` looked like "25 cards closed, none accepted"
    * on 2026-09-22 when the truth was 0-of-ONE resolved card and 24 still
    * inside the censor window.

@@ -1,6 +1,7 @@
 import { TIER_LABEL_PREFIX, type Tier } from "../constants.js";
 import type { SelectionDecision } from "../engine/types.js";
 import { repinAllowed, type RepinGateContext } from "../engine/pacing.js";
+import { routerMayWriteTierLabel } from "../engine/tier.js";
 
 /**
  * Turning a decision into a board write.
@@ -15,10 +16,10 @@ import { repinAllowed, type RepinGateContext } from "../engine/pacing.js";
  * 2. **Never re-pin an issue that already has an override.** A mid-flight model
  *    change fires `shouldResetTaskSessionForModelChange`
  *    (`heartbeat.ts:5127-5133`), discarding the warm prompt cache — the single
- *    largest cost line (ADR-0002). If the tier turns out wrong, that is a
+ *    largest cost line. If the tier turns out wrong, that is a
  *    finding for the NEXT issue's labelling, not a reason to re-pin this one.
  *
- *    One narrow exception: an override whose env carries secret
+ *    One narrow exception (): an override whose env carries secret
  *    refs the current assignee does not carry. The host checks every
  *    `secret_ref` against the RUN's agent, so such a pin fails every wake as
  *    `configuration_incomplete` — there is no warm session left to protect.
@@ -33,7 +34,7 @@ export interface ApplyPlan {
   /**
    * The selected model id. The caller builds the full env-preserving override.
    *
-   * If you came here looking for the sub-call surface pins
+   *  — if you came here looking for the sub-call surface pins
    * (`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`), they are
    * NOT here. This function is pure and never sees an env map. All five override
    * write paths build their patch through `modelOverrideForContext`
@@ -60,7 +61,7 @@ export interface ApplyPlan {
   envRepairOnly: boolean;
 }
 
-/** What `planEnvRepair` needs to know about an existing pin. */
+/**. What `planEnvRepair` needs to know about an existing pin. */
 export interface EnvRepairContext {
   /** The model the existing override pins, or null when it pins none. */
   pinnedModelId: string | null;
@@ -179,7 +180,9 @@ function planPin(decision: SelectionDecision, context: ApplyContext, targetIssue
     write: true,
     issueId: targetIssueId,
     modelId: decision.modelId,
-    labelName: context.hasExistingTierLabel || !tier ? null : tierLabelName(tier),
+    // a router-written label is never a T0 opt-in, so the router
+    // does not write `tier:T0` even for a decision that landed there.
+    labelName: context.hasExistingTierLabel || !tier || !routerMayWriteTierLabel(tier) ? null : tierLabelName(tier),
     reason: `pinning ${decision.modelId} at ${tier} — ${decision.trace.at(-1) ?? "selected"}`,
     envRepairOnly: false,
   };
@@ -190,7 +193,7 @@ export function tierLabelName(tier: Tier): string {
 }
 
 /**
- * The single gate for every router-owned model/env pin write.
+ * the single gate for every router-owned model/env pin write.
  *
  * `planApply` refuses advisory decisions, and the engine marks a decision
  * advisory exactly when this is false — but the five scheduled/event pin

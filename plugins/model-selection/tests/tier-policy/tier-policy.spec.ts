@@ -1,5 +1,5 @@
 /**
- * Validation and compilation of the tier policy document.
+ *  P1: validation and compilation of the tier policy document.
  * The legacy evaluator is keyed by the fixed T1/T2/T3 union, so under it a
  * rename is accepted and an added, deleted or reordered tier is refused with a
  * named issue. Every refusal here is a code a P2 edit tool will surface.
@@ -61,9 +61,9 @@ describe("seed policy", () => {
   it("validates clean and compiles to the serving cuts and bars", () => {
     expect(validateTierPolicy(SEED)).toEqual([]);
     expect(LEGACY_TIER_POLICY.evaluator).toBe(LEGACY_EVALUATOR_ID);
-    expect(LEGACY_TIER_POLICY.revision).toBe(1);
-    expect(LEGACY_TIER_POLICY.scoreThresholds).toEqual({ T1: 0.85, T2: 0.8, T3: 0.75 });
-    expect(LEGACY_TIER_POLICY.capabilityThresholds).toEqual({ T1: 0.8, T2: 0.8, T3: 0.75 });
+    expect(LEGACY_TIER_POLICY.revision).toBe(SEED.revision);
+    expect(LEGACY_TIER_POLICY.scoreThresholds).toEqual({ T0: 0.9, T1: 0.85, T2: 0.8, T3: 0.75 });
+    expect(LEGACY_TIER_POLICY.capabilityThresholds).toEqual({ T0: 0.9, T1: 0.8, T2: 0.8, T3: 0.75 });
     expect(LEGACY_TIER_POLICY.capability).toEqual({ priorK: 6, provenN: 8, vetoMargin: 0.1 });
     expect(LEGACY_TIER_POLICY.defaultTierId).toBe("T1");
   });
@@ -90,8 +90,8 @@ describe("tier edits under the legacy evaluator", () => {
   });
 
   it("refuses an added tier", () => {
-    const t0 = { ...(SEED.tiers[2] as TierDefinition), id: "T0", name: "T0", order: 3 };
-    expect(codes(edit((p) => ({ tiers: [...p.tiers, t0] })))).toContain("legacy-tier-unknown");
+    const extra = { ...(SEED.tiers[2] as TierDefinition), id: "T9", name: "T9", order: 9 };
+    expect(codes(edit((p) => ({ tiers: [...p.tiers, extra] })))).toContain("legacy-tier-unknown");
   });
 
   it("refuses a deleted tier", () => {
@@ -158,7 +158,7 @@ describe("tier edits under the legacy evaluator", () => {
 describe("references", () => {
   it("refuses a default tier or task-class ref that does not exist", () => {
     expect(codes(edit(() => ({ defaultTierId: "T9" })))).toContain("unknown-tier-ref");
-    expect(codes(edit(() => ({ taskClassTierRefs: { deploy: "T0" } })))).toContain("unknown-tier-ref");
+    expect(codes(edit(() => ({ taskClassTierRefs: { deploy: "T9" } })))).toContain("unknown-tier-ref");
     expect(codes(edit(() => ({ taskClassTierRefs: { deploy: "T2" } })))).toEqual([]);
   });
 });
@@ -261,7 +261,7 @@ describe("S-tier protection", () => {
   });
 
   it("allows raising an S-tier bar", () => {
-    const raised = { ...sTiered, revision: 3, tiers: sTiered.tiers.map((t) => (t.id === "T1" ? { ...t, legacy: { ...t.legacy, scoreThreshold: 0.9, capabilityThreshold: 0.85 } } : t)) };
+    const raised = { ...sTiered, revision: 3, tiers: sTiered.tiers.map((t) => (t.id === "T1" ? { ...t, legacy: { ...t.legacy, scoreThreshold: 0.87, capabilityThreshold: 0.85 } } : t)) };
     expect(codes(raised, sTiered)).toEqual([]);
   });
 });

@@ -22,7 +22,7 @@ function round3(value: number): number {
 }
 
 /**
- * Verbatim `rows` from a frozen `host-evidence.json` (27 rows,
+ * Verbatim `rows` from  r2's frozen `host-evidence.json` (27 rows,
  * copied from `model_scores.json`'s `models[mid]['tiers'][tier]`). `p`/`pObs`/
  * `nEff` are already rounded to 3/3/1 decimals in this fixture — see the
  * "Key design resolution" note in the governing plan for why the spot check
@@ -308,7 +308,7 @@ describe("accumulateRunStats -> summarize — raw-row replay of frozen host-evid
   });
 });
 
-describe("buildCardLedger — censor", () => {
+describe("buildCardLedger —  §2.2 censor", () => {
   const nowMs = Date.parse("2026-09-12T00:00:00.000Z");
   const dayMs = 24 * 60 * 60 * 1000;
 
@@ -498,8 +498,7 @@ describe("monotone tier capability", () => {
   it("is idempotent, and re-applied at read time to scores stored before the rule existed", () => {
     const capped = buildModelScore("glm-5.3", GLM_AA_INDEX, { T3: T3_PROVEN_PASS, T2: T2_PROVEN_FAIL }, TIERS);
     expect(enforceMonotoneCapability(capped.tiers)).toEqual(capped.tiers);
-    // A stored score from before capability became monotone in tier order: T1
-    // still carries its isolated prior verdict.
+    // A pre- stored score: T1 still carries its isolated prior verdict.
     const { cappedBy: _cappedBy, ...isolatedT1 } = capped.tiers.T1;
     const stored = { ...capped, tiers: { ...capped.tiers, T1: { ...isolatedT1, capable: true } } };
     expect(tierScoreFor(stored, "T1")).toMatchObject({ capable: false, cappedBy: "T2" });

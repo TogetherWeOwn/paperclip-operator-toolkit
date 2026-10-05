@@ -1,0 +1,46 @@
+{
+  "name": "zai-behind-reorder",
+  "laneUnderTest": "cliproxy-zai",
+  "mechanism": "pace-state-reorder",
+  "description": "The Z.ai lane trails its fair-share pace (behind) while the Codex lane is on pace. Cost order prefers the cheap Codex-lane model, but pace rank prefers behind over on — so enforce moves the pick onto the Z.ai lane while advise stays on cost.",
+  "issueId": "shadow-compare-zai-reorder-1",
+  "tier": "T1",
+  "models": [
+    {
+      "id": "codex-t1-cheap",
+      "tier": "T1",
+      "laneId": "cliproxy-codex",
+      "costPerMTokIn": 0.4,
+      "costPerMTokOut": 1.6
+    },
+    {
+      "id": "zai-t1-dear",
+      "tier": "T1",
+      "laneId": "cliproxy-zai",
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15
+    }
+  ],
+  "lanes": {
+    "cliproxy-codex": {
+      "state": "on",
+      "serviceable": true,
+      "score": { "utilization": 0.5, "elapsed": 0.5, "deviation": 0 }
+    },
+    "cliproxy-zai": {
+      "state": "behind",
+      "serviceable": true,
+      "score": { "utilization": 0.3, "elapsed": 0.5, "deviation": -0.2 }
+    }
+  },
+  "expected": {
+    "adviseWinner": "codex-t1-cheap",
+    "enforceWinner": "zai-t1-dear",
+    "advisePacingApplied": false,
+    "enforcePacingApplied": true,
+    "adviseTraceContains": ["pace ordering (shadow) reorders to zai-t1-dear > codex-t1-cheap"],
+    "adviseTraceOmits": ["pace ordering (enforce)", "slot throttle"],
+    "enforceTraceContains": ["pace ordering (enforce) reorders to zai-t1-dear > codex-t1-cheap"],
+    "enforceTraceOmits": ["slot throttle", "preferred for new dispatch"]
+  }
+}

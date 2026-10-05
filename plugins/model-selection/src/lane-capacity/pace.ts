@@ -476,8 +476,7 @@ function serviceable(account: PaceAccountObservation, windows: PaceWindowVerdict
  * the blown account for the whole storm. An any-account-serviceable roll-up
  * therefore overstates a lane whose provider behaves that way, so a tripped
  * serviceability window exhausts its own account (see `evaluateLanePace`)
- * (the lane itself is condemned only when no account can still serve), and
- * the account reads `exhausted` until reset.
+ *, and the account reads `exhausted` until reset.
  *
  * Note this is strictly wider than the per-window `serviceable` flag set in
  * `scoredWindow`, which trips only at a hard `utilization >= 1`: the margin
@@ -505,7 +504,7 @@ export function evaluateLanePace(input: {
   policy?: PacePolicy;
 }): LanePaceVerdict {
   const marginMilli = toMilli(input.policy?.margin ?? DEFAULT_MARGIN);
-  // A serviceability window at (or within the margin of) 1.0 trips.
+  // a serviceability window at (or within the margin of) 1.0 trips.
   // Default margin 0.1 → trip at >= 0.9; a lane-configured margin widens it.
   const tripCeilingMilli = SCALE - marginMilli;
   const urgentResetSeconds = input.policy?.urgentResetSeconds ?? DEFAULT_URGENT_RESET_SECONDS;
@@ -553,7 +552,7 @@ export function evaluateLanePace(input: {
       window.allowanceWeight === null
     );
     if (!governing) {
-      // A tripped serviceability window reads `exhausted` here too,
+      // a tripped serviceability window reads `exhausted` here too,
       // so the per-account output agrees with the lane roll-up below.
       const exhausted = account.health === "exhausted" || account.health === "unavailable" || tripped.length > 0;
       // The account declared a governing window that this snapshot cannot
@@ -696,11 +695,11 @@ export function evaluateLanePace(input: {
       ? 0
       : rawShare(entry) / shareDenominator,
   }));
-  // A tripped serviceability window condemns the lane only when no
+  // a tripped serviceability window condemns the lane only when no
   // account can still serve (serviceableAccountCount == 0). A healthy sibling
   // keeps the lane open; the tripped account itself stays excluded —
   // serviceable:false, state:exhausted, recommendedShare 0 — so dispatch never
-  // rides it. The no-failover evidence is preserved at the account
+  // rides it. 's no-failover evidence is preserved at the account
   // level, where the provider actually routes; the lane roll-up no longer
   // repeats it. With nothing serviceable left the lane is still poisoned, and
   // the tripped reset stays ahead of every other exit: it is the earliest

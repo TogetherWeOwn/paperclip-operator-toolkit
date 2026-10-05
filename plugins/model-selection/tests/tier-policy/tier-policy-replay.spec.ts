@@ -1,7 +1,7 @@
 /**
- * Policy-output replay: the data-driven `legacy-model-selection-v1`
- * evaluator against an explicitly normalized public derivative of a captured evaluator
- * (`serving-evaluator-t1cap080.js`, main 5a9be61 + the operator's T1 capability
+ *  P1 zero-diff replay: the data-driven `legacy-model-selection-v1`
+ * evaluator against a frozen, hashed copy of the SERVING evaluator
+ * (`serving-evaluator-t1baseline.js`, main 5a9be61 + the operator's T1 capability
  * 0.8 carry-forward).
  *
  * Every production caller uses the default arguments (worker.ts:3236,
@@ -14,11 +14,17 @@
  * Recorded-decision parity is NOT claimed: the paired decision stream records
  * each candidate's verdict but not the stats and priors that produced it.
  *
- * Monotone capability is the one deliberate departure from the frozen evaluator:
+ *  is the one deliberate departure from the frozen evaluator:
  * capability is now monotone in tier order. The grid compares against the
  * serving output with `enforceMonotoneCapability` applied, and a positive
  * control proves the raw serving output differs ONLY in the verdicts that rule
  * caps.
+ *
+ *  is the second deliberate departure: the ladder gained T0 (0.90), so
+ * a posterior or index at or above 0.90 now derives T0 where the frozen
+ * evaluator says T1. The frozen evaluator has no T0, so parity is held over its
+ * own tiers (T1..T3), the derived tier is compared with T0 read as the T1 it
+ * replaced, and a positive control proves that is the ONLY thing that moved.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -51,16 +57,20 @@ import {
 } from "../../src/engine/tier-policy.js";
 import type { ModelScore, TierScoreStats } from "../../src/engine/types.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "../fixtures.js";
-import * as serving from "./serving-evaluator-t1cap080.js";
+import * as serving from "./serving-evaluator-t1baseline.js";
 
-const FIXTURE_PATH = fileURLToPath(new URL("./serving-evaluator-t1cap080.js", import.meta.url));
-// Optional explicit path to the original captured worker artifact, not a host default.
-// Unset (the default, and always in CI): the byte-for-byte re-extraction test is skipped.
-const SERVING_WORKER = process.env.TIER_POLICY_SERVING_WORKER ?? "";
+const FIXTURE_PATH = fileURLToPath(new URL("./serving-evaluator-t1baseline.js", import.meta.url));
+const SERVING_WORKER = "/opt/serving-host/model-selection-0.4.0-main5a9be61-t1baseline/dist/worker.js";
 const SERVING_WORKER_SHA256 = "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099";
-const ORIGINAL_SLICES_SHA256 = "34776313af7253982428382cc0d6ed8caefaf9800804f87920799b550eea2e65";
-const PUBLIC_SLICES_SHA256 = "42d5b2e9c6d14f20198f563623950fad450f9ee19f05c4aa262bd8b314575745";
+// Re-pinned for the public derivative: the only byte delta from the captured
+// slices is the disclosure-driven rename of the internal capability tag.
+const SLICES_SHA256 = "d495c5bf7a1437b755cc0d1226c1c54b5fd5137eb7358b50883cb2a41b2b07cf";
 const SLICE_RANGES: ReadonlyArray<readonly [number, number]> = [[93, 93], [281, 285], [1464, 1508], [1580, 1701], [1896, 1902]];
+
+/** The tiers the frozen serving evaluator knows (T0 postdates it). */
+const SERVING_TIERS = TIER_ORDER.filter((t): t is Exclude<Tier, "T0"> => t !== "T0");
+/** : the frozen evaluator's view of a derived tier, where T0 did not exist. */
+const asServingTier = <T extends Tier | null | undefined>(tier: T): T | "T1" => (tier === "T0" ? "T1" : tier);
 
 const sha256 = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
 
@@ -73,33 +83,21 @@ function fixtureSlices(): string {
   return `${lines.slice(begin + 1, end).join("\n")}\n`;
 }
 
-function normalizeCapturedSlices(slices: string): string {
-  if (sha256(slices) !== ORIGINAL_SLICES_SHA256) throw new Error("unexpected original captured slice bytes");
-  const declaration = /^var BENCHMARK_SPEC_VERSION = "[^"\n]+";$/gm;
-  if ([...slices.matchAll(declaration)].length !== 1) throw new Error("format declaration anchor is not unique");
-  return slices.replace(declaration, 'var BENCHMARK_SPEC_VERSION = "benchmark-prior-v1";');
-}
-
-describe("public derivative of the frozen captured evaluator", () => {
-  it("pins the derivative separately from the unchanged original provenance", () => {
-    expect(sha256(fixtureSlices())).toBe(PUBLIC_SLICES_SHA256);
-    expect(PUBLIC_SLICES_SHA256).not.toBe(ORIGINAL_SLICES_SHA256);
-    expect(fixtureSlices()).not.toMatch(/(TOG|PAP)-?[0-9]+/i);
-    expect(() => normalizeCapturedSlices(fixtureSlices())).toThrow("unexpected original captured slice bytes");
+describe("frozen serving evaluator", () => {
+  it("is byte-identical to the captured slices", () => {
+    expect(sha256(fixtureSlices())).toBe(SLICES_SHA256);
   });
 
-  // The artifact only exists on the serving host; CI has no copy. Skipped unless
-  // TIER_POLICY_SERVING_WORKER points at an existing worker.js.
-  it.skipIf(!SERVING_WORKER || !existsSync(SERVING_WORKER))("verifies original artifact provenance before applying the one-declaration public normalization", () => {
+  // The artifact only exists on the serving host; CI has no copy.
+  it.skipIf(!existsSync(SERVING_WORKER))("re-extracts byte-for-byte from the serving worker.js", () => {
     const worker = readFileSync(SERVING_WORKER);
     expect(sha256(worker)).toBe(SERVING_WORKER_SHA256);
     const lines = worker.toString("utf8").split("\n");
     const slices = `${SLICE_RANGES.flatMap(([from, to]) => lines.slice(from - 1, to)).join("\n")}\n`;
-    expect(sha256(slices)).toBe(ORIGINAL_SLICES_SHA256);
-    expect(normalizeCapturedSlices(slices)).toBe(fixtureSlices());
+    expect(slices).toBe(fixtureSlices());
   });
 
-  it("preserves the original worker provenance and capability thresholds", () => {
+  it("records the serving build the policy is pinned to", () => {
     expect(LEGACY_MODEL_SELECTION_V1.legacyCompatibility.servingWorkerSha256).toBe(SERVING_WORKER_SHA256);
     expect(serving.T1_CAPABILITY_THRESHOLD).toBe(0.8);
     expect(serving.SCORE_THRESHOLDS).toEqual({ T1: 0.85, T2: 0.8, T3: 0.75 });
@@ -111,7 +109,7 @@ describe("public derivative of the frozen captured evaluator", () => {
 /** Index at which `priorP` lands exactly on `p` (inverse of the 0.55 + 0.45·i/60 curve). */
 const indexFor = (p: number) => ((p - 0.55) * 60) / 0.45;
 const NEAR = [-1e-9, 0, 1e-9];
-const BOUNDARY_INDICES = [0.75, 0.8, 0.85].flatMap((p) => NEAR.map((d) => indexFor(p) + d));
+const BOUNDARY_INDICES = [0.75, 0.8, 0.85, 0.9].flatMap((p) => NEAR.map((d) => indexFor(p) + d));
 
 const INDICES: ReadonlyArray<number | null> = [
   null,
@@ -160,10 +158,10 @@ const STATS_BY_TIER: ReadonlyArray<Partial<Record<Tier, TierScoreStats>>> = [
   { T1: STATS.sparse, T2: STATS.sparse, T3: STATS.sparse },
 ];
 
-const TIER_SETS: ReadonlyArray<readonly Tier[]> = [TIER_ORDER, ["T1"], []];
+const TIER_SETS: ReadonlyArray<readonly Tier[]> = [SERVING_TIERS, ["T1"], []];
 
 /** Priors placed exactly on, and one ulp-ish either side of, every cut and bar. */
-const PRIORS = [Number.NaN, 0.5, 0.55, 0.7, ...[0.75, 0.8, 0.85].flatMap((p) => NEAR.map((d) => p + d)), 0.9, 1];
+const PRIORS = [Number.NaN, 0.5, 0.55, 0.7, ...[0.75, 0.8, 0.85, 0.9].flatMap((p) => NEAR.map((d) => p + d)), 1];
 
 interface Diff {
   fn: string;
@@ -185,16 +183,26 @@ type BuildFn = (
   benchmarkRow?: BenchmarkRow | null,
 ) => ModelScore;
 
-/** The frozen serving evaluator held to the monotone-capability rule. */
+/** The frozen serving evaluator held to the  monotone-capability rule. */
 const servingMonotone: BuildFn = (id, idx, by, tiers, row) => {
   const score = serving.buildModelScore(id, idx, by, tiers, row) as ModelScore;
   return { ...score, tiers: enforceMonotoneCapability(score.tiers) };
 };
 
+/** The evaluator under test with T0 read as the serving T1 it replaced (see header). */
+const readAsServing =
+  (build: BuildFn): BuildFn =>
+  (...args) => {
+    const score = build(...args);
+    return { ...score, derivedTier: asServingTier(score.derivedTier) };
+  };
+
 function replayBuildModelScore(
-  next: BuildFn,
+  nextRaw: BuildFn,
   reference: BuildFn = servingMonotone,
+  { rawT0 = false }: { rawT0?: boolean } = {},
 ): { diffs: Diff[]; cases: number; scores: ModelScore[] } {
+  const next = rawT0 ? nextRaw : readAsServing(nextRaw);
   const diffs: Diff[] = [];
   const scores: ModelScore[] = [];
   let cases = 0;
@@ -214,15 +222,15 @@ function replayBuildModelScore(
   return { diffs, cases, scores };
 }
 
-describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () => {
+describe("zero-diff replay: legacy-model-selection-v1 vs serving t1baseline", () => {
   it("buildModelScore: every grid cell identical, and the grid crosses the T1 cut/bar split", () => {
     const { diffs, cases, scores } = replayBuildModelScore(buildModelScore);
     expect(diffs.slice(0, 3)).toEqual([]);
     expect(cases).toBe(INDICES.length * BENCHMARK_ROWS.length * STATS_BY_TIER.length * TIER_SETS.length);
 
     // Anti-vacuity: the grid must exercise both verdicts at every tier and the
-    // cell the t1cap080 patch exists for (capable at T1, derived tier below T1).
-    for (const tier of TIER_ORDER) {
+    // cell the t1baseline patch exists for (capable at T1, derived tier below T1).
+    for (const tier of SERVING_TIERS) {
       const verdicts = new Set(scores.map((s) => s.tiers[tier]?.capable).filter((v) => v !== undefined));
       expect(verdicts).toEqual(new Set([true, false]));
     }
@@ -233,7 +241,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     expect(new Set(scores.map((s) => s.priorBasis))).toEqual(new Set(["blended", "index-only", "unscored"]));
   });
 
-  it("Positive control: the raw serving output differs only in the verdicts the monotone rule caps", () => {
+  it(" positive control: the raw serving output differs only in the verdicts the monotone rule caps", () => {
     const { diffs } = replayBuildModelScore(buildModelScore, serving.buildModelScore as BuildFn);
     expect(diffs.length).toBeGreaterThan(0);
     let capped = 0;
@@ -241,7 +249,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
       const s = d.serving as ModelScore;
       const n = d.next as ModelScore;
       const uncapped = { ...n.tiers };
-      for (const tier of TIER_ORDER) {
+      for (const tier of SERVING_TIERS) {
         const t = n.tiers[tier];
         if (t?.cappedBy === undefined) continue;
         // A capped tier: unproven, an own-false easier tier, and it would have passed.
@@ -263,7 +271,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
   it("positive control: the old source T1 bar (0.85) is visible to the same grid", () => {
     const t1At085: TierPolicy = {
       ...LEGACY_MODEL_SELECTION_V1,
-      revision: 2,
+      revision: LEGACY_MODEL_SELECTION_V1.revision + 1,
       tiers: LEGACY_MODEL_SELECTION_V1.tiers.map((t): TierDefinition =>
         t.id === "T1" ? { ...t, legacy: { ...t.legacy, capabilityThreshold: 0.85 } } : t,
       ),
@@ -272,7 +280,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     const { diffs } = replayBuildModelScore((id, idx, by, tiers, row) => buildModelScore(id, idx, by, tiers, row, old));
     expect(diffs.length).toBeGreaterThan(0);
     // Only the T1 capability verdict may move; the cut, the prior and p never do.
-    // A T1 already capped by an easier tier stays false under the
+    // a T1 already capped by an easier tier stays false under the
     // 0.85 bar, and only its provenance moves — capped becomes its own verdict.
     let flipped = 0;
     for (const d of diffs) {
@@ -294,7 +302,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     const diffs: Diff[] = [];
     let cases = 0;
     for (const [name, s] of Object.entries(STATS)) {
-      for (const tier of [...TIER_ORDER, null] as const) {
+      for (const tier of [...SERVING_TIERS, null] as const) {
         for (const pp of PRIORS) {
           compare(diffs, "summarize", { name, tier, pp }, serving.summarize(s, tier, pp), summarize(s, tier, pp));
           // priorK/provenN passed explicitly, thresholds left to the default.
@@ -319,15 +327,19 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
   it("tier cuts: tierForPosterior, deriveModelTier, tierImpliedByIndex and the priors are unchanged", () => {
     const diffs: Diff[] = [];
     for (const p of [...PRIORS, -1, 0, 0.6, Number.POSITIVE_INFINITY]) {
-      compare(diffs, "tierForPosterior", p, serving.tierForPosterior(p), tierForPosterior(p));
+      const cut = tierForPosterior(p);
+      compare(diffs, "tierForPosterior", p, serving.tierForPosterior(p), { ...cut, tier: asServingTier(cut.tier) });
     }
     for (const aaIndex of INDICES) {
       compare(diffs, "priorP", aaIndex, serving.priorP(aaIndex), priorP(aaIndex));
-      if (aaIndex !== null) compare(diffs, "tierImpliedByIndex", aaIndex, serving.tierImpliedByIndex(aaIndex), tierImpliedByIndex(aaIndex));
+      if (aaIndex !== null) {
+        compare(diffs, "tierImpliedByIndex", aaIndex, serving.tierImpliedByIndex(aaIndex), asServingTier(tierImpliedByIndex(aaIndex)));
+      }
       for (const row of BENCHMARK_ROWS) {
         compare(diffs, "blendedPriorP", { aaIndex, row }, serving.blendedPriorP(aaIndex, row), blendedPriorP(aaIndex, row));
         for (const s of Object.values(STATS)) {
-          compare(diffs, "deriveModelTier", { aaIndex, row }, serving.deriveModelTier(aaIndex, row, s), deriveModelTier(aaIndex, row, s));
+          const derived = deriveModelTier(aaIndex, row, s);
+          compare(diffs, "deriveModelTier", { aaIndex, row }, serving.deriveModelTier(aaIndex, row, s), { ...derived, tier: asServingTier(derived.tier) });
         }
       }
     }
@@ -336,8 +348,41 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1cap080", () =
     expect(tierForPosterior(0.84).tier).toBe("T2");
     expect(tierForPosterior(0.85).tier).toBe("T1");
     expect(tierImpliedByIndex(indexFor(0.85) - 1e-9)).toBe("T2");
-    expect(LEGACY_TIER_POLICY.scoreThresholds).toEqual({ T1: 0.85, T2: 0.8, T3: 0.75 });
-    expect(LEGACY_TIER_POLICY.capabilityThresholds).toEqual({ T1: 0.8, T2: 0.8, T3: 0.75 });
+    expect(LEGACY_TIER_POLICY.scoreThresholds).toEqual({ T0: 0.9, T1: 0.85, T2: 0.8, T3: 0.75 });
+    expect(LEGACY_TIER_POLICY.capabilityThresholds).toEqual({ T0: 0.9, T1: 0.8, T2: 0.8, T3: 0.75 });
+  });
+});
+
+describe("T0 is the one deliberate departure from the frozen serving evaluator", () => {
+  it("positive control: the raw output differs from serving ONLY as a derived T0 where serving says T1", () => {
+    const { diffs, scores } = replayBuildModelScore(buildModelScore, servingMonotone, { rawT0: true });
+    expect(diffs.length).toBeGreaterThan(0);
+    for (const d of diffs) {
+      const s = d.serving as ModelScore;
+      const n = d.next as ModelScore;
+      expect(s.derivedTier).toBe("T1");
+      expect(n.derivedTier).toBe("T0");
+      expect({ ...n, derivedTier: "T1" }).toEqual(s);
+    }
+    // The grid reaches both sides of the 0.90 cut, so the control is not vacuous.
+    expect(scores.some((m) => m.derivedTier === "T0")).toBe(true);
+    expect(scores.some((m) => m.derivedTier === "T1")).toBe(true);
+  });
+
+  it("cuts T0 at exactly 0.90 and leaves the T1 cut at 0.85", () => {
+    expect(tierForPosterior(0.9).tier).toBe("T0");
+    expect(tierForPosterior(0.9 - 1e-9).tier).toBe("T1");
+    expect(tierForPosterior(1).tier).toBe("T0");
+    expect(tierImpliedByIndex(47)).toBe("T0");
+    expect(tierImpliedByIndex(46)).toBe("T1");
+    expect(tierImpliedByIndex(indexFor(0.85) - 1e-9)).toBe("T2");
+  });
+
+  it("holds the T0 capability bar at 0.90, and an empty T0 prior at 0.90 clears it", () => {
+    const empty = emptyTierScoreStats();
+    expect(summarize(empty, "T0", 0.9).capable).toBe(true);
+    expect(summarize(empty, "T0", 0.9 - 1e-9).capable).toBe(false);
+    expect(summarize(empty, "T0", Number.NaN).capable).toBe(false);
   });
 });
 
@@ -347,7 +392,7 @@ describe("zero-diff replay through selectModel (sticky and gated paths)", () => 
   // scores must give equal decisions; this checks it end to end.
   function scoresFrom(build: BuildFn, byTier: Partial<Record<Tier, TierScoreStats>>, aaShift: number) {
     return Object.fromEntries(
-      MODELS.map((m) => [m.id, build(m.id, m.aaIndex === null ? null : m.aaIndex + aaShift, byTier, TIER_ORDER, null)]),
+      MODELS.map((m) => [m.id, build(m.id, m.aaIndex === null ? null : m.aaIndex + aaShift, byTier, SERVING_TIERS, null)]),
     );
   }
 
@@ -359,7 +404,7 @@ describe("zero-diff replay through selectModel (sticky and gated paths)", () => 
       for (const aaShift of [-20, -10, 0, 10]) {
         const servingScores = scoresFrom(serving.buildModelScore, byTier, aaShift);
         const nextScores = scoresFrom(buildModelScore, byTier, aaShift);
-        for (const tier of TIER_ORDER) {
+        for (const tier of SERVING_TIERS) {
           for (const stickyModelId of [undefined, ...MODELS.map((m) => m.id)]) {
             const input = {
               profiles: PROFILES,
@@ -467,14 +512,15 @@ describe("version-unknown: a free-list index rule is never a raw index cut", () 
   });
 
   it("the seed enforces only the capability predicate", () => {
-    expect(LEGACY_TIER_POLICY.rules.map((r) => r.status)).toEqual(["enforced", "enforced", "enforced"]);
+    // One capability predicate per ladder tier (T0 joined in ).
+    expect(LEGACY_TIER_POLICY.rules.map((r) => r.status)).toEqual(TIER_ORDER.map(() => "enforced"));
   });
 });
 
 function withT1Rules(rules: TierDefinition["entryRules"]["all"]): TierPolicy {
   return {
     ...LEGACY_MODEL_SELECTION_V1,
-    revision: 2,
+    revision: LEGACY_MODEL_SELECTION_V1.revision + 1,
     tiers: LEGACY_MODEL_SELECTION_V1.tiers.map((t): TierDefinition => (t.id === "T1" ? { ...t, entryRules: { all: rules } } : t)),
   };
 }

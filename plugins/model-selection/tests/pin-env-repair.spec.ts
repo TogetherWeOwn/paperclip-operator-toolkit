@@ -12,7 +12,7 @@ import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 /**
- * Stale secret-ref repair. An override env replaces the assignee env
+ *  /  Class B. An override env replaces the assignee env
  * wholesale, and the host refuses a run whose merged env names a secret ref the
  * run's agent holds no binding for. A pin that snapshotted such a ref failed
  * every wake as `configuration_incomplete` until a human cleared it.
@@ -186,13 +186,20 @@ const failConfig = (harness: Awaited<ReturnType<typeof boot>>, errorCode = "conf
 describe("a configuration_incomplete run failure heals a poisoned pin", () => {
   const poisoned = { STALE: ref("former-assignee-secret"), KEEP: ref("agent-secret") };
 
-  it("rebuilds the env from the assignee on the same model", async () => {
+  // The repair no longer rebuilds the env FROM the assignee — it
+  // drops the stale ref and writes the pin's own keys: the agent's bindings
+  // (KEEP, PLAIN) stay on the agent record and reach the run through the
+  // base env under the per-key merge. The run heals because the merged env
+  // carries no ref the agent lacks, not because the pin re-supplies live refs.
+  it("drops the stale ref and writes only the pin's own keys on the same model", async () => {
     const harness = await boot(card(poisoned));
     await failConfig(harness);
     const after = await override(harness);
     expect(after.model).toBe(PIN);
     expect(after.env).not.toHaveProperty("STALE");
-    expect(after.env).toMatchObject(AGENT_ENV);
+    for (const key of Object.keys(AGENT_ENV)) {
+      expect(after.env, key).not.toHaveProperty(key);
+    }
     expect(staleOverrideSecretRefKeys(after.env, AGENT_ENV)).toEqual([]);
     expect(repairs(harness)).toHaveLength(1);
     expect(repairs(harness)[0]?.metadata).toMatchObject({ modelId: PIN, staleSecretRefKeys: ["STALE"], runId: "run-9" });

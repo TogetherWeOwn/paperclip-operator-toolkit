@@ -1,0 +1,46 @@
+{
+  "name": "codex-behind-reorder",
+  "laneUnderTest": "cliproxy-codex",
+  "mechanism": "pace-state-reorder",
+  "description": "The Codex lane trails its fair-share pace (behind) while the Claude lane is on pace. Cost order prefers the cheap Claude-lane model, but pace rank prefers behind over on — so enforce moves the pick onto the Codex lane while advise stays on cost.",
+  "issueId": "shadow-compare-codex-reorder-1",
+  "tier": "T1",
+  "models": [
+    {
+      "id": "codex-t1-dear",
+      "tier": "T1",
+      "laneId": "cliproxy-codex",
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15
+    },
+    {
+      "id": "claude-t1-cheap",
+      "tier": "T1",
+      "laneId": "cliproxy-claude",
+      "costPerMTokIn": 0.4,
+      "costPerMTokOut": 1.6
+    }
+  ],
+  "lanes": {
+    "cliproxy-codex": {
+      "state": "behind",
+      "serviceable": true,
+      "score": { "utilization": 0.3, "elapsed": 0.5, "deviation": -0.2 }
+    },
+    "cliproxy-claude": {
+      "state": "on",
+      "serviceable": true,
+      "score": { "utilization": 0.5, "elapsed": 0.5, "deviation": 0 }
+    }
+  },
+  "expected": {
+    "adviseWinner": "claude-t1-cheap",
+    "enforceWinner": "codex-t1-dear",
+    "advisePacingApplied": false,
+    "enforcePacingApplied": true,
+    "adviseTraceContains": ["pace ordering (shadow) reorders to codex-t1-dear > claude-t1-cheap"],
+    "adviseTraceOmits": ["pace ordering (enforce)", "slot throttle"],
+    "enforceTraceContains": ["pace ordering (enforce) reorders to codex-t1-dear > claude-t1-cheap"],
+    "enforceTraceOmits": ["slot throttle", "preferred for new dispatch"]
+  }
+}

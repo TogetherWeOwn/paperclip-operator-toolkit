@@ -7,7 +7,7 @@ const shared = {
   format: "esm",
   sourcemap: true,
   external: ["@paperclipai/plugin-sdk"],
-  // The manifest declares `run.model.resolve` only in a build made
+  // the manifest declares `run.model.resolve` only in a build made
   // for the fork host. The default artifact installs on a host without the hook.
   define: {
     __MODEL_SELECTION_RUN_RESOLVE__: JSON.stringify(process.env.MODEL_SELECTION_RUN_RESOLVE === "1"),

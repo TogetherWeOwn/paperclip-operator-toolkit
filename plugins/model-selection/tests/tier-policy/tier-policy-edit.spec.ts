@@ -1,5 +1,5 @@
 /**
- * The `model_selection_tier_policy` edit path.
+ *  P2 (): the `model_selection_tier_policy` edit path.
  * Every P1 guard must hold through the tool, plus the D4 request gates
  * (expectedRevision, reason, immutable id, referenced/default remove). This
  * build is proposal-only: no outcome is ever `accepted` and nothing persists.
@@ -26,8 +26,10 @@ import {
 } from "../../src/engine/tier-policy.js";
 
 const SEED = LEGACY_MODEL_SELECTION_V1;
+/** The active revision. Every edit proposes REV + 1; never hard-code the seed revision. */
+const REV = SEED.revision;
 const ACTOR = { agentId: "agent-1", runId: "run-1" };
-const REASON = "Test";
+const REASON = " test";
 
 const PREDICATE: MetricRule = { kind: "capability-predicate", decisionBinding: CAPABILITY_PRIOR_BINDING, policyRevision: LEGACY_EVALUATOR_ID };
 
@@ -72,7 +74,7 @@ function prepare(request: Record<string, unknown>, active: TierPolicy = SEED): T
 }
 
 function editRequest(tierId: string, patch: Record<string, unknown>, extra: Record<string, unknown> = {}) {
-  return { action: "edit", tierId, patch, expectedRevision: 1, reason: REASON, ...extra };
+  return { action: "edit", tierId, patch, expectedRevision: REV, reason: REASON, ...extra };
 }
 
 const codes = (result: TierPolicyEditResult) => result.issues.map((i) => i.code);
@@ -111,19 +113,19 @@ describe("edit", () => {
     const renamed = prepare(editRequest("T1", { name: "Frontier" }));
     expectProposalOnly(renamed);
     expect(renamed.baseSource).toBe(ACTIVE_TIER_POLICY_SOURCE);
-    expect(renamed).toMatchObject({ action: "edit", baseRevision: 1, proposedRevision: 2, dryRun: true });
+    expect(renamed).toMatchObject({ action: "edit", baseRevision: REV, proposedRevision: REV + 1, dryRun: true });
     expect(tierOf(renamed.proposedPolicy, "T1").name).toBe("Frontier");
     expect(renamed.diff).toEqual([
-      { path: "revision", change: "changed", before: 1, after: 2 },
+      { path: "revision", change: "changed", before: REV, after: REV + 1 },
       { path: "tiers.T1.name", change: "changed", before: "T1", after: "Frontier" },
     ]);
     expect(renamed.impact.after?.tierNames.T1).toBe("Frontier");
     expect(renamed.impact.wouldChangeServing).toBe(false);
 
-    const back = prepare({ ...editRequest("T1", { name: "T1" }), expectedRevision: 2, basePolicy: renamed.proposedPolicy });
+    const back = prepare({ ...editRequest("T1", { name: "T1" }), expectedRevision: REV + 1, basePolicy: renamed.proposedPolicy });
     expectProposalOnly(back);
     expect(back.baseSource).toBe("supplied");
-    expect(back.proposedRevision).toBe(3);
+    expect(back.proposedRevision).toBe(REV + 2);
     expect(back.proposedPolicy?.tiers).toEqual(SEED.tiers);
   });
 
@@ -139,11 +141,11 @@ describe("edit", () => {
 
   it("edits allowed efforts, and merges a partial legacy patch", () => {
     expectProposalOnly(prepare(editRequest("T2", { allowedEfforts: ["low", "medium"] })));
-    const raised = prepare(editRequest("T1", { legacy: { scoreThreshold: 0.9 } }));
+    const raised = prepare(editRequest("T1", { legacy: { scoreThreshold: 0.87 } }));
     expectProposalOnly(raised);
-    expect(tierOf(raised.proposedPolicy, "T1").legacy).toEqual({ ...tierOf(SEED, "T1").legacy, scoreThreshold: 0.9 });
+    expect(tierOf(raised.proposedPolicy, "T1").legacy).toEqual({ ...tierOf(SEED, "T1").legacy, scoreThreshold: 0.87 });
     expect(raised.impact.wouldChangeServing).toBe(true);
-    expect(raised.impact.after?.scoreThresholds.T1).toBe(0.9);
+    expect(raised.impact.after?.scoreThresholds.T1).toBe(0.87);
     expect(raised.diff.map((d) => d.path)).toEqual(["revision", "tiers.T1.legacy.scoreThreshold"]);
   });
 
@@ -177,7 +179,7 @@ describe("edit", () => {
   });
 
   it("refuses a changed id and fields outside the editable set", () => {
-    expectRejected(prepare(editRequest("T1", { id: "T0" })), "immutable-id");
+    expectRejected(prepare(editRequest("T1", { id: "T9" })), "immutable-id");
     expectRejected(prepare(editRequest("T1", { colour: "red" })), "unknown-patch-key");
     expectRejected(prepare(editRequest("T1", {})), "invalid-patch");
     expectRejected(prepare(editRequest("T9", { name: "x" })), "unknown-tier");
@@ -186,42 +188,42 @@ describe("edit", () => {
 });
 
 describe("add and remove", () => {
-  const T0 = { ...(SEED.tiers[0] as TierDefinition), id: "T0", name: "Floor", order: -1 };
+  const EXTRA = { ...(SEED.tiers[0] as TierDefinition), id: "T9", name: "Floor", order: -1 };
 
   it("refuses an added tier under the legacy evaluator but returns the proposal", () => {
-    const added = prepare({ action: "add", tier: T0, expectedRevision: 1, reason: REASON });
+    const added = prepare({ action: "add", tier: EXTRA, expectedRevision: REV, reason: REASON });
     expectRejected(added, "legacy-tier-unknown");
-    expect(added.proposedPolicy?.tiers.map((t) => t.id)).toEqual(["T3", "T2", "T1", "T0"]);
-    expect(added.diff.map((d) => `${d.path}:${d.change}`)).toEqual(["revision:changed", "tiers.T0:added"]);
+    expect(added.proposedPolicy?.tiers.map((t) => t.id)).toEqual(["T3", "T2", "T1", "T0", "T9"]);
+    expect(added.diff.map((d) => `${d.path}:${d.change}`)).toEqual(["revision:changed", "tiers.T9:added"]);
     expect(added.impact.after).toBeNull();
   });
 
   it("refuses a removed tier under the legacy evaluator", () => {
-    const removed = prepare({ action: "remove", tierId: "T2", expectedRevision: 1, reason: REASON });
+    const removed = prepare({ action: "remove", tierId: "T2", expectedRevision: REV, reason: REASON });
     expectRejected(removed, "legacy-tier-missing");
     expect(removed.diff.map((d) => `${d.path}:${d.change}`)).toEqual(["revision:changed", "tiers.T2:removed"]);
   });
 
   it("round-trips add then remove back to the seed tiers", () => {
-    const added = prepare({ action: "add", tier: T0, expectedRevision: 1, reason: REASON });
-    const removed = prepare({ action: "remove", tierId: "T0", expectedRevision: 2, reason: REASON, basePolicy: added.proposedPolicy });
+    const added = prepare({ action: "add", tier: EXTRA, expectedRevision: REV, reason: REASON });
+    const removed = prepare({ action: "remove", tierId: "T9", expectedRevision: REV + 1, reason: REASON, basePolicy: added.proposedPolicy });
     expectProposalOnly(removed);
-    expect(removed.proposedRevision).toBe(3);
+    expect(removed.proposedRevision).toBe(REV + 2);
     expect(removed.proposedPolicy?.tiers).toEqual(SEED.tiers);
   });
 
   it("refuses removing the default tier and a tier a task class references", () => {
-    expectRejected(prepare({ action: "remove", tierId: "T1", expectedRevision: 1, reason: REASON }), "tier-is-default");
+    expectRejected(prepare({ action: "remove", tierId: "T1", expectedRevision: REV, reason: REASON }), "tier-is-default");
     const referenced = { ...SEED, taskClassTierRefs: { deploy: "T3", review: "T3" } };
-    const result = prepare({ action: "remove", tierId: "T3", expectedRevision: 1, reason: REASON, basePolicy: referenced });
+    const result = prepare({ action: "remove", tierId: "T3", expectedRevision: REV, reason: REASON, basePolicy: referenced });
     expectRejected(result, "tier-referenced");
     expect(result.issues.find((i) => i.code === "tier-referenced")?.message).toContain("deploy, review");
-    expectRejected(prepare({ action: "remove", tierId: "T9", expectedRevision: 1, reason: REASON }), "unknown-tier");
+    expectRejected(prepare({ action: "remove", tierId: "T9", expectedRevision: REV, reason: REASON }), "unknown-tier");
   });
 
   it("refuses an add without a tier object", () => {
-    expectRejected(prepare({ action: "add", expectedRevision: 1, reason: REASON }), "invalid-tier");
-    expectRejected(prepare({ action: "add", tier: [T0], expectedRevision: 1, reason: REASON }), "invalid-tier");
+    expectRejected(prepare({ action: "add", expectedRevision: REV, reason: REASON }), "invalid-tier");
+    expectRejected(prepare({ action: "add", tier: [EXTRA], expectedRevision: REV, reason: REASON }), "invalid-tier");
   });
 });
 
@@ -236,7 +238,7 @@ describe("S-tier protection", () => {
   });
 
   it("accepts raising an S-tier bar and renaming it", () => {
-    expectProposalOnly(prepare(editRequest("T1", { legacy: { scoreThreshold: 0.9 } }), active));
+    expectProposalOnly(prepare(editRequest("T1", { legacy: { scoreThreshold: 0.87 } }), active));
     expectProposalOnly(prepare(editRequest("T1", { name: "S" }), active));
   });
 
@@ -259,11 +261,11 @@ describe("request gates", () => {
       const missing = prepare({ action, tierId: "T1", patch: { name: "x" }, reason: REASON });
       expectRejected(missing, "missing-expected-revision");
       expect(missing.proposedPolicy).toBeNull();
-      const stale = prepare({ action, tierId: "T1", patch: { name: "x" }, reason: REASON, expectedRevision: 2 });
+      const stale = prepare({ action, tierId: "T1", patch: { name: "x" }, reason: REASON, expectedRevision: REV + 1 });
       expectRejected(stale, "revision-conflict");
       expect(stale.proposedPolicy).toBeNull();
     }
-    expectRejected(prepare(editRequest("T1", { name: "x" }, { expectedRevision: "1" })), "revision-conflict");
+    expectRejected(prepare(editRequest("T1", { name: "x" }, { expectedRevision: String(REV) })), "revision-conflict");
   });
 
   it("checks expectedRevision on validate and diff too, when supplied", () => {
@@ -278,7 +280,7 @@ describe("request gates", () => {
 
   it("refuses an unknown action", () => {
     for (const action of [undefined, "", "accept", "delete", 3]) {
-      const result = prepare({ action, expectedRevision: 1, reason: REASON });
+      const result = prepare({ action, expectedRevision: REV, reason: REASON });
       expectRejected(result, "invalid-action");
       expect(result.action).toBeNull();
     }
@@ -299,19 +301,19 @@ describe("validate and diff", () => {
   });
 
   it("refuses an evidence-v2 candidate as evaluator-unavailable", () => {
-    const candidate = { ...SEED, revision: 2, evaluator: EVIDENCE_V2_EVALUATOR_ID };
+    const candidate = { ...SEED, revision: REV + 1, evaluator: EVIDENCE_V2_EVALUATOR_ID };
     expectRejected(prepare({ action: "validate", policy: candidate }), "evaluator-unavailable");
   });
 
   it("refuses a whole-policy candidate that is not the next revision", () => {
     expectRejected(prepare({ action: "validate", policy: { ...SEED } }), "revision-not-next");
-    expectRejected(prepare({ action: "diff", policy: { ...SEED, revision: 5 } }), "revision-not-next");
+    expectRejected(prepare({ action: "diff", policy: { ...SEED, revision: REV + 4 } }), "revision-not-next");
   });
 
   it("diffs a candidate by tier id, without needing a reason", () => {
     const candidate = {
       ...SEED,
-      revision: 2,
+      revision: REV + 1,
       tiers: SEED.tiers.map((t) => (t.id === "T2" ? { ...t, name: "Mid", allowedEfforts: ["high"] } : t)),
     };
     const result = prepare({ action: "diff", policy: candidate });
@@ -322,20 +324,20 @@ describe("validate and diff", () => {
 
   it("validate applies the S-tier check to a whole-policy candidate", () => {
     const active = sTierPolicy();
-    const candidate = { ...active, revision: 2, tiers: active.tiers.map((t) => (t.id === "T1" ? { ...t, sTier: false } : t)) };
+    const candidate = { ...active, revision: REV + 1, tiers: active.tiers.map((t) => (t.id === "T1" ? { ...t, sTier: false } : t)) };
     expectRejected(prepare({ action: "validate", policy: candidate }, active), "s-tier-weakened");
   });
 
   it("refuses a candidate whose containers would make the validator throw", () => {
     const candidates = [
       "policy",
-      { ...SEED, revision: 2, tiers: "T1" },
-      { ...SEED, revision: 2, tiers: [null] },
-      { ...SEED, revision: 2, tiers: SEED.tiers.map((t) => ({ ...t, entryRules: { all: [null] } })) },
-      { ...SEED, revision: 2, tiers: SEED.tiers.map((t) => ({ ...t, legacy: null })) },
-      { ...SEED, revision: 2, tiers: SEED.tiers.map((t) => ({ ...t, evidence: "legacy" })) },
-      { ...SEED, revision: 2, tiers: SEED.tiers.map((t) => ({ ...t, allowedEfforts: "high" })) },
-      { ...SEED, revision: 2, taskClassTierRefs: [] },
+      { ...SEED, revision: REV + 1, tiers: "T1" },
+      { ...SEED, revision: REV + 1, tiers: [null] },
+      { ...SEED, revision: REV + 1, tiers: SEED.tiers.map((t) => ({ ...t, entryRules: { all: [null] } })) },
+      { ...SEED, revision: REV + 1, tiers: SEED.tiers.map((t) => ({ ...t, legacy: null })) },
+      { ...SEED, revision: REV + 1, tiers: SEED.tiers.map((t) => ({ ...t, evidence: "legacy" })) },
+      { ...SEED, revision: REV + 1, tiers: SEED.tiers.map((t) => ({ ...t, allowedEfforts: "high" })) },
+      { ...SEED, revision: REV + 1, taskClassTierRefs: [] },
     ];
     for (const policy of candidates) {
       expectRejected(prepare({ action: "validate", policy }), "malformed-policy");
@@ -355,8 +357,8 @@ describe("result contract", () => {
       { action: "validate" },
       editRequest("T1", { name: "Frontier" }, { dryRun: false }),
       editRequest("T1", { order: 0 }),
-      { action: "remove", tierId: "T1", expectedRevision: 1, reason: REASON },
-      { action: "diff", policy: { ...SEED, revision: 2 } },
+      { action: "remove", tierId: "T1", expectedRevision: REV, reason: REASON },
+      { action: "diff", policy: { ...SEED, revision: REV + 1 } },
     ];
     for (const request of requests) {
       const result = prepare(request);
@@ -375,14 +377,14 @@ describe("result contract", () => {
 
   it("never mutates the active policy or the caller's inputs", () => {
     const before = JSON.stringify(SEED);
-    const patch = { legacy: { scoreThreshold: 0.9 } };
+    const patch = { legacy: { scoreThreshold: 0.87 } };
     const base = JSON.parse(JSON.stringify(SEED)) as TierPolicy;
     const baseBefore = JSON.stringify(base);
     const result = prepare({ ...editRequest("T1", patch), basePolicy: base });
     expectProposalOnly(result);
     expect(JSON.stringify(SEED)).toBe(before);
     expect(JSON.stringify(base)).toBe(baseBefore);
-    expect(patch).toEqual({ legacy: { scoreThreshold: 0.9 } });
+    expect(patch).toEqual({ legacy: { scoreThreshold: 0.87 } });
   });
 
   it("derives a stable audit id from action, base, proposal, reason and actor", () => {
@@ -409,13 +411,13 @@ describe("result contract", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     const inputs: Record<string, unknown>[] = [
-      { action: "edit", tierId: "T1", patch: cyclic, expectedRevision: 1, reason: REASON },
-      { action: "add", tier: cyclic, expectedRevision: 1, reason: REASON },
+      { action: "edit", tierId: "T1", patch: cyclic, expectedRevision: REV, reason: REASON },
+      { action: "add", tier: cyclic, expectedRevision: REV, reason: REASON },
       { action: "validate", policy: cyclic },
       { action: "validate", basePolicy: cyclic },
       { action: "edit", tierId: ["T1"], patch: "name", expectedRevision: {}, reason: 7 },
       { action: "validate", policy: { tiers: [{}] } },
-      { action: "edit", tierId: "T1", patch: { name: 42, order: "high", allowedEfforts: ["turbo"] }, expectedRevision: 1, reason: REASON },
+      { action: "edit", tierId: "T1", patch: { name: 42, order: "high", allowedEfforts: ["turbo"] }, expectedRevision: REV, reason: REASON },
     ];
     for (const request of inputs) {
       const result = prepare(request);

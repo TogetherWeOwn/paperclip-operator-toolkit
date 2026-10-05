@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-// Decide whether a change can alter the outcome of this plugin's mutation
-// gate, so CI skips the ~300-mutant sweep for PRs and pushes that cannot
-// affect it. The gate is by far the most expensive job in the repo and until
-// now ran on every run, including ones that never touched the plugin.
+// Decide whether a change can alter the outcome of this plugin's
+// mutation gate, so CI skips the ~300-mutant sweep for PRs and pushes that
+// cannot affect it. The gate is by far the most expensive job in the repo and
+// until now ran on every run, including ones that never touched the plugin.
 //
 // FAIL SAFE IS THE WHOLE DESIGN. "Impacted" is the safe answer, so every path
 // that is not a positive proof of "unaffected" resolves to impacted=true: an

@@ -4,13 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
 import { PLUGIN_STATE_KEYS, TIERS, TOOL_NAMES } from "../src/constants.js";
+import { LEGACY_MODEL_SELECTION_V1 } from "../src/engine/tier-policy.js";
 import { createPlugin } from "../src/worker.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
 /**
- * The three MCP tools in the
- * separate `paperclip-model-router` repo and the plain-object
- * `data` envelope for every tool here are covered elsewhere. This spec pins the FAIL-CLOSED shapes
+ *  (D2b, part 2).  covers the three MCP tools in the
+ * separate `paperclip-model-router` repo;  covers the plain-object
+ * `data` envelope for every tool here. This spec pins the FAIL-CLOSED shapes
  * for the remaining model-selection plugin tools in THIS repo: every
  * malformed input resolves (never throws) with a string `content` and a
  * plain-object `data` carrying a stable `{ ok: false, error: <code> }`
@@ -109,7 +110,7 @@ function cover(tool: string) {
   coveredTools.add(tool);
 }
 
-describe("Fail-closed error shapes for the remaining model-selection tools", () => {
+describe("fail-closed error shapes for the remaining model-selection tools", () => {
   it("advise: missing, mistyped, and unknown issueId all fail closed as issue-not-found", async () => {
     cover(TOOL_NAMES.advise);
     const harness = await boot(baseConfig());
@@ -371,7 +372,7 @@ describe("Fail-closed error shapes for the remaining model-selection tools", () 
     const cases: Array<[Record<string, unknown>, string]> = [
       [{}, "invalid-action"],
       [{ action: "bogus" }, "invalid-action"],
-      [{ action: "edit", expectedRevision: 1 }, "missing-reason"],
+      [{ action: "edit", expectedRevision: LEGACY_MODEL_SELECTION_V1.revision }, "missing-reason"],
       [{ action: "edit", reason: "r" }, "missing-expected-revision"],
       [{ action: "edit", tierId: "T1", patch: { name: "x" }, reason: "r", expectedRevision: 9 }, "revision-conflict"],
       [{ action: "add", basePolicy: 5 }, "malformed-policy"],
@@ -403,11 +404,16 @@ describe("Fail-closed error shapes for the remaining model-selection tools", () 
       action: "edit",
       tierId: "T1",
       patch: { name: "Frontier" },
-      expectedRevision: 1,
+      expectedRevision: LEGACY_MODEL_SELECTION_V1.revision,
       reason: "private-reason-text",
       dryRun: false,
     });
-    expect(data).toMatchObject({ ok: true, outcome: "proposalOnly", persisted: false, proposedRevision: 2 });
+    expect(data).toMatchObject({
+      ok: true,
+      outcome: "proposalOnly",
+      persisted: false,
+      proposedRevision: LEGACY_MODEL_SELECTION_V1.revision + 1,
+    });
     expect(writes).toEqual([]);
     expect(harness.activity.length).toBe(activityBefore);
     expect(harness.dbExecutes.length).toBe(executesBefore);

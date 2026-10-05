@@ -1,21 +1,19 @@
 import { copyFile, cp, mkdir, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 
-// The job and step that actually execute this gate on CI. The refusal names
-// the mutants matrix, not the required suite job: the suite job only
-// aggregates the shards' verdict and never runs the sweep itself, so an agent
-// told to cite the suite has no evidence to cite and falls back to running
-// the gate locally — the storm this refusal exists to stop.
-// `mutation-gate-runtime.spec.ts` pins both names to ci.yml.
+// The job and step that actually execute this gate on the private runner.
+// the refusal first named `Offline suites`, which never runs this
+// plugin's mutants — that job runs the repo-level verification/*-mutation-gate.sh
+// set. An agent told to cite a job that cannot hold the evidence has no
+// alternative to running the gate locally, which is the storm this refusal
+// exists to stop. `mutation-gate-runtime.spec.ts` pins both names to ci.yml.
 //
-// The sweep is sharded, so the step lives in the `model-selection mutants`
-// matrix (one job per shard) rather than in the required
-// `model-selection suite` job, which only aggregates their verdict.
+// the sweep is sharded, so the step now lives in the
+// `model-selection mutants` matrix (one job per shard) rather than in the
+// required `model-selection suite` job, which only aggregates their verdict.
 export const MUTATION_GATE_CI_JOB = "model-selection mutants";
 export const MUTATION_GATE_CI_STEP = "Kill named selection mutants";
-export const MUTATION_GATE_CI_MESSAGE = `run on CI (standard runner) — cite the PR's "${MUTATION_GATE_CI_JOB}" shard jobs, step "${MUTATION_GATE_CI_STEP}"`;
+export const MUTATION_GATE_CI_MESSAGE = `run on CI (private runner) — cite the PR's "${MUTATION_GATE_CI_JOB}" shard jobs, step "${MUTATION_GATE_CI_STEP}"`;
 
 export function mutationGateAllowed(env = process.env) {
   return env.CI === "true" || env.MUTATION_GATE_LOCAL === "1";
@@ -35,15 +33,15 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // `../../../` URL. Mutants run from a scratch copy rooted elsewhere, so any
 // such file that is not staged makes its spec throw ENOENT — and the mutant
 // loop scores every nonzero exit as a kill, so an unrunnable suite reports a
-// clean sweep while testing nothing (an unmutated run from the copy
+// clean sweep while testing nothing (: an unmutated run from the copy
 // exited 1 on `.github/workflows/ci.yml`, making `18/18 killed` meaningless).
 // This list is the fix; `isolated baseline` in mutation-gate.mjs is what keeps
 // it honest, because a new out-of-copy dependency fails there rather than
 // silently passing here.
 //
-// That honesty has now been paid out once. `test/fixtures/orgdb/
+// that honesty has now been paid out once. `test/fixtures/orgdb/
 // schema.sql` is read by `context-lookup.spec.ts`, which did not exist on this
-// branch — it arrived from main in the merge-forward. The gate
+// branch — it arrived from main in the merge-forward ( #205). The gate
 // went red on the isolated baseline at 21s, before the first mutant, rather
 // than inflating to a clean 20/20 on an unstaged fixture. Expect this list to
 // need an entry whenever main adds an out-of-plugin read; the
@@ -53,32 +51,30 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // nested-out-of-plugin-read.spec.ts, a spec deliberately nested one directory
 // under tests/ so the scan test proves it walks subdirectories and resolves
 // `../` depth relative to each spec's own location, not a fixed count.
+// `tests/fixtures/bridge/bridge-assembled-rows.json` is read by
+// assembled-snapshot-freshness.spec.ts via `../../../` from the
+// plugin tests dir; without staging, the isolated baseline throws ENOENT and
+// the gate reports BROKEN GATE.
+// No `ops/` entry: the public tree has no ops directory, and the only suite
+// consumer (paired-summary.spec.ts) takes the harness path from
+// PAIRED_DECISION_GATE_HARNESS, never from the checkout.
 export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
   ".github/workflows/ci.yml",
   "test/fixtures/orgdb/schema.sql",
   "CONTRIBUTING.md",
+  "tests/fixtures/bridge/bridge-assembled-rows.json",
 ]);
 
 export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATION_TREE_REPO_FIXTURES) {
   for (const relativePath of fixtures) {
     const target = join(scratchRoot, relativePath);
-    // Mirror the checkout. The isolated baseline must establish whether the
-    // suite can run with the available repository fixtures; absence must not
-    // manufacture successful mutant kills.
-    if (!existsSync(join(repoRoot, relativePath))) continue;
     await mkdir(dirname(target), { recursive: true });
     await copyFile(join(repoRoot, relativePath), target);
   }
 }
 
-export async function runSequentially(items, run) {
-  for (const item of items) {
-    await run(item);
-  }
-}
-
-// `MUTATION_SHARD=i/N` splits the sweep across N independent jobs. Three
-// properties are the whole contract, and each has a spec:
+// `MUTATION_SHARD=i/N` splits the sweep across N independent jobs.
+// Three properties are the whole contract, and each has a spec:
 //   * COVERAGE: for any N, the N shards are pairwise disjoint and their union is
 //     the whole list — a mutant that falls between shards is a mutant nobody
 //     kills, which reads as a green sweep that tested less than it claims.
@@ -108,6 +104,12 @@ export function selectMutationShard(items, shard) {
   return items.filter((_, position) => position % shard.total === shard.index - 1);
 }
 
+export async function runSequentially(items, run) {
+  for (const item of items) {
+    await run(item);
+  }
+}
+
 // Vitest 2.1.9 DOES read both variables — resolveConfig applies
 // VITEST_MAX_THREADS to poolOptions.threads/vmThreads and VITEST_MAX_FORKS to
 // poolOptions.forks/vmForks. What makes an env-only cap useless here is which
@@ -122,7 +124,7 @@ export function selectMutationShard(items, shard) {
 // flags. Either alone would be fragile: the flags without the pool would cap an
 // idle pool again, and the env var without the flags depends on a config
 // default that is not ours to hold still.
-// The default used to be conditional — `if (env.CI !== "true")` — so
+// the default used to be conditional — `if (env.CI !== "true")` — so
 // the cap applied everywhere EXCEPT the one context the refusal above permits.
 // `ci.yml` sets no VITEST_* for the `model-selection suite` job, and that job
 // runs on `[self-hosted, two-selfhosted]`, so bare `{ CI: "true" }` produced
@@ -143,6 +145,18 @@ export const MUTATION_GATE_DEFAULT_FORKS = 2;
 // this suite is ~13 s wall at maxForks=2 (35 files / 591 tests), so this is
 // ~45x headroom and cannot fire on a merely slow runner.
 export const MUTATION_GATE_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+
+// `spawnSync` caps each of stdout and stderr at 1 MiB by default and,
+// past that, SIGKILLs the child and reports `{ status: null, signal: "SIGKILL",
+// error: ENOBUFS }` — byte for byte what a host OOM kill or a sibling sweeper
+// looks like. A mutant the suite catches LOUDLY (the shard-split spec prints
+// whole arrays for every failing size/N row) crossed that line in CI, so a
+// mutant that was killed read as BROKEN GATE, twice, on the same mutant, on
+// different runners. A real kill must never depend on how much the failing
+// assertions print. 64 MiB is far above any failing run of this suite (~1.5 MB
+// worst case) and still bounded, so a runaway writer ends as BROKEN GATE
+// instead of exhausting the runner's memory.
+export const MUTATION_GATE_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024;
 
 // Returns a positive integer, never null. An empty, absent, zero or unparseable
 // value falls back to the default rather than to "unbounded" — `VITEST_MAX_FORKS:
@@ -168,12 +182,13 @@ export function mutationGateVitestInvocation(env = process.env) {
   const args = [
     "node_modules/vitest/vitest.mjs",
     "run",
-    // No results cache. The gate scores each run from process exit/stdout,
-    // never from the cache — and a nested vitest resolving its results file
-    // through a root-owned shared install dies on write even when the tests
-    // themselves pass. `--cache=false` isolates the run without chowning
-    // shared node_modules and without waiving the suite; CI (writable
-    // workspace) is unaffected either way.
+    // no results cache. The gate scores each run from process
+    // exit/stdout, never from the cache — and a nested vitest resolving
+    // `node_modules/.vite/vitest/results.json` through a root-owned shared
+    // install (package-root symlink chain) dies EACCES on write even when the
+    // tests themselves pass (flag-probe: 1/1 pass, exit 1). `--cache=false`
+    // isolates the run without chowning shared node_modules and without
+    // waiving the suite; CI (writable workspace) is unaffected either way.
     "--cache=false",
     "--pool=forks",
     `--poolOptions.forks.maxForks=${limit}`,
@@ -186,73 +201,6 @@ export function mutationGateVitestInvocation(env = process.env) {
     env: childEnv,
     timeout: MUTATION_GATE_RUN_TIMEOUT_MS,
     killSignal: "SIGKILL",
-  };
-}
-
-// How much of a run's captured output the gate keeps in memory for scoring
-// and failure printing. Full logs always land on disk; only the in-memory
-// copy is tailed.
-export const MUTATION_GATE_RUN_LOG_TAIL_BYTES = 1024 * 1024;
-
-let gateRunCounter = 0;
-
-function readLogTail(path) {
-  const fd = openSync(path, "r");
-  try {
-    const { size } = fstatSync(fd);
-    if (size <= MUTATION_GATE_RUN_LOG_TAIL_BYTES) return readFileSync(path, "utf8");
-    const length = MUTATION_GATE_RUN_LOG_TAIL_BYTES;
-    const buffer = Buffer.alloc(length);
-    readSync(fd, buffer, 0, length, size - length);
-    return `[truncated ${size} bytes to the last ${length}]\n${buffer.toString("utf8")}`;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-// Run one gate command with stdout/stderr redirected to per-run log files,
-// never buffered through spawnSync.
-//
-// spawnSync buffers both streams against a single shared 1MB default cap and
-// reports the overflow as `error.code === "ENOBUFS"` after killing the child
-// with the configured kill signal — a shape (`status: null, signal:
-// SIGKILL`) identical to an outside kill or the per-run timeout. One mutant
-// whose failing specs print large assertion diffs sat at ~75% of that cap
-// locally and over it on CI, so the same healthy run died deterministically
-// at the same second on every CI attempt while passing locally. Redirecting
-// to files removes the cliff entirely: a run now only fails to complete when
-// it really was killed or wedged, which is what the retry and the BROKEN
-// GATE paths are for. The returned shape matches spawnSync's (`status`,
-// `signal`, `error`, `stdout`, `stderr`) plus the log paths, so existing
-// scoring keeps working unchanged.
-export function runGateCommand({ command, args, cwd, env, timeout, killSignal, logDir, label }) {
-  gateRunCounter += 1;
-  const tag = `${String(gateRunCounter).padStart(3, "0")}-${label}`;
-  mkdirSync(logDir, { recursive: true });
-  const stdoutPath = join(logDir, `${tag}.stdout.log`);
-  const stderrPath = join(logDir, `${tag}.stderr.log`);
-  const outFd = openSync(stdoutPath, "w");
-  const errFd = openSync(stderrPath, "w");
-  let result;
-  try {
-    result = spawnSync(command, args, {
-      cwd,
-      env,
-      timeout,
-      killSignal,
-      stdio: ["ignore", outFd, errFd],
-    });
-  } finally {
-    closeSync(outFd);
-    closeSync(errFd);
-  }
-  return {
-    status: result.status,
-    signal: result.signal,
-    error: result.error,
-    stdout: readLogTail(stdoutPath),
-    stderr: readLogTail(stderrPath),
-    stdoutPath,
-    stderrPath,
+    maxBuffer: MUTATION_GATE_OUTPUT_LIMIT_BYTES,
   };
 }

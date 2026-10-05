@@ -46,7 +46,7 @@ function observation(): LanePaceObservation {
 const MODELS_WITH_LANES = MODELS.map((m) => ({ ...m, laneId: "lane-a" }));
 
 describe("paired decision records", () => {
-  it("produces every field the paired-decision schema requires", () => {
+  it("produces every field the paired-decision-v1 schema requires", () => {
     const decision = selectModel({
       ...base,
       descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
@@ -55,7 +55,7 @@ describe("paired decision records", () => {
 
     const record = buildShadowRecord({
       issueId: "i1",
-      issueIdentifier: "EX-1",
+      issueIdentifier: "",
       nowIso: NOW_ISO,
       decision,
       descriptor: { issueId: "i1", labelNames: ["tier:T3"] },
@@ -73,7 +73,7 @@ describe("paired decision records", () => {
     expect(record.schema).toBe(SHADOW_SCHEMA_VERSION);
     expect(record.writer).toBe("plugin-shadow");
     expect(record.issueId).toBe("i1");
-    expect(record.issueIdentifier).toBe("EX-1");
+    expect(record.issueIdentifier).toBe("");
     expect(record.ts).toBe(NOW_ISO);
     expect(["new-card", "repin"]).toContain(record.trigger);
     expect(["T1", "T2", "T3"]).toContain(record.tier);
@@ -419,7 +419,7 @@ describe("paired decision records", () => {
   });
 
   it("names the correct gate in explanations, not another gate that also applies", () => {
-    // Acceptance: `flaky` is both disabled AND on a lane the ledger
+    // acceptance: `flaky` is both disabled AND on a lane the ledger
     // reports unserviceable. `select.ts` checks `disabled` first and never
     // reaches the lane check for this model, so the persisted explanation
     // must name `disabled` — a wrong-but-populated `lane-unserviceable`
@@ -489,12 +489,12 @@ describe("paired decision records", () => {
     expect(record.explanationsTruncated).toBe(5);
   });
 
-  it("BoundPickWhy passes a short trace through untouched", () => {
+  it(": boundPickWhy passes a short trace through untouched", () => {
     expect(boundPickWhy(["a", "b"])).toBe("a; b");
     expect(boundPickWhy([])).toBe("");
   });
 
-  it("BoundPickWhy clamps a long trace with an explicit truncated marker", () => {
+  it(": boundPickWhy clamps a long trace with an explicit truncated marker", () => {
     // 3× the cap: the marker (~20 chars) is noise next to the cut, and the
     // contract that matters is a bounded output, not a strictly shorter one
     // (a trace 1 char over the cap legitimately grows by the marker).
@@ -545,7 +545,7 @@ describe("paired decision records", () => {
  * lane observations across 5,000 decisions. The quota page reads these two
  * columns, which meant a governing-window number was rendered under a
  * `fiveHour` label — a mislabelled reading, which is worse than a missing one
- * because it reads as a measurement. Build item 1 is "the 5-hour
+ * because it reads as a measurement.  Build item 1 is "the 5-hour
  * window binds first", and the 2026-09-11 incident lost 60 runs precisely
  * because weekly looked fine while 5h was gone.
  */

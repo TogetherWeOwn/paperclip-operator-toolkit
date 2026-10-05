@@ -16,7 +16,7 @@ import type {
 import type { Tier } from "../../src/constants.js";
 
 /**
- * Diff a real Python evaluation of `tier_dispatcher.py`'s
+ * task #10: diff a real Python evaluation of `tier_dispatcher.py`'s
  * `pick()` (via `pick_reference.py`, a verbatim port with file/podman I/O
  * replaced by stdin JSON — see that file's docstring) against the TypeScript
  * `selectModel()` engine, on identical inputs, across >= 20 scenarios.
@@ -28,13 +28,13 @@ import type { Tier } from "../../src/constants.js";
  *    Python's `pick()` only ever considers `MODELS` rows with
  *    `tier == TIER` — it has no concept of a tier FLOOR that also admits
  *    more-capable tiers (that admit-higher-tier behavior is a genuine
- *    ADR-0008 evolution in `select.ts`, not a porting target, so it
+ *    /ADR-0008 evolution in `select.ts`, not a porting target, so it
  *    is deliberately kept out of scope here by never giving a scenario a
  *    higher-tier model to admit).
  * 2. `pacingMode: "shadow"` everywhere, not `"enforce"`. `shadow` still runs
  *    every gate this harness cares about (hard-stop, lane-avoid, lane-outage,
  *    lane-no-room — all gated on `paceActive`, true in both `shadow` and
- *    `enforce`), but does NOT let `orderCandidatesByPace`'s
+ *    `enforce`), but does NOT let `orderCandidatesByPace`'s 
  *    pace-state-rank reordering overwrite `applyPickOrdering`'s cost-band
  *    tiebreak — a reordering concept `tier_dispatcher.py` never had. Using
  *    `enforce` here would silently re-sort same-tier candidates by raw cost
@@ -474,7 +474,7 @@ const SCENARIOS: ScenarioDef[] = [
     // cheapest USABLE regular candidate regardless of capability in that
     // case (tier_dispatcher.py:220-222), while `select.ts`'s capability-score
     // gate is a hard, never-bypassed exclusion (see the comment at
-    // select.ts:259-266) — a deliberate hardening documented
+    // select.ts:259-266) — a deliberate  hardening documented
     // elsewhere, not a porting gap this harness needs to (or should) paper
     // over. This scenario instead exercises the ladder both engines agree
     // on: a fallback-only row is used, uncontested by capability, once every
@@ -556,7 +556,7 @@ const SCENARIOS: ScenarioDef[] = [
     },
   },
   {
-    name: "zai-peak-hour-throttle-excludes-with-one-active-pin",
+    name: "zai-peak-hour-throttle-excludes-at-",
     tier: "T2",
     now: PEAK_NOW,
     models: [
@@ -604,7 +604,7 @@ const SCENARIOS: ScenarioDef[] = [
     lanes: { codex: { serviceable: false }, claude: { serviceable: false } },
   },
   {
-    // No prior scenario ever set `fiveHourUtil`, so
+    // fix 2/4: no prior scenario ever set `fiveHourUtil`, so
     // `lane_5h(lane) >= 0.5` (pick_reference.py:159) / the five-hour window
     // check inside `laneHasRoom()` (pacing.ts) was never exercised by this
     // harness. Named mutant: "5h stop dropped" — if that `>= 0.5` new-
@@ -622,7 +622,7 @@ const SCENARIOS: ScenarioDef[] = [
     lanes: { "opencode-go": { fiveHourUtil: 0.6 }, claude: {} },
   },
   {
-    // Proves the fallback ladder does NOT silently land on
+    // fix 2/4: proves the fallback ladder does NOT silently land on
     // a lane that is itself over its own avoid threshold — every candidate
     // here (regular AND fallback-only) is over-avoid. Named mutant: "fallback
     // skips the avoid gate" — if the fallback-only branch of `select.ts`'s
@@ -642,7 +642,7 @@ const SCENARIOS: ScenarioDef[] = [
   },
 ];
 
-describe("Task #10: pick_reference.py vs selectModel() equivalence", () => {
+describe(" task #10: pick_reference.py vs selectModel() equivalence", () => {
   it("covers at least 20 scenarios", () => {
     expect(SCENARIOS.length).toBeGreaterThanOrEqual(20);
   });
@@ -654,7 +654,7 @@ describe("Task #10: pick_reference.py vs selectModel() equivalence", () => {
     });
   }
 
-  it("Fix 2/4: all-lanes-over-avoid-fallback-never-lands-on-avoided-lane resolves to no usable model on both engines, not merely to matching engines", () => {
+  it(" fix 2/4: all-lanes-over-avoid-fallback-never-lands-on-avoided-lane resolves to no usable model on both engines, not merely to matching engines", () => {
     // The loop above only proves python === ts; it cannot by itself catch
     // both engines agreeing on the SAME wrong over-avoid lane. Assert the
     // stronger, specific property the issue asked for directly.

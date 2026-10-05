@@ -11,7 +11,7 @@ import {
   type RunResolveSnapshot,
 } from "../src/engine/run-resolve.js";
 import { stoppedLane, type LaneLedger } from "./run-resolve-helpers.js";
-import { MODELS, NOW, PROFILES, NO_ESCALATION } from "./fixtures.js";
+import { LANED_MODELS, MODELS, NOW, PROFILES, NO_ESCALATION, account, laneDoc } from "./fixtures.js";
 
 const LANES = { haiku: "lane-haiku", sonnet: "lane-sonnet", opus: "lane-opus" };
 
@@ -25,7 +25,13 @@ function roster(overrides: Record<string, Record<string, unknown>> = {}) {
 }
 
 function snapshot(
-  options: { ledger?: LaneLedger; models?: ReturnType<typeof roster>; selection?: Record<string, unknown> } = {},
+  options: {
+    ledger?: LaneLedger;
+    models?: readonly Record<string, unknown>[];
+    selection?: Record<string, unknown>;
+    /** The published lane-availability document as the worker loads it; `null` = nothing published. */
+    availabilityRaw?: unknown;
+  } = {},
 ): RunResolveSnapshot {
   const config = resolveConfig({
     selection: { enabled: true, mode: "enforce", holdOnUntrustedProfile: true, ...(options.selection ?? {}) },
@@ -43,7 +49,7 @@ function snapshot(
     laneOutageOverride: null,
     zaiPaceOverride: null,
     pinsWeightByLane: {},
-    availabilityRaw: null,
+    availabilityRaw: options.availabilityRaw ?? null,
     laneEvidence: { lanes: [], windowHours: 24, unreadableReason: null },
     loadedAtMs: NOW,
   };
@@ -95,7 +101,7 @@ function decided(resolution: ReturnType<typeof resolveRunDecision>) {
   return resolution;
 }
 
-describe("run-scoped decision", () => {
+describe("run-scoped decision ()", () => {
   it("decides a first run from the tier label, recording the first decision", () => {
     const resolution = decided(resolveRunDecision(input()));
     expect(resolution.result.model).toBe("claude-sonnet-5");
@@ -390,5 +396,206 @@ describe("run-scoped decision", () => {
   it("decides for a wake that carries a wake reason without forcing it advisory", () => {
     const resolution = decided(resolveRunDecision(input({ params: params({ wakeReason: "monitor" }) })));
     expect(resolution.result.model).toBe("claude-sonnet-5");
+  });
+});
+
+/**
+ * The sticky rule against the published quota document.
+ *
+ * Every other case in this file builds its snapshot with `availabilityRaw:
+ * null`, so the lane-availability term was never part of a sticky decision: a
+ * resolver that ignored the document passed all of them. `tests/availability.
+ * spec.ts` covers the term through `selectModel` with a fresh pick, not through
+ * the keep-or-switch rule that decides an enforced run (the stale-pin shape of
+ * ).
+ *
+ * Roster (`LANED_MODELS`): haiku is the only T3 row and sits alone on lane
+ * `zai`; sonnet (T2) and opus (T1) share `claude`. The incumbent is haiku on a
+ * `tier:T3` card, so a `zai` outage is a one-lane event with an unambiguous
+ * escalation target (sonnet), and a `zai` state that must NOT move the card
+ * leaves haiku in place.
+ *
+ * Each excluded state is paired with a healthy control decided under the same
+ * `holdOnUnknownAvailability` setting: a resolver that fails closed on every
+ * document would pass the excluded half alone.
+ */
+describe("sticky rule against the published quota document ()", () => {
+  const HAIKU = "claude-haiku-4-5-20251001";
+  const SONNET = "claude-sonnet-5";
+  const at = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
+  const MINUTE = 60_000;
+
+  /** Both lanes' accounts, `zaiOverrides` applied to `zai` only, `allOverrides` to every account. */
+  function fleet(
+    zaiOverrides: Record<string, unknown> = {},
+    options: { observedAt?: string; allOverrides?: Record<string, unknown> } = {},
+  ) {
+    const all = options.allOverrides ?? {};
+    return laneDoc(
+      [
+        ...["claude-a", "claude-b"].map((key) => account("claude", key, all)),
+        ...["zai-a", "zai-b"].map((key) => account("zai", key, { ...all, ...zaiOverrides })),
+      ],
+      options.observedAt,
+    );
+  }
+
+  const healthy = () => fleet();
+
+  /** The zai account windows with the five-hour serviceability window at `utilization`. */
+  const zaiWindows = (utilization: number) => ({
+    windows: [
+      {
+        name: "five_hour",
+        role: "serviceability",
+        utilization,
+        resets_at: at(60 * MINUTE),
+        window_seconds: 18_000,
+        allowance_weight: 1,
+      },
+      {
+        name: "weekly",
+        role: "allowance",
+        utilization: 0.5,
+        resets_at: at(48 * 60 * MINUTE),
+        window_seconds: 604_800,
+        allowance_weight: 1,
+      },
+    ],
+  });
+
+  /** Decide a `tier:T3` run whose previous routed model was haiku, against the given document. */
+  function decideSticky(availabilityRaw: unknown, holdOnUnknownAvailability: boolean, now: number = NOW) {
+    return resolveRunDecision(
+      input({
+        tier: "T3",
+        now,
+        snapshot: snapshot({
+          models: LANED_MODELS as unknown as Record<string, unknown>[],
+          availabilityRaw,
+          selection: { holdOnUnknownAvailability },
+        }),
+        params: params({ previous: { runId: "run-1", model: HAIKU, decisionId: "decision-prev" } }),
+        prior: prior({ model: HAIKU, tier: "T3" }),
+      }),
+    );
+  }
+
+  function expectKeptHaiku(resolution: ReturnType<typeof resolveRunDecision>) {
+    const decision = decided(resolution);
+    expect(decision.result.model).toBe(HAIKU);
+    expect(decision.switch).toBeNull();
+    expect(decision.result.reason).toBe(`sticky: ${HAIKU} still serviceable at T3`);
+    expect(decision.result.fallback).toBeUndefined();
+  }
+
+  function expectSwitchedToSonnet(resolution: ReturnType<typeof resolveRunDecision>, detailPrefix: string) {
+    const decision = decided(resolution);
+    expect(decision.result.model).toBe(SONNET);
+    expect(decision.switch).toMatchObject({ from: HAIKU, to: SONNET, reason: "unserviceable" });
+    expect(decision.switch?.detail).toContain(detailPrefix);
+    expect(decision.result.reason).toBe(`unserviceable: ${decision.switch?.detail}`);
+    // Escalated off the T3 judgement: a fallback the next run revisits, and the
+    // judged tier stays T3 so the escalation is not read as a tier change.
+    expect(decision.result.fallback).toBe(true);
+    expect(decision.result.tier).toBe("T3");
+  }
+
+  function expectHeldAtFloor(resolution: ReturnType<typeof resolveRunDecision>, because: string) {
+    expect(resolution.kind).toBe("keep");
+    if (resolution.kind !== "keep") return;
+    expect(resolution.reason).toMatch(/^held-at-floor: .*UNKNOWN/);
+    expect(resolution.reason).toContain(because);
+  }
+
+  describe.each([false, true])("known lane state, holdOnUnknownAvailability=%s", (hold) => {
+    it("exhausted window on the incumbent's lane: switches off it, naming the quota", () => {
+      expectKeptHaiku(decideSticky(healthy(), hold));
+      expectSwitchedToSonnet(decideSticky(fleet(zaiWindows(1)), hold), "lane-availability: quota");
+    });
+
+    it("window at 0.99 is still serviceable: no switch", () => {
+      // The near-miss half of the exhausted pair: the term trips at utilization
+      // 1.0 (`availability.ts`), it is not "any busy window".
+      expectKeptHaiku(decideSticky(fleet(zaiWindows(0.99)), hold));
+    });
+
+    it("live cooldown on the incumbent's lane: switches off it, naming the cooldown", () => {
+      const cooling = fleet({ cooldown: { until: at(10 * MINUTE), reason: "rate limit" } });
+      expectKeptHaiku(decideSticky(healthy(), hold));
+      expectSwitchedToSonnet(decideSticky(cooling, hold), "lane-availability: cooldown");
+    });
+
+    it("expired cooldown: the incumbent stays, no switch", () => {
+      const expired = fleet({ cooldown: { until: at(-MINUTE), reason: "expired" } });
+      expectKeptHaiku(decideSticky(healthy(), hold));
+      expectKeptHaiku(decideSticky(expired, hold));
+    });
+
+    it("an exhausted OTHER lane does not move an incumbent that is not on it", () => {
+      // Cross-lane control: `claude` is dead, haiku sits on `zai`.
+      const claudeDead = laneDoc([
+        ...["claude-a", "claude-b"].map((key) => account("claude", key, zaiWindows(1))),
+        ...["zai-a", "zai-b"].map((key) => account("zai", key)),
+      ]);
+      expectKeptHaiku(decideSticky(claudeDead, hold));
+    });
+  });
+
+  describe("unknown lane state: the incumbent follows holdOnUnknownAvailability", () => {
+    it("document past the shared 120-minute cutoff: kept silently with the hold off, parked at the floor with it on", () => {
+      // `stale_after_seconds` is raised so the 120-minute floor, not a record's
+      // own tighter cutoff, is what separates the 119- and 121-minute documents.
+      const aged = (minutes: number) =>
+        fleet({}, { observedAt: at(-minutes * MINUTE), allOverrides: { stale_after_seconds: 86_400 } });
+
+      for (const hold of [false, true]) {
+        expectKeptHaiku(decideSticky(aged(119), hold)); // control: inside the cutoff, readable
+      }
+      expectKeptHaiku(decideSticky(aged(121), false));
+      expectHeldAtFloor(decideSticky(aged(121), true), "exceeds the");
+    });
+
+    it("a record's own tighter stale_after_seconds makes an otherwise recent document unknown", () => {
+      const tight = fleet({}, { observedAt: at(-10 * MINUTE), allOverrides: { stale_after_seconds: 300 } });
+      expectKeptHaiku(decideSticky(tight, false));
+      expectHeldAtFloor(decideSticky(tight, true), "exceeds the");
+      // Control: the same records, observed a minute ago.
+      expectKeptHaiku(
+        decideSticky(fleet({}, { observedAt: at(-MINUTE), allOverrides: { stale_after_seconds: 300 } }), true),
+      );
+    });
+
+    it("future-dated document: kept with the hold off, parked at the floor with it on", () => {
+      const future = fleet({}, { observedAt: at(3 * 60 * MINUTE) });
+      for (const hold of [false, true]) {
+        expectKeptHaiku(decideSticky(healthy(), hold)); // control: a document observed in the past
+      }
+      expectKeptHaiku(decideSticky(future, false));
+      expectHeldAtFloor(decideSticky(future, true), "observation is in the future");
+    });
+
+    it.each([
+      ["no document published (null)", null, "availability document is not an object"],
+      ["a string", "nope", "availability document is not an object"],
+      ["a number", 42, "availability document is not an object"],
+      ["an array", [], "availability document is not an object"],
+      ["an object with no observedAt", {}, "no readable observedAt"],
+    ])("unreadable document, %s: kept with the hold off, parked at the floor with it on", (_name, raw, because) => {
+      for (const hold of [false, true]) {
+        expectKeptHaiku(decideSticky(healthy(), hold)); // control: the well-formed document
+      }
+      expectKeptHaiku(decideSticky(raw, false));
+      expectHeldAtFloor(decideSticky(raw, true), because);
+    });
+
+    it("a document that ages inside a cached snapshot is read against the decision's clock, not the load time", () => {
+      // The snapshot is cached up to its TTL (the worker's minute job refreshes
+      // it), so the document is normalized at decision time. Same snapshot,
+      // same raw document: readable at NOW, unknown three hours on.
+      const doc = fleet({}, { allOverrides: { stale_after_seconds: 86_400 } });
+      expectKeptHaiku(decideSticky(doc, true, NOW));
+      expectHeldAtFloor(decideSticky(doc, true, NOW + 3 * 60 * MINUTE), "exceeds the");
+    });
   });
 });

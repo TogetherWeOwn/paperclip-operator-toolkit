@@ -475,7 +475,7 @@ describe("worker: sync job + report/refresh tools", () => {
       v2Config({
         aaFreeSync: {
           enabled: true,
-          apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
+          apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
           bindings: V2_BINDINGS,
         },
       }),
@@ -511,7 +511,7 @@ describe("worker: sync job + report/refresh tools", () => {
       v2Config({
         aaFreeSync: {
           enabled: true,
-          apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
+          apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
           bindings: V2_BINDINGS,
         },
       }),

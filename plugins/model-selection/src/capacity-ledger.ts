@@ -1,7 +1,7 @@
 /**
- * Durable aggregate reservation ledger
+ * Durable aggregate reservation ledger — .
  *
- * First mergeable slice of the "durable store" contract:
+ * First mergeable slice of the  "durable store" contract (plan rev 7):
  * one aggregate compare-and-swap (CAS) per allocation domain, executed as a
  * single conditional UPDATE and validated in agent-testdb/CI only.
  *
@@ -33,7 +33,7 @@
  *   The in-memory `AdmissionSimulator` remains a simulation-only fixture and
  *   must not be promoted to storage.
  *
- * Runtime SQL limits respected:
+ * Runtime SQL limits respected (per the  capacity-evidence survey):
  * exactly one statement per call, single SELECT or INSERT/UPDATE/DELETE,
  * `$n` binds only, no BEGIN/COMMIT, no multi-statement batch, no mutation
  * CTE. Table namespace is a validated identifier, never interpolated input.

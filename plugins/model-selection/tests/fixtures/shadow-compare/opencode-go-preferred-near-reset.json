@@ -1,0 +1,52 @@
+{
+  "name": "opencode-go-preferred-near-reset",
+  "laneUnderTest": "cliproxy-opencode-go",
+  "mechanism": "preferred-near-reset",
+  "description": "Both lanes trail pace with identical deviations, so state rank and deviation both tie. The Go lane is inside the last 20% of its window (elapsed 0.85) and still behind, making it preferred-near-reset — enforce boosts the dearer Go-lane model first while advise stays on cost.",
+  "issueId": "shadow-compare-go-preferred-1",
+  "tier": "T1",
+  "models": [
+    {
+      "id": "codex-t1-cheap",
+      "tier": "T1",
+      "laneId": "cliproxy-codex",
+      "costPerMTokIn": 0.4,
+      "costPerMTokOut": 1.6
+    },
+    {
+      "id": "go-t1-dear",
+      "tier": "T1",
+      "laneId": "cliproxy-opencode-go",
+      "costPerMTokIn": 3,
+      "costPerMTokOut": 15
+    }
+  ],
+  "lanes": {
+    "cliproxy-codex": {
+      "state": "behind",
+      "serviceable": true,
+      "score": { "utilization": 0.3, "elapsed": 0.5, "deviation": -0.1 }
+    },
+    "cliproxy-opencode-go": {
+      "state": "behind",
+      "serviceable": true,
+      "score": { "utilization": 0.7, "elapsed": 0.85, "deviation": -0.1 }
+    }
+  },
+  "expected": {
+    "adviseWinner": "codex-t1-cheap",
+    "enforceWinner": "go-t1-dear",
+    "advisePacingApplied": false,
+    "enforcePacingApplied": true,
+    "adviseTraceContains": [
+      "pace ordering (shadow) reorders to go-t1-dear > codex-t1-cheap",
+      "go-t1-dear's lane is trailing pace near its reset window close — preferred for new dispatch"
+    ],
+    "adviseTraceOmits": ["pace ordering (enforce)", "slot throttle"],
+    "enforceTraceContains": [
+      "pace ordering (enforce) reorders to go-t1-dear > codex-t1-cheap",
+      "go-t1-dear's lane is trailing pace near its reset window close — preferred for new dispatch"
+    ],
+    "enforceTraceOmits": ["slot throttle"]
+  }
+}
