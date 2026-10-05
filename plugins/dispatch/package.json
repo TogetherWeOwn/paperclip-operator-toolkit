@@ -2,6 +2,7 @@
   "name": "paperclip-plugin-dispatch",
   "version": "0.1.0",
   "description": "Reports, and once evidence-gated wakes, stalled assigned work that no state change would otherwise wake. Native replacement for the host-side paperclip-dispatcher timer.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "paperclipPlugin": {
