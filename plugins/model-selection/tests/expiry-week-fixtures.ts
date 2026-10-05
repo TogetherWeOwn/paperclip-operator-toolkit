@@ -7,9 +7,9 @@ import {
 import { AdmissionSimulator } from '../src/admission-simulator.js';
 
 /**
- * Expiry-week scenario pack proving 98-100% window landing.
+ *  fixture set: expiry-week scenario pack proving 98-100% window landing.
  *
- * Fixtures + driver only: every
+ * Parent  under epic . Fixtures + driver only: every
  * behavioral target (`AdmissionSimulator`, `evaluateBudgets`) already exists.
  * No live dispatch, no enforcement change, no credentials.
  *
@@ -23,9 +23,10 @@ import { AdmissionSimulator } from '../src/admission-simulator.js';
  * - crossing the weekly reset retires holds without carrying debt: the next
  *   week opens fresh at zero and admits immediately.
  *
- * NON-GOALS (owned elsewhere, do NOT duplicate): the use-before-expiry
- * tie-break; the weekly-pace vs 5h-backstop conflict; the pacing.lanes
- * wire-up; the joint snapshot assembly.
+ * NON-GOALS (owned elsewhere, do NOT duplicate):  use-before-expiry
+ * tie-break (blocked);  weekly-pace vs 5h-backstop conflict
+ * (blocked);  pacing.lanes wire-up (in_progress);  joint
+ * snapshot assembly (in_review).
  */
 
 export const EXPIRY_WEEK_QUOTA = 100;

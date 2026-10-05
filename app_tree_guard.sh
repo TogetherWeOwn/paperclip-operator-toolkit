@@ -303,7 +303,7 @@ guarded_exec(){
   # command directly here would hand it CAP_SYS_ADMIN over the very
   # namespace that owns the mount, so `mount -o remount,bind,rw "$APP"`
   # would succeed with no EPERM -- verified escape, see
-  # repro_tog711_escape.sh. Nesting one more `unshare --mount
+  # mount-escape-repro.sh. Nesting one more `unshare --mount
   # --map-root-user` makes the mount inherited, and therefore locked.
   unshare --mount --map-root-user bash -c "$(build_guard_script "exec unshare --mount --map-root-user bash -c $(printf %q "$q")")"
 }

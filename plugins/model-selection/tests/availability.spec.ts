@@ -7,7 +7,7 @@ import { LANED_MODELS, NOW, NO_ESCALATION, PROFILES, account, config, laneDoc } 
 const base = { profiles: PROFILES, signals: NO_ESCALATION, now: NOW };
 
 /**
- * Acceptance criterion 5. Every test here is a PAIR: one lane state that must be
+ *  AC-5. Every test here is a PAIR: one lane state that must be
  * excluded, and one that must not. A gate with only the failing half passes
  * just as well when it excludes everything — which is exactly how a "working"
  * availability term takes the whole roster out and still reads as correct.
@@ -143,7 +143,7 @@ describe("availability — cooldown (the 2026-09-17 00:39Z shape)", () => {
   });
 
   it("excludes on health: cooldown, which the router's normalizer only down-ranks", () => {
-    // Measured against the real `router/src/capacity/normalize.ts`:
+    // Measured on  against the real `router/src/capacity/normalize.ts`:
     // "cooldown" lands in that module's *degraded* bucket, `postureFor` turns
     // degraded into `avoid`, and an avoided lane stays selectable. Here every
     // value that is not positively `healthy` takes the lane out.
@@ -170,7 +170,8 @@ describe("availability — cooldown (the 2026-09-17 00:39Z shape)", () => {
   it("excludes a cooldown record that carries no utilization window at all", () => {
     // The fail-open trap. A pure cooldown record is the natural producer shape
     // — a cooldown is not a utilization — it yields zero evidence rows in the
-    // router's collector, and a consumer with zero evidence fails open. Evaluating the cooldown off the RECORD rather than off the
+    // router's collector, and a consumer with zero evidence fails open
+    //. Evaluating the cooldown off the RECORD rather than off the
     // windows is what closes it.
     const bare = [
       {
@@ -413,8 +414,8 @@ describe("availability — the gate excludes rather than down-ranks", () => {
   });
 });
 
-describe("availability — the agent floor is covered too", () => {
-  // An earlier change (on main) added a second exit that hands the run back to the agent
+describe("availability — the agent floor is covered too (AC-3, post- merge)", () => {
+  //  (on main) added a second exit that hands the run back to the agent
   // floor when the volume profile is untrusted, and made that exit lane-aware
   // against the PACE predicates only. Those are gated on `pacingMode`; the
   // availability term is not. With pacing off — the default in `config()` —

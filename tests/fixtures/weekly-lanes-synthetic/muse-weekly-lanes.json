@@ -1,0 +1,15 @@
+{
+  "_provenance": "SYNTHETIC. Weekly utilizations mirror the 8-lane ladder from the model-selection synthetic lane-quota snapshot (plugins/model-selection admission-observation fixture: 0.04..0.99, one shared weekly reset), re-expressed as Muse weekly rows against the 2026-10-05T00:00:00Z reset. NOT a live reading, not a byte copy of any production document. No emails, credentials, display names, or model ids — opaque lane ids only.",
+  "observedAt": "2026-10-03T02:01:00Z",
+  "weeklyResetUtc": "2026-10-05T00:00:00Z",
+  "lanes": [
+    {"lane": "Muse-weekly-1", "weekly_utilization": 0.04, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-2", "weekly_utilization": 0.11, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-3", "weekly_utilization": 0.27, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-4", "weekly_utilization": 0.46, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-5", "weekly_utilization": 0.63, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-6", "weekly_utilization": 0.81, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-7", "weekly_utilization": 0.93, "weekly_reset_utc": "2026-10-05T00:00:00Z"},
+    {"lane": "Muse-weekly-8", "weekly_utilization": 0.99, "weekly_reset_utc": "2026-10-05T00:00:00Z"}
+  ]
+}

@@ -53,7 +53,7 @@ export function tierOfModel(modelId: string | null | undefined, models: readonly
 
 export interface ResolveTierOptions {
   /**
-   * Defect 6. Whether a given model's lane is currently a
+   * , Defect 6. Whether a given model's lane is currently a
    * serviceability hard stop (same check `hardStopExcluded` applies in
    * `select.ts`). When the model an issue is pinned to fails this check, the
    * pin can no longer win outright — a `pinnedModelId` that hard-bypasses
@@ -66,7 +66,7 @@ export interface ResolveTierOptions {
 }
 
 /**
- * The most capable tier a decision may place a card on. Absent is
+ * . The most capable tier a decision may place a card on. Absent is
  * the implicit ceiling: a judgement built before T0 existed never opted in.
  */
 export function admittedTierCeiling(judgement: Pick<TierJudgement, "admittedCeiling">): Tier {
@@ -78,7 +78,7 @@ function tierRank(tier: Tier): number {
 }
 
 /**
- * T0 admission (CTO-approved). Implicit dispatch is capped at
+ * T0 admission (, CTO-approved). Implicit dispatch is capped at
  * `IMPLICIT_TIER_CEILING`; a card reaches T0 only on an EXPLICIT issue-level
  * judgement — a `tier:T0` label, or a pin whose provenance is recorded as
  * `explicit`. Everything this engine derives by itself (a router-written pin
@@ -110,7 +110,7 @@ function applyAdmission(raw: TierJudgement, descriptor: IssueDescriptor): TierJu
 }
 
 /**
- * Whether the router may write this tier as a `tier:*` label. The
+ * . Whether the router may write this tier as a `tier:*` label. The
  * router's own writes are never an opt-in, so it never mints a label above the
  * implicit ceiling: `tier:T0` comes from a human or agent, not from this plugin.
  */
@@ -176,7 +176,7 @@ function resolveRecordedTier(
   }
 
   // Step 3 — the tier:* label, the durable record that survives a remapping of
-  // which model backs each tier .
+  // which model backs each tier (ADR-0008).
   const labelTier = tierFromLabels(descriptor.labelNames);
   if (labelTier) {
     return { tier: labelTier, source: "issue-label", detail: `${TIER_LABEL_PREFIX}${labelTier} label on the issue` };

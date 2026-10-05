@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 const root = new URL("..", import.meta.url).pathname;
 const gate = new URL("../scripts/mutation-gate.mjs", import.meta.url).pathname;
 const runtime = new URL("../scripts/mutation-gate-runtime.mjs", import.meta.url).href;
-// the step runs in the sharded `model-selection mutants` matrix; the
+// : the step runs in the sharded `model-selection mutants` matrix; the
 // required `model-selection suite` job only aggregates its verdict.
 const ciJob = "model-selection mutants";
 const ciStep = "Kill named selection mutants";
@@ -84,7 +84,7 @@ describe("mutation gate runtime controls", () => {
     expect(result).toBe(true);
   });
 
-  // The `{ CI: "true" }` row is the one that matters: the refusal
+  // . The `{ CI: "true" }` row is the one that matters: the refusal
   // above means CI is the ONLY context this gate ever runs in, and `ci.yml`
   // sets no VITEST_* for the `model-selection suite` job, so this bare
   // environment IS the real job env. It previously yielded `run --pool=forks`
@@ -190,7 +190,7 @@ describe("mutation gate runtime controls", () => {
     // value through the environment therefore caps a pool that never runs, so
     // assert the flags that reach the CLI, not just the pass-through.
     //
-    // `threads` is now the RESOLVED limit, not the caller's
+    // : `threads` is now the RESOLVED limit, not the caller's
     // VITEST_MAX_THREADS. The run is `--pool=forks`, so a differing thread
     // budget could never take effect; carrying it forward only left two numbers
     // in the child env disagreeing about one budget. VITEST_MAX_FORKS wins and
@@ -210,7 +210,7 @@ describe("mutation gate runtime controls", () => {
     });
   });
 
-  // `spawnSync` without `timeout` blocks forever, so a single wedged
+  // . `spawnSync` without `timeout` blocks forever, so a single wedged
   // run could spend the job's entire `timeout-minutes` and take the job down
   // with no mutant named. Assert three things together, because any one alone
   // is satisfiable while the bound does nothing: the invocation carries a
@@ -241,7 +241,7 @@ describe("mutation gate runtime controls", () => {
     expect(body).toContain("killSignal,");
   });
 
-  // `spawnSync` SIGKILLs a child that prints past 1 MiB on either
+  // . `spawnSync` SIGKILLs a child that prints past 1 MiB on either
   // stream and reports it as `{ status: null, signal: "SIGKILL" }` — the shape of
   // a host kill, which `completed()` rightly reads as BROKEN GATE. A mutant the
   // suite catches LOUDLY (the shard-split spec dumps whole arrays) hit exactly
@@ -369,7 +369,7 @@ describe("mutation gate runtime controls", () => {
     }
   });
 
-  // The refusal sends the reader somewhere instead of running the
+  // . The refusal sends the reader somewhere instead of running the
   // gate, so the pointer has to be true or the refusal is worse than no gate:
   // it costs the agent the local run AND the evidence. Three links are pinned —
   // the job name exists in ci.yml, a step by that name lives inside THAT job,
@@ -377,7 +377,7 @@ describe("mutation gate runtime controls", () => {
   // script. This asserts the wiring is present, not that it passes; a green
   // run of the step is what the citation is for.
   //
-  // the job is now the sharded `model-selection-mutants` matrix, and
+  // : the job is now the sharded `model-selection-mutants` matrix, and
   // its step carries the shard it runs through MUTATION_SHARD.
   it("names a CI job and step that actually execute this gate", () => {
     const block = jobBlock(readFileSync(workflow, "utf8"), "model-selection-mutants");
@@ -397,7 +397,7 @@ describe("mutation gate runtime controls", () => {
     expect(refusal).toContain(ciStep);
   });
 
-  // Sharding moves the verdict out of the required job, so each rule
+  // . Sharding moves the verdict out of the required job, so each rule
   // below closes one way for the sweep to go green while testing less than the
   // whole list. All are pinned against ci.yml by literal line, the same way the
   // job/step names are: a re-quoting fails the match, which is the safe side.
@@ -487,7 +487,7 @@ describe("mutation gate runtime controls", () => {
     });
   });
 
-  // The shard split is what lets N jobs cover one sweep, so its two
+  // . The shard split is what lets N jobs cover one sweep, so its two
   // properties are checked over every N the workflow could plausibly use and
   // over list sizes that straddle N (empty, one, fewer than N, a prime, the
   // real ~300): shards are pairwise disjoint and their union is the whole list.
@@ -639,7 +639,7 @@ describe("mutation gate runtime controls", () => {
     });
   });
 
-  //  /. Mutants run from a scratch copy of the plugin, so a
+  //  / . Mutants run from a scratch copy of the plugin, so a
   // spec that reads a repo file through one or more `../` segments finds
   // nothing there unless the gate stages it. That is not a benign skip: the
   // mutant loop reads any nonzero exit as a kill, so one ENOENT turns the

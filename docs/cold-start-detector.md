@@ -3,7 +3,7 @@
 **Incident:** 2026-08-25. An 89-minute quota drain became a 5.5-hour outage.
 **Issue:** TOG-487. The drain itself is TOG-477; this is about why the company never came back.
 **Tool:** [`cold_start_detector.sh`](../cold_start_detector.sh) · suite `test_cold_start_detector.sh` ·
-mutation gate `verification/tog-487-mutation-gate.sh`.
+mutation gate `verification/cold-start-detector-mutation-gate.sh`.
 
 Every figure below was queried directly against the live database while writing this, not
 carried over from a summary. Where a re-measurement disagreed with the issue that commissioned

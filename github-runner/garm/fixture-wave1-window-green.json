@@ -1,0 +1,21 @@
+{
+  "schema": "garm-wave1-window.v1",
+  "pickup_observed": true,
+  "pickup_wait_s": 191,
+  "tests_required": 16,
+  "tests_passed": 16,
+  "tests_skipped": 0,
+  "budget_evidence_age_s": 120,
+  "fs_max_use_pct": 61.5,
+  "pressure_incident_unresolved": false,
+  "static_fallback_available": true,
+  "interrupted_active_job": false,
+  "production_db_contact": false,
+  "unauthorized_access_or_routing": false,
+  "unexplained_lifecycle_leak": false,
+  "cap_or_admission_increase": false,
+  "host_pressure_stop_breach": false,
+  "trial_hours": 26,
+  "comparable_attempts_garm": 11,
+  "comparable_attempts_static": 12
+}

@@ -126,7 +126,7 @@ async function main() {
   console.log("  MODE IS NOT VERIFIED BY THIS PROBE. selection.mode defaults to");
   console.log('  "advise" (src/config/schema.ts:27) and is only non-default if the');
   console.log("  operator set plugin_config at install. Confirm mode separately");
-  console.log("  against the install record before treating the install as verified.");
+  console.log("  against the install record before closing  criterion 3.");
   process.exit(0);
 }
 

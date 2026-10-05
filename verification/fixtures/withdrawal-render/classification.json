@@ -1,0 +1,24 @@
+{ "items": {
+    "SAMPLE-PLAIN": {
+      "class": "CAPABILITY", "blast": 4, "credential": "operator",
+      "changes": "Nothing; this line exercises the non-withdrawn branch.",
+      "verify": "Read this fixture.",
+      "undo": "Not applicable.",
+      "commands": "# echo sample"
+    },
+    "SAMPLE-WITHDRAWN": {
+      "class": "CAPABILITY", "blast": 1, "credential": "operator",
+      "changes": "A forbidden fork build; do not run.",
+      "verify": "Confirm the banner renders above the blast radius.",
+      "undo": "Not applicable.",
+      "commands": "# \"$script\"\n# echo do-not-run",
+      "withdrawn": {
+        "date": "2026-01-02",
+        "body": "The authorisation for this line was withdrawn. It is retained so the next operator does not read its absence as \"never asked\".",
+        "commands_note": "WITHDRAWN — do not run these."
+      }
+    }
+  },
+  "decisions": {}, "misrouted": {},
+  "closed": {}
+}

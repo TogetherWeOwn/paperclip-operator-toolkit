@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# notify_paperclip_issue.sh — reference REQUEST_NOTIFY_CMD transport (TOG-254)
+# notify_paperclip_issue.sh — reference REQUEST_NOTIFY_CMD transport
 # ===========================================================================
 # Turns a request-queue notification into something a Paperclip agent actually
 # receives. Reads one notification JSON object on stdin; exits 0 on delivery.
@@ -32,7 +32,7 @@
 # write decisions would be a way to influence authorization, which is exactly
 # what the notifier is forbidden to become.
 #
-# THE PAYLOAD IS NOT TRUSTED INPUT (TOG-198 review, 2026-08-24)
+# THE PAYLOAD IS NOT TRUSTED INPUT (payload-trust review, 2026-08-24)
 # -------------------------------------------------------------
 # Two of its fields are written by the REQUESTER — the least-privileged party
 # in the flow — and both used to reach somewhere they should not:
@@ -56,6 +56,22 @@
 # Validate here even though the queue also validates: this script is a
 # reference REQUEST_NOTIFY_CMD and will be copied for other transports, and a
 # payload can reach it from a queue file restored from backup or hand-edited.
+#
+# WAKE-BUDGET CAP
+# ---------------
+# A card whose thread grows past the wake path's single-variable limit can
+# never wake an agent again: the whole thread reaches the agent process in one
+# environment variable, and the OS caps a single variable (MAX_ARG_STRLEN).
+# One 167669-byte comment once bricked its card this way, with every later
+# wake dying at spawn; the safe line for description + all comment bodies is
+# 80000 bytes. This transport appends bytes to cards, so it must not be the
+# thing that bricks one. The rendered comment is capped at 32768 bytes — no legitimate
+# decision notice is that large, and one post that size cannot eat the whole
+# thread budget. Over budget is a refusal (non-zero exit, curl never runs),
+# never a silent truncation: the queue records notify.failed, its undelivered
+# gate stays red, and the recipient reads the decision with `inbox` instead
+# of receiving a comment with bytes missing.
+MAX_COMMENT_BYTES=32768
 #
 # RESIDUAL RISK, ACCEPTED AND DELIBERATE
 # --------------------------------------
@@ -100,7 +116,7 @@ fi
 # An allowlist, not a denylist of traversal spellings: `..`, `%2e%2e`, `;`, a
 # bare `/` and an absolute `//host` are all the same bug, and a denylist is one
 # encoding away from missing the next one. A UUID and an identifier like
-# TOG-198 both pass; nothing that can change the route does. No `.`, so `..`
+# TASK-198 both pass; nothing that can change the route does. No `.`, so `..`
 # is unrepresentable rather than filtered.
 if [[ ! "$ISSUE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
   echo "refusing to address '$ISSUE': not a well-formed issue id" >&2
@@ -125,10 +141,24 @@ FENCE="$(printf '%*s' "$FENCE_LEN" '' | tr ' ' '`')"
 MSG="$(printf '**Provisioning request %s: %s**\n\nAddressed to %s (agent %s).\n\n%s\n%s\n%s\n' \
         "$RID" "$STATUS" "$ROLE" "${AGENT:-unknown}" "$FENCE" "$BODY" "$FENCE")"
 
+# Refuse before touching the network: one post must not eat the card's whole
+# 80 KB E2BIG budget (see MAX_COMMENT_BYTES above). Measured in bytes, not
+# characters — the wake path counts bytes, and multibyte text would silently
+# pass a character-length check. Exit 65 (unaddressable/refused, like the
+# malformed-id path) so the queue records notify.failed and no retry of the
+# same payload can succeed: the bytes are deterministic, so redelivery would
+# land the same oversized body on the same card.
+MSG_BYTES="$(printf '%s' "$MSG" | wc -c | tr -d ' ')"
+if (( MSG_BYTES > MAX_COMMENT_BYTES )); then
+  echo "refusing to post $MSG_BYTES bytes (limit $MAX_COMMENT_BYTES): a comment that large risks the card's wake budget (E2BIG)" >&2
+  echo "  post only the decision facts (request id, verdict, recipient); read the full record with \`inbox\`" >&2
+  exit 65
+fi
+
 # The credential goes in a 0600 config file, never in argv: /proc/<pid>/cmdline
 # is world-readable and this box is shared. Same pattern, and same reasoning, as
-# curl_authed() in gh_token.sh — see the TOG-200 note there. Only the PATH is
-# in argv.
+# curl_authed() in gh_token.sh — see the credential-handling note there.
+# Only the PATH is in argv.
 CFG_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/notify_pc.XXXXXXXX")" \
   || { echo "could not create a private temp directory" >&2; exit 69; }
 trap 'rm -rf "$CFG_DIR"' EXIT

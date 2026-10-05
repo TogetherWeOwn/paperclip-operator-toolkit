@@ -1,12 +1,12 @@
 import type { BenchmarkRow } from "./benchmark-prior.js";
 
 /**
- * Frozen versioned benchmark vectors, keyed by roster model id.
+ * Frozen `benchmark-prior-v1` benchmark vectors, keyed by roster model id.
  *
  * GENERATED, then committed — do not hand-edit. Source: Research A's
- * primary-source leaderboard captures (fetched 2026-09-15), joined to
- * the roster by the benchmark-table builder and frozen here by
- * Regenerate with that script and bump `BENCHMARK_SPEC_VERSION`
+ * primary-source leaderboard captures (fetched 2026-09-15, ), joined to
+ * the roster by `ops//build-benchmark-table.mjs` and frozen here by
+ * . Regenerate with that script and bump `BENCHMARK_SPEC_VERSION`
  * whenever the capture is refreshed.
  *
  * ## Why this is frozen rather than read live from the aa.ai snapshot
@@ -20,11 +20,11 @@ import type { BenchmarkRow } from "./benchmark-prior.js";
  * different effort than the one the capture joined (e.g. `claude-opus-5-xhigh`
  * carries `terminalbenchV40: null` while the capture's matched row has a value).
  * A prior blended across two effort levels is not reproducible, which is the
- * churn this design exists to end. So the vector is taken whole, from one
+ * churn this whole card exists to end. So the vector is taken whole, from one
  * capture, under one version.
  *
  * The aa.ai composite index stays LIVE — that half of the blend is refreshed
- * every `refreshScores` run, which is the settled design.
+ * every `refreshScores` run and is what  settled.
  *
  * ## Absence
  *

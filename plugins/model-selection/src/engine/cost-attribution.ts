@@ -1,5 +1,5 @@
 /**
- * Refuse a run's `usage_json.costUsd` as cost evidence when the
+ * : refuse a run's `usage_json.costUsd` as cost evidence when the
  * harness priced that run against the wrong provider's table.
  *
  * ## The defect, at its source
@@ -30,9 +30,9 @@
  * ## Why this module exists rather than a fix at the source
  *
  * The source fix lives in `paperclipai/paperclip`, which this company cannot
- * file against. What we *can* do is stop consuming the bad values: the remedy
- * on the table was "backfill or explicitly invalidate", and invalidate is the
- * only one available to a downstream consumer. Invalidating is also the honest
+ * file against. What we *can* do is stop consuming the bad values: 
+ * asked for "backfill or explicitly invalidate", and invalidate is the only
+ * one available to a downstream consumer. Invalidating is also the honest
  * option — we do not know Meta's real price for our token mix, and inventing
  * one here would be a second confidently-wrong number.
  *
@@ -48,8 +48,8 @@
  * Every other recorded provider is left alone, because every other provider
  * string in our data comes from an adapter that priced with that provider's
  * own table. A run with no recorded provider is also left alone: absence is
- * not evidence of misattribution, and rejecting it would silently discard that
- * older history.
+ * not evidence of misattribution, and rejecting it would silently discard the
+ * pre- history.
  */
 
 /** The provider string the Claude CLI lane stamps unconditionally. */

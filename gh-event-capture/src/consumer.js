@@ -74,7 +74,7 @@ function wakeEligible(issue, interactions) {
  * must leave the input cursor unadvanced. No retry loop or hidden network here.
  */
 export function createConsumer({ github, board, capture, allowedRepositories, mode = 'full-v1',
-  prTaskIndex = null, isPrivateRepository = () => true }) {
+  prTaskIndex = null, isPrivateRepository = () => true, bridgePolicy = null }) {
   requireValue(['full-v1', 'products-only-v1'].includes(mode), 'consumer mode is invalid')
   requireValue(Array.isArray(allowedRepositories) && allowedRepositories.length > 0,
     'an explicit repository allowlist is required')
@@ -177,7 +177,7 @@ export function createConsumer({ github, board, capture, allowedRepositories, mo
     if (row.event === 'pull_request') {
       // Event hints stay bot-scoped until the relay stage; owner-authored PRs
       // reconcile through backfill/sweep via the task index instead.
-      const original = classifyPullRequestEvent(payload)
+      const original = classifyPullRequestEvent(payload, bridgePolicy)
       if (!original) return { ignored: 'unscoped-PR' }
       const result = await reconcile(repo, original.prNumber)
       if (result.ignored) return result
@@ -209,7 +209,7 @@ export function createConsumer({ github, board, capture, allowedRepositories, mo
       const evidence = await capture.getPullRequestDelivery(repo, ref.number, result.pr.head.sha)
       requireValue(evidence?.event === 'pull_request', 'stored bot PR evidence is missing; do not advance cursor')
       const verified = readDelivery(evidence)
-      const candidates = classifyCheckSuiteEvent(payload, [verified.pull_request])
+      const candidates = classifyCheckSuiteEvent(payload, [verified.pull_request], bridgePolicy)
       const candidate = candidates.find((c) => c.prNumber === ref.number && c.issueRef === result.issue.identifier)
       requireValue(candidate, 'stored bot PR evidence does not match suite identity; do not advance cursor')
       wakes.push(await maybeWake(result, candidate, row.delivery_id, evidence.delivery_id))

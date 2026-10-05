@@ -1,5 +1,5 @@
 /**
- * joint capacity snapshot — GARM eligible vs queued vs reviewer/fixer.
+ * : joint capacity snapshot — GARM eligible vs queued vs reviewer/fixer.
  *
  * Parent  (pacer dependency for the joint agent/GARM controller,
  *  research). Read-only, pure, no live mutation.
@@ -34,7 +34,7 @@
  * -  weekly-pace conflict (blocked)
  * -  pacing.lanes wire-up (in_progress)
  *
- * Throughput note (): the joint controller optimizes completed
+ * Throughput note: the joint controller optimizes completed
  * merges / lead time, not raw run count. This snapshot reports pressure, not
  * a merge rate; raw run count is never the admission objective.
  */
@@ -351,7 +351,7 @@ export function snapshotJointCapacity(input: JointCapacitySnapshotInput): JointC
     limitations: [
       'Caller-declared observations are not certified production evidence.',
       'Pressure is a point-in-time ratio, not a merge-throughput or lead-time measure.',
-      'Raw run count is never the admission objective; completed merges / lead time are owned by the joint controller ().',
+      'Raw run count is never the admission objective; completed merges / lead time are owned by the joint controller.',
       'Missing quota/reset evidence keeps runners ineligible, never free capacity.',
     ],
   };

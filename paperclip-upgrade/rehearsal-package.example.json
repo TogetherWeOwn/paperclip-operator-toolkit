@@ -1,0 +1,18 @@
+{
+  "_comment": "paperclip-upgrade/rehearsal-package.example.json. Rehearsal package manifest: pins the exact candidate image, required migrations, effective-build proof and inventoried plugin builds for rehearse-upgrade.sh --package. Copy, fill in, hand to the operator. No secrets belong here.",
+  "candidateImage": "ghcr.io/paperclipai/paperclip@sha256:8462fc831df840f44a324f961180efd09939a6df125e4486dc63cf33be90937e",
+  "expectedImageSha256": "sha256:8462fc831df840f44a324f961180efd09939a6df125e4486dc63cf33be90937e",
+  "baseImageNote": "official 1001 linux/amd64 base, operator-cached and preflight-verified 2026-10-02 (Node 24.21.0, SDK 1.0.0, migrations 0280-0283 visible). The FINAL rehearsal must re-pin this manifest to the exact patched candidate image, not the stock base.",
+  "requiredMigrations": ["0280", "0281", "0282", "0283"],
+  "expectedBuildMarker": "EPIPE",
+  "_buildMarkerNote": "The EPIPE guard proves the BOOTED artifact contains the patched adapter-utils server-utils, not a stale overlay shadow. Pre-boot proof runs against the image; post-boot proof runs overlay-inclusive against the running stage container.",
+  "expectedBuildSha256": [],
+  "_buildShaNote": "Full sha256(s) of the patched server-utils file(s), filled by the operator from effective-build-check.sh --resolve evidence when the final candidate is known. Every value must match at least one collected file.",
+  "expectedPluginPackages": [],
+  "_pluginPackagesNote": "NAME:64-hex-sha256 entries, one per inventoried plugin build the target must ship (package.json hash resolved inside the image). Bundled path-null plugins are proven HERE via the target image catalog/runtime, never from the inventory file alone. Operator fills from effective-build-check.sh --resolve-pkg evidence; feeds the compatibility matrix input.",
+  "expectedFiles": [],
+  "_expectedFilesNote": "ABS:64-hex-sha256 entries pinning compiled/load identities inside the image AND the booted stage container. Re-pin to the operator-built image carrying the reviewed redaction port, and to its compiled /app/server/dist/redaction.js hash, when supplied; an earlier stage image does not contain that port. The legacy 916 whole-file redaction override (sha256 c177c806...) is always refused, as a mount over that path or as file content.",
+  "dumpNote": "pg_custom-format dump FILE from the read-only inventory backup (drain.sh backup paperclip.dump). Never a live database connection.",
+  "stageDatabaseName": "stage_rehearse_1001",
+  "neutraliseSql": "neutralise-stage.sql"
+}

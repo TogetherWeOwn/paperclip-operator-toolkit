@@ -419,7 +419,7 @@ describe("paired decision records", () => {
   });
 
   it("names the correct gate in explanations, not another gate that also applies", () => {
-    // acceptance: `flaky` is both disabled AND on a lane the ledger
+    //  acceptance: `flaky` is both disabled AND on a lane the ledger
     // reports unserviceable. `select.ts` checks `disabled` first and never
     // reaches the lane check for this model, so the persisted explanation
     // must name `disabled` — a wrong-but-populated `lane-unserviceable`

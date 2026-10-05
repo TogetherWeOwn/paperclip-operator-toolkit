@@ -14,18 +14,17 @@ import {
 } from './expiry-week-fixtures.js';
 
 /**
- * Expiry-week scenario pack proving 98-100% window landing.
+ * : expiry-week scenario pack proving 98-100% window landing.
  *
- * Fixtures + unit tests only: the
+ * Parent  under epic . Fixtures + unit tests only: the
  * pacer logic under test (`AdmissionSimulator` + `evaluateBudgets`) already
  * exists. No live dispatch, no enforcement change, no credentials.
  *
- * NON-GOALS (owned elsewhere): the use-before-expiry tie-break; the
- * weekly-pace vs 5h-backstop conflict; the pacing.lanes wire-up; the joint
- * snapshot assembly.
+ * NON-GOALS (owned elsewhere):  tie-break;  backstop
+ * conflict;  pacing.lanes wire-up;  snapshot.
  */
 
-describe('Expiry week: varied burn positions land at 98-100%', () => {
+describe(' expiry week: varied burn positions land at 98-100%', () => {
   it.each([
     { start: 10, landing: 0.98 },
     { start: 50, landing: 0.98 },
@@ -61,7 +60,7 @@ describe('Expiry week: varied burn positions land at 98-100%', () => {
   });
 });
 
-describe('Expiry week: behind-pace lanes catch up before reset', () => {
+describe(' expiry week: behind-pace lanes catch up before reset', () => {
   it.each([
     { start: 20, landing: 0.98, starts: 13 },
     { start: 30, landing: 0.98, starts: 17 },
@@ -77,7 +76,7 @@ describe('Expiry week: behind-pace lanes catch up before reset', () => {
   });
 });
 
-describe('Expiry week: reset boundary retires holds and opens fresh', () => {
+describe(' expiry week: reset boundary retires holds and opens fresh', () => {
   it('closes the old week with no carried debt and admits immediately in the new one', () => {
     const plan = VARIED_BURN_ACCOUNTS[0]!;
     const account = expiryWeekAccount(plan, EXPIRY_WEEK_NOW);

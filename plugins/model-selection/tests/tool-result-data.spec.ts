@@ -73,14 +73,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The Paperclip tool gateway maps a plugin result to
+ * . The Paperclip tool gateway maps a plugin result to
  * `structuredContent: result?.data ?? null`, and the Claude client rejects a
  * null `structuredContent` — every tool call that returned only `{content}`
  * (or an explicit `data: null`) failed schema validation in Claude Code.
  * Every registered tool must therefore return a plain-object `data` on EVERY
  * path, including validation rejections and fail-neutral network paths.
  */
-describe("Every tool result carries a plain-object data", () => {
+describe(": every tool result carries a plain-object data", () => {
   it("registers exactly the TOOL_NAMES registry (this test covers every tool by construction)", async () => {
     const harness = await boot(baseConfig());
     for (const name of Object.values(TOOL_NAMES)) {
@@ -259,12 +259,13 @@ describe("Every tool result carries a plain-object data", () => {
 });
 
 /**
- * Verification for the upstream gateway fix.
+ *  ( D1c, audit priority 1): verification for the upstream
+ * gateway fix prepared in .
  *
  * The gateway maps a plugin result to `structuredContent: result?.data ??
  * null`, and the Claude client rejects a null `structuredContent` — so any
  * tool path that returns a nullish `data` is a schema-validation failure in
- * Claude Code, one hop downstream of us. The producer side is already fixed
+ * Claude Code, one hop downstream of us.  fixed the producer side
  * (every handler returns a plain-object `data`); this block pins the
  * CONSUMER-side contract the gateway fix must satisfy, by running the exact
  * mapping the gateway applies over representative results from every tool and
@@ -275,8 +276,9 @@ describe("Every tool result carries a plain-object data", () => {
  * for that path — the shape the Claude client rejects. This suite goes red
  * on exactly the defect the upstream fix removes.
  */
-describe("The gateway structuredContent mapping never yields null", () => {
-  // The mapping the Paperclip tool gateway applies to a plugin result. Kept as a named function so the assertion
+describe(": the gateway structuredContent mapping never yields null", () => {
+  // The mapping the Paperclip tool gateway applies to a plugin result
+  // (worker.ts  header). Kept as a named function so the assertion
   // reads as the contract, not as an inline reimplementation that could
   // drift from it.
   function gatewayStructuredContent(result: { data: unknown }): unknown {

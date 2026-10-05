@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import unittest
+import urllib.error
 from unittest import mock
 
 import websearch_lane_probe as probe
@@ -149,11 +150,10 @@ class ScheduledMonitorTests(unittest.TestCase):
     def test_retired_omniroute_lane_is_not_scheduled(self):
         """Owner rule 2026-09-13: everything but Hindsight goes direct to CLIProxy.
 
-        The 07:36Z cutover (TOG-2880) completed that move, so a verdict on the
-        router lane measures a route no fleet traffic takes. Re-adding it would
-        reintroduce a standing exit-4/5 row that is not a health signal -- the
-        precise reason TOG-2905 removed it. This pin is what makes putting it
-        back a deliberate act rather than an accident.
+        The cutover completed that move, so a verdict on the router lane
+        measures a route no fleet traffic takes. Re-adding it would reintroduce
+        a standing exit-4/5 row that is not a health signal. This pin is what
+        makes putting it back a deliberate act rather than an accident.
         """
         for lane in probe.scheduled_lanes():
             self.assertNotIn("router.example.net", lane.base_url)
@@ -332,6 +332,64 @@ class ScheduledMonitorTests(unittest.TestCase):
         body = json.loads(request.data)
         self.assertIn("MANIFEST_DROP", body["body"])
         self.assertIn("direct cliproxy :: claude-sonnet-5", body["body"])
+
+
+class FetchRunSecretTests(unittest.TestCase):
+    def setUp(self):
+        self.env = {
+            "PAPERCLIP_API_URL": "https://paperclip.invalid/api",
+            "PAPERCLIP_API_KEY": "paperclip-canary",
+        }
+
+    @mock.patch("urllib.request.urlopen")
+    def test_value_fetch_posts_json_body(self, urlopen):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({"value": "lane-key"}).encode()
+        urlopen.return_value.__enter__.return_value = response
+
+        self.assertEqual(
+            probe.fetch_run_secret("cliproxy_agent_api_key", self.env), "lane-key"
+        )
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://paperclip.invalid/api/agents/me/secrets/"
+            "cliproxy_agent_api_key/value",
+        )
+        self.assertEqual(json.loads(request.data), {})
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers["content-type"], "application/json")
+
+    @mock.patch("urllib.request.urlopen")
+    def test_denial_is_loud_and_leaks_no_value(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://paperclip.invalid/api/agents/me/secrets/"
+            "cliproxy_agent_api_key/value",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"error":"Route not allowed"}'),
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertIsNone(
+                probe.fetch_run_secret("cliproxy_agent_api_key", self.env)
+            )
+        logged = stderr.getvalue()
+        self.assertIn("fetch_run_secret cliproxy_agent_api_key: HTTP 403", logged)
+        self.assertNotIn("lane-key", logged)
+        self.assertNotIn("paperclip-canary", logged)
+
+    @mock.patch("urllib.request.urlopen")
+    def test_transport_failure_is_loud_not_silent(self, urlopen):
+        urlopen.side_effect = OSError("connection reset")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertIsNone(
+                probe.fetch_run_secret("cliproxy_agent_api_key", self.env)
+            )
+        self.assertIn("fetch_run_secret cliproxy_agent_api_key: OSError", stderr.getvalue())
 
 
 if __name__ == "__main__":

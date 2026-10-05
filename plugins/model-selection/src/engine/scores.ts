@@ -31,7 +31,7 @@ export function priorP(aaIndex: number | null): number {
 
 /**
  * Blends the composite-index prior with the  five-benchmark basket
- * (). Replaces the  agentic sub-score average, which keyed off
+ *. Replaces the  agentic sub-score average, which keyed off
  * whatever aa.ai columns happened to be populated rather than a fixed basket.
  *
  * Falls back to the plain index prior when the basket misses its coverage gate,
@@ -55,7 +55,7 @@ const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse()
 /**
  * Tier from a posterior. T3 is the RESIDUAL bucket, not a fourth threshold.
  *
- * The cuts are the active tier policy's `scoreThresholds` (), which
+ * The cuts are the active tier policy's `scoreThresholds`, which
  * for `legacy-model-selection-v1` are still `SCORE_THRESHOLDS`. A model with
  * `p` under the T3 cut clears no tier at all. It is labelled
  * T3 and flagged `belowT3Floor` rather than dropped, because `tier` (the
@@ -235,7 +235,7 @@ export function buildModelScore(
     (agg.okMins as number[]).push(...stats.okMins);
   }
 
-  // the tier is cut from the OVERALL posterior — one number per model,
+  // : the tier is cut from the OVERALL posterior — one number per model,
   // across all tiers — not from any per-tier `capable` gate. Conflating the two
   // is what produced equal-index models landing in different tiers.
   const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg, capability.priorK, scoreThresholds);
@@ -254,7 +254,7 @@ export function buildModelScore(
 }
 
 /**
- * Capability is monotone in tier order: a tier with no PROVEN
+ * . Capability is monotone in tier order: a tier with no PROVEN
  * evidence of its own is no more capable than any easier tier.
  *
  * Each tier's `capable` is otherwise judged in isolation, and a tier with no
@@ -298,7 +298,7 @@ export function tierScoreFor(score: ModelScore | undefined, tier: Tier): TierSco
 }
 
 /**
- * The highest tier a promotion may reach: the hardest tier whose
+ * . The highest tier a promotion may reach: the hardest tier whose
  * monotone capability verdict is not false. Undefined when the score carries
  * no tier verdicts at all.
  *
@@ -354,7 +354,7 @@ export function applyDerivedTiers<T extends RosterRow>(
     const score = scoresByModelId[model.id];
     if (!score || !score.derivedTier) return model;
     if (score.tierSpecVersion !== specVersion) return model;
-    // a row an operator recorded above the implicit ceiling (T0) is
+    // : a row an operator recorded above the implicit ceiling (T0) is
     // placed by that record, not by a posterior — neither promoted into nor
     // demoted out of it. A demotion would not be "safe to act on" here: it
     // would turn an S-tier row into an ordinary regular T1 row that implicit
@@ -476,7 +476,7 @@ export function normModelId(modelId: string): string {
 /**
  * Ported from `model_scores.py`'s `classify()` (lines 50-55).
  *
- * INFRA_RE -> {kind:"infra", weight:0.0} is intentional (): infra
+ * INFRA_RE -> {kind:"infra", weight:0.0} is intentional: infra
  * is excluded from the quality posterior p and counted only as failInfra.
  * See the header above and scores.spec.ts's rawReplayCases / HOST_EVIDENCE
  * 75.7% regression for the invariant this preserves.
@@ -632,7 +632,7 @@ export interface CardRow {
 }
 
 /**
- * Hard exclusions require outcome-independent observation: rejects
+ * . Hard exclusions require outcome-independent observation: rejects
  * and accepts must both age 14 days. The reporting metric resolves rejects
  * early and is therefore insufficient, even when its denominator reaches 8.
  *
@@ -727,7 +727,7 @@ export function buildCardLedger(
       modelId,
       tier,
       cardsClosed: rows.length,
-      // Published so a consumer can tell "never accepted" from
+      // . Published so a consumer can tell "never accepted" from
       // "not resolved yet". `cardsClosed` alone cannot: it counts the
       // censored rows, so a brand-new entrant reads as a long losing streak.
       cardsResolved: resolved.length,

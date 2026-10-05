@@ -193,7 +193,7 @@ else
 fi
 # Asserted through `thread` rather than `list` on purpose: `list` has its own
 # defect (section 5) and would hand this one a false PASS by printing nothing.
-if "$Q" thread --request "$REQ" 2>&1 | grep -q EXPIRED; then
+if grep -q EXPIRED <<<"$("$Q" thread --request "$REQ" 2>&1)"; then
   ok "the record shows the request aged out, without a reviewer having touched it"
 else
   bad "an aged-out request still reads as pending; expiry is only written by a review attempt"
@@ -219,7 +219,7 @@ reset
 "$Q" submit --requester MGR --template E0_SPECIALIST --title "IRQ Reasoned approval" >/dev/null 2>&1
 REQ="$(last_sub)"
 "$Q" review --reviewer DIR --request "$REQ" --approve --reason "headcount plan signed off" >/dev/null 2>&1
-if "$Q" thread --request "$REQ" 2>&1 | grep -q "headcount plan signed off"; then
+if grep -q "headcount plan signed off" <<<"$("$Q" thread --request "$REQ" 2>&1)"; then
   ok "thread renders the approval's reasoning, not only its verdict"
 else
   bad "thread shows APPROVED without the reasoning behind it"
@@ -240,7 +240,7 @@ STUBBIN="$TMP/nobin"; mkdir -p "$STUBBIN"
 for b in bash jq sed awk grep cut date cat wc sort head tail tr printf mktemp rm; do
   p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$STUBBIN/$b"
 done
-if PATH="$STUBBIN" "$Q" list --status pending 2>/dev/null | grep -q "$REQ"; then
+if grep -q "$REQ" <<<"$(PATH="$STUBBIN" "$Q" list --status pending 2>/dev/null)"; then
   ok "list renders the pending queue without util-linux \`column\`"
 else
   bad "list prints nothing when \`column\` is absent — an unusable inbox looks like an empty one"

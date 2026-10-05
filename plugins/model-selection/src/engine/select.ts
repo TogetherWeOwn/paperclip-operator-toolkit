@@ -30,7 +30,9 @@ import { applyPickOrdering } from "./pick-order.js";
 import { earnInGuardFor, freeEarnInWinner } from "./free-lane-earn-in.js";
 import { compareSamePriceFamily } from "./same-price-family.js";
 import {
+  allLanesDeadVetoed,
   avoidThresholdFor,
+  deadVetoExcluded,
   hardStopExcluded,
   modelCooldownExcluded,
   laneAvoidExcluded,
@@ -67,7 +69,7 @@ export interface SelectionConfig {
   /** Keep the model already used on this issue (ADR-0008, Round 4). */
   stickyWithinIssue: boolean;
   /**
-   * `off`: no pace involvement at all (skips the hard stop too —
+   * . `off`: no pace involvement at all (skips the hard stop too —
    * an operator can fully disable this feature). `shadow` (default): the
    * hard stop and pace ordering both run and are recorded in the trace, but
    * `pacingApplied` on the decision tells the caller not to treat the result
@@ -78,9 +80,18 @@ export interface SelectionConfig {
    */
   pacingMode?: PacingMode;
   laneLedger?: LaneLedger;
+  /**
+   *  (D1e). The lanes configured for this company
+   * (`pacing.lanes[].laneId`). Null/absent fails the veto OPEN — without the
+   * configured set an unconfigured lane cannot be told apart from a dead one,
+   * so vetoing anything would risk vetoing everything. The worker passes the
+   * resolved lane ids; callers that cannot name the configured set omit this
+   * and get pre-D1e behaviour exactly.
+   */
+  configuredLaneIds?: readonly string[] | null;
   slotFloorFraction?: number;
   /**
-   * A live (non-expired) operator override for this issue: "route
+   * . A live (non-expired) operator override for this issue: "route
    * to this model regardless of pace." It bypasses pace-preference ordering
    * and the ahead-of-line slot throttle for THIS model only — it never
    * bypasses a capability gate, a tier floor, the untrusted-profile hold, or
@@ -137,7 +148,7 @@ export interface SelectionConfig {
   };
   /**
    * Which cost term orders candidates. Defaults to "list-price" — unchanged
-   * behavior. Composition with pacing (): objective reordering runs
+   * behavior. Composition with pacing: objective reordering runs
    * strictly AFTER pace ordering / the ahead-of-line slot throttle and never
    * bypasses either. Pace encodes hard capacity/serviceability reality
    * (a lane can only take so much traffic right now); objective encodes a
@@ -178,7 +189,7 @@ export interface SelectionConfig {
    */
   holdOnUnknownAvailability?: boolean;
   /**
-   * Monitor ticks, continuation wakes, and label-only passes
+   * . Monitor ticks, continuation wakes, and label-only passes
    * re-check an already-tiered card; the card is correctly judged T1 by
    * every rubric anchor, but the RE-CHECK itself is cheap. Absent/disabled:
    * byte-identical to pre- behavior. When enabled and
@@ -210,7 +221,7 @@ export interface SelectInput {
   /**  §2.2 card ledger, keyed `${modelId}:${tier}`. Only consulted for the shadow diff / non-default objective. */
   cardLedger?: Readonly<Record<string, CardLedgerEntry>>;
   /**
-   * the availability term. Read per decision from the published
+   * : the availability term. Read per decision from the published
    * quota-contract document (`worker.ts` `readAvailability`), never cached in
    * config — both measured failure shapes were transient (Z.ai's cooldown
    * ~4 minutes, Claude's window recovered inside two hours), so a value held
@@ -219,7 +230,7 @@ export interface SelectInput {
    */
   availability?: AvailabilitySnapshot;
   /**
-   * second failure shape: run-outcome evidence per lane, from
+   * , second failure shape: run-outcome evidence per lane, from
    * `heartbeat_runs`. Distinct from `availability`, which can only speak about
    * lanes that publish a quota contract — `devin/*` publishes none and still
    * refused 74 of 74 dispatches at the provider level, so the availability
@@ -252,6 +263,17 @@ export function selectModel(input: SelectInput): SelectionDecision {
   const ledger: LaneLedger = config.laneLedger ?? {};
   const slotFloorFraction = config.slotFloorFraction ?? 0.25;
   const overrideModelId = resolveConfiguredModelId(config.operatorOverrideModelId, config.models);
+
+  //  (D1e). CEO fail-open: when every configured lane meets the dead
+  // condition in the same window, the failure is poller-side, not per-lane —
+  // vetoing all of them would stop dispatch through `tier-exhausted`. Admit
+  // as today instead; the worker raises the operator card as "poller suspect"
+  // off `decision.deadVeto.bypassedAllDead`. Null configured set fails open
+  // too (see `configuredLaneIds` above).
+  const configuredLaneIds = config.configuredLaneIds ?? null;
+  const bypassAllDead =
+    paceActive && configuredLaneIds !== null && allLanesDeadVetoed(ledger, configuredLaneIds);
+  const deadVetoScope = { configuredLaneIds, bypassAllDead };
 
   // ---- : the availability term ------------------------------------
   //
@@ -403,7 +425,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       if (!evidenceExcluded.some((entry) => entry.modelId === model.id)) evidenceExcluded.push(note);
       if (!rejections.some((r) => r.modelId === model.id && r.stage === "lane-evidence")) {
         // The RULE is named, not just the verdict: `zero-success` and
-        // `wilson-upper` are different operator findings .
+        // `wilson-upper` are different operator findings (AC-6).
         rejections.push({
           modelId: model.id,
           stage: "lane-evidence",
@@ -443,13 +465,23 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // An issue-override pin on a lane that will not serve falls through to the
     // tier label / agent floor, the same as for the pace hard stop. An UNKNOWN
     // never moves a pin: a blind instrument is not grounds to discard a
-    // recorded human judgement.
+    // recorded human judgement. A dead-vetoed lane fails the pin the same
+    // way — a pin is a preference, not a suicide pact.
     isLaneUnserviceable: (model) =>
-      (paceActive && hardStopExcluded(ledger, model, now)) || laneRead(model).state === "unavailable",
+      (paceActive &&
+        (hardStopExcluded(ledger, model, now) || deadVetoExcluded(ledger, model, deadVetoScope))) ||
+      laneRead(model).state === "unavailable",
   });
   trace.push(`tier ${judgement.tier} via ${judgement.source} — ${judgement.detail}`);
+  if (bypassAllDead) {
+    trace.push(
+      `dead-lane veto fail-open: every configured lane meets the dead condition ` +
+        `(${(configuredLaneIds ?? []).length} of ${(configuredLaneIds ?? []).length}) — ` +
+        `admitting as today; a poller-side outage is suspect, not per-lane death`,
+    );
+  }
 
-  // T0 admission. Rows more capable than this decision's ceiling
+  // : T0 admission. Rows more capable than this decision's ceiling
   // are removed from the pool HERE, before the sticky lookup, the gate loop,
   // the exhaustion accounting, the ladder walk and the escalation-risk term
   // all read it — a barred row must never win, escalate a card into itself,
@@ -465,7 +497,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     );
   }
 
-  // a wake-scoped floor never raises the required tier and never
+  // : a wake-scoped floor never raises the required tier and never
   // touches `judgement` — it only ever supplies a lower starting rung for the
   // gate/ladder walk below, for this one decision. Computed here, ahead of
   // `base`/the sticky block, so both use it consistently.
@@ -508,6 +540,10 @@ export function selectModel(input: SelectInput): SelectionDecision {
       evidenceExcluded,
       incumbentEvidence,
     },
+    //  (D1e). Said on every decision, including when the veto did
+    // nothing — a gate that is silent when unconfigured is indistinguishable
+    // from a gate that is silent because it is broken.
+    deadVeto: { bypassedAllDead: bypassAllDead },
     wakeScopedTier: wakeFloorEligible ? requiredTier : null,
   };
 
@@ -526,13 +562,13 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // Sticky beats cost. A mid-issue model change fires
   // `shouldResetTaskSessionForModelChange` (heartbeat.ts:5127-5133), discarding
   // the warm prompt cache — and cache read is the largest cost line we have
-  //. The saving from a cheaper model on turn N does not repay a
+  // (ADR-0002). The saving from a cheaper model on turn N does not repay a
   // cache reset at turn N.
   //
   // Sticky beats cost, but it does not beat the required tier: an issue already
   // pinned to a lower-capability model must not stay there after a stronger
   // recorded judgement supersedes it. It also does not beat the serviceability
-  // hard stop (Defect 6): staying sticky to a model whose lane is
+  // hard stop (, Defect 6): staying sticky to a model whose lane is
   // exhausted/unavailable would silently wedge the issue there with no path
   // to escalate, the same failure `hardStopExcluded` exists to prevent for
   // every other candidate below — sticky is a preference for continuity, not
@@ -542,6 +578,8 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const incumbent = poolModels.find(
       (model) => model.id === stickyModelId && model.enabled,
     );
+    const incumbentVetoed =
+      incumbent && paceActive && deadVetoExcluded(ledger, incumbent, deadVetoScope);
     // Sticky history is not an opt-in: an incumbent above the ceiling (a T0 row
     // from a pin, floor or earlier decision) is declined and the issue re-selects.
     const barredIncumbent = config.models.find(
@@ -564,7 +602,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         operand: { kind: "tier-floor", tier: incumbent.tier, requiredTier },
       });
     } else if (incumbent && isAdapterBlockedModel(incumbent.id, descriptor.agentAdapterType)) {
-      // staying sticky to an adapter-incompatible model would wedge
+      // : staying sticky to an adapter-incompatible model would wedge
       // the issue on a lane that refuses every dispatch at the provider level.
       trace.push(
         `sticky ${incumbent.id} declined: incompatible with the ${descriptor.agentAdapterType} adapter — re-selecting instead of wedging this issue on a refusing lane`,
@@ -607,6 +645,26 @@ export function selectModel(input: SelectInput): SelectionDecision {
           verdict: laneVerdictFor(ledger, incumbent.laneId)?.state ?? null,
         },
       });
+    } else if (incumbent && incumbentVetoed) {
+      //  (D1e). Same reasoning as the hard stop above: a warm prompt
+      // cache on a lane with zero successes in its last 5 polls is worth
+      // nothing. Recorded under its own stage so `decisions.jsonl` answers
+      // which instrument took the lane out.
+      const streak = ledger[incumbent.laneId ?? ""]?.consecutiveNonSuccess ?? 0;
+      trace.push(
+        `sticky ${incumbent.id} declined: lane ${incumbent.laneId ?? "(none)"} is dead-vetoed ` +
+          `(${streak} consecutive polls with zero successes) — re-selecting instead of wedging this issue on a dead lane`,
+      );
+      rejections.push({
+        modelId: incumbent.id,
+        stage: "lane-dead-veto",
+        reason: `lane ${incumbent.laneId ?? "(none)"} has ${streak} consecutive polls with zero successes`,
+        operand: {
+          kind: "lane-dead-veto",
+          laneId: incumbent.laneId ?? null,
+          consecutiveNonSuccess: streak,
+        },
+      });
     } else if (incumbent && !clearsEvidence(incumbent)) {
       // A warm prompt cache on a lane that has never once returned a run is
       // worth nothing — same reasoning as the availability branch below, from
@@ -637,7 +695,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     trace.push(`hard capability gate: ${[...required].sort().join(", ")}`);
   }
 
-  // Read once, here, because the ledger now feeds two consumers with
+  // . Read once, here, because the ledger now feeds two consumers with
   // opposite standing: the `card-accept-rate` GATE in the loop below (live on
   // shipped config) and the shadow-diff/objective ordering far downstream
   // (inert unless `objective` is switched off its default).
@@ -651,7 +709,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       rejections.push({ modelId: model.id, stage: "disabled", reason: "disabled in the roster", operand: { kind: "disabled" } });
       continue;
     }
-    // Adapter-compatibility: `devin/*` cannot serve a `claude_local`
+    // . Adapter-compatibility: `devin/*` cannot serve a `claude_local`
     // assignee — Devin's content filter rejects the Claude Code / Agent SDK
     // system banner (Cognition ticket 71806; measured 25 failed / 3 succeeded
     // runs on claude_local+devin). An exclusion, never a down-rank, and an
@@ -693,7 +751,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // explicit `false` excludes; fail-open when `config.modelScores` is unset,
     // when this model has no recorded score, or when the tier verdict is
     // `null`, so a company with no scored history yet sees no change.
-    // read through `tierScoreFor`, so a tier with no proven
+    // : read through `tierScoreFor`, so a tier with no proven
     // evidence of its own cannot pass where an easier tier failed.
     const modelScore = config.modelScores?.[model.id];
     const score = tierScoreFor(modelScore, requiredTier);
@@ -713,7 +771,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // `capability-score` above measures whether RUNS succeed; this
+    // . `capability-score` above measures whether RUNS succeed; this
     // measures whether the CARDS those runs closed stayed closed. A model can
     // pass the first and fail this one: `gpt-6-astra` read a 98.0% run success
     // rate over 296 runs on 2026-09-22 while every resolved T1 card attributed
@@ -758,7 +816,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // Serviceability hard stop (): a lane that is exhausted or
+    // Serviceability hard stop: a lane that is exhausted or
     // unavailable excludes its model outright, same as a missing capability
     // — never merely deprioritized. `paceActive` gates this off entirely in
     // `pacing.mode: off`, and `hardStopExcluded` itself is fail-neutral: an
@@ -780,7 +838,27 @@ export function selectModel(input: SelectInput): SelectionDecision {
       });
       continue;
     }
-    // a lane whose combined utilization has reached its configured
+    //  (D1e). The dead-lane veto: a lane with zero successes in its
+    // last 5 consecutive polls excludes its models outright, at the same gate
+    // position as `lane-unserviceable` — never merely deprioritized. Gated on
+    // `paceActive` like the hard stop (inert when `pacing.mode` is off), and
+    // fail-open on an absent configured set and on the all-lanes-dead bypass
+    // (both decided in `deadVetoExcluded` via `deadVetoScope`).
+    if (paceActive && deadVetoExcluded(ledger, model, deadVetoScope)) {
+      const streak = ledger[model.laneId ?? ""]?.consecutiveNonSuccess ?? 0;
+      rejections.push({
+        modelId: model.id,
+        stage: "lane-dead-veto",
+        reason: `lane ${model.laneId ?? "(none)"} has ${streak} consecutive polls with zero successes`,
+        operand: {
+          kind: "lane-dead-veto",
+          laneId: model.laneId ?? null,
+          consecutiveNonSuccess: streak,
+        },
+      });
+      continue;
+    }
+    // : a lane whose combined utilization has reached its configured
     // withdrawal ceiling is out for NEW dispatch, through the same hard-stop
     // path: excluded outright, never waived by an operator override, and
     // counted as capacity when it empties a tier. Off unless the lane has a
@@ -827,7 +905,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // dispatches to the lane actually did. `devin/*` passes the first and
     // fails this one.
     if (!clearsEvidence(model)) continue;
-    // lane avoid threshold and operator-declared outage, ported from
+    // : lane avoid threshold and operator-declared outage, ported from
     // `tier_dispatcher.py`'s `AVOID`/`AVOID_LANE` and `lane_outage.json`. Both
     // are gated the same as the hard stop above (`paceActive` only) and, like
     // it, are never waived by an operator override.
@@ -968,7 +1046,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     }
   }
 
-  // say what the adapter-compatibility gate did on every decision,
+  // : say what the adapter-compatibility gate did on every decision,
   // including nothing — the same AC-6 discipline as the availability and
   // evidence terms above, so `decisions.jsonl` answers "why did this
   // claude_local card not get devin" without re-deriving it.
@@ -981,7 +1059,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   }
 
   if (qualified.length === 0) {
-    // Defect 2. Distinguish a genuine capacity dead end from an
+    // , Defect 2. Distinguish a genuine capacity dead end from an
     // ordinary config/capability gap. If every model from `requiredTier`
     // through the admitted ceiling that survived the disabled/capability/context
     // gates was excluded ONLY by the pace serviceability hard stop, there is
@@ -994,7 +1072,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
       const rejectedModel = poolModels.find((entry) => entry.id === rejection.modelId);
       return rejectedModel ? tierIndex(rejectedModel.tier) >= tierIndex(requiredTier) : false;
     });
-    // `lane-availability` counts here alongside `lane-unserviceable` ():
+    // `lane-availability` counts here alongside `lane-unserviceable`:
     // both are capacity, and which of the two inputs saw the outage first is an
     // implementation detail. Routing a wholly-unserviceable tier to
     // `no-eligible-model` would report a capacity outage as a config gap and
@@ -1002,11 +1080,13 @@ export function selectModel(input: SelectInput): SelectionDecision {
     // `lane-evidence` joins them for the same reason: a tier whose every lane
     // has proven dead is a capacity outage, and the fact that run history
     // rather than a quota document is what proved it changes nothing about who
-    // needs to hear about it.
-    // `lane-withdrawn` () joins them: a tier whose every lane sits at
+    // needs to hear about it. `lane-dead-veto` (, D1e) joins them for
+    // the same reason again: a tier whose every lane has zero poll successes
+    // is a capacity dead end — never silent misrouting.
+    // `lane-withdrawn` joins them: a tier whose every lane sits at
     // its withdrawal ceiling is a capacity outage by the operator's own
     // definition of one.
-    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-withdrawn"]);
+    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-dead-veto", "lane-withdrawn"]);
     // ...with one exception, and it is the tri-state one. If the only reason
     // nothing qualified is that `holdOnUnknownAvailability` excluded lanes
     // nobody could READ, that is not a capacity dead end — it is a blind
@@ -1075,7 +1155,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     return candidates;
   }
 
-  // Defect 2. Walk the tier ladder one rung at a time, starting at
+  // , Defect 2. Walk the tier ladder one rung at a time, starting at
   // the required tier — never pool every qualifying tier into one flat cost
   // race. A candidate one tier up must never win merely for being cheaper
   // than a candidate that was actually available at the required tier; it is
@@ -1153,7 +1233,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     );
   }
 
-  // Pace ordering (): pace state, deviation, cost, release date, id —
+  // Pace ordering: pace state, deviation, cost, release date, id —
   // computed and traced whenever pacing is not `off`, but only allowed to
   // change the winner in `enforce`. `orderCandidatesByPace` partitions by
   // tier (in cost-sort order) before comparing anything, so this can never
@@ -1167,7 +1247,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
         ? `pace ordering (${pacingMode}) reorders to ${paceOrdered.map((c) => c.modelId).join(" > ")}`
         : `pace ordering (${pacingMode}) agrees with cost ordering`,
     );
-    // Defect 5. Preferred-near-reset is the gas-pedal counterpart
+    // , Defect 5. Preferred-near-reset is the gas-pedal counterpart
     // to the hard stop and slot throttle, both of which only ever hold a
     // lane back — this is traced separately so the 48h comparison stream can
     // tell a "trailing lane preferred" reorder apart from an ordinary
@@ -1179,7 +1259,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
 
-  // Ahead-of-line slot throttling (enforce only): a candidate whose
+  // Ahead-of-line slot throttling (, enforce only): a candidate whose
   // lane is `ahead` is capped at `slotFloorFraction` of traffic rather than
   // excluded — the floor never reaches zero while the lane is serviceable
   // (serviceability itself was already enforced above as a hard stop, not
@@ -1266,7 +1346,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // random 10% sampling roll, while this is a deterministic owner rule about
   // who wins the tier. Sticky continuity is unaffected — a sticky incumbent
   // returns before this runs.
-  // earn-in never fires on protected cards (critical/high
+  // : earn-in never fires on protected cards (critical/high
   // priority, review/gate). The picker itself enforces the guard; this trace
   // line says which side of it this decision fell on, so `decisions.jsonl`
   // answers "why did this card not earn-in" without re-deriving it.
@@ -1301,7 +1381,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
 
   // `objective` never affects `candidates`/`winner` unless explicitly switched
   // away from the default. Shipped config always leaves this at "list-price"
-  // (hard constraint) — the alternate ordering above only feeds the
+  // ( hard constraint) — the alternate ordering above only feeds the
   // shadow-diff record, observed for 7 days before any enforcement proposal.
   const objective = config.objective ?? "list-price";
   // Earn-in already sits at orderedCandidates[0] and clears the slot throttle
@@ -1332,7 +1412,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // availability. And the floor is frequently never a candidate above: a
   // fleet-wide floor model is usually below `requiredTier` for a T1/T2 card,
   // so it never reached the `qualified` loop and its lane was never tested
-  // against `ledger`/`laneOutageOverride` at all (). Test it here,
+  // against `ledger`/`laneOutageOverride` at all. Test it here,
   // on the exact same predicates, before handing the run back to a lane that
   // might already be dead. `winner` already cleared every gate above
   // (including serviceability), so it is always a safe explicit fallback.
@@ -1352,7 +1432,7 @@ export function selectModel(input: SelectInput): SelectionDecision {
     if (floorModel && floorLaneRead !== null && floorLaneRead.state === "unavailable") {
       // `excluded` on the decision is a live reference, so the floor's own
       // exclusion is answerable in `decisions.jsonl` even though the floor
-      // never entered the candidate loop .
+      // never entered the candidate loop (AC-6).
       if (!excludedByLane.some((entry) => entry.modelId === floorModel.id)) {
         excludedByLane.push({
           modelId: floorModel.id,

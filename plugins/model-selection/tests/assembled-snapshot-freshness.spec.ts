@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import { assembleAdditiveConfig } from "../scripts/assemble-additive-config.mjs";
 
 /**
- * assembled-snapshot freshness, regenerate-and-diff (read-only).
+ * : assembled-snapshot freshness, regenerate-and-diff (read-only).
  *
- * Leaf of  under epic. The committed assembled-roster
+ * Leaf of  under epic . The committed assembled-roster
  * snapshot is tests/fixtures/bridge/bridge-assembled-rows.json (repo
  * root, owned by ): the 3 bridge rows with the lane bindings the
  * assembly infers. A roster edit, a lane-rule change in
@@ -23,8 +23,8 @@ import { assembleAdditiveConfig } from "../scripts/assemble-additive-config.mjs"
  * enforce change.
  *
  * Non-goals (owned elsewhere, do not duplicate): tiers.yaml-vs-roster drift
- * (); per-model enabled-row inventory (); gap unit tests
- * (); live wiring ().
+ *; per-model enabled-row inventory; gap unit tests
+ *; live wiring.
  */
 
 const PLUGIN_DIR = resolve(__dirname, "..");

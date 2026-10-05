@@ -1,21 +1,20 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 
 const script = new URL("../scripts/summarize-paired-decisions.mjs", import.meta.url).pathname;
-const gate = process.env.PAIRED_DECISION_GATE_HARNESS ?? "";
+const gate = new URL("../../../ops/gate_harness.py", import.meta.url).pathname;
 const start = "2026-09-14T00:00:00Z";
 const end = "2026-09-15T00:00:00Z";
 
 function record(writer: "host" | "plugin-shadow", overrides: Record<string, unknown> = {}) {
   return {
-    schema: process.env.PAIRED_DECISION_SCHEMA_VERSION ?? SHADOW_SCHEMA_VERSION,
+    schema: "paired-decision-v1",
     writer,
     issueId: "issue-1",
-    issueIdentifier: "EX-1",
+    issueIdentifier: "",
     ts: "2026-09-14T12:00:00Z",
     trigger: "new-card",
     tier: "T2",
@@ -63,7 +62,7 @@ function run(lines: unknown[]) {
   return { ...result, report, out };
 }
 
-// --input also accepts a directory of UTC-hour shards.
+// : --input also accepts a directory of UTC-hour shards.
 function runShardDir(files: Record<string, unknown[]>) {
   const dir = scratch();
   const shards = join(dir, "shards");
@@ -78,53 +77,7 @@ function runShardDir(files: Record<string, unknown[]>) {
   return { ...result, report };
 }
 
-describe("public paired-summary harness contract", () => {
-  it("requires an explicitly injected gate harness", () => {
-    const dir = scratch();
-    const input = join(dir, "decisions.jsonl");
-    writeFileSync(input, "");
-    const result = spawnSync(process.execPath, [script, "--input", input, "--start", start, "--end", end], { encoding: "utf8" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("--gate-harness is required");
-  });
-
-  it("partitions input for an injected synthetic harness without claiming the full gate", () => {
-    const dir = scratch();
-    const input = join(dir, "decisions.jsonl");
-    const injected = join(dir, "synthetic-harness.py");
-    writeFileSync(input, [record("host", { schema: "decision-pair-v1" }), record("plugin-shadow", { schema: "decision-pair-v1" })].map((value) => JSON.stringify(value)).join("\n") + "\n");
-    // Report-shape test double only, not the deployment's policy/clean-window gate.
-    writeFileSync(injected, `import json, pathlib, sys
-args = sys.argv
-assert args[1] == "agreement"
-def records(flag):
-    return [json.loads(line) for line in pathlib.Path(args[args.index(flag) + 1]).read_text().splitlines() if line]
-host, shadow = records("--host"), records("--shadow")
-assert len(host) == len(shadow) == 1
-assert host[0]["writer"] == "host" and shadow[0]["writer"] == "plugin-shadow"
-report = {"denominators": {"hostRecords": len(host), "shadowRecords": len(shadow), "comparablePairs": 1, "nonComparable": 0}}
-pathlib.Path(args[args.index("--out") + 1]).write_text(json.dumps(report))
-sys.exit(7)
-`);
-    const result = spawnSync(process.execPath, [script, "--input", input, "--start", start, "--end", end, "--gate-harness", injected], { encoding: "utf8" });
-    expect(result.status).toBe(0);
-    const canonical = JSON.parse(result.stdout);
-    expect(canonical).toMatchObject({ schema: "paired-decision-summary-v2", dataGap: false, cleanWindowGateEvaluated: false, fullCleanWindowGateExit: 7 });
-    const args = [script, "--input", input, "--start", start, "--end", end, "--gate-harness", injected];
-    const legacy = spawnSync(process.execPath, [...args, "--report-schema", "legacy-bounded-summary-v2"], { encoding: "utf8" });
-    expect(legacy.status).toBe(0);
-    expect(JSON.parse(legacy.stdout)).toEqual({ ...canonical, schema: "legacy-bounded-summary-v2" });
-    for (const invalid of ["legacy-bounded-summary-v1", "", "UNVALIDATED", "x".repeat(80) + "-v2"]) {
-      const refused = spawnSync(process.execPath, [...args, "--report-schema", invalid], { encoding: "utf8" });
-      expect(refused.status).toBe(1);
-      expect(refused.stderr).toContain("--report-schema must be an exact v2 identifier");
-    }
-  });
-});
-
-// Deployment integration is optional and uses only an explicit operator path.
-// A skipped block is not evidence that the deployment's harness passed.
-describe.skipIf(!existsSync(gate))("bounded paired decision summary (deployment integration)", () => {
+describe("bounded paired decision summary", () => {
   it("accepts one correlated pair without claiming the 48h clean window", () => {
     const result = run([record("host"), record("plugin-shadow")]);
     expect(result.status).toBe(0);

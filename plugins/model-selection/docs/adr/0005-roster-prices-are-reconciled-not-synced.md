@@ -2,9 +2,9 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-22
-- **Related:** ADR-0001 (the volume-aware cost term these fields feed), the
-  aa.ai drift sweep this is structured after, and the thirteen rows shipped
-  disabled rather than cost-sorted on an estimate
+- **Related:** ADR-0001 (the volume-aware cost term these fields feed),
+  the aa.ai drift sweep this is structured after, and the thirteen rows
+  that shipped disabled rather than cost-sorted on an estimate pending pricing confirmation
 
 ## Context
 
@@ -45,7 +45,7 @@ company overnight, with the first evidence being a changed bill.
 
 So the job emits a diff, stores it, logs the findings to the activity stream,
 and stops. An operator applies. This is deliberately the same posture as the
-thirteen roster rows that shipped **disabled** with the marker *"Would
+thirteen pricing-confirmation rows, which shipped **disabled** with the marker *"Would
 enable once CLIProxy pricing is confirmed — shipped disabled to avoid an
 estimated price silently winning cost-sort over already-proven models."* The
 principle is identical: a wrong price that routes is worse than a stale price

@@ -11,7 +11,7 @@
  * absent/sparse/mature/vetoed stats. A positive control proves the grid would
  * see the old source's T1 0.85 bar, so a zero here is a finding, not a void.
  *
- * Recorded-decision parity is NOT claimed: the paired decision stream records
+ * Recorded-decision parity is NOT claimed: the  decision stream records
  * each candidate's verdict but not the stats and priors that produced it.
  *
  *  is the one deliberate departure from the frozen evaluator:
@@ -62,8 +62,6 @@ import * as serving from "./serving-evaluator-t1baseline.js";
 const FIXTURE_PATH = fileURLToPath(new URL("./serving-evaluator-t1baseline.js", import.meta.url));
 const SERVING_WORKER = "/opt/serving-host/model-selection-0.4.0-main5a9be61-t1baseline/dist/worker.js";
 const SERVING_WORKER_SHA256 = "dde5fe180cc86856d2332a6ee56ff3ea62fedd349c91c1550de8bd8773b3c099";
-// Re-pinned for the public derivative: the only byte delta from the captured
-// slices is the disclosure-driven rename of the internal capability tag.
 const SLICES_SHA256 = "d495c5bf7a1437b755cc0d1226c1c54b5fd5137eb7358b50883cb2a41b2b07cf";
 const SLICE_RANGES: ReadonlyArray<readonly [number, number]> = [[93, 93], [281, 285], [1464, 1508], [1580, 1701], [1896, 1902]];
 
@@ -280,7 +278,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1baseline", ()
     const { diffs } = replayBuildModelScore((id, idx, by, tiers, row) => buildModelScore(id, idx, by, tiers, row, old));
     expect(diffs.length).toBeGreaterThan(0);
     // Only the T1 capability verdict may move; the cut, the prior and p never do.
-    // a T1 already capped by an easier tier stays false under the
+    // : a T1 already capped by an easier tier stays false under the
     // 0.85 bar, and only its provenance moves — capped becomes its own verdict.
     let flipped = 0;
     for (const d of diffs) {
@@ -353,7 +351,7 @@ describe("zero-diff replay: legacy-model-selection-v1 vs serving t1baseline", ()
   });
 });
 
-describe("T0 is the one deliberate departure from the frozen serving evaluator", () => {
+describe(": T0 is the one deliberate departure from the frozen serving evaluator", () => {
   it("positive control: the raw output differs from serving ONLY as a derived T0 where serving says T1", () => {
     const { diffs, scores } = replayBuildModelScore(buildModelScore, servingMonotone, { rawT0: true });
     expect(diffs.length).toBeGreaterThan(0);

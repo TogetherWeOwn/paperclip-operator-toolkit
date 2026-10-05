@@ -1,0 +1,18 @@
+# The command the native monitor runs every cycle, verbatim.
+#
+# This file is the checked-in copy of the command recorded on the card. It
+# exists so a rename can be caught by CI: verification/recorded-monitor-command-gate.sh
+# parses the repo paths out of the block below and proves they still resolve
+# AND still run from a tree that contains nothing else.
+#
+# If you rename or move either script, this file must change in the same
+# commit, and so must the monitored card description and its monitorNotes.
+# Updating ci.yml alone keeps CI green while silently killing the monitor.
+#
+# --- BEGIN RECORDED COMMAND ---
+D="$PAPERCLIP_RUN_SCRATCH_DIR/recorded-monitor"; rm -rf "$D"; mkdir -p "$D/scripts"
+git -C "$PAPERCLIP_WORKSPACE_CWD" show origin/main:discord_job_health_monitor.sh > "$D/discord_job_health_monitor.sh"
+git -C "$PAPERCLIP_WORKSPACE_CWD" show origin/main:scripts/discord_job_health.js  > "$D/scripts/discord_job_health.js"
+chmod +x "$D/discord_job_health_monitor.sh"
+"$D/discord_job_health_monitor.sh"
+# --- END RECORDED COMMAND ---

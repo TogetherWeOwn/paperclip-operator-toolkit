@@ -8,9 +8,9 @@ import {
 } from "../src/lane-capacity/pace.js";
 
 /**
- * Codex + Claude account lane-row validation.
+ * : Codex + Claude account lane-row validation.
  *
- * The operator read (2026-10-03) reports the
+ * Slice of . The  operator read (2026-10-03) reports the
  * non-bridge subscription accounts as Codex 3 accounts at 14%/14%/0% weekly
  * utilization and Claude 2 accounts at 17%/2%, with weekly resets 10-09/10-10.
  *
@@ -101,7 +101,7 @@ function row(id: string, tier: "T1" | "T2" | "T3", enabled = true) {
 }
 
 // Enabled non-bridge rows only. Bridge ids (muse-spark-1.3-contributor,
-// claude-sonnet-5-5, gpt-6.1-sol) are covered elsewhere and stay out of this slice.
+// claude-sonnet-5-5, gpt-6.1-sol) are 's and stay out of this slice.
 const NON_BRIDGE_ROSTER = [
   row("claude-opus-5", "T1"),
   row("claude-fable-5-1", "T1"),
@@ -145,7 +145,7 @@ function assemble(
   });
 }
 
-describe("Codex/Claude account lane rows", () => {
+describe(" Codex/Claude account lane rows", () => {
   it("serves all three operator-read Codex accounts on cliproxy-codex", () => {
     const observation = observe("cliproxy-codex", CODEX_RECORDS);
     const verdict = evaluateLanePace({ observation, asOf: OBSERVED_AT });

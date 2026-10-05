@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
 # test_quota_rotation_watch.sh — offline suite for quota_rotation_watch.py
-# (TOG-425).
 #
 # No database, no network, no credentials: every case is a synthetic
 # quota-pacing feed written into a temp dir, so CI can run this.
@@ -12,7 +11,7 @@
 #    Section 2 feeds a case where `is_current` points at the IDLE account the
 #    whole time -- exactly the shape measured on 2026-08-24T15:07Z -- and
 #    asserts the verdict still follows the burn delta. A watcher rewritten to
-#    read `is_current` (which is what TOG-425 step 2 literally asks for)
+#    read `is_current` (which is what a field-first watcher would do)
 #    fails here.
 #
 #  * THE WRONG THRESHOLD. 0.95 is OUR pause gate; 0.98 is teamclaude's
@@ -52,7 +51,7 @@ sample() {
   local f=$1 ts=$2 runs=$3 r5=$4 rw=$5 rc=$6 p5=$7 pw=$8 pc=$9
   printf '{"ts":"%s","pool_verdict":"AHEAD","runs_in_flight":%s,"accounts":[' "$ts" "$runs" >>"$f"
   printf '{"name":"1856877+Rick7C2@users.noreply.github.com","five_hour":%s,"weekly":%s,"is_current":%s,"weekly_reset_utc":"2026-09-11 00:00 UTC"},' "$r5" "$rw" "$rc" >>"$f"
-  printf '{"name":"pisnrzrs@two.gg","five_hour":%s,"weekly":%s,"is_current":%s,"weekly_reset_utc":"2026-09-11 00:00 UTC"}]}\n' "$p5" "$pw" "$pc" >>"$f"
+  printf '{"name":"standby-account@example.invalid","five_hour":%s,"weekly":%s,"is_current":%s,"weekly_reset_utc":"2026-09-11 00:00 UTC"}]}\n' "$p5" "$pw" "$pc" >>"$f"
 }
 
 # run <file> [extra args...] -> sets OUT and CODE
@@ -85,8 +84,9 @@ assert "rotation is detected"            0 "ROTATED"
 assert "and named on the 5h bucket"      0 "spent on five_hour"
 
 echo "== 2. THE LYING FIELD: is_current points at the idle account throughout =="
-# rick burns 0.28 -> 0.38 with is_current=false; pisnrzrs is is_current=true
-# and burns nothing. A watcher keyed on is_current reports the opposite.
+# The first account burns 0.28 -> 0.38 with is_current=false; the standby
+# is is_current=true and burns nothing. A watcher keyed on is_current
+# reports the opposite.
 F="$WORK/liar.jsonl"; : >"$F"
 sample "$F" 2026-08-24T15:07:00Z 11 0.04 0.28 false 0    0.73 true
 sample "$F" 2026-08-24T15:25:00Z 17 0.48 0.32 false 0    0.73 true
@@ -95,8 +95,8 @@ sample "$F" 2026-08-24T16:10:00Z 8  0.98 0.38 false 0.06 0.74 true
 sample "$F" 2026-08-24T16:40:00Z 3  0.99 0.38 false 0.42 0.77 true
 run "$F"
 assert "verdict follows burn, not is_current" 0 "ROTATED"
-# The spent account must be the one that was BURNING (rick), even though
-# is_current said pisnrzrs the whole time.
+# The spent account must be the one that was BURNING (the first account),
+# even though is_current named the standby the whole time.
 if grep -q "1856877+Rick7C2@users.noreply.github.com spent" <<<"$OUT"; then
   ok "the burning account is the one reported spent"
 else

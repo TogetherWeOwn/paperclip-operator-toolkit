@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# test_gh_shim.sh — regression suite for gh-shim. TOG-1448.
+# test_gh_shim.sh — regression suite for gh-shim.
 #
-# gh-shim is the `gh` CLI wrapper installed at /paperclip/.local/bin/gh on
-# every instance, ahead of /usr/bin on PATH. It mints a fresh GitHub App
-# installation token per invocation (TOG-113) by shelling out to
-# gh-app-token.js, then execs the real gh.
+# gh-shim is the `gh` CLI wrapper installed in a per-user bin directory,
+# ahead of /usr/bin on PATH. It mints a fresh GitHub App installation token
+# per invocation by shelling out to gh-app-token.js, then execs the real gh.
 #
-# The defect this guards against (TOG-1448): the shim used to gate minting on
+# The defect this guards against: the shim used to gate minting on
 # GH_APP_PRIVATE_KEY being present in the environment —
 #   if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] && [ -n "${GH_APP_PRIVATE_KEY:-}" ]; then
 # — which is backwards: gh-app-token.js already does its own broker-first,
-# PEM-fallback selection (TOG-222). Once an agent's environment stops binding
-# GH_APP_PRIVATE_KEY (the TOG-222 cutover), that condition would silently skip
-# minting altogether and hand `gh` no token at all, while `git push` (a
-# different credential path) kept working. The hand-fix on the running
-# instance already removed the PEM clause; this suite is what stops a
+# PEM-fallback selection. Once an agent's environment stops binding
+# GH_APP_PRIVATE_KEY (the credential-unbind cutover), that condition would
+# silently skip minting altogether and hand `gh` no token at all, while
+# `git push` (a different credential path) kept working. The hand-fix on the
+# running instance already removed the PEM clause; this suite is what stops a
 # re-bootstrap from reintroducing it.
 #
 # Since /usr/bin/gh is not something this suite can safely overwrite (and may
@@ -44,7 +43,7 @@ hdr() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()  { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 bad() { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
 
-TMP="$(mktemp -d "${PAPERCLIP_RUN_SCRATCH_DIR:-${TMPDIR:-/tmp}}/tog1448-gh-shim-XXXXXX")" || exit 1
+TMP="$(mktemp -d "${PAPERCLIP_RUN_SCRATCH_DIR:-${TMPDIR:-/tmp}}/gh-shim-XXXXXX")" || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
 # --- static checks -----------------------------------------------------------
@@ -56,10 +55,11 @@ else
   bad "gh-shim does not parse"
 fi
 
-# Comments are allowed to document the TOG-1448 history; only CODE must never
-# reference GH_APP_PRIVATE_KEY again.
-if grep -v '^\s*#' "$SHIM" | grep -q 'GH_APP_PRIVATE_KEY'; then
-  bad "gh-shim code still references GH_APP_PRIVATE_KEY — the TOG-1448 gate is back"
+# Comments may document the removed PEM-gate history; only CODE must never
+# reference GH_APP_PRIVATE_KEY again. Herestring, not a pipe into grep -q: under
+# pipefail a pipe can report the producer's SIGPIPE instead of the match result.
+if grep -q 'GH_APP_PRIVATE_KEY' <<<"$(grep -v '^\s*#' "$SHIM")"; then
+  bad "gh-shim code still references GH_APP_PRIVATE_KEY — the PEM gate is back"
 else
   ok "gh-shim code does not gate minting on GH_APP_PRIVATE_KEY"
 fi
@@ -92,7 +92,7 @@ run_shim() {
   env -i PATH="$d/bin:/usr/bin:/bin" HOME="$d" "$d/gh-shim" "$@"
 }
 
-# --- test 1: mints without GH_APP_PRIVATE_KEY (the TOG-1448 regression) ------
+# --- test 1: mints without GH_APP_PRIVATE_KEY (the removed-PEM-gate regression) -
 hdr "mints a token when only GH_TOKEN/GITHUB_TOKEN/GH_APP_PRIVATE_KEY are all unset"
 D1="$TMP/mints-without-pem"; stage "$D1"
 cat > "$D1/bin/node" <<'EOF'

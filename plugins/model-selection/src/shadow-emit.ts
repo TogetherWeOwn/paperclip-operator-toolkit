@@ -4,9 +4,9 @@ import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, Selectio
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * Agreement stream `paired-decision-v1`, the paired
+ *  /  / . `paired-decision-v1`, the paired
  * host/plugin-shadow agreement stream `ops/gate_harness.py`
- * correlates. The host cleanup retired the separate host dispatcher, so both writer
+ * correlates.  retired the separate host dispatcher, so both writer
  * projections now come from the same authoritative `advise()` decision. This
  * module only builds records; `worker.ts` appends the pair via
  * `ctx.localFolders`.
@@ -66,7 +66,7 @@ export interface ShadowCandidate {
 }
 
 /**
- * One rejected candidate's gate and operand — the machine-readable
+ * . One rejected candidate's gate and operand — the machine-readable
  * counterpart to `Rejection.reason`, so a consumer can tell which of several
  * plausible gates actually excluded a model without parsing prose.
  */
@@ -100,13 +100,13 @@ export interface ShadowDecisionRecord {
   };
   candidates: ShadowCandidate[];
   /**
-   * One entry per rejected candidate, capped at
+   * . One entry per rejected candidate, capped at
    * `SHADOW_EXPLANATIONS_CAP` — see `explanationsTruncated` for the count of
    * any rejections that did not fit, so a capped list never reads as a
    * complete one.
    */
   explanations: ShadowExplanation[];
-  /** Count of rejections dropped past `SHADOW_EXPLANATIONS_CAP`; 0 when nothing was cut. */
+  /** . Count of rejections dropped past `SHADOW_EXPLANATIONS_CAP`; 0 when nothing was cut. */
   explanationsTruncated: number;
   operatorOverride: { id: string; expiresAt: string } | null;
   pickWhy: string;
@@ -337,7 +337,7 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
 }
 
 /**
- * Clamp the one unbounded free-text field so a single record can
+ * . Clamp the one unbounded free-text field so a single record can
  * never be an oversized JSONL/RPC line by itself. Pure string cut with an
  * explicit `...[truncated N chars]` tail — the marker makes the cut visible
  * to the comparison stream instead of a silent truncation.
@@ -379,7 +379,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     },
     laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
-    // one entry per rejected candidate, naming the gate that
+    // : one entry per rejected candidate, naming the gate that
     // rejected it and that gate's operand — `pickWhy`/`trace` only summarise
     // the outcome ("no model cleared the gates (112 rejected)"), which was
     // not reconstructable after the fact once the roster grew past what a
@@ -403,7 +403,7 @@ export function buildShadowRecord(input: ShadowRecordInput): ShadowDecisionRecor
 }
 
 /**
- * The host projection is emitted from the same native-plugin
+ * . The host projection is emitted from the same native-plugin
  * decision as the shadow projection. It is evidence about the authoritative
  * host choice, not a second actuator or an independently recomputed pick.
  */

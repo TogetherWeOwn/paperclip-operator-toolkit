@@ -87,10 +87,10 @@ describe("roster consolidation: reviewed-roster.json supersedes tier_roster.json
       if (!reviewedModel) continue;
       if (legacyModel.enabled === reviewedModel.enabled) continue;
       // A deliberate disable is explained when the reviewed note carries a
-      // dated DISABLED marker recording when and why it was disabled.
+      // dated DISABLED marker citing the authorizing issue (e.g. ex-3213).
       // The note-substring test above separately enforces the legacy note is kept.
       const note = reviewedModel.note ?? "";
-      if (reviewedModel.enabled === false && /DISABLED \d{4}-\d{2}-\d{2}\b/.test(note)) continue;
+      if (reviewedModel.enabled === false && /DISABLED \d{4}-\d{2}-\d{2} (?:TOG|ex)-\d+/.test(note)) continue;
       unexplained.push(`${key}: legacy=${legacyModel.enabled} reviewed=${reviewedModel.enabled}`);
     }
     expect(unexplained).toEqual([]);

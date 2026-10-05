@@ -151,7 +151,7 @@ esac
         block = job(self.text, "model-selection-mutants")
         self.assertIn("needs: model-selection-impact", block)
         self.assertIn("needs.model-selection-impact.outputs.impacted == 'true'", block)
-        self.assertIn("shard: [1, 2, 3, 4, 5, 6, 7, 8]", block)
+        self.assertIn("shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]", block)
         self.assertIn("fail-fast: false", block)
         self.assertIn("run: npm run test:mutants", block)
         self.assertIn('if [ "$EVENT" != "pull_request" ]; then', job(self.text, "changes"))

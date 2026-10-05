@@ -28,7 +28,7 @@ import { resolveFormatCompatibility, type FormatCompatibility } from "../format-
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
-/** Mirrors paperclip-model-router's `SecretRef` (). */
+/** Mirrors paperclip-model-router's `SecretRef`. */
 export interface SecretRef {
   type: "secret_ref";
   secretId: string;
@@ -47,7 +47,7 @@ export interface LaneSourceConfig {
   /** : resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
   /**
-   * Combined utilization (0-1] at or above which the lane is
+   * . Combined utilization (0-1] at or above which the lane is
    * withdrawn from NEW dispatch. Omitted (the default) never withdraws.
    */
   withdrawAtUtilization?: number;
@@ -165,7 +165,7 @@ export interface ResolvedConfig {
     maxWakesPerFiring: number;
     focusProjectIds: readonly string[];
   };
-  /**. See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
+  /** . See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
   wakeScopedFloor: {
     enabled: boolean;
     wakeReasons: readonly string[];
@@ -386,7 +386,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
       contextRunLogRoot: typeof selection.contextRunLogRoot === "string" && selection.contextRunLogRoot.trim()
         ? selection.contextRunLogRoot.trim() : null,
-      // unset resolves to the fleet ceiling, so behaviour is
+      // : unset resolves to the fleet ceiling, so behaviour is
       // unchanged until the operator sets it (1M to release Muse's window).
       agentEnvContextTokens: num(
         selection.agentEnvContextTokens,
@@ -419,7 +419,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         const avoid = record(pacing.avoid);
         const rawPerLane = record(avoid.perLane);
         const keys = Object.keys(rawPerLane);
-        // the withdrawal ceilings live on the lane entries, so the
+        // : the withdrawal ceilings live on the lane entries, so the
         // key is only present when a lane has one and every existing config
         // resolves to exactly the shape it always did.
         const withdrawAt = Object.fromEntries(
@@ -606,7 +606,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
     if (model.costPerMTokCacheRead === 0 && model.costPerMTokIn > 0) {
       // A zero cache-read rate makes the largest cost line free and would order
-      // candidates on the wrong term entirely .
+      // candidates on the wrong term entirely (ADR-0002).
       warnings.push(
         `${model.id} has costPerMTokCacheRead 0 — cache read is the largest cost line; a zero rate hides it`,
       );
@@ -649,7 +649,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   const emptyTiers = TIERS.filter(
     (t) => !config.models.some((model) => model.enabled && model.tier === t),
   );
-  // T0 is explicit-only, so an empty T0 cannot make enforce pin a
+  // : T0 is explicit-only, so an empty T0 cannot make enforce pin a
   // card onto an unserved tier — only a card that opted in with `tier:T0` waits
   // (it holds at its floor). It stays a warning, which also lets the build ship
   // before the roster gains its first T0 row; the migration cannot precede the
@@ -675,7 +675,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   // pacing.lanes entry — see `unwiredEnforceLaneErrors` for the exact gate.
   errors.push(...unwiredEnforceLaneErrors(config));
   if (config.selection.mode === "enforce" && Object.keys(config.tierLabelIds).length === 0) {
-    // Not an error: the label is additive. But an operator who meant
+    // Not an error: the label is additive (ADR-0008). But an operator who meant
     // to get tier labels on the board should hear that they will not appear.
     warnings.push(
       "no tierLabelIds configured; overrides will be written without a tier:* label, because the plugin cannot resolve a label id from its name",
@@ -693,7 +693,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     laneIds.add(lane.laneId);
     const secretError = validateSecretRefShape(lane.apiKeySecretRef, `pacing.lanes.${lane.laneId}.apiKeySecretRef`);
     if (secretError) errors.push(secretError);
-    // 0 would withdraw the lane on every reading and above 1 could
+    // : 0 would withdraw the lane on every reading and above 1 could
     // never fire; either is a silent misconfiguration, so refuse it.
     if (lane.withdrawAtUtilization !== undefined && !(lane.withdrawAtUtilization > 0 && lane.withdrawAtUtilization <= 1)) {
       errors.push(
@@ -774,7 +774,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
   }
 
-  // Defect 6. A model row's `laneId` that does not resolve to a
+  // , Defect 6. A model row's `laneId` that does not resolve to a
   // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
   // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
   // has: `laneVerdictFor` degrades a typo'd or renamed lane id to
@@ -787,7 +787,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.pacing.mode !== "off") {
     const referencedLaneIds = new Set<string>();
     for (const model of config.models) {
-      // a disabled row can never be selected or pinned, so its
+      // : a disabled row can never be selected or pinned, so its
       // lane can never silently evade pace governance — only enabled rows
       // must resolve. This keeps the gate consistent with the enforce
       // preflight (`unwiredEnforceLaneErrors`), where a disabled lane

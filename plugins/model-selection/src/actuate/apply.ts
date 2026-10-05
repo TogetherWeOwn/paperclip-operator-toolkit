@@ -16,10 +16,10 @@ import { routerMayWriteTierLabel } from "../engine/tier.js";
  * 2. **Never re-pin an issue that already has an override.** A mid-flight model
  *    change fires `shouldResetTaskSessionForModelChange`
  *    (`heartbeat.ts:5127-5133`), discarding the warm prompt cache — the single
- *    largest cost line. If the tier turns out wrong, that is a
+ *    largest cost line (ADR-0002). If the tier turns out wrong, that is a
  *    finding for the NEXT issue's labelling, not a reason to re-pin this one.
  *
- *    One narrow exception (): an override whose env carries secret
+ *    One narrow exception: an override whose env carries secret
  *    refs the current assignee does not carry. The host checks every
  *    `secret_ref` against the RUN's agent, so such a pin fails every wake as
  *    `configuration_incomplete` — there is no warm session left to protect.
@@ -55,13 +55,13 @@ export interface ApplyPlan {
   /** Why we are or are not writing. Always populated. */
   reason: string;
   /**
-   * True when this write only rebuilds the env of an existing pin:
+   * . True when this write only rebuilds the env of an existing pin:
    * `modelId` is the model the override ALREADY pins, never the decision's.
    */
   envRepairOnly: boolean;
 }
 
-/**. What `planEnvRepair` needs to know about an existing pin. */
+/** . What `planEnvRepair` needs to know about an existing pin. */
 export interface EnvRepairContext {
   /** The model the existing override pins, or null when it pins none. */
   pinnedModelId: string | null;
@@ -81,14 +81,14 @@ export interface ApplyContext {
   /** Issue status. We do not re-pin work that is already finished. */
   status: string;
   /**
-   * Present only when this decision was reached under
+   * . Present only when this decision was reached under
    * `pacing.mode: enforce` and is a candidate for a pace-driven repin of an
    * issue that already carries an override. Absent entirely for a plain
    * (non-pacing) re-pin attempt, which keeps the pre-2137 refusal below.
    */
   paceRepin?: RepinGateContext;
   /**
-   * Present when the caller read the existing pin; lets a declined
+   * . Present when the caller read the existing pin; lets a declined
    * plan fall back to a same-model env repair. Absent: no repair is planned.
    */
   envRepair?: EnvRepairContext;
@@ -119,7 +119,7 @@ export function planApply(
 }
 
 /**
- * A same-model env-only rewrite of an existing pin whose env carries
+ * . A same-model env-only rewrite of an existing pin whose env carries
  * secret refs the current assignee does not carry, or null when none applies.
  *
  * Why this is safe against rule 2: the model does not change, so
@@ -180,7 +180,7 @@ function planPin(decision: SelectionDecision, context: ApplyContext, targetIssue
     write: true,
     issueId: targetIssueId,
     modelId: decision.modelId,
-    // a router-written label is never a T0 opt-in, so the router
+    // : a router-written label is never a T0 opt-in, so the router
     // does not write `tier:T0` even for a decision that landed there.
     labelName: context.hasExistingTierLabel || !tier || !routerMayWriteTierLabel(tier) ? null : tierLabelName(tier),
     reason: `pinning ${decision.modelId} at ${tier} — ${decision.trace.at(-1) ?? "selected"}`,
@@ -193,7 +193,7 @@ export function tierLabelName(tier: Tier): string {
 }
 
 /**
- * the single gate for every router-owned model/env pin write.
+ * : the single gate for every router-owned model/env pin write.
  *
  * `planApply` refuses advisory decisions, and the engine marks a decision
  * advisory exactly when this is false — but the five scheduled/event pin

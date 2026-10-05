@@ -1,5 +1,5 @@
 /**
- *  P1: tiers as data (design D3/D4/D6).
+ *  P1: tiers as data ( design D3/D4/D6).
  *
  * Before this module the tier ladder was three hard-coded lookups: the tier CUT
  * (`SCORE_THRESHOLDS` in `tierForPosterior`/`deriveModelTier`/`tierImpliedByIndex`)
@@ -478,7 +478,7 @@ export function compileTierPolicy(policy: TierPolicy, options: ValidateOptions =
 export const T1_CAPABILITY_THRESHOLD = 0.8;
 
 /**
- * The T0 capability bar (). T0 is the explicit-only rung above T1: its
+ * The T0 capability bar. T0 is the explicit-only rung above T1: its
  * cut is `SCORE_THRESHOLDS.T0` (0.9) and its bar is the same, so a model has to
  * clear the cut it is placed by. Dispatch admission lives in `engine/tier.ts`.
  */
@@ -508,7 +508,7 @@ function legacyTier(
  * The migration baseline: exactly what the serving build evaluates. Tier cuts
  * are `SCORE_THRESHOLDS` (0.9/0.85/0.8/0.75); capability bars are the same except
  * T1 at 0.8. T3/T2/T1 are replayed against the frozen serving evaluator in
- * `tests/tier-policy/tier-policy-replay.spec.ts`; T0 (revision 2) has
+ * `tests/tier-policy/tier-policy-replay.spec.ts`; T0 (, revision 2) has
  * no serving ancestor and is asserted on its own.
  */
 export const LEGACY_MODEL_SELECTION_V1: TierPolicy = Object.freeze({
