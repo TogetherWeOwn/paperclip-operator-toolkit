@@ -1996,7 +1996,7 @@ jobs:
             cp -r lib "$1/"
             cp test_sql_backend.sh org_provisioner.sh org_request_queue.sh \
                org_access_review.sh test_privilege_ceilings.sh test_request_queue.sh \
-               skills.sh "$1/"
+               gh_access.sh skills.sh "$1/"
           }
 
           # BASELINE FIRST, in the same staging directory the mutants use. Not
