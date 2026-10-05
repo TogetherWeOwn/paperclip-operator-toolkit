@@ -1,9 +1,9 @@
 /**
- * Pacer reviewer/fixer load headroom readout (read-only).
+ * pacer reviewer/fixer load headroom readout (read-only).
  *
- * Joint-controller input for the research on preserving reviewer/fixer
- * capacity while scaling admission. Pure snapshot only: no admission change,
- * no pacing change.
+ * Parent  via fan-out ; joint-controller input for the
+ * research (preserve reviewer/fixer capacity while scaling
+ * admission). Pure snapshot only: no admission change, no pacing change.
  *
  * WHAT IT IS:
  * - A point-in-time headroom readout over per-agent assignment data: each
@@ -26,11 +26,11 @@
  *   assigned or pending load is a bottleneck.
  *
  * NON-GOALS (owned elsewhere, do NOT duplicate):
- * - The joint GARM eligible-vs-queued snapshot (pressure, host
+ * - joint GARM eligible-vs-queued snapshot (pressure, host
  *   budgets, quotas, hysteresis live there; this probe reports headroom
  *   only and owns no hysteresis bands or cooldowns).
- * - The admission audit log.
- * - The burn-down trajectory (done).
+ * - admission audit log.
+ * - burn-down trajectory (done).
  */
 
 export const REVIEWER_FIXER_HEADROOM_SCHEMA = "reviewer-fixer-headroom-v1";
@@ -200,7 +200,7 @@ export function snapshotReviewerFixerHeadroom(input: ReviewerFixerHeadroomInput)
       "Caller-declared assignments are not certified production evidence.",
       "Headroom is a point-in-time count, not a merge-throughput or lead-time measure.",
       "Raw review/fix counts are never the admission objective; completed merges / lead time are owned by the joint controller.",
-      "Hysteresis and cooldown are owned by the joint GARM snapshot; this probe reports headroom only and cannot flap-guard on its own.",
+      "Hysteresis and cooldown are owned by ; this probe reports headroom only and cannot flap-guard on its own.",
     ],
   };
 }

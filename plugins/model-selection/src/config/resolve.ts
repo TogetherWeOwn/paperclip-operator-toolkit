@@ -42,7 +42,7 @@ export interface LaneSourceConfig {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy: PacePolicy;
-  /** Resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
+  /** resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
 }
 
@@ -63,7 +63,7 @@ export interface ClassificationConfig {
   t3ConfidenceFloor: number;
   t2ConfidenceFloor: number;
   batchSize: number;
-  /** Re-examine a `tier:*` label this plugin did not write. Defaults on. */
+  /** re-examine a `tier:*` label this plugin did not write. Defaults on. */
   reclassifyForeignLabels: boolean;
 }
 
@@ -74,13 +74,13 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
-    /** Exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
+    /** exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
     holdOnUnknownAvailability: boolean;
     objective: SelectionObjective;
     fleetContextCeilingTokens: number;
     /** Operator-verified local run-log root; absent means honest fleet fallback. */
     contextRunLogRoot: string | null;
-    /** Agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
+    /** agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
     agentEnvContextTokens: number;
     compactionRatio: number;
   };
@@ -91,7 +91,7 @@ export interface ResolvedConfig {
    * up by name.
    */
   tierLabelIds: Partial<Record<Tier, string>>;
-  /** Label id for `operator`, applied to escalation issues. Optional. */
+  /** , Defect 2. Label id for `operator`, applied to escalation issues. Optional. */
   operatorLabelId: string | null;
   profiles: { windowDays: number; minSamples: number; maxAgeDays: number };
   quality: { t1EscalationCeiling: number; t2EscalationCeiling: number; silentFailureWeight: number };
@@ -101,11 +101,11 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
-    /** Port of `AVOID`/`AVOID_LANE`. */
+    /** port of `AVOID`/`AVOID_LANE`. */
     avoid: { defaultThreshold: number; perLane: Record<string, number> };
-    /** Port of `LANE_CAP_PER_ACCOUNT`. */
+    /** port of `LANE_CAP_PER_ACCOUNT`. */
     laneCapPerAccount: Record<string, number>;
-    /** Port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
+    /** port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
     fiveHourWindowName: string;
     /** Named weekly allowance window reported in the shadow stream's per-lane snapshot (reporting only). */
     weeklyWindowName: string;
@@ -133,7 +133,7 @@ export interface ResolvedConfig {
   formatCompatibility?: FormatCompatibility;
   accountAdmissionShadow: { enabled: boolean };
   aaSync: { enabled: boolean };
-  /** Default-off free-list sync. Absent/disabled = legacy behavior exactly. */
+  /** P2: default-off free-list sync. Absent/disabled = legacy behavior exactly. */
   aaFreeSync: {
     enabled: boolean;
     apiKeySecretRef: SecretRef | null;
@@ -147,11 +147,11 @@ export interface ResolvedConfig {
     }>;
     maxSnapshotAgeHours: number;
   };
-  /** Default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
+  /** default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
   acceptedWork: { enabled: boolean };
   /** models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
   priceSync: { enabled: boolean };
-  /** Absorption of the standalone `dispatch` plugin. */
+  /** absorption of the standalone `dispatch` plugin. */
   dispatch: {
     wakeEnabled: boolean;
     idleMinutes: number;
@@ -374,7 +374,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
       fleetContextCeilingTokens: num(selection.fleetContextCeilingTokens, 1_000_000),
       contextRunLogRoot: typeof selection.contextRunLogRoot === "string" && selection.contextRunLogRoot.trim()
         ? selection.contextRunLogRoot.trim() : null,
-      // Unset resolves to the fleet ceiling, so behaviour is
+      // unset resolves to the fleet ceiling, so behaviour is
       // unchanged until the operator sets it (1M to release Muse's window).
       agentEnvContextTokens: num(
         selection.agentEnvContextTokens,
@@ -536,6 +536,39 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
   };
 }
 
+/**
+ * enforce preflight: refuse an enforce request whose roster has an
+ * ENABLED lane missing its pacing.lanes entry. Enforce pins cards onto the
+ * lane's models, and with no pacing.lanes entry `laneVerdictFor` degrades the
+ * lane to "unpolled" forever (fail-neutral by design) — the pin would run
+ * with no pace governance and no serviceability hard stop, a silent failure.
+ * One error per missing lane id, naming the lane id and the missing
+ * pacing.lanes key. Disabled rows can never be pinned, so a disabled row's
+ * missing lane entry passes; lane-less rows (no laneId) pass — there is
+ * nothing to wire.
+ *
+ * Deliberately NOT gated on pacing.mode:  Defect 6 already refuses a
+ * missing laneId when pacing is on, for every row; this gate covers the
+ * enforce flip itself, including pacing.mode=off where Defect 6 stays
+ * silent. Advise mode never writes a pin, so it carries no refusal either.
+ * Live lanes wiring stays on ; this predicate runs on fixtures here.
+ */
+export function unwiredEnforceLaneErrors(config: ResolvedConfig): string[] {
+  if (config.selection.mode !== "enforce") return [];
+  const wired = new Set(config.pacing.lanes.map((lane) => lane.laneId));
+  const missing = new Map<string, string>();
+  for (const model of config.models) {
+    if (!model.enabled || !model.laneId || wired.has(model.laneId)) continue;
+    if (!missing.has(model.laneId)) {
+      missing.set(
+        model.laneId,
+        `selection.mode is enforce but enabled model "${model.id}" references laneId "${model.laneId}", which has no pacing.lanes entry — wire pacing.lanes["${model.laneId}"] before enforcing so pace routing governs the pin`,
+      );
+    }
+  }
+  return [...missing.values()];
+}
+
 /** Config problems worth refusing or warning about at install time. */
 export function validateConfig(config: ResolvedConfig): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
@@ -588,7 +621,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
   }
-  // Enforce preflight: selection.mode=enforce pins cards onto a
+  // enforce preflight: selection.mode=enforce pins cards onto a
   // tier's models, so a tier with zero enabled rows must refuse at
   // config-resolve time — enforce can never pin onto an unserved tier.
   // Advise mode never writes a pin, so it keeps the historical warning only.
@@ -608,6 +641,9 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
       warnings.push(`no enabled model at tier ${t}`);
     }
   }
+  // enforce preflight: fail closed when an enabled lane has no
+  // pacing.lanes entry — see `unwiredEnforceLaneErrors` for the exact gate.
+  errors.push(...unwiredEnforceLaneErrors(config));
   if (config.selection.mode === "enforce" && Object.keys(config.tierLabelIds).length === 0) {
     // Not an error: the label is additive (ADR-0008). But an operator who meant
     // to get tier labels on the board should hear that they will not appear.
@@ -660,7 +696,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     );
   }
 
-  // The free-list sync never writes, but a misconfigured one
+  // P2: the free-list sync never writes, but a misconfigured one
   // produces a silently empty or misleading diff — fail loudly here instead.
   if (config.aaFreeSync.enabled) {
     const secretError = validateSecretRefShape(config.aaFreeSync.apiKeySecretRef, "aaFreeSync.apiKeySecretRef");
@@ -701,7 +737,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
   }
 
-  // A model row's `laneId` that does not resolve to a
+  // , Defect 6. A model row's `laneId` that does not resolve to a
   // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
   // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
   // has: `laneVerdictFor` degrades a typo'd or renamed lane id to
@@ -714,7 +750,12 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.pacing.mode !== "off") {
     const referencedLaneIds = new Set<string>();
     for (const model of config.models) {
-      if (model.laneId) referencedLaneIds.add(model.laneId);
+      // a disabled row can never be selected or pinned, so its
+      // lane can never silently evade pace governance — only enabled rows
+      // must resolve. This keeps the gate consistent with the enforce
+      // preflight (`unwiredEnforceLaneErrors`), where a disabled lane
+      // without a pacing.lanes entry passes.
+      if (model.enabled && model.laneId) referencedLaneIds.add(model.laneId);
     }
     for (const laneId of referencedLaneIds) {
       if (!laneIds.has(laneId)) {

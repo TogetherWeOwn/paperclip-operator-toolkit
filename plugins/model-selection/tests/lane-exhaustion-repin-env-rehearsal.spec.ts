@@ -16,7 +16,7 @@ import {
 import { NO_ESCALATION, PROFILES, config } from "./fixtures.js";
 
 /**
- * Repin-env rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
+ * rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
  * the repin WRITE and assert that all seven surfaces — the main `model` plus
  * the six model-valued env keys — leave the exhausted lane.
  *
@@ -25,15 +25,14 @@ import { NO_ESCALATION, PROFILES, config } from "./fixtures.js";
  * that choice does not leave the card's sub-call env frozen on it, which is
  * the surface the 00:0xZ board sweep found on 118 of 130 overridden open
  * cards: `assigneeAdapterOverrides.adapterConfig.env` is per-card state,
- * written wholesale (measured: an issues PATCH replaces the whole
+ * written wholesale (measured on : an issues PATCH replaces the whole
  * `adapterConfig`, and `env` within it, with no per-key merge), so a repin
  * that writes only `model` both strands the six keys on the dead lane AND —
  * under the measured replace semantics — strips every secret binding off the
  * card.
  *
- * The env under rehearsal is the one the real failed run (see the sibling
- * spec) actually read, plus the secret_ref entries the fix must carry
- * through byte-for-byte.
+ * The env under rehearsal is the one 's run actually read, plus the
+ * secret_ref entries the fix must carry through byte-for-byte.
  */
 
 const SOL = "gpt-5.6-sol";
@@ -113,7 +112,7 @@ function repinWrite(quarantine: LaneOutageOverride | null) {
     profiles: PROFILES,
     signals: NO_ESCALATION,
     now: INCIDENT_MS,
-    descriptor: { issueId: "EX-3012", labelNames: ["tier:T1"] },
+    descriptor: { issueId: "", labelNames: ["tier:T1"] },
     config: config({
       models: ROSTER,
       pacingMode: "enforce",
@@ -157,7 +156,7 @@ function surfaceLanes(patch: { adapterConfig: { model: string; env?: Record<stri
   return surfaces;
 }
 
-describe("Rehearsal: the repin write evacuates every model surface, not just `model`", () => {
+describe(" rehearsal: the repin write evacuates every model surface, not just `model`", () => {
   const verdict = laneExhaustionFromRunFailure({ error: LIVE_429, models: ROSTER });
   const quarantine = verdict
     ? mergeLaneOutage(null, autoQuarantineFor(verdict, INCIDENT_MS), NOW_ISO)
@@ -176,7 +175,7 @@ describe("Rehearsal: the repin write evacuates every model surface, not just `mo
       profiles: PROFILES,
       signals: NO_ESCALATION,
       now: INCIDENT_MS,
-      descriptor: { issueId: "EX-3012", labelNames: ["tier:T1"] },
+      descriptor: { issueId: "", labelNames: ["tier:T1"] },
       config: config({
         models: ROSTER,
         pacingMode: "enforce",
@@ -287,7 +286,7 @@ describe("Rehearsal: the repin write evacuates every model surface, not just `mo
       expect(scan(FROZEN_OVERRIDE_ENV)).toBe(true);
     });
 
-    it("flags a card with only ONE frozen key (a shape seen on the live board)", () => {
+    it("flags a card with only ONE frozen key", () => {
       // 150 cards had PAPERCLIP_ASSIGNED_MODEL dead but only 148 had the
       // ANTHROPIC_DEFAULT_* pair — so partially-frozen rows are real and must
       // not need all six keys dead to qualify.

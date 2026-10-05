@@ -56,7 +56,7 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * 2026-09-19 owner rule: a free subscription lane whose
+ * rule (b), 2026-09-19 owner rule: a free subscription lane whose
  * credential is serviceable and under its per-account cap wins its tier over
  * a paid/earned model until it has enough observations to be judged —
  * otherwise a new subscription can never earn placement.
@@ -93,7 +93,7 @@ export function freeEarnInCandidates(
   requiredTier: Tier,
   descriptor?: Pick<IssueDescriptor, "priority" | "title"> | null,
 ): FreeEarnInPick[] {
-  // Protected cards (critical/high priority, review/gate) never
+  // protected cards (critical/high priority, review/gate) never
   // enter the reorder. Checked before any lane read so a protected card takes
   // no experimental traffic regardless of lane state.
   if (earnInGuardFor(descriptor).protected) return [];

@@ -40,7 +40,7 @@ const ROSTER: ModelEntry[] = [
 
 /**
  * The exact string the 2026-09-16 16:40Z outage wrote to
- * `heartbeat_runs.error`, copied from a real failed run. This is the
+ * `heartbeat_runs.error`, copied from 's own failed run. This is the
  * one input the whole feature exists to recognise, so it is asserted verbatim
  * rather than paraphrased.
  */
@@ -49,13 +49,13 @@ const LIVE_429 =
   + "(last error: usage_limit_reached: The usage limit has been reached)";
 
 /**
- * The managed-capacity family,
+ * (ported from /PR #331). The managed-capacity family,
  * verbatim from `heartbeat_runs.error`.
  *
  * Measured over the 14 days to 2026-09-17: 56 failed runs carried this family,
  * with ZERO overlap with the 623 matched by the original five phrases — so
  * before this was added, the quarantine could see none of them. The 63-minute
- * OpenCode Go episode these come from is what blocked a single card three
+ * OpenCode Go episode these come from is what blocked  itself three
  * times.
  */
 const LIVE_MANAGED_OPENCODE =
@@ -118,7 +118,7 @@ describe("laneExhaustionFromRunFailure — managed-capacity family", () => {
 
 describe("laneExhaustionFromRunFailure — subscription-lapsed 403 family", () => {
   /**
-   * Verbatim from the 2026-09-20 host probe (re-probed 2026-09-26):
+   * Verbatim from the 2026-09-20 host probe on  (re-probed 2026-09-26):
    * `opencode-go/deepseek-v4-flash -> 403 "Upstream request failed: An active
    * OpenCode Go subscription is required to use Go models."` The lane names
    * itself in CLIProxy's own words, carries no roster id, and arrives as a 403

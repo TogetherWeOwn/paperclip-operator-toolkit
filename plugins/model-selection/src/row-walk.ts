@@ -1,5 +1,5 @@
 /**
- * The one hard-return-by-deadline row walk shared by every
+ * the one hard-return-by-deadline row walk shared by every
  * row-walking scheduled pass (classifyIssues, labelOnlyPass, repinPass,
  * balancePass).
  *

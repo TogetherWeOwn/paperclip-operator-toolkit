@@ -4,7 +4,7 @@ Chooses the cheapest fully-capable model for each harness run, keyed on a
 **recorded tier judgement** and ordered by a **volume-aware cost term** measured
 from this company's own runs.
 
-Built against the original router design, ADR-0002/0004/0005/0008/0010 and
+Built per  against the  design, ADR-0002/0004/0005/0008/0010 and
 the Round-4 record.
 
 ---
@@ -238,7 +238,7 @@ initial pins and idle repins.
 **This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T1"`,
 `holdOnUntrustedProfile: true`. Installing it changes no live selection variable.
 
-Per the original shipping constraint, enforcement must not be switched on until Stage 2
+Per the  constraint, enforcement must not be switched on until Stage 2
 (`tier:T1/T2/T3` labels + narrow-slice rollout) is confirmed stable. **Never
 change two live selection variables in one measurement window** — if
 enforcement flips while the Stage 2 slice is still moving, neither result is
@@ -279,14 +279,13 @@ Order of operations:
 ### Paired host/plugin decision evidence
 
 `shadowEmit.enabled` is off by default. When enabled, every authoritative
-`advise()` decision appends two versioned paired-decision records to the current
+`advise()` decision appends two `paired-decision-v1` records to the current
 UTC-hour shard in `shadow-decisions/` (`decisions-YYYY-MM-DD-HHZ.jsonl`): one
 tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
 timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
-the comparison stream without restoring the host `tier_dispatcher.py` that was
-retired when the standalone host dispatcher was absorbed into this plugin, or
-adding a second actuator.
+the comparison stream without restoring the host `tier_dispatcher.py` retired
+by  or adding a second actuator.
 
 Shards stay small on purpose: each hourly shard is rewritten whole on every
 append and capped at `shadowEmit.shardMaxRecords` (default 200, pair-aligned
@@ -303,12 +302,9 @@ A bounded interval can be split by writer without copying or changing records:
 cat shadow-decisions/decisions-*.jsonl > interval.jsonl
 jq -c 'select(.writer == "host")' interval.jsonl > host.jsonl
 jq -c 'select(.writer == "plugin-shadow")' interval.jsonl > shadow.jsonl
-python3 "$GATE_HARNESS" agreement \
+python3 "$COMPANY_ROOT/ops//gate_harness.py" agreement \
   --host host.jsonl --shadow shadow.jsonl --out agreement.json
 ```
-
-`$GATE_HARNESS` is the operator-held gate harness script; it is maintained
-privately and is not part of this repository.
 
 The agreement command deliberately remains nonzero until the separate
 48-hour/200-decision clean-window gate is satisfied. For a reproducible bounded
@@ -319,73 +315,23 @@ npm run decisions:summary -- \
   --input shadow-decisions \
   --start 2026-09-14T00:00:00Z \
   --end 2026-09-15T00:00:00Z \
-  --gate-harness "$GATE_HARNESS" \
   --out summary-24h.json
 ```
 
 `--input` accepts a single JSONL file (legacy `decisions.jsonl`) or a
 directory of UTC-hour shards; a directory reads every matching shard in
-lexical (= chronological) order and ignores non-shard files. `--gate-harness`
-is required: there is no host-local or private-repository default path.
-
-Public contract tests always exercise argument refusal and partitioning with a
-synthetic report-shape harness. To run the separate deployment integration block,
-set `PAIRED_DECISION_GATE_HARNESS` to a reviewed harness path before running
-`npm test -- tests/paired-summary.spec.ts`. Without that explicit path, those
-integration tests skip; this is not proof of the 48-hour clean-window gate.
+lexical (= chronological) order and ignores non-shard files.
 
 That command exits nonzero on empty, missing-writer, malformed, or unpaired
 data. It reports the earliest actual correlated pair as `observationStart` and
 sets `cleanWindowGateEvaluated: false`; never substitute plugin-config apply
 time or report the clean-window gate as passed from this bounded summary.
 
-### Private format compatibility
-
-Public defaults use `benchmark-prior-v1`, `accepted-work-posterior-v1`,
-`paired-decision-v1` and `paired-decision-summary-v2`. A private deployment
-that already persists or consumes other identifiers must supply its reviewed
-mapping **before** pinning this source revision; this public move does not
-activate a deployment or rewrite historical records.
-
-```json
-{
-  "formatCompatibility": {
-    "tierSpecVersion": "legacy-benchmark-v1",
-    "acceptedWorkSpecVersion": "legacy-posterior-v1",
-    "shadowSchemaVersion": "legacy-paired-decision-v1"
-  }
-}
-```
-
-These are synthetic examples, not installation values. Each field is one exact
-v1 identifier, not a list, wildcard or prefix rule. Null/absence is canonical-only;
-invalid profiles refuse rather than silently changing storage. Reads translate
-only the configured alias on a cloned payload before the existing strict
-version/structure checks. Writes and both shadow projections translate only the
-canonical identifier; in-memory scores and math remain canonical. Other stored
-versions stay rejected. Do not use this identity bridge to relabel different
-cohorting, benchmark weights, censoring or algorithm semantics.
-
-For a private bounded-summary reader that requires a retained v2 report name,
-pass `--report-schema legacy-bounded-summary-v2` explicitly. The report payload,
-24-hour bound and clean-window disclaimer stay unchanged. Optional deployment
-integration may set `PAIRED_DECISION_SCHEMA_VERSION` to the same reviewed shadow
-identifier used by its private harness. The headroom library snapshot uses the
-generic `reviewer-fixer-headroom-v1`; it has no tool handler in this source tree,
-and no live headroom integration is claimed here.
-
-The frozen evaluator test is now an explicitly labeled public derivative. Its
-original worker and slice hashes remain unchanged. Only the benchmark-identifier
-declaration is normalized; a distinct derivative hash is pinned. The optional
-original-artifact test verifies both original hashes before applying that one
-normalization. An unconfigured/skipped artifact check is not deployment proof.
-
 Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
 configuring its existing `shadow-decisions` local folder. Preserve the complete
 live config with a parsed read-merge-write and readback; do not use a textual
 `replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
-or secret references. Resolving lane secrets by config index (so that lane N's
-secret reference resolves correctly) remains a prerequisite for any live config
+or secret references.  remains a prerequisite for any live config
 write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
 shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
@@ -416,8 +362,8 @@ preserves the complete live `pacing` object (including secret references), and
 adds a provider lane to new rows only when the mapping is unambiguous. It refuses
 to write when fewer than 25 models are lane-bound, a live binding or pacing field
 changes, canonical rows collide, or an enabled model is outside pacing. The last
-guard deliberately blocks enabled Z.ai rows until a real Z.ai lane is
-supplied; assigning them to OpenCode Go would make capacity attribution false.
+guard deliberately blocks enabled Z.ai rows until  supplies a real Z.ai
+lane; assigning them to OpenCode Go would make capacity attribution false.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
 it is operator-supplied because the plugin genuinely cannot look one up. There is
@@ -459,7 +405,7 @@ rejection ("rework") signals are folded in as soft evidence (`failModel`/
 via captured `ctx.events` state, never a live `activity_log` read — that table
 is also outside the allowlist.
 
-Alongside `modelScores`, the same job builds the card-level
+Alongside `modelScores`, the same job builds the  §2.2 card-level
 acceptance ledger (`buildCardLedger`): each closed card is `pending` (excluded
 from both accepted/rejected) until 14 days past close (`CARD_CENSOR_DAYS`)
 unless it was rejected first, in which case it counts immediately. Both are
@@ -476,10 +422,36 @@ shadow-only — it is scored against the card ledger and diffed against what
 diff is what should be reviewed for 7 days before anyone proposes flipping the
 default.
 
+### Scheduled-pass pre-write quarantine check
+
+When selection writes are allowed and pacing is not `off`, the label-only,
+repin, pinned-balance and unpinned-balance paths re-read the company's lane-outage
+snapshot before writing a model pin. A selected model newly excluded by that
+snapshot is skipped without counting a pin/repin/balance. The unwritten row stays
+unsettled: label-only and repin retain their incremental watermark before it.
+Balance keeps its bounded ID cycle but carries `retryPending` across pages and
+wraps, bypassing the quiet-board gate until a full clean retry cycle completes;
+`unsettledInCycle` records skips on earlier pages of the current cycle. Clearing
+quarantine therefore retries even a card whose `updated_at` never changed.
+Advisory selection adds no pre-write outage read because it writes no pin.
+
+Every write path rechecks the job deadline and row slice after the awaited outage
+read. An expired row writes no pin or activity and consumes no write counter,
+even when its abandoned callback later finishes.
+
+The check narrows the stale-snapshot window; the state read and issue write are
+not atomic. It neither enables enforcement nor adds per-model cooldown support.
+`tests/scheduled-quarantine.spec.ts` covers late reads, exhausted row slices,
+two-firing retries, multi-page balance retries and healthy/advisory controls.
+The original four write-path tests and healthy-lane repin control remain in
+`tests/scheduled-passes.spec.ts`; `pre-write-quarantine-check-inverted` makes
+them fail.
+
 ### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
 
-`planEarnIn` / `recordEarnInOutcome` are pure decision functions, covered by
-`tests/earnIn.spec.ts` but **not called from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions —  §3
+/ decision B — covered by `tests/earnIn.spec.ts` but **not called
+from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
 these functions, and the shipped config keeps `earnIn.enabled: false`
 regardless. Gates implemented, in order: enabled check → sticky stop state →
 T1-only → work-class allowlist (`research`/`review`) → todo status → excludes
@@ -498,13 +470,13 @@ safety/authority violation.
 
 ---
 
-## The pin moves to card creation
+## the pin moves to card creation
 
 Owner directive (2026-09-16): *"a task should not start until the model router
 has set its model."* The scheduled passes (`*/10`) cannot honor that — their row
 queries **exclude cards with a running run**, and a dispatched card is running
-within ~0.2–0.3 s of creation (measured in a pin-feasibility analysis that is
-maintained privately), so a card's whole first turn happens before any pass can even see it. It lands
+within ~0.2–0.3 s of creation (`docs/routing/-issue-created-pin-feasibility.md`),
+so a card's whole first turn happens before any pass can even see it. It lands
 on the agent floor, which is exactly what the directive forbids.
 
 The plugin half (`src/worker.ts`, `tests/creation-pin.spec.ts`) adds two event
@@ -544,9 +516,7 @@ fire-and-forget and loses the same measured dispatch race — the handler runs a
 the passes were structurally missing gets labelled and pinned the moment it is
 idle (between turns), which shrinks the unpinned window from "the whole first
 turn" to "one turn at most" — and is the release mechanism the core-side
-dispatch gate needs once it lands (the proposed upstream dispatch gate defers
-issue-bound agent-assigned wakes until the card carries an
-`adapterConfig.model` pin).
+dispatch gate needs once it lands.
 
 **Floor-equal residual class:** when the router's pick *is* the floor model,
 the event path (matching pass convention) writes no override — the card already
@@ -600,7 +570,7 @@ scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ---
 
-## The model is decided when the run starts
+## the model is decided when the run starts
 
 Pins race the run they are meant to steer. With the fork's run-model
 hook installed, `onResolveRunModel` decides each issue run's model at its start, from
@@ -660,7 +630,7 @@ npm run test:mutants  # CI/private runner only: 115 named mutants, one per accep
                        # cohort randomization, run/card conflation, rolling-clock
                        # injection, lane-posture bypass, per-tier lane collapse,
                        # disallowed activity_log read, shadow-pair wiring, earn-in
-                       # guards, creation-pin wiring/guards/notice throttle
+                       # guards,  creation-pin wiring/guards/notice throttle
 npm run build         # esbuild → dist/manifest.js, dist/worker.js
 npm run profiles:refresh   # re-measure volume from heartbeat_runs (needs DATABASE_URL)
 npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce

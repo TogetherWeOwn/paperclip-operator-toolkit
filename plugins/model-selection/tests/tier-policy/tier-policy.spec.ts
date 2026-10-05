@@ -1,5 +1,5 @@
 /**
- * Validation and compilation of the tier policy document.
+ * P1: validation and compilation of the tier policy document.
  * The legacy evaluator is keyed by the fixed T1/T2/T3 union, so under it a
  * rename is accepted and an added, deleted or reordered tier is refused with a
  * named issue. Every refusal here is a code a P2 edit tool will surface.

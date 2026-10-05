@@ -8,7 +8,7 @@ import {
   type RowVerdict,
 } from "../src/row-walk.js";
 
-// The shared hard-return walk. `Date` and timers are faked
+// the shared hard-return walk. `Date` and timers are faked
 // TOGETHER — production arms the race timer at row start for the remaining
 // budget, so a Date-only jump would leave the timer far in the future.
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");

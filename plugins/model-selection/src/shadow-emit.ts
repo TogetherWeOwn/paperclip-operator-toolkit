@@ -1,18 +1,17 @@
 import { SHADOW_EXPLANATIONS_CAP, SHADOW_PICK_WHY_MAX_CHARS } from "./constants.js";
-import { PUBLIC_FORMAT_IDENTIFIERS } from "./format-compatibility.js";
 import { slotFactorFor, type LaneLedger, type OperatorOverrideEntry } from "./engine/pacing.js";
 import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, SelectionDecision } from "./engine/types.js";
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * Versioned paired decisions, the
- * host/plugin-shadow agreement stream the shadow gate harness
- * correlates. The separate host dispatcher has been retired, so both writer
+ * /  / . `paired-decision-v1`, the paired
+ * host/plugin-shadow agreement stream `ops//gate_harness.py`
+ * correlates.  retired the separate host dispatcher, so both writer
  * projections now come from the same authoritative `advise()` decision. This
  * module only builds records; `worker.ts` appends the pair via
  * `ctx.localFolders`.
  */
-export const SHADOW_SCHEMA_VERSION = PUBLIC_FORMAT_IDENTIFIERS.shadowSchemaVersion;
+export const SHADOW_SCHEMA_VERSION = "paired-decision-v1";
 export type DecisionWriter = "host" | "plugin-shadow";
 
 export type ShadowLaneState = "available" | "degraded" | "exhausted" | "unavailable";
@@ -324,9 +323,8 @@ function buildCandidates(decision: SelectionDecision, models: readonly ModelEntr
       usable: true,
       // This engine has no unproven/exploration-slot concept (unlike the
       // reference dispatcher's 10% EXPLORE lane for unproven T2/T3
-      // candidates) — the planned follow-up slices do not add one, so every
-      // candidate is reported proven rather than guessing at an unmodeled
-      // distinction.
+      // candidates) —  slices 2-5 do not add one, so every candidate
+      // is reported proven rather than guessing at an unmodeled distinction.
       proven: true,
       // Dollars for one run at the judged tier's measured volume — the number
       // this engine actually orders on (`expectedCostUsd`), not a $/Mtok rate.
@@ -381,7 +379,7 @@ function buildDecisionRecord(input: ShadowRecordInput, writer: DecisionWriter): 
     },
     laneSnapshot: buildLaneSnapshot(input.models, input.laneLedger, input.slotFloorFraction, input.windowNames, input.nowIso),
     candidates: buildCandidates(decision, input.models),
-    // One entry per rejected candidate, naming the gate that
+    // one entry per rejected candidate, naming the gate that
     // rejected it and that gate's operand — `pickWhy`/`trace` only summarise
     // the outcome ("no model cleared the gates (112 rejected)"), which was
     // not reconstructable after the fact once the roster grew past what a

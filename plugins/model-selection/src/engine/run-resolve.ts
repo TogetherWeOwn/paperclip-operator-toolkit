@@ -36,7 +36,7 @@ import type {
 } from "./types.js";
 
 /**
- * The run-scoped model decision.
+ * the run-scoped model decision.
  *
  * Everything in this file is pure. The worker owns every read and hands this
  * module a frozen view of the hot caches, so the decision itself performs no
@@ -44,7 +44,7 @@ import type {
  * which is what the p99 <= 250 ms budget in §6 depends on.
  *
  * The wire types below mirror the fork's `ResolveRunModelParams` /
- * `ResolveRunModelResult` (`packages/plugins/sdk/src/protocol.ts`).
+ * `ResolveRunModelResult`.
  * They are declared here because the SDK this package builds against
  * (2026.824.1) predates the hook; the host's own validator is the authority.
  */
@@ -292,10 +292,21 @@ export function resolveRunDecision(input: RunResolveInput): RunResolution {
   const { params, issue, agent, snapshot, prior, now } = input;
   const issueId = params.issueId;
   if (!issueId) return { kind: "keep", reason: "non-issue run" };
-  if (params.issueOverrideModel) return { kind: "keep", reason: "issue carries an override model" };
 
   const { config } = snapshot;
   if (config.models.length === 0) return { kind: "keep", reason: "no models configured" };
+
+  // an override whose model is gone from the roster (retired row,
+  // e.g. a bridge model added then removed) or disabled is an orphan, not a
+  // judgement. Honoring it would keep the run on a model id with no enabled
+  // roster row; fall through to the fresh per-run decision instead. A live
+  // override on an enabled row still wins outright, same as before.
+  if (params.issueOverrideModel) {
+    const liveOverride = resolveConfiguredModelId(params.issueOverrideModel, config.models);
+    if (liveOverride && config.models.some((model) => model.id === liveOverride && model.enabled)) {
+      return { kind: "keep", reason: "issue carries an override model" };
+    }
+  }
 
   const nowIso = new Date(now).toISOString();
   const hasTierLabel = issue.labelNames.some((name) => name.startsWith(TIER_LABEL_PREFIX));

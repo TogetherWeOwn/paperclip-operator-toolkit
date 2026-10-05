@@ -32,17 +32,17 @@ describe("scheduled SQL namespace guard", () => {
   it.each([
     ["score runs", REFRESH_SCORE_RUNS_SQL],
     ["closing runs", REFRESH_SCORE_CLOSING_RUNS_SQL],
-    // The union'd context lookup must clear the same guard. Its two
+    // the union'd context lookup must clear the same guard. Its two
     // branches are alias-free precisely so no dotted reference can follow a
     // `from`/`join` token and be mistaken for a schema qualifier.
     ["last-run context usage", LAST_RUN_CONTEXT_USAGE_SQL],
-    // The lane-evidence aggregate runs on the same path and is
+    // the lane-evidence aggregate runs on the same path and is
     // alias-free for the same reason.
     ["lane evidence runs", LANE_EVIDENCE_RUNS_SQL],
-    // The creation pin's queued-PK read and running-runs UNION
+    // the creation pin's queued-PK read and running-runs UNION
     // run on the same path and are alias-free for the same reason.
     ["creation-pin live runs", CREATION_PIN_LIVE_RUNS_SQL],
-    // The run-scoped decision's database fallback and its live
+    // the run-scoped decision's database fallback and its live
     // routed-run read share the same alias-free shape.
     ["previous run decision", PREVIOUS_RUN_DECISION_SQL],
     ["active routed run models", ACTIVE_ROUTED_RUN_MODELS_SQL],
@@ -50,7 +50,7 @@ describe("scheduled SQL namespace guard", () => {
     expect(() => validateLikeHost(query, "plugin_model_selection_test")).not.toThrow();
   });
 
-  // The success status on `heartbeat_runs` is `succeeded`, not
+  // the success status on `heartbeat_runs` is `succeeded`, not
   // `completed`. A query that counts `completed` finds zero successes for every
   // lane, so every lane reads proven-dead and the term excludes the whole
   // roster. Nothing else in the suite reads this string, so assert it here.

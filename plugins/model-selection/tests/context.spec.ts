@@ -41,9 +41,9 @@ describe("context fit", () => {
         KEEP_AGENT: { type: "plain", value: "agent" },
         [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "1000000" },
       },
-      // A non-plugin key left on the pin by an earlier repin. It is not this
-      // plugin's to re-assert, and the current agent env is the source of
-      // truth, so it must not survive.
+      // A non-plugin key left on the pin by an earlier repin. : it is
+      // not this plugin's to re-assert, and the current agent env is the source
+      // of truth, so it must not survive.
       existingOverrideEnv: { STALE_ISSUE: { type: "plain", value: "issue" } },
     });
 
@@ -153,7 +153,7 @@ describe("context fit", () => {
     });
   });
 
-  // The poisoned-pin shape: an agent with no bindings inherits a poisoned pin. A
+  // The  shape: an agent with no bindings inherits a poisoned pin. A
   // wide-model repin for that known-but-empty agent must write only the pin's
   // own keys (the sub-call surfaces), never the stranded foreign secret refs.
   it("strands a poisoned pin's foreign refs when repinned for a known-but-empty agent", () => {
@@ -242,7 +242,7 @@ describe("context fit", () => {
  * Stamps are floored at `MIN_STAMPED_CONTEXT_TOKENS` (thrash incident
  * 2026-09-19/20): `max(floor(window*ratio), min(window, 250000))`.
  */
-describe("Agent-env cap split", () => {
+describe(" agent-env cap split", () => {
   const solModel = { id: "gpt-5.6-sol", contextWindow: 272_000 };
   const museModel = { id: "muse-spark", contextWindow: 1_048_576 };
 
@@ -335,11 +335,11 @@ describe("Agent-env cap split", () => {
 });
 
 /**
- * The repin must evacuate the haiku-class sub-call
+ * + . The repin must evacuate the haiku-class sub-call
  * surfaces along with the main model, and it must do so WITHOUT dropping
  * anything else off the agent's env — the host replaces the whole env object,
  * so a two-key write is a fleet-wide secret wipe for the duration of the run.
- * The evacuation also covers the four main-lane surfaces the 00:0xZ
+ * extends the evacuation to the four main-lane surfaces the 00:0xZ
  * sweep found frozen on the exhausted Codex lane across 118 open cards.
  */
 describe("sub-call surface pins", () => {
@@ -362,7 +362,7 @@ describe("sub-call surface pins", () => {
     });
   });
 
-  it("repoints the four main-lane surfaces found frozen on the exhausted lane", () => {
+  it("repoints the four main-lane surfaces  found frozen on the exhausted lane", () => {
     const patch = modelOverrideForContext({
       model: fleetModel,
       agentEnvContextTokens: 1_000_000,
@@ -394,7 +394,7 @@ describe("sub-call surface pins", () => {
         ANTHROPIC_SMALL_FAST_MODEL: exhaustedLane,
         ANTHROPIC_DEFAULT_HAIKU_MODEL: exhaustedLane,
       },
-      // A non-plugin key left on the pin by an earlier repin is not
+      // a non-plugin key left on the pin by an earlier repin is not
       // re-asserted for a known agent; the agent env is the source of truth.
       existingOverrideEnv: { STALE_ISSUE: { type: "plain", value: "issue" } },
     });
@@ -553,7 +553,7 @@ describe("sub-call surface pins", () => {
     }
   });
 
-  // The unknown-assignee branch preserves the snapshot because
+  // (c). The unknown-assignee branch preserves the snapshot because
   // it cannot rebuild from an unseen base — but the model-owned surfaces are
   // still re-derived against the NEW model. Here the old pin was written for
   // the wide model (no ceiling) pointing sub-calls at the dead lane; the
@@ -585,7 +585,7 @@ describe("sub-call surface pins", () => {
     });
   });
 
-  // The ceiling half of the same rule: the old pin's ceiling
+  // (c). The ceiling half of the same rule: the old pin's ceiling
   // was derived from the narrow model, the repin moves to the wide one, and
   // the stale ceiling must be cleared, not carried. The snapshot never had
   // sub-call surfaces, so none are invented — the "does not invent" test
@@ -608,9 +608,10 @@ describe("sub-call surface pins", () => {
     expect(patch.assigneeAdapterOverrides.adapterConfig.env).not.toHaveProperty(CONTEXT_LIMIT_ENV_KEY);
   });
 
-  // Unknown-assignee must not INVENT sub-call surfaces the snapshot never
-  // had — a card pinned by an earlier build (or by another writer) gains
-  // them only through the known-assignee rebuild, never by snapshot surgery.
+  // (c). Unknown-assignee must not INVENT sub-call surfaces the
+  // snapshot never had — a card pinned before  (or by another
+  // writer) gains them only through the known-assignee rebuild, never by
+  // snapshot surgery.
   it("does not invent sub-call surfaces an unknown-assignee snapshot never had", () => {
     const patch = modelOverrideForContext({
       model: fleetModel,
@@ -628,7 +629,7 @@ describe("sub-call surface pins", () => {
     }
   });
 
-  // The secret-binding rule survives the unknown branch: a
+  // (c). The secret-binding rule survives the unknown branch: a
   // secret-bound sub-call surface in the snapshot is never overwritten.
   it("never overwrites a secret-bound sub-call surface from an unknown-assignee snapshot", () => {
     const secretBound = { type: "secret_ref", key: "small_fast_model" };
@@ -651,7 +652,7 @@ describe("sub-call surface pins", () => {
   });
 });
 
-describe("Fallback pin provenance stamp", () => {
+describe(" fallback pin provenance stamp", () => {
   const stamp = { decisionId: "d-1", agentId: "agent-a", fallback: true as const, decidedAt: "2026-09-10T12:00:00.000Z" };
   const stampKey = "MODEL_SELECTION_PIN_PROVENANCE";
 

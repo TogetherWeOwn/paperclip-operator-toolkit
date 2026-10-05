@@ -83,7 +83,7 @@ export type OperatorOverrideLedger = Record<string, OperatorOverrideEntry>;
  * "we don't know" rather than a fabricated one. One lane's failure has no
  * effect on any other lane's entry — callers merge one result at a time.
  *
- * That honesty is right for `verdict` and wrong as the ONLY record
+ * that honesty is right for `verdict` and wrong as the ONLY record
  * of serviceability, because it silently discards a measurement already
  * taken. `unserviceableSince` is the durable half — updated only from a
  * verdict this poll actually returned, carried forward untouched when the
@@ -170,20 +170,20 @@ function paceStateOf(ledger: LaneLedger, model: ModelEntry | undefined): PaceSta
 }
 
 /**
- * The only lane states the balance pass pulls idle pins toward —
+ * the only lane states the balance pass pulls idle pins toward —
  * a lane trailing its fair-share pace should get volume routed to it before
  * its allowance window closes unused. Everything else (including `on`,
  * `ahead`, and `unknown`) is never a pace-pull target.
  */
 const PACE_PULL_STATES: ReadonlySet<PaceState> = new Set(["behind", "behind-urgent"]);
 
-/** Whether this model's lane is trailing pace. `unknown` (unobserved or lane-less) is never behind. */
+/** whether this model's lane is trailing pace. `unknown` (unobserved or lane-less) is never behind. */
 export function isBehindPace(ledger: LaneLedger, model: ModelEntry | undefined): boolean {
   return PACE_PULL_STATES.has(paceStateOf(ledger, model));
 }
 
 /**
- * This model's lane rank in the new-pin preference order (lower =
+ * this model's lane rank in the new-pin preference order (lower =
  * more preferred). The balance-pass pace-pull gate requires the target's rank
  * to be strictly better (lower) than the pinned lane's, so a pull never moves
  * a card sideways between equally-behind lanes or backwards onto a
@@ -204,14 +204,14 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * Fraction of a governing window's duration (0-1) after
+ * , Defect 5. Fraction of a governing window's duration (0-1) after
  * which a trailing lane is considered close enough to reset that its unused
  * allowance is at risk of being wasted. 0.8 = the last 20% of the window.
  */
 export const PREFERRED_ELAPSED_THRESHOLD = 0.8;
 
 /**
- * The pace engine was brake-only. `hardStopExcluded`
+ * , Defect 5: the pace engine was brake-only. `hardStopExcluded`
  * excludes an exhausted lane and `slotFactorFor` throttles a lane running
  * `ahead` — both only ever hold a lane BACK. Nothing on the other side ever
  * PREFERS a lane, so a lane trailing its elapsed-fraction trajectory can
@@ -322,7 +322,7 @@ export function orderCandidatesByPace(
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
 
-      // Owner rule: same vendor family, tier, and price — the newer
+      // owner rule: same vendor family, tier, and price — the newer
       // release wins outright unless the older one carries an explicit
       // earn-in verdict proving it's better. This runs before the plain
       // release-date fallback below because it is a strict same-family match
@@ -375,7 +375,7 @@ const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = n
  * the pace engine reports (malformed document, stale snapshot, no records,
  * unusable account identity): those are a verdict saying "I could not tell".
  *
- * What is NOT fail-neutral any more is a lane this plugin HAS
+ * what is NOT fail-neutral any more is a lane this plugin HAS
  * observed unserviceable and has since lost the reading for. `verdict` goes
  * null on every failed poll, and reading serviceability solely off `verdict`
  * meant a flapping poll silently readmitted a lane measured exhausted minutes
@@ -430,7 +430,7 @@ function unserviceableVerdict(verdict: LanePaceVerdict): boolean {
 
 /**
  * Deterministic per-issue coin flip in [0, 1), stable for a given input
- * string. Used for ahead-of-line slot throttling, and for the
+ * string. Used for ahead-of-line slot throttling, and for the 
  * T2/T3 explore-fraction roll (`applyPickOrdering` in `select.ts`), so the
  * same issue always lands on the same side of a cap/roll — no shared
  * counter, so no last-write-wins race between concurrent selections (see

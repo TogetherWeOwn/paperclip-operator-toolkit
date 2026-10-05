@@ -33,7 +33,7 @@ export interface ApplyPlan {
   /**
    * The selected model id. The caller builds the full env-preserving override.
    *
-   * If you came here looking for the sub-call surface pins
+   * if you came here looking for the sub-call surface pins
    * (`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`), they are
    * NOT here. This function is pure and never sees an env map. All five override
    * write paths build their patch through `modelOverrideForContext`
@@ -190,7 +190,7 @@ export function tierLabelName(tier: Tier): string {
 }
 
 /**
- * The single gate for every router-owned model/env pin write.
+ * the single gate for every router-owned model/env pin write.
  *
  * `planApply` refuses advisory decisions, and the engine marks a decision
  * advisory exactly when this is false — but the five scheduled/event pin

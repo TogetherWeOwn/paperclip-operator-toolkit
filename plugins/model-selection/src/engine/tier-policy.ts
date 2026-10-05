@@ -1,5 +1,5 @@
 /**
- * Tiers as data.
+ * P1: tiers as data.
  *
  * Before this module the tier ladder was three hard-coded lookups: the tier CUT
  * (`SCORE_THRESHOLDS` in `tierForPosterior`/`deriveModelTier`/`tierImpliedByIndex`)

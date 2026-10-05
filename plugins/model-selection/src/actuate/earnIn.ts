@@ -45,7 +45,7 @@ export interface EarnInCandidateCard {
   status: string;
   /** True if a run is currently active on this card. */
   hasRunningRun: boolean;
-  /** `research` | `review` §3. Anything else is out of scope. */
+  /** `research` | `review` per  §3. Anything else is out of scope. */
   workClass: string;
   hasOperatorPin: boolean;
   hasExclusion: boolean;
@@ -113,7 +113,7 @@ export function planEarnIn(
   if (!modelScore) {
     return nothing(`no model score for ${card.modelId}; cannot judge capable/proven`);
   }
-  // The monotone verdict, so an unproven T1 above a failed T2 is not capable.
+  // the monotone verdict, so an unproven T1 above a failed T2 is not capable.
   const t1 = enforceMonotoneCapability(modelScore.tiers).T1;
   if (t1.proven) {
     return nothing(`${card.modelId} is already proven at T1; not an earn-in candidate`);

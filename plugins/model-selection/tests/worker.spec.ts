@@ -25,7 +25,7 @@ const AGENT = "agent-1";
 const TIER_LABEL_ID = "lbl-t1";
 const OTHER_LABEL_ID = "lbl-other";
 
-// Freeze the wall clock at the fixture NOW so the seeded PROFILES
+// freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running. The two lane
 // tests below that stamp `new Date()` explicitly stay consistent — the stamp
@@ -109,7 +109,7 @@ async function boot(
   const setup = plugin.definition.setup;
   if (!setup) throw new Error("plugin definition has no setup handler");
   await setup(harness.ctx);
-  // The worker tracks its known companies from
+  // reopen: the worker tracks its known companies from
   // `onConfigChanged` replays instead of `ctx.companies.list()` — mirror the
   // host's real startup config-delivery sequence (plugin-loader.ts step 5b)
   // so the scheduled jobs under test see this company.
@@ -277,9 +277,9 @@ describe("worker", () => {
     expect(h.activity).toEqual([]);
   });
 
-  // The derived tier has to reach `selectModel`, not just sit on the
+  // the derived tier has to reach `selectModel`, not just sit on the
   // stored score. Unit-testing `applyDerivedTiers` directly leaves the wiring
-  // uncovered — the same gap found earlier for the shadow emitter — so these
+  // uncovered — the same gap  found for the shadow emitter — so these
   // two drive the real advise path and read the model actually chosen.
   it("selects on the derived tier, not the roster's configured tier", async () => {
     // claude-sonnet-5 is configured T2. Promoted to T1 by its score, it becomes
@@ -308,60 +308,6 @@ describe("worker", () => {
     );
     const result = await harness.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
     expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
-  });
-
-  it("reads only the configured stored tier alias through the advise path", async () => {
-    const alias = "legacy-benchmark-v1";
-    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
-    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
-    const stored = { modelScores: [{ ...promotedSonnet(), tierSpecVersion: alias }] };
-    await h.ctx.state.set(key, stored);
-    const result = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-    expect((result as { data: { modelId: string } }).data.modelId).toBe("claude-sonnet-5");
-    expect(await h.ctx.state.get(key)).toEqual(stored);
-    await h.ctx.state.set(key, { modelScores: [{ ...promotedSonnet(), tierSpecVersion: "unconfigured-benchmark-v1" }] });
-    const unknown = await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-    expect((unknown as { data: { modelId: string } }).data.modelId).toBe("claude-opus-5");
-  });
-
-  it("persists the configured score identifier without rewriting its algorithm fields", async () => {
-    const alias = "legacy-benchmark-v1";
-    const baseline = await boot(baseConfig());
-    const h = await boot(baseConfig({ formatCompatibility: { tierSpecVersion: alias } }));
-    await baseline.runJob("refreshScores");
-    await h.runJob("refreshScores");
-    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.modelScores };
-    const canonical = await baseline.ctx.state.get(key) as { modelScores: ModelScore[]; cardLedger: unknown; computedAt: string };
-    const stored = await h.ctx.state.get(key) as typeof canonical;
-    expect(stored.modelScores.length).toBeGreaterThan(0);
-    expect(stored).toEqual({ ...canonical, modelScores: canonical.modelScores.map((score) => ({ ...score, tierSpecVersion: alias })) });
-  });
-
-  it("round-trips the configured posterior identifier through refresh and the read-only report", async () => {
-    const alias = "legacy-posterior-v1";
-    const h = await boot(baseConfig({ acceptedWork: { enabled: true }, formatCompatibility: { acceptedWorkSpecVersion: alias } }));
-    await h.runJob("refreshScores");
-    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.acceptedWorkOverlay };
-    const stored = await h.ctx.state.get(key) as { specVersion: string; cohorts: unknown[] };
-    expect(stored.specVersion).toBe(alias);
-    const report = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
-    expect((report as { data: { specVersion: string; cohorts: unknown[] } }).data).toMatchObject({ specVersion: alias, cohorts: stored.cohorts });
-    expect(await h.ctx.state.get(key)).toEqual(stored);
-    await h.ctx.state.set(key, { ...stored, specVersion: "unconfigured-posterior-v1" });
-    const unknown = await h.executeTool(TOOL_NAMES.acceptedWorkReport, {}, runCtx);
-    expect((unknown as { data: { ok: boolean } }).data.ok).toBe(false);
-  });
-
-  it("serializes both shadow projections with only the configured format change", async () => {
-    const alias = "legacy-paired-decision-v1";
-    const h = await boot(baseConfig({ shadowEmit: { enabled: true }, formatCompatibility: { shadowSchemaVersion: alias } }));
-    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
-    const shard = `decisions-${new Date(NOW).toISOString().slice(0, 13).replace("T", "-")}Z.jsonl`;
-    const text = await h.ctx.localFolders.readText(COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, shard);
-    const records = text.trim().split("\n").map((line) => JSON.parse(line));
-    expect(records).toHaveLength(2);
-    expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
-    expect(records.map((record) => record.schema)).toEqual([alias, alias]);
   });
 
   it("keeps the configured tier when the stored tier came from another spec version", async () => {
@@ -632,11 +578,11 @@ describe("worker", () => {
 
   it("resolves a legacy wrapped pin before checking the pinned lane hard stop", async () => {
     // Fixture roster carries exactly one T1 row (claude-opus-5). Pinning it
-    // while its lane is a serviceability hard stop is therefore the
-    // tier-exhausted dead end, not an ordinary pace reorder: T2/T3 are below the
+    // while its lane is a serviceability hard stop is therefore the 
+    // Defect 2 dead end, not an ordinary pace reorder: T2/T3 are below the
     // required tier, so there is nowhere to escalate to, and the correct
     // outcome is `tier-exhausted` (no write) — same as an unwrapped pin would
-    // get. What THIS test actually guards is wrapped-pin composition: the raw
+    // get. What THIS test actually guards is  composition: the raw
     // `cliproxy/`-wrapped pin must still resolve to `claude-opus-5` and reach
     // its lane's hard-stop check (proven by the trace below), not silently
     // fail to match and skip the hard stop entirely.
@@ -975,11 +921,11 @@ describe("worker", () => {
   // muse-spark-1.3-contributor. These two drive the whole refreshScores path,
   // because the guard lives in the worker's row mapping and a unit test of the
   // predicate alone would still pass if the call site were removed.
-  describe("Provider-misattributed closing-run costs", () => {
+  describe(": provider-misattributed closing-run costs", () => {
     const MUSE = "muse-spark-1.3-contributor";
     const rosterWithMuse = [
       ...MODELS,
-      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: "Fixture" },
+      { ...MODELS[MODELS.length - 1]!, id: MUSE, note: " fixture" },
     ];
 
     async function ledgerForProvider(provider: string) {
@@ -1058,12 +1004,12 @@ describe("worker", () => {
       runCtx,
     );
     expect((result as { content: string }).content).toContain("not a configured roster entry");
-    // Rejections still carry a plain-object data (never null), so the
+    // rejections still carry a plain-object data (never null), so the
     // gateway's structuredContent mapping never yields null.
     expect((result as { data: unknown }).data).toEqual({ ok: false, error: "unknown-model", modelId: "cliproxy/not-in-roster" });
   });
 
-  // A lane's apiKeySecretRef is resolved inside the pollLaneCapacity
+  // a lane's apiKeySecretRef is resolved inside the pollLaneCapacity
   // job, before the poll, never inside poll.ts itself.
   describe("pollLaneCapacity secret resolution", () => {
     const laneConfig = (apiKeySecretRef?: Record<string, unknown>) =>
@@ -1091,7 +1037,7 @@ describe("worker", () => {
 
     it("resolves the secret and sends it as X-Api-Key when ctx.secrets.resolve succeeds", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
+        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -1112,7 +1058,7 @@ describe("worker", () => {
       await secretHarness.runJob("pollLaneCapacity");
 
       expect(seenHeaders).toMatchObject({ "X-Api-Key": "resolved-lane-key" });
-      // The host's plugin-secrets-handler.ts binds config_secret_bindings
+      // the host's plugin-secrets-handler.ts binds config_secret_bindings
       // rows by the lane's array INDEX (pacing.lanes.<n>.apiKeySecretRef), not by
       // laneId — a laneId-keyed resolve path reads back nothing after any config
       // write, since syncSecretRefsForTarget(replaceAll: true) drops non-matching rows.
@@ -1137,7 +1083,7 @@ describe("worker", () => {
             {
               laneId: "lane-b",
               statusUrl: "https://status.example.com/lane-b",
-              apiKeySecretRef: { type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" },
+              apiKeySecretRef: { type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" },
               windows: [{ name: "primary", role: "serviceability", utilizationFields: ["utilization"] }],
             },
           ],
@@ -1166,7 +1112,7 @@ describe("worker", () => {
 
     it("records lane-secret-unavailable and never calls http.fetch when ctx.secrets.resolve throws", async () => {
       const secretHarness = await boot(
-        laneConfig({ type: "secret_ref", secretId: "5ec2e700-0000-4000-8000-000000000001" }),
+        laneConfig({ type: "secret_ref", secretId: "153ddc6c-4d7d-4ad8-b71d-882d6cfd5ad4" }),
       );
       secretHarness.seed({ companies: [{ id: COMPANY, name: "Co" } as never] });
 
@@ -1217,7 +1163,7 @@ describe("worker", () => {
   // increments them from the same results it merges into the lane ledger, and
   // `model_selection_tier_outcomes` reads them back. Read-only end to end —
   // nothing here may change which model a decision selects.
-  describe("Tier poll outcomes", () => {
+  describe(" tier poll outcomes", () => {
     const LANED = MODELS.map((entry) => ({
       ...entry,
       laneId: entry.id === "claude-haiku-4-5-20251001" ? "lane-zai" : "lane-claude",
@@ -1329,7 +1275,7 @@ describe("worker", () => {
     });
   });
 
-  describe("Tier-exhausted operator alarm", () => {
+  describe(" Defect 2: tier-exhausted operator alarm", () => {
     function unserviceableVerdict(laneId: string): LanePaceVerdict {
       return {
         laneId,
@@ -1432,8 +1378,8 @@ describe("worker", () => {
     });
   });
 
-  describe("Shadow decision emitter wiring in worker.ts", () => {
-    // Emits land in the UTC-hour shard for the decision timestamp
+  describe("/2138: shadow decision emitter wiring in worker.ts", () => {
+    // emits land in the UTC-hour shard for the decision timestamp
     // (`decisions-YYYY-MM-DD-HHZ.jsonl`), not in a single `decisions.jsonl`.
     // The fixture clock is frozen at NOW (2026-09-10T12:00Z), so every advise()
     // in these tests lands in `decisions-2026-09-10-12Z.jsonl`. The shard name
@@ -1502,7 +1448,7 @@ describe("worker", () => {
       expect(records[0].ts).toBe(records[1].ts);
     });
 
-    it("Retention deletes whole old shards past retentionShards, newest pair intact", async () => {
+    it(": retention deletes whole old shards past retentionShards, newest pair intact", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       // Seed two shards from older hours directly — the emitter never writes
       // outside the current hour, so retention is the only path that removes
@@ -1521,7 +1467,7 @@ describe("worker", () => {
       expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
     });
 
-    it("Retention never touches the legacy single-file decisions.jsonl", async () => {
+    it(": retention never touches the legacy single-file decisions.jsonl", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       await h.ctx.localFolders.writeTextAtomic(
         COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl", '{"writer":"host","legacy":true}\n',
@@ -1532,7 +1478,7 @@ describe("worker", () => {
       expect(legacy).toContain('"legacy":true');
     });
 
-    it("A write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
+    it(": a write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
       h.ctx.localFolders.writeTextAtomic = async () => {
@@ -1546,7 +1492,7 @@ describe("worker", () => {
       h.ctx.localFolders.writeTextAtomic = originalWrite;
     });
 
-    it("A transient read failure after existing records aborts the emit instead of truncating history", async () => {
+    it(": a transient read failure after existing records aborts the emit instead of truncating history", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
@@ -1573,7 +1519,7 @@ describe("worker", () => {
       ).toBe(true);
     });
 
-    it("Two overlapping emits both land instead of collapsing to one record", async () => {
+    it(": two overlapping emits both land instead of collapsing to one record", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
 
       await Promise.all([
@@ -1588,7 +1534,7 @@ describe("worker", () => {
     });
   });
 
-  describe("Ancillary model pin drift", () => {
+  describe(" Defect 3: ancillary model pin drift", () => {
     function agentWith(overrides: Record<string, unknown>) {
       return {
         id: "agent-drift",

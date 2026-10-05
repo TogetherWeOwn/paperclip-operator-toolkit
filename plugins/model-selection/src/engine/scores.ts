@@ -29,8 +29,8 @@ export function priorP(aaIndex: number | null): number {
 }
 
 /**
- * Blends the composite-index prior with the five-benchmark basket.
- * Replaces the earlier agentic sub-score average, which keyed off
+ * Blends the composite-index prior with the  five-benchmark basket
+ *. Replaces the  agentic sub-score average, which keyed off
  * whatever aa.ai columns happened to be populated rather than a fixed basket.
  *
  * Falls back to the plain index prior when the basket misses its coverage gate,
@@ -234,7 +234,7 @@ export function buildModelScore(
     (agg.okMins as number[]).push(...stats.okMins);
   }
 
-  // The tier is cut from the OVERALL posterior — one number per model,
+  // the tier is cut from the OVERALL posterior — one number per model,
   // across all tiers — not from any per-tier `capable` gate. Conflating the two
   // is what produced equal-index models landing in different tiers.
   const derivedTier = deriveModelTier(aaIndex, benchmarkRow, agg, capability.priorK, scoreThresholds);
@@ -287,9 +287,9 @@ export function enforceMonotoneCapability(tiers: Readonly<Record<Tier, TierScore
 /**
  * The capability verdict every consumer reads for (model, tier): the stored
  * tier score with `enforceMonotoneCapability` applied. Applied at READ time as
- * well as in `buildModelScore`, so scores persisted before this rule existed
- * are held to the rule from the first selection after deploy, not from the
- * next `refreshScores`.
+ * well as in `buildModelScore`, so scores persisted before  are held
+ * to the rule from the first selection after deploy, not from the next
+ * `refreshScores`.
  */
 export function tierScoreFor(score: ModelScore | undefined, tier: Tier): TierScore | undefined {
   if (!score?.tiers) return undefined;
@@ -304,9 +304,9 @@ export function tierScoreFor(score: ModelScore | undefined, tier: Tier): TierSco
  * Reads the monotone verdict, prior-only verdicts included, rather than
  * requiring evidence AT the target tier. The rung walk only ever runs a model
  * at its own rostered tier, so a T2 row never gathers T1 evidence; demanding
- * it would freeze every T1 promotion. What it does forbid is the defect: a
- * model with an adverse verdict at or below the target being promoted past
- * it.
+ * it would freeze every T1 promotion and undo . What it does
+ * forbid is the defect: a model with an adverse verdict at or below the
+ * target being promoted past it.
  */
 function promotionCeiling(score: ModelScore): Tier | undefined {
   if (!score.tiers) return undefined;
@@ -365,8 +365,7 @@ export function applyDerivedTiers<T extends RosterRow>(
       //    model at all — only the aa.ai composite. That is enough to keep a
       //    model where it is, or to move it down, but not to hand it harder
       //    work: the two models this fires hardest on measure worst of the
-      //    whole capture on the agentic benchmarks we DO have (a review
-      //    finding). Retain, and let a populated basket do the promoting.
+      //    whole capture on the agentic benchmarks we DO have. Retain, and let a populated basket do the promoting.
       if (score.priorBasis === "index-only") return model;
       // 2. A model listed at more than one rung is placed there deliberately
       //    (`gpt-5.6-sol` carries both T1 and T2 on the codex lane). The
@@ -376,7 +375,7 @@ export function applyDerivedTiers<T extends RosterRow>(
       //    given. Only the model's top rung moves up, so a promotion can never
       //    vacate a lower rung the operator listed it at.
       if (model.tier !== topRung(model.id)) return model;
-      // 3. Never past the hardest tier the model is still capable
+      // 3. : never past the hardest tier the model is still capable
       //    at. The derived tier pools every tier's runs, so easy wins can
       //    out-vote a proven failure at the tier just above them (`glm-5.3`:
       //    89/89 at T3 lifting it to T1 while it measures p=0.585 at T2).
@@ -429,7 +428,7 @@ function topConfiguredRungs(models: readonly RosterRow[]): (modelId: string) => 
 // captured signal against the run window it already has in hand — same
 // semantics (72h/48h closing-run match), different data source.
 
-// ---- quality (p) vs availability split ---------------------------------
+// ---- quality (p) vs availability split —  ---------------------
 //
 // p is a PURE QUALITY posterior: wOk / nEff where nEff = wOk + wBad.
 // INFRA_RE failures are excused (weight 0, failInfra++ only, no wBad) so
@@ -657,7 +656,7 @@ function validCount(value: number): boolean {
 }
 
 /**
- * Card-level acceptance ledger. A card closed less than
+ * §2.2 card-level acceptance ledger. A card closed less than
  * `CARD_CENSOR_DAYS` ago and not yet rejected is `pending` — right-censored,
  * excluded from both the accepted and rejected counts (never assumed 1.0).
  */

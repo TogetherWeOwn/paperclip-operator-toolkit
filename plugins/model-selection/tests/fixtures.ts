@@ -287,7 +287,7 @@ export function account(
 }
 
 /**
- * The sub-call surface pins every override write now
+ * + . The sub-call surface pins every override write now
  * carries: the four main-lane keys at the pinned model, the two haiku-class
  * keys at the resolved cheapest-healthy-T3 pick (defaulting to the pin, the
  * same fallback the write itself applies).

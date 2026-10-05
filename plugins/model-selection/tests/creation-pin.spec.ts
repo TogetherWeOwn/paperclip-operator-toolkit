@@ -11,7 +11,7 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 const COMPANY = "co-1";
 const AGENT = "agent-1";
 
-// Freeze the wall clock at the fixture NOW so the seeded PROFILES
+// freeze the wall clock at the fixture NOW so the seeded PROFILES
 // (computedAt = NOW - 1h) stay inside the production 14-day guard
 // (src/engine/cost.ts). Date-only: async timers keep running. The quality
 // test below builds its cards relative to `Date.now()`, so it stays
@@ -153,15 +153,15 @@ function pinnedModel(of: Issue): string | null {
 }
 
 /**
- * Exposure-window cut: an `issue.created` event on an
+ * AC2 + the exposure-window cut: an `issue.created` event on an
  * assigned, unlabelled, idle card must classify, label AND pin in the same
  * tick — not wait for the 10-minute pass that the card's own dispatch makes
  * missable (the passes' row queries exclude cards with running runs).
  */
-describe("Creation-time pin", () => {
+describe(" creation-time pin", () => {
   it("classifies, labels and pins an assigned unlabelled idle card on issue.created", async () => {
-    // The pin notice names the card actually pinned (seeded
-    // identifier), never a hardcoded identifier baked into the code path.
+    // the pin notice names the card actually pinned (seeded
+    // identifier), never the hardcoded  of the card that built this path.
     const card = issue("i1", { identifier: "EX-9999" } as Partial<Issue>);
     const harness = await boot(baseConfig(), [card]);
     const calls = stubClassifier(harness, "T2");
@@ -285,6 +285,132 @@ describe("Creation-time pin", () => {
     expect(pinnedModel(after as Issue)).toBeNull();
   });
 
+  it("pins an assigned labelled idle card on backlog -> todo re-entry", async () => {
+    // the third creation moment. The card parked in backlog missed
+    // both `issue.created` and the assignment arm, so it rides the agent
+    // floor until the next 10-minute pass. Reuses `pinAtDecisionTime` —
+    // same source string convention as the other two triggers.
+    const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+    const harness = await boot(baseConfig(), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      { changes: { status: { from: "backlog", to: "todo" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" },
+    );
+
+    expect(calls).toHaveLength(0); // label already present: no classification
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(pinnedModel(after as Issue)).toBe("claude-opus-5");
+    expect(harness.activity.some((entry) => entry.message.includes("issue.updated:status-todo"))).toBe(true);
+  });
+
+  it("classifies, labels and pins an unlabelled card on backlog -> todo re-entry", async () => {
+    // Unlabelled re-entry takes the same classify-then-pin path as
+    // `issue.created` on an unlabelled card.
+    const card = issue("i1");
+    const harness = await boot(baseConfig(), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      { changes: { status: { from: "backlog", to: "todo" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" },
+    );
+
+    expect(calls).toHaveLength(1);
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(after?.labelIds).toContain("lbl-T2");
+    expect(pinnedModel(after as Issue)).toBe("claude-sonnet-5");
+  });
+
+  it("pins once when one tick carries both assignment and todo re-entry", async () => {
+    // Both arms firing in one tick would double-classify an unlabelled card
+    // (two classifier HTTP calls) — the status arm yields to the assignment
+    // arm, which already pins.
+    const card = issue("i1");
+    const harness = await boot(baseConfig(), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      {
+        changes: {
+          assigneeAgentId: { from: null, to: AGENT },
+          status: { from: "backlog", to: "todo" },
+        },
+      },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" },
+    );
+
+    expect(calls).toHaveLength(1);
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(pinnedModel(after as Issue)).toBe("claude-sonnet-5");
+    expect(harness.activity.some((entry) => entry.message.includes("issue.updated:assignment"))).toBe(true);
+    expect(harness.activity.some((entry) => entry.message.includes("issue.updated:status-todo"))).toBe(false);
+  });
+
+  it("ignores a status change that does not enter todo", async () => {
+    // todo -> in_progress is dispatch, not re-entry: `pinAtDecisionTime`
+    // must not fire (no classification, no pin attempt).
+    const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+    const harness = await boot(baseConfig(), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      { changes: { status: { from: "todo", to: "in_progress" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" },
+    );
+
+    expect(calls).toHaveLength(0);
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(pinnedModel(after as Issue)).toBeNull();
+    expect(harness.activity.some((entry) => entry.message.includes("issue.updated:status-todo"))).toBe(false);
+  });
+
+  it("ignores a todo -> todo status receipt (no re-entry)", async () => {
+    const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+    const harness = await boot(baseConfig(), [card]);
+    const calls = stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      { changes: { status: { from: "todo", to: "todo" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" },
+    );
+
+    expect(calls).toHaveLength(0);
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(pinnedModel(after as Issue)).toBeNull();
+  });
+
+  it("still records the reopen signal on done -> todo while also pinning", async () => {
+    // done -> todo is both a reopen (scores evidence) and a re-entry (pin):
+    // the status arm must not let the reopen early-return below swallow the
+    // pin, nor the pin swallow the signal.
+    const card = issue("i1", { labels: [tierLabel("T1")], labelIds: ["lbl-T1"] });
+    const harness = await boot(baseConfig(), [card]);
+    stubClassifier(harness, "T2");
+
+    await harness.emit(
+      "issue.updated",
+      { changes: { status: { from: "done", to: "todo" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue", occurredAt: new Date(NOW).toISOString() },
+    );
+
+    const after = await harness.ctx.issues.get("i1", COMPANY);
+    expect(pinnedModel(after as Issue)).toBe("claude-opus-5");
+    const stored = await harness.ctx.state.get({
+      scopeKind: "company",
+      scopeId: COMPANY,
+      stateKey: PLUGIN_STATE_KEYS.reworkSignals,
+    });
+    const signals = (stored as { signals?: Array<{ issueId: string; kind: string }> } | null)?.signals ?? [];
+    expect(signals.some((s) => s.issueId === "i1" && s.kind === "reopen")).toBe(true);
+  });
+
   /**
    * The assignment wake queues (and often claims) the run
    * between this path's classify and advise steps, so a pin gated on strict
@@ -292,7 +418,7 @@ describe("Creation-time pin", () => {
    * safe: Paperclip reads the override at run START. The gate reads the
    * card's live `heartbeat_runs` rows; `executionRunId` is not consulted.
    */
-  describe("Queued-but-unstarted run", () => {
+  describe(" queued-but-unstarted run", () => {
     /** Route `ctx.db.query` to the card's live-run rows; everything else reads empty. */
     function stubRunRows(
       harness: Awaited<ReturnType<typeof boot>>,
@@ -505,7 +631,7 @@ describe("Creation-time pin", () => {
  * the roster, so the heuristic tier is `selection.defaultTier` (T2) and its
  * pick (`claude-sonnet-5`) is not the floor: the first pin is a real write.
  */
-describe("Event-time first pin", () => {
+describe(" event-time first pin", () => {
   const OFF_ROSTER_AGENT = agentRow({ adapterConfig: { model: "muse-spark-1.3" } });
 
   function firstPinConfig() {
@@ -576,7 +702,7 @@ describe("Event-time first pin", () => {
   });
 
   it("re-pins to the classified tier while the run is still queued and unstarted", async () => {
-    const harness = await boot(firstPinConfig(), [issue("i1", { identifier: "EX-9998" } as Partial<Issue>)], [OFF_ROSTER_AGENT]);
+    const harness = await boot(firstPinConfig(), [issue("i1", { identifier: "" } as Partial<Issue>)], [OFF_ROSTER_AGENT]);
     stubLiveRuns(harness, () => QUEUED_UNSTARTED);
     stubClassifier(harness, "T1");
 
@@ -588,7 +714,7 @@ describe("Event-time first pin", () => {
     const repins = harness.activity.filter((entry) => entry.message.includes("re-pinned"));
     expect(repins).toHaveLength(1);
     expect(repins[0]?.message).toContain("claude-sonnet-5 -> claude-opus-5");
-    expect(repins[0]?.message).toContain("EX-9998");
+    expect(repins[0]?.message).toContain("");
     expect(repins[0]?.metadata).toMatchObject({ phase: "classified-repin", from: "claude-sonnet-5" });
   });
 
@@ -675,10 +801,10 @@ describe("Event-time first pin", () => {
 });
 
 /**
- * A card the router cannot pin must be VISIBLE — one activity
+ * AC3: a card the router cannot pin must be VISIBLE — one activity
  * notice naming the outcome and the lane states — not a silent `continue`.
  */
-describe("Unpinnable-card visibility", () => {
+describe(" unpinnable-card visibility", () => {
   function exhaustedLedger(laneId: string) {
     return {
       [laneId]: {
@@ -796,7 +922,7 @@ describe("Unpinnable-card visibility", () => {
   });
 });
 
-describe("Creation-time pin in advisory selection", () => {
+describe(" creation-time pin in advisory selection", () => {
   // Same gate as the scheduled passes, on the event path: the classifier
   // still runs and the tier label still lands (labels are not pins), but no
   // override is written.

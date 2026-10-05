@@ -1104,7 +1104,7 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("newer-model");
   });
 
-  it("Same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
+  it(": same-price-family rule prefers the newer release, matching the corrected roster chronology", () => {
     // config/reviewed-roster.json's claude-opus-4-8 releasedAt was fabricated
     // to land AFTER claude-opus-5's real GA date — that
     // data bug is fixed separately in the roster file itself, since no
@@ -1125,7 +1125,7 @@ describe("orderCandidatesByPace", () => {
     expect(ordered[0]!.modelId).toBe("claude-opus-5");
   });
 
-  it("An explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
+  it(": an explicit provenBetter earn-in verdict lets the older same-price-family model keep winning", () => {
     const models = [
       model({
         id: "claude-opus-4-8",
@@ -1148,7 +1148,7 @@ describe("orderCandidatesByPace", () => {
   });
 });
 
-describe("Preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
+describe(" Defect 5: preferred-near-reset is the two-sided counterpart to the hard stop and slot throttle", () => {
   it("prefers a serviceable lane trailing its elapsed-fraction trajectory as its reset window nears close", () => {
     const trailingNearClose = verdict({
       state: "behind",
@@ -1978,7 +1978,7 @@ describe("laneHasRoom (tier_dispatcher.py lane_has_room())", () => {
   });
 });
 
-describe("Weekly-pace vs 5h backstop conflict (parity-gap slice)", () => {
+describe(" weekly-pace vs 5h backstop conflict (parity-gap slice of  deliverable 2)", () => {
   const capPerAccount = { "opencode-go": 2, zai: 3 };
   const baseArgs = {
     ledger: {} as LaneLedger,
@@ -2056,5 +2056,151 @@ describe("Weekly-pace vs 5h backstop conflict (parity-gap slice)", () => {
     const afterNowMs = Date.parse("2026-09-14T00:30:00.000Z"); // Monday, 30min into the new week (outside 06:00-10:00 UTC peak)
     expect(zaiWeeklyPaceOk({ ledger: afterReset, laneId: "zai", weeklyWindowName: "weekly", defaultMargin: 0.15, overrideMargin: null, nowMs: afterNowMs })).toBe(false);
     expect(laneHasRoom(roomArgs(afterReset, afterNowMs))).toBe(false);
+  });
+});
+
+describe(" pacer admission hysteresis (shadow-mode unit pins, no enforcement change)", () => {
+  // Slice of  deliverable 2 (use-before-expiry pacing): pin the
+  // hysteresis that keeps a lane oscillating near its pace margin from
+  // flapping admission — the margin deadband in `evaluateLanePace` and the
+  // idle-repin gate in `repinAllowed`. Tests only; no src, config, lane or
+  // secret change. Fixtures are synthetic (no production quota figures), and
+  // every path exercised here is pure observation — nothing reserves,
+  // selects, pins or starts anything. The shadow comparison already names
+  // this behavior (its hysteretic-defer rule); these pins hold the
+  // classification it relies on.
+  //
+  // Non-goals (owned elsewhere): the weekly-vs-5h conflict matrix;
+  // the headroom-per-hour tie-break and rollover fixtures; roster
+  // rows; the shadow-emit repair; the enforce path.
+
+  // A 1000s allowance window observed with 300s to reset: elapsed is exactly
+  // 0.7, so the asserted state is decided by the utilization alone against
+  // the default 0.1 margin. The elapsed assertion guards fixture drift — if
+  // the window math moves, these fail as fixture errors, not as hysteresis
+  // verdicts.
+  //
+  // No reported per-account decision: a production snapshot that reports none
+  // normalizes these rate fields to null (`firstNumber` → null). `undefined`
+  // would be misread as reported (`hasReportedAccountDecision` tests
+  // `!== null`), sending every account down the burn-rate → push path instead
+  // of the margin classification these pins hold.
+  function bareAccount(overrides: Partial<PaceAccountObservation>): PaceAccountObservation {
+    return account({
+      targetBurnRate: null,
+      observedBurnRate: null,
+      deficit: null,
+      recommendedShare: null,
+      ...overrides,
+    });
+  }
+
+  function hysteresisLedger(utilization: number): LaneLedger {
+    const evaluated = evaluateLanePace({ observation: observation({ accounts: [bareAccount({ windows: [window({
+      utilization, allowanceWeight: 1, windowSeconds: 1000, resetsAt: "2026-09-08T12:05:00.000Z",
+    })] })] }) });
+    expect(evaluated.score?.elapsed).toBe(0.7);
+    return { "lane-a": { laneId: "lane-a", fetchedAt: "t", error: null, observation: null, verdict: evaluated } };
+  }
+
+  function straddleObservation() {
+    return observation({ accounts: [
+      bareAccount({ accountKey: "a1", windows: [window({
+        utilization: 0.79, allowanceWeight: 1, windowSeconds: 1000, resetsAt: "2026-09-08T12:05:00.000Z",
+      })] }),
+      bareAccount({ accountKey: "a2", windows: [window({
+        utilization: 0.81, allowanceWeight: 1, windowSeconds: 1000, resetsAt: "2026-09-08T12:05:00.000Z",
+      })] }),
+    ] });
+  }
+
+  describe("margin deadband (evaluateLanePace)", () => {
+    it("holds a lane exactly at its pace margin as on — the deadband absorbs the upper boundary", () => {
+      // Named mutant: "upper margin edge is ahead (>= instead of >)". At
+      // deviation exactly +margin the lane is neither behind (so no
+      // use-before-expiry push fires) nor ahead (so no throttle applies).
+      const ledger = hysteresisLedger(0.8);
+      expect(ledger["lane-a"]!.verdict?.score?.deviation).toBe(0.1);
+      expect(ledger["lane-a"]!.verdict?.state).toBe("on");
+      expect(ledger["lane-a"]!.verdict?.serviceable).toBe(true);
+      expect(ledger["lane-a"]!.verdict?.urgentResetAt).toBeNull();
+    });
+
+    it("classifies just past the upper margin edge as ahead, not on", () => {
+      // Deviation 0.101: close enough to flap against the boundary under
+      // jitter, far enough that the deadband must not hold it.
+      const ledger = hysteresisLedger(0.801);
+      expect(ledger["lane-a"]!.verdict?.state).toBe("ahead");
+      expect(ledger["lane-a"]!.verdict?.serviceable).toBe(true);
+    });
+
+    it("holds a lane exactly at the lower pace margin as on — the deadband absorbs the lower boundary", () => {
+      // Named mutant: "lower margin edge is behind (<= instead of <)".
+      const ledger = hysteresisLedger(0.6);
+      expect(ledger["lane-a"]!.verdict?.score?.deviation).toBe(-0.1);
+      expect(ledger["lane-a"]!.verdict?.state).toBe("on");
+      expect(ledger["lane-a"]!.verdict?.urgentResetAt).toBeNull();
+    });
+
+    it("fires the use-before-expiry push just past the lower margin edge — the deadband edge is where the gas pedal engages", () => {
+      // Deviation -0.101 with 5 minutes to reset: genuinely trailing with
+      // allowance about to be destroyed unused, so the account reads push and
+      // the lane elevates to behind-urgent naming this reset.
+      const ledger = hysteresisLedger(0.599);
+      expect(ledger["lane-a"]!.verdict?.accounts[0]?.state).toBe("push");
+      expect(ledger["lane-a"]!.verdict?.state).toBe("behind-urgent");
+      expect(ledger["lane-a"]!.verdict?.urgentResetAt).toBe("2026-09-08T12:05:00.000Z");
+    });
+
+    it("holds the lane aggregate on while its accounts straddle the margin — per-account oscillation must not flap the lane", () => {
+      // a1 trails inside the deadband (deviation -0.01, on), a2 leads just
+      // outside it (deviation +0.11, ahead). The milli-normalized aggregate
+      // lands exactly on the margin and holds on; a raw-float average
+      // (0.8 - 0.7 = 0.10000000000000009 > 0.1) would read ahead.
+      const evaluated = evaluateLanePace({ observation: straddleObservation() });
+      expect(evaluated.accounts.map((entry) => entry.state)).toEqual(["on", "ahead"]);
+      expect(evaluated.serviceable).toBe(true);
+      expect(evaluated.knownAccountCount).toBe(2);
+      expect(evaluated.score?.deviation).toBe(0.1);
+      expect(evaluated.state).toBe("on");
+      expect(evaluated.urgentResetAt).toBeNull();
+    });
+
+    it("observes without mutating: evaluating lane pace leaves the input observation untouched (shadow reads, never writes)", () => {
+      const input = straddleObservation();
+      const before = structuredClone(input);
+      evaluateLanePace({ observation: input });
+      expect(input).toEqual(before);
+    });
+  });
+
+  describe("idle-repin gate boundary (repinAllowed)", () => {
+    const gate = {
+      hasOperatorPin: false,
+      isIdle: true,
+      lastRepinAt: null as string | null,
+      now: "2026-08-31T12:00:00.000Z",
+      idleRepinHysteresisSeconds: 300,
+      isServiceabilityHardStop: false,
+    };
+
+    it("admits a repin exactly at the hysteresis age — the comparison is strict (<), so the boundary itself is live", () => {
+      // Named mutant: "boundary off-by-one (<= blocks at exactly the hysteresis)".
+      const result = repinAllowed({ ...gate, lastRepinAt: "2026-08-31T11:55:00.000Z" });
+      expect(result.allowed).toBe(true);
+      expect(result.reason).toContain("hysteresis");
+    });
+
+    it("blocks one second inside the window — 299s elapsed is still below the 300s hysteresis", () => {
+      const result = repinAllowed({ ...gate, lastRepinAt: "2026-08-31T11:55:01.000Z" });
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain("hysteresis");
+    });
+
+    it("admits the first-ever pace repin — with no last repin there is no clock to enforce", () => {
+      const result = repinAllowed({ ...gate });
+      expect(result.allowed).toBe(true);
+      expect(result.reason).toContain("hysteresis");
+    });
   });
 });
