@@ -443,8 +443,8 @@ test('stats summarise the store and the rejection counters', async () => {
 // Counting per (day, reason) bounds how many ROWS a passer-by can create. On
 // its own it does NOT bound how many WRITES they cause — the version of this
 // service reviewed on 2026-08-24 issued one D1 `INSERT ... ON CONFLICT` per
-// rejected request, on an account whose D1 allowance is shared with the
-// production `routeware-shadow-api` Worker. Flooding the security control would
+// rejected request, on an account whose D1 allowance is shared with another
+// production Worker. Flooding the security control would
 // have degraded an unrelated service.
 //
 // These assert on CALL COUNT, not on the totals. A test that only checked the

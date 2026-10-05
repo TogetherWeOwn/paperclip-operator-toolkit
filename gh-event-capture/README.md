@@ -40,8 +40,8 @@ down, or nothing happened — and this store cannot tell you which. If an incide
 what this store does or does not contain, that review has reached the edge of what the plan
 supports, and the answer is to reason about scope and exposure window instead.
 
-It also means **no adversary is required to create a gap**. The D1 allowance is shared with the
-production `routeware-shadow-api` Worker on the same Cloudflare account, and the coupling runs both
+It also means **no adversary is required to create a gap**. The D1 allowance is shared with
+another production Worker on the same Cloudflare account, and the coupling runs both
 ways: if that Worker exhausts the account's allowance, `store.append` throws, and `receive()` does
 not wrap it. The error propagates, GitHub sees a `5xx`, and after 3 days of retries those
 deliveries are gone for good. Capture does not degrade into a read-only store when the quota goes
@@ -98,23 +98,20 @@ Until gate 4 completes, `expected-subscription.json` has an empty `hook_url` and
 
 ## 3. Gate 0 — where this can actually run
 
-The org already operates a **Cloudflare Workers account in production**: account
-`209cf7dd678adfb683947dd7874d05af`, which serves the `routeware-shadow-api` Worker with D1, R2
-and Durable Objects. So the prerequisite is not missing infrastructure. A Worker gives a real,
+This needs a **Cloudflare Workers account with D1**. A Worker gives a real,
 durable, publicly reachable HTTPS origin on a hostname that survives a process restart — not a
 tunnel that dies with an agent run.
 
-**What is missing is a deploy credential.** No `CLOUDFLARE_API_TOKEN` exists in any agent
-environment, and `routeware-shadow-api` has its own CI deploy job switched off for exactly this
-reason (see that repo's `docs/HANDOVER.md` § 0). So the deploy in § 4 is an **operator action**,
-which is also how this whole repo works: agents propose, the operator applies.
+Deploying is an **operator action**: the deploy credential lives outside agent environments,
+so the deploy in § 4 is applied by the operator, which is also how this whole repo works:
+agents propose, the operator applies.
 
-Marginal cost is zero — the account is already paid for, and this Worker adds no cron, no
-Durable Object and no browser binding. It does consume that account's D1 quota.
+This Worker adds no cron, no Durable Object and no browser binding. It does consume that
+account's D1 quota.
 
 **That sharing runs both ways, and the return direction is the one that bites.** This Worker
 drawing on the shared allowance is the documented half. The undocumented half was that
-`routeware-shadow-api` exhausting the same allowance makes `store.append` throw here — and
+another Worker exhausting the same allowance makes `store.append` throw here — and
 `receive()` does not wrap the append, so the throw becomes a `5xx` to GitHub and capture stops on
 live deliveries. Measured against the real module. GitHub retries for 3 days and then drops them,
 so a quota incident on an unrelated service silently costs this store real history. § 1 records it
@@ -806,8 +803,8 @@ request would hand any passer-by an unbounded write channel into the store the c
 
 Bounding the *rows* was not enough on its own, and the first version of this service got that
 wrong. Fixed cardinality still meant **one D1 write per rejected request** — so an anonymous flood
-converted directly into write volume against an account-level allowance **shared with the
-production `routeware-shadow-api` Worker**. Flooding the security control would have degraded an
+converted directly into write volume against an account-level allowance **shared with
+another production Worker on the same account**. Flooding the security control would have degraded an
 unrelated service: the endpoint whose job is to notice trouble was the lever for causing it.
 
 So `src/rejection-counter.js` buffers in the isolate and settles to D1 at most once per interval.

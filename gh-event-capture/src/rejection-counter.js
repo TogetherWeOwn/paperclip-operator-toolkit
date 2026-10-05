@@ -5,9 +5,9 @@
 // reason) instead of storing a row each already bounds how many ROWS a
 // passer-by can create: the cardinality is fixed. It does not bound how many
 // WRITES they can cause. One `INSERT ... ON CONFLICT` per rejected request
-// means an anonymous flood converts directly into D1 write volume, on the same
-// Cloudflare account that serves `routeware-shadow-api` in production, against
-// an account-level daily write allowance the two Workers share. Attacking the
+// means an anonymous flood converts directly into D1 write volume, on a
+// Cloudflare account whose daily write allowance is shared with another
+// production Worker. Attacking the
 // security control would degrade an unrelated production service — the worst
 // shape this could take, because the endpoint whose job is to notice trouble is
 // the lever that causes it.
