@@ -1,0 +1,69 @@
+{
+  "admission_authorized": false,
+  "evidence_class": "source-only",
+  "forbidden_preparation_actions": {
+    "image_build": false,
+    "migration_authorized": false,
+    "pool_cap_change": false
+  },
+  "image_build_authorized": false,
+  "migration_authorized": false,
+  "notes": "Source-only pin sheet for isolated-profile preparation. No image build, no pool cap change, no migration authority. Null output fingerprints are HOLD, not pins.",
+  "output_hold": {
+    "base_image_fingerprint": null,
+    "output_image_fingerprint": null,
+    "profile_sha256": null
+  },
+  "pins": {
+    "composer": {
+      "source": "https://getcomposer.org/changelog/2.9.3",
+      "version": "2.9.3"
+    },
+    "extensions": {
+      "gd": {
+        "enabled": true,
+        "notes": "bundled with pinned PHP; enabled in image",
+        "version": "8.5.11"
+      },
+      "pcov": {
+        "source": "https://pecl.php.net/package-changelog.php?package=pcov",
+        "version": "1.0.12"
+      },
+      "pdo_pgsql": {
+        "enabled": true,
+        "notes": "bundled with pinned PHP; enabled in image",
+        "version": "8.5.11"
+      },
+      "zip": {
+        "enabled": true,
+        "notes": "bundled with pinned PHP; enabled in image",
+        "version": "8.5.11"
+      }
+    },
+    "node": {
+      "source": "npm package node 24.12.0 published 2026-09-24; GitHub removed Node20 2026-09-23, runners use Node24",
+      "version": "24.12.0"
+    },
+    "php": {
+      "source": "https://www.php.net/releases/8_5_11.php",
+      "version": "8.5.11"
+    },
+    "psql": {
+      "on_path": true,
+      "source": "Azure Aug-2026 latest minors 18.6/17.11/16.15; Cloud SQL lists 16.15; postgres.org 16.10 superseded",
+      "version": "16.15"
+    },
+    "runner": {
+      "source": "https://github.com/actions/runner/blob/v2.330.0/src/Misc/layoutbin/runsvc.sh",
+      "version": "2.330.0"
+    }
+  },
+  "requirements": {
+    "node24_runner_smoke": true,
+    "no_floating_tags": true,
+    "psql_on_path": true
+  },
+  "role": "isolated",
+  "schema": "garm-isolated-toolchain.v1",
+  "status": "synthetic-preparation-only"
+}

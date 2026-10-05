@@ -1,0 +1,128 @@
+{
+  "actions": {
+    "active_work_aborted": false,
+    "cache_removal": false,
+    "cap_change": false,
+    "credential_change": false,
+    "pool_change": false,
+    "provider_restart": false,
+    "routing_change": false,
+    "running_vm_profile_change": false,
+    "static_service_change": false,
+    "workflow_edit": false
+  },
+  "docker": {
+    "client_installed": true,
+    "daemon_reachable": true,
+    "docker_host_set": false,
+    "socket_present": true,
+    "tcp_relay_reachable": false
+  },
+  "ephemeral": {
+    "one_job_then_deregister": true,
+    "registration_absent_after_job": true,
+    "runner_ephemeral": true,
+    "vm_absent_after_job": true
+  },
+  "evidence_class": "synthetic",
+  "image": {
+    "docker": true,
+    "fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+    "inputs_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "node24_runner_smoke": true,
+    "profile_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "rebuild_receipt_present": true,
+    "sudo": true,
+    "tool_versions": {
+      "composer": "2.0.0",
+      "docker": "27.0.0",
+      "node": "24.0.0",
+      "php": "8.5.0",
+      "psql": "16.0.0",
+      "runner": "2.999.0"
+    }
+  },
+  "labels": {
+    "eligible": [
+      "self-hosted",
+      "two-ephemeral"
+    ],
+    "ineligible": [
+      "two-isolated",
+      "two-selfhosted"
+    ]
+  },
+  "network_deny": {
+    "host_services_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "metadata_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "production_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    }
+  },
+  "probes": {
+    "ci_postgres": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "host_services_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "metadata_denied": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "native_build": {
+      "positive_control_passed": true,
+      "result": "pass"
+    },
+    "service_loopback": {
+      "positive_control_passed": true,
+      "result": "pass"
+    }
+  },
+  "resources": {
+    "configured_max": 2,
+    "cpu": 4,
+    "disk_gib": 40,
+    "ram_mib": 8192,
+    "safe_max": 1
+  },
+  "role": "generic",
+  "runtime": {
+    "login_shell": false,
+    "root": false,
+    "sudo": true,
+    "user": "runner"
+  },
+  "schema": "garm-generic-profile-receipt.v1",
+  "size_caps": {
+    "image_gib": 30,
+    "log_retention_days": 30,
+    "workspace_gib": 20
+  },
+  "source": {
+    "bundle_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "revision": "2222222222222222222222222222222222222222"
+  },
+  "toolchain": {
+    "composer_provides": true,
+    "extensions_provided": [
+      "gd",
+      "pcov",
+      "pdo_pgsql",
+      "zip"
+    ],
+    "node_series": "24",
+    "php_provides": true,
+    "psql_on_path": true,
+    "runner_smoke": true
+  }
+}

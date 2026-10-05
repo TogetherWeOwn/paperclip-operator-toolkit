@@ -1,0 +1,117 @@
+{
+  "admission_authorized": false,
+  "base": {
+    "base_image_fingerprint": null,
+    "builder_revision": null,
+    "cloud_init_sha256": null,
+    "distribution": "ubuntu-24.04",
+    "packages_snapshot_sha256": null
+  },
+  "docker": {
+    "client_installed": false,
+    "daemon_reachable": false,
+    "docker_host_set": false,
+    "socket_present": false,
+    "tcp_relay_reachable": false
+  },
+  "evidence_class": "synthetic",
+  "host_verified": false,
+  "installed": false,
+  "labels": {
+    "eligible": [
+      "self-hosted",
+      "two-isolated"
+    ],
+    "explicitly_ineligible": [
+      "two-ephemeral",
+      "two-selfhosted"
+    ]
+  },
+  "migration_complete": false,
+  "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to build or execute",
+  "network_deny": [
+    {
+      "name": "metadata",
+      "positive_control_required": true,
+      "target": "169.254.169.254"
+    },
+    {
+      "name": "host-services",
+      "positive_control_required": true,
+      "target": "host-gateway-and-link-local"
+    },
+    {
+      "name": "production-network",
+      "positive_control_required": true,
+      "target": "production-cidrs"
+    }
+  ],
+  "output": {
+    "inputs_sha256": null,
+    "output_image_fingerprint": null,
+    "profile_sha256": null,
+    "rebuild_receipt_present": false
+  },
+  "resources": {
+    "configured_max": 2,
+    "cpu": 2,
+    "disk_gib": 20,
+    "ram_mib": 4096,
+    "safe_max": 1
+  },
+  "role": "isolated",
+  "runtime_user": {
+    "login_shell": false,
+    "name": "runner",
+    "root": false,
+    "sudo": false
+  },
+  "schema": "garm-isolated-image-profile.v1",
+  "status": "synthetic-preparation-only",
+  "toolchain": {
+    "cc": {
+      "purpose": "native-build-smoke",
+      "required": true,
+      "version": null
+    },
+    "composer": {
+      "policy": "absent-by-design",
+      "provides_on_isolated": false,
+      "required": false
+    },
+    "node": {
+      "purpose": "runner-runtime-and-action-support",
+      "required": true,
+      "runner_smoke": true,
+      "series": "24",
+      "version": null
+    },
+    "php": {
+      "policy": "absent-by-design",
+      "provides_on_isolated": false,
+      "required": false
+    },
+    "php_extensions": {
+      "extensions": [
+        "pdo_pgsql",
+        "zip",
+        "gd",
+        "pcov"
+      ],
+      "policy": "absent-by-design",
+      "provided_by": "privileged",
+      "required": false
+    },
+    "psql": {
+      "on_path": true,
+      "purpose": "native-postgres-and-role-setup",
+      "required": true,
+      "version": null
+    },
+    "runner": {
+      "purpose": "ephemeral-job-execution",
+      "required": true,
+      "version": null
+    }
+  }
+}
