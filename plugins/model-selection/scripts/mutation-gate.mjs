@@ -1104,7 +1104,7 @@ const mutants = [
     name: "repin-moves-fallback-sideways",
     file: "src/worker.ts",
     from:
-      "                // Recovery moves back to a normal lane, never\n" +
+      "                // recovery moves back to a normal lane, never\n" +
       "                // sideways to another fallback-only row — that churn buys no\n" +
       "                // recovery. Re-stamp an expired pin so the sideways case does\n" +
       "                // not re-pay advise on every pass, mirroring the same-model\n" +
@@ -2197,7 +2197,7 @@ const mutants = [
     file: "src/worker.ts",
     from:
       "                if (described.hasOperatorPin) return \"settled\";\n" +
-      "                // Backstop for the `assignee_user_id is null`\n" +
+      "                // backstop for the `assignee_user_id is null`\n" +
       "                // predicate above — a user-assigned card rejects issues.update\n" +
       "                // with an agent override (\"Issue can only have one assignee\").\n" +
       "                if (described.assigneeUserId) return \"settled\";\n" +
@@ -2214,7 +2214,7 @@ const mutants = [
     file: "src/worker.ts",
     from:
       "                if (described.hasOperatorPin) return \"settled\";\n" +
-      "                // Backstop for the `assignee_user_id is null`\n" +
+      "                // backstop for the `assignee_user_id is null`\n" +
       "                // predicate above — a user-assigned card rejects issues.update\n" +
       "                // with an agent override (\"Issue can only have one assignee\").\n" +
       "                if (described.assigneeUserId) return \"settled\";\n" +
@@ -2358,7 +2358,7 @@ const mutants = [
     name: "repin-clear-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                  // Clearing a pin mutates a selection variable like\n" +
+      "                  // clearing a pin mutates a selection variable like\n" +
       "                  // any other write — advisory reports it without doing it.\n" +
       "                  if (writesAllowed) {\n" +
       "                    await ctx.issues.update(\n" +
@@ -2382,7 +2382,7 @@ const mutants = [
     name: "repin-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                // The write needs enforcement; the decision and its\n" +
+      "                // the write needs enforcement; the decision and its\n" +
       "                // log do not.\n" +
       "                if (writesAllowed) {\n",
     to:
@@ -2398,7 +2398,7 @@ const mutants = [
     name: "balance-pinned-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                  // The write needs enforcement — including the\n" +
+      "                  // the write needs enforcement — including the\n" +
       "                  // env-evacuation, which mutates the override like any repin.\n" +
       "                  // The decision and its log do not.\n" +
       "                  if (writesAllowed) {\n",
@@ -2415,8 +2415,8 @@ const mutants = [
     name: "balance-unpinned-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                // Same per-issue isolation as the pinned branch.\n" +
-      "                // This branch's write is gated like the pinned one.\n" +
+      "                // same per-issue isolation as the pinned branch.\n" +
+      "                // this branch's write is gated like the pinned one.\n" +
       "                if (writesAllowed) {\n",
     to:
       "                // Same per-issue isolation as the pinned branch.\n" +
