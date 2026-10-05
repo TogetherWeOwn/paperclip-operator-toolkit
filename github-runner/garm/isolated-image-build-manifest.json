@@ -1,0 +1,61 @@
+{
+  "schema": "garm-isolated-build-manifest.v1",
+  "evidence_class": "synthetic",
+  "role": "isolated",
+  "base": {
+    "distribution": "ubuntu-24.04",
+    "image_alias": null,
+    "base_image_fingerprint": null,
+    "packages_snapshot_sha256": null
+  },
+  "toolchain": {
+    "node_series": "24",
+    "node_version": null,
+    "postgres": {
+      "flavor": "16",
+      "packages": [
+        "postgresql-16",
+        "postgresql-client-16"
+      ],
+      "versions": null
+    },
+    "cc_present": true,
+    "runner_version": "2.337.0",
+    "runner_archive": "actions-runner-linux-x64-2.337.0.tar.gz",
+    "runner_url": "https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.337.0.tar.gz",
+    "runner_sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+  },
+  "runtime": {
+    "user": "runner",
+    "root": false,
+    "sudo": false,
+    "login_shell": false
+  },
+  "docker": {
+    "client_installed": false,
+    "daemon_reachable": false,
+    "socket_present": false,
+    "tcp_relay_reachable": false,
+    "docker_host_set": false
+  },
+  "resources": {
+    "cpu": 2,
+    "ram_mib": 4096,
+    "disk_gib": 20,
+    "safe_max": 1,
+    "configured_max": 2
+  },
+  "cloud_init_sha256": null,
+  "output": {
+    "output_image_fingerprint": null,
+    "profile_sha256": null,
+    "inputs_sha256": null,
+    "rebuild_receipt_present": false
+  },
+  "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to build or execute",
+  "admission_authorized": false,
+  "host_verified": false,
+  "migration_complete": false,
+  "installed": false,
+  "status": "synthetic-preparation-only"
+}

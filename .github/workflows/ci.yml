@@ -712,6 +712,9 @@ jobs:
           # of its own syntax.
           for f in *.sh lib/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in scripts/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # verification/ holds offline gates with suites of their own; same
+          # argument as scripts/*.sh above — the bare globs do not descend.
+          for f in verification/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           # scripts/*.js is included explicitly for the same reason as lib/: a
           # bare `*.js` glob does not descend, and until TOG-890 the two tools
           # under scripts/ were never parse-checked at all.
@@ -724,11 +727,20 @@ jobs:
           # one file, or the next root-level Python lands here unparsed and
           # nobody notices until it is in front of an operator.
           for f in omniroute/*.py *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
-          rm -rf omniroute/__pycache__ __pycache__
+          # Ported toolkit trees: offline checkers, detectors, gates and the
+          # migration gate. Same argument as the globs above.
+          for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          rm -rf omniroute/__pycache__ __pycache__ scripts/__pycache__ paperclip-upgrade/__pycache__ verification/__pycache__ watchdog/__pycache__ github-runner/garm/__pycache__ hooks/muse-stop-guard/measure/__pycache__
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
           for f in mcp/*.mjs mcp/test/*.mjs; do
             node --check --input-type=module < "$f" || { echo "::error file=$f::node parse error"; rc=1; }
+          done
+          # Ported JS trees carry their own test files (run under `node
+          # --test` in the steps below). Checked as files so each file's own
+          # module goal applies.
+          for f in gh-event-capture/src/*.js gh-event-capture/test/*.test.mjs protection-rule/src/*.js protection-rule/test/*.test.mjs hooks/muse-stop-guard/*.mjs hooks/muse-stop-guard/measure/*.mjs hooks/muse-stop-guard/smoke/*.mjs omniroute/rehearsal/*.mjs; do
+            node --check "$f" || { echo "::error file=$f::node parse error"; rc=1; }
           done
           exit $rc
 
@@ -3155,6 +3167,128 @@ jobs:
             'a ref with no canonical blob REFUSES rather than passing or failing' || rc=1
 
           exit $rc
+
+      # Ported toolkit suites (non-plugin slice). Each runs fully offline on
+      # synthetic fixtures: no network, no credentials, no host mutation.
+      # Two suites from the same slice already run elsewhere in CI
+      # (test_operator_runbook.sh in runbook-gates, and
+      # test_provisioned_cheap_profile.sh above), so they are not repeated
+      # here. The stop-guard smoke harness needs a live agent runtime and
+      # runs by hand, not here.
+      - name: lost-probe burst detector suite
+        run: python3 -m unittest -v test_process_lost_probe.py
+
+      - name: runner disk pressure suite
+        run: ./test_runner_disk_pressure.sh
+
+      - name: runner disk triage suite
+        run: ./test_runner_disk_triage.sh
+
+      # Failure-drain and queue suites over checked-in synthetic fixtures.
+      - name: CI failure log-drain suite
+        run: ./test_ci_failure_drain.sh
+
+      - name: dead-letter queue redrive suite
+        run: ./test_dlq_redrive.sh
+
+      # Fake pg module on NODE_PATH; no database is contacted.
+      - name: idle-transaction stall probe suite
+        run: ./test_db_idle_transaction_stall.sh
+
+      - name: container image lint suite
+        run: ./test_garm_image_lint.sh
+
+      - name: agent error proposer suite
+        run: python3 -m unittest -v test_agent_error_proposer.py
+
+      # Faces the checked-in gate file; bodies are synthetic candidate posts.
+      - name: public-post hygiene gate suite
+        run: ./test_public_comment_hygiene_gate.sh
+
+      - name: single-writer recovery suite
+        run: python3 -m unittest -v test_recovery_writer.py
+
+      - name: router pin cleanup suite
+        run: python3 -m unittest -v test_model_pin_cleanup.py
+
+      # Fixture-driven through the audit's offline env seams; the live-board
+      # section stays out of the ported suite.
+      - name: permission-narrowing audit suite
+        run: ./test_gh_override_scope_audit.sh
+
+      # Throwaway git repos under mktemp; asserts byte-identical pins files.
+      - name: draft pin audit suite
+        run: ./test_upstream_draft_pin_audit.sh
+
+      # Runs the audit over this repo's own workflows manifest; mutants of
+      # copies prove each finding code, so the gate cannot go vacuous.
+      - name: required-checks audit suite
+        run: python3 -m unittest -v test_ci_required_checks_audit.py
+
+      # Stub GitHub and board APIs on loopback; asserts signature stability
+      # and the propose/draft contract, not the host wrapper.
+      - name: red-main poll suite
+        run: ./test_red_main_poll.sh
+
+      # Synthetic cohorts: the counting rule, not any fleet's taxonomy.
+      - name: runner capacity headroom suite
+        run: ./test_runner_capacity_headroom.sh
+
+      # Unit tests plus positive/negative controls, writer-compat pins and
+      # secret-hygiene assertions, all offline on synthetic snapshots.
+      - name: platform watchdog gate
+        run: ./verification/platform-watchdog-gate.sh
+
+      # Mutation gate: planted defects must kill, survivors fail the step.
+      - name: lost-probe mutation gate
+        run: python3 verification/process-lost-mutation-gate.py
+
+      # GARM offline checkers, each on its synthetic fixture. The
+      # build-manifest checker cross-checks a pinned runner env, so the step
+      # builds that file from the manifest's own values first; the cleanup
+      # and reclaim tools are driven on synthetic inputs with refusal paths
+      # asserting their exit codes.
+      - name: GARM offline checker suite
+        run: |
+          set -euo pipefail
+          cd github-runner/garm
+          python3 validate_receipt.py fixture-isolated.json --at 2026-10-03T03:30:00Z
+          python3 validate_receipt.py fixture-privileged.json --at 2026-10-03T03:30:00Z
+          python3 validate_canary_pool.py canary-pool-spec.json
+          printf 'RUNNER_VERSION=2.337.0\nRUNNER_ARCHIVE=actions-runner-linux-x64-2.337.0.tar.gz\nRUNNER_URL=https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.337.0.tar.gz\nRUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613\n' > "$RUNNER_TEMP/runner.env"
+          python3 validate_build_manifest.py isolated-image-build-manifest.json --runner-env "$RUNNER_TEMP/runner.env"
+          python3 validate_toolchain.py toolchain-isolated.json
+          python3 validate_isolated_profile.py fixture-isolated-profile.json
+          python3 validate_isolated_profile.py fixture-isolated-profile.json fixture-isolated.json
+          python3 validate_generic_profile.py fixture-generic-profile.json
+          python3 validate_test_profile.py fixture-test-profile.json
+          python3 validate_drain.py drain-contracts.json
+          python3 check_first_pickup.py fixture-first-pickup-pass.json
+          rm -rf "$RUNNER_TEMP/job1" && mkdir -p "$RUNNER_TEMP/job1"
+          printf 'synthetic-fixture' > "$RUNNER_TEMP/job1/.garm-job-fixture"
+          touch "$RUNNER_TEMP/job1/tmp-residue1" "$RUNNER_TEMP/job1/keep.log"
+          python3 post_job_cleanup.py cleanup "$RUNNER_TEMP/job1" --job ci-garm-checkers
+          if python3 storage_auto_reclaim.py "$RUNNER_TEMP/does-not-exist.json" --apply; then
+            echo "::error::storage_auto_reclaim accepted a write-intent flag" >&2
+            exit 1
+          fi
+
+      # Event-capture offline suites: pure logic plus stub-transport cases.
+      - name: event capture suites
+        run: node --test gh-event-capture/test/*.test.mjs
+
+      # Protection rule suites on synthetic tables and stub transports.
+      - name: protection rule suites
+        run: node --test protection-rule/test/*.test.mjs
+
+      # Stop-guard classifier and installer suites on synthetic fixtures.
+      - name: stop-guard suite
+        run: node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs
+
+      # Differential proof that the compiled rewrite matches the reviewed
+      # translator patch: structural check, 200k-case fuzz, negative control.
+      - name: compiled-patch differential proof
+        run: node omniroute/rehearsal/verify-compiled-patch.mjs
 
       # TOG-910. THE ONLY STEP IN THIS JOB THAT IS ALLOWED AN `if:`, AND THE
       # REASON IS THE WHOLE POINT OF THE CARD.

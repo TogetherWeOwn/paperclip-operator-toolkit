@@ -1,0 +1,141 @@
+{
+  "admission_authorized": false,
+  "base": {
+    "base_image_fingerprint": null,
+    "builder_revision": null,
+    "cloud_init_sha256": null,
+    "distribution": "ubuntu-24.04",
+    "packages_snapshot_sha256": null
+  },
+  "constraints": {
+    "lxd_privileged_required": false,
+    "no_sudo_no_docker_surface": true,
+    "org_group_refuses_public_repos": true,
+    "public_pr_routing": "standard-github-hosted-only"
+  },
+  "docker": {
+    "client_installed": false,
+    "daemon_reachable": false,
+    "docker_host_set": false,
+    "socket_present": false,
+    "tcp_relay_reachable": false
+  },
+  "ephemeral_lifecycle": {
+    "one_job_then_deregister": true,
+    "registration_absent_after_job": true,
+    "runner_ephemeral": true,
+    "vm_absent_after_job": true
+  },
+  "evidence_class": "synthetic",
+  "host_verified": false,
+  "installed": false,
+  "labels": {
+    "eligible": [
+      "self-hosted",
+      "two-test"
+    ],
+    "explicitly_ineligible": [
+      "two-ephemeral",
+      "two-selfhosted",
+      "two-isolated"
+    ]
+  },
+  "migration_complete": false,
+  "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to build or execute",
+  "network_deny": [
+    {
+      "name": "metadata",
+      "positive_control_required": true,
+      "target": "169.254.169.254"
+    },
+    {
+      "name": "host-services",
+      "positive_control_required": true,
+      "target": "host-gateway-and-link-local"
+    },
+    {
+      "name": "production-network",
+      "positive_control_required": true,
+      "target": "production-cidrs"
+    }
+  ],
+  "output": {
+    "inputs_sha256": null,
+    "output_image_fingerprint": null,
+    "profile_sha256": null,
+    "rebuild_receipt_present": false
+  },
+  "resources": {
+    "configured_max": 2,
+    "cpu": 2,
+    "disk_gib": 20,
+    "ram_mib": 4096,
+    "safe_max": 1
+  },
+  "role": "test",
+  "runtime_user": {
+    "login_shell": false,
+    "name": "runner",
+    "root": false,
+    "sudo": false
+  },
+  "schema": "garm-test-image-profile.v1",
+  "size_caps": {
+    "image_gib": 20,
+    "log_retention_days": 30,
+    "workspace_gib": 20
+  },
+  "status": "synthetic-preparation-only",
+  "toolchain": {
+    "cc": {
+      "purpose": "native-build-smoke",
+      "required": true,
+      "version": null
+    },
+    "composer": {
+      "purpose": "php-dependency-install",
+      "required": true,
+      "series": "2",
+      "version": null
+    },
+    "docker": {
+      "policy": "absent-by-design",
+      "provides_on_test": false,
+      "required": false
+    },
+    "node": {
+      "purpose": "runner-runtime-and-action-support",
+      "required": true,
+      "runner_smoke": true,
+      "series": "24",
+      "version": null
+    },
+    "php": {
+      "purpose": "test-suite-runtime",
+      "required": true,
+      "series": "8.5",
+      "version": null
+    },
+    "php_extensions": {
+      "extensions": [
+        "pdo_pgsql",
+        "zip",
+        "gd",
+        "pcov"
+      ],
+      "provided_by": "test",
+      "required": true
+    },
+    "psql": {
+      "on_path": true,
+      "purpose": "postgres-client-and-role-setup",
+      "required": true,
+      "version": null
+    },
+    "runner": {
+      "purpose": "ephemeral-job-execution",
+      "required": true,
+      "version": null
+    }
+  }
+}

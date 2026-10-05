@@ -2,8 +2,8 @@
 # ===========================================================================
 # approval_timeout_probe.sh — the tool-approval deadline is displayed, not kept
 # ---------------------------------------------------------------------------
-# WHAT TOG-400 SAID, AND WHERE IT WAS WRONG.
-# TOG-400 (split from TOG-390) reported that `tool_action_requests.expires_at`
+# WHAT THE PRIOR AUDIT SAID, AND WHERE IT WAS WRONG.
+# A prior audit (split from the queue-liveness probe) reported that `tool_action_requests.expires_at`
 # "is never set", on the evidence that the single `insert(toolActionRequests)`
 # does not write it. The insert really does not write it — and the conclusion
 # still does not follow, because the value arrives one statement later in an
@@ -33,12 +33,12 @@
 # A deadline that is rendered on the approver's card and never enforced is a
 # worse failure than no deadline at all: the approver is told the request will
 # lapse at T, so a request still sitting there at T+3d reads as impossible
-# rather than as stuck. TOG-400's version of the finding would have sent the
+# rather than as stuck. That version of the finding would have sent the
 # fix to the wrong place — adding a write that is already there — and left the
 # missing clock in place.
 #
 # ---------------------------------------------------------------------------
-# WHAT THIS IS NOT. It is not a timeout, and it expires nothing. TOG-390
+# WHAT THIS IS NOT. It is not a timeout, and it expires nothing. The queue-liveness probe
 # deliberately declined to build a local imitation of one, because a version
 # living in this repo would have put a green checkbox over an unchanged failure
 # mode. That reasoning holds. This file WRITES NOTHING. It is a conformance
@@ -48,7 +48,7 @@
 # for it, not against it. The path has never executed anywhere on this instance,
 # so the absence of complaints is not evidence that it works — the FIRST real
 # approval request is the one that strands, and nothing else watches this table.
-# `queue_liveness.sh` (TOG-390) watches agent reachability and the provisioner
+# `queue_liveness.sh` watches agent reachability and the provisioner
 # queue; it never reads `tool_action_requests`.
 #
 # WHY IT ALARMS ON BEING FIXED. Exit 3 fires when the deployed bundle stops
@@ -65,8 +65,7 @@
 # `approvalState` and `idempotencyKey` the way the lazy path already does.
 # Measured, we have no path to ship it: `/app/server` is not a git checkout, and
 # `/app` is a podman overlay recreated from the image on restart — the restart
-# that would deploy an edit is the same event that erases it (proved on GST-43,
-# superseding `deploy-gst-40.sh`).
+# that would deploy an edit is the same event that erases it (proved on-host).
 #
 # ---------------------------------------------------------------------------
 # WHY THE BUNDLE SCAN IS NODE AND NOT GREP.
@@ -190,7 +189,7 @@ for (const f of files) {
   }
 
   // A1b — the deadline that IS written, one statement later. This is the half
-  // TOG-400 missed by looking only at the insert.
+  // the prior audit missed by looking only at the insert.
   i = 0;
   for (;;) {
     const j = text.indexOf(UPDATE, i); if (j < 0) break;
@@ -342,7 +341,7 @@ cmd_bundle() {
   fi
 
   if [ "$drift" -eq 1 ]; then
-    c_yel "DRIFT: the deployed bundle no longer matches TOG-400's findings."
+    c_yel "DRIFT: the deployed bundle no longer matches the documented findings."
     echo "  Re-audit before relying on either answer. Our controls assume the"
     echo "  approval deadline is DISPLAYED and never ENFORCED; if that has"
     echo "  changed, the assumption underneath them has inverted."
@@ -450,7 +449,7 @@ cmd_probe() {
   echo
   case "$worst" in
     "$EXIT_OK")       c_grn "VERDICT: known state. Deadline displayed, never enforced; nothing stranded." ;;
-    "$EXIT_DRIFT")    c_yel "VERDICT: DRIFT. TOG-400's findings no longer describe the deployed server." ;;
+    "$EXIT_DRIFT")    c_yel "VERDICT: DRIFT. The documented findings no longer describe the deployed server." ;;
     "$EXIT_STRANDED") c_red "VERDICT: STRANDED. Live approval requests nobody will ever close." ;;
     "$EXIT_UNKNOWN")  c_yel "VERDICT: UNKNOWN. At least one half could not be measured. Not green." ;;
   esac
@@ -469,7 +468,7 @@ $ME — is the tool-approval deadline enforced? (it is displayed, not enforced)
   --explain             print the file:line each assertion was read from
 
 DIST defaults to \$PAPERCLIP_SERVER_DIST, else /app/server/dist.
-Database backend follows lib/pcsql.sh (\$PAPERCLIP_SQL_BACKEND: podman|psql).
+Database backend follows lib/pcsql.sh (\$PAPERCLIP_SQL_BACKEND: podman|docker|psql).
 
 exit 0 known state · 2 refused · 3 drift · 4 stranded · 5 could not measure
 EOF

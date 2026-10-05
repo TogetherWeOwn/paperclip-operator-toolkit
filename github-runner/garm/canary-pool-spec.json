@@ -1,0 +1,42 @@
+{
+  "schema": "garm-canary-pool-spec.v1",
+  "evidence_class": "synthetic",
+  "role": "isolated",
+  "host": "garm-host-a",
+  "provider": {
+    "name": null,
+    "garm_version": "0.2.1",
+    "provider_version": "0.1.3",
+    "lxd_version": "5.21"
+  },
+  "pool": {
+    "runner_prefix": "garm-iso",
+    "tags": [
+      "self-hosted",
+      "garm-managed"
+    ],
+    "forbidden_tags": [
+      "two-ephemeral",
+      "two-isolated",
+      "two-selfhosted",
+      "garm-host-a"
+    ],
+    "image_alias": null,
+    "image_digest": null,
+    "flavor_profile": "garm-isolated-2x4x20",
+    "os_type": "linux",
+    "os_arch": "amd64",
+    "min_idle_runners": 0,
+    "max_runners": 1
+  },
+  "image_phases": {
+    "phase_a_generic": "operator records the installed generic private image digest at pool creation; phase A proves pool mechanics and job pickup only, never the isolated role",
+    "phase_b_pinned_isolated": "pool image re-pointed to the pinned isolated digest after the build receipt lands; canary re-run must prove the full isolated profile before any routing change"
+  },
+  "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to build or execute",
+  "admission_authorized": false,
+  "host_verified": false,
+  "migration_complete": false,
+  "installed": false,
+  "status": "synthetic-preparation-only"
+}

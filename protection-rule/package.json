@@ -1,0 +1,15 @@
+{
+  "name": "protection-rule",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Custom deployment protection rule per environment: approves only a verified plan plus CEO GO (migration apply) or a CEO GO for the exact head SHA (production), rejects everything else.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/decide.test.mjs test/verify.test.mjs test/app.test.mjs test/evidence.test.mjs test/board.test.mjs",
+    "check": "node --check src/decide.js && node --check src/verify.js && node --check src/github.js && node --check src/board.js && node --check src/callback.js && node --check src/evidence.js && node --check src/app.js && node --check src/server.js && node --check test/decide.test.mjs && node --check test/verify.test.mjs && node --check test/app.test.mjs && node --check test/zip-fixture.mjs && node --check test/evidence.test.mjs && node --check test/board.test.mjs"
+  },
+  "devDependencies": {}
+}

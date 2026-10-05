@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# Offline regression suite for operator_runbook.sh (TOG-434).
-# NO DATABASE, NO CREDENTIALS, NO NETWORK — this is what CI runs.
+# Offline regression suite for operator_runbook.sh.
+# NO DATABASE, NO CREDENTIALS, NO NETWORK — this is what CI runs. One bounded
+# exception: section 10 fetches a runbook's pinned commit from `origin` when a
+# shallow clone lacks it, and fails loudly if it cannot.
 #
 # WHAT THIS SUITE IS ACTUALLY FOR
 # ---------------------------------------------------------------------------
@@ -291,10 +293,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "6b. check-handoff — a runbook that never filed an interaction (TOG-851)"
+section "6b. check-handoff — a runbook that never filed an interaction"
 # The hole this closes: `check` is driven by the pending interaction set, so an
 # ask that filed NO interaction is not in its input and cannot fail any of its
-# branches. TOG-846 shipped a complete operator runbook, filed zero
+# branches. A shipped runbook filed zero
 # interactions, was closed done, and every gate passed while the artifact sat on
 # disk with no delivery path. These tests pin the second input.
 HDIR_OK="$TMP/handoff_ok";   mkdir -p "$HDIR_OK"
@@ -305,8 +307,8 @@ cat > "$HCLS" <<'JSON'
     "changes":"c","verify":"v","undo":"u","moved":true,"never_carded":true } },
   "decisions": {}, "misrouted": {}, "closed": {} }
 JSON
-: > "$HDIR_OK/TOG-846-cliproxy-update-runbook.md"
-: > "$HDIR_BAD/TOG-846-cliproxy-update-runbook.md"
+: > "$HDIR_OK/TOG-846-update-runbook.md"
+: > "$HDIR_BAD/TOG-846-update-runbook.md"
 : > "$HDIR_BAD/TOG-999-orphan-runbook.md"
 
 out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_OK" 2>&1)"; rc=$?
@@ -325,14 +327,14 @@ grep -q 'TOG-846' <<<"$out" \
   && bad "TOG-846 is classified and must not be reported as unregistered" "$out" \
   || ok "does not report a correctly-registered artifact"
 
-# THE REGRESSION THAT MATTERS. This is the literal TOG-846 defect: the artifact
+# THE REGRESSION THAT MATTERS. This is the literal stranded-runbook defect: the artifact
 # exists, it filed no interaction, and it is absent from the classification file.
 # If this ever goes green again, the hole is back.
 HCLS_EMPTY="$TMP/hcls_empty.json"
 jq '.items = {}' "$HCLS" > "$HCLS_EMPTY"
 rc=$("$TOOL" check-handoff --classification "$HCLS_EMPTY" --handoff "$HDIR_OK" >/dev/null 2>&1; echo $?)
-(( rc == 3 )) && ok "TOG-846's own failure mode is caught (artifact on disk, no entry, no card)" \
-              || bad "THE TOG-846 HOLE IS OPEN: a stranded runbook passed clean (exit $rc)"
+(( rc == 3 )) && ok "that failure mode is caught (artifact on disk, no entry, no card)" \
+              || bad "THE HOLE IS OPEN: a stranded runbook passed clean (exit $rc)"
 
 # An entry anywhere in the file counts as registered — decisions/misrouted/closed
 # are classifications too, and demanding an `items` entry would force a genuine
@@ -421,14 +423,14 @@ if [[ -f "$REAL" ]]; then
   [[ -z "$dupes" ]] && ok "no identifier is classified twice" || bad "classified twice: $dupes"
   # A retired line must carry the MEASUREMENT that retired it. Without it the
   # section degrades into a list of things someone decided to stop tracking,
-  # and TOG-174 — cancelled with the key still un-rotated — is precisely the
+  # and a shipped entry — cancelled with the key still un-rotated — is precisely the
   # entry that must never be read as "completed".
   thin="$(jq -r '(.closed//{}) | to_entries[] | select(((.value.outcome//"")|length)==0 or ((.value.evidence//"")|length)==0) | .key' "$REAL")"
   [[ -z "$thin" ]] && ok "every retired line carries an outcome and its evidence" \
     || bad "retired lines missing outcome/evidence: $(tr '\n' ' ' <<<"$thin")"
   "$TOOL" render </dev/null >/dev/null 2>&1 && ok "shipped classification renders" || bad "shipped classification fails to render"
 
-  # TOG-1164. `withdrawn` is a SOURCE field (TOG-1140/#254): the 🛑 banner only
+  # `withdrawn` is a SOURCE field: the 🛑 banner only
   # renders because this field exists. Nothing before this asserted the field
   # itself survives a regeneration — `del(.. | .withdrawn?)` on this file once
   # rendered 0 banners and left every other section 7 check, and the whole
@@ -440,7 +442,7 @@ if [[ -f "$REAL" ]]; then
   # asserting, in its own data, that it has been withdrawn — so it MUST also
   # carry a `withdrawn` object with a non-empty `body`. That is the general
   # form the issue asked for: the next withdrawn line is covered by what it
-  # says about itself, not by naming TOG-516.
+  # says about itself, not by naming one item.
   unmarked_withdrawn="$(jq -r '
     .items | to_entries[]
     | select((.value.commands // "") | test("WITHDRAWN"))
@@ -451,10 +453,10 @@ if [[ -f "$REAL" ]]; then
     || bad "WITHDRAWN in commands with no withdrawn.body: $(tr '\n' ' ' <<<"$unmarked_withdrawn")"
 
   # At least one shipped item must actually exercise this path, or the check
-  # above is vacuously true. TOG-516/TOG-847's NO-FORK ruling is that item.
+  # above is vacuously true. The NO-FORK ruling is that item.
   n_withdrawn="$(jq -r '[.items[] | select((.withdrawn.body // "") | length > 0)] | length' "$REAL")"
   [[ "$n_withdrawn" -ge 1 ]] && ok "the shipped classification carries at least one withdrawn item" \
-    || bad "no shipped item carries a withdrawn object — this suite would not have caught TOG-1164"
+    || bad "no shipped item carries a withdrawn object — this suite would not have caught the deletion"
 
   # The render itself must still show the banner for every withdrawn item, and
   # the banner must sit ABOVE the blast-radius line — it is a stop sign, and a
@@ -476,8 +478,6 @@ if [[ -f "$REAL" ]]; then
     && ok "every withdrawn item renders its 🛑 banner above its blast-radius line" \
     || bad "withdrawn item(s) missing the banner or rendered it below blast radius: $bad_order"
 else
-  # The live classification is operator data and stays in the private
-  # repository; the public toolkit ships the generator and its fixtures only.
   ok "shipped classification absent in this checkout — skipped (operator data stays private)"
 fi
 
@@ -485,23 +485,23 @@ fi
 section "8. retired lines are recorded, never silently dropped"
 # The failure this pins: a line leaves the live list and simply vanishes, so the
 # next operator reads its absence as "never asked" or "already done". One entry
-# in the shipped file (TOG-174) was CANCELLED WITHOUT THE WORK BEING DONE, so
+# in the shipped file was CANCELLED WITHOUT THE WORK BEING DONE, so
 # the distinction is load-bearing, not decorative.
 CLOSED_ONE="$STAGE/closed_one.json"
 cat >"$CLOSED_ONE" <<'JSON'
-{ "items": { "TOG-1": { "class":"CAPABILITY","blast":1,"credential":"root",
+{ "items": { "TASK-1": { "class":"CAPABILITY","blast":1,"credential":"root",
     "changes":"c","verify":"v","undo":"u","moved":true } },
   "decisions": {}, "misrouted": {},
-  "closed": { "TOG-2": { "blast":1,"outcome":"cancelled, NOT performed","evidence":"probe X measured it unchanged" } } }
+  "closed": { "TASK-2": { "blast":1,"outcome":"cancelled, NOT performed","evidence":"probe X measured it unchanged" } } }
 JSON
 out="$("$TOOL" render --classification "$CLOSED_ONE" </dev/null 2>&1)"
-grep -q 'TOG-2' <<<"$out" && ok "a retired line still appears in the document" \
+grep -q 'TASK-2' <<<"$out" && ok "a retired line still appears in the document" \
   || bad "a retired line vanished from the render — absence reads as 'never asked'"
 grep -q 'cancelled, NOT performed' <<<"$out" && ok "its outcome is carried" || bad "outcome dropped"
 grep -q 'probe X measured it unchanged' <<<"$out" && ok "its evidence is carried" || bad "evidence dropped"
 # It must NOT be renumbered into the live list — that would send an operator to
 # redo finished work, or worse, treat a live line as finished.
-grep -q '### 2\. TOG-2' <<<"$out" && bad "retired line was numbered into the live runbook list" \
+grep -q '### 2\. TASK-2' <<<"$out" && bad "retired line was numbered into the live runbook list" \
   || ok "retired line is not numbered into the live list"
 # And the live count must not include it.
 grep -q '| Runbook lines (capability requests) | 1 |' <<<"$out" \
@@ -520,19 +520,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "9. a withdrawal survives a source-side regeneration (TOG-1152)"
-# THE HOLE THIS CLOSES. The render-drift gate (test_omniroute_rehearsal.sh:714)
-# asserts render == docs/OPERATOR-RUNBOOK.md. That catches a hand-edit to the
-# DOCUMENT — which is what it caught on 36cd6a70. It is structurally blind to a
+section "9. a withdrawal survives a source-side regeneration"
+# THE HOLE THIS CLOSES. The render-drift gate
+# asserts render == the shipped document. That catches a hand-edit to the
+# DOCUMENT — which is what it once caught. It is structurally blind to a
 # deletion at the SOURCE followed by a regeneration, because afterwards the
 # source and the document agree: they simply agree on a document with no stop
-# sign. Measured at main d380fd11:
+# sign. Measured:
 #
 #   jq 'del(.. | .withdrawn?)' operator_runbook_classification.json > tmp && mv tmp ...
-#   ./operator_runbook.sh render > docs/OPERATOR-RUNBOOK.md
+#   ./operator_runbook.sh render > <shipped-document>
 #   -> 0 🛑 banners, test_operator_runbook.sh 79/0, test_omniroute_rehearsal.sh 73/0
 #
-# The owner's NO-FORK stop sign (TOG-847) was gone and nothing in CI noticed.
+# The NO-FORK stop sign was gone and nothing in CI noticed.
 # verification/tog-703-runbook-withdrawal-marker.sh asserts this property but
 # cannot run in CI — it measures from a host STAGING_DIR no runner can reach.
 # These assertions are the hermetic, source-level half of the same property.
@@ -602,7 +602,7 @@ if [[ -f "$REAL" ]]; then
 
   # POSITIVE CONTROL. Without this, the four assertions above are unfalsifiable:
   # a green tells us nothing about whether they would catch the deletion. This
-  # replays the exact mutation from the TOG-1149 review on a STAGING COPY and
+  # replays the exact mutation from a prior review on a STAGING COPY and
   # requires the source assertion to go red on it.
   MUT="$TMP/withdrawn_deleted.json"
   jq 'del(.. | .withdrawn?)' "$REAL" >"$MUT"
@@ -627,7 +627,317 @@ if [[ -f "$REAL" ]]; then
     fi
   fi
 else
-  ok "shipped classification absent in this checkout — section 9 skipped (operator data stays private)"
+  ok "shipped classification absent in this checkout — skipped (operator data stays private)"
+fi
+
+# ---------------------------------------------------------------------------
+section "10. a pinned checkout satisfies its own step-0 SUMS block"
+# A prior incident: a runbook said `git checkout --detach <sha>`
+# and, six lines later, `sha256sum --check --strict` against r3 lane hashes that
+# tree does not carry (3/6 FAILED). Earlier sections were green on that pair, because
+# nothing resolved the SUMS paths AT the pinned commit. This does.
+#
+# For every classification entry (at any depth) whose `commands` open a checksum
+# heredoc, take the `git checkout --detach <sha>` that precedes it, read each
+# listed file with `git cat-file blob <sha>:<path>` (the exact bytes a checkout
+# writes, no textconv), and compare its sha256 to the block. A pin that is not in
+# the local object store (a shallow CI clone holds only the PR head) is FETCHED by
+# full sha; if that fails the gate is RED. It never skips.
+#
+# Output contract of pin_sums_gate: `SELECTED <entry>` for every entry it
+# gates, then `OK ...` per verified entry and `FAIL ...` per defect; exit 1 iff
+# any FAIL. A block with no pin before it, a pin or heredoc it cannot read, a
+# tree moved after the pin, an empty or malformed block, a path absent at the pin
+# and an unresolvable pin are all defects: each is a way for this gate to go
+# quiet while the pair is still wrong.
+
+# ONE predicate opens a checksum block: a non-comment line naming sha256sum with
+# a `<<`. It both SELECTS the entry and starts the PARSE, so what is gated and
+# what is checked cannot drift apart (the first cut matched by substring and
+# parsed by exact line; an indented block start passed with no output at all).
+sums_start() { [[ $1 != "#"* && $1 == *sha256sum* && $1 == *"<<"* ]]; }
+
+pin_sums_gate() {  # $1=classification.json  $2=git repository to resolve pins in
+  local cls="$1" repo="$2" key b64 cmds raw line pin full path want got n rc=0 erc
+  local in_sums blk_n has delim dash fetch_out blob="$TMP/pin_blob.$$"
+  local -a depth
+  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "FAIL $repo is not a git checkout — pins cannot be resolved"; return 1
+  fi
+  while IFS=$'\t' read -r key b64; do
+    [[ -n "$key" ]] || continue
+    cmds="$(base64 -d <<<"$b64")"; has=0
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      line="${raw#"${raw%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+      if sums_start "$line"; then has=1; break; fi
+    done <<<"$cmds"
+    (( has )) || continue
+    echo "SELECTED $key"
+    pin=""; full=""; in_sums=0; n=0; blk_n=0; erc=0; delim=""; dash=0
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      if (( in_sums )); then
+        # inside the heredoc: the terminator is exact, `<<-` strips leading tabs
+        line="$raw"; (( dash )) && line="${raw#"${raw%%[!$'\t']*}"}"
+        if [[ $line == "$delim" ]]; then in_sums=0; continue; fi
+        [[ -n "$pin" && -n "$full" ]] || continue   # already reported above
+        if [[ $raw =~ ^[[:space:]]*([0-9a-f]{64})[[:space:]]+\*?(.+)$ ]]; then
+          want="${BASH_REMATCH[1]}"; path="${BASH_REMATCH[2]}"; n=$((n+1))
+          if git -C "$repo" cat-file blob "${full}:${path}" >"$blob" 2>/dev/null; then
+            got="$(sha256sum <"$blob" | cut -d' ' -f1)"
+            if [[ "$got" != "$want" ]]; then
+              echo "FAIL $key: $path at ${full:0:12} hashes to $got but the SUMS block says $want"; rc=1; erc=1
+            fi
+          else
+            echo "FAIL $key: $path does not exist at ${full:0:12} (SUMS block says $want)"; rc=1; erc=1
+          fi
+        elif [[ -n "$raw" ]]; then
+          echo "FAIL $key: malformed SUMS line (want '<64 hex>  <path>'): $raw"; rc=1; erc=1
+        fi
+        continue
+      fi
+      line="${raw#"${raw%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+      [[ $line == "#"* ]] && continue
+      if [[ $line =~ ^git[[:space:]]+(checkout|switch)[[:space:]]+--detach[[:space:]]+([0-9a-f]{7,40})$ ]]; then
+        pin="${BASH_REMATCH[2]}"; full=""
+      elif [[ $line =~ (^|[[:space:];\&\|])git[[:space:]]+(checkout|switch)([[:space:]]|$) ]]; then
+        echo "FAIL $key: tree moved by a line the gate cannot read as a pin (want 'git checkout --detach <hex sha>'): $line"; rc=1; erc=1
+      elif sums_start "$line"; then
+        blk_n=$((blk_n+1))
+        if [[ $line == *"<<<"* ]] || ! [[ $line =~ \<\<(-?)[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*)[\'\"]? ]]; then
+          echo "FAIL $key: cannot read the heredoc delimiter on: $line"; rc=1; erc=1
+          continue
+        fi
+        dash=0; [[ ${BASH_REMATCH[1]} == "-" ]] && dash=1
+        delim="${BASH_REMATCH[2]}"; in_sums=1
+        if [[ -z "$pin" ]]; then
+          echo "FAIL $key: SUMS block with no 'git checkout --detach <sha>' before it"; rc=1; erc=1
+        elif [[ -z "$full" ]]; then
+          full="$(git -C "$repo" rev-parse --verify -q "${pin}^{commit}" 2>/dev/null)"
+          fetch_out=""
+          if [[ -z "$full" && ${#pin} -eq 40 ]]; then
+            # --depth=1 only when the clone is ALREADY shallow: on a full clone it
+            # would write the pin into the shared .git/shallow and truncate history.
+            depth=(); [[ "$(git -C "$repo" rev-parse --is-shallow-repository 2>/dev/null)" == true ]] && depth=(--depth=1)
+            fetch_out="$(git -C "$repo" fetch --no-tags ${depth[@]+"${depth[@]}"} origin "$pin" 2>&1)"
+            full="$(git -C "$repo" rev-parse --verify -q "${pin}^{commit}" 2>/dev/null)"
+          elif [[ -z "$full" ]]; then
+            fetch_out="abbreviated pin: only a full 40-hex sha can be fetched"
+          fi
+          if [[ -z "$full" ]]; then
+            echo "FAIL $key: pin $pin is not in $repo and could not be fetched from origin ($(tr '\n' ' ' <<<"$fetch_out" | cut -c1-200))"; rc=1; erc=1
+          fi
+        fi
+      fi
+    done <<<"$cmds"
+    if (( in_sums == 1 )); then echo "FAIL $key: SUMS block is never closed"; rc=1; erc=1; fi
+    if (( n == 0 && erc == 0 )); then echo "FAIL $key: SUMS block lists no files — it pins nothing"; rc=1; erc=1; fi
+    if (( erc == 0 )); then echo "OK $key: $n file(s) match at pin ${full:0:12}"; fi
+  done < <(jq -r '
+      path(.. | objects | select(((.commands // null) | type) == "string")) as $p
+      | "\($p | map(tostring) | join("/"))\t\(getpath($p).commands | @base64)"' "$cls")
+  rm -f "$blob"
+  return $rc
+}
+
+# A throwaway repository whose pins we control. c1 -> c2 changes a.sh only, so a
+# SUMS block written for c2 and pinned at c1 is exactly the wrong-pin shape: one
+# file wrong, the rest right.
+GR="$TMP/pinrepo"
+mkdir -p "$GR" && git -C "$GR" init -q 2>/dev/null
+gitq() { git -C "$GR" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false "$@"; }
+printf 'a v1\n' >"$GR/a.sh"; printf 'b\n' >"$GR/b.sh"
+gitq add a.sh b.sh && gitq commit -q -m c1 && C1="$(gitq rev-parse HEAD)"
+printf 'a v2\n' >"$GR/a.sh"
+gitq add a.sh && gitq commit -q -m c2 && C2="$(gitq rev-parse HEAD)"
+A2="$(sha256sum <"$GR/a.sh" | cut -d' ' -f1)"; B2="$(sha256sum <"$GR/b.sh" | cut -d' ' -f1)"
+A1="$(gitq show "$C1:a.sh" | sha256sum | cut -d' ' -f1)"
+# c3 is DANGLING (no ref reaches it): a full clone of GR never contains it, so it
+# is the pin that a full clone must fetch.
+C3="$(gitq commit-tree "$C2^{tree}" -p "$C2" -m c3)"
+
+mk_pin_cls() {  # $1=out file  $2=entry key  $3=commands text
+  jq -n --arg k "$2" --arg c "$3" '{items:{($k):{class:"CAPABILITY",blast:1,credential:"x",changes:"x",verify:"x",undo:"x",commands:$c}}}' >"$1"
+}
+SUMS_OPEN="sha256sum --check --strict <<'SUMS'"
+pin_cmds() {  # $1=pin sha (or ""), remaining args = SUMS lines; $SUMS_OPEN is the block-start line
+  local sha="$1"; shift
+  [[ -z "$sha" ]] || printf 'git checkout --detach %s\n' "$sha"
+  printf '%s\n' "$SUMS_OPEN"; printf '%s\n' "$@"; printf 'SUMS\n'
+}
+run_gate() { pin_sums_gate "$1" "$GR" 2>&1; }
+
+# BASELINE. A gate that is red on a correct pair would make every control below
+# pass for the wrong reason, so the correct pair goes first.
+mk_pin_cls "$TMP/pin_good.json" FIX "$(pin_cmds "$C2" "$A2  a.sh" "$B2  b.sh")"
+out="$(run_gate "$TMP/pin_good.json")"; rc=$?
+(( rc == 0 )) && grep -q '^OK items/FIX' <<<"$out" && ! grep -q '^FAIL' <<<"$out" \
+  && ok "BASELINE: a pin that carries every SUMS file is green" \
+  || bad "BASELINE: the correct pair must pass, rc=$rc" "$out"
+
+# POSITIVE CONTROL — the incident. Pin c1, SUMS written for c2.
+mk_pin_cls "$TMP/pin_bad.json" FIX "$(pin_cmds "$C1" "$A2  a.sh" "$B2  b.sh")"
+out="$(run_gate "$TMP/pin_bad.json")"; rc=$?
+(( rc != 0 )) && grep -q '^FAIL items/FIX: a.sh' <<<"$out" \
+  && ok "CONTROL: a wrong pin (c1 pinned, c2 hashes) goes RED naming the file" \
+  || bad "CONTROL FAILED: a pin whose files do not match the SUMS block passed, rc=$rc" "$out"
+grep -q "$A1" <<<"$out" && grep -q "$A2" <<<"$out" \
+  && ok "the finding carries BOTH hashes (at the pin and in the SUMS block)" \
+  || bad "finding must show the hash at the pin ($A1) and the SUMS hash ($A2)" "$out"
+grep -q 'FAIL items/FIX: b.sh' <<<"$out" \
+  && bad "b.sh is identical at c1 and c2 and must not be reported" "$out" \
+  || ok "only the drifted file is reported (b.sh matches at both commits)"
+
+# The block-start line as an operator or an author might actually write it. Each
+# is a WRONG pair (c1 pinned, c2 hashes) and must be RED naming a.sh; before the
+# selector and parser shared one predicate, the first two passed with no output.
+for variant in "  $SUMS_OPEN" "$SUMS_OPEN " $'\t'"$SUMS_OPEN" \
+               "sha256sum -c --strict <<'SUMS'" "sha256sum --check --strict --quiet <<'SUMS'" \
+               "sha256sum --check --strict <<SUMS" "sha256sum --check --strict <<\"SUMS\""; do
+  mk_pin_cls "$TMP/pin_var.json" FIX "$(SUMS_OPEN="$variant" pin_cmds "$C1" "$A2  a.sh")"
+  out="$(run_gate "$TMP/pin_var.json")"; rc=$?
+  (( rc != 0 )) && grep -q '^FAIL items/FIX: a.sh' <<<"$out" \
+    && ok "CONTROL: block start [$variant] is selected, parsed and RED on a wrong pin" \
+    || bad "CONTROL FAILED: block start [$variant] let a wrong pair through, rc=$rc" "$out"
+done
+# `<<-` strips leading tabs from the body and the terminator; the gate must read
+# the delimiter off the line and honour that, or a tab-indented block never closes.
+mk_pin_cls "$TMP/pin_dash.json" FIX "$(printf 'git checkout --detach %s\nsha256sum --check --strict <<-SUMS\n\t%s  a.sh\n\t%s  b.sh\n\tSUMS\n' "$C2" "$A2" "$B2")"
+out="$(run_gate "$TMP/pin_dash.json")"; rc=$?
+(( rc == 0 )) && grep -q '^OK items/FIX: 2 file' <<<"$out" \
+  && ok "a tab-indented '<<-' block with a correct pair is green (terminator read from the line)" \
+  || bad "a correct tab-indented '<<-' pair must pass, rc=$rc" "$out"
+
+# A here-string is not a block the gate can read; it must say so, not pass.
+mk_pin_cls "$TMP/pin_here.json" FIX "$(printf 'git checkout --detach %s\nsha256sum -c <<<"%s  a.sh"\n' "$C1" "$A2")"
+out="$(run_gate "$TMP/pin_here.json")"; rc=$?
+(( rc != 0 )) && grep -q 'cannot read the heredoc delimiter' <<<"$out" \
+  && ok "CONTROL: a here-string checksum line is RED, not ignored" \
+  || bad "CONTROL FAILED: a here-string checksum line was skipped, rc=$rc" "$out"
+
+# An entry nested deeper than items/<ID>. The old selector walked two levels and
+# the non-vacuity count walked all of them, so this was counted and never checked.
+jq -n --arg c "$(pin_cmds "$C1" "$A2  a.sh")" '{items:{grp:{DEEP:{commands:$c}}}}' >"$TMP/pin_deep.json"
+out="$(run_gate "$TMP/pin_deep.json")"; rc=$?
+(( rc != 0 )) && grep -q '^FAIL items/grp/DEEP: a.sh' <<<"$out" \
+  && ok "CONTROL: an entry nested below items/<ID> is gated, and RED on a wrong pin" \
+  || bad "CONTROL FAILED: a nested entry was not gated, rc=$rc" "$out"
+
+# Two entries: the second is wrong. 'OK count >= 1' would have been satisfied by
+# the first; the verdict has to be per entry.
+jq -n --arg g "$(pin_cmds "$C2" "$A2  a.sh")" --arg b "$(pin_cmds "$C1" "$A2  a.sh")" \
+  '{items:{GOOD:{commands:$g},BAD:{commands:$b}}}' >"$TMP/pin_two.json"
+out="$(run_gate "$TMP/pin_two.json")"; rc=$?
+(( rc != 0 )) && grep -q '^OK items/GOOD' <<<"$out" && grep -q '^FAIL items/BAD: a.sh' <<<"$out" \
+  && [[ "$(grep -c '^SELECTED ' <<<"$out")" == 2 ]] \
+  && ok "CONTROL: with one good and one wrong entry the gate selects both and fails the wrong one" \
+  || bad "CONTROL FAILED: a wrong entry hid behind a good one, rc=$rc" "$out"
+
+# Each remaining defect is a way the gate could go quiet while the pair is wrong.
+mk_pin_cls "$TMP/pin_nopath.json" FIX "$(pin_cmds "$C1" "$A1  a.sh" "$B2  c.sh")"
+out="$(run_gate "$TMP/pin_nopath.json")"; rc=$?
+(( rc != 0 )) && grep -q 'c.sh does not exist at' <<<"$out" \
+  && ok "CONTROL: a SUMS path absent at the pin is RED, not skipped" \
+  || bad "CONTROL FAILED: a path missing at the pin passed, rc=$rc" "$out"
+
+mk_pin_cls "$TMP/pin_nocommit.json" FIX "$(pin_cmds "$(printf '1%.0s' {1..40})" "$A2  a.sh")"
+out="$(run_gate "$TMP/pin_nocommit.json")"; rc=$?
+(( rc != 0 )) && grep -q 'could not be fetched' <<<"$out" \
+  && ok "CONTROL: a pin that is neither local nor fetchable is RED, not skipped" \
+  || bad "CONTROL FAILED: an unresolvable pin passed silently, rc=$rc" "$out"
+
+# The failure text of one entry must not leak into another's.
+jq -n --arg a "$(pin_cmds "$(printf '1%.0s' {1..40})" "$A2  a.sh")" --arg b "$(pin_cmds "deadbee" "$A2  a.sh")" \
+  '{items:{FIRST:{commands:$a},SECOND:{commands:$b}}}' >"$TMP/pin_logs.json"
+out="$(run_gate "$TMP/pin_logs.json")"
+second="$(grep '^FAIL items/SECOND' <<<"$out")"
+[[ "$second" == *"abbreviated pin"* && "$second" != *"fatal"* && "$second" != *"couldn't find"* ]] \
+  && ok "an abbreviated unknown pin reports itself, not the previous entry's fetch error" \
+  || bad "SECOND entry's failure must be its own: $second" "$out"
+
+mk_pin_cls "$TMP/pin_nopin.json" FIX "$(pin_cmds "" "$A2  a.sh")"
+out="$(run_gate "$TMP/pin_nopin.json")"; rc=$?
+(( rc != 0 )) && grep -q 'no .git checkout --detach' <<<"$out" \
+  && ok "CONTROL: a SUMS block with no pin before it is RED" \
+  || bad "CONTROL FAILED: a SUMS block against an unpinned tree passed, rc=$rc" "$out"
+
+mk_pin_cls "$TMP/pin_unreadable.json" FIX "$(printf 'git checkout --detach "$SHA"\n'; pin_cmds "" "$A2  a.sh")"
+out="$(run_gate "$TMP/pin_unreadable.json")"; rc=$?
+(( rc != 0 )) && grep -q 'cannot read as a pin' <<<"$out" \
+  && ok "CONTROL: a pin the gate cannot read (a variable) is RED, not ignored" \
+  || bad "CONTROL FAILED: an unparseable pin was ignored, rc=$rc" "$out"
+
+# The tree moved AFTER a good pin: the block would be checked against a stale pin.
+mk_pin_cls "$TMP/pin_moved.json" FIX "$(printf 'git checkout --detach %s\ngit switch --detach %s\n' "$C2" "$C1"; pin_cmds "" "$A2  a.sh")"
+out="$(run_gate "$TMP/pin_moved.json")"; rc=$?
+mk_pin_cls "$TMP/pin_moved2.json" FIX "$(printf 'git checkout --detach %s\ngit checkout main\n' "$C2"; pin_cmds "" "$A2  a.sh")"
+out2="$(run_gate "$TMP/pin_moved2.json")"; rc2=$?
+# the first form is a legitimate re-pin to C1 (switch --detach <sha> IS a pin), so
+# its wrong hash is what must fail; the second moves the tree to a branch.
+(( rc != 0 )) && grep -q '^FAIL items/FIX: a.sh' <<<"$out" \
+  && (( rc2 != 0 )) && grep -q 'tree moved' <<<"$out2" \
+  && ok "CONTROL: a later 'git switch --detach' re-pins; a later 'git checkout <branch>' is RED" \
+  || bad "CONTROL FAILED: a tree move after the pin went unflagged, rc=$rc/$rc2" "$out $out2"
+
+mk_pin_cls "$TMP/pin_empty.json" FIX "$(pin_cmds "$C2")"
+out="$(run_gate "$TMP/pin_empty.json")"; rc=$?
+(( rc != 0 )) && grep -q 'lists no files' <<<"$out" \
+  && ok "CONTROL: an empty SUMS block is RED (it would pin nothing)" \
+  || bad "CONTROL FAILED: an empty SUMS block passed, rc=$rc" "$out"
+
+mk_pin_cls "$TMP/pin_junk.json" FIX "$(pin_cmds "$C2" "$A2  a.sh" "not-a-hash  b.sh")"
+out="$(run_gate "$TMP/pin_junk.json")"; rc=$?
+(( rc != 0 )) && grep -q 'malformed SUMS line' <<<"$out" \
+  && ok "CONTROL: a malformed SUMS line is RED, not dropped" \
+  || bad "CONTROL FAILED: a malformed SUMS line was dropped, rc=$rc" "$out"
+
+# The fetch paths. A depth-1 clone holds only the tip, exactly like the CI
+# checkout; c1 is then reachable only by an explicit fetch of its full sha.
+git -C "$GR" config uploadpack.allowAnySHA1InWant true
+SH="$TMP/pinshallow"
+if git clone -q --depth=1 "file://$GR" "$SH" >/dev/null 2>&1 && ! git -C "$SH" cat-file -e "${C1}^{commit}" 2>/dev/null; then
+  mk_pin_cls "$TMP/pin_fetch.json" FIX "$(pin_cmds "$C1" "$A1  a.sh" "$B2  b.sh")"
+  out="$(pin_sums_gate "$TMP/pin_fetch.json" "$SH" 2>&1)"; rc=$?
+  (( rc == 0 )) && git -C "$SH" cat-file -e "${C1}^{commit}" 2>/dev/null \
+    && ok "a pin missing from a shallow clone is fetched by full sha, then verified" \
+    || bad "shallow-clone pin was not fetched and verified, rc=$rc" "$out"
+  mk_pin_cls "$TMP/pin_fetchbad.json" FIX "$(pin_cmds "$C1" "$A2  a.sh")"
+  out="$(pin_sums_gate "$TMP/pin_fetchbad.json" "$SH" 2>&1)"; rc=$?
+  (( rc != 0 )) && grep -q '^FAIL items/FIX: a.sh' <<<"$out" \
+    && ok "CONTROL: a fetched pin with wrong hashes is still RED" \
+    || bad "CONTROL FAILED: a fetched pin skipped verification, rc=$rc" "$out"
+else
+  bad "could not build a depth-1 clone lacking c1 — the fetch path is unproved"
+fi
+# A FULL clone must stay full. `--depth=1` on it writes the pin into the shared
+# .git/shallow and truncates `git log`, for every worktree on that object store.
+FC="$TMP/pinfull"
+if git clone -q "file://$GR" "$FC" >/dev/null 2>&1 \
+   && [[ "$(git -C "$FC" rev-parse --is-shallow-repository)" == false ]] \
+   && ! git -C "$FC" cat-file -e "${C3}^{commit}" 2>/dev/null; then
+  mk_pin_cls "$TMP/pin_full.json" FIX "$(pin_cmds "$C3" "$A2  a.sh" "$B2  b.sh")"
+  out="$(pin_sums_gate "$TMP/pin_full.json" "$FC" 2>&1)"; rc=$?
+  (( rc == 0 )) && git -C "$FC" cat-file -e "${C3}^{commit}" 2>/dev/null \
+    && [[ "$(git -C "$FC" rev-parse --is-shallow-repository)" == false ]] \
+    && [[ "$(git -C "$FC" rev-list --count "$C3")" == 3 ]] \
+    && ok "CONTROL: fetching an absent pin into a FULL clone leaves it full (3 commits behind the pin)" \
+    || bad "CONTROL FAILED: the gate shallowed a full clone or failed to fetch, rc=$rc" "$out"
+else
+  bad "could not build a full clone lacking c3 — the stays-full control is unproved"
+fi
+
+# THE REAL FILE. Non-vacuity first: if no entry opens a SUMS block the gate
+# passes forever and pins nothing; retire this section with the last such block.
+# The count comes from the gate's own SELECTED lines, so what is counted is what
+# is gated, and every selected entry must come back OK.
+if [[ -f "$REAL" ]]; then
+  out="$(pin_sums_gate "$REAL" "$HERE" 2>&1)"; rc=$?
+  sel_n="$(grep -c '^SELECTED ' <<<"$out")"; ok_n="$(grep -c '^OK ' <<<"$out")"
+  (( sel_n > 0 )) \
+    && ok "$sel_n shipped entry(ies) open a SUMS block — the gate is not vacuous" \
+    || bad "NO shipped entry opens a SUMS block — this section is vacuous"
+  (( rc == 0 && sel_n > 0 && ok_n == sel_n )) \
+    && ok "every shipped SUMS block ($ok_n of $sel_n) matches the commit its own checkout pins ($(grep '^OK ' <<<"$out" | head -1))" \
+    || bad "a shipped runbook pins a commit that does not carry its own SUMS hashes ($ok_n of $sel_n OK), rc=$rc" "$out"
 fi
 
 printf '\n== totals\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"

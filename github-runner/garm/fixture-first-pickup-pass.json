@@ -1,0 +1,11 @@
+{
+  "schema": "garm-first-pickup-report.v1",
+  "run_id": "0",
+  "repository": "example/synthetic",
+  "pool_labels": ["self-hosted", "two-ephemeral"],
+  "runner_name": "garm-two-synthetic",
+  "dispatched_at": "2026-10-03T22:00:00Z",
+  "picked_up_at": "2026-10-03T22:03:11Z",
+  "queue_wait_s": 191,
+  "slo_seconds": 600
+}
