@@ -73,10 +73,50 @@ touches one.
   `curl` argv. Pinned by `test_post_rollup_comment.sh` (26 cases, stub API
   playing the deployed 403 semantics).
 
+## Live finding 2026-10-05: a bound root is not automatically readable
+
+The host preflight proved it: with the key correctly bound to the rollup
+(`parentIssueIds` carrying the rollup UUID, DevOps-only assignee allowlist),
+both `GET /api/issues/{rollup}` and `GET .../comments` answered `403
+{"error":"Issue is outside this actor's authorization boundary"}`. The
+rollup was `todo` but **unassigned**, with no children. Bound-plus-unassigned
+is outside the actor's boundary on both single-issue routes.
+
+Two candidate gates, both fixed without minting, rotating, widening or
+deleting the key:
+
+1. **Assignee gate (supported by the evidence).** The key's
+   `allowedAssigneeAgentIds` covers only the triage owner, and the refused
+   thread was assigned to nobody. Assigning the thread to the triage owner
+   is the narrowest fix.
+2. **Root-vs-descendant gate (consistent, unproven).** The bound UUID may
+   delimit the subtree *under* it rather than the card itself. If the
+   assigned root is still refused, the supported fallback is a pre-created
+   child thread under the bound rollup, assigned to the triage owner, with
+   `RED_MAIN_ROLLUP_PARENT_ID` / `PAPERCLIP_ROLLUP_PARENT_ID` repointed at
+   the child UUID. Same single-issue routes, same key, no scope change.
+
+Operator retest protocol with the EXISTING key only (no new mint):
+
+- (a) Assign the rollup to the triage owner, re-run both GETs. If `200`,
+  the assignee gate was the cause: proceed with seeded/live checks.
+- (b) Else create one child under the rollup assigned to the triage owner,
+  re-run both GETs against the child. If `200`, repoint the env to the
+  child and proceed.
+- (c) If both still `403`, stop: the key's authority itself is insufficient
+  and the change goes through the CEO/CISO chain -- never a broader
+  standard/board/run-token substitute by inference.
+
+Both scripts fail closed on any 403 (poller exits 3 with no fragment, writer
+posts nothing) and their 403 lines now name this fix.
+
 ## Provisioning checklist (operator)
 
-1. Pre-create the rollup parent card (open status, assigned to the triage
-   owner) and record its UUID.
+1. Pre-create the rollup parent card (open status) and **assign it to the
+   triage owner before minting anything** -- an unassigned bound thread is
+   refused (live 2026-10-05). Record its UUID. If the assigned root ever
+   stays refused, pre-create one assigned child thread under it as the
+   fallback transport and record the child UUID instead.
 2. Mint exactly one bridge key with the body above; record the key id, never
    the value, in one 0600 env file with `RED_MAIN_ROLLUP_PARENT_ID` set.
 3. Seeded checks before enabling: the offline suite
