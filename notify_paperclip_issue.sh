@@ -57,6 +57,20 @@
 # reference REQUEST_NOTIFY_CMD and will be copied for other transports, and a
 # payload can reach it from a queue file restored from backup or hand-edited.
 #
+# WAKE-BUDGET CAP
+# ---------------
+# A card whose thread grows past the wake path's single-variable limit can
+# never wake an agent again: the whole thread reaches the agent process in one
+# environment variable, and the OS caps a single variable (MAX_ARG_STRLEN).
+# This transport appends bytes to cards, so it must not be the thing that
+# bricks one. The rendered comment is capped at 32768 bytes — no legitimate
+# decision notice is that large, and one post that size cannot eat the whole
+# thread budget. Over budget is a refusal (non-zero exit, curl never runs),
+# never a silent truncation: the queue records notify.failed, its undelivered
+# gate stays red, and the recipient reads the decision with `inbox` instead
+# of receiving a comment with bytes missing.
+MAX_COMMENT_BYTES=32768
+#
 # RESIDUAL RISK, ACCEPTED AND DELIBERATE
 # --------------------------------------
 # A requester may still name any WELL-FORMED issue id it knows, including one
@@ -124,6 +138,20 @@ FENCE="$(printf '%*s' "$FENCE_LEN" '' | tr ' ' '`')"
 
 MSG="$(printf '**Provisioning request %s: %s**\n\nAddressed to %s (agent %s).\n\n%s\n%s\n%s\n' \
         "$RID" "$STATUS" "$ROLE" "${AGENT:-unknown}" "$FENCE" "$BODY" "$FENCE")"
+
+# Refuse before touching the network: one post must not eat the card's whole
+# 80 KB E2BIG budget (see MAX_COMMENT_BYTES above). Measured in bytes, not
+# characters — the wake path counts bytes, and multibyte text would silently
+# pass a character-length check. Exit 65 (unaddressable/refused, like the
+# malformed-id path) so the queue records notify.failed and no retry of the
+# same payload can succeed: the bytes are deterministic, so redelivery would
+# land the same oversized body on the same card.
+MSG_BYTES="$(printf '%s' "$MSG" | wc -c | tr -d ' ')"
+if (( MSG_BYTES > MAX_COMMENT_BYTES )); then
+  echo "refusing to post $MSG_BYTES bytes (limit $MAX_COMMENT_BYTES): a comment that large risks the card's wake budget (E2BIG)" >&2
+  echo "  post only the decision facts (request id, verdict, recipient); read the full record with \`inbox\`" >&2
+  exit 65
+fi
 
 # The credential goes in a 0600 config file, never in argv: /proc/<pid>/cmdline
 # is world-readable and this box is shared. Same pattern, and same reasoning, as

@@ -16,6 +16,12 @@
 # its own argv and config file, so what would have gone over the wire is an
 # assertable artifact. Every assertion below was reproduced against the real
 # script before it was written.
+#
+# BASH_ENV resets PATH in every non-interactive bash (sandbox shim trap), so a
+# child notify_paperclip_issue.sh would lose this stub at the front of PATH
+# and hit the real network instead. Unset it so the stub holds for every
+# deliver() below, including the direct invocation in section 6.
+unset BASH_ENV
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -234,6 +240,56 @@ STUB_HTTP_CODE=500 deliver "$(payload "1111-2222")"
 hdr "6. No payload, no delivery"
 OUT="$(printf '' | PATH="$BIN:$PATH" "$NOTIFY" 2>&1)"; RC=$?
 [[ $RC -ne 0 ]] && ok "an empty payload is refused" || bad "an empty payload was accepted"
+
+# ===========================================================================
+hdr "7. An oversized comment is refused before the network, never truncated"
+# A comment large enough to push a card's thread past the wake path's
+# single-variable limit would brick the card — every later wake would die at
+# spawn, because the whole thread arrives in one environment variable. This
+# transport appends bytes to cards, so it must not be the thing that bricks
+# one. Over budget is a refusal (exit 65, curl never runs), never a silent
+# truncation: the queue records notify.failed, its undelivered gate stays
+# red, and the recipient reads the decision with `inbox`.
+unset STUB_HTTP_CODE
+BIG_BODY="$(head -c 40000 /dev/zero | tr '\0' 'A')"
+deliver "$(payload "1111-2222" "$BIG_BODY")"
+[[ $RC -eq 65 ]] && ok "a 40000-byte body is refused with exit 65 (unaddressable/refused)" \
+                 || bad "a 40000-byte body exited $RC, wanted 65 ($OUT)"
+[[ ! -s "$ARGV" ]] && ok "  ...and curl never ran for the oversized payload" \
+                   || bad "  ...but curl ran for the oversized payload"
+grep -q 'refusing to post' <<<"$OUT" \
+  && ok "  ...with a refusal naming the byte count" \
+  || bad "  ...without a refusal message"
+grep -q 'inbox' <<<"$OUT" \
+  && ok "  ...pointing at the inbox pull path" \
+  || bad "  ...without pointing at the inbox pull path"
+
+# Bytes, not characters: 20000 'é' is 20000 chars but 40000 bytes UTF-8, so a
+# character-length check would wave it through and the card would still brick.
+WIDE_BODY="$(python3 -c "print('é'*20000)")"
+deliver "$(payload "1111-2222" "$WIDE_BODY")"
+[[ $RC -eq 65 ]] && ok "a 20000-char / 40000-byte body is refused — the limit counts bytes" \
+                 || bad "a 20000-char multibyte body exited $RC, wanted 65"
+[[ ! -s "$ARGV" ]] && ok "  ...and curl never ran for the multibyte payload" \
+                   || bad "  ...but curl ran for the multibyte payload"
+
+# The complement, or the guard above has quietly broken the feature: an
+# ordinary decision notice still delivers.
+SMALL_BODY="$(head -c 30000 /dev/zero | tr '\0' 'B')"
+deliver "$(payload "1111-2222" "$SMALL_BODY")"
+[[ $RC -eq 0 ]] && ok "a 30000-byte body still delivers" \
+                || bad "a 30000-byte body was refused (rc=$RC $OUT)"
+grep -q '/issues/1111-2222/comments' "$CFGCOPY" \
+  && ok "  ...on the comments route" \
+  || bad "  ...but not on the comments route"
+
+# Deterministic bytes mean redelivery lands the same oversized body on the
+# same card, so no retry of the same payload can succeed — the queue's
+# notify.failed is terminal for this payload, not a transient to drain.
+deliver "$(payload "1111-2222" "$BIG_BODY")"
+[[ $RC -eq 65 && ! -s "$ARGV" ]] \
+  && ok "a second delivery of the same payload refuses identically — retry cannot succeed" \
+  || bad "the retry behaved differently (rc=$RC, curl-ran=$([ -s "$ARGV" ] && echo yes || echo no))"
 
 printf '\n\033[1mRESULT: %d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
