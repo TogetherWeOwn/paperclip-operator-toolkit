@@ -113,7 +113,10 @@ ALLOWED_MUTATIONS = {
 # a mutation of the card's attention state).
 HOLD_MAINTENANCE = {"create_pause_hold", "restore_blocked"}
 
-DEFAULT_CEO_AGENT_ID = "e4f5c0ce-9d95-4443-97d2-53b35f0a2dca"
+# The chief-executive redirect target is operator configuration, never code:
+# --ceo-agent-id must name it explicitly; without one the redirect is refused.
+# A hardcoded default here would route owner-bound work to one deployment's
+# executive wherever this tool runs.
 
 # First and only auto-action: an agent stuck in error resets to idle past this
 # age, and only for the known-benign exit-143 false-failure. Mirrors the
@@ -717,8 +720,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--apply", action="store_true", help="perform decided mutations; default is dry-run")
     parser.add_argument("--max-repairs", type=int, default=5,
                         help="cap on applied mutations per cycle; 0 is observe-only")
-    parser.add_argument("--ceo-agent-id", default=DEFAULT_CEO_AGENT_ID,
-                        help="agent receiving owner-bound work (empty disables the redirect)")
+    parser.add_argument("--ceo-agent-id", default=None,
+                        help="agent receiving owner-bound work; required for the redirect (empty disables it)")
     parser.add_argument("--owner-user-id", default=None,
                         help="owner user identity, matched only to refuse/redirect it")
     parser.add_argument("--owner-agent-id", default=None,
