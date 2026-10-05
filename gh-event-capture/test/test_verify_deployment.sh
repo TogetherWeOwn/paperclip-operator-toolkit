@@ -60,6 +60,13 @@ const { createMemoryStore } = await import(src('store-memory.js'))
 const MODE = process.env.MODE ?? 'ok'
 const store = createMemoryStore()
 
+// Explicit trusted operator inputs, mirroring the unit-test harness in
+// `capture.test.mjs`: since main #12 `createApp` takes no policy defaults.
+// Synthetic scope only — the verifier's probe delivery carries no repository,
+// and storage is not scope-gated, so any valid values keep every mode green.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
+const ALLOWED_REPOSITORIES = Object.freeze(['ExampleOrg/example-repo'])
+
 if (MODE === 'no-store') {
   // Answers as though it stored, and did not. The failure mode a deploy with a
   // wrong `database_id` would produce: everything looks green, nothing lands.
@@ -68,6 +75,8 @@ if (MODE === 'no-store') {
 
 const app = createApp({
   store,
+  bridgePolicy: BRIDGE_POLICY,
+  allowedRepositories: [...ALLOWED_REPOSITORIES],
   webhookSecret: MODE === 'no-secret' ? undefined : process.env.SECRET,
   queryToken: MODE === 'no-token' ? undefined : process.env.TOKEN,
 })
