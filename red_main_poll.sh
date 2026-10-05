@@ -98,14 +98,20 @@
 #                          Sent via a curl config pipe, never on argv.
 #   RED_MAIN_ROLLUP_PARENT_ID
 #                          optional bounded-read mode. When set to the UUID of
-#                          the pre-created rollup parent card the installer's
-#                          key is bound to, the board read uses only
-#                          single-issue routes (GET the parent, GET its
-#                          comments) and never touches the company-wide issue
-#                          list. That list answers 403 to least-privilege
-#                          bridge keys, so unattended timers must set this.
+#                          a rollup thread inside the installer's key boundary,
+#                          the board read uses only single-issue routes (GET
+#                          the thread, GET its comments) and never touches the
+#                          company-wide issue list. That list answers 403 to
+#                          least-privilege bridge keys, so unattended timers
+#                          must set this. Bound is not enough: live 2026-10-05
+#                          proved the bound rollup root itself can answer 403
+#                          ("outside this actor's authorization boundary")
+#                          when it is unassigned, so the thread MUST be
+#                          assigned to the key's triage owner; if the root
+#                          stays refused, use an assigned descendant thread
+#                          under the bound parent (same routes, no key change).
 #                          Incident tags are found in prior draft bodies and
-#                          filed-key mirrors posted as comments on the parent;
+#                          filed-key mirrors posted as comments on the thread;
 #                          the filing routine (which holds a full read) still
 #                          owns the final dedupe check before opening a card.
 #                          Entries carry boardRead:"parent-comments" in this
@@ -221,20 +227,32 @@ board_api_get() {
 # Non-zero when the thread could not be read in full: the caller must NOT
 # treat that as "no incident". Unreadable covers transport errors, non-200
 # statuses, a missing or closed parent, and bodies that are not an issue or
-# a comment list. Uses only single-issue routes, which a parent-bound bridge
-# key is permitted; it never touches the company-wide list.
+# a comment list. Uses only single-issue routes and never touches the
+# company-wide list. A 403 here means the thread is outside the key's
+# boundary even though the key is parent-bound: live 2026-10-05 proved a
+# bound-but-unassigned rollup root answers 403 on both routes, so the thread
+# must be assigned to the key's triage owner (or be an assigned descendant
+# of the bound parent) -- see docs/red-main-task-bridge-contract.md.
+# bounded_403_hint <what> <code> -> one stderr line naming the fix. A 403 on
+# a single-issue route under a parent-bound bridge key is a boundary refusal,
+# not "no incident": the usual causes are an unassigned thread (the key's
+# assignee allowlist covers only the triage owner) or a bound root the API
+# treats as outside the actor's boundary (use an assigned descendant thread).
+bounded_403_hint() {
+  echo "red_main_poll: $1 answered HTTP $2 (boundary refusal, not 'no incident': assign the thread to the key's triage owner, or point RED_MAIN_ROLLUP_PARENT_ID at an assigned descendant of the bound parent)" >&2
+}
 board_titles_bounded() {
   local parent_id="$1" key="$2" resp code raw title bodies
   resp="$(board_api_get "/api/issues/${parent_id}" "$key")" || return 1
   code="${resp##*$'\n'}"
   raw="${resp%$'\n'*}"
-  [[ "$code" == "200" ]] || { echo "red_main_poll: rollup parent read answered HTTP $code" >&2; return 1; }
+  [[ "$code" == "200" ]] || { bounded_403_hint "rollup thread read" "$code"; return 1; }
   title="$(jq -r '.title // ""' <<<"$raw" 2>/dev/null)" || return 1
   [[ -n "$title" ]] || { echo "red_main_poll: rollup parent body is not an issue" >&2; return 1; }
   resp="$(board_api_get "/api/issues/${parent_id}/comments" "$key")" || return 1
   code="${resp##*$'\n'}"
   raw="${resp%$'\n'*}"
-  [[ "$code" == "200" ]] || { echo "red_main_poll: rollup comments read answered HTTP $code" >&2; return 1; }
+  [[ "$code" == "200" ]] || { bounded_403_hint "rollup comments read" "$code"; return 1; }
   bodies="$(jq -c 'if type == "array" then .
                    elif type == "object" and (.comments | type) == "array" then .comments
                    else error("unrecognised comments shape") end' <<<"$raw" 2>/dev/null)" || return 1

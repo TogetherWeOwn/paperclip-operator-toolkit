@@ -86,8 +86,15 @@ post_rollup_comment() {
 
   # 1. The rollup thread must exist and be open. An unreadable or closed
   # parent is NOT "posted nowhere, carry on": the finding is NOT recorded.
+  # A 403 here is a boundary refusal, not an empty thread: live 2026-10-05
+  # proved a bound-but-unassigned rollup root answers 403 on this route, so
+  # the thread must be assigned to the key's triage owner (or be an assigned
+  # descendant of the bound parent).
   local parent_raw parent_status
-  parent_raw="$(_prc_api GET "/api/issues/${PAPERCLIP_ROLLUP_PARENT_ID}")" || return 1
+  parent_raw="$(_prc_api GET "/api/issues/${PAPERCLIP_ROLLUP_PARENT_ID}")" || {
+    echo "post_rollup_comment: rollup thread unreadable -- assign it to the key's triage owner, or repoint PAPERCLIP_ROLLUP_PARENT_ID at an assigned descendant of the bound parent (see docs/red-main-task-bridge-contract.md)" >&2
+    return 1
+  }
   parent_status="$(jq -r '.status // ""' <<<"$parent_raw" 2>/dev/null)" || {
     echo "post_rollup_comment: rollup parent body is not an issue; NOT posting blind" >&2
     return 1

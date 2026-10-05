@@ -76,6 +76,9 @@ class H(http.server.BaseHTTPRequestHandler):
                     status, payload = 405, {}
                 elif iid == "parent-denied":
                     status, payload = 403, {"error": "Forbidden"}
+                elif iid == "parent-outside-boundary":
+                    # Live 2026-10-05: bound-but-unassigned rollup root.
+                    status, payload = 403, {"error": "Issue is outside this actor's authorization boundary"}
                 elif iid == "parent-missing":
                     status, payload = 404, {"error": "Not found"}
                 elif iid == "parent-badshape":
@@ -204,6 +207,24 @@ for parent in parent-closed parent-missing parent-denied parent-badshape; do
     && ok "$parent: no success line" \
     || bad "$parent: no success line" "$(cat "$WORK/err.txt")"
 done
+
+hdr "Live 2026-10-05: bound-but-unassigned root is a boundary refusal"
+# The deployed API answered 403 "outside this actor's authorization boundary"
+# on the rollup-root read while the bound rollup was unassigned. The writer
+# must post nothing, claim nothing, and name the assignment/descendant fix.
+rc="$(run_post parent-outside-boundary "[red-main-poll]" "t" "some finding")"
+[[ "$rc" != "0" && "$(comment_posts)" == "0" ]] \
+  && ok "boundary-refused root: non-zero with zero comment POSTs" \
+  || bad "boundary-refused root: non-zero with zero comment POSTs" "exit=$rc posts=$(comment_posts) err=$(cat "$WORK/err.txt")"
+! grep -q "posted comment" "$WORK/err.txt" \
+  && ok "boundary-refused root: no success line" \
+  || bad "boundary-refused root: no success line" "$(cat "$WORK/err.txt")"
+grep -q "triage owner" "$WORK/err.txt" \
+  && ok "boundary-refused root: names the assignment fix" \
+  || bad "boundary-refused root: names the assignment fix" "$(cat "$WORK/err.txt")"
+[[ "$(company_calls)" == "0" ]] \
+  && ok "boundary-refused root: zero company-wide calls" \
+  || bad "boundary-refused root: zero company-wide calls"
 
 hdr "A refused comment write is a failed tick, never a posted finding"
 for parent in comments-down comments-forbidden; do
