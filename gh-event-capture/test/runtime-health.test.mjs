@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, chmod, stat, readdir, mkdir, rename, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { receiptNamespace } from '../src/receipt-cycle.js'
+import { receiptNamespace } from './trusted-fixtures.mjs'
 import { freshHealth, beginFiring, finishFiring, healthFinding, freshAlertState, alertDecision,
   MISSED_AFTER_MS, ALERT_RETRY_MS, KEY_LIFETIME_MS } from '../src/runtime-health.js'
 import { loadRuntimeManifest, initializeRuntime, runRuntime, watchRuntime, invokeAlertHook, main } from '../src/runtime-cli.js'
@@ -76,8 +76,9 @@ test('alert decisions suppress chatter, retry ambiguous delivery with stable ID,
 async function harness(t) {
   const root = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'runtime-health-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const config = { version: 1, mode: 'products-only-v1', captureOrigin: 'https://capture.test', boardOrigin: 'https://board.test',
-    companyId: '12345678-1234-4234-8234-123456789abc', allowedRepositories: ['ExampleOrg/example-repo'],
+  const config = { version: 1, mode: 'products-only-v1', bridgePolicy: { trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' },
+    repositoryVisibility: { 'example-owner/project': true }, captureOrigin: 'https://capture.test', boardOrigin: 'https://board.test',
+    companyId: '00000000-0000-4000-8000-000000000105', allowedRepositories: ['example-owner/project'],
     stateDirectory: join(root, 'state'), captureTokenFile: join(root, 'capture.key'), boardTokenFile: join(root, 'board.key'), limits: {} }
   await writeFile(config.captureTokenFile, 'private-capture-test', { mode: 0o600 })
   await writeFile(config.boardTokenFile, 'private-board-test', { mode: 0o600 })
@@ -207,9 +208,9 @@ test('corrupt health alerts rather than resetting; corrupt dedup fails closed', 
 test('native alert hook gets payload only on stdin and no inherited run/provider credentials', async (t) => {
   const h = await harness(t)
   const output = join(h.root, 'hook-input.json')
-  await writeFile(h.manifest.alertHookFile, `#!/usr/bin/env node\nlet data = ''; process.stdin.on('data', s => data += s); process.stdin.on('end', () => {
+  await writeFile(h.manifest.alertHookFile, `#!${process.execPath}\nlet data = ''; process.stdin.on('data', s => data += s); process.stdin.on('end', () => {
     if (process.argv.length !== 2 || process.env.PAPERCLIP_API_KEY || process.env.TEST_RUNTIME_SECRET) process.exit(3);
-    require('node:fs').writeFileSync(${JSON.stringify(output)}, data, {mode: 0o600});
+    import('node:fs').then(fs => fs.writeFileSync(${JSON.stringify(output)}, data, {mode: 0o600}));
   });\n`, { mode: 0o700 })
   const prior = process.env.TEST_RUNTIME_SECRET
   process.env.TEST_RUNTIME_SECRET = 'do-not-inherit'

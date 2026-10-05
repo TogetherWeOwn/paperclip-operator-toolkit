@@ -113,7 +113,7 @@ export async function runProductPass({ config, captureToken, boardToken, runId =
   let events = null
   let sweeps = null
   try {
-    const scoped = { allowedRepositories: config.allowedRepositories }
+    const scoped = { allowedRepositories: config.allowedRepositories, bridgePolicy: config.bridgePolicy }
     const transport = budget.fetch(fetchImpl)
     const capture = createCaptureAdapter({ ...scoped, baseUrl: config.captureOrigin, queryToken: captureToken,
       fetchImpl: transport, pageSize: limits.pageSize, maxPages: limits.maxPages })
@@ -121,7 +121,8 @@ export async function runProductPass({ config, captureToken, boardToken, runId =
       run: budget.run((_file, args, options) => run(githubExecutable, args, options)), maxPages: limits.maxPages })
     const board = createPaperclipAdapter({ ...scoped, baseUrl: config.boardOrigin, token: boardToken,
       companyId: config.companyId, runId, fetchImpl: transport })
-    const consumer = createConsumer({ ...scoped, github, board, capture, mode: MODE })
+    const consumer = createConsumer({ ...scoped, github, board, capture, mode: MODE,
+      isPrivateRepository: repository => config.repositoryVisibility[repository] })
     budget.check()
     // One lock and one total budget. Persist the next starting stream BEFORE
     // work so an exhausted/crashed capture pass cannot starve reconciliation.

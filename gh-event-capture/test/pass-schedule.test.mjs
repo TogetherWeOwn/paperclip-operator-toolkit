@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { loadPassSchedule, savePassSchedule } from '../src/pass-schedule.js'
 import { withReceiptStore } from '../src/receipt-store.js'
-import { runReceiptCycle, deliveryFingerprint } from '../src/receipt-cycle.js'
+import { runReceiptCycle, deliveryFingerprint } from './trusted-fixtures.mjs'
 import { runSweepCycle } from '../src/sweep-cycle.js'
 import { loadSweepState, saveSweepState } from '../src/sweep-store.js'
 
 const namespace = 'a'.repeat(64)
-const repo = 'ExampleOrg/example-repo'
-const other = 'ExampleOrg/example-second'
+const repo = 'example-owner/project'
+const other = 'example-owner/z-other'
 async function storage(t) {
   const directory = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'pass-schedule-'))
   t.after(() => rm(directory, { recursive: true, force: true }))

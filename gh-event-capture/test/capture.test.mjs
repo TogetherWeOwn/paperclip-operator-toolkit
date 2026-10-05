@@ -25,6 +25,13 @@ const SECRET = 'test-webhook-secret-not-a-real-one'
 const QUERY_TOKEN = 'test-query-token-not-a-real-one'
 const URL_BASE = 'https://gh-event-capture.example.workers.dev'
 
+// Explicit trusted operator inputs: the app takes no policy defaults, so the
+// suite states the tracker prefix, agent identity and repository scope it
+// exercises. Every delivery repository below must be listed here.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
+const ALLOWED_REPOSITORIES = Object.freeze(['ExampleOrg/example-repo', 'ExampleOrg/example-second',
+  'ExampleOrg/new-repo', 'example-owner/project'])
+
 // A fixed clock, so `received_at` is asserted against a literal rather than
 // against a value recomputed the same wrong way as the code under test.
 const T0 = Date.parse('2026-08-24T00:00:00.000Z')
@@ -50,7 +57,8 @@ async function sign(secret, body) {
 
 function harness({ webhookSecret = SECRET, queryToken = QUERY_TOKEN, now, rejectionFlushMs } = {}) {
   const store = createMemoryStore()
-  const app = createApp({ store, webhookSecret, queryToken, now, rejectionFlushMs })
+  const app = createApp({ store, webhookSecret, queryToken, now, rejectionFlushMs,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
   return { store, app }
 }
 
@@ -319,7 +327,8 @@ test('a retried delivery is de-duplicated and still answered 200', async () => {
 test('a retry does not overwrite the first receipt time', async () => {
   const store = createMemoryStore()
   let clock = 1000
-  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock })
+  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
 
   await app(await delivery(pushPayload(), { id: 'stable' }))
   clock = 999_000
@@ -335,7 +344,8 @@ test('a retry does not overwrite the first receipt time', async () => {
 async function seeded() {
   const store = createMemoryStore()
   let clock = T0
-  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock })
+  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
 
   const rows = [
     ['e1', 'push', { repository: { full_name: 'ExampleOrg/example-repo' }, sender: { login: 'human-reviewer' } }],
@@ -510,7 +520,8 @@ test('a rejection counter that cannot write still answers 401, never 500', async
   store.noteRejection = async () => {
     throw new Error('D1 unavailable')
   }
-  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock })
+  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
 
   const res = await app(await delivery(pushPayload(), { signature: null }))
   assert.equal(res.status, 401)
@@ -588,7 +599,7 @@ test('claiming a fresh key succeeds; claiming it again reports it was already ta
 test('a null head sha still produces a stable claim key', async () => {
   const { app } = harness()
   const body = { issue_ref: 'TASK-3552', head_sha: null, kind: 'work_product_create', delivery_id: 'd-1',
-    pr_url: 'https://github.com/ExampleOrg/example-repo/pull/42', action: 'opened' }
+    pr_url: 'https://github.com/example-owner/project/pull/42', action: 'opened' }
   await seedClaim(app, body, SECRET)
   const res = await app(claimRequest(body))
   assert.equal(res.status, 200)
@@ -651,13 +662,14 @@ test('GET /bridge/claims lists claims newest first and can be scoped to one issu
   // wall-clock millisecond would otherwise make the DESC ordering ambiguous.
   let clock = T0
   const store = createMemoryStore()
-  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock++ })
+  const app = createApp({ store, webhookSecret: SECRET, queryToken: QUERY_TOKEN, now: () => clock++,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
 
   const claims = [
     { issue_ref: 'TASK-3552', head_sha: 'sha1', kind: 'check_suite_completed', delivery_id: 'd-1' },
     { issue_ref: 'TASK-3552', head_sha: 'sha2', kind: 'check_suite_completed', delivery_id: 'd-2' },
     { issue_ref: 'TASK-9', head_sha: 'sha3', kind: 'work_product_create', delivery_id: 'd-3',
-      pr_url: 'https://github.com/ExampleOrg/example-repo/pull/42', action: 'opened' },
+      pr_url: 'https://github.com/example-owner/project/pull/42', action: 'opened' },
   ]
   for (const c of claims) {
     // eslint-disable-next-line no-await-in-loop -- ordering matters: claimed_ms must strictly increase

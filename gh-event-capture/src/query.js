@@ -1,3 +1,4 @@
+import { trustedBridgePolicy, normalizeIssueRef } from './trusted-policy.js'
 // Query-string parsing for `GET /events`.
 //
 // Strict by construction: an unknown parameter is a 400, not a silent ignore. A
@@ -45,14 +46,13 @@ function parseLimit(raw) {
 
 const BRIDGE_ALLOWED = new Set(['issue_ref', 'limit'])
 
-export function parseBridgeQuery(params) {
+export function parseBridgeQuery(params, bridgePolicy) {
+  const policy = trustedBridgePolicy(bridgePolicy)
   const error = parameterError(params, BRIDGE_ALLOWED)
   if (error) return { ok: false, error }
   const issueRef = params.get('issue_ref')
-  // Task refs are `PREFIX-n` (letter-led prefix, positive number): the private
-  // tracker is one issuer among others, never hardcoded here.
-  if (issueRef !== null && !/^([A-Z][A-Z0-9]*)-\d+$/.test(issueRef)) {
-    return { ok: false, error: 'issue_ref must look like PREFIX-123' }
+  if (issueRef !== null && normalizeIssueRef(issueRef, policy) === null) {
+    return { ok: false, error: 'issue_ref does not match the trusted tracker policy' }
   }
   const parsed = parseLimit(params.get('limit'))
   if (!parsed.ok) return parsed

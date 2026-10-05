@@ -1,13 +1,13 @@
 // Host-local at-most-once claims for PR-closeout exception wakes.
 //
-// The decision core classifies one authoritative GitHub snapshot into at most one
+// core (S1) classifies one authoritative GitHub snapshot into at most one
 // exception class per (repository, PR, head SHA). This module remembers which
 // (repository, PR, head SHA, class) tuples already produced a wake, so the
 // event path and the repair sweep stay idempotent without ever touching D1.
 //
 // Own state file (`claims.json`) and own namespace, beside `receipts.json` in
 // the SAME state directory. This module takes no lock of its own: the caller
-// must hold the receipt-store lock for the entire pass (see the product-only runner).
+// must hold the receipt-store lock for the entire pass (see consumer-runner.js).
 // Two concurrent writers would interleave atomic renames, so overlapping passes
 // must keep failing closed at the receipt lock first.
 //

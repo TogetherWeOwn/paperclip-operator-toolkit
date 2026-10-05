@@ -175,6 +175,13 @@ test "$(stat -c '%a %u' "$PRIVATE/QUERY_TOKEN")" = "600 $UID"
 "$WRANGLER" secret put WEBHOOK_SECRET < "$PRIVATE/WEBHOOK_SECRET"
 "$WRANGLER" secret put QUERY_TOKEN < "$PRIVATE/QUERY_TOKEN"
 
+# 3b. Trusted scope as `[vars]` (committed nowhere): the tracker prefix and
+#    agent identity the service trusts, plus the repository scope it serves.
+#    A deploy that forgets them fails closed rather than running wide open.
+#    Example values only — use your own tracker prefix, bot login and repos.
+#    vars = { BRIDGE_POLICY = "{\"trackerPrefix\": \"TASK\", \"agentLogin\": \"your-agent[bot]\"}",
+#             ALLOWED_REPOSITORIES = "your-org/your-repo" }
+
 # 4. Deploy, then confirm it is up and configured.
 "$WRANGLER" deploy
 curl -s https://gh-event-capture.REPLACE_SUBDOMAIN.workers.dev/health

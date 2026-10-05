@@ -1,9 +1,7 @@
 // Non-waking Paperclip transport for products-only-v1. Deliberately exposes no
 // comment, agent wakeup, issue mutation or eligibility operation.
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
-// Task refs are `PREFIX-n` (letter-led prefix, positive number): the private
-// tracker is one issuer among others, never hardcoded here.
-const REF = /^([A-Z][A-Z0-9]*)-[1-9]\d*$/
+import { trustedBridgePolicy, trustedRepositories, normalizeIssueRef } from './trusted-policy.js'
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/
 const TYPES = new Set(['preview_url', 'runtime_service', 'pull_request', 'branch', 'commit', 'artifact', 'document'])
 const STATUSES = new Set(['active', 'ready_for_review', 'approved', 'changes_requested', 'merged', 'closed', 'failed', 'archived', 'draft'])
@@ -14,9 +12,11 @@ function requireValue(condition, message) {
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const uuid = (v) => typeof v === 'string' && UUID.test(v)
 
-export function createPaperclipAdapter({ baseUrl, token, companyId, allowedRepositories,
+export function createPaperclipAdapter({ baseUrl, token, companyId, allowedRepositories, bridgePolicy,
   runId = null, fetchImpl = globalThis.fetch, timeoutMs = 30000,
   maxResponseBytes = 4 * 1024 * 1024, maxProducts = 10000 }) {
+  const policy = trustedBridgePolicy(bridgePolicy)
+  trustedRepositories(allowedRepositories)
   let origin
   try {
     const url = new URL(baseUrl)
@@ -80,9 +80,9 @@ export function createPaperclipAdapter({ baseUrl, token, companyId, allowedRepos
     }
   }
   async function getIssue(refOrId) {
-    requireValue(typeof refOrId === 'string' && (REF.test(refOrId) || uuid(refOrId)), 'Paperclip issue selector is invalid')
+    requireValue(typeof refOrId === 'string' && (normalizeIssueRef(refOrId, policy) !== null || uuid(refOrId)), 'Paperclip issue selector is invalid')
     const issue = await request('GET', `/issues/${encodeURIComponent(refOrId)}`)
-    requireValue(object(issue) && uuid(issue.id) && issue.companyId === companyId && REF.test(issue.identifier) &&
+    requireValue(object(issue) && uuid(issue.id) && issue.companyId === companyId && normalizeIssueRef(issue.identifier, policy) !== null &&
       (uuid(refOrId) ? issue.id === refOrId : issue.identifier === refOrId), 'Paperclip issue identity or company does not match')
     issues.add(issue.id)
     // Product mode needs identity only. Do not expose partial eligibility data

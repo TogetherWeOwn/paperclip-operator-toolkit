@@ -1,15 +1,10 @@
-// In-memory store. Test double for `store-d1.js`, and the reason the whole
-// suite runs with `node --test` and no credentials, no network and no
-// Cloudflare account (CONTRIBUTING § "What done means", item 6: if a change can
-// only be tested against the real thing, it will stop being tested).
-//
-// It must mirror the D1 adapter's OBSERVABLE semantics exactly — the same
-// dedupe behaviour, the same ordering, the same append-only refusal — or the
-// suite passes against something the deployment does not do. Where the two
-// could drift, the SQL is the specification and this file follows it.
+// In-memory capture store for credential-free tests. It implements duplicate
+// suppression, keyset ordering, append-only refusal and atomic unique claims.
+// A separately supplied persistent adapter must preserve this observable
+// contract; passing this suite does not validate a deployment database.
 
 /**
- * @returns {object} a store with the same surface as `createD1Store`
+ * @returns {object} an injected store for the runtime-agnostic app
  */
 export function createMemoryStore() {
   /** @type {Map<string, any>} */
@@ -20,13 +15,12 @@ export function createMemoryStore() {
   const bridgeClaims = new Map()
 
   // How many times `noteRejection` was actually CALLED, as distinct from how
-  // much it counted. In D1 one call is one write, so this is the suite's proxy
-  // for write volume — the quantity `rejection-counter.js` exists to bound. A
-  // test that only checked the totals would pass just as happily against the
-  // per-request version that could burn a shared production D1 allowance.
+  // much it counted. This is the suite's proxy for storage write volume,
+  // which rejection-counter.js bounds. Totals alone would also pass against
+  // the unbounded per-request-write implementation.
   let noteRejectionCalls = 0
 
-  /** Mirrors `deliveries_no_update` / `deliveries_no_delete` in the migration. */
+  /** Append-only refusal is a store contract, not just app etiquette. */
   const APPEND_ONLY = 'deliveries is append-only'
 
   return {
@@ -90,7 +84,7 @@ export function createMemoryStore() {
      * per-request row would hand any passer-by an unbounded write channel into
      * the store the control depends on.
      *
-     * `count` is an INCREMENT, mirroring the D1 adapter's `count + excluded.count`.
+     * `count` is an increment, not a replacement.
      * Callers arrive coalesced from `rejection-counter.js`.
      *
      * @param {string} day  `YYYY-MM-DD`
@@ -157,7 +151,7 @@ export function createMemoryStore() {
       return out.slice(0, f.limit).map((c) => ({ ...c }))
     },
 
-    // Test-only seams. Not part of the D1 adapter's surface; the suite uses
+    // Test-only seams. Not part of a persistent adapter's surface; the suite uses
     // them to assert that append-only is a property of the STORE and not a
     // politeness the app happens to observe.
     _forbiddenMutation() {

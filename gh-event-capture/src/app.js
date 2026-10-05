@@ -1,7 +1,6 @@
 // Routing and policy. Runtime-agnostic on purpose: it takes a store and two
 // secrets and returns a `fetch`-shaped function, so the whole surface is
-// testable under `node --test` with an in-memory store, and `worker.js` is a
-// thin adapter that supplies D1 and the Cloudflare `env`.
+// testable with an in-memory store. Deployment adapters are not included.
 //
 // Two rules govern every route below.
 //
@@ -11,8 +10,7 @@
 //   worse than an empty store, because the empty one does not mislead anyone.
 //
 //   DEFAULT IS REFUSAL. Unknown path, unknown method, unknown query parameter:
-//   all rejected. This is the same rule that `gh-app-token.js` learned the hard
-//   way on 2026-08-23, applied to an endpoint the public internet can reach.
+//   all rejected. Anonymous callers cannot widen the service's query policy.
 
 import { verifySignature, REJECT, SIGNATURE_HEADER, DELIVERY_HEADER, EVENT_HEADER } from './verify.js'
 import { buildRecord, MAX_ACCEPTED_BODY_BYTES } from './record.js'
@@ -20,9 +18,7 @@ import { parseQuery, parseBridgeQuery, nextCursor } from './query.js'
 import { claimKey as bridgeClaimKey, classifyPullRequestEvent, classifyCheckSuiteEvent } from './bridge.js'
 import { createRejectionCounter, FLUSH_INTERVAL_MS } from './rejection-counter.js'
 
-// Task refs are `PREFIX-n` (letter-led prefix, positive number): the private
-// tracker is one issuer among others, never hardcoded here.
-const ISSUE_REF_RE = /^([A-Z][A-Z0-9]*)-\d+$/
+import { trustedBridgePolicy, trustedRepositories, normalizeIssueRef } from './trusted-policy.js'
 
 const WEBHOOK_PATH = '/gh/webhook'
 
@@ -46,8 +42,8 @@ function json(body, status = 200) {
  * Constant-time-ish bearer check for the read API.
  *
  * The read API is not the security boundary the signature check is — it guards
- * a store of metadata about a private org, not a write path — but it is on the
- * same public host, so it gets a real comparison rather than `===`.
+ * a metadata store, not signature attribution — and shares the public service
+ * surface, so it gets a comparison rather than `===`.
  *
  * @param {Request} request
  * @param {string | undefined | null} expected
@@ -83,15 +79,19 @@ function utcDay(ms) {
  */
 export function createApp({
   store,
+  bridgePolicy,
+  allowedRepositories,
   webhookSecret,
   queryToken,
   now = () => Date.now(),
   rejectionFlushMs = FLUSH_INTERVAL_MS,
 }) {
+  const policy = trustedBridgePolicy(bridgePolicy)
+  const repositories = new Set(trustedRepositories(allowedRepositories))
   // Rejection counting goes through a coalescing buffer rather than straight to
   // the store. The webhook route takes anonymous traffic, so a write per
-  // rejected request would let a passer-by convert a flood into D1 write
-  // volume on an account shared with a production Worker. See that module.
+  // rejected request would turn an anonymous flood into storage write volume.
+  // The bound is per counter instance, not a global abuse limit.
   const rejections = createRejectionCounter({ store, now, intervalMs: rejectionFlushMs })
   /**
    * POST /gh/webhook — the only unauthenticated write path in the service.
@@ -174,14 +174,8 @@ export function createApp({
   }
 
   /**
-   * POST /bridge/claim — the host consumer's at-most-once ledger write. See
-   * `migrations/d1/0002_bridge_claims.sql`: the D1 unique constraint on
-   * `claim_key` is what actually enforces "one wake per (issue, head sha,
-   * kind)", this route just exposes it to a caller running outside the
-   * Worker (the tracker's host-side consumer). Same bearer as `/events` — this
-   * is not a second security boundary, it is the read/write API guarding the
-   * same store `QUERY_TOKEN` already guards.
-   * @param {Request} request
+   * POST /bridge/claim: the store must atomically enforce unique claim keys.
+   * Only immutable signed evidence establishes an effect, never the selector.
    */
   async function claimBridge(request) {
     /** @type {any} */
@@ -192,8 +186,8 @@ export function createApp({
       return json({ error: 'body is not JSON' }, 400)
     }
     const { issue_ref: issueRef, head_sha: headSha, kind, delivery_id: deliveryId } = body ?? {}
-    if (typeof issueRef !== 'string' || !ISSUE_REF_RE.test(issueRef)) {
-      return json({ error: 'issue_ref must look like PREFIX-123' }, 400)
+    if (normalizeIssueRef(issueRef, policy) === null) {
+      return json({ error: 'issue_ref does not match the trusted tracker policy' }, 400)
     }
     if (headSha !== null && headSha !== undefined && typeof headSha !== 'string') {
       return json({ error: 'head_sha must be a string or null' }, 400)
@@ -230,15 +224,26 @@ export function createApp({
     let candidates = []
     try {
       const payload = JSON.parse(delivery.body)
+      if (!repositories.has(payload?.repository?.full_name) || payload.repository.full_name !== delivery.repository) {
+        return json({ error: 'stored delivery is outside configured scope' }, 400)
+      }
       if (delivery.event === 'pull_request') {
-        const effect = classifyPullRequestEvent(payload)
+        const pr = payload.pull_request
+        if (pr?.base?.repo?.full_name !== delivery.repository || !Number.isSafeInteger(pr.number) || pr.number <= 0 ||
+            pr.html_url !== `https://github.com/${delivery.repository}/pull/${pr.number}`) {
+          return json({ error: 'stored PR identity does not match repository scope' }, 400)
+        }
+        const effect = classifyPullRequestEvent(payload, policy)
         if (effect) {
           candidates.push(effect)
           if (effect.wake) candidates.push({ ...effect, kind: 'pull_request_merged' })
         }
       } else if (delivery.event === 'check_suite') {
         const evidence = JSON.parse(prDelivery.body)
-        candidates = classifyCheckSuiteEvent(payload, [evidence?.pull_request])
+        if (prDelivery.repository !== delivery.repository || evidence?.repository?.full_name !== delivery.repository) {
+          return json({ error: 'stored PR evidence is outside configured scope' }, 400)
+        }
+        candidates = classifyCheckSuiteEvent(payload, [evidence?.pull_request], policy)
       }
       if (!candidates.some((c) => bridgeClaimKey({ ...c, deliveryId }) === claimKey)) {
         return json({ error: 'claim does not match stored delivery effect' }, 400)
@@ -261,11 +266,11 @@ export function createApp({
   }
 
   /**
-   * GET /bridge/claims — read side of the ledger, for `query.sh bridged`.
+   * GET /bridge/claims — authenticated read side of the claim ledger.
    * @param {URL} url
    */
   async function listBridgeClaims(url) {
-    const parsed = parseBridgeQuery(url.searchParams)
+    const parsed = parseBridgeQuery(url.searchParams, policy)
     if (!parsed.ok) return json({ error: parsed.error }, 400)
     const claims = await store.listBridgeClaims(parsed.filters)
     return json({ count: claims.length, claims })
@@ -283,7 +288,7 @@ export function createApp({
     // Unauthenticated, and deliberately says nothing about the store's
     // contents. `GET /health` returning 200 means THIS SERVICE is up. It does
     // not mean events are arriving, and it is not evidence that the App is
-    // still subscribed — see README § "What this does not tell you".
+    // still subscribed. Subscription checks are an external responsibility.
     if (path === '/health') {
       if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405)
       return json({
@@ -317,7 +322,7 @@ export function createApp({
 
       if (path === '/events') return await listEvents(request, url)
       if (path === '/stats') {
-        // Settle the rejection buffer first, so `query.sh stats` reports a
+        // Settle the rejection buffer first, so the authenticated read reports a
         // current number instead of one lagging by up to the flush interval.
         // Safe to write from a read path only because getting here costs a
         // valid QUERY_TOKEN — an anonymous caller cannot use this to force

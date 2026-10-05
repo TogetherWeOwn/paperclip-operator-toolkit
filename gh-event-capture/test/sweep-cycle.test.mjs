@@ -6,14 +6,14 @@ import { tmpdir } from 'node:os'
 import { runSweepCycle, sweepLimits } from '../src/sweep-cycle.js'
 import { loadSweepState, saveSweepState } from '../src/sweep-store.js'
 import { withReceiptStore } from '../src/receipt-store.js'
-import { receiptNamespace } from '../src/receipt-cycle.js'
-import { createConsumer } from '../src/consumer.js'
+import { receiptNamespace } from './trusted-fixtures.mjs'
+import { createConsumer } from './trusted-fixtures.mjs'
 import { agentPr } from './bridge-fixtures.mjs'
 
-const repo = 'ExampleOrg/example-repo'
-const other = 'ExampleOrg/example-second'
+const repo = 'example-owner/project'
+const other = 'example-owner/z-other'
 const namespace = receiptNamespace({ captureOrigin: 'https://capture.test', boardOrigin: 'http://127.0.0.1:3100',
-  companyId: '12345678-1234-4234-8234-123456789abc', allowedRepositories: [repo, other], mode: 'products-only-v1' })
+  companyId: '00000000-0000-4000-8000-000000000105', allowedRepositories: [repo, other], mode: 'products-only-v1' })
 async function harness(t, open = { [repo]: [1, 2, 3] }) {
   const root = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'sweep-cycle-'))
   t.after(() => rm(root, { recursive: true, force: true }))

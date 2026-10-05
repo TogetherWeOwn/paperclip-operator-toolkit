@@ -320,9 +320,11 @@ test('real capture and consumer recover missing evidence without duplicate wakes
   const s = await storage(t)
   let time = 2000
   const store = createMemoryStore()
-  const app = createApp({ store, webhookSecret: 'test', queryToken: 'test-token', now: () => time })
+  const app = createApp({ store, webhookSecret: 'test', queryToken: 'test-token', now: () => time,
+    bridgePolicy: { trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' }, allowedRepositories: [repo] })
   const capture = createCaptureAdapter({ baseUrl: 'https://capture.test', queryToken: 'test-token',
-    allowedRepositories: [repo], pageSize: 1, fetchImpl: (url, init) => app(new Request(url, init)) })
+    allowedRepositories: [repo], bridgePolicy: { trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' },
+    pageSize: 1, fetchImpl: (url, init) => app(new Request(url, init)) })
   const pr = { ...agentPr, title: 'Receipt integration', body: '', state: 'open', merged: false, reviewDecision: null }
   const issue = { id: 'issue', identifier: 'TASK-123', status: 'in_progress', assigneeAgentId: 'agent',
     assigneeUserId: null, blockedBy: [] }
@@ -337,7 +339,9 @@ test('real capture and consumer recover missing evidence without duplicate wakes
     async updateWorkProduct(id, body) { Object.assign(products[0], body); return products[0] },
     async commentIfEligible(id, body) { const comment = { id: 'comment', ...body }; comments.push(comment); return { sent: true, comment } },
   }
-  const consumer = createConsumer({ capture, board, github: { async getPullRequest() { return pr } }, allowedRepositories: [repo] })
+  const consumer = createConsumer({ capture, board, github: { async getPullRequest() { return pr } },
+    allowedRepositories: [repo],
+    bridgePolicy: { trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' } })
   const cycle = (receipts) => runReceiptCycle({ capture, consumer, receipts, allowedRepositories: [repo] })
   await ingest(app, 'check_suite', 'suite', { action: 'completed', repository,
     check_suite: { status: 'completed', head_sha: pr.head.sha, pull_requests: [{ number: pr.number }] } })

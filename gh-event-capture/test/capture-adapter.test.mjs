@@ -12,11 +12,15 @@ const base = 'https://capture.test'
 const token = 'TEST-PRIVATE-CREDENTIAL'
 const timestamp = 1700000000000
 const pr = { ...agentPr, head: { ...agentPr.head, sha }, title: 'Bridge', body: '', state: 'open', merged: false }
+// Explicit trusted operator inputs: the adapter and app take no policy defaults.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
 function harness(options = {}) {
   const store = createMemoryStore()
   const h = { time: timestamp, calls: [] }
-  h.app = createApp({ store, webhookSecret: 'test', queryToken: token, now: () => h.time })
+  h.app = createApp({ store, webhookSecret: 'test', queryToken: token, now: () => h.time,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [repo] })
   h.adapter = createCaptureAdapter({ baseUrl: base, queryToken: token, allowedRepositories: [repo], pageSize: 2,
+    bridgePolicy: BRIDGE_POLICY,
     fetchImpl: async (url, init) => {
       h.calls.push({ url, init })
       return h.app(new Request(url, init))
@@ -31,6 +35,7 @@ const json = (body, init = {}) => new Response(JSON.stringify(body), { headers: 
 function stub(responses, options = {}) {
   const calls = []
   const adapter = createCaptureAdapter({ baseUrl: base, queryToken: token, allowedRepositories: [repo], pageSize: 2,
+    bridgePolicy: BRIDGE_POLICY,
     fetchImpl: async (url, init) => {
       calls.push({ url, init })
       assert.ok(responses.length, 'unexpected transport retry')
@@ -237,6 +242,7 @@ test('request deadline aborts before headers and while reading a partial body', 
   for (const streamPhase of [false, true]) {
     let aborted = false
     const adapter = createCaptureAdapter({ baseUrl: base, queryToken: token, allowedRepositories: [repo], timeoutMs: 20,
+      bridgePolicy: BRIDGE_POLICY,
       fetchImpl: async (url, { signal }) => {
         if (!streamPhase) return new Promise((resolve, reject) => {
           signal.addEventListener('abort', () => { aborted = true; reject(new Error(token)) }, { once: true })
@@ -257,6 +263,7 @@ test('aborted claim response is not retried and replay sees the already-recorded
   await h.prEvent('merge', { ...pr, merged: true }, { action: 'closed' })
   let writes = 0
   const adapter = createCaptureAdapter({ baseUrl: base, queryToken: token, allowedRepositories: [repo],
+    bridgePolicy: BRIDGE_POLICY,
     fetchImpl: async (url, init) => {
       const response = await h.app(new Request(url, init))
       if (init.method === 'POST' && ++writes === 1) throw new Error(token)
@@ -274,7 +281,7 @@ test('consumer plus capture transport reconciles a PR and deduplicates suite and
   const current = { ...structuredClone(pr), reviewDecision: 'APPROVED' }
   const products = []
   const comments = []
-  const consumer = createConsumer({ capture: h.adapter, allowedRepositories: [repo],
+  const consumer = createConsumer({ capture: h.adapter, allowedRepositories: [repo], bridgePolicy: BRIDGE_POLICY,
     github: { async getPullRequest() { return structuredClone(current) } }, board: {
       async getIssue() { return { id: 'issue', identifier: 'TASK-3552', status: 'in_progress',
         assigneeAgentId: 'engineer', assigneeUserId: null, blockedBy: [] } },
@@ -304,7 +311,7 @@ test('consumer plus capture transport reconciles a PR and deduplicates suite and
 })
 
 test('invalid configuration/selectors fail before any request and never reveal configuration contents', async () => {
-  const good = { baseUrl: base, queryToken: token, allowedRepositories: [repo] }
+  const good = { baseUrl: base, queryToken: token, allowedRepositories: [repo], bridgePolicy: BRIDGE_POLICY }
   for (const config of [{ baseUrl: `https://user:${token}@capture.test` }, { baseUrl: `https://capture.test/?token=${token}` },
     { baseUrl: 'http://capture.test' }, { baseUrl: 'https://capture.test/path' }, { baseUrl: token },
     { queryToken: '' }, { queryToken: 'bad\nvalue' }, { allowedRepositories: [] }, { allowedRepositories: ['bad'] },

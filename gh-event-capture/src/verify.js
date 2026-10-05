@@ -6,7 +6,7 @@
 // that does not end in `{ ok: true }` must end in a rejection; there is no
 // "accept on doubt" branch and one must never be added.
 //
-// Default-is-refusal (CONTRIBUTING § "What done means", item 1): the function
+// Default-is-refusal: the function
 // returns a rejection for every input shape it does not explicitly recognise,
 // including the case where no secret is configured at all. An unconfigured
 // deployment rejects everything rather than storing unverified bytes.
@@ -19,7 +19,7 @@ const PREFIX = 'sha256='
 const HEX_64 = /^[0-9a-f]{64}$/
 
 // Rejection reasons. These are stable identifiers, not prose: the rejection
-// counters in the store are keyed on them and `scripts/query.sh` matches them,
+// counters and authenticated API consumers are keyed on them,
 // so rewording one is a breaking change. Assert on these, never on a message.
 export const REJECT = {
   NO_SECRET: 'secret_unconfigured',
@@ -111,7 +111,7 @@ export async function verifySignature({ secret, body, header }) {
 /**
  * Hex-encoded SHA-256 of the raw body. Stored on every record so a truncated
  * row still identifies which payload it was, and so the store can be
- * re-verified end to end later (see README § "Re-verifying the store").
+ * re-verified end to end later against the original raw bytes and signature.
  *
  * @param {Uint8Array} bytes
  * @returns {Promise<string>}

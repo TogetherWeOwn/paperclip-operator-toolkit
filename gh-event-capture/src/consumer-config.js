@@ -1,3 +1,4 @@
+import { trustedBridgePolicy, trustedVisibility } from './trusted-policy.js'
 // Linux host configuration: credentials are read from private files, never argv.
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
@@ -6,7 +7,7 @@ import { receiptNamespace } from './receipt-cycle.js'
 import { runnerLimits } from './consumer-runner.js'
 
 const FIELDS = new Set(['version', 'mode', 'captureOrigin', 'boardOrigin', 'companyId',
-  'allowedRepositories', 'stateDirectory', 'captureTokenFile', 'boardTokenFile', 'limits'])
+  'bridgePolicy', 'repositoryVisibility', 'allowedRepositories', 'stateDirectory', 'captureTokenFile', 'boardTokenFile', 'limits'])
 function requireValue(condition) {
   if (!condition) throw new Error('consumer configuration or credential file is invalid')
 }
@@ -37,6 +38,8 @@ export async function loadConsumerConfig(path) {
       config.mode === 'products-only-v1' && absolute(config.stateDirectory) &&
       absolute(config.captureTokenFile) && absolute(config.boardTokenFile))
     requireValue(new URL(config.captureOrigin).protocol === 'https:')
+    config.bridgePolicy = trustedBridgePolicy(config.bridgePolicy)
+    config.repositoryVisibility = trustedVisibility(config.repositoryVisibility, config.allowedRepositories)
     receiptNamespace(config)
     config.limits = runnerLimits(config.limits)
     config.stateDirectory = resolve(config.stateDirectory)

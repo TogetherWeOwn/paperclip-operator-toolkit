@@ -41,8 +41,11 @@ function virtualClock() {
 async function harness(t) {
   const root = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'product-pass-'))
   t.after(() => rm(root, { recursive: true, force: true }))
+  // Explicit trusted operator inputs: the loader takes no policy defaults.
+  const bridgePolicy = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
   const config = { version: 1, mode: 'products-only-v1', captureOrigin: 'https://capture.test',
-    boardOrigin: 'https://board.test', companyId, allowedRepositories: [repo], stateDirectory: join(root, 'state'),
+    boardOrigin: 'https://board.test', companyId, allowedRepositories: [repo], bridgePolicy,
+    repositoryVisibility: { [repo]: true }, stateDirectory: join(root, 'state'),
     captureTokenFile: join(root, 'capture.key'), boardTokenFile: join(root, 'board.key'), limits: {} }
   const configPath = join(root, 'config.json')
   await writeFile(config.captureTokenFile, secret + '\n', { mode: 0o600 })
@@ -51,7 +54,8 @@ async function harness(t) {
   h.save = () => writeFile(configPath, JSON.stringify(config), { mode: 0o600 })
   await h.save()
   const store = createMemoryStore()
-  const app = createApp({ store, webhookSecret: 'test', queryToken: secret, now: () => 1000 })
+  const app = createApp({ store, webhookSecret: 'test', queryToken: secret, now: () => 1000,
+    bridgePolicy, allowedRepositories: [repo] })
   const pr = { ...agentPr, title: 'Runner PR', body: '', head: { ref: 'task-3552-runner', sha: 'a'.repeat(40) },
     state: 'open', draft: false, merged: false }
   h.ingest = (id, event = 'pull_request') => ingest(app, event, id, event === 'pull_request'

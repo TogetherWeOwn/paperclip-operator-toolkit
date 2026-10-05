@@ -18,12 +18,14 @@ const body = { type: 'pull_request', provider: 'github', title: 'Bridge PR',
   url: `https://github.com/${repo}/pull/42`, externalId: `${repo}#42`, status: 'active', reviewState: 'none',
   metadata: { repo, number: 42, headSha: sha, headRef: 'task-3552-bridge' } }
 const product = { ...body, id: productId, companyId, issueId }
+// Explicit trusted operator inputs: the adapter takes no policy defaults.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body),
   { status, headers: { 'content-type': 'application/json', ...headers } })
 function harness(responses = [], options = {}) {
   const calls = []
   const adapter = createPaperclipAdapter({ baseUrl: 'https://board.test', token, companyId,
-    allowedRepositories: [repo], runId, fetchImpl: async (url, init) => {
+    allowedRepositories: [repo], bridgePolicy: BRIDGE_POLICY, runId, fetchImpl: async (url, init) => {
       calls.push({ url, init })
       assert.ok(responses.length, 'unexpected request or automatic retry')
       const value = responses.shift()
@@ -190,13 +192,13 @@ function fakeBoard(options = {}) {
     }
     assert.fail('unexpected route: '+path)
   }
-  h.pr = { number: 42, html_url: body.url, user: { login: 'togetherweown[bot]' },
+  h.pr = { number: 42, html_url: body.url, user: { type: 'Bot', login: 'capture-agent[bot]' },
     head: { ref: 'task-3552-bridge', sha }, base: { repo: { full_name: repo } },
     title: 'Bridge PR', state: 'open', draft: false, merged: false, reviewDecision: null }
   h.adapter = createPaperclipAdapter({ baseUrl: 'https://board.test', token, companyId,
-    allowedRepositories: [repo], fetchImpl: h.fetch })
+    allowedRepositories: [repo], bridgePolicy: BRIDGE_POLICY, fetchImpl: h.fetch })
   h.consumer = createConsumer({ board: h.adapter, github: { async getPullRequest() { return h.pr } },
-    allowedRepositories: [repo], mode: 'products-only-v1' })
+    allowedRepositories: [repo], mode: 'products-only-v1', bridgePolicy: BRIDGE_POLICY })
   h.delivery = (action = 'opened') => ({ delivery_id: 'a', event: 'pull_request', body_truncated: 0,
     body: JSON.stringify({ action, repository: { full_name: repo }, pull_request: h.pr }) })
   return h
@@ -227,7 +229,7 @@ test('real loopback socket handles product writes with non-waking routes only', 
       assert.equal(req.headers.authorization, `Bearer ${token}`)
       let body = ''
       for await (const chunk of req) body += chunk
-      const reply = await h.fetch(`http://localhost${req.url}`, { method: req.method, body: body || undefined })
+      const reply = await h.fetch(`http://127.0.0.1${req.url}`, { method: req.method, body: body || undefined })
       res.writeHead(reply.status, { 'content-type': 'application/json' })
       res.end(await reply.text())
     } catch { res.writeHead(500); res.end() }
@@ -236,7 +238,7 @@ test('real loopback socket handles product writes with non-waking routes only', 
   await once(server, 'listening')
   t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
   const adapter = createPaperclipAdapter({ baseUrl: `http://127.0.0.1:${server.address().port}`, token,
-    companyId, allowedRepositories: [repo] })
+    companyId, allowedRepositories: [repo], bridgePolicy: BRIDGE_POLICY })
   await adapter.getIssue('TASK-3552')
   await adapter.listWorkProducts(issueId)
   assert.equal((await adapter.createWorkProduct(issueId, body)).id, productId)

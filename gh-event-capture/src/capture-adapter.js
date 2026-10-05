@@ -1,7 +1,8 @@
 // Host transport for the capture API, not a durable cursor/checkpoint runner.
 // Every scan starts at its newest page; callers must not treat received_ms as
 // an append sequence or skip replay solely because a timestamp was seen before.
-import { AGENT_LOGIN, claimKey } from './bridge.js'
+import { claimKey } from './bridge.js'
+import { trustedBridgePolicy, trustedRepositories, normalizeIssueRef } from './trusted-policy.js'
 
 const EVENTS = new Set(['pull_request', 'check_suite'])
 const ID = /^[A-Za-z0-9._:-]{1,128}$/
@@ -30,9 +31,11 @@ function payloadOf(row) {
   return payload
 }
 
-export function createCaptureAdapter({ baseUrl, queryToken, allowedRepositories,
+export function createCaptureAdapter({ baseUrl, queryToken, allowedRepositories, bridgePolicy,
   fetchImpl = globalThis.fetch, timeoutMs = 30000, maxResponseBytes = 4 * 1024 * 1024,
   pageSize = 50, maxPages = 100 }) {
+  const policy = trustedBridgePolicy(bridgePolicy)
+  trustedRepositories(allowedRepositories)
   let origin
   try {
     const url = new URL(baseUrl)
@@ -160,13 +163,13 @@ export function createCaptureAdapter({ baseUrl, queryToken, allowedRepositories,
         'capture PR evidence changed identity')
       const pr = payloadOf(row).pull_request
       if (pr?.number === number && pr.base?.repo?.full_name === repository &&
-        pr.head?.sha === sha && pr.user?.login === AGENT_LOGIN) return row
+        pr.head?.sha === sha && pr.user?.type === 'Bot' && pr.user?.login === policy.agentLogin) return row
     }
     return null
   }
 
   async function claim(body) {
-    requireValue(body && /^([A-Z][A-Z0-9]*)-\d+$/.test(body.issue_ref) && typeof body.head_sha === 'string' && SHA.test(body.head_sha) &&
+    requireValue(body && normalizeIssueRef(body.issue_ref, policy) !== null && typeof body.head_sha === 'string' && SHA.test(body.head_sha) &&
       ['check_suite_completed', 'pull_request_merged'].includes(body.kind), 'capture wake claim is invalid')
     // Re-read source identity before POST so the shared query token cannot be
     // used by this adapter to claim outside its configured repository scope.

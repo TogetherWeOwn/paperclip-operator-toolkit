@@ -9,6 +9,8 @@ const repo = repository.full_name
 const sha = 'a'.repeat(40)
 const otherSha = 'b'.repeat(40)
 const clone = (value) => structuredClone(value)
+// Explicit trusted operator inputs: the app takes no policy defaults.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
 
 function harness(mode = 'full-v1') {
   const h = {
@@ -20,7 +22,8 @@ function harness(mode = 'full-v1') {
     evidence: null, onClaim: null, beforeComment: null, failComment: false,
   }
   h.store = createMemoryStore()
-  const app = createApp({ store: h.store, webhookSecret: 'test', queryToken: 'test' })
+  const app = createApp({ store: h.store, webhookSecret: 'test', queryToken: 'test',
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [repo] })
   const github = { async getPullRequest() { h.githubReads++; return clone(h.pr) } }
   h.board = {
     async getIssue() { return clone(h.issue) },
@@ -66,7 +69,8 @@ function harness(mode = 'full-v1') {
       return result
     },
   }
-  h.consumer = createConsumer({ github, board: h.board, capture: h.capture, allowedRepositories: [repo], mode })
+  h.consumer = createConsumer({ github, board: h.board, capture: h.capture, allowedRepositories: [repo], mode,
+    bridgePolicy: BRIDGE_POLICY })
   h.prEvent = async (id, action, pr = h.pr) => {
     await ingest(app, 'pull_request', id, { action, repository, pull_request: clone(pr) })
     h.evidence = id

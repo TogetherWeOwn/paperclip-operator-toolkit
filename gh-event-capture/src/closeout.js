@@ -1,4 +1,3 @@
-// PR closeout v2: pure exception classifier.
 //
 // No I/O. This module turns ONE authoritative snapshot of a pull request, read
 // from GitHub at flush time, into at most one exception class. Webhook

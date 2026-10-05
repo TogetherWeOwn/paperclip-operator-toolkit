@@ -4,12 +4,12 @@ import { mkdtemp, readFile, writeFile, rm, stat, symlink, readdir, mkdir, chmod 
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { withReceiptStore } from '../src/receipt-store.js'
-import { receiptNamespace } from '../src/receipt-cycle.js'
+import { receiptNamespace } from './trusted-fixtures.mjs'
 import { SWEEP_FILE, freshSweepState, repoSweeps, checkSweepState, loadSweepState, saveSweepState } from '../src/sweep-store.js'
 
-const repo = 'ExampleOrg/example-repo'
+const repo = 'example-owner/project'
 const config = { captureOrigin: 'https://capture.test', boardOrigin: 'http://127.0.0.1:3100',
-  companyId: '12345678-1234-4234-8234-123456789abc', allowedRepositories: [repo], mode: 'products-only-v1' }
+  companyId: '00000000-0000-4000-8000-000000000105', allowedRepositories: [repo], mode: 'products-only-v1' }
 const namespace = receiptNamespace(config)
 async function storage(t) {
   const root = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'sweep-store-'))
@@ -46,7 +46,7 @@ test('absent state is fresh; each origin, company, scope and mode has isolated p
   await saveSweepState({ ...s, state: progress() })
   const before = await readFile(join(s.directory, SWEEP_FILE), 'utf8')
   for (const changed of [{ captureOrigin: 'https://other.test' }, { boardOrigin: 'https://board.test' },
-    { companyId: '00000000-0000-4000-8000-000000000001' }, { allowedRepositories: ['ExampleOrg/example-second'] }, { mode: 'full-v1' }]) {
+    { companyId: '00000000-0000-4000-8000-000000000001' }, { allowedRepositories: ['example-owner/z-other'] }, { mode: 'full-v1' }]) {
     const other = receiptNamespace({ ...config, ...changed })
     assert.notEqual(other, namespace)
     await assert.rejects(loadSweepState({ ...s, namespace: other }), /namespace does not match/)

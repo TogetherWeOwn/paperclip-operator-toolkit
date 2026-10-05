@@ -6,16 +6,18 @@ import { createApp } from '../src/app.js'
 import { createMemoryStore } from '../src/store-memory.js'
 import { seedClaim, ingest, agentPr, repository } from './bridge-fixtures.mjs'
 
+// The evidence repository matches the seeded delivery repository: the claim
+// route requires the stored PR identity to sit inside the delivery's scope.
 const pr = {
   number: 42,
-  html_url: 'https://github.com/ExampleOrg/example-repo/pull/42',
+  html_url: 'https://github.com/example-owner/project/pull/42',
   user: { login: 'togetherweown[bot]' },
   head: { ref: 'task-3552-bridge', sha: 'abc123' },
-  base: { repo: { full_name: 'ExampleOrg/example-repo' } },
+  base: { repo: { full_name: 'example-owner/project' } },
   draft: false,
 }
 const suite = {
-  repository: { full_name: 'ExampleOrg/example-repo' },
+  repository: { full_name: 'example-owner/project' },
   check_suite: { status: 'completed', head_sha: 'abc123', pull_requests: [{ number: 42, head: pr.head }] },
 }
 
@@ -42,7 +44,8 @@ test('work claims distinguish action, PR, delivery, and wake effect at the same 
 })
 
 test('claim route uses the same keys and allows sync, merged update, and merge wake independently', async () => {
-  const app = createApp({ store: createMemoryStore(), webhookSecret: 'test', queryToken: 'test', now: () => 1 })
+  const app = createApp({ store: createMemoryStore(), webhookSecret: 'test', queryToken: 'test', now: () => 1,
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
   async function claim(c) {
     const res = await app(new Request('https://capture.test/bridge/claim', {
       method: 'POST', headers: { authorization: 'Bearer test', 'content-type': 'application/json' },
@@ -94,9 +97,15 @@ function claimRequest(body) {
     method: 'POST', headers: { authorization: 'Bearer test' }, body: JSON.stringify(body),
   })
 }
+// Explicit trusted operator inputs: the app takes no policy defaults, so the
+// suite states the tracker prefix, agent identity and repository scope it
+// exercises, including the fixture repository behind seedClaim.
+const BRIDGE_POLICY = Object.freeze({ trackerPrefix: 'TASK', agentLogin: 'capture-agent[bot]' })
+const ALLOWED_REPOSITORIES = Object.freeze(['ExampleOrg/example-repo', 'example-owner/project'])
 function claimHarness() {
   const store = createMemoryStore()
-  const app = createApp({ store, webhookSecret: 'test', queryToken: 'test' })
+  const app = createApp({ store, webhookSecret: 'test', queryToken: 'test',
+    bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
   return { store, app }
 }
 const mergeClaim = { issue_ref: 'TASK-3552', head_sha: 'abc123', kind: 'pull_request_merged', delivery_id: 'merge' }
@@ -186,7 +195,7 @@ test('claim listing rejects unknown, duplicate, malformed and out-of-range filte
   const seen = []
   const app = createApp({ queryToken: 'test', store: {
     async listBridgeClaims(filters) { seen.push(filters); return [] },
-  } })
+  }, bridgePolicy: BRIDGE_POLICY, allowedRepositories: [...ALLOWED_REPOSITORIES] })
   for (const query of ['event=push', 'limti=5', 'limit=0', 'limit=501', 'limit=9999', 'limit=-1',
     'limit=1.5', 'limit=', 'limit=1&limit=2', 'issue_ref=TASK-1&issue_ref=TASK-2', 'issue_ref=no']) {
     const res = await app(new Request('https://capture.test/bridge/claims?' + query, { headers: { authorization: 'Bearer test' } }))
