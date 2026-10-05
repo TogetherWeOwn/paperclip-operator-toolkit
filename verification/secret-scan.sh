@@ -15,7 +15,7 @@ rc=0
 if git grep -nIE '(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})'; then
   echo "::error::a GitHub-token-shaped string is committed"; rc=1
 fi
-if git grep -nIE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY'; then
+if git grep -nIE 'BEGIN (RSA |EC |OPENSSH |PGP |ENCRYPTED |DSA )?PRIVATE KEY'; then
   echo "::error::private key material is committed"; rc=1
 fi
 # The .gitignore entries other steps and the tools depend on. Losing
