@@ -3337,6 +3337,78 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./ci_dark_steps.sh report || true
 
+  # Upgrade rehearsal offline suite (paperclip-upgrade/). A separate required
+  # job because it needs its own PostgreSQL cluster, the migrations snapshot
+  # and Node 24, none of which the offline-suites job provides. It is wired
+  # into ci-ok below, and ci-ok is the required aggregator, so no ruleset
+  # change is needed for this job to gate merges.
+  upgrade-offline:
+    name: Upgrade offline suite
+    needs: [changes]
+    if: needs.changes.outputs.heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      # Migrations snapshot for the validate_sql base-schema proof. The fork
+      # repo is public, so no credential is needed (and none is provided).
+      - uses: actions/checkout@v4
+        with:
+          repository: TogetherWeOwn/paperclip
+          ref: 742aa11d332611e8aff16bb9c87a21b527a1cab1
+          path: public-schema
+          sparse-checkout: packages/db/src/migrations
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SQL proof dependency
+        run: python3 -m pip install --isolated psycopg2-binary==2.9.10
+
+      # The embedded node resolver in effective-build-check executes under
+      # the installed Node; the capture slice already proved job-pinned
+      # Node 20 is the wrong runtime for ported suites that need newer.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Ephemeral PostgreSQL for the database-backed proof steps (same
+      # throwaway pattern as privilege-suites). Port 5432 is pinned by the
+      # proof scripts' explicit disposable selection; ubuntu-latest runners
+      # host one job each.
+      - name: Start an ephemeral PostgreSQL cluster
+        run: |
+          set -euo pipefail
+          PGBIN=/usr/lib/postgresql/16/bin
+          PGDATA="$RUNNER_TEMP/upgrade-pgdata"
+          rm -rf "$PGDATA"
+          install -d -m 700 "$PGDATA"
+          "$PGBIN/initdb" -D "$PGDATA" -U agent_test --auth-host=trust --auth-local=trust >/dev/null
+          "$PGBIN/pg_ctl" -D "$PGDATA" -w -l "$RUNNER_TEMP/upgrade-pg.log" \
+            -o "-p 5432 -h 127.0.0.1 -k $PGDATA" start >/dev/null
+
+      - name: upgrade rehearsal offline suite
+        env:
+          PAPERCLIP_UPGRADE_MIGRATIONS_DIR: public-schema/packages/db/src/migrations
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: agent_test
+        run: ./paperclip-upgrade/test-offline.sh
+
+      - name: Stop the ephemeral PostgreSQL cluster
+        if: always()
+        run: |
+          set -u
+          PGBIN=/usr/lib/postgresql/16/bin
+          PGDATA="$RUNNER_TEMP/upgrade-pgdata"
+          "$PGBIN/pg_ctl" -D "$PGDATA" -m immediate stop || true
+          rm -rf "$PGDATA"
+
   # TOG-2951. These two steps accounted for ~69.8 minutes of the 102-minute
   # Offline suites runtime. Keeping them in a separate required job lets the
   # remaining offline suites finish in roughly 30 minutes and prevents either
@@ -5008,6 +5080,7 @@ jobs:
       - changes
       - privilege-suites
       - offline-suites
+      - upgrade-offline
       - long-mutation-gates
       - runbook-gates
       - broker-suite
@@ -5040,6 +5113,7 @@ jobs:
       - changes
       - privilege-suites
       - offline-suites
+      - upgrade-offline
       - long-mutation-gates
       - runbook-gates
       - broker-suite
