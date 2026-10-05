@@ -47,6 +47,9 @@ name: CI
 #                                       filed as a decision, and whether the
 #                                       runbook still matches the live owner
 #                                       queue — TOG-434
+#     test_op_approval_executor.sh      approval-queue executor: allowlisted
+#                                       execution, approval re-verification,
+#                                       replay/SHADOW/boundary refusals
 #     test_interaction_envelope_lint.sh whether the envelope you are about to
 #                                       POST says what you think it says: the
 #                                       server strips unknown keys silently and
@@ -3098,6 +3101,12 @@ jobs:
       - name: pacer admission audit suite
         run: python3 -m unittest -v test_pacer_admission_audit
 
+      # Approval-queue executor (Part B3): allowlist-bound execution with
+      # approval re-verification; fully offline on tmp-confined fixtures
+      # with a pinned clock. SHADOW refusal, replay, and boundary cases.
+      - name: operator approval executor suite
+        run: ./test_op_approval_executor.sh
+
       # Fixture-driven through the audit's offline env seams; the live-board
       # section stays out of the ported suite.
       - name: permission-narrowing audit suite
@@ -3188,6 +3197,7 @@ jobs:
           python3 validate_test_profile.py fixture-test-profile.json
           python3 validate_drain.py drain-contracts.json
           python3 check_first_pickup.py fixture-first-pickup-pass.json
+          python3 check_image_provenance.py image-digest-pins.json role-contracts.json isolated-image-profile.json fixture-privileged-private.json fixture-isolated-private.json fixture-isolated-profile.json
           rm -rf "$RUNNER_TEMP/job1" && mkdir -p "$RUNNER_TEMP/job1"
           printf 'synthetic-fixture' > "$RUNNER_TEMP/job1/.garm-job-fixture"
           touch "$RUNNER_TEMP/job1/tmp-residue1" "$RUNNER_TEMP/job1/keep.log"
