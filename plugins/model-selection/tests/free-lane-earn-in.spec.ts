@@ -14,7 +14,7 @@ function model(baseModel: ModelEntry, overrides: Partial<ModelEntry>): ModelEntr
   return { ...baseModel, ...overrides };
 }
 
-type TierKey = "T1" | "T2" | "T3";
+type TierKey = "T0" | "T1" | "T2" | "T3";
 
 function tierScore(overrides: Partial<ModelScore["tiers"]["T1"]> = {}): ModelScore["tiers"]["T1"] {
   return {
@@ -44,6 +44,7 @@ function score(
     aaIndex: null,
     priorP: 0.8,
     tiers: {
+      T0: tierScore(tiers.T0),
       T1: tierScore(tiers.T1),
       T2: tierScore(tiers.T2),
       T3: tierScore(tiers.T3),
@@ -151,7 +152,7 @@ function earnInTrace(decision: { trace: readonly string[] }): boolean {
   return decision.trace.some((line) => line.includes("free-lane earn-in"));
 }
 
-describe("free-lane earn-in helpers", () => {
+describe("free-lane earn-in helpers ( rule b)", () => {
   const models: ModelEntry[] = [freeModel("meta-free"), paidModel("opus-paid")];
   const candidates = [candidate("opus-paid", 2), candidate("meta-free", 0)];
 
@@ -245,9 +246,9 @@ describe("free-lane earn-in helpers", () => {
   });
 });
 
-describe("free-lane earn-in through selectModel", () => {
+describe("free-lane earn-in through selectModel ( rule b)", () => {
   it("2026-09-19 owner rule: an unproven model on a serviceable free lane wins its tier over a proven paid model", () => {
-    // This is the 21:12Z experiment inverted: without earn-in,
+    // This is the 21:12Z /3401 experiment inverted: without earn-in,
     // `applyPickOrdering`'s free-must-be-proven filter demotes meta-free to
     // the tail and the earned opus score wins. Earn-in promotes it back.
     const decision = selectModel({

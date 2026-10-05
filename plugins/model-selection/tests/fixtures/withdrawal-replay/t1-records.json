@@ -1,0 +1,2684 @@
+{
+ "schema": "withdrawal-replay-v1",
+ "source": "T1 plugin-shadow records of paired-decision-v1 joined to the last fleet-quota-balancer.log line at or before each ts; cut 2026-10-04 22:05Z",
+ "population": {
+  "muse_headroom_expires_first": {
+   "t1RecordsOverlappingBridgeLog": 95,
+   "withMetaAccountsAndMuseCandidate": 60
+  },
+  "muse_collective_95": {
+   "t1RecordsOverlappingBridgeLog": 23,
+   "withMetaAccountsAndMuseCandidate": 20
+  },
+  "meta_weekly_below_98": {
+   "t1RecordsOverlappingBridgeLog": 277,
+   "withMetaAccountsAndMuseCandidate": 277
+  },
+  "claude_5h_below_98": {
+   "t1RecordsOverlappingBridgeLog": 237,
+   "withMetaAccountsAndMuseCandidate": 237
+  }
+ },
+ "records": [
+  {
+   "ts": "2026-10-04T00:23:09.600Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 143,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.33
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.433955
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T02:12:48.067Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 150,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.49
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T02:20:01.206Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 101,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.5
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.433955
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T02:30:20.432Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 112,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.51
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.433955
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T02:35:25.107Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 77,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.52
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T02:37:04.649Z",
+   "regime": "muse_headroom_expires_first",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "muse_headroom_expires_first",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 46,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.92
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.52
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.081947
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.274087
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.433955
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.791366
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T14:44:19.004Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 47,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.95
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T14:45:01.173Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 89,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.95
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.327
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T14:49:21.949Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 32,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.95
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T15:12:51.091Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 132,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.96
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T16:19:56.465Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 98,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.96
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.327
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T16:20:10.295Z",
+   "regime": "muse_collective_95",
+   "bridgeCeiling": 0.95,
+   "bridge": {
+    "model": "gpt-6.1-sol",
+    "reason": "muse_collective_95",
+    "meta_combined": null
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 112,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.96
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.74
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.327
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T17:40:32.095Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.958
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 12,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.97
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.75
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.327
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T17:50:27.856Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.958
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 8,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.97
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.75
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.073204
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 2.088657
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.327
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.614392
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T18:50:19.628Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.963
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 120,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "degraded",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.77
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T19:40:28.083Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.968
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 8,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.81
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T19:50:20.038Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.976
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 120,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.82
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T19:57:22.742Z",
+   "regime": "meta_weekly_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "muse-spark-1.3-contributor(xhigh)",
+    "reason": "meta_weekly_below_98",
+    "meta_combined": 0.976
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 63,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.82
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T20:40:32.142Z",
+   "regime": "claude_5h_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "claude-sonnet-5-5",
+    "reason": "claude_5h_below_98",
+    "meta_combined": 0.98
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 11,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.85
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T20:50:36.268Z",
+   "regime": "claude_5h_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "claude-sonnet-5-5",
+    "reason": "claude_5h_below_98",
+    "meta_combined": 0.98
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 16,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.85
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T21:48:46.390Z",
+   "regime": "claude_5h_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "claude-sonnet-5-5",
+    "reason": "claude_5h_below_98",
+    "meta_combined": 0.98
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 25,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.85
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T21:56:51.580Z",
+   "regime": "claude_5h_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "claude-sonnet-5-5",
+    "reason": "claude_5h_below_98",
+    "meta_combined": 0.98
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 30,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.85
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "glm-5.3",
+     "lane": "cliproxy-zai",
+     "tier": "T1",
+     "blended": 2.171403
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  },
+  {
+   "ts": "2026-10-04T22:01:59.507Z",
+   "regime": "claude_5h_below_98",
+   "bridgeCeiling": 0.98,
+   "bridge": {
+    "model": "claude-sonnet-5-5",
+    "reason": "claude_5h_below_98",
+    "meta_combined": 0.981
+   },
+   "selectorPick": "muse-spark-1.3-contributor(xhigh)",
+   "ageSeconds": 96,
+   "metaAccounts": [
+    {
+     "accountKey": "meta-lane-1",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-2",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-3",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-4",
+     "health": "unavailable",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-5",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-6",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    },
+    {
+     "accountKey": "meta-lane-7",
+     "health": "healthy",
+     "serviceable": true,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.85
+    },
+    {
+     "accountKey": "meta-lane-8",
+     "health": "exhausted",
+     "serviceable": false,
+     "weight": 1,
+     "governingWindow": "weekly",
+     "governingResetAt": "2026-10-05T00:00:00.000Z",
+     "utilization": 0.99
+    }
+   ],
+   "candidates": [
+    {
+     "model": "muse-spark-1.3-contributor(xhigh)",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "muse-spark-1.2-contributor",
+     "lane": "cliproxy-meta",
+     "tier": "T1",
+     "blended": 0.065065
+    },
+    {
+     "model": "gpt-6.1-sol",
+     "lane": "cliproxy-codex",
+     "tier": "T1",
+     "blended": 1.904412
+    },
+    {
+     "model": "claude-sonnet-5-5",
+     "lane": "cliproxy-claude",
+     "tier": "T1",
+     "blended": 2.413515
+    }
+   ]
+  }
+ ]
+}

@@ -4,7 +4,7 @@ Chooses the cheapest fully-capable model for each harness run, keyed on a
 **recorded tier judgement** and ordered by a **volume-aware cost term** measured
 from this company's own runs.
 
-Built per the staged rollout plan against the tiered-selection design, ADR-0002/0004/0005/0008/0010 and
+Built per  against the  design, ADR-0002/0004/0005/0008/0010 and
 the Round-4 record.
 
 ---
@@ -93,6 +93,16 @@ threshold, and existing within-tier ordering prefers its near-reset headroom.
 The avoidance margin is the engine default, not a new live setting or a lane's
 optional pace-classification override. Missing/nonfinite scores remain neutral;
 positive exhaustion, outages, tier floors, and quality gates still apply.
+
+## Lane withdrawal ceiling
+
+`pacing.lanes[].withdrawAtUtilization` (optional, off by default) withdraws a lane
+from new dispatch once its combined utilization, the capacity-weighted mean of its
+accounts with unserviceable accounts counted as spent, reaches that fraction. It
+exists because the selector otherwise keeps a lane open while one account can serve,
+which sent every new T1 to a Meta lane with 7 of 8 accounts exhausted. See
+[`docs/lane-withdrawal.md`](docs/lane-withdrawal.md) for the definition, the replay
+evidence and what is not yet known.
 
 ## Two safety properties worth naming
 
@@ -225,11 +235,17 @@ Every model pin is paired with a context-safe runtime envelope:
 - a model at or above the agent-env cap gets no issue-level compaction
   binding and inherits the agent env instead.
 
-The host shallow-spreads issue `adapterConfig` over the agent config, so an issue
-`env` object replaces the agent's `env` object rather than deep-merging it. The
-write helper copies the agent env and any existing issue env before it changes
-only `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Unrelated bindings therefore survive both
-initial pins and idle repins.
+The fork merges the issue `adapterConfig.env` over the agent's `env` per key
+(deployed), so the agent's bindings reach the run through the base
+env. The write helper therefore never copies the agent env into the pin: a pin
+carries only the plugin-owned keys in `PIN_ENV_ALLOWLIST` (the compaction
+ceiling, the fallback provenance stamp and the six model-valued sub-call
+surfaces). Copying the agent's `secret_ref` bindings snapshotted them into
+every pin and failed the run-agent binding check after a reassignment or an
+unbind (). A sub-call surface the assignee binds to a secret vetoes
+the plain pin for that key, so the pin never shadows the agent's live binding.
+Unrelated bindings survive both initial pins and idle repins because they stay
+on the agent record.
 
 ---
 
@@ -238,13 +254,13 @@ initial pins and idle repins.
 **This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T1"`,
 `holdOnUntrustedProfile: true`. Installing it changes no live selection variable.
 
-Per the single-variable rollout constraint, enforcement must not be switched on until Stage 2
+Per the  constraint, enforcement must not be switched on until Stage 2
 (`tier:T1/T2/T3` labels + narrow-slice rollout) is confirmed stable. **Never
 change two live selection variables in one measurement window** — if
 enforcement flips while the Stage 2 slice is still moving, neither result is
 readable.
 
-**Measured Stage 2 state as of 2026-08-31:** the three company
+**Measured Stage 2 state as of 2026-08-31 (review):** the three company
 labels `tier:T1` / `tier:T2` / `tier:T3` exist (created 07:38:46Z), but **0 of
 300 issues carry any tier label** — every issue returns an empty `labels` and
 `labelIds`. Stage 2 is *created*, not *rolled out*. Consequences, both by design:
@@ -285,7 +301,7 @@ tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
 timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
 the comparison stream without restoring the host `tier_dispatcher.py` retired
-by the host dispatcher removal or adding a second actuator.
+by  or adding a second actuator.
 
 Shards stay small on purpose: each hourly shard is rewritten whole on every
 append and capped at `shadowEmit.shardMaxRecords` (default 200, pair-aligned
@@ -331,7 +347,7 @@ Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
 configuring its existing `shadow-decisions` local folder. Preserve the complete
 live config with a parsed read-merge-write and readback; do not use a textual
 `replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
-or secret references. Operator review remains a prerequisite for any live config
+or secret references.  remains a prerequisite for any live config
 write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
 shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
@@ -362,7 +378,7 @@ preserves the complete live `pacing` object (including secret references), and
 adds a provider lane to new rows only when the mapping is unambiguous. It refuses
 to write when fewer than 25 models are lane-bound, a live binding or pacing field
 changes, canonical rows collide, or an enabled model is outside pacing. The last
-guard deliberately blocks enabled Z.ai rows until operations supplies a real Z.ai
+guard deliberately blocks enabled Z.ai rows until  supplies a real Z.ai
 lane; assigning them to OpenCode Go would make capacity attribution false.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
@@ -371,11 +387,11 @@ no label surface anywhere in the plugin SDK, and `labels` is absent from
 `PLUGIN_DATABASE_CORE_READ_TABLES`, so a name→id query is rejected outright by
 `assertAllowedPublicRead` (`plugin-database.ts:157-168`). Leaving it unset is
 supported — the override is still written, just without the label, which is
-additive information rather than a gate (ADR-0008).
+additive information rather than a gate .
 
 ---
 
-## Slices 2–4: scores, cost shadowing, bounded T1 earn-in
+## Slices 2–4 (): scores, cost shadowing, bounded T1 earn-in
 
 Approved decisions A and B, implemented **without changing production
 selection** — objective stays `list-price` and earn-in stays disabled until
@@ -405,7 +421,7 @@ rejection ("rework") signals are folded in as soft evidence (`failModel`/
 via captured `ctx.events` state, never a live `activity_log` read — that table
 is also outside the allowlist.
 
-Alongside `modelScores`, the same job builds the §2.2 card-level
+Alongside `modelScores`, the same job builds the  §2.2 card-level
 acceptance ledger (`buildCardLedger`): each closed card is `pending` (excluded
 from both accepted/rejected) until 14 days past close (`CARD_CENSOR_DAYS`)
 unless it was rejected first, in which case it counts immediately. Both are
@@ -449,8 +465,8 @@ them fail.
 
 ### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
 
-`planEarnIn` / `recordEarnInOutcome` are pure decision functions — §3
-/ decision B — covered by `tests/earnIn.spec.ts` but **not called
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions —  §3
+/  decision B — covered by `tests/earnIn.spec.ts` but **not called
 from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
 these functions, and the shipped config keeps `earnIn.enabled: false`
 regardless. Gates implemented, in order: enabled check → sticky stop state →
@@ -470,12 +486,12 @@ safety/authority violation.
 
 ---
 
-## the pin moves to card creation
+## : the pin moves to card creation
 
 Owner directive (2026-09-16): *"a task should not start until the model router
 has set its model."* The scheduled passes (`*/10`) cannot honor that — their row
 queries **exclude cards with a running run**, and a dispatched card is running
-within ~0.2–0.3 s of creation (see the routing feasibility note),
+within ~0.2–0.3 s of creation (`docs/routing/-issue-created-pin-feasibility.md`),
 so a card's whole first turn happens before any pass can even see it. It lands
 on the agent floor, which is exactly what the directive forbids.
 
@@ -516,7 +532,10 @@ fire-and-forget and loses the same measured dispatch race — the handler runs a
 the passes were structurally missing gets labelled and pinned the moment it is
 idle (between turns), which shrinks the unpinned window from "the whole first
 turn" to "one turn at most" — and is the release mechanism the core-side
-dispatch gate needs once it lands.
+dispatch gate needs once it lands (half 1,
+`docs/upstream/paperclip-dispatch-gate-unpinned-issues.md`: defer
+issue-bound agent-assigned wakes until the card carries an
+`adapterConfig.model` pin).
 
 **Floor-equal residual class:** when the router's pick *is* the floor model,
 the event path (matching pass convention) writes no override — the card already
@@ -570,9 +589,9 @@ scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ---
 
-## the model is decided when the run starts
+## : the model is decided when the run starts
 
-Pins race the run they are meant to steer. With the fork's run-model
+Pins race the run they are meant to steer (). With the fork's run-model
 hook installed, `onResolveRunModel` decides each issue run's model at its start, from
 hot caches only, under a sticky rule, and returns plain plugin-owned env. It is off
 by default (`runResolve.enabled`), needs `selection.mode: "enforce"`, and, once on,
@@ -638,11 +657,15 @@ npm run gate:stage2        # Stage 2 gate as a count; exit 1 = do not enforce
 
 `verify` and `test:mutants` refuse outside `CI=true` unless
 `MUTATION_GATE_LOCAL=1` is deliberately set. Reviewers run only the changed spec
-locally; mutation evidence links the PR's **model-selection suite** job, step
-**Kill named selection mutants** — and only that. Do **not** cite **Offline
-suites**: it runs the repo-level `verification/*-mutation-gate.sh` set and never
-invokes this plugin's gate, so it cannot carry this evidence whichever way it
-lands. The local override runs with Vitest forks and threads defaulting to 2. See
+locally; mutation evidence links the PR's **model-selection mutants (shard i/N)**
+jobs, step **Kill named selection mutants** — and only that. The sweep is split
+into `N` round-robin shards (`MUTATION_SHARD=i/N`) that run as parallel jobs and
+is skipped when the diff cannot affect it (`scripts/mutation-impact.mjs`); the
+required **model-selection suite** job only aggregates that verdict. Do **not**
+cite **Offline suites**: it runs the repo-level `verification/*-mutation-gate.sh`
+set and never invokes this plugin's gate, so it cannot carry this evidence
+whichever way it lands. The local override runs with Vitest forks and threads
+defaulting to 2. See
 [`docs/model-selection-review-runbook.md`](../../docs/model-selection-review-runbook.md).
 
 `gate:stage2` is the shipping constraint expressed as code rather than as a

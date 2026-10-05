@@ -55,7 +55,12 @@ describe("tierImpliedByIndex", () => {
     expect(tierImpliedByIndex(0)).toBeNull();
   });
 
-  it("returns T1 for a very high index", () => {
-    expect(tierImpliedByIndex(100)).toBe("T1");
+  it("46 does not clear T0's cut, 47 does ()", () => {
+    expect(tierImpliedByIndex(46)).toBe("T1");
+    expect(tierImpliedByIndex(47)).toBe("T0");
+  });
+
+  it("returns T0 for a very high index", () => {
+    expect(tierImpliedByIndex(100)).toBe("T0");
   });
 });

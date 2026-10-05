@@ -109,7 +109,7 @@ async function boot(
   const setup = plugin.definition.setup;
   if (!setup) throw new Error("plugin definition has no setup handler");
   await setup(harness.ctx);
-  // reopen: the worker tracks its known companies from
+  //  reopen: the worker tracks its known companies from
   // `onConfigChanged` replays instead of `ctx.companies.list()` — mirror the
   // host's real startup config-delivery sequence (plugin-loader.ts step 5b)
   // so the scheduled jobs under test see this company.
@@ -220,7 +220,7 @@ describe("worker", () => {
       expect(stored.report).toMatchObject({ governsHostStarts: false, claimsReservations: false, selectedOrServedAccount: null });
       if (variant === "lane-snapshot") {
         const rows = stored.report.observationAdapter!.rows;
-        expect(rows).toHaveLength(9);
+        expect(rows).toHaveLength(2 * 2 + 3 + 2 + 8 * 2);
         expect(rows.filter(r => r.laneId === "claude-lane-1").map(r => r.state)).toEqual(["known", "known"]);
         expect(rows.filter(r => r.laneId !== "claude-lane-1").every(r => r.reasons.includes("lane-absent-from-snapshot"))).toBe(true);
         expect(stored.report.evaluations[0]!.bindings.every(b => b.proposal === "unknown" && b.allowedStarts === null)).toBe(true);
@@ -439,7 +439,10 @@ describe("worker", () => {
     });
   });
 
-  it("pins a narrow model with merged env and preserves unrelated labels", async () => {
+  // the pin carries only plugin-owned keys. KEEP_ME and the
+  // agent's own ceiling stay on the agent record — the run resolves them
+  // from the base env under the per-key merge.
+  it("pins a narrow model with plugin-only env and preserves unrelated labels", async () => {
     const narrowModels = MODELS.map((model) =>
       model.id === "claude-opus-5" ? { ...model, contextWindow: 200_000 } : model,
     );
@@ -471,10 +474,9 @@ describe("worker", () => {
       adapterConfig: {
         model: "claude-opus-5",
         env: {
-          KEEP_ME: { type: "plain", value: "yes" },
           CLAUDE_CODE_MAX_CONTEXT_TOKENS: { type: "plain", value: "200000" },
           // T3 pick on the fixtures roster is haiku, so the cheap keys land there,
-          // not on the T1 pin.
+          // not on the T1 pin ().
           ...subCallPins("claude-opus-5", "claude-haiku-4-5-20251001"),
         },
       },
@@ -921,7 +923,7 @@ describe("worker", () => {
   // muse-spark-1.3-contributor. These two drive the whole refreshScores path,
   // because the guard lives in the worker's row mapping and a unit test of the
   // predicate alone would still pass if the call site were removed.
-  describe(": provider-misattributed closing-run costs", () => {
+  describe("provider-misattributed closing-run costs", () => {
     const MUSE = "muse-spark-1.3-contributor";
     const rosterWithMuse = [
       ...MODELS,
@@ -1070,7 +1072,7 @@ describe("worker", () => {
       expect(ledger?.["lane-a"]?.error ?? null).toBeNull();
     });
 
-    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N", async () => {
+    it("resolves lane N's secret at the same array-index path the host's config extractor binds for lane N ()", async () => {
       const multiLaneConfig = baseConfig({
         pacing: {
           mode: "enforce",
@@ -1448,7 +1450,7 @@ describe("worker", () => {
       expect(records[0].ts).toBe(records[1].ts);
     });
 
-    it(": retention deletes whole old shards past retentionShards, newest pair intact", async () => {
+    it("retention deletes whole old shards past retentionShards, newest pair intact", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       // Seed two shards from older hours directly — the emitter never writes
       // outside the current hour, so retention is the only path that removes
@@ -1467,7 +1469,7 @@ describe("worker", () => {
       expect(records.map((record) => record.writer)).toEqual(["host", "plugin-shadow"]);
     });
 
-    it(": retention never touches the legacy single-file decisions.jsonl", async () => {
+    it("retention never touches the legacy single-file decisions.jsonl", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100, retentionShards: 1 } }));
       await h.ctx.localFolders.writeTextAtomic(
         COMPANY, LOCAL_FOLDER_KEYS.shadowDecisions, "decisions.jsonl", '{"writer":"host","legacy":true}\n',
@@ -1478,7 +1480,7 @@ describe("worker", () => {
       expect(legacy).toContain('"legacy":true');
     });
 
-    it(": a write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
+    it("a write failure still swallows — advise() returns, failure logged, retention never runs", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       const originalWrite = h.ctx.localFolders.writeTextAtomic.bind(h.ctx.localFolders);
       h.ctx.localFolders.writeTextAtomic = async () => {
@@ -1492,7 +1494,7 @@ describe("worker", () => {
       h.ctx.localFolders.writeTextAtomic = originalWrite;
     });
 
-    it(": a transient read failure after existing records aborts the emit instead of truncating history", async () => {
+    it("a transient read failure after existing records aborts the emit instead of truncating history", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
       await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE }, runCtx);
@@ -1519,7 +1521,7 @@ describe("worker", () => {
       ).toBe(true);
     });
 
-    it(": two overlapping emits both land instead of collapsing to one record", async () => {
+    it("two overlapping emits both land instead of collapsing to one record", async () => {
       const h = await boot(baseConfig({ shadowEmit: { enabled: true, shardMaxRecords: 100 } }));
 
       await Promise.all([

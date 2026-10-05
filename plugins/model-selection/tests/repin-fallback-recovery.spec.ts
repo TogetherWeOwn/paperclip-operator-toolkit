@@ -162,7 +162,11 @@ for (const path of ["scheduled", "reactive"] as const) {
       expect(repins).toHaveLength(1);
       expect(repins[0]?.message).toContain("serviceable again");
       const after = await harness.ctx.issues.get(ISSUE, COMPANY);
-      expect(after?.assigneeAdapterOverrides).toMatchObject({ adapterConfig: { env: { KEEP: "binding" } } });
+      // the pin carries only plugin-owned keys. KEEP stays on the
+      // agent record — the run resolves it from the base env under the
+      // per-key merge — so it must NOT appear in the pin.
+      expect((after?.assigneeAdapterOverrides as { adapterConfig: { env?: Record<string, unknown> } })?.adapterConfig.env)
+        .not.toHaveProperty("KEEP");
     });
 
     it("holds the fallback while every normal lane is still down", async () => {

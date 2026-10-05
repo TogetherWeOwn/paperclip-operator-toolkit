@@ -1,4 +1,11 @@
-import { COST_BAND_MULTIPLIER, EXPLORE_FRACTION, FREE_MUST_BE_PROVEN_USD, type Tier } from "../constants.js";
+import {
+  COST_BAND_MULTIPLIER,
+  EXPLORE_FRACTION,
+  FREE_MUST_BE_PROVEN_USD,
+  IMPLICIT_TIER_CEILING,
+  TIER_ORDER,
+  type Tier,
+} from "../constants.js";
 import { blendedListPrice, hashUnitInterval, laneEffectiveUtilization, type LaneLedger } from "./pacing.js";
 import type { Candidate, ModelEntry, ModelScore } from "./types.js";
 
@@ -19,7 +26,7 @@ function provenFor(
 }
 
 /**
- * Port of `tier_dispatcher.py` `pick()`'s post-capability-gate
+ *  port of `tier_dispatcher.py` `pick()`'s post-capability-gate
  * ordering: the 2026-09-06 14:2xZ "cheapest capable model" rule, its
  * 2026-09-06 16:2xZ free/stealth-must-be-proven carve-out, its 2026-09-05
  * least-utilized-lane spread tiebreak within a 20% cost band, and its 10%
@@ -44,7 +51,7 @@ export function applyPickOrdering(
   requiredTier: Tier,
   issueId: string,
   /**
-   * Port of `tier_dispatcher.py` `pick(..., explore=False)`:
+   *  port of `tier_dispatcher.py` `pick(..., explore=False)`:
    * `label_only_pass`/`repin_pass`/`balance_pass`'s pinned-branch call sites
    * all suppress the explore roll (they are re-affirming or replacing an
    * already-chosen pin, not seeding new evidence). Defaults to `true` so
@@ -73,10 +80,19 @@ export function applyPickOrdering(
   // T1 — an unproven candidate never earns judgement work. Deterministic per
   // issue+tier, not `Math.random()`: a repeated advise()/apply() pair on the
   // same issue must not flip which candidate "won" the explore roll.
-  const unproven = candidates.filter((candidate) => !provenOf(candidate));
+  //
+  // "Never T1" generalises to "never the implicit ceiling or above".
+  // T0 is operator-recorded and explicit-opt-in only, so explore must neither
+  // fire for a T0 card nor ever hand a T0 row an unproven roll — checked on the
+  // card's tier AND on each candidate's own tier, because a wake-floored
+  // decision can walk the ladder up to a T0 rung from a lower required tier.
+  const ceilingRank = TIER_ORDER.indexOf(IMPLICIT_TIER_CEILING);
+  const unproven = candidates.filter(
+    (candidate) => !provenOf(candidate) && TIER_ORDER.indexOf(candidate.tier) <= ceilingRank,
+  );
   if (
     allowExplore &&
-    requiredTier !== "T1" &&
+    TIER_ORDER.indexOf(requiredTier) < ceilingRank &&
     unproven.length > 0 &&
     hashUnitInterval(`explore:${requiredTier}:${issueId}`) < EXPLORE_FRACTION
   ) {

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   ANCILLARY_MODEL_ENV_KEYS,
   CONTEXT_LIMIT_ENV_KEY,
+  PIN_ENV_ALLOWLIST,
+  PIN_LANE_MODEL_ENV_KEYS,
   estimateIssueContext,
   modelOverrideForContext,
   PIN_PROVENANCE_ENV_KEY,
@@ -13,7 +15,7 @@ const narrowModel = { id: "glm-5.3", contextWindow: 200_000 };
 const fleetModel = { id: "claude-opus-5", contextWindow: 1_000_000 };
 
 /**
- * The six model-valued sub-call surfaces every pin now carries:
+ * The six model-valued sub-call surfaces every pin now carries ():
  * the four main-lane keys at the pinned model, the two haiku-class keys at
  * the resolved cheap pick (which defaults to the pin — the same fallback
  * `modelOverrideForContext` applies when no healthy T3 model exists).
@@ -32,6 +34,9 @@ const subCalls = (modelId: string, cheapModelId: string = modelId) => ({
 });
 
 describe("context fit", () => {
+  // The pin carries only plugin-owned keys. The agent's bindings
+  // (KEEP_AGENT, its own ceiling) stay on the agent record and reach the run
+  // through the base env under the per-key merge — they are never copied here.
   it("stamps the floored compaction ceiling for a narrow model and drops a stale override key", () => {
     const patch = modelOverrideForContext({
       model: narrowModel,
@@ -52,7 +57,6 @@ describe("context fit", () => {
         adapterConfig: {
           model: "glm-5.3",
           env: {
-            KEEP_AGENT: { type: "plain", value: "agent" },
             [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "200000" },
             ...subCalls("glm-5.3"),
           },
@@ -77,11 +81,11 @@ describe("context fit", () => {
     });
 
     // The stale override key is dropped; the inherited ceiling is cleared
-    // because the wide model no longer needs it.
-    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      KEEP_AGENT: { type: "plain", value: "agent" },
-      ...subCalls("claude-opus-5"),
-    });
+    // because the wide model no longer needs it. The agent's own keys are
+    // never copied into the pin ().
+    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual(
+      subCalls("claude-opus-5"),
+    );
   });
 
   it("writes the sub-call pins when clearing the sole inherited compaction ceiling", () => {
@@ -144,10 +148,11 @@ describe("context fit", () => {
       if (strandedKey === CONTEXT_LIMIT_ENV_KEY) continue;
       expect(env).not.toHaveProperty(strandedKey);
     }
-    // ...and the plugin still does its own job: B's bindings survive, the plugin
-    // key still carries, and the narrow model still gets its compaction ceiling.
+    // ...and the plugin still does its own job: the plugin key still carries
+    // and the narrow model still gets its compaction ceiling. : B's
+    // own bindings are NOT copied into the pin — they reach the run through
+    // the base env under the per-key merge.
     expect(env).toEqual({
-      B_ONLY: { type: "plain", value: "b" },
       [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "200000" },
       ...subCalls("glm-5.3"),
     });
@@ -172,7 +177,10 @@ describe("context fit", () => {
   });
 
   // Unbinding a secret on the agent record must actually take effect: the pin's
-  // copy of the dead ref must not resurrect it on the next pass.
+  // copy of the dead ref must not resurrect it on the next pass. :
+  // the agent's live bindings are never copied into the pin at all — the run
+  // reads them from the base env — so neither the dead ref NOR the live one
+  // appears here.
   it("lets an unbound agent secret disappear instead of resupplying it from the pin", () => {
     const patch = modelOverrideForContext({
       model: narrowModel,
@@ -184,7 +192,6 @@ describe("context fit", () => {
     });
 
     expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      STILL_BOUND: { type: "secret_ref", key: "still_bound" },
       [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "200000" },
       ...subCalls("glm-5.3"),
     });
@@ -230,6 +237,67 @@ describe("context fit", () => {
       history: "run-found",
       fleetCeilingTokens: 200_000,
     })).toEqual({ tokens: 200_000, source: "fleet-ceiling-fallback" });
+  });
+});
+
+/**
+ * The pin env allowlist: every key a pin may carry once the fork
+ * merges override env per key (). Written env is checked against
+ * this list, and the list itself is checked against the production write
+ * constants — so a new written key that forgets the allowlist goes red here,
+ * not silent into production.
+ */
+describe(" pin env allowlist", () => {
+  it("holds exactly the compaction stamp, the provenance stamp, and the six model-valued sub-call surfaces", () => {
+    // Spelled LITERALLY, not derived: adding a written key must turn this red.
+    const expected = [
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+      "MODEL_SELECTION_PIN_PROVENANCE",
+      "PAPERCLIP_ASSIGNED_MODEL",
+      "CLAUDE_CODE_SUBAGENT_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ];
+    expect([...PIN_ENV_ALLOWLIST].sort()).toEqual([...expected].sort());
+    expect([...PIN_ENV_ALLOWLIST]).toEqual([
+      CONTEXT_LIMIT_ENV_KEY,
+      PIN_PROVENANCE_ENV_KEY,
+      ...PIN_LANE_MODEL_ENV_KEYS,
+      ...ANCILLARY_MODEL_ENV_KEYS,
+    ]);
+  });
+
+  it("writes no key outside the allowlist, fed an agent env full of secrets and arbitrary keys", () => {
+    const patch = modelOverrideForContext({
+      model: narrowModel,
+      agentEnvContextTokens: 1_000_000,
+      compactionRatio: 0.75,
+      agentEnv: {
+        GH_APP_PRIVATE_KEY: { type: "secret_ref", secretId: "gh-key", version: "latest" },
+        GH_APP_REPOS: { type: "plain", value: "paperclip-ops-tooling" },
+        PAPERCLIP_API_KEY: { type: "user_secret_ref", key: "paperclip_api_key", version: "latest" },
+        SOME_BARE_STRING: "kept-verbatim",
+        RANDOM_PLAIN: { type: "plain", value: "nope" },
+      },
+      existingOverrideEnv: {
+        STALE_SECRET: { type: "secret_ref", secretId: "stale", version: "latest" },
+        STALE_PLAIN: { type: "plain", value: "stale" },
+      },
+    });
+
+    const env = patch.assigneeAdapterOverrides.adapterConfig.env ?? {};
+    const allowed = new Set(PIN_ENV_ALLOWLIST);
+    for (const key of Object.keys(env)) {
+      expect(allowed.has(key), key).toBe(true);
+    }
+    // And positively: nothing the agent carried leaked in.
+    for (const key of ["GH_APP_PRIVATE_KEY", "GH_APP_REPOS", "PAPERCLIP_API_KEY", "SOME_BARE_STRING", "RANDOM_PLAIN", "STALE_SECRET", "STALE_PLAIN"]) {
+      expect(env, key).not.toHaveProperty(key);
+    }
+    // The pin still does its own job.
+    expect(env[CONTEXT_LIMIT_ENV_KEY]).toEqual({ type: "plain", value: "200000" });
   });
 });
 
@@ -335,11 +403,11 @@ describe(" agent-env cap split", () => {
 });
 
 /**
- * + . The repin must evacuate the haiku-class sub-call
+ *  +. The repin must evacuate the haiku-class sub-call
  * surfaces along with the main model, and it must do so WITHOUT dropping
  * anything else off the agent's env — the host replaces the whole env object,
  * so a two-key write is a fleet-wide secret wipe for the duration of the run.
- * extends the evacuation to the four main-lane surfaces the 00:0xZ
+ *  extends the evacuation to the four main-lane surfaces the 00:0xZ
  * sweep found frozen on the exhausted Codex lane across 118 open cards.
  */
 describe("sub-call surface pins", () => {
@@ -381,7 +449,12 @@ describe("sub-call surface pins", () => {
     });
   });
 
-  it("keeps every other agent env binding, including secrets, across the write", () => {
+  // The pin carries ONLY plugin-owned keys: no agent binding —
+  // secret or plain, relevant or not — is ever copied in. Fed an agent env
+  // holding secret_refs, user_secret_refs, plain values and bare strings, the
+  // written env holds nothing outside the allowlist. The run reads the
+  // agent's bindings from the base env under the per-key merge.
+  it("copies no agent env binding, including secrets, into the pin", () => {
     const patch = modelOverrideForContext({
       model: narrowModel,
       agentEnvContextTokens: 1_000_000,
@@ -399,17 +472,20 @@ describe("sub-call surface pins", () => {
       existingOverrideEnv: { STALE_ISSUE: { type: "plain", value: "issue" } },
     });
 
-    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      GH_APP_PRIVATE_KEY: { type: "secret_ref", key: "gh_app_private_key" },
-      GH_APP_REPOS: { type: "plain", value: "paperclip-ops-tooling" },
-      PAPERCLIP_API_KEY: { type: "user_secret_ref", key: "paperclip_api_key" },
-      SOME_BARE_STRING: "kept-verbatim",
+    const env = patch.assigneeAdapterOverrides.adapterConfig.env ?? {};
+    // The two exhausted plain values are re-derived onto the pin (plain agent
+    // values are this plugin's routing surface — ); the bindings that
+    // are NOT this plugin's surface never enter the pin.
+    expect(env).toEqual({
       [CONTEXT_LIMIT_ENV_KEY]: { type: "plain", value: "200000" },
       ...subCalls("glm-5.3"),
     });
+    for (const key of ["GH_APP_PRIVATE_KEY", "GH_APP_REPOS", "PAPERCLIP_API_KEY", "SOME_BARE_STRING", "STALE_ISSUE"]) {
+      expect(env, key).not.toHaveProperty(key);
+    }
   });
 
-  it("adds both surfaces to an agent that carried neither", () => {
+  it("writes only the pin's own surfaces for an agent that carried unrelated keys", () => {
     const patch = modelOverrideForContext({
       model: fleetModel,
       agentEnvContextTokens: 1_000_000,
@@ -417,10 +493,10 @@ describe("sub-call surface pins", () => {
       agentEnv: { UNRELATED: { type: "plain", value: "x" } },
     });
 
-    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      UNRELATED: { type: "plain", value: "x" },
-      ...subCalls("claude-opus-5"),
-    });
+    // UNRELATED stays on the agent record; the pin carries the six surfaces.
+    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual(
+      subCalls("claude-opus-5"),
+    );
   });
 
   it("writes the surfaces for a known-but-empty agent env", () => {
@@ -466,39 +542,52 @@ describe("sub-call surface pins", () => {
     }
   });
 
-  it("never overwrites a secret-bound sub-call surface", () => {
-    const secretBound = { type: "secret_ref", key: "small_fast_model" };
+  // The pin no longer carries the agent's values, so a secret-bound
+  // agent surface vetoes the plain pin for that key: writing one would shadow
+  // the agent's live binding for the run under the per-key merge. The key is
+  // left OUT of the pin (not copied in) — the run resolves it from the base
+  // env. The other surfaces are still pinned.
+  it("leaves a secret-bound agent surface out of the pin instead of shadowing it", () => {
     const patch = modelOverrideForContext({
       model: fleetModel,
       agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentEnv: {
-        ANTHROPIC_SMALL_FAST_MODEL: secretBound,
+        ANTHROPIC_SMALL_FAST_MODEL: { type: "secret_ref", key: "small_fast_model" },
         ANTHROPIC_DEFAULT_HAIKU_MODEL: exhaustedLane,
       },
     });
 
-    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      ...subCalls("claude-opus-5"),
-      ANTHROPIC_SMALL_FAST_MODEL: secretBound,
+    const env = patch.assigneeAdapterOverrides.adapterConfig.env ?? {};
+    expect(env).not.toHaveProperty("ANTHROPIC_SMALL_FAST_MODEL");
+    expect(env).toEqual({
+      PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: "claude-opus-5" },
+      CLAUDE_CODE_SUBAGENT_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_OPUS_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_SONNET_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: "claude-opus-5" },
     });
   });
 
-  it("never overwrites a secret-bound main-lane surface either", () => {
-    const secretBound = { type: "secret_ref", key: "subagent_model" };
+  it("leaves a secret-bound main-lane agent surface out of the pin too", () => {
     const patch = modelOverrideForContext({
       model: fleetModel,
       agentEnvContextTokens: 1_000_000,
       compactionRatio: 0.75,
       agentEnv: {
-        CLAUDE_CODE_SUBAGENT_MODEL: secretBound,
+        CLAUDE_CODE_SUBAGENT_MODEL: { type: "secret_ref", key: "subagent_model" },
         PAPERCLIP_ASSIGNED_MODEL: exhaustedLane,
       },
     });
 
-    expect(patch.assigneeAdapterOverrides.adapterConfig.env).toEqual({
-      ...subCalls("claude-opus-5"),
-      CLAUDE_CODE_SUBAGENT_MODEL: secretBound,
+    const env = patch.assigneeAdapterOverrides.adapterConfig.env ?? {};
+    expect(env).not.toHaveProperty("CLAUDE_CODE_SUBAGENT_MODEL");
+    expect(env).toEqual({
+      PAPERCLIP_ASSIGNED_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_OPUS_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_SONNET_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_SMALL_FAST_MODEL: { type: "plain", value: "claude-opus-5" },
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: { type: "plain", value: "claude-opus-5" },
     });
   });
 
@@ -553,7 +642,7 @@ describe("sub-call surface pins", () => {
     }
   });
 
-  // (c). The unknown-assignee branch preserves the snapshot because
+  //  (c). The unknown-assignee branch preserves the snapshot because
   // it cannot rebuild from an unseen base — but the model-owned surfaces are
   // still re-derived against the NEW model. Here the old pin was written for
   // the wide model (no ceiling) pointing sub-calls at the dead lane; the
@@ -585,7 +674,7 @@ describe("sub-call surface pins", () => {
     });
   });
 
-  // (c). The ceiling half of the same rule: the old pin's ceiling
+  //  (c). The ceiling half of the same rule: the old pin's ceiling
   // was derived from the narrow model, the repin moves to the wide one, and
   // the stale ceiling must be cleared, not carried. The snapshot never had
   // sub-call surfaces, so none are invented — the "does not invent" test
@@ -608,7 +697,7 @@ describe("sub-call surface pins", () => {
     expect(patch.assigneeAdapterOverrides.adapterConfig.env).not.toHaveProperty(CONTEXT_LIMIT_ENV_KEY);
   });
 
-  // (c). Unknown-assignee must not INVENT sub-call surfaces the
+  //  (c). Unknown-assignee must not INVENT sub-call surfaces the
   // snapshot never had — a card pinned before  (or by another
   // writer) gains them only through the known-assignee rebuild, never by
   // snapshot surgery.
@@ -629,7 +718,7 @@ describe("sub-call surface pins", () => {
     }
   });
 
-  // (c). The secret-binding rule survives the unknown branch: a
+  //  (c). The secret-binding rule survives the unknown branch: a
   // secret-bound sub-call surface in the snapshot is never overwritten.
   it("never overwrites a secret-bound sub-call surface from an unknown-assignee snapshot", () => {
     const secretBound = { type: "secret_ref", key: "small_fast_model" };
@@ -668,7 +757,9 @@ describe(" fallback pin provenance stamp", () => {
     expect(env[stampKey]).toEqual({ type: "plain", value: JSON.stringify(stamp) });
     expect(PIN_PROVENANCE_ENV_KEY).toBe(stampKey);
     expect(readPinProvenance(env)).toEqual(stamp);
-    expect(env.KEEP).toEqual({ type: "secret_ref", key: "keep" });
+    // the pin carries the stamp but NOT the agent's binding — KEEP
+    // stays on the agent record and reaches the run through the base env.
+    expect(env).not.toHaveProperty("KEEP");
   });
 
   it("drops an earlier pin's stamp when this pin carries none", () => {

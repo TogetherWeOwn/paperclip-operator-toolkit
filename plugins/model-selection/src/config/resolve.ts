@@ -16,8 +16,10 @@ import {
   LANE_ID_OPENCODE_GO,
   LANE_ID_ZAI,
   PACING_MODES,
+  TIER_LABEL_PREFIX,
   TIER_ORDER,
   TIERS,
+  isImplicitlyAdmittedTier,
   type PacingMode,
   type Tier,
 } from "../constants.js";
@@ -26,7 +28,7 @@ import { resolveFormatCompatibility, type FormatCompatibility } from "../format-
 import type { ModelEntry } from "../engine/types.js";
 import type { LanePaceDefinition, PaceWindowDefinition, PacePolicy } from "../lane-capacity/pace.js";
 
-/** Mirrors paperclip-model-router's `SecretRef`. */
+/** Mirrors paperclip-model-router's `SecretRef` (). */
 export interface SecretRef {
   type: "secret_ref";
   secretId: string;
@@ -42,8 +44,13 @@ export interface LaneSourceConfig {
   maxResponseBytes: number;
   lane: LanePaceDefinition;
   policy: PacePolicy;
-  /** resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
+  /** : resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
+  /**
+   * Combined utilization (0-1] at or above which the lane is
+   * withdrawn from NEW dispatch. Omitted (the default) never withdraws.
+   */
+  withdrawAtUtilization?: number;
 }
 
 export type SelectionObjective = "list-price" | "cost-per-accepted-card";
@@ -63,7 +70,7 @@ export interface ClassificationConfig {
   t3ConfidenceFloor: number;
   t2ConfidenceFloor: number;
   batchSize: number;
-  /** re-examine a `tier:*` label this plugin did not write. Defaults on. */
+  /** : re-examine a `tier:*` label this plugin did not write. Defaults on. */
   reclassifyForeignLabels: boolean;
 }
 
@@ -74,13 +81,13 @@ export interface ResolvedConfig {
     defaultTier: Tier;
     stickyModelWithinIssue: boolean;
     holdOnUntrustedProfile: boolean;
-    /** exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
+    /** : exclude a model whose lane availability is UNKNOWN, rather than recording it and proceeding. */
     holdOnUnknownAvailability: boolean;
     objective: SelectionObjective;
     fleetContextCeilingTokens: number;
     /** Operator-verified local run-log root; absent means honest fleet fallback. */
     contextRunLogRoot: string | null;
-    /** agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
+    /** : agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
     agentEnvContextTokens: number;
     compactionRatio: number;
   };
@@ -101,11 +108,11 @@ export interface ResolvedConfig {
     slotFloorFraction: number;
     operatorOverrideTtlSeconds: number;
     idleRepinHysteresisSeconds: number;
-    /** port of `AVOID`/`AVOID_LANE`. */
-    avoid: { defaultThreshold: number; perLane: Record<string, number> };
-    /** port of `LANE_CAP_PER_ACCOUNT`. */
+    /**  port of `AVOID`/`AVOID_LANE`. */
+    avoid: { defaultThreshold: number; perLane: Record<string, number>; withdrawAt?: Record<string, number> };
+    /**  port of `LANE_CAP_PER_ACCOUNT`. */
     laneCapPerAccount: Record<string, number>;
-    /** port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
+    /**  port of `lane_5h()`'s hardcoded 5h JSON key, and its >= 0.5 new-admission stop. */
     fiveHourWindowName: string;
     /** Named weekly allowance window reported in the shadow stream's per-lane snapshot (reporting only). */
     weeklyWindowName: string;
@@ -133,7 +140,7 @@ export interface ResolvedConfig {
   formatCompatibility?: FormatCompatibility;
   accountAdmissionShadow: { enabled: boolean };
   aaSync: { enabled: boolean };
-  /** P2: default-off free-list sync. Absent/disabled = legacy behavior exactly. */
+  /**  P2: default-off free-list sync. Absent/disabled = legacy behavior exactly. */
   aaFreeSync: {
     enabled: boolean;
     apiKeySecretRef: SecretRef | null;
@@ -147,25 +154,25 @@ export interface ResolvedConfig {
     }>;
     maxSnapshotAgeHours: number;
   };
-  /** default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
+  /** : default-off accepted-work posterior producer. Absent/disabled = no overlay built. */
   acceptedWork: { enabled: boolean };
-  /** models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
+  /**  models.dev price reconciliation kill switch. Report-only by construction; there is no apply mode. */
   priceSync: { enabled: boolean };
-  /** absorption of the standalone `dispatch` plugin. */
+  /**  absorption of the standalone `dispatch` plugin (/). */
   dispatch: {
     wakeEnabled: boolean;
     idleMinutes: number;
     maxWakesPerFiring: number;
     focusProjectIds: readonly string[];
   };
-  /** See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
+  /**. See `select.ts`'s `SelectionConfig.wakeScopedFloor` for the mechanism. */
   wakeScopedFloor: {
     enabled: boolean;
     wakeReasons: readonly string[];
     floorTier: Tier;
   };
   /**
-   * The run-scoped decision flag. Off (default):
+   *  ( §4.3). The run-scoped decision flag. Off (default):
    * `onResolveRunModel` answers `keep` and every legacy pin path runs exactly as
    * before. On: the handler decides each run's model from hot caches and the
    * creation/assignment pins, `labelOnlyPass`/`balancePass` pin writes and the
@@ -332,6 +339,11 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             requestTimeoutMs: num(rawLane.requestTimeoutMs, 5000),
             maxResponseBytes: num(rawLane.maxResponseBytes, 262_144),
             apiKeySecretRef: secretRef(rawLane.apiKeySecretRef),
+            // Kept as written, finite numbers only: `validateConfig` reports an
+            // out-of-range ceiling rather than this dropping it silently.
+            ...(typeof rawLane.withdrawAtUtilization === "number" && Number.isFinite(rawLane.withdrawAtUtilization)
+              ? { withdrawAtUtilization: rawLane.withdrawAtUtilization }
+              : {}),
             lane: {
               laneId: rawLane.laneId,
               free: bool(rawLane.free, false),
@@ -407,14 +419,21 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         const avoid = record(pacing.avoid);
         const rawPerLane = record(avoid.perLane);
         const keys = Object.keys(rawPerLane);
+        // the withdrawal ceilings live on the lane entries, so the
+        // key is only present when a lane has one and every existing config
+        // resolves to exactly the shape it always did.
+        const withdrawAt = Object.fromEntries(
+          lanes.flatMap((lane) => (lane.withdrawAtUtilization === undefined ? [] : [[lane.laneId, lane.withdrawAtUtilization] as const])),
+        );
+        const withdrawal = Object.keys(withdrawAt).length > 0 ? { withdrawAt } : {};
         if (keys.length === 0) {
-          return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane: { ...DEFAULT_AVOID_PER_LANE } };
+          return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane: { ...DEFAULT_AVOID_PER_LANE }, ...withdrawal };
         }
         const perLane: Record<string, number> = {};
         for (const [laneId, threshold] of Object.entries(rawPerLane)) {
           if (typeof threshold === "number" && Number.isFinite(threshold)) perLane[laneId] = threshold;
         }
-        return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane };
+        return { defaultThreshold: num(avoid.defaultThreshold, 0.8), perLane, ...withdrawal };
       })(),
       laneCapPerAccount: (() => {
         const raw = record(pacing.laneCapPerAccount);
@@ -537,7 +556,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
 }
 
 /**
- * enforce preflight: refuse an enforce request whose roster has an
+ *  enforce preflight: refuse an enforce request whose roster has an
  * ENABLED lane missing its pacing.lanes entry. Enforce pins cards onto the
  * lane's models, and with no pacing.lanes entry `laneVerdictFor` degrades the
  * lane to "unpolled" forever (fail-neutral by design) — the pin would run
@@ -587,7 +606,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
     if (model.costPerMTokCacheRead === 0 && model.costPerMTokIn > 0) {
       // A zero cache-read rate makes the largest cost line free and would order
-      // candidates on the wrong term entirely (ADR-0002).
+      // candidates on the wrong term entirely .
       warnings.push(
         `${model.id} has costPerMTokCacheRead 0 — cache read is the largest cost line; a zero rate hides it`,
       );
@@ -621,7 +640,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
   }
-  // enforce preflight: selection.mode=enforce pins cards onto a
+  //  enforce preflight: selection.mode=enforce pins cards onto a
   // tier's models, so a tier with zero enabled rows must refuse at
   // config-resolve time — enforce can never pin onto an unserved tier.
   // Advise mode never writes a pin, so it keeps the historical warning only.
@@ -630,22 +649,33 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   const emptyTiers = TIERS.filter(
     (t) => !config.models.some((model) => model.enabled && model.tier === t),
   );
+  // T0 is explicit-only, so an empty T0 cannot make enforce pin a
+  // card onto an unserved tier — only a card that opted in with `tier:T0` waits
+  // (it holds at its floor). It stays a warning, which also lets the build ship
+  // before the roster gains its first T0 row; the migration cannot precede the
+  // build, because the previous build rejects `tier: "T0"` as an unknown tier.
   if (config.selection.enabled && config.selection.mode === "enforce") {
     for (const t of emptyTiers) {
-      errors.push(
-        `selection.mode is enforce but tier ${t} has no enabled models; enforce cannot pin onto an unserved tier`,
-      );
+      if (isImplicitlyAdmittedTier(t)) {
+        errors.push(
+          `selection.mode is enforce but tier ${t} has no enabled models; enforce cannot pin onto an unserved tier`,
+        );
+      } else {
+        warnings.push(
+          `no enabled model at tier ${t}; cards that opt in with ${TIER_LABEL_PREFIX}${t} hold at their floor until one is enabled`,
+        );
+      }
     }
   } else {
     for (const t of emptyTiers) {
       warnings.push(`no enabled model at tier ${t}`);
     }
   }
-  // enforce preflight: fail closed when an enabled lane has no
+  //  enforce preflight: fail closed when an enabled lane has no
   // pacing.lanes entry — see `unwiredEnforceLaneErrors` for the exact gate.
   errors.push(...unwiredEnforceLaneErrors(config));
   if (config.selection.mode === "enforce" && Object.keys(config.tierLabelIds).length === 0) {
-    // Not an error: the label is additive (ADR-0008). But an operator who meant
+    // Not an error: the label is additive. But an operator who meant
     // to get tier labels on the board should hear that they will not appear.
     warnings.push(
       "no tierLabelIds configured; overrides will be written without a tier:* label, because the plugin cannot resolve a label id from its name",
@@ -663,6 +693,13 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     laneIds.add(lane.laneId);
     const secretError = validateSecretRefShape(lane.apiKeySecretRef, `pacing.lanes.${lane.laneId}.apiKeySecretRef`);
     if (secretError) errors.push(secretError);
+    // 0 would withdraw the lane on every reading and above 1 could
+    // never fire; either is a silent misconfiguration, so refuse it.
+    if (lane.withdrawAtUtilization !== undefined && !(lane.withdrawAtUtilization > 0 && lane.withdrawAtUtilization <= 1)) {
+      errors.push(
+        `pacing.lanes.${lane.laneId}.withdrawAtUtilization must be above 0 and at most 1 (got ${lane.withdrawAtUtilization}); omit it to never withdraw the lane`,
+      );
+    }
   }
   if (config.pacing.mode !== "off" && config.pacing.lanes.length === 0) {
     warnings.push(`pacing.mode is ${config.pacing.mode} but no lanes are configured; pace ordering has nothing to key on`);
@@ -696,7 +733,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     );
   }
 
-  // P2: the free-list sync never writes, but a misconfigured one
+  //  P2: the free-list sync never writes, but a misconfigured one
   // produces a silently empty or misleading diff — fail loudly here instead.
   if (config.aaFreeSync.enabled) {
     const secretError = validateSecretRefShape(config.aaFreeSync.apiKeySecretRef, "aaFreeSync.apiKeySecretRef");
@@ -737,7 +774,7 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
     }
   }
 
-  // , Defect 6. A model row's `laneId` that does not resolve to a
+  // Defect 6. A model row's `laneId` that does not resolve to a
   // configured `pacing.lanes[].laneId` is exactly the silent-failure shape
   // the reference dispatcher's unvalidated `pinnedModelId`/fallback config
   // has: `laneVerdictFor` degrades a typo'd or renamed lane id to

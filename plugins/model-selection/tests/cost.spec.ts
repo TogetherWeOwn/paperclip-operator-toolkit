@@ -63,7 +63,7 @@ describe("profile trust", () => {
   });
 
   it("trusts a profile exactly at the 14-day threshold", () => {
-    // The guard is `age > PROFILE_MAX_AGE_MS`, so a profile aged
+    // the guard is `age > PROFILE_MAX_AGE_MS`, so a profile aged
     // exactly 14 days is still trusted — the fail-closed edge, not past it.
     const atThreshold: VolumeProfile[] = [
       { ...t1, computedAt: new Date(NOW - PROFILE_MAX_AGE_MS).toISOString() },
@@ -96,8 +96,46 @@ describe("profile trust", () => {
 
 describe("escalation risk", () => {
   it("is zero at the top tier — there is nothing to escalate to", () => {
-    expect(tierAbove("T1")).toBeNull();
-    expect(escalationRisk("T1", MODELS, PROFILES, NO_ESCALATION, NOW)).toBe(0);
+    expect(tierAbove("T0")).toBeNull();
+    expect(escalationRisk("T0", MODELS, PROFILES, NO_ESCALATION, NOW, "T0")).toBe(0);
+  });
+
+  describe("T0 sits above T1 but is not an implicit escalation target", () => {
+    const t0Opus = { ...opus, id: "t0-model", tier: "T0" as const };
+    const withT0 = [...MODELS, t0Opus];
+    const t0Profile: VolumeProfile = { ...t1, tier: "T0" };
+    const profiles = [...PROFILES, t0Profile];
+    const signals: QualitySignal[] = [
+      { tier: "T1", escalationRate: 0.5, silentFailureCount: 0, sampleCount: 40, computedAt: FRESH },
+    ];
+
+    it("tierAbove walks the ladder through T1 to T0", () => {
+      expect(tierAbove("T3")).toBe("T2");
+      expect(tierAbove("T2")).toBe("T1");
+      expect(tierAbove("T1")).toBe("T0");
+    });
+
+    it("charges a T1 card no T0 redo at the implicit ceiling, however high the T1 escalation rate", () => {
+      expect(escalationRisk("T1", withT0, profiles, signals, NOW)).toBe(0);
+    });
+
+    it("prices the T0 redo only when the decision is admitted to T0 (positive control)", () => {
+      const risk = escalationRisk("T1", withT0, profiles, signals, NOW, "T0");
+      expect(risk).toBeCloseTo(runCost(t0Opus, t0Profile).runCostUsd * 0.5, 6);
+      expect(risk).toBeGreaterThan(0);
+    });
+
+    it("never prices a fallback-only T0 row as the redo", () => {
+      const fallbackOnlyT0 = [...MODELS, { ...t0Opus, fallbackOnly: true }];
+      expect(escalationRisk("T1", fallbackOnlyT0, profiles, signals, NOW, "T0")).toBe(0);
+    });
+
+    it("costOf takes the same ceiling: a T1 candidate carries no T0 escalation term by default", () => {
+      const implicit = costOf(opus, "T1", profiles, withT0, signals, NOW);
+      const admitted = costOf(opus, "T1", profiles, withT0, signals, NOW, "T0");
+      expect(implicit?.escalationRiskUsd).toBe(0);
+      expect(admitted?.escalationRiskUsd).toBeGreaterThan(0);
+    });
   });
 
   it("is zero when the measured escalation rate is a true zero", () => {

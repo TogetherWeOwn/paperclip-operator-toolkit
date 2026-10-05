@@ -53,6 +53,7 @@ import {
   REPIN_PASS_FETCH_LIMIT,
   REPIN_PASS_JOB_BUDGET_MS,
   REPIN_PASS_ROW_TIMEOUT_MS,
+  IMPLICIT_TIER_CEILING,
   REPIN_PASS_WRITE_LIMIT,
   ROUTE_KEYS,
   SCORE_THRESHOLDS,
@@ -105,7 +106,7 @@ import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
-import { resolveTier, tierFromLabels, tierOfModel } from "./engine/tier.js";
+import { resolveTier, tierFromLabels, tierOfModel, tierWithFallback } from "./engine/tier.js";
 import {
   accumulateRunStats,
   applyDerivedTiers,
@@ -144,6 +145,7 @@ import {
   isBehindPace,
   isLaneOutageActive,
   laneAvoidExcluded,
+  laneWithdrawnExcluded,
   laneEffectiveUtilization,
   laneHasRoom,
   laneHealthyAccountCount,
@@ -220,7 +222,7 @@ import {
 
 /**
  * The SDK this package builds against (2026.824.1) predates the
- * run-model hook; the fork's SDK adds `onResolveRunModel` to
+ * run-model hook; the fork's SDK () adds `onResolveRunModel` to
  * `PluginDefinition`. Widen the definition here so the handler type-checks on
  * both, and the host's own validator stays the authority on the wire shape.
  */
@@ -320,7 +322,7 @@ export function createPlugin() {
   let context: PluginContext | null = null;
 
   /**
-   * reopen: `ctx.companies.list()` is a wildcard host call that,
+   *  reopen: `ctx.companies.list()` is a wildcard host call that,
    * unlike every other call this worker makes, is not carried by the
    * per-company `proactiveCompanyScopes` authorization the host seeds
    * from this plugin's configured companies (/695). A scheduled
@@ -376,7 +378,7 @@ export function createPlugin() {
         };
       };
 
-      // --- lane pace ledger, operator overrides, repin history ----
+      // --- : lane pace ledger, operator overrides, repin history ----
 
       const laneLedgerKey = (companyId: string) => ({
         scopeKind: "company" as const,
@@ -389,7 +391,7 @@ export function createPlugin() {
         return stored && typeof stored === "object" ? (stored as LaneLedger) : {};
       };
 
-      // --- lane availability -------------------------------------
+      // --- : lane availability -------------------------------------
 
       const laneAvailabilityKey = (companyId: string) => ({
         scopeKind: "company" as const,
@@ -414,7 +416,7 @@ export function createPlugin() {
       };
 
       /**
-       * , second failure shape: the lane-evidence term's input.
+       * second failure shape: the lane-evidence term's input.
        *
        * Short-TTL and re-read rather than cached in config, for the same reason
        * the availability term is. The TTL exists only so the three scheduled
@@ -556,7 +558,7 @@ export function createPlugin() {
       };
 
       /**
-       * , Defect 2. `tier-exhausted` is a capacity dead end — every
+       * Defect 2. `tier-exhausted` is a capacity dead end — every
        * model from the required tier through the T1 ceiling is
        * pace-unserviceable, and there is nowhere left for the ladder walk in
        * `select.ts` to climb to. `ctx.metrics.write` records the outcome for
@@ -565,7 +567,7 @@ export function createPlugin() {
        *
        * This reuses the instance's existing `Operator: <title>` + `operator`
        * label issue-creation convention (confirmed against 20+ live examples
-       * — , , , etc. — all plain `manual`-origin
+       * — , etc. — all plain `manual`-origin
        * issues, usually a child of the blocked issue, usually unassigned).
        * That is a materially different mechanism from a same-issue
        * confirmation card: it is a real, separately-triaged unit of work, and
@@ -641,7 +643,7 @@ export function createPlugin() {
        * this way, so it must be detected on the message text, not a numeric
        * code. Any other error — folder not configured, not readable, transient
        * I/O — is NOT this case, and treating it as "empty" is exactly the QA
-       * defect: it silently truncates the on-disk history.
+       *  defect: it silently truncates the on-disk history.
        */
       const isMissingShadowFileError = (err: unknown): boolean => {
         const message = err instanceof Error ? err.message : String(err);
@@ -652,7 +654,7 @@ export function createPlugin() {
       // serialize their read-modify-write against the same shard file instead
       // of racing: two emits that both read the same "before" content and then
       // both write collapse to whichever write lands last, silently dropping
-      // the other's record.
+      // the other's record ().
       const decisionEmitChains = new Map<string, Promise<void>>();
 
       /**
@@ -770,7 +772,7 @@ export function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.modelScores,
       });
 
-      // --- LLM tier classification (tier_dispatcher.py classify()) --
+      // --- : LLM tier classification (tier_dispatcher.py classify()) --
 
       const classificationHttp: ClassificationHttpClient = {
         fetch: (url, init) => ctx.http.fetch(url, init),
@@ -833,7 +835,7 @@ export function createPlugin() {
         stateKey: PLUGIN_STATE_KEYS.shadowDiffs,
       });
 
-      // --- absorbed dispatch stall-sweep ---------
+      // --- : absorbed dispatch stall-sweep (/) ---------
 
       const dispatchLastFiringKey = (companyId: string) => ({
         scopeKind: "company" as const,
@@ -842,7 +844,7 @@ export function createPlugin() {
       });
 
       /**
-       * port of `tier_dispatcher.py`'s `lane_active_pins()`: current
+       *  port of `tier_dispatcher.py`'s `lane_active_pins()`: current
        * todo/in_progress pinned weight per lane, a flash model (blended list
        * price under $1/Mtok) counting as half a lane slot. Computed live per
        * `advise()` call — same cadence the Python source used, reading fresh
@@ -874,7 +876,7 @@ export function createPlugin() {
         return weightByLane;
       };
 
-      // --- aa.ai Intelligence Index snapshot + per-company drift dedup ---
+      // --- : aa.ai Intelligence Index snapshot + per-company drift dedup ---
 
       const aaSnapshotKey = () => ({
         scopeKind: "instance" as const,
@@ -888,7 +890,7 @@ export function createPlugin() {
 
       interface AaSnapshotState {
         fetchedAt: string | null;
-        /** Every aa.ai slug (one per model x effort-level) mapped to its full parsed record. */
+        /** Every aa.ai slug (one per model x effort-level) mapped to its full parsed record ( scope expansion). */
         bySlug: Record<string, AaModelRecord>;
         lastAttemptAt: string | null;
         lastError: string | null;
@@ -910,7 +912,7 @@ export function createPlugin() {
       }
 
       /**
-       * scope expansion ("store the raw snapshot per fetch ... so
+       *  scope expansion ("store the raw snapshot per fetch ... so
        * history is queryable"): appends one entry per successful fetch to a
        * bounded rolling list in plugin state. Kept in `plugin_state` rather
        * than `ctx.entities` — the latter would need a new, unconfirmed
@@ -1021,14 +1023,14 @@ export function createPlugin() {
         identifier: string | null;
         /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
         agentEnv: Record<string, unknown> | null;
-        /** `null` = UNKNOWN; decides the effort key and vocabulary. */
+        /** . `null` = UNKNOWN; decides the effort key and vocabulary. */
         agentAdapterType: string | null;
-        /** `null` = UNKNOWN; read only for the effort it already carries. */
+        /** . `null` = UNKNOWN; read only for the effort it already carries. */
         agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /** Lazy + per-pass memoized; see {@link loadContextUsage}. */
         contextUsage: (logRoot: string | null) => Promise<ContextUsage>;
-        /** the assignment signal a creation-time pin keys on. */
+        /** : the assignment signal a creation-time pin keys on. */
         assigneeAgentId: string | null;
         /**
          * the human assignment, if any. A card with a user
@@ -1037,7 +1039,7 @@ export function createPlugin() {
          * passes skip it — SQL first, this field as the per-row backstop.
          */
         assigneeUserId: string | null;
-        /** raw description for the classification prompt. */
+        /** : raw description for the classification prompt. */
         description: string;
       } | null> => {
         const issue = await ctx.issues.get(issueId, companyId);
@@ -1066,7 +1068,7 @@ export function createPlugin() {
         // Stays `null` unless we actually read the agent row. An unreadable or
         // absent assignee must not be reported as "the agent has no env vars":
         // the override write replaces the whole env object, so that conflation
-        // would wipe the agent's real bindings for the run.
+        // would wipe the agent's real bindings for the run ().
         let agentEnv: Record<string, unknown> | null = null;
         // Same UNKNOWN discipline: the effort a pin may legally write
         // depends on the assignee's adapter, so an unreadable agent means we
@@ -1161,7 +1163,7 @@ export function createPlugin() {
         };
       };
 
-      // --- P2: opt-in free-list sync/discovery/shadow ---------------
+      // ---  P2: opt-in free-list sync/discovery/shadow ---------------
       //
       // Shadow-only v2 evidence, resolved AFTER selection from the last-good
       // free-list snapshot. Never an input to selection: the winner is already
@@ -1246,14 +1248,14 @@ export function createPlugin() {
         companyId: string,
         params: Record<string, unknown>,
         /**
-         * port of `tier_dispatcher.py` `pick(..., explore=False)`.
+         *  port of `tier_dispatcher.py` `pick(..., explore=False)`.
          * `labelOnlyPass`/`repinPass`/`balancePass`'s pinned-branch calls set
          * this `false` — they are re-affirming or replacing an existing pin,
          * not seeding new evidence. Defaults `true`: unchanged tool behavior.
          */
         allowExplore = true,
         /**
-         * port of `balance_pass()`'s unpinned branch:
+         *  port of `balance_pass()`'s unpinned branch:
          * `pick("T1", floor)` always dispatches unpinned+labelled cards at
          * T1, regardless of the row's own tier:* label — the 2026-09-05
          * 23:05Z "balanced T1-class pin" rule. `resolveTier()` would
@@ -1304,9 +1306,9 @@ export function createPlugin() {
         pinnedModelId: string | null;
         /** `null` means UNKNOWN, not empty — see ModelOverrideInput.agentEnv in engine/context.ts. */
         agentEnv: Record<string, unknown> | null;
-        /** `null` = UNKNOWN; decides the effort key and vocabulary. */
+        /** . `null` = UNKNOWN; decides the effort key and vocabulary. */
         agentAdapterType: string | null;
-        /** `null` = UNKNOWN; read only for the effort it already carries. */
+        /** . `null` = UNKNOWN; read only for the effort it already carries. */
         agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /**
@@ -1316,7 +1318,7 @@ export function createPlugin() {
          * falls back to the pin; see `ModelOverrideInput.cheapModelId`).
          */
         ancillaryModelId: string | null;
-        /** the assignee a fallback pin's provenance stamp names. */
+        /** : the assignee a fallback pin's provenance stamp names. */
         assigneeAgentId: string | null;
       } | null> => {
         const issueId = typeof params.issueId === "string" ? params.issueId : null;
@@ -1327,9 +1329,14 @@ export function createPlugin() {
         // A deliberate repin keeps the caller's effective tier even when the
         // old pin's lane is dead. Merely replacing labels cannot do this:
         // resolveTier gives a serviceable pin precedence over those labels.
+        // a forced tier can never create a T0 opt-in. The synthetic
+        // label below would read as an explicit `tier:T0` judgement, so T0 is
+        // honoured only when the card already carries that label itself.
+        const forcedTier: Tier | undefined =
+          forceTier === "T0" && tierFromLabels(described.descriptor.labelNames) !== "T0" ? IMPLICIT_TIER_CEILING : forceTier;
         const selectionDescriptor: IssueDescriptor = {
           ...described.descriptor,
-          ...(forceTier ? { pinnedModelId: null, labelNames: [`${TIER_LABEL_PREFIX}${forceTier}`] } : {}),
+          ...(forcedTier ? { pinnedModelId: null, labelNames: [`${TIER_LABEL_PREFIX}${forcedTier}`] } : {}),
           ...(suppressSticky ? { stickyModelId: null } : {}),
         };
         const { profiles, signals } = await readProfiles(companyId);
@@ -1416,7 +1423,7 @@ export function createPlugin() {
           `run=${usage.runId ?? "none"} evidence=${usage.evidence}`,
         );
 
-        // P2: shadow-only v2 evidence, resolved AFTER selection from
+        //  P2: shadow-only v2 evidence, resolved AFTER selection from
         // the last-good free-list snapshot. Never an input to selection: the
         // winner is already decided above, and this only annotates the
         // decision for the shadow stream. Absent entirely (not null) when v2
@@ -1443,7 +1450,7 @@ export function createPlugin() {
 
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
 
-        // AC-6, the operational half: the term is the metric name, so
+        //  AC-6, the operational half: the term is the metric name, so
         // "which term is taking candidates out right now" is answerable without
         // reparsing the decision stream. `lane_unknown_selected` is the one that
         // must not be silent — it counts decisions made on an unread lane.
@@ -1658,7 +1665,7 @@ export function createPlugin() {
             return { content: `No write: ${plan.reason}`, data: { decision: result.decision, plan } };
           }
 
-          // P2: recover through the candidate-carrying path so the
+          //  P2: recover through the candidate-carrying path so the
           // v2 identity evidenced at advise time travels with the row instead
           // of being re-derived (possibly differently) from the bare model id.
           const selectedModel = recoverSelectedCandidate(result.config.models, {
@@ -1865,7 +1872,7 @@ export function createPlugin() {
         },
       );
 
-      // Prepare/validate/diff only: the
+      //  (P2,  D4). Prepare/validate/diff only: the
       // SDK has no compare-and-set primitive, so nothing proves a write would
       // land on one authoritative revision. The tool therefore never touches
       // ctx.state or config and never changes routing; the log line is the audit.
@@ -1898,7 +1905,7 @@ export function createPlugin() {
         },
       );
 
-      // --- rework-signal capture ---
+      // --- rework-signal capture ( §2.2 / model_scores.py:93-131) ---
       // `activity_log` is not an allowlisted table, so reopen detection cannot
       // be a live SQL join. Capture it from the event stream instead and let
       // `refreshScores` fold the accumulated signals in at its own cadence.
@@ -1924,7 +1931,7 @@ export function createPlugin() {
         // assigned by a later PATCH, after `issue.created` already fired and
         // found no assignee. Agent-to-agent reassignment is not a creation
         // moment (the card had one under the previous assignee), so it does
-        // not re-decide the model; it only re-homes the pin's env.
+        // not re-decide the model; it only re-homes the pin's env ().
         const assignment = asRecord(changes.assigneeAgentId);
         const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
         let didAssignmentPin = false;
@@ -2006,7 +2013,7 @@ export function createPlugin() {
         });
       });
 
-      // --- creation-time pin + unpinnable-card visibility ---------
+      // --- : creation-time pin + unpinnable-card visibility ---------
       // The scheduled passes are `*/10` and their row queries EXCLUDE cards
       // with a running/queued run — a card dispatched within seconds of
       // creation (measured 0.2-0.3 s create-to-first-run,
@@ -2017,10 +2024,10 @@ export function createPlugin() {
       // the first turn either (the bus is fire-and-forget and loses the same
       // measured race); they pin every card the passes were missing as soon
       // as it is idle — exactly the release mechanism the core-side dispatch
-      // gate needs once it lands.
+      // gate (half 1) needs once it lands.
 
       /**
-       * AC3. One visible activity notice per throttle window for a
+       *  AC3. One visible activity notice per throttle window for a
        * card the router looked at and could not pin — `no-eligible-model` or
        * `tier-exhausted`. Without this, labelOnlyPass/balancePass `continue`
        * silently, and a sustained lane outage reads as "no news" on every
@@ -2102,7 +2109,7 @@ export function createPlugin() {
        * Classifications this worker has started and not finished,
        * by issue. The run-scoped hook may WAIT (<= 1 s) on one that is already
        * running so a card created a moment ago gets its classified tier; it
-       * never starts one. Entries remove themselves on settle.
+       * never starts one ( §6). Entries remove themselves on settle.
        */
       const classificationsInFlight = new Map<string, Promise<Tier | null>>();
       const trackClassification = (issueId: string, work: Promise<Tier | null>): Promise<Tier | null> => {
@@ -2116,7 +2123,7 @@ export function createPlugin() {
       };
 
       /**
-       * half 2, restructured by .
+       *  half 2, restructured by  ( §7 item 2).
        * Label-tier semantics — the pin is decided at the card's own tier label
        * (existing, or just written by the classification below), the same
        * outcome `labelOnlyPass` would produce, NOT balancePass's forced T1: an
@@ -2145,7 +2152,7 @@ export function createPlugin() {
 
         const described = await describeIssue(companyId, issueId, {});
         if (!described) return;
-        // `issue.created` carries no assignee — an unassigned
+        // `issue.created` carries no assignee ( §3) — an unassigned
         // card returns here and is picked up by the assignment arm below.
         if (!described.assigneeAgentId) return;
         if (!balanceOpenStatuses.has(described.status)) return;
@@ -2334,7 +2341,7 @@ export function createPlugin() {
           ctx.logger.info("creation-time pin skipped: pick equals floor", { companyId, issueId, source });
           return null;
         }
-        // P2: candidate-carrying recovery (see the apply path).
+        //  P2: candidate-carrying recovery (see the apply path).
         const selectedModel = recoverSelectedCandidate(config.models, result.decision);
         if (!selectedModel) return null;
         // the creation path's own final read — the shared
@@ -2409,7 +2416,7 @@ export function createPlugin() {
             latencyMs,
             identifier,
             trace: result.decision.trace,
-            // P2: the served leg of the v2 identity — which
+            //  P2: the served leg of the v2 identity — which
             // curated candidate this pin actually served (null on legacy).
             candidateId: selectedModel.candidateId,
             // present only when the gate above skipped the write.
@@ -2435,7 +2442,7 @@ export function createPlugin() {
         }
       });
 
-      // --- run-scoped model decision -------
+      // ---  ( §4.3, §6): run-scoped model decision -------
       //
       // `onResolveRunModel` is called by the host inside `executeRun`, before
       // the adapter config merge, with a deadline. It answers from memory:
@@ -2453,7 +2460,7 @@ export function createPlugin() {
       //
       // Anything the handler cannot get inside its budget becomes `defer`: the
       // host parks the run for a bounded retry and never falls back to the
-      // agent default (owner directive, ).
+      // agent default (owner directive).
 
       /** Time kept back from the host deadline for the answer's own trip. */
       const RUN_RESOLVE_DEADLINE_MARGIN_MS = 150;
@@ -2891,7 +2898,7 @@ export function createPlugin() {
               liveAsOf: snapshot.fetchedAt,
               delta: model.aaIndex !== null && liveIndex !== null ? liveIndex - model.aaIndex : null,
               crossesBoundary: liveIndex !== null && configuredImpliedTier !== liveImpliedTier,
-              // scope expansion: full-record fields, surface only —
+              //  scope expansion: full-record fields, surface only —
               // never fed back into tier/enablement decisions.
               aaCostPerTask: liveRecord?.intelligenceIndexCostPerTask ?? null,
               aaPriceIn: liveRecord?.price1mInputTokens ?? null,
@@ -2974,7 +2981,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled lane-capacity poll ---------------------------
+      // --- scheduled lane-capacity poll () ---------------------------
       // runs every 2 minutes, inside the tightest publisher-declared
       // freshness budget (180s live). At 5 minutes, picks older than 180s read
       // every lane UNKNOWN ~half the time. One company's failure, or one
@@ -3002,7 +3009,7 @@ export function createPlugin() {
                     companyId: company.id,
                     // Must match the array-index path plugin-secrets-handler.ts's
                     // extractSecretRefBindingsFromConfig binds on config write
-                    // — a laneId-keyed path here reads back nothing
+                    // () — a laneId-keyed path here reads back nothing
                     // because syncSecretRefsForTarget replaceAll wipes non-matching rows.
                     configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`,
                   });
@@ -3071,7 +3078,7 @@ export function createPlugin() {
               });
             }
 
-            // AC-2: the availability term's writer. Published from the
+            //  AC-2: the availability term's writer. Published from the
             // same poll the ledger comes from, so the selector and the pacer can
             // never disagree about what was observed. Written on EVERY poll,
             // including one where nothing produced records — leaving the prior
@@ -3098,7 +3105,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled aa.ai Intelligence Index refresh -------------
+      // --- scheduled aa.ai Intelligence Index refresh () -------------
       // Fetched once at instance scope (aa.ai data is not company-specific),
       // then diffed per company against that company's roster. A fetch/parse
       // failure preserves the prior snapshot untouched and just records the
@@ -3109,7 +3116,7 @@ export function createPlugin() {
       //
       // Extracted to a plain function (not just the job callback) so the
       // `refreshAaIndexNow` tool below can run the identical sweep on demand
-      // without duplicating the fetch/diff/surface
+      // (reopen AC4) without duplicating the fetch/diff/surface
       // logic or waiting for the next cron tick.
       const runAaIndexRefresh = async (): Promise<{ fetchedAt: string | null; error: string | null; modelsFetched: number }> => {
         const nowIso = new Date().toISOString();
@@ -3229,7 +3236,7 @@ export function createPlugin() {
         await runAaIndexRefresh();
       });
 
-      // Manual operator escalation for the same sweep:
+      // Manual operator escalation for the same sweep (reopen AC4):
       // aa.ai revises rankings between scheduled ticks, and an operator who
       // just saw a revision shouldn't have to wait up to 6 hours to fold it
       // in. Runs the exact same fetch/diff/surface path as the cron job.
@@ -3253,7 +3260,7 @@ export function createPlugin() {
         },
       );
 
-      // --- scheduled models.dev price reconciliation ------------
+      // --- scheduled models.dev price reconciliation () ------------
       //
       // ADR-0001's cost term is a sorter, and it reads `costPerMTokIn` /
       // `costPerMTokOut` / `costPerMTokCacheRead` straight off hand-entered
@@ -3267,7 +3274,7 @@ export function createPlugin() {
       // This job closes the detection gap and nothing else. It REPORTS. A
       // price change reorders the entire fleet's routing, so the output is a
       // diff an operator approves — deliberately the same posture as the
-      // thirteen -marked rows shipped disabled rather than let an
+      // thirteen change-review-marked rows shipped disabled rather than let an
       // estimated price silently win cost-sort over a proven model.
       //
       // Structured like `runAaIndexRefresh` above and for the same reasons:
@@ -3411,7 +3418,7 @@ export function createPlugin() {
         await runPriceReconcile();
       });
 
-      // --- scheduled free-list sync ---------------------------
+      // --- scheduled free-list sync (P2) ---------------------------
       //
       // Default-off at every layer: the job returns before any network when
       // no company enables `aaFreeSync`, and per-company diffs are computed
@@ -3868,7 +3875,7 @@ export function createPlugin() {
         },
       );
 
-      // --- scheduled score + card-ledger refresh -
+      // --- scheduled score + card-ledger refresh ( §2.2 / ) -
       // Ported from `model_scores.py`, with one structural change: the Python
       // original attributes tier via a live SQL join against
       // `issue_labels`/`labels` (lines 56-63), which this plugin cannot do —
@@ -4033,7 +4040,7 @@ export function createPlugin() {
               return typeof live === "number" ? live : model.aaIndex;
             };
             // the  five-benchmark basket, superseding the
-            // agentic sub-score average. Frozen `-v1` vectors —
+            //  agentic sub-score average. Frozen `benchmark-v1` vectors —
             // three of the five benchmarks are not aa.ai columns at all, and
             // mixing live aa.ai rows with the capture would blend effort levels
             // (see `benchmark-data.ts`). The composite index half stays live.
@@ -4044,7 +4051,7 @@ export function createPlugin() {
               buildModelScore(model.id, liveAaIndex(model), statsByModel[model.id] ?? {}, TIERS, benchmarkRow(model)),
             );
 
-            // owner directive: the router alone decides the tier, so
+            //  owner directive: the router alone decides the tier, so
             // this is applied live rather than shadowed. An unscored model keeps
             // its configured tier — `derivedTier` is null there, never 0.8's T2.
             //
@@ -4240,7 +4247,8 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled LLM tier classification) -----------------------------------------------------------
+      // --- scheduled LLM tier classification (tier_dispatcher.py
+      // main()) -----------------------------------------------------------
       // For every open, agent-assigned issue with no per-issue override, no
       // `pin:operator`, and no running/queued run, classify it with the RUBRIC
       // and write a tier:* label (never a status or assignee change — same
@@ -4249,7 +4257,7 @@ export function createPlugin() {
       // never sets it true gets byte-identical behavior to before this job
       // existed.
       //
-      // removed "with no tier:* label" from that list. An existing
+      //  removed "with no tier:* label" from that list. An existing
       // label now ends the candidate only when THIS job wrote it
       // (`classifierLabeledIssues` provenance); a label written by anybody else
       // is re-examined and replaced. `classification.reclassifyForeignLabels:
@@ -4413,6 +4421,9 @@ export function createPlugin() {
                 // wrongly calling it ours just leaves the card on the tier we
                 // ourselves assigned. So a disagreement resolves to "ours".
                 const existingLabelTier = tierFromLabels(labelNames);
+                // the classifier cannot emit T0, so re-classifying a
+                // `tier:T0` label would only ever DROP an explicit opt-in.
+                if (existingLabelTier === "T0") return "settled";
                 const ourRecordedTier = classifierLabeled[issueId];
                 const ourLabelId = ourRecordedTier ? config.tierLabelIds[ourRecordedTier] : undefined;
                 const stillCarriesOurLabel =
@@ -4459,9 +4470,9 @@ export function createPlugin() {
                   t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
                   t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
                 });
-                void pickTier; // consumed by the apply-sweep, not this job
+                void pickTier; // consumed by the apply-sweep (task #6/#7), not this job
 
-                // write gate: the host fires at 300 s regardless, so
+                //  write gate: the host fires at 300 s regardless, so
                 // a write with no budget left — or after burning more than the
                 // row's own slice — is an orphaned mutation: refuse it. This is
                 // also what stops a row the walk abandoned at the deadline from
@@ -4571,7 +4582,8 @@ export function createPlugin() {
         }
       });
 
-      // --- shared helpers for the three scheduled sweeps below -----------------------
+      // --- shared helpers for the three scheduled sweeps below (:
+      // label_only_pass / repin_pass / balance_pass) -----------------------
 
       const balanceOpenStatuses = new Set(["todo", "in_progress", "blocked", "in_review"]);
 
@@ -4600,7 +4612,8 @@ export function createPlugin() {
        *   - an unreadable or unparseable mark reads as epoch (full scan);
        *   - the mark advances to the firing start only when the fetch did NOT
        *     hit its row limit (drained) and every row was settled; otherwise
-       *     it is a cursor past the settled prefix, so unreached and unsettled rows stay
+       *     it is a cursor past the settled prefix (
+       *     `scanMarkAfterWalk`), so unreached and unsettled rows stay
        *     visible next firing;
        *   - rows without a parseable `updated_at` never move the mark.
        */
@@ -4618,7 +4631,7 @@ export function createPlugin() {
       };
 
       /**
-       * / : advance the watermark after a bounded walk.
+       *  / : advance the watermark after a bounded walk.
        * `settledPrefix` is the walk's count of leading fetched rows that were
        * decided; the mark jumps to the firing start only when that is every
        * row of a drained fetch, and otherwise moves just past the settled
@@ -4704,10 +4717,10 @@ export function createPlugin() {
       };
 
       /**
-       * The fallback lease's bookkeeping.
+       *  ( §7 item 4). The fallback lease's bookkeeping.
        * A pin on a `fallbackOnly` model carries a provenance stamp in its
        * override env (`PIN_PROVENANCE_ENV_KEY`), and this index of stamped
-       * issue ids lets the lease pass visit only those issues.
+       * issue ids lets the lease pass visit only those issues ().
        * The stamp is the authority; the index is a pointer to it, and an
        * entry whose `decisionId` no longer matches the issue's stamp is
        * dropped on its next visit.
@@ -4806,7 +4819,7 @@ export function createPlugin() {
        * Keyed on the card's live `heartbeat_runs` rows
        * (`CREATION_PIN_LIVE_RUNS_SQL`), NOT on `executionRunId`: this fork
        * stamps that column at claim, so it cannot name a queued run
-       *. Returns true when `checkoutRunId` is null, no
+       * ( §2.3). Returns true when `checkoutRunId` is null, no
        * scheduled retry is queued/running, and every live run attributed to
        * the card is `queued` with `started_at IS NULL` (vacuously true with
        * none). Any `running` row, or any row with `started_at` set, reads as
@@ -4844,7 +4857,7 @@ export function createPlugin() {
         companyId: string,
         issueId: string,
         models: ResolvedConfig["models"],
-        /** the pin this write may replace; null = must be unpinned. */
+        /** : the pin this write may replace; null = must be unpinned. */
         expectedPinnedModelId: string | null,
       ): Promise<boolean> => {
         const issue = await ctx.issues.get(issueId, companyId);
@@ -4862,7 +4875,7 @@ export function createPlugin() {
       };
 
       /**
-       * Re-home a pin's env when a card moves from
+       *  ( §5). Re-home a pin's env when a card moves from
        * one agent to another.
        *
        * The override env was built from the PREVIOUS assignee's env, and the
@@ -4873,7 +4886,7 @@ export function createPlugin() {
        * as pinned — only the env under it moves.
        *
        * Rebuild from the new assignee's env when the pin can be rewritten
-       * before the next run starts (`pinnableBeforeStart`, ), so the
+       * before the next run starts (`pinnableBeforeStart`), so the
        * context ceiling and sub-call keys follow the pin. Otherwise (run
        * already started, operator pin, closed card, unknown assignee env, a
        * pin outside the roster, or classification off) drop the env and keep
@@ -5110,6 +5123,7 @@ export function createPlugin() {
         if (config.pacing.mode === "off") return true;
         if (hardStopExcluded(laneLedger, model)) return false;
         if (laneAvoidExcluded(laneLedger, model, config.pacing.avoid)) return false;
+        if (laneWithdrawnExcluded(laneLedger, model, config.pacing.avoid, Date.parse(nowIso))) return false;
         if (laneOutageExcluded(laneOutageOverride, nowIso, model)) return false;
         const score = tierScoreFor(modelScores[model.id], tier);
         if (score && score.capable === false) return false;
@@ -5137,7 +5151,8 @@ export function createPlugin() {
       };
 
       /**
-       * * `labelOnlyPass`/`repinPass`/`balancePass` used to gate on
+       *  (root cause #3, 2026-09-16 16:40Z incident).
+       * `labelOnlyPass`/`repinPass`/`balancePass` used to gate on
        * `tierFromLabels(...)` alone and `continue` when it returned null — so
        * a card with no tier:* label at all (label inherited-and-cleared,
        * classification disabled, or the classifier hasn't reached it yet) was
@@ -5149,19 +5164,16 @@ export function createPlugin() {
        * fallback: pin's tier, assignee floor, then selection.defaultTier.
        * During a repin, retain that recorded requirement even if its lane is
        * unusable, and let a stronger label supersede a stale weaker pin.
+       *
+       * The fallback itself is `tierWithFallback` in `engine/tier.ts` (),
+       * so the scheduled passes share `selectModel`'s T0 admission boundary and
+       * the boundary is unit-testable.
        */
-      const tierWithFallback = (descriptor: IssueDescriptor, models: ResolvedConfig["models"], defaultTier: Tier): Tier => {
-        // Preserve the strongest recorded judgement across a lane failure:
-        // neither a stale weaker pin nor a weaker label can lower this floor.
-        const judgedTier = resolveTier(descriptor, models, defaultTier).tier;
-        const labelTier = tierFromLabels(descriptor.labelNames);
-        return labelTier && tierIndex(labelTier) > tierIndex(judgedTier) ? labelTier : judgedTier;
-      };
-
-      // --- scheduled label-only pass) --------------------------------------------------
+      // --- scheduled label-only pass (tier_dispatcher.py
+      // label_only_pass()) --------------------------------------------------
       // 2026-09-07 01:0xZ owner rule: a card that already carries a tier:*
       // label but no pin (label inherited/copied from a parent card, e.g.
-      // cloned 's tier:T1) was skipped by the classify job
+      //  cloned 's tier:T1) was skipped by the classify job
       // (which only looks at issues with NO tier:* label) and never pinned —
       // the model-selection plugin then chose the model on its own, putting
       // the Steward's  run on claude-sonnet-5 while the Claude lane
@@ -5224,7 +5236,7 @@ export function createPlugin() {
                 where i.company_id = $1
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
-                  -- a user-assigned card rejects issues.update
+                  -- : a user-assigned card rejects issues.update
                   -- with an agent override ("Issue can only have one
                   -- assignee"), which used to abort the whole pass.
                   and i.assignee_user_id is null
@@ -5264,7 +5276,7 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let pinned = 0;
-            // / : the shared hard-return walk
+            //  / : the shared hard-return walk
             // (`row-walk.ts`). The 2026-09-28 reopen: a between-row deadline
             // check cannot contain an already-admitted slow row — 
             // spent ~98 s inside host calls AFTER the host's 300 s wall had
@@ -5302,7 +5314,7 @@ export function createPlugin() {
                   // A row the walk abandoned must not write even its notice.
                   if (Date.now() >= deadlineAt) return "unsettled";
                   ctx.logger.info("label-only pass: no pick", { companyId: company.id, issue: identifier, tier });
-                  // AC3: a card the router cannot pin must be visible
+                  //  AC3: a card the router cannot pin must be visible
                   // on its own activity feed, not just in this worker's log.
                   await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
                   return "settled";
@@ -5333,11 +5345,11 @@ export function createPlugin() {
                   return "settled";
                 }
 
-                // P2: candidate-carrying recovery (see the apply path).
+                //  P2: candidate-carrying recovery (see the apply path).
                 const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                 if (!selectedModel) return "settled";
                 if (Date.now() >= deadlineAt || Date.now() - rowStartedAt >= LABEL_ONLY_PASS_ROW_TIMEOUT_MS) {
-                  // reopen: this row's own host calls consumed the
+                  //  reopen: this row's own host calls consumed the
                   // budget — committing the pin now would write a mutation the
                   // host's RPC response can never carry (the orphaned-write half
                   // of the 2026-09-28 11:00Z incident), and a row the walk
@@ -5421,7 +5433,7 @@ export function createPlugin() {
                         }${advisorySuffix}`,
                   entityType: "issue",
                   entityId: issueId,
-                  // P2: the served leg of the v2 identity (null on legacy).
+                  //  P2: the served leg of the v2 identity (null on legacy).
                   metadata: { modelId: result.decision.modelId, tier, fromLabel: labelTier !== null, trace: result.decision.trace, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
                 if (writesAllowed) pinned += 1;
@@ -5469,7 +5481,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled repin pass) --
+      // --- scheduled repin pass (tier_dispatcher.py repin_pass()) --
       // Idle issues pinned to a model whose lane is now unusable, or that has
       // been measurably demoted for their tier, get re-pinned within the same
       // tier. Capped at REPIN_PASS_WRITE_LIMIT writes per run, same as the
@@ -5596,13 +5608,13 @@ export function createPlugin() {
 
                 const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
                 if (!described) return "settled";
-                // (#457, merged): preserve manual pins and active
+                //  (#457, merged): preserve manual pins and active
                 // runs with the idle guard — a non-idle card is not repinnable.
                 if (described.hasOperatorPin || !described.isIdle) return "settled";
                 const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
                 const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
-                // (a) clear-on-blocked: a blocked card needs no lane
+                //  (a) clear-on-blocked: a blocked card needs no lane
                 // reservation — clear the pin instead of re-pinning it. Runs
                 // before the usability check so a blocked card never spends
                 // the advise call either. Operator pins are already exempt
@@ -5654,7 +5666,7 @@ export function createPlugin() {
                   fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
                 });
                 described.descriptor.requiredContextTokens = contextEstimate.tokens ?? undefined;
-                // (b) 24h expiry: a stale pin is re-validated through
+                //  (b) 24h expiry: a stale pin is re-validated through
                 // `advise` even when the pinned lane still reads usable. Only
                 // the usability early return is skipped — everything below
                 // (fresh advise, same-model no-op, capability re-check) still
@@ -5704,13 +5716,13 @@ export function createPlugin() {
                   return "settled";
                 }
 
-                // (#457, merged): carry the tier into advise so a
+                //  (#457, merged): carry the tier into advise so a
                 // deliberate repin keeps the caller's effective tier even
                 // when the old pin's lane is dead.
                 const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
                 if (result.decision.modelId === pinnedModelId) {
-                  // (b): an expired pin the fresh advise re-affirms is
+                  //  (b): an expired pin the fresh advise re-affirms is
                   // still alive — re-stamp it so the next pass does not pay
                   // for the same re-validation again. No issue write, so no
                   // write-limit cost; still no write past the deadline.
@@ -5735,7 +5747,7 @@ export function createPlugin() {
                   return "settled";
                 }
 
-                // P2: candidate-carrying recovery (see the apply path).
+                //  P2: candidate-carrying recovery (see the apply path).
                 const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                 if (!selectedModel) return "settled";
                 // recovery moves back to a normal lane, never
@@ -5762,7 +5774,7 @@ export function createPlugin() {
                   });
                   return "unsettled";
                 }
-                // (#457, merged): final write-safety re-read — the
+                //  (#457, merged): final write-safety re-read — the
                 // pin must still be safe after the row's own host calls.
                 if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) return "settled";
                 // the write needs enforcement; the decision and its
@@ -5810,7 +5822,7 @@ export function createPlugin() {
                   message: `Model Selection re-pinned ${pinnedModelId} -> ${result.decision.modelId} (${tier}): ${pinExpired ? "pin expired, re-validated" : hasRecoveredNormal ? "fallback lane recovered; normal lane serviceable again" : "lane unusable or measurably demoted"}${advisorySuffix}`,
                   entityType: "issue",
                   entityId: issueId,
-                  // P2: the served leg of the v2 identity (null on legacy).
+                  //  P2: the served leg of the v2 identity (null on legacy).
                   metadata: { from: pinnedModelId, modelId: result.decision.modelId, tier, trace: result.decision.trace, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
                 if (writesAllowed) repinned += 1;
@@ -5860,7 +5872,7 @@ export function createPlugin() {
       };
 
       /**
-       * The fallback lease.
+       *  ( §7 item 4). The fallback lease.
        *
        * A pin on a `fallbackOnly` model is a stopgap taken because no regular
        * model was serviceable. The repin pass leaves a usable pin alone for
@@ -5868,7 +5880,7 @@ export function createPlugin() {
        * for up to a day after its primary comes back. This pass re-decides a
        * stamped fallback pin as soon as some regular model for its tier is
        * serviceable again, and touches nothing else: it walks only the
-       * stamped-issue index (never all open issues, ), examines at
+       * stamped-issue index (never all open issues), examines at
        * most `FALLBACK_LEASE_EXAMINE_LIMIT` entries, least recently checked
        * first, and writes at most `FALLBACK_LEASE_WRITE_LIMIT` pins.
        *
@@ -6053,7 +6065,7 @@ export function createPlugin() {
         }
       });
 
-      // /  Class B. An override `env` REPLACES the
+      //  /  Class B. An override `env` REPLACES the
       // assignee's env wholesale (host `mergeModelProfileAdapterConfig`), so a
       // pin written while the assignee carried a secret binding it has since
       // lost keeps naming that ref. The host then refuses every run on the card
@@ -6120,7 +6132,7 @@ export function createPlugin() {
         });
       };
 
-      // --- immediate lane quarantine from a rejected run ----------
+      // --- : immediate lane quarantine from a rejected run ----------
       //
       // The owner directive after the 2026-09-16 Codex exhaustion: "paperclip
       // should be able to handle this without your intervention". The router
@@ -6236,7 +6248,8 @@ export function createPlugin() {
         ctx.logger.info("lane quarantine repin complete", { companyId, laneId: verdict.laneId, repinned });
       });
 
-      // --- scheduled balance pass) ------------------------------------------------------
+      // --- scheduled balance pass (tier_dispatcher.py
+      // balance_pass()) ------------------------------------------------------
       // Owner rule 2026-09-05 23:05Z (spread across all accounts): idle cards
       // that carry a tier label but no override were left on the floor by the
       // old exclusion rule; give them a balanced T1-class pin instead. Also
@@ -6304,7 +6317,7 @@ export function createPlugin() {
                   `select max(updated_at) as max_updated
                      from issues
                     where company_id = $1
-                      -- the gate watches routable cards only, so a
+                      -- : the gate watches routable cards only, so a
                       -- user-assigned card changing cannot force a cycle that
                       -- would only skip it again.
                       and assignee_user_id is null
@@ -6340,7 +6353,7 @@ export function createPlugin() {
                   and i.id::text > $2
                   and i.status in ('todo','in_progress','blocked','in_review')
                   and a.status <> 'terminated'
-                  -- a user-assigned card rejects issues.update
+                  -- : a user-assigned card rejects issues.update
                   -- with an agent override ("Issue can only have one
                   -- assignee"), which used to abort the whole pass.
                   and i.assignee_user_id is null
@@ -6362,7 +6375,7 @@ export function createPlugin() {
             const contextUsageCache: ContextUsageCache = new Map();
 
             let balanced = 0;
-            // pace-pull: per-pass, per-target-lane move accounting.
+            //  pace-pull: per-pass, per-target-lane move accounting.
             // `pacePullWeights` is the active-pins weight snapshot the free-
             // slot caps are computed from, read lazily on the first pace-pull
             // candidate so passes with no behind lane pay no extra query;
@@ -6512,7 +6525,7 @@ export function createPlugin() {
                     newUtilization !== null &&
                     currentUtilization - newUtilization >= BALANCE_PASS_BUSIER_UTILIZATION_DELTA;
 
-                  // pace-pull: `orderCandidatesByPace` ranks only NEW
+                  //  pace-pull: `orderCandidatesByPace` ranks only NEW
                   // pins, so a pin that landed before its lane fell behind never
                   // moves until PIN_MAX_AGE_MS expiry. Pull an idle card toward
                   // a behind-pace lane when pacing is enforced, `advise()` picked
@@ -6576,7 +6589,7 @@ export function createPlugin() {
 
                   if (!(cheaper || incapable || busier || envDrifted || pacePull)) return "settled";
 
-                  // P2: candidate-carrying recovery (see the apply path).
+                  //  P2: candidate-carrying recovery (see the apply path).
                   const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                   if (!selectedModel) return "settled";
 
@@ -6702,7 +6715,7 @@ export function createPlugin() {
                       busier,
                       envDrifted,
                       pacePull,
-                      // P2: the served leg of the v2 identity (null on legacy).
+                      //  P2: the served leg of the v2 identity (null on legacy).
                       candidateId: selectedModel.candidateId,
                       ...(writesAllowed ? {} : { advisory: true, written: false }),
                     },
@@ -6725,10 +6738,12 @@ export function createPlugin() {
                 // T1-class pin instead of leaving it on the agent floor.
                 // `pick("T1", floor)` in Python — always T1, never this row's
                 // own tier label.
-                const result = await advise(company.id, { issueId }, false, "T1", false, contextUsageCache);
+                // an explicit `tier:T0` card is never pinned DOWN to T1.
+                const balancedTier: Tier = labelTier === "T0" ? "T0" : "T1";
+                const result = await advise(company.id, { issueId }, false, balancedTier, false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                   if (Date.now() >= deadlineAt) return "unsettled";
-                  // AC3: same visibility as the label-only pass —
+                  //  AC3: same visibility as the label-only pass —
                   // this branch previously `continue`d without a trace.
                   await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
                   return "settled";
@@ -6755,11 +6770,11 @@ export function createPlugin() {
                   );
                 if (floorHealthy) return "settled";
 
-                // P2: candidate-carrying recovery (see the apply path).
+                //  P2: candidate-carrying recovery (see the apply path).
                 const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                 if (!selectedModel) return "settled";
                 if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) return "settled";
-                if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite("T1");
+                if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(balancedTier);
                 // same per-issue isolation as the pinned branch.
                 // this branch's write is gated like the pinned one.
                 if (writesAllowed) {
@@ -6810,12 +6825,12 @@ export function createPlugin() {
                   companyId: company.id,
                   message:
                     (result.decision.modelId === floorModelId
-                      ? `Model Selection explicitly pinned ${result.decision.modelId} (T1): floor lane unserviceable`
-                      : `Model Selection balanced floor -> ${result.decision.modelId} (T1): unpinned labelled card given a balanced T1 pin`) + advisorySuffix,
+                      ? `Model Selection explicitly pinned ${result.decision.modelId} (${balancedTier}): floor lane unserviceable`
+                      : `Model Selection balanced floor -> ${result.decision.modelId} (${balancedTier}): unpinned labelled card given a balanced ${balancedTier} pin`) + advisorySuffix,
                   entityType: "issue",
                   entityId: issueId,
-                  // P2: the served leg of the v2 identity (null on legacy).
-                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: "T1", candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
+                  //  P2: the served leg of the v2 identity (null on legacy).
+                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: balancedTier, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
                 // a shadow install writes nothing, so the pass
                 // counter must not count it.
@@ -6888,7 +6903,8 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled dispatch sweep -----------------------------------
+      // --- scheduled dispatch sweep (absorption of the standalone
+      // `dispatch` plugin, /) -----------------------------------
       // Ported wholesale, not reimplemented: `dispatch-selection.ts` carries
       // the ADR 0001/0003/0004/Q2/Q5 owner decisions as comments, and this job
       // body is the same `sweepCompany` orchestration the standalone plugin
@@ -6914,7 +6930,7 @@ export function createPlugin() {
             const config = await companyConfig(company.id);
             const dispatchConfig = config.dispatch;
 
-            // fix 3/4: standalone-plugin notes, restored alongside the
+            //  fix 3/4: standalone-plugin notes, restored alongside the
             // metrics/logger lines that already cover the same events — see
             // dispatch-reporting.ts's logStateChange, which folds this array
             // into metadata.notes.
@@ -7114,10 +7130,10 @@ export function createPlugin() {
 
             // lane-down gate, read once per firing. Three signals,
             // OR'd: the pace-ledger hard stop (a measured exhaustion), the
-            // operator outage override, and the
+            // operator outage override (quarantine), and the
             // collector availability snapshot's `unavailable` state. UNKNOWN
             // availability never gates — fail-neutral, a broken instrument
-            // must not take dispatch down.
+            // must not take dispatch down (policy).
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const availability = await readAvailability(company.id, sweepNowMs);
@@ -7296,7 +7312,7 @@ export function createPlugin() {
           }
         }
       });
-      // reopen: `onConfigChanged` only replays at worker startup for
+      //  reopen: `onConfigChanged` only replays at worker startup for
       // a full plugin reload (plugin-loader.ts step 5b); a bare crash-restart
       // (`plugin-worker-manager.ts` autoRestart) respawns the process without
       // it, which would otherwise reset `knownCompanyIds` to empty and make
@@ -7319,7 +7335,7 @@ export function createPlugin() {
     },
 
     /**
-     * Answers the host's run-scoped model
+     *  ( §4.3). Answers the host's run-scoped model
      * decision from hot caches only. Declared on the definition so the fork's
      * SDK advertises `resolveRunModel`; a host without the hook never calls it.
      */
@@ -7331,7 +7347,7 @@ export function createPlugin() {
     },
 
     /**
-     * reopen: the sole feed for `knownCompanyIds` (see the comment
+     *  reopen: the sole feed for `knownCompanyIds` (see the comment
      * above its declaration). The host calls this unconditionally for every
      * configured company at worker startup (`plugin-loader.ts` step 5b) and
      * again on every operator config save — so this set converges to exactly

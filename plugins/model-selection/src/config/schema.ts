@@ -8,7 +8,7 @@ import { EFFORT_LADDER } from "../engine/effort.js";
 
 const MODEL_CAPABILITIES = ["tools", "structured-output", "vision", "long-context", "computer-use"];
 
-/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA`. */
+/** Mirrors paperclip-model-router's `SECRET_REF_SCHEMA` (). */
 const SECRET_REF_SCHEMA = {
   type: ["object", "null"],
   format: "secret-ref",
@@ -54,7 +54,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /**
          * Which cost term orders candidates. `list-price` (default) is the
          * existing `expectedCostUsd` sort, byte-for-byte unchanged.
-         * `cost-per-accepted-card` is Slice 3 — computed
+         * `cost-per-accepted-card` is Slice 3 (decision A) — computed
          * and shadow-diffed for 7 days before this ever flips in a live config.
          */
         objective: { type: "string", enum: ["list-price", "cost-per-accepted-card"], default: "list-price" },
@@ -104,9 +104,9 @@ export const SELECTION_CONFIG_SCHEMA = {
           },
           contextWindow: { type: "integer", minimum: 1, default: 200000 },
           aaIndex: { type: ["number", "null"], default: null },
-          /** explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
+          /** : explicit aa.ai leaderboard slug override, when normalized-id matching won't find it. */
           aaSlug: { type: "string", minLength: 1 },
-          /** snapshot date the roster's aaIndex above was curated from. Informational only. */
+          /** : snapshot date the roster's aaIndex above was curated from. Informational only. */
           aaIndexUpdatedAt: { type: ["string", "null"], format: "date", default: null },
           releasedAt: { type: "string", format: "date" },
           fallbackOnly: { type: "boolean", default: false },
@@ -117,7 +117,7 @@ export const SELECTION_CONFIG_SCHEMA = {
            * its deterministic counter and lane gates.
            */
           earnIn: { type: ["object", "null"], default: null },
-          /** which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
+          /** : which `pacing.lanes[].laneId` governs this model's pace. Omit for a model with no lane. */
           laneId: { type: "string", minLength: 1 },
           /**
            * reasoning effort to pin alongside this model. Omit to
@@ -142,7 +142,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      * absent from PLUGIN_DATABASE_CORE_READ_TABLES, so `ctx.db.query` against it
      * is rejected by `assertAllowedPublicRead`. Leaving this unset is a
      * supported configuration — the override is still written, just without the
-     * label, which is additive information rather than a gate (ADR-0008).
+     * label, which is additive information rather than a gate .
      */
     tierLabelIds: {
       type: "object",
@@ -154,7 +154,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * , Defect 2. Company label id for the `operator` label, applied to
+     * Defect 2. Company label id for the `operator` label, applied to
      * the escalation issue this plugin creates when a tier is fully
      * pace-exhausted. Same constraint as `tierLabelIds`: there is no label
      * surface in the plugin SDK, so the id cannot be resolved from the name —
@@ -176,7 +176,7 @@ export const SELECTION_CONFIG_SCHEMA = {
     },
     quality: {
       type: "object",
-      title: "Quality floor (ADR-0005)",
+      title: "Quality floor ",
       additionalProperties: false,
       properties: {
         /**
@@ -220,7 +220,7 @@ export const SELECTION_CONFIG_SCHEMA = {
               },
               requestTimeoutMs: { type: "integer", minimum: 1, default: 5000 },
               maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
-              /** resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
+              /** : resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
               apiKeySecretRef: SECRET_REF_SCHEMA,
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
@@ -268,6 +268,14 @@ export const SELECTION_CONFIG_SCHEMA = {
                   },
                 },
               },
+              /**
+               * withdraw the lane from NEW dispatch once its combined
+               * utilization (capacity-weighted mean of its accounts' governing
+               * window, an unserviceable account counting as fully spent) reaches
+               * this fraction. Omit to never withdraw; 0 is rejected by
+               * `validateConfig`, not here, so the error names the lane.
+               */
+              withdrawAtUtilization: { type: "number", minimum: 0, maximum: 1 },
               /** Overrides the pace engine's default margin/urgent-reset/staleness policy for this lane. */
               margin: { type: "number", minimum: 0, maximum: 1 },
               urgentResetSeconds: { type: "integer", minimum: 1 },
@@ -283,7 +291,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Minimum idle time before a pace-driven repin may fire on the same issue again. */
         idleRepinHysteresisSeconds: { type: "integer", minimum: 0, default: 300 },
         /**
-         * port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
+         *  port of `tier_dispatcher.py`'s module-level `AVOID = 0.8` /
          * `AVOID_LANE = {"codex": 0.99}`. A lane at or above its threshold is
          * excluded from NEW admission only when its governing pace deviation
          * also exceeds the pace engine's default 0.1 margin —
@@ -306,7 +314,7 @@ export const SELECTION_CONFIG_SCHEMA = {
           default: {},
         },
         /**
-         * port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
+         *  port of `tier_dispatcher.py`'s `LANE_CAP_PER_ACCOUNT =
          * {"opencode-go": 2, "zai": 3}` (2026-09-06 17:1xZ / 2026-09-07
          * 12:32Z owner rules). Caps the number of ACTIVE (todo/in_progress)
          * cards a lane may hold per healthy account; unset entries have no
@@ -324,7 +332,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Named weekly allowance window reported in the shadow stream's per-lane snapshot. Reporting only — no gate reads it (the Z.ai weekly gate has its own `zai.weeklyWindowName`). */
         weeklyWindowName: { type: "string", minLength: 1, default: "weekly" },
         /**
-         * port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
+         *  port of `tier_dispatcher.py` `pick()`'s Codex/OpenCode-Go
          * fallback rule (2026-09-07 03:15Z owner rule): `codexLaneId` names
          * which configured lane is Codex, so the T1-Go-fallback and Z.ai
          * long-run-agent-exclusion rules know which lane's avoid threshold/
@@ -334,7 +342,7 @@ export const SELECTION_CONFIG_SCHEMA = {
         /** Names which configured lane is OpenCode Go, for the T1-Go-fallback rule above. */
         opencodeGoLaneId: { type: "string", minLength: 1, default: "cliproxy-opencode-go" },
         /**
-         * port of `zai_peak_now()` / `zai_weekly_pace_ok()`
+         *  port of `zai_peak_now()` / `zai_weekly_pace_ok()`
          * (2026-09-08 13:20Z owner rule). `laneId` names which configured
          * lane is the Z.ai lane so the peak-hour throttle and weekly-pacing
          * gate know which lane to apply to.
@@ -354,7 +362,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC. Default
+     * Ported from `tier_dispatcher.py`'s `classify()`/RUBRIC (). Default
      * OFF: this section being absent, or `enabled: false`, means the plugin
      * writes no tier labels of its own — a company that only ever records tier
      * via explicit pins/labels sees no behavior change from this section
@@ -372,7 +380,7 @@ export const SELECTION_CONFIG_SCHEMA = {
          * Called directly (mirroring paperclip-model-router's own upstream
          * call), never through model-router's `/invoke` route: the host's
          * `isPrivateIP()` block on `ctx.http.fetch()` makes a same-host
-         * `/invoke` hop unreachable from a plugin.
+         * `/invoke` hop unreachable from a plugin (architecture note).
          */
         baseUrl: {
           type: "string",
@@ -417,7 +425,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Slice 4: bounded T1 earn-in for unproven candidate
+     * Slice 4 (decision B): bounded T1 earn-in for unproven candidate
      * models. Default OFF — this section being absent, or `enabled: false`,
      * must leave dispatch behavior byte-for-byte identical to today.
      */
@@ -441,7 +449,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Agreement stream. Emits paired `host` and `plugin-shadow`
+     *  /. Emits paired `host` and `plugin-shadow`
      * `paired-decision-v1` JSONL records per `advise()` call to the
      * `shadowDecisions` local folder, for the 48h agreement stream
      * `ops/gate_harness.py` correlates.
@@ -449,18 +457,6 @@ export const SELECTION_CONFIG_SCHEMA = {
      * installing this plugin must not start writing files an operator did
      * not ask for.
      */
-    formatCompatibility: {
-      type: "object",
-      title: "Private format compatibility",
-      description: "Exact v1 format identifiers supplied by a reviewed private deployment. Absent/null fields use generic public identities; this never relaxes payload validation.",
-      additionalProperties: false,
-      default: {},
-      properties: {
-        tierSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
-        acceptedWorkSpecVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
-        shadowSchemaVersion: { type: ["string", "null"], maxLength: 80, pattern: "^[a-z0-9][a-z0-9._:-]*-v1$", default: null },
-      },
-    },
     shadowEmit: {
       type: "object",
       title: " shadow decision emitter",
@@ -511,7 +507,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * P2: free-list sync/discovery/shadow. Default OFF — an absent
+     *  P2: free-list sync/discovery/shadow. Default OFF — an absent
      * section, or `enabled: false`, leaves dispatch byte-for-byte identical
      * to today (no fetch, no snapshot, no evidence). Bindings are curated
      * model x effective-effort rows (see `aa-free/sync.ts verifyBindings`);
@@ -521,7 +517,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     aaFreeSync: {
       type: "object",
-      title: "aa.ai free-list sync",
+      title: "aa.ai free-list sync ( P2)",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
@@ -557,7 +553,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     acceptedWork: {
       type: "object",
-      title: "First-party accepted-work posterior",
+      title: "First-party accepted-work posterior ()",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },
@@ -584,14 +580,15 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * absorbs the standalone `dispatch` plugin so the `plugins` table shows one dispatcher, not two. Mirrors
+     * absorbs the standalone `dispatch` plugin (design
+     * ) so the `plugins` table shows one dispatcher, not two. Mirrors
      * that plugin's `instanceConfigSchema` field-for-field, including its
      * defaults — `wakeEnabled: false` so absorbing it changes nothing live
      * until an operator explicitly flips the wake gate.
      */
     dispatch: {
       type: "object",
-      title: "Stall-sweep dispatch",
+      title: "Stall-sweep dispatch (/)",
       additionalProperties: false,
       properties: {
         wakeEnabled: {
@@ -648,7 +645,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     wakeScopedFloor: {
       type: "object",
-      title: "Wake-scoped floor",
+      title: "Wake-scoped floor ()",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: true },
@@ -664,7 +661,7 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * Run-scoped model decision. Requires a host
+     *  ( §4.3). Run-scoped model decision. Requires a host
      * built with the `run.model.resolve` hook and a manifest built with
      * `MODEL_SELECTION_RUN_RESOLVE=1`. Off by default: `onResolveRunModel`
      * answers `keep` and every legacy pin path is unchanged. On: each issue run
@@ -674,7 +671,7 @@ export const SELECTION_CONFIG_SCHEMA = {
      */
     runResolve: {
       type: "object",
-      title: "Run-scoped model decision",
+      title: "Run-scoped model decision ()",
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean", default: false },

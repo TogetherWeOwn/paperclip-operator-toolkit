@@ -32,7 +32,13 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-async function boot(models: ModelEntry[], cardOverrides: Partial<Issue> = {}, adapterType = "codex_local", pacingMode = "enforce") {
+async function boot(
+  models: ModelEntry[],
+  cardOverrides: Partial<Issue> = {},
+  adapterType = "codex_local",
+  pacingMode = "enforce",
+  pacingExtra: Record<string, unknown> = {},
+) {
   const card = {
     id: ISSUE, companyId: COMPANY, title: "Engineering hotfix", priority: "critical", status: "in_progress",
     assigneeAgentId: "agent-1", assigneeUserId: null, checkoutRunId: null, executionRunId: null,
@@ -43,7 +49,7 @@ async function boot(models: ModelEntry[], cardOverrides: Partial<Issue> = {}, ad
     models,
     classification: { enabled: true },
     selection: { enabled: true, mode: "enforce", defaultTier: "T3", fleetContextCeilingTokens: 200_000 },
-    pacing: { mode: pacingMode },
+    pacing: { mode: pacingMode, ...pacingExtra },
   };
   const harness = createTestHarness({ manifest, config });
   harness.seed({
@@ -106,7 +112,11 @@ for (const path of ["scheduled", "reactive"] as const) {
       expect(await pinned(harness)).toBe(normal);
       expect(harness.activity.some((entry) => entry.message.includes("re-pinned"))).toBe(true);
       const after = await harness.ctx.issues.get(ISSUE, COMPANY);
-      expect(after?.assigneeAdapterOverrides).toMatchObject({ adapterConfig: { env: { KEEP: "binding" } } });
+      // the pin carries only plugin-owned keys. KEEP stays on the
+      // agent record — the run resolves it from the base env under the
+      // per-key merge — so it must NOT appear in the pin.
+      expect((after?.assigneeAdapterOverrides as { adapterConfig: { env?: Record<string, unknown> } })?.adapterConfig.env)
+        .not.toHaveProperty("KEEP");
     });
 
     it("does not select weaker glm or fallback-only swe when no T1 replacement qualifies", async () => {
@@ -167,5 +177,91 @@ describe("scheduled effective-tier backstops", () => {
     );
     await harness.runJob("repinPass");
     expect(await pinned(harness)).toBe(normal);
+  });
+});
+
+/**
+ * worker wiring. The repin pass keeps a pin while its model is
+ * usable and capable (`isUsableAndCapable`), and moves it through `advise`
+ * otherwise. A lane at its `withdrawAtUtilization` ceiling is out for new
+ * dispatch, so an idle card pinned there must be moved off it, exactly as for
+ * an unserviceable lane. The lane is SERVICEABLE here (one account left), so
+ * only the withdrawal can explain the move; the control run leaves the ceiling
+ * out and proves nothing else would. The pass never reaches a card with a
+ * running or queued run (its candidate query excludes them), so this moves
+ * idle pins only.
+ */
+describe("scheduled repin off a withdrawn lane ()", () => {
+  const lanes = (extra: Record<string, unknown>) => [
+    {
+      laneId: "lane-dead",
+      statusUrl: "https://status.example/lane-dead",
+      windows: [{ name: "weekly", role: "allowance", utilizationFields: ["used"] }],
+      ...extra,
+    },
+  ];
+
+  async function seedSpentLane(harness: Awaited<ReturnType<typeof boot>>) {
+    // A pin with no stamp reads as expired and is re-validated through advise
+    // regardless of the lane. A FRESH pin rides the usability early return, so
+    // only `isUsableAndCapable` can move it: the wired site under test.
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.pinPinnedAt },
+      { [ISSUE]: new Date(NOW).toISOString() },
+    );
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      {
+        "lane-dead": {
+          laneId: "lane-dead",
+          fetchedAt: new Date(NOW).toISOString(),
+          observation: null,
+          error: null,
+          verdict: {
+            laneId: "lane-dead",
+            observedAt: new Date(NOW).toISOString(),
+            state: "on",
+            serviceable: true,
+            score: { utilization: 0.99, elapsed: 0.9, deviation: 0.09 },
+            accounts: [],
+            knownAccountCount: 8,
+            knownWeight: 8,
+            serviceableAccountCount: 1,
+            urgentResetAt: null,
+            reason: "ok",
+          },
+          // What `mergeLedgerEntry` stores for 7 exhausted accounts and one at 0.85.
+          combinedUtilization: {
+            utilization: 0.98125,
+            accounts: 8,
+            resetsAt: new Date(NOW + 2 * 60 * 60 * 1000).toISOString(),
+            measuredAt: new Date(NOW).toISOString(),
+          },
+        },
+      },
+    );
+  }
+
+  it("moves an idle pin off a lane at its withdrawal ceiling", async () => {
+    const harness = await boot(roster(), {}, "codex_local", "enforce", { lanes: lanes({ withdrawAtUtilization: 0.98 }) });
+    await seedSpentLane(harness);
+    await harness.runJob("repinPass");
+    expect(await pinned(harness)).toBe(normal);
+    expect(harness.activity.some((entry) => entry.message.includes("re-pinned"))).toBe(true);
+  });
+
+  it("leaves the same pin alone when no ceiling is configured", async () => {
+    const harness = await boot(roster(), {}, "codex_local", "enforce", { lanes: lanes({}) });
+    await seedSpentLane(harness);
+    await harness.runJob("repinPass");
+    expect(await pinned(harness)).toBe(incumbent);
+    expect(harness.activity.filter((entry) => entry.message.includes("re-pinned"))).toHaveLength(0);
+  });
+
+  it("leaves the pin alone while the lane is below its ceiling", async () => {
+    const harness = await boot(roster(), {}, "codex_local", "enforce", { lanes: lanes({ withdrawAtUtilization: 0.99 }) });
+    await seedSpentLane(harness);
+    await harness.runJob("repinPass");
+    expect(await pinned(harness)).toBe(incumbent);
   });
 });

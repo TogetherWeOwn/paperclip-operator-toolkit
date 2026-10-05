@@ -1,4 +1,4 @@
-import type { Tier } from "../constants.js";
+import { IMPLICIT_TIER_CEILING, TIER_ORDER, type Tier } from "../constants.js";
 import { laneVerdictFor, type LaneLedger } from "./pacing.js";
 import { tierScoreFor } from "./scores.js";
 import type { Candidate, IssueDescriptor, ModelEntry, ModelScore } from "./types.js";
@@ -56,7 +56,7 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * rule (b), 2026-09-19 owner rule: a free subscription lane whose
+ *  rule (b), 2026-09-19 owner rule: a free subscription lane whose
  * credential is serviceable and under its per-account cap wins its tier over
  * a paid/earned model until it has enough observations to be judged —
  * otherwise a new subscription can never earn placement.
@@ -99,6 +99,10 @@ export function freeEarnInCandidates(
   if (earnInGuardFor(descriptor).protected) return [];
   const picks: FreeEarnInPick[] = [];
   for (const candidate of candidates) {
+    // earn-in seeds evidence for the unjudged; it never carries a
+    // card above the implicit ceiling. T0 placement is operator-recorded, so a
+    // T0 rung (reachable only on an explicit opt-in) is never reordered here.
+    if (TIER_ORDER.indexOf(candidate.tier) > TIER_ORDER.indexOf(IMPLICIT_TIER_CEILING)) continue;
     const model = modelOf(models, candidate);
     const laneId = model?.laneId ?? null;
     if (!laneId) continue;

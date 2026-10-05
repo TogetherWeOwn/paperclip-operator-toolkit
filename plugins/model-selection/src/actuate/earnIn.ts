@@ -4,7 +4,7 @@ import { enforceMonotoneCapability } from "../engine/scores.js";
 import type { EarnInState, ModelScore } from "../engine/types.js";
 
 /**
- * Bounded T1 earn-in. Default OFF —
+ * Bounded T1 earn-in ( §3,  decision B). Default OFF —
  * `planEarnIn` is a pure decision function; `worker.ts` never calls it unless
  * `config.earnIn.enabled === true`, and the shipped config keeps that false.
  *
@@ -86,7 +86,7 @@ export function planEarnIn(
     return nothing(`${card.modelId} is stopped: 2+ material first-submission failures or a safety/authority violation`);
   }
   if (card.tier !== "T1") {
-    return nothing("earn-in only ever admits T1 work");
+    return nothing("earn-in only ever admits T1 work (never T0, which is operator-recorded)");
   }
   if (!config.classes.includes(card.workClass)) {
     return nothing(`work class ${card.workClass} is not in the configured earn-in classes`);

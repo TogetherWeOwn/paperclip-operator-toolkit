@@ -120,6 +120,7 @@ export const MODEL_SCORES: ModelScore[] = [
     aaIndex: 51,
     priorP: 0.933,
     tiers: {
+      T0: tierScore(),
       T1: tierScore({
         n: 416,
         ok: 321,
@@ -145,6 +146,7 @@ export const MODEL_SCORES: ModelScore[] = [
     aaIndex: 43,
     priorP: 0.873,
     tiers: {
+      T0: tierScore(),
       T1: tierScore({ n: 22, ok: 11, p: 0.852, capable: true, proven: true }),
       T2: tierScore({
         n: 17,
@@ -214,7 +216,7 @@ export function config(overrides: Partial<SelectionConfig> = {}): SelectionConfi
   };
 }
 
-// --- lane availability fixtures ----------------------------------
+// --- : lane availability fixtures ----------------------------------
 
 /**
  * The same three models, each pinned to the lane it actually serves on. Kept
@@ -287,7 +289,7 @@ export function account(
 }
 
 /**
- * + . The sub-call surface pins every override write now
+ *  +. The sub-call surface pins every override write now
  * carries: the four main-lane keys at the pinned model, the two haiku-class
  * keys at the resolved cheapest-healthy-T3 pick (defaulting to the pin, the
  * same fallback the write itself applies).

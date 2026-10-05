@@ -2,6 +2,7 @@ import {
   CARD_CENSOR_DAYS,
   CARD_ZERO_ACCEPT_MIN_RESOLVED,
   CARD_ZERO_ACCEPT_WINDOW_DAYS,
+  IMPLICIT_TIER_CEILING,
   REWORK_WEIGHT_REJECTED,
   REWORK_WEIGHT_REOPEN,
   SCORE_PRIOR_K,
@@ -30,7 +31,7 @@ export function priorP(aaIndex: number | null): number {
 
 /**
  * Blends the composite-index prior with the  five-benchmark basket
- *. Replaces the  agentic sub-score average, which keyed off
+ * (). Replaces the  agentic sub-score average, which keyed off
  * whatever aa.ai columns happened to be populated rather than a fixed basket.
  *
  * Falls back to the plain index prior when the basket misses its coverage gate,
@@ -54,7 +55,7 @@ const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse()
 /**
  * Tier from a posterior. T3 is the RESIDUAL bucket, not a fourth threshold.
  *
- * The cuts are the active tier policy's `scoreThresholds`, which
+ * The cuts are the active tier policy's `scoreThresholds` (), which
  * for `legacy-model-selection-v1` are still `SCORE_THRESHOLDS`. A model with
  * `p` under the T3 cut clears no tier at all. It is labelled
  * T3 and flagged `belowT3Floor` rather than dropped, because `tier` (the
@@ -62,7 +63,7 @@ const TIER_ORDER_BY_CAPABILITY_DESC: readonly Tier[] = [...TIER_ORDER].reverse()
  * `select.ts`) are already separate concepts in this engine: flooring the LABEL
  * does not promote the model, since `summarize`'s `capable` still refuses to let
  * it win T3 work. Dropping it instead would contradict the owner's own live
- * placement of `claude-haiku-4-5` at T3 on an index of 15.41.
+ *  placement of `claude-haiku-4-5` at T3 on an index of 15.41.
  */
 export function tierForPosterior(
   p: number,
@@ -144,7 +145,7 @@ function round(value: number, digits: number): number {
  *
  * `thresholds` are CAPABILITY bars, not tier cuts. They default to the active
  * tier policy's `capabilityThresholds`, which differ from `SCORE_THRESHOLDS` at
- * T1 (0.8, the serving `t1cap080` bar, vs a 0.85 cut).
+ * T1 (0.8, the serving `t1baseline` bar, vs a 0.85 cut).
  */
 export function summarize(
   stats: TierScoreStats,
@@ -304,7 +305,7 @@ export function tierScoreFor(score: ModelScore | undefined, tier: Tier): TierSco
  * Reads the monotone verdict, prior-only verdicts included, rather than
  * requiring evidence AT the target tier. The rung walk only ever runs a model
  * at its own rostered tier, so a T2 row never gathers T1 evidence; demanding
- * it would freeze every T1 promotion and undo . What it does
+ * it would freeze every T1 promotion and undo /. What it does
  * forbid is the defect: a model with an adverse verdict at or below the
  * target being promoted past it.
  */
@@ -353,19 +354,37 @@ export function applyDerivedTiers<T extends RosterRow>(
     const score = scoresByModelId[model.id];
     if (!score || !score.derivedTier) return model;
     if (score.tierSpecVersion !== specVersion) return model;
+    // a row an operator recorded above the implicit ceiling (T0) is
+    // placed by that record, not by a posterior — neither promoted into nor
+    // demoted out of it. A demotion would not be "safe to act on" here: it
+    // would turn an S-tier row into an ordinary regular T1 row that implicit
+    // dispatch is free to pick, the exact outcome T0 exists to prevent. Whether
+    // the row can still do T0 work is the capability gate's job (`capable` at
+    // T0), which fails closed, visibly, rather than leaking down a rung.
+    if (tierIndex(model.tier) > tierIndex(IMPLICIT_TIER_CEILING)) return model;
     const derived = score.derivedTier;
     if (derived === model.tier) return model;
 
     if (tierIndex(derived) > tierIndex(model.tier)) {
-      // PROMOTION. Two refusals, both fail-closed; neither applies to a
-      // demotion, which is always safe to act on and always applies per row.
+      // PROMOTION. Refusals are fail-closed; none applies to a demotion, which
+      // is always safe to act on and always applies per row.
+      //
+      // 0. : derivation never places a row in an explicit-only rung.
+      //    T0 is entered by an operator recording it on the roster, never by a
+      //    posterior: an auto-promoted T1 row would leave implicit dispatch
+      //    with no T1, and a T2 row would skip T1 outright. A derived tier
+      //    above the implicit ceiling is read as the ceiling. A row already AT
+      //    T0 never reaches here: it is exempt from derivation both ways (above).
+      const target = tierIndex(derived) > tierIndex(IMPLICIT_TIER_CEILING) ? IMPLICIT_TIER_CEILING : derived;
+      if (tierIndex(target) <= tierIndex(model.tier)) return model;
       //
       // 1. An `index-only` basis means the five-benchmark basket missed its
       //    coverage gate, so there is no admissible agentic evidence for this
       //    model at all — only the aa.ai composite. That is enough to keep a
       //    model where it is, or to move it down, but not to hand it harder
       //    work: the two models this fires hardest on measure worst of the
-      //    whole capture on the agentic benchmarks we DO have. Retain, and let a populated basket do the promoting.
+      //    whole capture on the agentic benchmarks we DO have (
+      //    review). Retain, and let a populated basket do the promoting.
       if (score.priorBasis === "index-only") return model;
       // 2. A model listed at more than one rung is placed there deliberately
       //    (`gpt-5.6-sol` carries both T1 and T2 on the codex lane). The
@@ -383,7 +402,8 @@ export function applyDerivedTiers<T extends RosterRow>(
       //    configured tier retains it — this rule never demotes.
       const ceiling = promotionCeiling(score);
       if (ceiling === undefined || tierIndex(ceiling) <= tierIndex(model.tier)) return model;
-      if (tierIndex(derived) > tierIndex(ceiling)) return { ...model, tier: ceiling };
+      if (tierIndex(target) > tierIndex(ceiling)) return { ...model, tier: ceiling };
+      return { ...model, tier: target };
     }
 
     return { ...model, tier: derived };
@@ -456,7 +476,7 @@ export function normModelId(modelId: string): string {
 /**
  * Ported from `model_scores.py`'s `classify()` (lines 50-55).
  *
- * INFRA_RE -> {kind:"infra", weight:0.0} is intentional: infra
+ * INFRA_RE -> {kind:"infra", weight:0.0} is intentional (): infra
  * is excluded from the quality posterior p and counted only as failInfra.
  * See the header above and scores.spec.ts's rawReplayCases / HOST_EVIDENCE
  * 75.7% regression for the invariant this preserves.
@@ -656,7 +676,7 @@ function validCount(value: number): boolean {
 }
 
 /**
- * §2.2 card-level acceptance ledger. A card closed less than
+ *  §2.2 card-level acceptance ledger. A card closed less than
  * `CARD_CENSOR_DAYS` ago and not yet rejected is `pending` — right-censored,
  * excluded from both the accepted and rejected counts (never assumed 1.0).
  */

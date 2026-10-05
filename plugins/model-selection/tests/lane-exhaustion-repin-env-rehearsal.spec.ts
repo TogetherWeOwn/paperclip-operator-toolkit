@@ -16,7 +16,7 @@ import {
 import { NO_ESCALATION, PROFILES, config } from "./fixtures.js";
 
 /**
- * rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
+ *  rehearsal: replay the 2026-09-16 16:40Z Codex exhaustion through
  * the repin WRITE and assert that all seven surfaces — the main `model` plus
  * the six model-valued env keys — leave the exhausted lane.
  *
@@ -221,11 +221,20 @@ describe(" rehearsal: the repin write evacuates every model surface, not just `m
     }
   });
 
-  it("every secret_ref and unrelated binding survives the write byte-for-byte", () => {
+  // The repin write carries no copy of the agent env: every
+  // AGENT_ENV key stays OUT of the pin. The run resolves the agent's bindings
+  // (including its secret_refs) from the base env under the per-key merge —
+  // and the seven model surfaces are still evacuated onto the healthy lane.
+  it("copies no agent env binding into the repin write", () => {
     const write = repinWrite(quarantine);
     const env = write!.patch.assigneeAdapterOverrides.adapterConfig.env!;
-    for (const [key, value] of Object.entries(AGENT_ENV)) {
-      expect(env[key]).toEqual(value);
+    for (const key of Object.keys(AGENT_ENV)) {
+      expect(env, key).not.toHaveProperty(key);
+    }
+    // The pin still does its own job: all seven surfaces leave the dead lane.
+    const surfaces = surfaceLanes(write!.patch.assigneeAdapterOverrides);
+    for (const [surface, lane] of Object.entries(surfaces)) {
+      expect(lane, `surface ${surface}`).toBe(CLAUDE_LANE);
     }
   });
 
@@ -286,7 +295,7 @@ describe(" rehearsal: the repin write evacuates every model surface, not just `m
       expect(scan(FROZEN_OVERRIDE_ENV)).toBe(true);
     });
 
-    it("flags a card with only ONE frozen key", () => {
+    it("flags a card with only ONE frozen key ('s shape on the live board)", () => {
       // 150 cards had PAPERCLIP_ASSIGNED_MODEL dead but only 148 had the
       // ANTHROPIC_DEFAULT_* pair — so partially-frozen rows are real and must
       // not need all six keys dead to qualify.

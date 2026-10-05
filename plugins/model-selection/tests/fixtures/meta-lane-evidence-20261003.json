@@ -1,0 +1,132 @@
+{
+  "provenance": {
+    "note": "In-repo identity evidence for the committed Meta lane bindings. Copied verbatim from board document operator-meta-lane-evidence-20261003-2020 (), read from host /srv/cliproxy-usage/meta.json. Utilization values are operational telemetry, not secrets. meta-lane-4 was cached/unavailable at capture and must not be certified as fresh serviceable evidence.",
+    "sourcePath": "/srv/cliproxy-usage/meta.json",
+    "sourceSha256": "3462fefafd4b2e789ffa5c8fced77f4f4f954927393695fd6733131d3910eec1",
+    "observedAt": "2026-10-03T20:25:22.029996Z",
+    "capturedAt": "2026-10-03T20:27:36.132967+00:00",
+    "scope": "Unscoped host telemetry evidence only; NOT a named-cohort admission-shadow acceptance run"
+  },
+  "records": [
+    {
+      "lane": "meta-lane-1",
+      "health": "exhausted",
+      "observationQuality": "live",
+      "weekly_utilization": 0.99,
+      "five_hour_utilization": 1.0,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-05T00:00:00Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-2",
+      "health": "healthy",
+      "observationQuality": "live",
+      "weekly_utilization": 0.81,
+      "five_hour_utilization": 0.2,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-03T20:58:32Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-3",
+      "health": "exhausted",
+      "observationQuality": "live",
+      "weekly_utilization": 0.99,
+      "five_hour_utilization": 1.0,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-05T00:00:00Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-4",
+      "health": "unavailable",
+      "observationQuality": "cached",
+      "weekly_utilization": 0.99,
+      "five_hour_utilization": 0.0,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-04T01:21:28Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-5",
+      "health": "healthy",
+      "observationQuality": "live",
+      "weekly_utilization": 0.7,
+      "five_hour_utilization": 0.21,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-03T21:44:06Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-6",
+      "health": "exhausted",
+      "observationQuality": "live",
+      "weekly_utilization": 0.99,
+      "five_hour_utilization": 1.0,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-05T00:00:00Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-7",
+      "health": "healthy",
+      "observationQuality": "live",
+      "weekly_utilization": 0.19,
+      "five_hour_utilization": 0.04,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-04T00:46:07Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    },
+    {
+      "lane": "meta-lane-8",
+      "health": "exhausted",
+      "observationQuality": "live",
+      "weekly_utilization": 0.99,
+      "five_hour_utilization": 1.0,
+      "weekly_resets_at": "2026-10-05T00:00:00Z",
+      "five_hour_resets_at": "2026-10-05T00:00:00Z",
+      "governing_window": "weekly",
+      "window_seconds": {
+        "five_hour": 18000,
+        "weekly": 604800,
+        "daily": 86400
+      }
+    }
+  ]
+}

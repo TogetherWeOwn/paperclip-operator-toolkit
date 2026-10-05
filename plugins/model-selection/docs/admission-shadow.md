@@ -1,6 +1,7 @@
 # Bounded account admission shadow
 
-This is the shadow-only implementation of admission contract v1. It does **not**
+This is the shadow-only implementation of admission contract v1 (
+ revision `2ce3dcf0-58d4-4953-afc6-99f839aecf46`). It does **not**
 enforce admission, reserve production allowance, select an upstream account,
 change an issue override or certify 98–100% end-of-week attainment.
 
@@ -34,6 +35,15 @@ durable atomic storage backend or reserve-before-start consumer. It checks all
 pools in one simulated transition, enforces separate lane slots, returns the
 same allocation on an identical idempotency-key replay and rejects key reuse
 with changed parameters.
+
+The simulator owns a deep copy of its constructor input, including observations,
+pre-existing holds, binding window IDs and nested burn estimates. Returned
+allocations, lifecycle/reconciliation results, evaluations and snapshots are
+detached copies: caller edits cannot change held allowance, occupied slots or
+validated attempt parameters. Attempt and reconciliation replays retain their
+original result even after later simulated transitions; `snapshot()` reports the
+current reservation state instead. These are fixture ownership guarantees, not
+evidence of production reservation isolation.
 
 Only proven cancellation before start refunds a hold. Committed failures and
 timeouts retain allowance, even after a confirmed end frees a slot. Attributed
@@ -105,7 +115,7 @@ issue overrides/labels and activity with the config omitted, off and on. They
 cover normal advice/enforcement, sticky incumbents, untrusted-profile holds,
 tier exhaustion, hard-stop repin and computation/storage failure isolation.
 
-## Lane quota observation adapter
+## Lane quota observation adapter ()
 
 `admission-observation.ts` turns a per-lane quota snapshot (the lane-document
 record shape: `lane`, `*_utilization`, `*_resets_at`, `observationQuality`
@@ -121,14 +131,21 @@ table is listed as `unmappedLanes` and excluded; a lane that is not a stable id
 is only counted (`unstableLaneCount`), never echoed. A table lane missing from
 the snapshot yields `unknown` windows. Only whitelisted record fields are read;
 nothing else is copied or persisted. **Only lanes with in-repo evidence are
-committed** (Claude 1-2 with 5h + 7d, Codex 1-3 weekly, Z.ai 1 with 5h + weekly).
-Meta lane ids have no in-repo evidence yet: add them from the live Meta lane
-document (provider `meta`, 5h + weekly) before a Meta cohort can be reported.
+committed** (Claude 1-2 with 5h + 7d, Codex 1-3 weekly, Z.ai 1 with 5h +
+weekly, Meta 1-8 with 5h + weekly). The Meta ids come from the live lane
+document read on 2026-10-03, copied into
+`tests/fixtures/meta-lane-evidence-20261003.json` with its source hash and
+capture time. Committing an identity certifies nothing about freshness:
+meta-lane-4 was `cached`/`unavailable` at capture, and the adapter marks
+cached observations stale; no utilization-only observation admits anything
+regardless of provider.
 
 **Windows.** Every account declares ALL its governing windows. The start is the
-reset minus the fixed window length (5h, 7d). Resets are snapped to the nearest
-minute for the window id because reported instants jitter by up to about a
-second around a whole-minute boundary; the exact instant stays on the row as
+reset minus the fixed window length (5h, 7d). Resets snap to the nearest minute
+for the window id: any reported instant within half the grid (30 s) takes that
+boundary's identity. Observed provider jitter is only about a second around a
+whole-minute boundary, so a genuinely different reset inside the 30 s band
+would be indistinguishable from jitter; the exact instant stays on the row as
 `reportedResetAt`. Eight Meta lanes with one shared reset stay eight
 per-account windows (distinct pools); nothing is averaged. Lanes that share a pool
 are counted once; disagreeing observations of one pool/window are `invalid`.
@@ -157,8 +174,11 @@ invalid window reports no attainment.
 `accountAdmissionShadow.enabled` **and** `maxAgeMs`. The report records
 `observationAdapter` (per account/window rows with state, reasons, freshness,
 observation quality, utilization, exact and snapped reset, plus unmapped,
-unstable and missing lanes). The evidence kind is `fresh-observations` as
-caller-declared; complete-window and 24-hour fresh validation remain `unproven`.
+unstable and missing lanes). The evidence kind is hardcoded to
+`fresh-observations` on the lane-snapshot path: a stored lane document carries
+no provenance of its own. Fixture replays use the explicit
+`accounts`/`windows` report with `synthetic-replay` or `observed-replay`.
+Complete-window and 24-hour fresh validation remain `unproven`.
 Optional `bindings` use the table account ids (use `windowIds: null` unless the
 caller holds the derived window ids); they never admit from utilization alone.
 
@@ -192,6 +212,23 @@ npm --prefix plugins/model-selection run typecheck
 npm --prefix plugins/model-selection run build
 ```
 
+For the bounded object-ownership regression alone:
+
+```sh
+npm --prefix plugins/model-selection test -- tests/admission-simulator.spec.ts tests/admission-budget.spec.ts
+node plugins/model-selection/scripts/admission-simulator-alias-oracle.mjs
+```
+
+The alias oracle requires an existing run-owned scratch directory in
+`PAPERCLIP_RUN_SCRATCH_DIR` or `PAPERCLIP_SCRATCH_DIR` (`RUNNER_TEMP` in CI).
+It copies only the simulator, budget evaluator and simulator spec, verifies the
+unmutated ownership tests pass, then requires assertion failures from deliberate
+shallow-copy mutants at constructor, evaluation, return, snapshot and replay-cache
+boundaries. Empty runs, process errors/timeouts, anchor drift and surviving mutants
+fail loudly. Copies are removed in `finally`; checkout source is never mutated.
+It runs only the ownership tests, not a full-window simulation or the full mutation
+gate. The fixtures use fixed synthetic clocks and no database or network.
+
 Use the existing compatibility fixtures for selected binding, issue overrides
-and application-time actuation. CI owns the repo's mutation gate; its guard
+and application-time actuation. CI owns the repo's full mutation gate; its guard
 intentionally refuses non-CI runs.

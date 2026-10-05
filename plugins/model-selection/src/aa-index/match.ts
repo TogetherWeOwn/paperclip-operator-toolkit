@@ -39,7 +39,7 @@ export function resolveAaSlug(
  *
  * These are the tier policy's score cuts (`tierForPosterior`), not its
  * capability bars (`summarize`). The two used to be the same table; since the
- * serving `t1cap080` carry-forward they differ at T1 (cut 0.85, bar 0.8), and
+ * serving `t1baseline` carry-forward they differ at T1 (cut 0.85, bar 0.8), and
  * this has always followed the cut. It only flags drift; it never admits a
  * model to a tier.
  */

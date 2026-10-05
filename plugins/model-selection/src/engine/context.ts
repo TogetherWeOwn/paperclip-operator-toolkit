@@ -3,6 +3,7 @@ import {
   blendedListPrice,
   hardStopExcluded,
   laneAvoidExcluded,
+  laneWithdrawnExcluded,
   laneOutageExcluded,
   type LaneAvoidConfig,
   type LaneLedger,
@@ -16,7 +17,7 @@ import type { ModelEntry, ModelScore } from "./types.js";
 export const CONTEXT_LIMIT_ENV_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 
 /**
- * (thrash incident 2026-09-19/20). Floor for the per-pin stamped
+ *  (thrash incident 2026-09-19/20). Floor for the per-pin stamped
  * cap: Claude Code starts every run with ~45k fixed context, so a 128k stamp
  * thrashed autocompact and killed ~1 in 4 runs. Never stamp below 250k when
  * the window allows; a window under 250k gets its full window.
@@ -25,7 +26,7 @@ export const MIN_STAMPED_CONTEXT_TOKENS = 250_000;
 
 /**
  * Plugin-owned override env key that marks a pin on a
- * `fallbackOnly` model. A fallback pin outlives the
+ * `fallbackOnly` model ( §5, §7 item 4). A fallback pin outlives the
  * capacity gap that justified it: `stickyModelId = pinnedModelId` keeps it,
  * and nothing revisited it until the 24 h expiry. The stamp lets the fallback
  * lease pass find exactly these pins, through the index in plugin state,
@@ -124,7 +125,7 @@ export type AdapterEnv = Record<string, unknown>;
  * The sub-call model surfaces a pin must carry alongside the main
  * model, or the evacuation is partial.
  *
- * measured the fleet (`docs/routing/-lane-exhaustion-autoheal.md`
+ *  measured the fleet (`docs/routing/-lane-exhaustion-autoheal.md`
  * §#1b): 24 of 26 agents point both of these at the CLIProxy Codex lane. Repin
  * the main model away from an exhausted lane and leave these behind, and the
  * card's haiku-class sub-calls still resolve to the dead lane — a run that reads
@@ -147,7 +148,7 @@ export const ANCILLARY_MODEL_ENV_KEYS = [
  * The main-lane sub-call surfaces: env keys whose value should track
  * the model the pin itself selected, not a cheaper pick.
  *
- * Measured 2026-09-17 on the 16:40Z Codex exhaustion: 118 open cards
+ * Measured 2026-09-17 on the 16:40Z Codex exhaustion (): 118 open cards
  * carried a live main-model pin plus all six sub-call keys still frozen on the
  * exhausted lane.  moved the two haiku-class keys and deferred these
  * four; the 00:0xZ board sweep showed the deferred four are the bulk of the
@@ -194,6 +195,7 @@ export function cheapestHealthyModelIdForTier(input: {
     if (input.pacingMode === "off") return true;
     if (hardStopExcluded(input.ledger, model)) return false;
     if (laneAvoidExcluded(input.ledger, model, input.laneAvoidConfig)) return false;
+    if (laneWithdrawnExcluded(input.ledger, model, input.laneAvoidConfig, Date.parse(input.nowIso))) return false;
     if (laneOutageExcluded(input.laneOutageOverride, input.nowIso, model)) return false;
     const score = tierScoreFor(input.modelScores[model.id], input.tier);
     if (score?.capable === false) return false;
@@ -210,7 +212,7 @@ export const ALL_MODEL_ENV_KEYS = [
 ] as const;
 
 /**
- * , remediation half. True when any model-valued sub-call env key on an
+ * remediation half. True when any model-valued sub-call env key on an
  * existing override points at a model that is currently excluded — the "pin
  * healthy, sub-calls dead" state.
  *
@@ -260,6 +262,7 @@ export function overrideEnvOnExcludedLane(input: {
     if (!model) continue;
     if (hardStopExcluded(input.ledger, model)) return true;
     if (laneAvoidExcluded(input.ledger, model, input.laneAvoidConfig)) return true;
+    if (laneWithdrawnExcluded(input.ledger, model, input.laneAvoidConfig, Date.parse(input.nowIso))) return true;
     if (laneOutageExcluded(input.laneOutageOverride, input.nowIso, model)) return true;
   }
   return false;
@@ -300,8 +303,8 @@ function secretBindingIdentity(binding: unknown): string | null {
  * in it, and the check looks each merged-env ref up by (secret, agent,
  * `env.<KEY>`) — so a ref the agent env does not carry at that key has no row,
  * and the run fails `configuration_incomplete` before a session starts
- *. That happens to a pin snapshotted under an earlier
- * assignee, or one whose secret was since unbound from the agent.
+ * (Class B). That happens to a pin snapshotted under an earlier
+ * assignee (), or one whose secret was since unbound from the agent.
  *
  * Only refs the host would refuse are reported: a malformed ref fails the
  * host's schema parse and is never checked, and a `user_secret_ref` that is
@@ -361,17 +364,25 @@ export interface ModelOverrideInput {
    * The assignee agent's `adapterConfig.env`, or `null`/absent when it is
    * UNKNOWN — no assignee, or the agent read failed.
    *
-   * The distinction is load-bearing, not cosmetic. Because the host replaces the
-   * whole `env` object (see below), writing an env map we built from an unknown
-   * base would delete every binding the agent actually carries — GH tokens and
-   * all. So an unknown agent env suppresses the ancillary writes entirely: the
-   * main model pin still lands, and the run keeps the agent's env untouched.
-   * A known-but-empty env (`{}`) is a different fact and does get them.
+   * the agent env is READ but never COPIED into the pin. It
+   * decides the known/unknown rule (unknown suppresses the sub-call writes
+   * entirely — the main model pin still lands — because we cannot rebuild a
+   * base we cannot see) and vetoes a plain pin over a secret-bound agent
+   * surface (the pin must not shadow the agent's live binding under the
+   * per-key merge). The values themselves reach the run through the base
+   * env, never through the pin.
+   *
+   * The distinction is load-bearing, not cosmetic. Writing an env map built
+   * from an unknown base would clobber bindings the agent actually carries —
+   * GH tokens and all. So an unknown agent env suppresses the ancillary
+   * writes entirely: the main model pin still lands, and the run keeps the
+   * agent's env untouched. A known-but-empty env (`{}`) is a different fact
+   * and does get them.
    */
   agentEnv?: AdapterEnv | null;
   existingOverrideEnv?: AdapterEnv;
   /**
-   * Target for the two haiku-class sub-call keys: the cheapest
+   * Target for the two haiku-class sub-call keys (): the cheapest
    * healthy T3 model, resolved by `cheapestHealthyModelIdForTier` at the call
    * site. NOT the main pin — pinning `ANTHROPIC_SMALL_FAST_MODEL` to a T1
    * model would price every background haiku-class call at T1 rates.
@@ -400,32 +411,44 @@ export interface ModelOverrideInput {
 const PLUGIN_OWNED_ENV_KEYS: readonly string[] = [CONTEXT_LIMIT_ENV_KEY];
 
 /**
- * Build the complete issue-level adapter override.
+ * Every env key a pin may carry under the fork's per-key override
+ * env merge (deployed): the compaction stamp, the fallback
+ * provenance stamp (), plus the six model-valued sub-call surfaces.
+ * Anything else in the assignee's env — secret_refs, bindings, hand edits —
+ * stays on the agent record and reaches the run through the base env, never
+ * through the pin. (The  tests spell the list literally and assert
+ * these constants match it, so adding a written key without updating the
+ * tests goes red.)
+ */
+export const PIN_ENV_ALLOWLIST: readonly string[] = [
+  CONTEXT_LIMIT_ENV_KEY,
+  PIN_PROVENANCE_ENV_KEY,
+  ...PIN_LANE_MODEL_ENV_KEYS,
+  ...ANCILLARY_MODEL_ENV_KEYS,
+];
+
+/**
+ * Build the issue-level adapter override.
  *
- * The host shallow-spreads `issueOverrides.adapterConfig` over the agent
- * adapter config — `{...baseConfig, ...modelProfile.adapterConfig, ...issueAdapterConfig}`,
- * `mergeModelProfileAdapterConfig`, `heartbeat.ts:3705-3714` — so an issue-level
- * `env` object replaces the agent's `env` object wholesale, per key it does not
- * carry included. Merge the maps here before writing; otherwise adding the
- * compaction ceiling or a sub-call pin silently deletes every unrelated agent
- * env binding.
+ * The pin carries ONLY plugin-owned keys (`PIN_ENV_ALLOWLIST`:
+ * the compaction stamp, the fallback provenance stamp, and the six
+ * model-valued sub-call surfaces). The fork merges override env per key
+ * (`mergeIssueAdapterConfigOverrides`, deployed), so the agent's
+ * bindings reach the run through the base env — copying them into the pin
+ * snapshots secret_refs (155 of 155 pins on 2026-10-01) that fail the
+ * run-agent binding check after a reassignment () or an unbind.
+ * Do NOT spread `agentEnv` into the pin.
  *
- * The agent side of that merge (`agentEnv`) is re-read from the agent record on
- * every pass (`worker.ts` describeIssue), so it always describes the assignee as
- * of now. The existing override is not: it is a snapshot written by an earlier
- * repin, under whatever assignment held at the time. Spreading it wholesale
- * ratchets that snapshot onto every later pin — so reassigning a card injects
- * the previous assignee's secret refs, and unbinding a secret never
- * takes effect because the pin keeps re-supplying the dead ref. So when the
- * assignee env is KNOWN we rebuild from it and carry forward only the keys this
- * plugin owns; the assignee's own bindings come back from `agentEnv`, the source
- * of truth, and never needed the snapshot. When the assignee env is UNKNOWN we
- * cannot rebuild, so we fall back to preserving the existing override rather than
- * clobber bindings we cannot see — except the model-owned surfaces
- * (`CONTEXT_LIMIT_ENV_KEY`, `PIN_LANE_MODEL_ENV_KEYS`,
- * `ANCILLARY_MODEL_ENV_KEYS`, ), which are re-derived against the new
- * model below so a repin never leaves them pointing at the model it just
- * moved off.
+ * The agent env is still READ, for the two things only it can tell us. When
+ * the assignee env is UNKNOWN we cannot rebuild a base we cannot see, so we
+ * preserve the existing override rather than clobber unseen bindings —
+ * except the model-owned surfaces (`CONTEXT_LIMIT_ENV_KEY`,
+ * `PIN_LANE_MODEL_ENV_KEYS`, `ANCILLARY_MODEL_ENV_KEYS`), which
+ * are re-derived against the new model below so a repin never leaves them
+ * pointing at the model it just moved off. And a secret binding in the
+ * ASSIGNEE's env vetoes the plain pin for that key: the pin no longer
+ * carries the agent's value, so writing one would shadow the agent's live
+ * binding for the run.
  *
  * the same per-key merge is why effort is decided HERE rather than at
  * the six call sites. `model` and its effort have to leave as one patch, or the
@@ -456,9 +479,14 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
   const agentEnvKnown = input.agentEnv !== null && input.agentEnv !== undefined;
   const agentEnv = input.agentEnv ?? {};
   const overrideEnv = input.existingOverrideEnv ?? {};
-  // Known assignee: rebuild from `agentEnv` and carry forward only plugin-owned
-  // keys from the old pin. Unknown assignee: we have no current base to rebuild
-  // from, so preserve the existing override instead of clobbering unseen bindings.
+  // The pin carries only plugin-owned keys (`PLUGIN_OWNED_ENV_KEYS`
+  // carried from the old pin, plus the sub-call surfaces re-derived below) —
+  // the agent's env is NEVER spread in. Under the fork's per-key merge
+  // (deployed) the agent's bindings reach the run through the
+  // base env; copying them here snapshots secret_refs that fail the
+  // run-agent binding check after a reassignment () or an unbind.
+  // Unknown assignee: we have no base we could rebuild from, so preserve
+  // the existing override rather than clobber bindings we cannot see.
   let carriedOverrideEnv: AdapterEnv;
   if (agentEnvKnown) {
     carriedOverrideEnv = {};
@@ -468,7 +496,14 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
   } else {
     carriedOverrideEnv = overrideEnv;
   }
-  const env: AdapterEnv = { ...agentEnv, ...carriedOverrideEnv };
+  const env: AdapterEnv = { ...carriedOverrideEnv };
+  // The pin no longer carries the agent's values, so a
+  // secret-bound agent surface vetoes the plain pin for that key: writing one
+  // would shadow the agent's live binding for the run under the per-key
+  // merge. (A secret-bound value already in the carried snapshot is still
+  // never overwritten — see the loops below.)
+  const agentSecretBound = (key: string): boolean =>
+    agentEnvKnown && isSecretBinding(agentEnv[key]);
   const agentEnvCap = positiveInteger(input.agentEnvContextTokens);
   const modelWindow = positiveInteger(input.model.contextWindow);
   const ratio =
@@ -513,7 +548,10 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
   if (!ancillaryBlocked) {
     for (const key of PIN_LANE_MODEL_ENV_KEYS) {
       if (!agentEnvKnown && !(key in overrideEnv)) continue;
-      if (isSecretBinding(env[key])) continue;
+      // A secret-bound snapshot value is never overwritten (we cannot
+      // reconstruct it); a secret-bound AGENT value vetoes the plain pin so
+      // the pin does not shadow the agent's live binding under per-key merge.
+      if (isSecretBinding(env[key]) || agentSecretBound(key)) continue;
       env[key] = { type: "plain", value: input.model.id };
     }
     const cheapPick = input.cheapModelId || input.model.id;
@@ -522,7 +560,7 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
       : cheapPick;
     for (const key of ANCILLARY_MODEL_ENV_KEYS) {
       if (!agentEnvKnown && !(key in overrideEnv)) continue;
-      if (isSecretBinding(env[key])) continue;
+      if (isSecretBinding(env[key]) || agentSecretBound(key)) continue;
       env[key] = { type: "plain", value: cheapId };
     }
   }
@@ -537,9 +575,13 @@ export function modelOverrideForContext(input: ModelOverrideInput): {
     env[PIN_PROVENANCE_ENV_KEY] = { type: "plain", value: JSON.stringify(input.provenance) };
   }
 
+  // the agent-env clause is gone with the spread. The agent's own
+  // ceiling is never copied into the pin, so there is nothing to explicitly
+  // remove; the override clause stays so a stale pin ceiling is cleared by a
+  // wide-model repin (the column is replaced wholesale — only the merge with
+  // the base env is per key).
   const mustWriteEnv =
     Object.keys(env).length > 0 ||
-    CONTEXT_LIMIT_ENV_KEY in agentEnv ||
     CONTEXT_LIMIT_ENV_KEY in overrideEnv;
 
   const effortPin = effortPinForOverride(input);
