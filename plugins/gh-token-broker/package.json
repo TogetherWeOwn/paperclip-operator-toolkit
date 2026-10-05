@@ -2,6 +2,7 @@
   "name": "paperclip-plugin-gh-token-broker",
   "version": "0.1.0",
   "description": "Mints least-privilege, repo-scoped GitHub App installation tokens for agent runs so the signing key never enters an agent address space.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "paperclipPlugin": {
