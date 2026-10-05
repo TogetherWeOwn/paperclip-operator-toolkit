@@ -2,7 +2,6 @@
 
 - **Status:** accepted
 - **Date:** 2026-10-04
-- **Card:** 
 - **Spec:**  (D1e); follow-up of 
 - **Related:**  (pacer serviceability),  / ADR-0004 (lane
   availability),  (the poller-side API slowness this ADR defends

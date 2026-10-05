@@ -74,7 +74,7 @@ numbers. The bridge log's `meta_combined` agrees at the tail (0.981 at 22:01Z ag
 
 ### What is not known
 
-The live bridge script has not been mirrored (`/paperclip/shared/host-bridge/fleet_quota_balancer.py`
+The live bridge script has not been mirrored (`fleet_quota_balancer.py` (shared-host copy)
 is dated 2026-10-03 18:12Z; the live reasons and `meta_combined` field are not in it). This
 definition is the best-supported reading of the evidence, not a port, and the margins are
 narrow: 0.0025 below the ceiling in the MUSE regime, 0.0012 above it in the withdrawal regime.

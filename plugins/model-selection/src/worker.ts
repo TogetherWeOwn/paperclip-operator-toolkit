@@ -331,7 +331,7 @@ export function createPlugin() {
    *  reopen: `ctx.companies.list()` is a wildcard host call that,
    * unlike every other call this worker makes, is not carried by the
    * per-company `proactiveCompanyScopes` authorization the host seeds
-   * from this plugin's configured companies (LOOA-629/695). A scheduled
+   * from this plugin's configured companies. A scheduled
    * job's `companies.list()` call therefore only succeeds when no other
    * invocation happens to be active in the worker process at that exact
    * moment — nondeterministic, and observed failing from the real
@@ -3384,7 +3384,7 @@ export function createPlugin() {
       // This job closes the detection gap and nothing else. It REPORTS. A
       // price change reorders the entire fleet's routing, so the output is a
       // diff an operator approves — deliberately the same posture as the
-      // thirteen CAP-061-marked rows shipped disabled rather than let an
+      // thirteen pricing-confirmation rows shipped disabled rather than let an
       // estimated price silently win cost-sort over a proven model.
       //
       // Structured like `runAaIndexRefresh` above and for the same reasons:

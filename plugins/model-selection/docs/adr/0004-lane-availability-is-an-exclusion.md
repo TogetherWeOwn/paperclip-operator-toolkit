@@ -2,7 +2,6 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-17
-- **Card:** 
 - **Parent:** 
 - **Related:**  (pacer serviceability),  (the collector), 
   (producer-side cooldown contract),  (`tier-exhausted`)

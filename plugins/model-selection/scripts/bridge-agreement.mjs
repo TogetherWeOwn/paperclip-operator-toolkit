@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 
-export const DEFAULT_BRIDGE_LOG = "/paperclip/shared/host-bridge/fleet-quota-balancer.log";
+export const DEFAULT_BRIDGE_LOG = "./fleet-quota-balancer.log";
 const HOURLY_FILE = /^decisions-\d{4}-\d{2}-\d{2}-\d{2}Z\.jsonl$/;
 
 /** @param {string | null | undefined} model */
@@ -184,7 +184,7 @@ export async function shadowFiles(dir, includeLegacy) {
 function defaultShadowDir(env) {
   if (env.MODEL_SELECTION_SHADOW_DIR) return env.MODEL_SELECTION_SHADOW_DIR;
   if (env.PAPERCLIP_COMPANY_ID) {
-    return `/paperclip/instances/default/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
+    return `${env.MODEL_SELECTION_STATE_ROOT ?? "/var/lib"}/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
   }
   return null;
 }

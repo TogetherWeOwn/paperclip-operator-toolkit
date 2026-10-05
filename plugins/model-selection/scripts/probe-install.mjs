@@ -26,7 +26,7 @@ const COMPANY = process.env.PAPERCLIP_COMPANY_ID;
 const PLUGIN_ID = "togetherweown.model-selection"; // src/constants.ts:1
 const ADVISE = "/advise"; // src/manifest.ts:118 -- NOT /invoke (that is paperclip-model-router)
 
-// Known-installed ids, from /paperclip/.paperclip/plugins/package.json. None declare
+// Known-installed ids, from the host's installed-plugins manifest. None declare
 // apiRoutes, so each must answer "does not expose scoped API routes".
 const INSTALLED_CONTROLS = [
   "paperclip-plugin-discord",

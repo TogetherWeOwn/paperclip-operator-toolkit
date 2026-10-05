@@ -556,7 +556,7 @@ const SCENARIOS: ScenarioDef[] = [
     },
   },
   {
-    name: "zai-peak-hour-throttle-excludes-at-cap-1",
+    name: "zai-peak-hour-throttle-excludes-at-capacity-1",
     tier: "T2",
     now: PEAK_NOW,
     models: [
