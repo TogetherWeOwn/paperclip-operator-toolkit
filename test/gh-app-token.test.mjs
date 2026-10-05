@@ -1,5 +1,5 @@
 /**
- * TOG-222 — gh-app-token.js credential-source and cache tests.
+ * gh-app-token.js credential-source and cache tests.
  *
  * Everything here runs the real CLI as a child process against stub servers, so
  * the thing under test is the surface git actually invokes. No real GitHub App
@@ -97,14 +97,14 @@ const githubOk = () => (req) => {
 }
 
 function scratch(name) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tog222-${name}-`))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ghtoken-${name}-`))
   return dir
 }
 
 const brokerEnv = (base, over = {}) => ({
   GH_APP_BROKER_URL: base,
   PAPERCLIP_API_KEY: 'pk_test_key',
-  PAPERCLIP_TASK_ID: 'TOG-222',
+  PAPERCLIP_TASK_ID: 'TASK-222',
   PAPERCLIP_RUN_ID: 'run-1',
   ...over,
 })
@@ -123,7 +123,7 @@ test('credential get mints via the broker when no PEM is present', async () => {
 
     const call = b.calls.at(-1)
     assert.equal(call.method, 'POST')
-    assert.equal(call.url, '/api/plugins/gh-token-broker/api/issues/TOG-222/github-token')
+    assert.equal(call.url, '/api/plugins/gh-token-broker/api/issues/TASK-222/github-token')
     assert.equal(call.headers.authorization, 'Bearer pk_test_key')
     assert.equal(call.headers['x-paperclip-run-id'], 'run-1')
   } finally {
@@ -174,7 +174,7 @@ test('the broker token is reused from cache within a run', async () => {
 
 // --- defect 2: a withdrawn credential invalidates its cache ------------------
 
-test('REGRESSION: a pre-TOG-222 cache (GH_APP_ID only, no cred) is refused', async () => {
+test('REGRESSION: a legacy cache (GH_APP_ID only, no cred) is refused', async () => {
   // This is verbatim the reproduction from the issue: GH_APP_ID still bound,
   // GH_APP_PRIVATE_KEY unbound, a cache entry holding a live token. It used to
   // exit 0 and print the password.
@@ -365,7 +365,7 @@ test('auto falls back to the PEM when the broker is absent (404), loudly', async
     assert.equal(r.code, 0, r.stderr)
     assert.ok(r.stdout.includes(FAKE_PEM_TOKEN))
     assert.match(r.stderr, /falling back to GH_APP_PRIVATE_KEY/)
-    assert.match(r.stderr, /TOG-174/)
+    assert.match(r.stderr, /raw signing key/)
   } finally {
     await b.close()
     await g.close()
@@ -461,7 +461,7 @@ test('an unreachable broker fails within the timeout rather than hanging', async
   }
 })
 
-// --- TOG-2899: retry-with-backoff on a transient broker failure -------------
+// --- retry-with-backoff on a transient broker failure --------------------------
 
 test('a timeout is retried before falling closed, and names the timeout knob', async () => {
   const b = await stub(() => null) // accepts, never responds, every attempt
@@ -575,7 +575,7 @@ test('source mode reports readiness and mints nothing', async () => {
     const out = JSON.parse(r.stdout)
     assert.equal(out.mode, 'auto')
     assert.equal(out.broker.configured, true)
-    assert.equal(out.broker.issueId, 'TOG-222')
+    assert.equal(out.broker.issueId, 'TASK-222')
     assert.equal(out.pem.present, false)
     assert.equal(b.calls.length, 0, 'source must not mint')
     assert.ok(!r.stdout.includes('pk_test_key'), 'must not echo the API key')
@@ -585,7 +585,7 @@ test('source mode reports readiness and mints nothing', async () => {
   }
 })
 
-test('source mode reports the TOG-2899 broker timeout/retry defaults, and their overrides', async () => {
+test('source mode reports the broker timeout/retry defaults, and their overrides', async () => {
   const b = await stub(brokerOk())
   try {
     const defaults = await run(['source'], brokerEnv(b.base))

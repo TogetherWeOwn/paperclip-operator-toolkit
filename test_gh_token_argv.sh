@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression suite for gh_token.sh — credentials must never reach argv.
 #
-# THE BUG THIS EXISTS FOR (TOG-200). gh_token.sh invoked curl as
+# THE BUG THIS EXISTS FOR. gh_token.sh invoked curl as
 # `curl -sS -X GET url -H "Authorization: Bearer $tok" ...` in two places:
 # app_api() with the App JWT, and the `api` subcommand with a live
 # installation token minted at the App's full ceiling. /proc/<pid>/cmdline is
@@ -220,7 +220,9 @@ credential_did_arrive() {
   fi
   case "$want" in
     jwt)
-      if grep -E "^BEARER\s" "$CFGLOG" | grep -qE "$JWT_MATCHER"; then
+      # Herestring, not a pipe into grep -q: under pipefail a pipe can report
+      # the producer's SIGPIPE instead of the match result.
+      if grep -qE "$JWT_MATCHER" <<<"$(grep -E "^BEARER\s" "$CFGLOG")"; then
         ok "$desc: the App JWT reached curl by config file"
       else
         bad "$desc: the bearer in the config file is not a JWT — is the tool sending a placeholder?"
@@ -256,7 +258,7 @@ STUB_CMDLOG="$CMDLOG" STUB_CFGLOG="$CFGLOG" STUB_MINT_CANARY="$MINT_CANARY" \
 if grep -qE "$JWT_MATCHER" "$CMDLOG"; then
   ok "an argv-borne App JWT IS detected"
 else
-  bad "detector is blind to JWTs: the app_api() half of TOG-200 is untested"
+  bad "detector is blind to JWTs: the app_api() half of the argv rule is untested"
 fi
 
 # --- 1..4: every subcommand that touches the network --------------------------
@@ -301,7 +303,7 @@ credential_did_arrive "api" token
 # The `api` subcommand forwards the caller's extra curl arguments. Those are
 # not credentials and must keep working, or the fix breaks real usage.
 #
-# They moved behind a literal `--` in TOG-305: argument 3 is now the request
+# They moved behind a literal `--` when the body/args slots were split: argument 3
 # body, because it used to be read as an extra curl argument and so the body
 # never reached the request. See test_gh_token_api_body.sh for that contract;
 # what this suite still owns is only that forwarding them leaks no credential.
@@ -314,8 +316,8 @@ fi
 no_creds_in_argv "api with extra args"
 
 # A request body is not a credential, but it can carry one — a secret value
-# being written, a token being rotated. TOG-200's rule is about argv, so the
-# body belongs under it too, and this is the suite that reads /proc.
+# being written, a token being rotated. The no-credentials-on-argv rule covers
+# bodies too, and this is the suite that reads /proc.
 run_tool api PUT /repos/stub-org/repo/pulls/1/merge '{"sha":"deadbeefdeadbeefdeadbeefdeadbeef0000ffff"}'
 if grep -q 'deadbeefdeadbeef' "$CMDLOG"; then
   bad "api: the request body reached curl's argv"
@@ -358,7 +360,7 @@ fi
 # The `-ge` is only a vacuity guard: with a single call, "max concurrent is 1"
 # is true by construction and proves nothing. Two calls is the smallest number
 # that can distinguish "removed between calls" from "removed at exit", so two
-# is the threshold. It was 3 until TOG-331, when `check` stopped fetching the
+# is the threshold. It was 3 until a refactor stopped `check` fetching the
 # installation body twice — the count is an artefact of how many endpoints
 # `check` happens to consult, and pinning the artefact turned a saved API call
 # into a red test in a suite about argv.
@@ -389,7 +391,7 @@ STUB_MINT_FAILS=""
 if [[ $RC -ne 0 ]]; then
   ok "a failed mint still exits non-zero"
 else
-  bad "a failed mint exited 0 — unrelated to TOG-200, but it would mask this test"
+  bad "a failed mint exited 0 — unrelated to the argv rule, but it would mask this test"
 fi
 leftover="$(leftovers)"
 if [[ -z "$leftover" ]]; then

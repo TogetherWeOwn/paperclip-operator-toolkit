@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# notify_paperclip_issue.sh — reference REQUEST_NOTIFY_CMD transport (TOG-254)
+# notify_paperclip_issue.sh — reference REQUEST_NOTIFY_CMD transport
 # ===========================================================================
 # Turns a request-queue notification into something a Paperclip agent actually
 # receives. Reads one notification JSON object on stdin; exits 0 on delivery.
@@ -32,7 +32,7 @@
 # write decisions would be a way to influence authorization, which is exactly
 # what the notifier is forbidden to become.
 #
-# THE PAYLOAD IS NOT TRUSTED INPUT (TOG-198 review, 2026-08-24)
+# THE PAYLOAD IS NOT TRUSTED INPUT (payload-trust review, 2026-08-24)
 # -------------------------------------------------------------
 # Two of its fields are written by the REQUESTER — the least-privileged party
 # in the flow — and both used to reach somewhere they should not:
@@ -62,8 +62,10 @@
 # A card whose thread grows past the wake path's single-variable limit can
 # never wake an agent again: the whole thread reaches the agent process in one
 # environment variable, and the OS caps a single variable (MAX_ARG_STRLEN).
-# This transport appends bytes to cards, so it must not be the thing that
-# bricks one. The rendered comment is capped at 32768 bytes — no legitimate
+# One 167669-byte comment once bricked its card this way, with every later
+# wake dying at spawn; the safe line for description + all comment bodies is
+# 80000 bytes. This transport appends bytes to cards, so it must not be the
+# thing that bricks one. The rendered comment is capped at 32768 bytes — no legitimate
 # decision notice is that large, and one post that size cannot eat the whole
 # thread budget. Over budget is a refusal (non-zero exit, curl never runs),
 # never a silent truncation: the queue records notify.failed, its undelivered
@@ -114,7 +116,7 @@ fi
 # An allowlist, not a denylist of traversal spellings: `..`, `%2e%2e`, `;`, a
 # bare `/` and an absolute `//host` are all the same bug, and a denylist is one
 # encoding away from missing the next one. A UUID and an identifier like
-# TOG-198 both pass; nothing that can change the route does. No `.`, so `..`
+# TASK-198 both pass; nothing that can change the route does. No `.`, so `..`
 # is unrepresentable rather than filtered.
 if [[ ! "$ISSUE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
   echo "refusing to address '$ISSUE': not a well-formed issue id" >&2
@@ -155,8 +157,8 @@ fi
 
 # The credential goes in a 0600 config file, never in argv: /proc/<pid>/cmdline
 # is world-readable and this box is shared. Same pattern, and same reasoning, as
-# curl_authed() in gh_token.sh — see the TOG-200 note there. Only the PATH is
-# in argv.
+# curl_authed() in gh_token.sh — see the credential-handling note there.
+# Only the PATH is in argv.
 CFG_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/notify_pc.XXXXXXXX")" \
   || { echo "could not create a private temp directory" >&2; exit 69; }
 trap 'rm -rf "$CFG_DIR"' EXIT

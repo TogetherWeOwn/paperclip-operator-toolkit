@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # ===========================================================================
 # quota_rotation_watch.py — does teamclaude actually stop sending traffic to a
-# quota-spent Claude account, and does a second account absorb it? (TOG-425)
+# quota-spent Claude account, and does a second account absorb it?
 #
 # WHY THIS IS A SCRIPT AND NOT A PAIR OF EYES
 #
-# TOG-425 was written as "watch a number until it crosses a threshold, then see
+# The watch request was "watch a number until it crosses a threshold, then see
 # if the other account moves". Done by hand that is three judgement calls deep
 # (which threshold, which field, over what interval) and no two runs would
 # answer it the same way. The question has exactly one right method, so it is
@@ -13,10 +13,10 @@
 #
 # THE MEASUREMENT, AND WHY IT IS NOT `is_current`
 #
-# TOG-425 step 2 says to watch `is_current`. MEASURED: that field does not
+# The field-first method watches `is_current`. MEASURED: that field does not
 # track which account is serving. Between 2026-08-24T15:07Z and 16:10Z
 # `1856877+Rick7C2@users.noreply.github.com` burned its weekly 0.28 -> 0.38 with `is_current:
-# false` the entire time, while `pisnrzrs@two.gg` sat at `is_current: true`
+# false` the entire time, while `standby-account@example.invalid` sat at `is_current: true`
 # and burned nothing. A watcher keyed on `is_current` would have reported the
 # exact opposite of what happened.
 #
@@ -61,11 +61,14 @@
 import argparse
 import datetime
 import json
+import os
 import sys
 
 from pacing_verdict import read_verdict_rows
 
-JSONL = "/paperclip/operator-handoff/quota-pacing.jsonl"
+# Host paths stay out of the code: the feed location rides the environment
+# with a repo-local fallback, never a hard-coded operator directory.
+JSONL = os.environ.get("QUOTA_PACING_JSONL", "quota-pacing.jsonl")
 UNKNOWN_EXIT = 6
 
 # teamclaude's own account-rotation threshold (account-manager.js:111).
@@ -207,7 +210,7 @@ def judge(samples, lo, hi, spent, epsilon):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Did teamclaude rotate away from a quota-spent account? (TOG-425)"
+        description="Did teamclaude rotate away from a quota-spent account?"
     )
     ap.add_argument("--jsonl", default=JSONL)
     ap.add_argument("--threshold", type=float, default=SWITCH_THRESHOLD,
