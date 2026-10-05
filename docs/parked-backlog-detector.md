@@ -1,8 +1,8 @@
-# Parked backlog detector — TOG-3728
+# Parked backlog detector
 
 ## Delivery boundary
 
-TOG-3728 plan revision 2 accepts **detector-only** delivery following the CTO
+The accepted plan revision accepts **detector-only** delivery following the CTO
 ruling on TOG-3742 and Director reconciliation on TOG-3747. The actual promotion
 caller has no established authorized source/read-path. Its pre-PATCH integration
 is **unsupplied and closed as unachievable under that boundary**, not silently
@@ -90,7 +90,7 @@ prose signal, not a scheduling decision; consumers must not use it as approval.
 
 ```sh
 bash test_parked_backlog_guard.sh
-node verification/tog-3728-mutation-gate.cjs
+node verification/parked-backlog-guard-mutation-gate.cjs
 ```
 
 The offline CI job runs both commands. The mutation gate copies source and tests

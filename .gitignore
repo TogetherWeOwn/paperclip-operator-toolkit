@@ -81,7 +81,7 @@ plugins/model-selection/dist/*.map
 # them — `python3 -m py_compile` over `omniroute/*.py *.py` — and the "Syntax
 # check every script" step cleans up with a hand-maintained
 # `rm -rf omniroute/__pycache__ __pycache__`. That list is NOT complete:
-# test_host_ops_broker.py imports host-ops/broker.py and leaves a THIRD
+# the host-ops broker test imports host-ops/broker.py and leaves a THIRD
 # directory, host-ops/__pycache__, behind after the rm has already run.
 # Measured, not assumed — five .pyc from the parse gate, one more from the
 # broker suite, all `?? `-offered to `git add -A`.

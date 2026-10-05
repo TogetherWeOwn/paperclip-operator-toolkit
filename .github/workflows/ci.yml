@@ -21,9 +21,6 @@ name: CI
 #                                       grants, one-shot consumption and redacted
 #                                       submission receipts — TOG-576
 #     omniroute_combo_cli.sh selftest   containment logic, fixture catalogue
-#     test_tog153_artifacts.sh          TOG-153 register/verify artifact contract:
-#                                       fail-loud argv, dedicated catch-all,
-#                                       .items envelope and verifier B4 — TOG-519
 #     test_responsible_leader.sh        who may approve a provisioning request
 #     test_provisioning_policy.sh       create-policy gates under widened ceilings
 #     test_request_record_integrity.sh  whether the RECORD of a decision can
@@ -42,15 +39,6 @@ name: CI
 #     test_capability_gate.sh           who may decide a CAPABILITY request, and
 #                                       which four asks stop for the owner
 #                                       whatever any agent says — TOG-387
-#     test_tog825_verify_g4.sh          whether the host acceptance gate can read
-#                                       the current structured listening event,
-#                                       and refuses missing/contradictory evidence
-#                                       rather than scoring it green — TOG-825
-#     test_host_ops_broker.py           fixed read-only host verbs, executor
-#                                       previews, replay/expiry, signed evidence,
-#                                       and the disabled write gate — TOG-520
-#     test_host_ops_install.sh          the installer's service-identity, key and
-#                                       sudoers contracts — TOG-520
 #     test_interaction_route.sh         where an ask belongs — the owner, an
 #                                       agent, or an operator runbook; and
 #                                       whether it could be answered at all
@@ -625,7 +613,7 @@ jobs:
       - name: Privilege invariants are named and mutation-gated
         run: |
           set +e
-          out="$(./verification/tog-480-mutation-gate.sh 2>&1)"; rc=$?
+          out="$(./verification/postgres-policy-mutants-gate.sh 2>&1)"; rc=$?
           printf '%s\n' "$out"
           if [[ $rc -ne 0 ]]; then
             summary="$(printf '%s\n' "$out" | grep -E 'BASELINE FAILED|mutant left|red, but|mutation anchor|mutant does not parse' | tail -n 20 | tr '\n' ' ' | cut -c1-1500)"
@@ -658,7 +646,7 @@ jobs:
     # Self-hosted example (private fleet equivalent of the old isolated pool):
     #     runs-on: [self-hosted, linux, X64]
     # plus a runner-identity proof step matching your fleet's naming. See
-    # verification/tog-2677-selfhosted-runner-gate.sh, which enforces the
+    # verification/ci-runner-pool-conformance-gate.sh, which enforces the
     # label contract for this workflow.
     # The two long mutation steps have their own 55m/25m deadlines below, so a
     # runaway step is bounded before the job ceiling is reached. The ceiling
@@ -689,7 +677,7 @@ jobs:
       # self-hosted label, or any runs-on value outside the pinned set, or
       # dropping the clean checkout must turn this job red.
       - name: runner-label contract
-        run: ./test_tog2677_selfhosted_runner.sh
+        run: ./test-selfhosted-runner-gate.sh
 
       # TOG-3884's dedicated-UID offline fixtures (`github-runner/`) stay in
       # the private repo with the fleet they install; no step for them here.
@@ -707,9 +695,9 @@ jobs:
           # Parse the published tools. Private host installers, deployment
           # scripts and rehearsal packages are checked in their source repo.
           # scripts/*.sh is included for the same reason as lib/: a bare `*.sh`
-          # glob does not descend, and dispatch_deploy.sh is operator-run
-          # against the live dispatch-src checkout with no other CI coverage
-          # of its own syntax.
+          # glob does not descend, and operator-run deploy scripts are checked
+          # in their source repo with their suites
+          # of their own syntax.
           for f in *.sh lib/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in scripts/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           # verification/ holds offline gates with suites of their own; same
@@ -744,39 +732,9 @@ jobs:
           done
           exit $rc
 
-      # TOG-2307. Exercises deploy/rollback/status entirely against fabricated
-      # fixture git repos built under mktemp (DISPATCH_DEPLOY_TEST_MODE=1); the
-      # live /paperclip/plugin-packages-root/dispatch-src checkout is never
-      # touched. Covers the smoke-gate-before-live-HEAD contract, clean-tree
-      # and commit-object refusal, gc anchoring, and status's absent/corrupt/
-      # drift triad.
-      - name: dispatch_deploy.sh hermetic suite
-        run: ./test_dispatch_deploy.sh
-
-      - name: dispatch_deploy.sh suite is not vacuous (mutation-gated)
-        run: ./verification/tog-2307-dispatch-deploy-mutation-gate.sh
-
-      # TOG-2307. dispatch_deploy.sh status is only correct if something runs
-      # it on a clock against the real checkout; this is the scheduled half of
-      # that loop. Offline: dispatch_deploy.sh and curl are recording stubs
-      # under a fixed clock, so no real Paperclip issue or dispatch-src
-      # checkout is touched. Covers drift/refusal never reading as healthy, an
-      # undocumented detector exit code never being trusted as a pass, and the
-      # re-arm being verified against the authoritative monitorNextCheckAt
-      # column rather than the request's own echo.
-      - name: dispatch_deploy_monitor.sh hermetic suite
-        run: ./test_dispatch_deploy_monitor.sh
-
-      - name: dispatch_deploy_monitor.sh suite is not vacuous (mutation-gated)
-        run: ./verification/tog-2307-dispatch-deploy-monitor-mutation-gate.sh
-
-      # TOG-519. These operator scripts cannot reach their live management
-      # surface in CI, but the catch-all contract is still testable with a stub:
-      # unknown argv refuses, TC_CATCHALL creates its own observable combo, the
-      # mappings reader accepts the live .items envelope, and verifier B4 rejects
-      # the old claude-* -> claude-sonnet target. The suite never sends inference.
-      - name: TOG-153 operator artifact suite
-        run: ./test_tog153_artifacts.sh
+      # Operator-run deploy and provider-registration scripts (dispatch_deploy,
+      # provider registration) live outside the public tree with their suites;
+      # they are covered in their source repo, not here.
 
       - name: omniroute containment selftest
         run: ./omniroute_combo_cli.sh selftest
@@ -973,7 +931,7 @@ jobs:
       # baseline, and require the owning case to go red. Includes a rename
       # mutant, because an unanchored presence check passes on a rename.
       - name: grant attribution is load-bearing (mutation-gated)
-        run: ./verification/tog-870-mutation-gate.sh
+        run: ./verification/grant-attribution-resolver-mutation-gate.sh
 
       # The widened-catalog cases above are absence assertions: they also pass if
       # their setup never reaches the named gate. Delete each independent guard
@@ -1136,11 +1094,8 @@ jobs:
       - name: task liveness reconciler suite
         run: python3 -m unittest -v test_liveness_reconciler.py
 
-      - name: task liveness deployment contract suite
-        run: python3 -m unittest -v test_liveness_reconciler_deployment.py
-
-      - name: task liveness deployment gates are load-bearing
-        run: ./verification/tog-586-service-mutation-gate.sh
+      # Host deployment contracts (systemd units, installers) live outside the
+      # public tree with their suites; they are covered in their source repo.
 
       # TOG-676. The Discord daily digest has never posted — not once, in any
       # channel, on any day. It read as healthy for two consecutive write-ups
@@ -1689,7 +1644,7 @@ jobs:
       # were being satisfied by the guard NEXT DOOR rather than the one they
       # were named for, and passed until this gate said which limb they covered.
       - name: dropchannel_scan narrowing is not vacuous (mutation-gated)
-        run: ./verification/tog-385-mutation-gate.sh
+        run: ./verification/credential-rule-narrowing-mutation-gate.sh
 
       # TOG-2869. The step ABOVE is what caught this: it reported
       #   FAIL  URL userinfo guard removed: suite went red, but NOT on the case
@@ -1706,7 +1661,7 @@ jobs:
       # fabricates a red, but at a baseline check like "does the output contain SKIP"
       # it fabricates a GREEN and the gate above it silently stops measuring.
       - name: a matched pattern never reads as a miss (SIGPIPE verdict gate)
-        run: ./verification/tog-2869-sigpipe-verdict-gate.sh
+        run: ./verification/sigpipe-verdict-false-miss-gate.sh
 
       # TOG-487. Same shape, same reason. Every refusal in the cold-start
       # detector is a limb a reasonable person would simplify away — coalescing
@@ -1723,7 +1678,7 @@ jobs:
       # still ages as stale and still fires. The assertion now pins the OWNER
       # the plan names, which is what the shift actually breaks.
       - name: cold-start detector refusals are not vacuous (mutation-gated)
-        run: ./verification/tog-487-mutation-gate.sh
+        run: ./verification/cold-start-detector-mutation-gate.sh
 
       # TOG-994. Check 9 of org_access_review.sh compares a GRANT
       # (company_secret_bindings) against a DECLARATION (adapterConfig.env). The
@@ -1738,8 +1693,8 @@ jobs:
       # PostgreSQL with jsonb_each and LATERAL that no runner has. Its §3 is the
       # load-bearing part: it reconstructs the pre-fix text and requires the
       # guard to go RED on it, so a grep that matches nothing cannot pass.
-      - name: check 9 filters both sides of its join (TOG-994)
-        run: ./test_tog994_check9_symmetry.sh
+      - name: check 9 filters both sides of its join
+        run: ./test-grant-declaration-symmetry.sh
 
       # TOG-994, the destructive half. org_orphan_retire.sh DELETEs permission
       # grants and secret bindings, so the assertions that matter are the
@@ -1751,8 +1706,8 @@ jobs:
       # invisible. §6 is the positive control: it shows the same invocation
       # reaching the write, so a tool that is broken and refuses everything
       # cannot pass the refusal tests.
-      - name: orphan retirement refuses what it must (TOG-994)
-        run: ./test_tog994_orphan_retire.sh
+      - name: orphan retirement refuses what it must
+        run: ./test-orphan-grant-retirement.sh
 
       # TOG-676. Same shape, and the limb at risk is the delivery check itself.
       # It reads as redundant with the failure count — every digest that has
@@ -1763,7 +1718,7 @@ jobs:
       # believes a delivery satisfies the NOT_DELIVERED case while measuring
       # nothing, so a real send is pinned green too.
       - name: Discord delivery proof is not vacuous (mutation-gated)
-        run: ./verification/tog-676-mutation-gate.sh
+        run: ./verification/digest-delivery-detector-mutation-gate.sh
 
       # TOG-676, the wrapper half. The limb at risk here is the UNKNOWN branch:
       # a wrapper that reports an unmeasurable detector as healthy looks like a
@@ -1772,7 +1727,7 @@ jobs:
       # in a comment -- the first draft "killed" a mutation that had edited
       # header prose and changed no behaviour at all.
       - name: Discord delivery monitor is not vacuous (mutation-gated)
-        run: ./verification/tog-676-monitor-mutation-gate.sh
+        run: ./verification/job-health-monitor-wrapper-mutation-gate.sh
 
       # TOG-890. A card parked `blocked` whose unblockDescriptor says "waiting
       # on interaction X", where X was since withdrawn, rejected, expired or
@@ -1815,62 +1770,11 @@ jobs:
       - name: parked backlog detector suite
         run: bash ./test_parked_backlog_guard.sh
       - name: parked backlog detector is not vacuous (isolated mutation gate)
-        run: node ./verification/tog-3728-mutation-gate.cjs
+        run: node ./verification/parked-backlog-guard-mutation-gate.cjs
 
-      # TOG-831. The scheduler that takes the nightly database backup can wedge:
-      # it marks a backup in flight and, if that run dies without clearing the
-      # flag, every later tick sees "already running" and returns. No backup is
-      # taken and nothing goes red -- the wedge is silent, and it recurred on
-      # 2026-09-05 at 06:36Z.
-      #
-      # This suite tests db_backup_stall.sh, the DETECTOR, and it runs offline:
-      # green here means the detector's own logic holds, never that the host is
-      # healthy or that the watchdog patch is deployed. The deployment question
-      # is answered by verification/tog-831-stall-guard-sim.mjs, which reads
-      # /app/server/src/index.ts and is deliberately NOT registered here --
-      # ubuntu-latest has no /app, so it could only ever be vacuous or red
-      # (CONTRIBUTING rule 8). Run that one on the host.
-      - name: database backup stall detector suite
-        run: ./test_db_backup_stall.sh
-
-      # A correct detector that nothing runs measures nothing. The suite above
-      # drives db_backup_stall.sh against fixture directories, so it can never
-      # testify about this host -- and on 2026-09-05 the scheduler wedged at
-      # 06:36Z and was found by a human at 17:45Z, eleven hours later, with the
-      # evidence sitting on disk the whole time. The 2026-08-30 occurrence ran
-      # 92 hours. Both times the detector-shaped signal existed and no clock
-      # read it.
-      #
-      # db_backup_stall_monitor.sh is that clock: it runs the detector against
-      # production from a native Paperclip issue monitor, comments the verdict,
-      # and re-arms. This suite covers the wrapper offline (stubbed detector,
-      # stubbed curl, fixed clock). Its load-bearing assertions are the three
-      # ways a monitor lies: a stall becoming a healthy claim, an UNMEASURABLE
-      # detector scoring clean, and a re-arm that reports success while leaving
-      # monitorNextCheckAt unset -- after which the monitor stops forever with
-      # nothing red anywhere.
-      #
-      # It earned its place while being written: the wrapper propagated an
-      # undocumented detector exit verbatim, so a caller testing `rc == 1`
-      # would have read exit 7 as "no stall". The suite caught it before the
-      # first cycle ran.
-      - name: database backup stall monitor wrapper suite
-        run: ./test_db_backup_stall_monitor.sh
-
-      # TOG-2370: the in-server scheduler's in-flight guard is process memory
-      # that a hung COPY can leak permanently, and by TOG-2370 even a full
-      # container restart no longer reliably clears it. host_db_backup.sh is
-      # an independent host-side pg_dump fallback that does not depend on the
-      # in-server scheduler's health at all. This suite runs offline against
-      # a recording podman stub: no real container, database, or network. Its
-      # load-bearing assertions are that a truncated/trailer-less/table-less
-      # dump is never left visible under its real filename (the exact
-      # TOG-1129/1130 empty-gzip-residue shape), that a concurrent dump
-      # (another COPY, or another cycle of this same script) causes a clean
-      # skip rather than a stacked dump, and that retention only ever prunes
-      # this script's own `-hostcron` files, never a server-authored archive.
-      - name: host-side database backup fallback suite
-        run: ./test_host_db_backup.sh
+      # Host database-backup tooling (stall detector, monitor wrapper, pg_dump
+      # fallback) lives outside the public tree with its suites; host-side
+      # coverage runs where the database is reachable, not here.
 
       # And those are 40 green assertions about a detector, which is worth
       # nothing until somebody breaks the detector and watches them go red. Each
@@ -1883,7 +1787,7 @@ jobs:
       # the file as binary and return nothing. A gate that only asserted "the
       # suite went red" would have scored that as a pass.
       - name: stale-descriptor sweep is not vacuous (mutation-gated)
-        run: ./verification/tog-890-mutation-gate.sh
+        run: ./verification/stale-descriptor-sweep-mutation-gate.sh
 
       # TOG-720, the third half: the command itself. The two gates above prove
       # the wrapper and the detector behave. Neither proves the monitor can
@@ -1921,8 +1825,8 @@ jobs:
       # resolves nothing but echoes a file COUNT differs between the two runs
       # (the negative tree has one file fewer) and passed the difference-only
       # rule. That is mutant 6, and it is what the decoy limb exists to catch.
-      - name: The TOG-720 monitor's recorded command still runs from a clean tree
-        run: ./verification/tog-720-recorded-command.sh
+      - name: The recorded monitor command still runs from a clean tree
+        run: ./verification/recorded-monitor-command-gate.sh
 
       # TOG-349. A THIRD drift question, and the one a hash cannot answer.
       # tool_drift.sh asks whether two copies differ; this asks whether the
@@ -1995,7 +1899,7 @@ jobs:
       # that the unparseable-manifest case only held because ALL its rows were
       # broken; one broken row among good ones was silently skipped at exit 0.
       - name: deployed-vs-repo drift suite is not vacuous (mutation-gated)
-        run: ./verification/tog-723-mutation-gate.sh
+        run: ./verification/plugin-deploy-drift-detector-mutation-gate.sh
 
       # TOG-721. The question underneath a RESERVED decision: if the owner said
       # "file the upstream reports" today, would anything actually happen?
@@ -2042,7 +1946,7 @@ jobs:
       # it at all — all four probes do record, so nothing observable changes; it
       # is mutated on its THRESHOLD instead.
       - name: upstream readiness suite is not vacuous (mutation-gated)
-        run: ./verification/tog-721-mutation-gate.sh
+        run: ./verification/filing-readiness-check-mutation-gate.sh
 
       # TOG-1072. Does every `pinned` line in upstream_draft_pins.txt name
       # bytes that are actually FILABLE? Two gates already guard that file and
@@ -2078,39 +1982,8 @@ jobs:
       # actions/checkout@v4 clones --depth=1 --single-branch, and an earlier
       # revision that pinned fixtures to real refs would have been a
       # permanently red step that never once scored a mutant.
-      - name: pinned upstream blobs are filable, and sendable blobs are pinned (mutation-gated)
-        run: ./verification/tog-1072-pin-conformance-mutants.sh
-
-      # TOG-3327. The fork-disclosure audit itself is NOT registered here and
-      # must not be: it needs outbound network to api.github.com, which this
-      # sandbox blocks, so it would fail open on the one signal it exists to
-      # produce. Its own header says so.
-      #
-      # Its author-classifier is a different animal. `OUR_AUTHOR_RE` decides
-      # whether a public ref is checked against the allowlist or skipped
-      # entirely, it is a pure function of a string, and it needs no network.
-      # It was silently wrong -- it missed the container-default bot identity
-      # in /paperclip/.gitconfig, so 11 real undeclared publications across
-      # three public forks were classified "upstream-authored" and never
-      # examined. A gate that skips the finding reports PASS.
-      #
-      # 26 identities, 20 of them negative cases taken from this org's actual
-      # forks plus five adversarial near-misses. The negative half is the
-      # load-bearing half: matching `users.noreply.github.com` broadly would
-      # claim every GitHub user as ours and turn the allowlist into a rubber
-      # stamp. Verified non-vacuous -- reverting to the pre-TOG-3327 regex
-      # reddens it with 4 false negatives, over-widening with 5 false
-      # positives.
-      #
-      # The same step also asserts WHERE the gate puts its GH_TOKEN (TOG-3328
-      # review finding): a bearer in curl's argv is readable by every process
-      # on this shared-uid host via /proc/<pid>/cmdline and is printed verbatim
-      # by `bash -x`. Offline -- `curl` is stubbed on PATH, so nothing is sent.
-      # Non-vacuous: restoring the `-H "Authorization: ..."` form reddens it,
-      # and a positive control requires the token to actually reach curl
-      # through its 0600 config file, so "sent nowhere" cannot pass.
-      - name: fork-disclosure author classifier + token placement (TOG-1014 gate, offline half)
-        run: ./verification/tog-1014-public-fork-disclosure-audit.sh --self-test
+      # Pin-conformance and fork-disclosure gates whose subjects live outside
+      # the public tree run with their subjects, not here.
 
       # TOG-657. The activation gate for the one procedure in this company that
       # a git revert cannot undo: stopping the live service, restoring a
@@ -2138,29 +2011,8 @@ jobs:
       - name: TOG-657 host-validation activation gate suite
         run: ./test_paperclip_activation_gate.sh
 
-      # TOG-716. capture_host_evidence.sh is what a human actually runs, once,
-      # in a scarce host window. It shipped with NO test and in NO CI job, on
-      # the strength of "verified against stubs" in a commit message — stubs
-      # that were never committed, so nothing re-verified it after the next
-      # edit. This is that suite, with those stubs committed.
-      #
-      # It also covers the TOG-716 addition: the window now captures the image
-      # digest as well as the networks. `paperclip-local` is a HOST-LOCAL image
-      # in no registry, so no agent can resolve its digest — capturing only the
-      # networks would have spent the one human window closing one red and left
-      # `image_digest_placeholder` still refusing.
-      #
-      # Every refusal is asserted BY NAME, never by exit status: the script is
-      # fail-closed on nearly every input, so rc=2 passes for fixtures that
-      # never reach the check under test. Section 9 deletes each guard in a
-      # staging copy and asserts the bad input is then ACCEPTED, so a control
-      # that stops doing anything cannot keep a green suite.
-      #
-      # Offline: podman and systemctl are stubs on PATH in mktemp. No host, no
-      # podman, no credential.
-      - name: TOG-716 host-evidence capture suite
-        run: ./test_capture_host_evidence.sh
-
+      # Host-evidence capture tooling lives outside the public tree with its
+      # suite; host-window coverage runs where the host is reachable, not here.
 
       # TOG-400. A FOURTH drift question, about a defect in a bundle we do not
       # own. `tool_action_requests.expires_at` IS written — one hour out, by an
@@ -2192,23 +2044,8 @@ jobs:
       - name: model-endpoint preflight suite
         run: ./test_agent_endpoint_preflight.sh
 
-      # TOG-4338. The CLIProxy quota-controller unit suite: planning and
-      # apply decisions over synthetic telemetry. Offline: pure fixtures
-      # in-process, no host, credential, network, or CLIProxy.
-      - name: CLIProxy quota controller suite
-        run: python3 -m unittest -v test_cliproxy_quota_controller.py
-
-      # TOG-526. The offline stub proves its argv/environment detectors can
-      # catch exposed credentials, then requires private transport and rejects
-      # incomplete or malformed OmniRoute responses.
-      - name: OmniRoute chain verifier credential suite
-        run: ./test_tog485_verify_chain_argv.sh
-
-      # Same credential boundary for the operator-side registration script:
-      # management auth and the CLIProxy connection key must stay out of argv
-      # and child environments, including on its default dry-run path.
-      - name: OmniRoute registration credential suite
-        run: ./test_tog352_register_cliproxy_argv.sh
+      # Host quota-controller units and provider-registration scripts live
+      # outside the public tree with their suites; covered in their source repo.
 
       # TOG-425. Whether teamclaude stops sending traffic to a quota-spent
       # Claude account, read out of the pacer's jsonl. Every case is a
@@ -4185,7 +4022,7 @@ jobs:
         run: node --test plugins/omniroute-broker/test/broker.test.mjs
 
       - name: Mapping-guard calibration mutation suite
-        run: node --test test_tog473_mapping_guard.mjs
+        run: node --test test-mapping-guard-calibration.mjs
 
       - name: Prove credential and key-management surfaces stay absent
         run: |

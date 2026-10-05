@@ -98,7 +98,7 @@ IMAGE_LINE = re.compile(rb"(?m)^Image=.*$")
 
 def normalized_digest(path):
     # Collapse every `Image=` line to one constant, mirroring exactly what
-    # capture_host_render.sh does before handing the unit to the generator.
+    # the host render helper does before handing the unit to the generator.
     return hashlib.sha256(
         IMAGE_LINE.sub(b"Image=<SUBSTITUTED>", path.read_bytes())
     ).hexdigest()
@@ -123,7 +123,7 @@ norm_expected = {
 
 for key in ("server", "run"):
     # The raw bytes moving is tolerated ONLY when the sole difference is the
-    # `Image=` line, which capture_host_render.sh substitutes away before the
+    # `Image=` line, which the host render helper substitutes away before the
     # generator ever sees the unit — so it cannot have changed what was
     # rendered. Sharing a normalized hash proves the files are identical
     # everywhere else, because normalization rewrites only `^Image=` lines.

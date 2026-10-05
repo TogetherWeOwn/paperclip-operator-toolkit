@@ -330,13 +330,13 @@ for name in "${SENDABLE[@]}"; do
   #    the right reason instead: four plugins really do build a
   #    `dist/manifest.js` under this repo, so the citation resolves and the
   #    check stays quiet. That case is pinned as a control in
-  #    verification/tog-1029-filing-gate-check5-mutants.sh -- if it ever starts
+  #    verification/upstream-filing-gate-check5-mutants.sh -- if it ever starts
   #    failing again, the fix is not to re-narrow the pattern.
   #
   #    RESTORED after d9033479 replaced this check in place rather than adding
   #    alongside it. Checks 5 and 6 are orthogonal -- 5 asks "does internal
   #    framing survive the strip", 6 asks "is a cited vendor file absent here"
-  #    -- and the tog-1029 suite went 4/4 surviving while the bundle still read
+  #    -- and the check-5 suite went 4/4 surviving while the bundle still read
   #    PASS 7/7, because every gated report happens to carry the marker today.
   cited_absent=""
   while IFS= read -r f; do

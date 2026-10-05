@@ -403,8 +403,8 @@ non-zero — an assertion that could not run must not read as one that passed.
    open and silent on the gateway's side. Control 3 is what makes it loud on
    ours. Do not remove it on the grounds that the header "is always there".
 4. **Upstream drift.** Every gateway property relied on here is Paperclip's
-   behaviour, not ours. Re-run `verification/tool-gateway-identity/` on every
-   build change.
+   behaviour, not ours. Re-verify gateway identity behaviour on every
+   build change, where the gateway code is reachable.
 5. **`201` on a rejected identity claim.** `POST /api/tool-gateway/sessions`
    silently overrides a body `agentId` rather than rejecting it. Correct
    outcome, misleading signal — anyone probing by hand reads that 201 as a

@@ -139,7 +139,7 @@
 #                       "networkNames": {
 #                         "paperclip.network": "paperclip",
 #                         "omniroute.network": "systemd-omniroute" } }
-#                   Capture all three with ./capture_host_evidence.sh, or by
+#                   Capture all three with a host-evidence capture, or by
 #                   hand:
 #                     podman inspect paperclip \
 #                       --format '{{json .NetworkSettings.Networks}}'
@@ -574,7 +574,7 @@ gate_networks() {
     if [ "${#guessed[@]}" -gt 0 ]; then
       refuse network_name_unresolved \
         "carrier legs do not match the running service, but ${#guessed[@]} key(s) (${guessed[*]}) were compared using Quadlet's DEFAULT systemd-<stem> name because no unit was readable. NetworkName= overrides that default, so this is not evidence the carrier is wrong" \
-        "capture the effective NetworkName= for ${guessed[0]} into HOST_EVIDENCE .networkNames (./capture_host_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
+        "capture the effective NetworkName= for ${guessed[0]} into HOST_EVIDENCE .networkNames (capture host evidence first), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
       return
     fi
     refuse network_leg_mismatched \
@@ -645,7 +645,7 @@ gate_networks() {
     local -a uu=(); mapfile -t uu < <(printf '%s\n' "${unresolved[@]}" | sort -u)
     refuse network_name_unresolved \
       "$CARRIER_REL names podman network(s) directly and no unit appears to render them — but ${#uu[@]} installed unit(s) (${uu[*]}) could not be read, so they were resolved to Quadlet's DEFAULT systemd-<stem> name. NetworkName= overrides that default, so one of them may in fact render this leg, which would make the bare key a boot race this gate cannot see" \
-      "capture the effective NetworkName= for ${uu[0]} into HOST_EVIDENCE .networkNames (./capture_host_evidence.sh), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
+      "capture the effective NetworkName= for ${uu[0]} into HOST_EVIDENCE .networkNames (capture host evidence first), or ship the .network unit in $(dirname "$CARRIER_REL"). Do NOT edit the carrier's Network= keys on this refusal"
     return
   fi
   if [ "${#unmanaged[@]}" -gt 0 ]; then

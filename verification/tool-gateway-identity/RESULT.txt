@@ -1,8 +1,0 @@
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > stamps a distinct x-paperclip-agent-id for each authenticated agent 453ms
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > ignores a caller-supplied x-paperclip-agent-id and stamps the authenticated one 147ms
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > passes a `requester` tool argument through verbatim — arguments are not identity 173ms
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > sends NO identity header at all when headerPolicy.metadata.forward is unset 157ms
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > refuses a loopback endpoint under this instance's deployment settings 121ms
- ✓ src/__tests__/tog196-identity.probe.test.ts > TOG-196 — tool gateway agent identity > binds a session to the authenticated agent, ignoring a body-supplied agentId 49ms
- Test Files  1 passed (1)
-      Tests  6 passed (6)

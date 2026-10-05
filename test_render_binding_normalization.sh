@@ -43,7 +43,7 @@ norm() { sed 's|^Image=.*|Image=<SUBSTITUTED>|' "$1" | sha256sum | cut -d' ' -f1
 raw()  { sha256sum "$1" | cut -d' ' -f1; }
 
 # Build a fixture: two carriers plus a render that binds them, as
-# capture_host_render.sh would have written it.
+# the host render helper would have written it.
 make_case() {
   local d; d="$(mktemp -d)"
   cp "$HERE/deploy/paperclip-immutable/paperclip.container" "$d/server"

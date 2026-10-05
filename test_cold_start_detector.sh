@@ -138,7 +138,7 @@ assert() {
 
 # EVERY assertion goes through a helper that takes its label ONCE.
 #
-# This is not tidiness. verification/tog-487-mutation-gate.sh requires that a
+# This is not tidiness. verification/cold-start-detector-mutation-gate.sh requires that a
 # named mutation reddens the case that CLAIMS to cover it, and it matches on
 # the printed label. Hand-written `... && ok "the long name" || bad "short"`
 # pairs print a different string on failure, so the gate cannot attribute the

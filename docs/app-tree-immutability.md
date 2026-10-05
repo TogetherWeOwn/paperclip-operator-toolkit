@@ -169,7 +169,7 @@ hand that command `CAP_SYS_ADMIN` over its own mount, and a single unnested
 `mount -o remount,bind,rw "$APP"` would clear the `ro` flag with no `EPERM`
 at all. That gap existed in an earlier draft of `--exec` (PR #138), was
 caught in CISO review, and is reproduced standalone in
-`repro_tog711_escape.sh`.
+`mount-escape-repro.sh`.
 
 ### What stays writable on purpose
 
