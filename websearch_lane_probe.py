@@ -24,9 +24,9 @@ as the manifest defect.
 
 The OmniRoute lane (cliproxy/claude-sonnet-5 via the configured router host) was in
 this set until 2026-09-16 and is now retired: the owner rule of 2026-09-13 sends
-everything except Hindsight direct to CLIProxy, and the 07:36Z cutover
-(TOG-2880) completed that move. A verdict on a route no traffic takes is not a
-fleet health signal, so the row is removed rather than left to report red. Probe
+everything except Hindsight direct to CLIProxy, and the cutover completed
+that move. A verdict on a route no traffic takes is not a fleet health signal,
+so the row is removed rather than left to report red. Probe
 it ad hoc with single-lane mode if that ever needs re-checking.
 """
 
@@ -187,13 +187,31 @@ def fetch_run_secret(secret_key: str, environ: Mapping[str, str]) -> str | None:
     url = f"{_paperclip_api_base(environ)}/api/agents/me/secrets/{secret_key}/value"
     request = urllib.request.Request(
         url,
-        headers={"authorization": "Bearer " + environ["PAPERCLIP_API_KEY"]},
+        data=b"{}",
+        headers={
+            "authorization": "Bearer " + environ["PAPERCLIP_API_KEY"],
+            "content-type": "application/json",
+        },
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             payload = json.loads(response.read())
-    except Exception:
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode(errors="replace")[:200]
+        except Exception:
+            detail = ""
+        print(
+            f"fetch_run_secret {secret_key}: HTTP {error.code} {detail}".rstrip(),
+            file=sys.stderr,
+        )
+        return None
+    except Exception as error:
+        print(
+            f"fetch_run_secret {secret_key}: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
         return None
     value = payload.get("value") if isinstance(payload, dict) else None
     return value if isinstance(value, str) and value else None
@@ -249,8 +267,7 @@ SCHEDULED_LANES = (
 RETIRED_SCHEDULED_LANES = {
     "OmniRoute :: cliproxy/claude-sonnet-5": (
         "owner rule 2026-09-13; all traffic except Hindsight goes direct to "
-        "CLIProxy, completed by the 07:36Z cutover (TOG-2880). Removed "
-        "2026-09-16 (TOG-2905)."
+        "CLIProxy, completed by the cutover. Removed 2026-09-16."
     ),
 }
 

@@ -2,7 +2,7 @@
 # ===========================================================================
 # Offline suite for the notification TRANSPORT — notify_paperclip_issue.sh
 # ===========================================================================
-# TOG-198 review, 2026-08-24. test_decision_notify.sh covers the QUEUE half of
+# Payload-trust review, 2026-08-24. test_decision_notify.sh covers the QUEUE half of
 # notification and covers it well — 41 assertions, containment included. But
 # every one of its transports is a stub, so the reference transport that
 # actually ships bytes had no coverage at all, and it carried three defects.
@@ -84,7 +84,7 @@ leader_payload() {
 # ===========================================================================
 hdr "1. The credential never reaches argv"
 # gh_token.sh's "credentials never reach argv" note established this for the
-# whole repo under TOG-200. Cited by NAME, not by line: the numbers it used to
+# whole repo. Cited by NAME, not by line: the numbers it used to
 # carry had already drifted onto the wrong block, and a stale citation still
 # reads like a citation.
 # /proc/<pid>/cmdline is world-readable and this box is shared between
@@ -132,7 +132,7 @@ for evil in "../../agents/me/secrets?x=" "../../../admin" "x/../../y" \
 done
 
 hdr "   ...while well-formed addresses still deliver"
-for good in "6ad942ae-66ba-4c0c-ab14-8e0e8fc2efca" "TOG-198" "1111_2222"; do
+for good in "6ad942ae-66ba-4c0c-ab14-8e0e8fc2efca" "TASK-198" "1111_2222"; do
   deliver "$(payload "$good")"
   if [[ $RC -eq 0 ]] && grep -q "url = \"https://paperclip.invalid/api/issues/$good/comments\"" "$CFGCOPY"; then
     ok "delivered to '$good' on the comments route"
@@ -245,9 +245,10 @@ OUT="$(printf '' | PATH="$BIN:$PATH" "$NOTIFY" 2>&1)"; RC=$?
 hdr "7. An oversized comment is refused before the network, never truncated"
 # A comment large enough to push a card's thread past the wake path's
 # single-variable limit would brick the card — every later wake would die at
-# spawn, because the whole thread arrives in one environment variable. This
-# transport appends bytes to cards, so it must not be the thing that bricks
-# one. Over budget is a refusal (exit 65, curl never runs), never a silent
+# spawn, because the whole thread arrives in one environment variable (one
+# 167669-byte comment once did exactly this). This transport appends bytes
+# to cards, so it must not be the thing that bricks one. Over budget is a
+# refusal (exit 65, curl never runs), never a silent
 # truncation: the queue records notify.failed, its undelivered gate stays
 # red, and the recipient reads the decision with `inbox`.
 unset STUB_HTTP_CODE

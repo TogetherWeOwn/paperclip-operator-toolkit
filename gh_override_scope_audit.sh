@@ -188,8 +188,9 @@ fetch_projects() {
   api_get "/api/companies/$PAPERCLIP_COMPANY_ID/projects"
 }
 
-# No single list call sees the whole board: the endpoint caps page size,
-# so the audit fans out per project and judges each row on its own state.
+# No single list call sees the whole board: the endpoint caps pages at
+# 500 rows, so the audit fans out per project and judges each row on its
+# own state.
 # Findings on actionable issues are findings; rows outside the mint-capable
 # states are NOT-ACTIONABLE info (true about the data, never a pass, never
 # a finding).
