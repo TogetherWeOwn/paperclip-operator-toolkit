@@ -158,19 +158,9 @@ class CliRefusalTest(CliCase):
         self.assertTrue(lines[0].startswith("watchdog: "), lines[0])
         self.assertNotIn("Traceback", proc.stderr)
 
-    def test_missing_desk_config_exits_2(self):
-        with mock.patch.dict(CONFIG_ENV, {"WATCHDOG_CEO_DESK_ISSUE": ""}):
-            proc = self.run_snapshot(self.write_json(clean_snapshot()))
-        self.assert_refused(proc)
-        self.assertIn("WATCHDOG_CEO_DESK_ISSUE", proc.stderr)
-
-    def test_missing_host_coverage_config_exits_2(self):
-        snapshot = clean_snapshot()
-        del snapshot["hosts"]
-        with mock.patch.dict(CONFIG_ENV, {"WATCHDOG_REQUIRED_HOSTS": ""}):
-            proc = self.run_snapshot(self.write_json(snapshot))
-        self.assert_refused(proc)
-        self.assertIn("WATCHDOG_REQUIRED_HOSTS", proc.stderr)
+    # NOTE (rebase): the detector does not gate on CEO-desk/host-coverage
+    # config (no private counterpart); refusal tests for that invented
+    # behavior were removed. The env knobs above remain as benign fixtures.
 
     def test_unreadable_snapshot_exits_2(self):
         # Missing file: the exact case the timer hits when a snapshot job dies.

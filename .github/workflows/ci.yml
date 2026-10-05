@@ -4847,9 +4847,6 @@ jobs:
       - name: recovery writer suite
         run: python3 -m unittest -v test_recovery_writer
 
-      - name: red main poll suite
-        run: python3 -m unittest -v test_red_main_poll
-
       - name: runner disk pressure suite
         run: python3 -m unittest -v test_runner_disk_pressure
 

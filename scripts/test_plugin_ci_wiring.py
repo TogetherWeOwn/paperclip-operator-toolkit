@@ -61,7 +61,7 @@ class PluginWiring(unittest.TestCase):
                      'ci_required_checks_audit.py', 'test_ci_required_checks_audit.py',
                      'runner_disk_pressure.sh', 'test_provisioned_transport_db.py',
                      'test_transport_db_guards.py', 'docs/transport-database-proof.md',
-                     'red_main_poll.sh', 'red_main_poll.py', 'test_red_main_poll.py'):
+                     'red_main_poll.sh'):
             self.assertIn(name, selected)
         root = WORKFLOW.parents[2]
         for component in ('protection-rule', 'gh-event-capture'):

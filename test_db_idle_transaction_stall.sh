@@ -40,7 +40,10 @@ module.exports = { Client };
 JS
 
 run_case() {
+  # Pin the fake module ahead of the server's installed pg package. NODE_PATH
+  # alone loses to the production probe's absolute-path resolver.
   env -i PATH="$PATH" HOME="$WORK" NODE_PATH="$WORK/node_modules" \
+    PAPERCLIP_PG_MODULE="$WORK/node_modules/pg" \
     DATABASE_URL="postgresql://monitor.invalid/db" \
     FAKE_ROW="${FAKE_ROW:-}" \
     FAKE_CONNECT_ERROR="${FAKE_CONNECT_ERROR:-}" \

@@ -188,7 +188,6 @@ protection-rule/test/verify.test.mjs
 protection-rule/test/zip-fixture.mjs
 public_comment_hygiene_gate.sh
 recovery_writer.py
-red_main_poll.py
 red_main_poll.sh
 runner_disk_pressure.sh
 runner_disk_triage.sh
@@ -228,7 +227,6 @@ test_provisioned_transport.py
 test_provisioned_transport_db.py
 test_public_comment_hygiene_gate.sh
 test_recovery_writer.py
-test_red_main_poll.py
 test_request_queue.sh
 test_runner_disk_triage.sh
 test_sql_backend.sh
