@@ -3278,9 +3278,20 @@ jobs:
             exit 1
           fi
 
+      # gh-event-capture declares engines >=22 and its runtime preflight refuses
+      # older Nodes, so its suites run on 24. The rest of this job stays on
+      # the pinned 20 it was validated against.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       # Event-capture offline suites: pure logic plus stub-transport cases.
       - name: event capture suites
         run: node --test gh-event-capture/test/*.test.mjs
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       # Protection rule suites on synthetic tables and stub transports.
       - name: protection rule suites
