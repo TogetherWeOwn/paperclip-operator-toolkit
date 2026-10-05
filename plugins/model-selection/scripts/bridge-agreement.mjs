@@ -181,10 +181,12 @@ export async function shadowFiles(dir, includeLegacy) {
   return [...(includeLegacy ? ["decisions.jsonl"] : []), ...names].map((name) => join(dir, name));
 }
 
+// Fully env-provided: no hardcoded host prefix. Operators point
+// MODEL_SELECTION_SHADOW_DIR at the checkout, or set MODEL_SELECTION_STATE_ROOT.
 function defaultShadowDir(env) {
   if (env.MODEL_SELECTION_SHADOW_DIR) return env.MODEL_SELECTION_SHADOW_DIR;
   if (env.PAPERCLIP_COMPANY_ID) {
-    return `/paperclip/instances/default/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
+    return `${env.MODEL_SELECTION_STATE_ROOT ?? "/var/lib"}/companies/${env.PAPERCLIP_COMPANY_ID}/plugin-local/model-selection/shadow-decisions`;
   }
   return null;
 }
