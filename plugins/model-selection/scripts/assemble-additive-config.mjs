@@ -6,6 +6,15 @@ const LEGACY_WRAPPER = "cliproxy/";
 const DEFAULT_MIN_LANE_BOUND_MODELS = 25;
 const SUBSCRIPTION_EXCLUSIVE_ID = /^glm-/;
 
+function assertNoDuplicateFlags(names) {
+  for (const name of names) {
+    const count = process.argv.filter((arg) => arg === `--${name}`).length;
+    if (count > 1) {
+      throw new Error(`duplicate --${name} flag`);
+    }
+  }
+}
+
 function argument(name) {
   const index = process.argv.indexOf(`--${name}`);
   return index === -1 ? null : process.argv[index + 1] ?? null;
@@ -331,10 +340,36 @@ export function assembleAdditiveConfig(roster, live, options = {}) {
   };
 }
 
+// (a): pin the two approved rows' cost/capability/fallbackOnly
+// fields to the reviewed roster as of PR #689. The verifier has no roster
+// input, so these pinned values are the only guard against a hand-edited
+// artifact swapping in cheaper-looking or fallback-only rows. Update only
+// with a reviewed roster change; any drift fails closed.
 const BRIDGE_ADDITIONS = [
-  { id: "muse-spark-1.3-contributor", tier: "T3", laneId: "cliproxy-meta" },
-  { id: "claude-sonnet-5-5", tier: "T2", laneId: "cliproxy-claude" },
+  {
+    id: "muse-spark-1.3-contributor", tier: "T3", laneId: "cliproxy-meta",
+    capabilities: ["tools", "structured-output", "long-context"],
+    costPerMTokIn: 0, costPerMTokOut: 0, costPerMTokCacheRead: 0,
+    fallbackOnly: false,
+  },
+  {
+    id: "claude-sonnet-5-5", tier: "T2", laneId: "cliproxy-claude",
+    capabilities: ["tools", "structured-output", "vision", "long-context"],
+    costPerMTokIn: 3, costPerMTokOut: 15, costPerMTokCacheRead: 0.3,
+    fallbackOnly: false,
+  },
 ];
+
+function assertPinnedBridgeFields(row, expected) {
+  if (stableJson(row.capabilities) !== stableJson(expected.capabilities)) {
+    throw new Error(`bridge packet changed capabilities for ${expected.id}:${expected.tier}`);
+  }
+  for (const field of ["costPerMTokIn", "costPerMTokOut", "costPerMTokCacheRead", "fallbackOnly"]) {
+    if (!Object.is(row[field], expected[field])) {
+      throw new Error(`bridge packet changed ${field} for ${expected.id}:${expected.tier}`);
+    }
+  }
+}
 
 /** Validate the narrow +2 packet before output and again against operator readback. */
 export function validateBridgeConfig(live, artifact) {
@@ -358,8 +393,25 @@ export function validateBridgeConfig(live, artifact) {
       throw new Error(`bridge packet changed live row: ${row.id}:${row.tier}`);
     }
   }
+  // (b): live-row order and addition position matter because
+  // shadow-emit picks the first row per lane. Live rows must stay in order
+  // at the front; the two approved additions must be appended in order.
+  if (artifact.models.length !== live.models.length + BRIDGE_ADDITIONS.length) {
+    throw new Error("bridge packet must add exactly the two approved model+tier rows");
+  }
+  for (let index = 0; index < live.models.length; index++) {
+    if (stableJson(artifact.models[index]) !== stableJson(live.models[index])) {
+      throw new Error("bridge packet changed live row order or moved additions (live rows must stay in order at the front)");
+    }
+  }
+  const tail = artifact.models.slice(live.models.length);
+  for (let index = 0; index < BRIDGE_ADDITIONS.length; index++) {
+    if (modelKey(tail[index]) !== modelKey(BRIDGE_ADDITIONS[index])) {
+      throw new Error("bridge packet additions must be appended in reviewed order: muse-spark-1.3-contributor:T3 then claude-sonnet-5-5:T2");
+    }
+  }
   const added = artifact.models.filter((row) => !beforeKeys.has(modelKey(row)));
-  if (added.length !== BRIDGE_ADDITIONS.length || artifact.models.length !== live.models.length + 2) {
+  if (added.length !== BRIDGE_ADDITIONS.length) {
     throw new Error("bridge packet must add exactly the two approved model+tier rows");
   }
   for (const expected of BRIDGE_ADDITIONS) {
@@ -367,6 +419,7 @@ export function validateBridgeConfig(live, artifact) {
     if (!row || row.id !== expected.id || row.enabled !== true || row.laneId !== expected.laneId) {
       throw new Error(`bridge packet missing approved enabled binding: ${expected.id}:${expected.tier}`);
     }
+    assertPinnedBridgeFields(row, expected);
   }
   const sol = artifactByKey.get(modelKey({ id: "gpt-6.1-sol", tier: "T1" }));
   if (!sol || sol.enabled !== true || sol.laneId !== "cliproxy-codex" || !beforeKeys.has(modelKey(sol))) {
@@ -397,6 +450,7 @@ export function assembleBridgeConfig(roster, live, options = {}) {
     if (!row || row.enabled !== true) {
       throw new Error(`reviewed roster lacks enabled bridge row: ${expected.id}:${expected.tier}`);
     }
+    assertPinnedBridgeFields(row, expected);
     return { ...row, id: expected.id, laneId: laneForNewModel(row, availableLaneIds) };
   });
   const config = { ...live, models: [...live.models, ...additions] };
@@ -420,6 +474,7 @@ export function assembleBridgeConfig(roster, live, options = {}) {
 }
 
 async function main() {
+  assertNoDuplicateFlags(["roster", "live", "out", "counts", "min-lane-bound", "bridge-only"]);
   const rosterPath = argument("roster");
   const livePath = argument("live");
   const outputPath = argument("out");
