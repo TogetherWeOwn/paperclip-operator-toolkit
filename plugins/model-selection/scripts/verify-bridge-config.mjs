@@ -4,6 +4,15 @@ import { isDeepStrictEqual } from "node:util";
 import { readFile } from "node:fs/promises";
 import { validateBridgeConfig } from "./assemble-additive-config.mjs";
 
+function assertNoDuplicateFlags(names) {
+  for (const name of names) {
+    const count = process.argv.filter((arg) => arg === `--${name}`).length;
+    if (count > 1) {
+      throw new Error(`duplicate --${name} flag`);
+    }
+  }
+}
+
 function argument(name) {
   const index = process.argv.indexOf(`--${name}`);
   return index === -1 ? null : process.argv[index + 1] ?? null;
@@ -15,6 +24,7 @@ async function snapshot(path) {
 }
 
 async function main() {
+  assertNoDuplicateFlags(["live", "artifact", "readback"]);
   const livePath = argument("live");
   const artifactPath = argument("artifact");
   const readbackPath = argument("readback");

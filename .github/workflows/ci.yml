@@ -3180,7 +3180,9 @@ jobs:
       # build-manifest checker cross-checks a pinned runner env, so the step
       # builds that file from the manifest's own values first; the cleanup
       # and reclaim tools are driven on synthetic inputs with refusal paths
-      # asserting their exit codes.
+      # asserting their exit codes; the wave-1 window verdict evaluates
+      # HOLD/NO-GO rollback triggers plus trial adequacy over one synthetic
+      # observation file.
       - name: GARM offline checker suite
         run: |
           set -euo pipefail
@@ -3197,6 +3199,7 @@ jobs:
           python3 validate_test_profile.py fixture-test-profile.json
           python3 validate_drain.py drain-contracts.json
           python3 check_first_pickup.py fixture-first-pickup-pass.json
+          python3 wave1_window_verdict.py fixture-wave1-window-green.json
           python3 check_image_provenance.py image-digest-pins.json role-contracts.json isolated-image-profile.json fixture-privileged-private.json fixture-isolated-private.json fixture-isolated-profile.json
           rm -rf "$RUNNER_TEMP/job1" && mkdir -p "$RUNNER_TEMP/job1"
           printf 'synthetic-fixture' > "$RUNNER_TEMP/job1/.garm-job-fixture"
