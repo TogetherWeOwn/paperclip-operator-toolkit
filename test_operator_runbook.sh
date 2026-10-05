@@ -307,8 +307,8 @@ cat > "$HCLS" <<'JSON'
     "changes":"c","verify":"v","undo":"u","moved":true,"never_carded":true } },
   "decisions": {}, "misrouted": {}, "closed": {} }
 JSON
-: > "$HDIR_OK/TOG-846-cliproxy-update-runbook.md"
-: > "$HDIR_BAD/TOG-846-cliproxy-update-runbook.md"
+: > "$HDIR_OK/TOG-846-update-runbook.md"
+: > "$HDIR_BAD/TOG-846-update-runbook.md"
 : > "$HDIR_BAD/TOG-999-orphan-runbook.md"
 
 out="$("$TOOL" check-handoff --classification "$HCLS" --handoff "$HDIR_OK" 2>&1)"; rc=$?
