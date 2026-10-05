@@ -710,6 +710,15 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
         run: bash ./test_ci_no_new_static_labels.sh
 
+      # The change-gating contract itself is load-bearing: a heavy job
+      # whose `needs: changes` is deleted while its heavy `if:` stays
+      # would skip on every PR while its required check reports success.
+      # This pins needs+if on every heavy job, the mutants chain, the
+      # always-run scans, the full-run triggers, and the absence of
+      # workflow-level path filters -- with a positive control for each.
+      - name: change-gating contract holds
+        run: ./test_ci_gating.sh
+
       # TOG-3884's dedicated-UID offline fixtures (`github-runner/`) stay in
       # the private repo with the fleet they install; no step for them here.
 
