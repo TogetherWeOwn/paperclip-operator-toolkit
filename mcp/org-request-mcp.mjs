@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ===========================================================================
 // org-request-mcp — the host-side MCP transport for org_request_queue.sh
-// TOG-196 / epic TOG-194.
+// Binds loopback only; never exposed beyond the host.
 // ---------------------------------------------------------------------------
 // WHAT THIS IS
 //   A thin HTTP MCP server that runs ON THE HOST as the operator user and
@@ -67,9 +67,9 @@
 // no secret in the config file either: the config stores the SHA-256 of the
 // bearer, never the bearer. A host-file read does not yield a usable token.
 //
-// Zero dependencies, deliberately: this runs as the operator user with podman
-// access, and an npm tree next to that is a supply-chain surface we are not
-// taking on for an HTTP server this small.
+// Zero dependencies, deliberately: this runs as the operator user with
+// container-engine (docker or podman) access, and an npm tree next to that is
+// a supply-chain surface we are not taking on for an HTTP server this small.
 // ===========================================================================
 
 import http from "node:http";
@@ -84,7 +84,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26", "2024-11-05"]);
 
 // The bind address is NOT configurable. "Bind loopback only" is a stated
-// non-negotiable of TOG-196, and a constraint that lives in a config file is a
+// non-negotiable of the originating design, and a constraint that lives in a config file is a
 // constraint one edit away from being gone. Caddy is the only thing that
 // listens publicly; this process cannot be made to, short of editing source.
 const BIND_ADDRESS = "127.0.0.1";
@@ -95,7 +95,7 @@ const CLI_TIMEOUT_MS = 120_000;
 const CLI_MAX_BUFFER = 4 * 1024 * 1024;
 const RUN_CHECK_TIMEOUT_MS = 15_000;
 // A short cache, not a long one. The gateway re-checks the run on every call
-// anyway; this only stops a burst from becoming one `podman exec` per request.
+// anyway; this only stops a burst from becoming one container exec per request.
 const RUN_CHECK_TTL_MS = 10_000;
 const RUN_CHECK_CACHE_MAX = 512;
 
@@ -104,7 +104,7 @@ const RUN_CHECK_CACHE_MAX = 512;
 // of these. See normalizeConfig and makeQueueRunner — both refuse, in that
 // order, because the second is what still holds if someone builds a cfg object
 // without going through the first.
-const RESERVED_QUEUE_ENV = new Set(["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR"]);
+const RESERVED_QUEUE_ENV = new Set(["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR", "CONTAINER_ENGINE", "PAPERCLIP_SQL_BACKEND"]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TEMPLATE_RE = /^[A-Za-z0-9_]{1,64}$/;
@@ -133,7 +133,7 @@ const CAPABILITY_ACTION_RE = /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/;
 // a caller believe it had acted as someone else right up until it read the
 // audit log.
 //
-// TWO CONTROLS, AND THE ORDER BETWEEN THEM MATTERS (TOG-341)
+// TWO CONTROLS, AND THE ORDER BETWEEN THEM MATTERS
 //   The general control is assertKnownArguments(): any key absent from the
 //   tool's own inputSchema.properties is refused. That is what
 //   `additionalProperties: false` advertises to clients, and it is enforced
@@ -148,7 +148,7 @@ const CAPABILITY_ACTION_RE = /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$/;
 //
 //   Every name here is already an unknown key, so the list is now genuinely
 //   redundant for SAFETY and load-bearing only for the MESSAGE. It was the
-//   other way round before TOG-341, and the header claimed otherwise. Keep it:
+//   other way round before the tenancy-hardening change, and the header claimed otherwise. Keep it:
 //   it also means anyone adding a field to a schema has to walk past it.
 // ---------------------------------------------------------------------------
 const FORBIDDEN_ARGUMENT_NAMES = new Set([
@@ -223,9 +223,16 @@ export function normalizeConfig(input, configPath = "(inline)") {
   }
   // queueEnv is an operator-owned test seam, but a config file that can set
   // COMPANY_ID is a config file that can lie about tenancy to the queue — and
-  // one that can set PATH chooses which `podman` and which `psql` run. Refuse
+  // one that can set PATH chooses which container engine and which `psql` run,
+  // as do CONTAINER_ENGINE and PAPERCLIP_SQL_BACKEND directly. Refuse
   // at load, so it is a unit that will not start rather than a request that
-  // quietly ran against the wrong company. (TOG-341)
+  // quietly ran against the wrong company or the wrong database.
+  // Some hosts are Docker-only, so the engine the host answers to is config,
+  // not source. Unset means the historical default; anything but docker or
+  // podman is refused at load rather than failing per-request in execFile.
+  if (cfg.containerEngine !== undefined && cfg.containerEngine !== "docker" && cfg.containerEngine !== "podman") {
+    problems.push('containerEngine, when set, must be "docker" or "podman"');
+  }
   const reservedEnv = Object.keys(isPlainObject(cfg.queueEnv) ? cfg.queueEnv : {})
     .filter((key) => RESERVED_QUEUE_ENV.has(key));
   if (reservedEnv.length > 0) {
@@ -245,6 +252,7 @@ export function normalizeConfig(input, configPath = "(inline)") {
     capabilityScript: typeof cfg.capabilityScript === "string" ? cfg.capabilityScript : null,
     port,
     dbContainer: typeof cfg.dbContainer === "string" ? cfg.dbContainer : "paperclip-db",
+    containerEngine: typeof cfg.containerEngine === "string" ? cfg.containerEngine : "podman",
     // Corroborating (agent, run, company) against heartbeat_runs is the control
     // that turns "a header says so" into "the database agrees". It is on by
     // default and the only sanctioned reason to disable it is an offline test.
@@ -417,6 +425,15 @@ export function readIdentityHeaders(headers, cfg) {
 
 const runCheckCache = new Map();
 
+// The container binary the host answers to. Some hosts are Docker-only, so
+// the transport cannot hard-code `podman` here. Config wins, then the
+// environment, then the historical default — and the queue runners receive
+// the same value as CONTAINER_ENGINE below, so corroboration and the queue
+// never disagree.
+export function containerEngineFor(cfg) {
+  return cfg.containerEngine || process.env.CONTAINER_ENGINE || "podman";
+}
+
 export function makeRunCorroborator(cfg, exec = execFileAsync, now = () => Date.now()) {
   return async function corroborateRun(identity) {
     if (!cfg.requireLiveRun) return;
@@ -440,7 +457,7 @@ export function makeRunCorroborator(cfg, exec = execFileAsync, now = () => Date.
       // nothing this process runs puts a caller-influenced value on a command
       // line that /proc exposes to every account on the box.
       const result = await exec(
-        "podman",
+        containerEngineFor(cfg),
         [
           "exec", "-i",
           "-e", "PGV_RUN_ID", "-e", "PGV_AGENT_ID", "-e", "PGV_COMPANY_ID",
@@ -506,7 +523,7 @@ export function _resetRunCheckCache() {
 // FIVE ARE WRITES AND ONE IS A READ, and the read is not a rounding error in
 // that count: an agent principal has no shell on this host, so a surface of
 // writes alone makes the decision record write-only to the very party the
-// decision is about. See read_my_requests. (TOG-312)
+// decision is about. See read_my_requests.
 //
 // Each tool carries a `script` field naming which CLI it forwards to; the
 // handler picks the runner and the arg-builder from it, and a tool with no
@@ -521,11 +538,11 @@ export function _resetRunCheckCache() {
 // ---------------------------------------------------------------------------
 
 /**
- * The three safer-alternative arguments (TOG-388, extended to the capability
- * gate by TOG-403), declared once and reused by every tool that fronts a
- * DECISION rather than a request.
+ * The three safer-alternative arguments, declared once and reused by every
+ * tool that fronts a DECISION rather than a request (the capability gate
+ * included).
  *
- * SHARED, NOT COPIED, for the same reason TOG-403 factored the gate functions
+ * SHARED, NOT COPIED, for the same reason the gate functions were factored
  * instead of duplicating them: two copies of a decision surface become two
  * surfaces, and the divergence is invisible from either side. Here the copy
  * would also be caught mechanically — ci.yml's mutation gate requires each of
@@ -541,7 +558,7 @@ export function _resetRunCheckCache() {
 // not cosmetic: ci.yml's mutation gate requires every needle to match this file
 // exactly once, and two identical `...saferAlternativeProperties(` lines could
 // not be mutated independently — the gate would silently report on whichever
-// one came first, which is the blindness TOG-341 added the uniqueness check to
+// one came first, which is the blindness the uniqueness check was added to
 // catch. Same reason the capability-requester needle carries a leading space.
 const RISKY_TEMPLATE_CLAUSE = "Required when the requested template is risky.";
 const RISKY_CAPABILITY_CLAUSE =
@@ -639,7 +656,7 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log and readable by the requester, who may answer it.",
           maxLength: 4000,
         },
-        // SAFER-ALTERNATIVE-FIRST (TOG-388). These are not optional extras: the
+        // SAFER-ALTERNATIVE-FIRST. These are not optional extras: the
         // queue REFUSES a denial that carries neither `alternatives` nor
         // `no_safer_alternative`, and refuses to grant a risky template without
         // `alternatives_considered`. They are declared here because this
@@ -653,18 +670,18 @@ export const TOOLS = [
   },
 
   // -------------------------------------------------------------------------
-  // The READ (TOG-312). Every other tool on this transport is a write, and for
+  // The READ tool. Every other tool on this transport is a write, and for
   // an agent principal that made the decision record write-only.
   //
-  // The premise of TOG-196 is that an agent has no shell on the queue host. So
+  // The premise of the originating design is that an agent has no shell on the queue host. So
   // before this tool, `review_provisioning_request`'s own schema could promise
   // that a reason is "recorded in the grant log and readable by the requester,
-  // who may answer it" while no tool on this transport could read it. TOG-198's
+  // who may answer it" while no tool on this transport could read it. The earlier
   // deny-with-reason was, over this door, a conversation with one speaker: the
   // denial reason, the approval and its seated agent id, and the expiry were
   // not merely undelivered but UNREACHABLE.
   //
-  // TWO PROPERTIES THIS TOOL MUST KEEP, both from the TOG-254 decision:
+  // TWO PROPERTIES THIS TOOL MUST KEEP, both from the original read-tool decision:
   //
   //   1. READING IS NOT ACKING. There is no ack in the queue and this tool
   //      introduces none. A requester that never calls it cannot hold a request
@@ -706,7 +723,7 @@ export const TOOLS = [
   },
 
   // -------------------------------------------------------------------------
-  // Capability gate (capability_gate.sh, TOG-387). Three tools, mirroring the
+  // Capability gate (capability_gate.sh). Three tools, mirroring the
   // gate's three commands. The risk class is DERIVED FROM THE REGISTRY, never
   // supplied here — there is no --risk field to declare and no way to assert an
   // ask is routine. The requester supplies FACTS and REASONING; the registry
@@ -778,7 +795,7 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log and readable by the requester. Required for approvals too.",
           maxLength: 8000,
         },
-        // TOG-467. Without these the gate is UNREACHABLE through this transport
+        // Reachability. Without these the gate is UNREACHABLE through this transport
         // on every path but one: `capability_gate.sh` refuses a denial that
         // carries neither `alternatives` nor `no_safer_alternative`, and
         // refuses to grant a risky ask — class credential, spend or publish —
@@ -819,7 +836,7 @@ export const TOOLS = [
           description: "Why. Recorded in the grant log alongside the domain owner's reason. Required for approvals too.",
           maxLength: 8000,
         },
-        // TOG-467, and this arm is the unconditional one. A countersignature
+        // This arm is the unconditional one. A countersignature
         // only ever runs on a custody request and custody is only ever reached
         // by class credential, so the ask is risky BY CONSTRUCTION: there is no
         // routine branch here, and an approval without the considered record is
@@ -832,7 +849,7 @@ export const TOOLS = [
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
 
-// WHAT THIS TRANSPORT ADVERTISES vs WHAT IT CAN RUN (TOG-825)
+// WHAT THIS TRANSPORT ADVERTISES vs WHAT IT CAN RUN
 //
 // capabilityScript is optional, and makeScriptRunner fails closed when a
 // capability tool reaches a server without one. That refusal is correct and it
@@ -915,7 +932,7 @@ function assertNoIdentityArgument(args) {
 }
 
 /**
- * Append the safer-alternative-first arguments (TOG-388) to a decision's argv.
+ * Append the safer-alternative-first arguments to a decision's argv.
  *
  * Passed through to the CLI, which is where the RULE lives. Nothing here
  * decides whether a decision is allowed: this transport validates SHAPE
@@ -929,9 +946,9 @@ function assertNoIdentityArgument(args) {
  * of the flag that precedes it, not as a flag of its own.
  *
  * SHARED by the queue's `review` and the capability gate's `review` and
- * `countersign` (TOG-467). The two scripts parse these flags with the same
- * five functions out of lib/reqrecord.sh — TOG-403 factored them there rather
- * than copying them — so the transport side is factored to match. One shape,
+ * `countersign`. The two scripts parse these flags with the same
+ * five functions out of lib/reqrecord.sh — factored there rather
+ * than copied — so the transport side is factored to match. One shape,
  * one place, whichever door the decision arrives at.
  */
 function appendSaferAlternativeArgs(argv, args) {
@@ -1236,13 +1253,14 @@ export function makeScriptRunner(scriptPath, cfg, exec = execFileAsync) {
           // written last and win. normalizeConfig already refuses a config that
           // names one of them; this ordering is what still holds for a cfg
           // object built by hand, and it is one line. A config file must never
-          // be able to tell the queue it is a different company. (TOG-341)
+          // be able to tell the queue it is a different company.
           env: {
             ...cfg.queueEnv,
             PATH: process.env.PATH ?? "/usr/bin:/bin",
             HOME: process.env.HOME ?? "/",
             COMPANY_ID: cfg.companyId,
             PAPERCLIP_DB_CTR: cfg.dbContainer,
+            CONTAINER_ENGINE: containerEngineFor(cfg),
           },
         });
         return { ok: true, text: (stdout + stderr).trim(), exitCode: 0 };
@@ -1599,7 +1617,7 @@ export async function main(argv) {
     tools: advertisedTools(cfg).map((tool) => tool.name),
     // Loud on the line the operator actually reads. An install that meant to
     // front the gate and left capabilityScript unset is a silent three-tool
-    // hole otherwise — that is exactly how TOG-825 went unnoticed for nine days.
+    // hole otherwise — that is exactly how an advertised-but-denied gap went unnoticed for nine days.
     capabilityToolsAdvertised: Boolean(cfg.capabilityScript),
   }) + "\n");
   if (!cfg.capabilityScript) {

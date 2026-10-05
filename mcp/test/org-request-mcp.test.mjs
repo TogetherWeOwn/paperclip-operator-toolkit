@@ -1,5 +1,5 @@
 // ===========================================================================
-// org-request-mcp regression suite — TOG-196.
+// org-request-mcp regression suite.
 //
 // WHAT THIS SUITE IS FOR
 //   Every non-negotiable in the issue is an assertion here, and the DoD test
@@ -23,7 +23,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ import {
   makeQueueRunner,
   makeCapabilityRunner,
   makeRunCorroborator,
+  containerEngineFor,
   createServer,
   HttpError,
   _resetRunCheckCache,
@@ -57,8 +58,21 @@ const CALLER = "6a02a7ed-c2f9-4638-bd44-b453c589cbb1";  // the agent actually ca
 const VICTIM = "70f9e158-e8c6-4be4-bc0f-6ad5770a3f44";  // the agent it will try to be
 const RUN = "11111111-2222-3333-4444-555555555555";
 
+// Every scratch dir is removed when this test process exits. Without that each
+// run leaves its scratch dirs in the shared runner /tmp, and repeated CI runs
+// on a shared runner turn that into a large buildup. Cleanup is best effort so
+// it can never fail a suite that otherwise passed.
+const scratchDirs = [];
+process.on("exit", () => {
+  for (const dir of scratchDirs) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 function scratch() {
-  return mkdtempSync(path.join(tmpdir(), "org-mcp-test-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "org-mcp-test-"));
+  scratchDirs.push(dir);
+  return dir;
 }
 
 // A stub org_request_queue.sh. It must be NAMED that: the server refuses to
@@ -255,10 +269,10 @@ test("DoD: the queue is invoked with the AUTHENTICATED principal as --requester"
 });
 
 // ===========================================================================
-// 1b. TOG-312 — the READ, and the two properties it must not acquire.
+// 1b. The READ tool, and the two properties it must not acquire.
 //
 // Every other tool here is a write. An agent principal has no shell on the
-// queue host (that is the premise of TOG-196), so before this tool the denial
+// queue host (that is the premise of the originating design), so before this tool the denial
 // reason, the approval with its seated agent id, and the expiry were not merely
 // undelivered but unreachable: review_provisioning_request's own schema said a
 // reason is "readable by the requester", and nothing on this transport could
@@ -269,7 +283,7 @@ test("DoD: the queue is invoked with the AUTHENTICATED principal as --requester"
 // it stops being a read.
 // ===========================================================================
 
-test("TOG-312: the read tool is scoped by the AUTHENTICATED principal, and takes no arguments", async () => {
+test("the read tool is scoped by the AUTHENTICATED principal, and takes no arguments", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
     const response = await call(
@@ -286,7 +300,7 @@ test("TOG-312: the read tool is scoped by the AUTHENTICATED principal, and takes
   });
 });
 
-// TOG-579: compose the exact authenticated selector above with the REAL queue.
+// Compose the exact authenticated selector above with the REAL queue.
 // Standing authority is named by permission profile, but MCP knows only the
 // authenticated UUID. The enqueue path must record each live holder's UUID;
 // resolving the caller's current profile during read would retarget old notices.
@@ -335,7 +349,7 @@ function realQueueConfig(dir) {
   return { cfg, queue };
 }
 
-test("TOG-579 ACCEPTANCE: authenticated P4 and P1 UUIDs pull only their own standing notices", { skip: skipIfNoQueue }, async () => {
+test("ACCEPTANCE: authenticated P4 and P1 UUIDs pull only their own standing notices", { skip: skipIfNoQueue }, async () => {
   const dir = scratch();
   const { cfg, queue } = realQueueConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -382,7 +396,7 @@ test("TOG-579 ACCEPTANCE: authenticated P4 and P1 UUIDs pull only their own stan
   });
 });
 
-test("TOG-312: the read tool declares no properties at all, so there is nothing to point elsewhere", () => {
+test("the read tool declares no properties at all, so there is nothing to point elsewhere", () => {
   const tool = TOOLS.find((candidate) => candidate.name === "read_my_requests");
   assert.ok(tool, "read_my_requests is gone; the transport is write-only again");
   assert.deepEqual(
@@ -394,7 +408,7 @@ test("TOG-312: the read tool declares no properties at all, so there is nothing 
   assert.deepEqual(tool.inputSchema.required ?? [], []);
 });
 
-test("TOG-312: naming another agent in the read tool's arguments is refused, never honoured", async () => {
+test("naming another agent in the read tool's arguments is refused, never honoured", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
     // Both shapes: an identity-named key (the specific refusal) and an
@@ -420,7 +434,7 @@ test("TOG-312: naming another agent in the read tool's arguments is refused, nev
   });
 });
 
-test("TOG-312: the read tool's message says there is no argument, rather than trailing off after 'Accepted:'", () => {
+test("the read tool's message says there is no argument, rather than trailing off after 'Accepted:'", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   assert.throws(
     () => buildQueueArgs("read_my_requests", { since: "yesterday" }, identity),
@@ -429,10 +443,10 @@ test("TOG-312: the read tool's message says there is no argument, rather than tr
   );
 });
 
-test("TOG-312: reading is not acking — the read reaches no subcommand that writes a decision", () => {
+test("reading is not acking — the read reaches no subcommand that writes a decision", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   const argv = buildQueueArgs("read_my_requests", {}, identity);
-  // Constraint 1 of the TOG-254 decision: acking must never be a precondition
+  // Constraint 1 of the original read-tool decision: acking must never be a precondition
   // in the decision path, so this tool must not be able to ack. Constraint 2:
   // delivery is not a security control, so it must not be able to block, alter,
   // delay or re-target a decision. Both reduce to the same mechanical check —
@@ -446,7 +460,7 @@ test("TOG-312: reading is not acking — the read reaches no subcommand that wri
   }
 });
 
-test("TOG-312: an unauthenticated read is refused exactly as an unauthenticated write is", async () => {
+test("an unauthenticated read is refused exactly as an unauthenticated write is", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
     // The read is per-principal, so anonymity is not "harmless discovery" here
@@ -503,7 +517,7 @@ const EVERY_ARGUMENT = {
   },
   review_provisioning_request: {
     request_id: "REQ-004", decision: "approve", reason: "fine",
-    // TOG-388. These are policy-exclusive at the CLI — a denial cannot carry
+    // These are policy-exclusive at the CLI — a denial cannot carry
     // both `alternatives` and `no_safer_alternative`, and an approval carries
     // neither — but buildQueueArgs deliberately enforces SHAPE and not POLICY,
     // so one fixture carrying all of them is the right way to prove that every
@@ -512,7 +526,7 @@ const EVERY_ARGUMENT = {
     no_safer_alternative: "nothing narrower reaches the connection API",
     alternatives_considered: [{ alternative: "read-only access", why_it_failed: "the drift is a write" }],
   },
-  // TOG-312. The read tool declares no properties, so its fixture is empty ON
+  // The read tool declares no properties, so its fixture is empty ON
   // PURPOSE — and the deepEqual below is what makes that a real assertion:
   // adding a property to the schema without adding it here fails on the very
   // tool where a new property would be most dangerous, because a property is
@@ -526,7 +540,7 @@ const EVERY_ARGUMENT = {
   },
   review_capability_request: {
     request_id: "CAP-004", decision: "approve", reason: "the domain owner agrees",
-    // TOG-467. Same three, same shape-not-policy reasoning as the queue above.
+    // Same three, same shape-not-policy reasoning as the queue above.
     alternatives: ["grant github.repo.read instead"],
     no_safer_alternative: "nothing narrower mints an installation token",
     alternatives_considered: [{ alternative: "reuse the cached token", why_it_failed: "it expired mid-run" }],
@@ -539,7 +553,7 @@ const EVERY_ARGUMENT = {
   },
 };
 
-// Every leaf string a fixture carries, in order. TOG-388 gave one tool array-
+// Every leaf string a fixture carries, in order. One tool array-
 // and object-valued properties, and the flat `argv.includes(value)` this used
 // to do would have compared an argv of strings against an Array and an Object
 // — never equal, so the assertion would have failed for the wrong reason, or
@@ -588,7 +602,7 @@ test("every property a schema advertises is actually read onto the argv", () => 
 });
 
 // ---------------------------------------------------------------------------
-// TOG-388: the safer-alternatives arguments, and the one property of them that
+// The safer-alternatives arguments, and the one property of them that
 // a flat "did it reach the argv" check cannot see.
 //
 // The CLI requires `--because` to IMMEDIATELY follow its `--considered`. If
@@ -597,7 +611,7 @@ test("every property a schema advertises is actually read onto the argv", () => 
 // and the queue would pair alternative 1 with reason 2. That produces a record
 // that is fully populated and entirely wrong, which is worse than a missing one
 // because it reads as diligence. Adjacency is therefore asserted directly.
-test("TOG-388: considered/because pairs reach the argv ADJACENTLY, never as two runs", () => {
+test("considered/because pairs reach the argv ADJACENTLY, never as two runs", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   const argv = buildQueueArgs("review_provisioning_request", {
     request_id: "REQ-009", decision: "approve", reason: "measured",
@@ -613,7 +627,7 @@ test("TOG-388: considered/because pairs reach the argv ADJACENTLY, never as two 
   ], "the pairs must interleave; two runs of flags would mis-pair every entry after the first");
 });
 
-test("TOG-388: a denial's alternatives and no-safer finding reach the argv", () => {
+test("a denial's alternatives and no-safer finding reach the argv", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   assert.deepEqual(
     buildQueueArgs("review_provisioning_request", {
@@ -633,7 +647,7 @@ test("TOG-388: a denial's alternatives and no-safer finding reach the argv", () 
   );
 });
 
-test("TOG-388: a malformed alternatives_considered entry is refused, not partially built", () => {
+test("a malformed alternatives_considered entry is refused, not partially built", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   const build = (considered) => () => buildQueueArgs("review_provisioning_request", {
     request_id: "REQ-012", decision: "approve", reason: "r", alternatives_considered: considered,
@@ -648,7 +662,7 @@ test("TOG-388: a malformed alternatives_considered entry is refused, not partial
   assert.throws(build(Array.from({ length: 11 }, () => ({ alternative: "a", why_it_failed: "b" }))), /at most 10/);
 });
 
-test("TOG-388: a flag-shaped value in the new fields is refused, like every other free-text field", () => {
+test("a flag-shaped value in the new fields is refused, like every other free-text field", () => {
   // The transport's existing free-text rule — a value may not begin with '-' —
   // has to reach INSIDE the new array and object properties, not just the flat
   // string ones. It does, because they route through checkStringArg like
@@ -801,6 +815,46 @@ test("a live RUNNING run for this agent corroborates the identity", async () => 
   assert.equal(sawEnv.PGV_RUN_ID, RUN);
 });
 
+test("corroboration uses the configured container engine, not a hard-coded podman", async () => {
+  // Some hosts are Docker-only, so a hard-coded "podman" here fails every
+  // submit/review with `missing podman`. The engine is config, and the queue
+  // runners receive the same value as CONTAINER_ENGINE (pinned below), so the
+  // two never disagree on which binary runs.
+  _resetRunCheckCache();
+  let sawFile = "";
+  let sawArgs = null;
+  const corroborate = makeRunCorroborator(
+    { requireLiveRun: true, dbContainer: "paperclip-db", containerEngine: "docker" },
+    async (file, args, options) => {
+      sawFile = file;
+      sawArgs = args;
+      assert.equal(options.env.PGV_AGENT_ID, CALLER);
+      return { stdout: "1\n", stderr: "" };
+    },
+  );
+  await corroborate({ agentId: CALLER, companyId: COMPANY, runId: RUN });
+  assert.equal(sawFile, "docker");
+  assert.deepEqual(sawArgs.slice(0, 2), ["exec", "-i"]);
+  assert.ok(sawArgs.includes("paperclip-db"));
+});
+
+test("containerEngineFor defaults to podman and honours the environment", () => {
+  const saved = process.env.CONTAINER_ENGINE;
+  try {
+    delete process.env.CONTAINER_ENGINE;
+    assert.equal(containerEngineFor({}), "podman");
+    assert.equal(containerEngineFor({ containerEngine: "docker" }), "docker");
+    process.env.CONTAINER_ENGINE = "docker";
+    assert.equal(containerEngineFor({}), "docker");
+    // Config wins over the environment, so one host's export cannot silently
+    // retarget a unit whose config names the other engine.
+    assert.equal(containerEngineFor({ containerEngine: "podman" }), "podman");
+  } finally {
+    if (saved === undefined) delete process.env.CONTAINER_ENGINE;
+    else process.env.CONTAINER_ENGINE = saved;
+  }
+});
+
 test("a run that is not RUNNING refuses the call", async () => {
   _resetRunCheckCache();
   const corroborate = makeRunCorroborator(
@@ -914,13 +968,13 @@ test("the bearer is never passed into the queue script's environment", async () 
   }
 });
 
-// TOG-341: queueEnv is an operator seam for the queue's own test hooks. It is
+// queueEnv is an operator seam for the queue's own test hooks. It is
 // not a way to restate a value this server owns. Two independent controls,
 // because they fail independently — the config one is loud at startup, the
 // ordering one still holds for a cfg object nobody normalized.
 
 test("a config whose queueEnv restates a reserved name is refused at load", () => {
-  for (const key of ["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR"]) {
+  for (const key of ["COMPANY_ID", "PATH", "HOME", "PAPERCLIP_DB_CTR", "CONTAINER_ENGINE", "PAPERCLIP_SQL_BACKEND"]) {
     assert.throws(
       () => normalizeConfig({
         companyId: COMPANY,
@@ -959,6 +1013,48 @@ test("the tenancy the queue sees comes from the server, not from queueEnv", asyn
   );
 });
 
+// The engine the queue scripts use is a server-owned value, exactly
+// like the tenancy above — a config file must neither restate it via queueEnv
+// (refused at load, pinned in the loop above) nor smuggle it past the spread
+// order on a hand-built cfg.
+
+test("containerEngine is config with a podman default, and anything else is refused at load", () => {
+  const base = { companyId: COMPANY, bearerSha256: BEARER_SHA, queueScript: "/x/org_request_queue.sh" };
+  assert.equal(normalizeConfig({ ...base }).containerEngine, "podman");
+  assert.equal(normalizeConfig({ ...base, containerEngine: "docker" }).containerEngine, "docker");
+  assert.equal(normalizeConfig({ ...base, containerEngine: "podman" }).containerEngine, "podman");
+  assert.throws(
+    () => normalizeConfig({ ...base, containerEngine: "nerdctl" }),
+    /containerEngine/,
+  );
+});
+
+test("the queue sees the server's container engine as CONTAINER_ENGINE", async () => {
+  const dir = scratch();
+  let sawEnv = null;
+  const cfg = configFor(dir, { containerEngine: "docker" });
+  const run = makeQueueRunner(cfg, async (file, args, options) => {
+    sawEnv = options.env;
+    return { stdout: "SUBMITTED REQ-001", stderr: "" };
+  });
+  await run(["submit", "--requester", CALLER, "--template", "E4_AUDIT_ANALYST", "--title", "t"]);
+  assert.equal(sawEnv.CONTAINER_ENGINE, "docker");
+
+  // And a hand-built cfg that smuggles one in via queueEnv still loses: the
+  // server-owned values are written last and win, exactly as for tenancy.
+  const smuggled = {
+    ...configFor(dir),
+    queueEnv: { CONTAINER_ENGINE: "not-the-engine" },
+  };
+  let smuggledEnv = null;
+  const runSmuggled = makeQueueRunner(smuggled, async (file, args, options) => {
+    smuggledEnv = options.env;
+    return { stdout: "SUBMITTED REQ-001", stderr: "" };
+  });
+  await runSmuggled(["submit", "--requester", CALLER, "--template", "E4_AUDIT_ANALYST", "--title", "t"]);
+  assert.equal(smuggledEnv.CONTAINER_ENGINE, "podman");
+});
+
 // ===========================================================================
 // 5. Exactly the sanctioned tools, and never the provisioner.
 // ===========================================================================
@@ -967,7 +1063,7 @@ test("tools/list advertises exactly the sanctioned tools, and each binds to a kn
   const dir = scratch();
   // capabilityConfigFor, not configFor: this test pins the FULL sanctioned set,
   // so it must run on a transport configured to front both scripts. Discovery
-  // is now derived from config (TOG-825), so a queue-only config legitimately
+  // is now derived from config, so a queue-only config legitimately
   // advertises three. Which tools a PARTIAL config offers is pinned in §9.
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(rpc("tools/list", {}));
@@ -984,7 +1080,7 @@ test("tools/list advertises exactly the sanctioned tools, and each binds to a kn
       "submit_capability_request",
       "submit_provisioning_request",
     ]);
-    // TOG-312, asserted as a PROPERTY and not left implicit in the list above.
+    // The read tool, asserted as a PROPERTY and not left implicit in the list above.
     // The defect was not a missing name — it was a transport on which every
     // tool was a write, which made the decision record unreadable to the one
     // principal it was about. A future edit that removes the read must fail on
@@ -1121,7 +1217,7 @@ test("decision is a closed set; nothing else becomes a flag", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TOG-341: the inputSchema is ENFORCED, not merely advertised.
+// The inputSchema is ENFORCED, not merely advertised.
 //
 // Before this, `additionalProperties: false` was a claim made to clients that
 // nothing in this process checked. An unlisted key could not reach the CLI —
@@ -1146,7 +1242,7 @@ test("an argument the schema does not declare is refused, not silently dropped",
   }
 });
 
-// The exact call measured in the TOG-336 review of PR #9, which returned
+// The exact call measured in a past review, which returned
 // ["submit","--requester",A,"--template","E4_X","--title","x"] and dropped the
 // other three keys without a word.
 test("the review's measured silent-drop case is now a refusal", () => {
@@ -1261,7 +1357,7 @@ test("tools/list works WITHOUT identity headers, or the connection can never go 
   const dir = scratch();
   // Fully configured, so "the full catalogue" below means all six. What this
   // test is actually about is ANONYMITY, not the tool count: discovery must
-  // succeed on credential headers alone. Config-derived filtering (TOG-825) is
+  // succeed on credential headers alone. Config-derived filtering is
   // a separate axis, pinned in §9.
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     // The gateway's catalog refresh (tool-access.ts remoteTools) sends
@@ -1412,7 +1508,7 @@ echo ok
 });
 
 // ===========================================================================
-// 8. Capability tools — the transport contract (TOG-399).
+// 8. Capability tools — the transport contract.
 //
 // The same property the provisioning tools carry, one CLI over: the principal
 // is the AUTHENTICATED session and is structurally unreachable from tool input.
@@ -1421,7 +1517,7 @@ echo ok
 // drives the REAL gate end to end.
 // ===========================================================================
 
-test("TOG-399: submit_capability_request forwards --requester from the authenticated principal", async () => {
+test("submit_capability_request forwards --requester from the authenticated principal", async () => {
   const dir = scratch();
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(
@@ -1449,7 +1545,7 @@ test("TOG-399: submit_capability_request forwards --requester from the authentic
   });
 });
 
-test("TOG-399: review and countersign forward --reviewer / --custodian from the principal", async () => {
+test("review and countersign forward --reviewer / --custodian from the principal", async () => {
   for (const [name, flag, verb] of [
     ["review_capability_request", "--reviewer", "review"],
     ["countersign_capability_request", "--custodian", "countersign"],
@@ -1468,7 +1564,7 @@ test("TOG-399: review and countersign forward --reviewer / --custodian from the 
   }
 });
 
-test("TOG-399: a caller naming itself as custodian/decider is refused before the gate", () => {
+test("a caller naming itself as custodian/decider is refused before the gate", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   // The three provisioning identity names PLUS the capability gate's own.
   const names = ["custodian", "custodianAgentId", "custodian_agent_id", "decider", "requester", "reviewer"];
@@ -1486,7 +1582,7 @@ test("TOG-399: a caller naming itself as custodian/decider is refused before the
   }
 });
 
-test("TOG-399: a self-naming argument reaches the gate NOWHERE, over the wire", async () => {
+test("a self-naming argument reaches the gate NOWHERE, over the wire", async () => {
   const dir = scratch();
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(
@@ -1505,7 +1601,7 @@ test("TOG-399: a self-naming argument reaches the gate NOWHERE, over the wire", 
   });
 });
 
-test("TOG-399: a capability request id must be CAP-nnn, never a queue REQ-nnn", () => {
+test("a capability request id must be CAP-nnn, never a queue REQ-nnn", () => {
   const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
   for (const bad of ["REQ-004", "cap-004", "CAP-", "CAP-4", "004", "CAP-004; rm -rf /"]) {
     assert.throws(
@@ -1520,7 +1616,7 @@ test("TOG-399: a capability request id must be CAP-nnn, never a queue REQ-nnn", 
   assert.deepEqual(argv, ["review", "--reviewer", CALLER, "--request", "CAP-004", "--reject", "--reason", "no"]);
 });
 
-test("TOG-399: capability tools fail CLOSED when the server never configured a capability script", async () => {
+test("capability tools fail CLOSED when the server never configured a capability script", async () => {
   const dir = scratch();
   // A config with NO capabilityScript. normalizeConfig makes it null; the
   // handler must refuse rather than execFile(undefined).
@@ -1542,7 +1638,7 @@ test("TOG-399: capability tools fail CLOSED when the server never configured a c
   });
 });
 
-test("TOG-399: a provisioning call never reaches the capability gate", async () => {
+test("a provisioning call never reaches the capability gate", async () => {
   const dir = scratch();
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(
@@ -1573,7 +1669,7 @@ test("assertCapabilityScript refuses a script that is not capability_gate.sh", (
 });
 
 // ===========================================================================
-// 9. THE ACCEPTANCE (TOG-399): a request SUBMITTED by one authenticated agent
+// 9. THE ACCEPTANCE: a request SUBMITTED by one authenticated agent
 //    and COUNTERSIGNED by a DIFFERENT authenticated agent, principals derived
 //    from the transport and unsuppliable by either caller — driven through the
 //    REAL capability_gate.sh, not a stub.
@@ -1625,7 +1721,7 @@ function realGateConfig(dir) {
   return { cfg, queuePath };
 }
 
-test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from the transport", { skip: skipIfNoGate }, async () => {
+test("ACCEPTANCE: two DIFFERENT authenticated agents, principals from the transport", { skip: skipIfNoGate }, async () => {
   const dir = scratch();
   const { cfg, queuePath } = realGateConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -1650,8 +1746,8 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
 
     // --- agent B (the domain owner) turns key 1 ----------------------------
     // github.token is class credential, so this grant is RISKY and the gate
-    // requires the considered record (TOG-403). It travels as a tool argument
-    // because TOG-467 declared one; before that this call was unsatisfiable
+    // requires the considered record. It travels as a tool argument
+    // because the gate declared one; before that this call was unsatisfiable
     // over this transport at any argument list, which is what turned `main`
     // red rather than merely turning this test red.
     const review = await call(
@@ -1706,7 +1802,7 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
 });
 
 // ===========================================================================
-// TOG-467. The four decision paths that `main` proved were unreachable.
+// The four decision paths that `main` proved were unreachable.
 //
 // Measured against the real gate before the fix, with an approve-a-non-risky-
 // ask control that passed: review-deny, review-approve-risky, countersign-
@@ -1723,7 +1819,7 @@ test("TOG-399 ACCEPTANCE: two DIFFERENT authenticated agents, principals from th
 // requester blocked by the one agent who already knows the safer shape.
 // ===========================================================================
 
-test("TOG-467 ACCEPTANCE: a denial carries its safer alternative over the wire into the record", { skip: skipIfNoGate }, async () => {
+test("ACCEPTANCE: a denial carries its safer alternative over the wire into the record", { skip: skipIfNoGate }, async () => {
   const dir = scratch();
   const { cfg, queuePath } = realGateConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -1764,7 +1860,7 @@ test("TOG-467 ACCEPTANCE: a denial carries its safer alternative over the wire i
   });
 });
 
-test("TOG-467 ACCEPTANCE: a custodian's no_safer_alternative finding reaches the record", { skip: skipIfNoGate }, async () => {
+test("ACCEPTANCE: a custodian's no_safer_alternative finding reaches the record", { skip: skipIfNoGate }, async () => {
   const dir = scratch();
   const { cfg, queuePath } = realGateConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -1823,7 +1919,7 @@ test("TOG-467 ACCEPTANCE: a custodian's no_safer_alternative finding reaches the
   });
 });
 
-test("TOG-467: the transport forwards the arguments and does NOT decide the policy", { skip: skipIfNoGate }, async () => {
+test("the transport forwards the arguments and does NOT decide the policy", { skip: skipIfNoGate }, async () => {
   const dir = scratch();
   const { cfg } = realGateConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -1861,7 +1957,7 @@ test("TOG-467: the transport forwards the arguments and does NOT decide the poli
   });
 });
 
-test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even authenticated", { skip: skipIfNoGate }, async () => {
+test("ACCEPTANCE: the requester cannot countersign its own request, even authenticated", { skip: skipIfNoGate }, async () => {
   const dir = scratch();
   const { cfg } = realGateConfig(dir);
   await withServer(cfg, {}, async (call) => {
@@ -1894,10 +1990,10 @@ test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even
       headersFor(DOMAIN_OWNER),
     );
     // ASSERT THE PRECONDITION, or the whole test is satisfiable by the wrong
-    // gate — which is what it did until TOG-459.
+    // gate — which is what it did until the countersign-side fix.
     //
     // This test PASSED throughout the window in which `alternatives_considered`
-    // was undeclared on the transport (TOG-467), and it passed without ever
+    // was undeclared on the transport, and it passed without ever
     // reaching the rule it is named for. The review above was refused for want
     // of the record, so the request stayed `pending`, and the countersign below
     // died at capability_gate.sh:983 — "request has no domain-owner key yet; the
@@ -1948,7 +2044,7 @@ test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even
   });
 });
 
-// TOG-459. The countersign side of TOG-467's fail-closed test, which covers
+// The countersign side of the fail-closed test, which covers
 // review. Not a duplicate: the two rules are DIFFERENT. A review's record is
 // required only when the REGISTRY calls the capability risky, so that test also
 // depends on the classification. A countersignature is reached only through
@@ -1959,7 +2055,7 @@ test("TOG-399 ACCEPTANCE: the requester cannot countersign its own request, even
 // Without this, deleting that unconditional assert would leave every test green:
 // the review-side test exercises a different call, and every other countersign
 // test supplies a record and so never asks what happens without it.
-test("TOG-459: a countersignature without the record is refused, with no routine branch to fall into",
+test("a countersignature without the record is refused, with no routine branch to fall into",
   { skip: skipIfNoGate }, async () => {
     const dir = scratch();
     const { cfg } = realGateConfig(dir);
@@ -2013,7 +2109,7 @@ test("TOG-459: a countersignature without the record is refused, with no routine
   });
 
 // ===========================================================================
-// 9. Discovery matches what the transport can actually run (TOG-825).
+// 9. Discovery matches what the transport can actually run.
 //
 // The defect: capabilityScript is optional and the runner fails closed without
 // it, but tools/list advertised all six tools unconditionally. So a deployment
@@ -2026,7 +2122,7 @@ test("TOG-459: a countersignature without the record is refused, with no routine
 // is configured to run it. The fail-closed runner stays as defence in depth.
 // ===========================================================================
 
-test("TOG-825: with capabilityScript unset, the capability tools are NOT advertised", async () => {
+test("with capabilityScript unset, the capability tools are NOT advertised", async () => {
   const dir = scratch();
   // configFor sets no capabilityScript — exactly the live deployment's config.
   await withServer(configFor(dir), {}, async (call) => {
@@ -2051,7 +2147,7 @@ test("TOG-825: with capabilityScript unset, the capability tools are NOT adverti
   });
 });
 
-test("TOG-825: with capabilityScript set, all six tools are advertised", async () => {
+test("with capabilityScript set, all six tools are advertised", async () => {
   const dir = scratch();
   await withServer(capabilityConfigFor(dir), {}, async (call) => {
     const response = await call(rpc("tools/list", {}));
@@ -2063,7 +2159,7 @@ test("TOG-825: with capabilityScript set, all six tools are advertised", async (
   });
 });
 
-test("TOG-825: an unadvertised capability tool called anyway is refused, and never reaches a script", async () => {
+test("an unadvertised capability tool called anyway is refused, and never reaches a script", async () => {
   const dir = scratch();
   await withServer(configFor(dir), {}, async (call) => {
     const response = await call(
@@ -2087,7 +2183,7 @@ test("TOG-825: an unadvertised capability tool called anyway is refused, and nev
   });
 });
 
-test("TOG-825: the fail-closed runner is retained even so", async () => {
+test("the fail-closed runner is retained even so", async () => {
   // advertisedTools is the fix; the runner's refusal is the backstop. If a
   // future change reintroduces the tool into the catalog, this must still hold.
   const dir = scratch();
@@ -2097,4 +2193,74 @@ test("TOG-825: the fail-closed runner is retained even so", async () => {
   const result = await run(["--submit"]);
   assert.equal(result.ok, false);
   assert.match(result.text, /capabilityScript is unset/);
+});
+
+// ===========================================================================
+// 10. Discovery matches what the transport can actually run, positive
+// direction (audit priority 1: verification for the upstream gateway fix,
+// "advertised-but-denied" half).
+//
+// Section 9 pins the NEGATIVE direction: with capabilityScript
+// unset, the three capability tools are withheld from tools/list. These pin
+// the POSITIVE direction the upstream fix is about: every tool discovery DOES
+// advertise must be callable — an advertised tool that always fails is worse
+// than an absent one, because it consumes the attempt the instructions
+// demand. Both configs are covered, so a future binding split is pinned on
+// each side of it.
+// ===========================================================================
+
+test("every advertised tool is callable, queue-only config", async () => {
+  const dir = scratch();
+  // No capabilityScript — the live deployment shape. The advertised three
+  // must each build an argv AND survive the wire without unknown_tool.
+  await withServer(configFor(dir), {}, async (call) => {
+    const listed = await call(rpc("tools/list", {}));
+    const names = listed.json.result.tools.map((t) => t.name);
+    assert.deepEqual(names, [
+      "submit_provisioning_request",
+      "review_provisioning_request",
+      "read_my_requests",
+    ]);
+    const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+    for (const name of names) {
+      assert.doesNotThrow(
+        () => buildArgsForTool(name, EVERY_ARGUMENT[name], identity),
+        `${name} is advertised and must therefore build an argv`,
+      );
+      const response = await call(
+        rpc("tools/call", { name, arguments: EVERY_ARGUMENT[name] }),
+        IDENTITY_HEADERS,
+      );
+      assert.equal(response.status, 200);
+      assert.doesNotMatch(
+        response.json.result.content[0].text, /unknown_tool/,
+        `${name} is advertised by tools/list and must therefore be dispatchable`,
+      );
+    }
+  });
+});
+
+test("every advertised tool is callable, full config", async () => {
+  const dir = scratch();
+  await withServer(capabilityConfigFor(dir), {}, async (call) => {
+    const listed = await call(rpc("tools/list", {}));
+    const names = listed.json.result.tools.map((t) => t.name);
+    assert.equal(names.length, 6, "a fully configured transport offers every tool");
+    const identity = { agentId: CALLER, companyId: COMPANY, runId: RUN };
+    for (const name of names) {
+      assert.doesNotThrow(
+        () => buildArgsForTool(name, EVERY_ARGUMENT[name], identity),
+        `${name} is advertised and must therefore build an argv`,
+      );
+      const response = await call(
+        rpc("tools/call", { name, arguments: EVERY_ARGUMENT[name] }),
+        IDENTITY_HEADERS,
+      );
+      assert.equal(response.status, 200);
+      assert.doesNotMatch(
+        response.json.result.content[0].text, /unknown_tool/,
+        `${name} is advertised by tools/list and must therefore be dispatchable`,
+      );
+    }
+  });
 });
