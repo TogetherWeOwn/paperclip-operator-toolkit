@@ -424,8 +424,8 @@ export const LOCAL_FOLDER_KEYS = {
   /**
    * Append-only `paired-decision-v1` JSONL records, one per
    * `advise()` call, for the 48h host/plugin-shadow agreement stream
-   * `ops//gate_harness.py` correlates against. Plugin-owned path —
-   * never `ops//`, which is 's own directory.
+   * `ops/gate_harness.py` correlates against. Plugin-owned path —
+   * never `ops/`, which is the host's own directory.
    *
    * Lowercase-and-hyphen only: `pluginManifestV1Schema` rejects a `folderKey`
    * that doesn't match `^[a-z0-9][a-z0-9._:-]*$` (no camelCase).
@@ -435,7 +435,7 @@ export const LOCAL_FOLDER_KEYS = {
 
 /**
  * Cap on how many `rejections` entries a decision record's
- * `explanations` carries.  measured up to 112 rejected candidates in
+ * `explanations` carries. Load testing measured up to 112 rejected candidates in
  * one decision on today's roster; this leaves headroom while still keeping
  * the record bounded as the roster grows, rather than letting it scale
  * unbounded with roster size. A decision with more rejections than this

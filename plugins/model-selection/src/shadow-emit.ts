@@ -4,9 +4,9 @@ import type { IssueDescriptor, ModelEntry, Rejection, RejectionOperand, Selectio
 import type { LanePaceVerdict } from "./lane-capacity/pace.js";
 
 /**
- * /  / . `paired-decision-v1`, the paired
- * host/plugin-shadow agreement stream `ops//gate_harness.py`
- * correlates.  retired the separate host dispatcher, so both writer
+ * Agreement stream `paired-decision-v1`, the paired
+ * host/plugin-shadow agreement stream `ops/gate_harness.py`
+ * correlates. The host cleanup retired the separate host dispatcher, so both writer
  * projections now come from the same authoritative `advise()` decision. This
  * module only builds records; `worker.ts` appends the pair via
  * `ctx.localFolders`.

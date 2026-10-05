@@ -441,10 +441,10 @@ export const SELECTION_CONFIG_SCHEMA = {
       default: {},
     },
     /**
-     * / . Emits paired `host` and `plugin-shadow`
+     * Agreement stream. Emits paired `host` and `plugin-shadow`
      * `paired-decision-v1` JSONL records per `advise()` call to the
      * `shadowDecisions` local folder, for the 48h agreement stream
-     * `ops//gate_harness.py` correlates.
+     * `ops/gate_harness.py` correlates.
      * Off by default — same inert-install discipline as `selection.mode`:
      * installing this plugin must not start writing files an operator did
      * not ask for.

@@ -4,7 +4,7 @@ Chooses the cheapest fully-capable model for each harness run, keyed on a
 **recorded tier judgement** and ordered by a **volume-aware cost term** measured
 from this company's own runs.
 
-Built per  against the  design, ADR-0002/0004/0005/0008/0010 and
+Built per the staged rollout plan against the tiered-selection design, ADR-0002/0004/0005/0008/0010 and
 the Round-4 record.
 
 ---
@@ -238,7 +238,7 @@ initial pins and idle repins.
 **This plugin ships inert.** Defaults are `mode: "advise"`, `defaultTier: "T1"`,
 `holdOnUntrustedProfile: true`. Installing it changes no live selection variable.
 
-Per the  constraint, enforcement must not be switched on until Stage 2
+Per the single-variable rollout constraint, enforcement must not be switched on until Stage 2
 (`tier:T1/T2/T3` labels + narrow-slice rollout) is confirmed stable. **Never
 change two live selection variables in one measurement window** — if
 enforcement flips while the Stage 2 slice is still moving, neither result is
@@ -285,7 +285,7 @@ tagged `writer: "host"` and one tagged
 `writer: "plugin-shadow"`. Both projections come from the same decision object,
 timestamp, lane ledger, candidate roster, and state fingerprint. This supplies
 the comparison stream without restoring the host `tier_dispatcher.py` retired
-by  or adding a second actuator.
+by the host dispatcher removal or adding a second actuator.
 
 Shards stay small on purpose: each hourly shard is rewritten whole on every
 append and capped at `shadowEmit.shardMaxRecords` (default 200, pair-aligned
@@ -302,7 +302,7 @@ A bounded interval can be split by writer without copying or changing records:
 cat shadow-decisions/decisions-*.jsonl > interval.jsonl
 jq -c 'select(.writer == "host")' interval.jsonl > host.jsonl
 jq -c 'select(.writer == "plugin-shadow")' interval.jsonl > shadow.jsonl
-python3 "$COMPANY_ROOT/ops//gate_harness.py" agreement \
+python3 "$COMPANY_ROOT/ops/gate_harness.py" agreement \
   --host host.jsonl --shadow shadow.jsonl --out agreement.json
 ```
 
@@ -331,7 +331,7 @@ Deployment is limited to enabling the existing `shadowEmit.enabled` flag and
 configuring its existing `shadow-decisions` local folder. Preserve the complete
 live config with a parsed read-merge-write and readback; do not use a textual
 `replaceAll` mutation or alter `selection.mode`, `pacing.mode`, lane definitions,
-or secret references.  remains a prerequisite for any live config
+or secret references. Operator review remains a prerequisite for any live config
 write. Roll back by changing only `shadowEmit.enabled` to `false`; leave the
 shard files as historical evidence. No host service or timer is started or
 stopped by this feature.
@@ -362,7 +362,7 @@ preserves the complete live `pacing` object (including secret references), and
 adds a provider lane to new rows only when the mapping is unambiguous. It refuses
 to write when fewer than 25 models are lane-bound, a live binding or pacing field
 changes, canonical rows collide, or an enabled model is outside pacing. The last
-guard deliberately blocks enabled Z.ai rows until  supplies a real Z.ai
+guard deliberately blocks enabled Z.ai rows until operations supplies a real Z.ai
 lane; assigning them to OpenCode Go would make capacity attribution false.
 
 `tierLabelIds` is worth a note: it maps each tier to a **company label id**, and
@@ -405,7 +405,7 @@ rejection ("rework") signals are folded in as soft evidence (`failModel`/
 via captured `ctx.events` state, never a live `activity_log` read — that table
 is also outside the allowlist.
 
-Alongside `modelScores`, the same job builds the  §2.2 card-level
+Alongside `modelScores`, the same job builds the §2.2 card-level
 acceptance ledger (`buildCardLedger`): each closed card is `pending` (excluded
 from both accepted/rejected) until 14 days past close (`CARD_CENSOR_DAYS`)
 unless it was rejected first, in which case it counts immediately. Both are
@@ -449,7 +449,7 @@ them fail.
 
 ### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
 
-`planEarnIn` / `recordEarnInOutcome` are pure decision functions —  §3
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions — §3
 / decision B — covered by `tests/earnIn.spec.ts` but **not called
 from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
 these functions, and the shipped config keeps `earnIn.enabled: false`
@@ -475,7 +475,7 @@ safety/authority violation.
 Owner directive (2026-09-16): *"a task should not start until the model router
 has set its model."* The scheduled passes (`*/10`) cannot honor that — their row
 queries **exclude cards with a running run**, and a dispatched card is running
-within ~0.2–0.3 s of creation (`docs/routing/-issue-created-pin-feasibility.md`),
+within ~0.2–0.3 s of creation (see the routing feasibility note),
 so a card's whole first turn happens before any pass can even see it. It lands
 on the agent floor, which is exactly what the directive forbids.
 
