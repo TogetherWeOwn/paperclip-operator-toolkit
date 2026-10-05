@@ -1,0 +1,8 @@
+{
+  "_provenance": "SYNTHETIC. Weekly utilizations and resets re-express the 2 committed Claude rows of the synthetic lane-quota snapshot (plugins/model-selection/tests/fixtures/lane-quota-snapshot.synthetic-2026-10-03T0201Z.json: claude-lane-1 seven_day 0.55 reset 2026-10-09T19:00:00.443239Z, claude-lane-2 seven_day 0.93 reset 2026-10-03T09:59:59.666254Z) as Claude weekly countdown rows. NOT a live reading, not a byte copy of any production document. No emails, credentials, display names, or model ids — opaque lane ids only.",
+  "observedAt": "2026-10-03T02:01:00Z",
+  "lanes": [
+    {"lane": "claude-lane-1", "weekly_utilization": 0.55, "weekly_reset_utc": "2026-10-09T19:00:00.443239Z"},
+    {"lane": "claude-lane-2", "weekly_utilization": 0.93, "weekly_reset_utc": "2026-10-03T09:59:59.666254Z"}
+  ]
+}

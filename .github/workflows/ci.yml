@@ -3067,6 +3067,14 @@ jobs:
       - name: required-checks audit suite
         run: python3 -m unittest -v test_ci_required_checks_audit.py
 
+      # Lane use-before-expiry countdowns over synthetic weekly fixtures.
+      # Deterministic: every case pins its clock; no network, no roster read.
+      - name: claude countdown suite
+        run: python3 -m unittest -v test_claude_countdown
+
+      - name: codex countdown suite
+        run: python3 -m unittest -v test_codex_countdown
+
       # Stub GitHub and board APIs on loopback; asserts signature stability
       # and the propose/draft contract, not the host wrapper.
       - name: red-main poll suite
