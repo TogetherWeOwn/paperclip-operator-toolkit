@@ -96,6 +96,20 @@
 #   RED_MAIN_API_KEY       agent API key for the board read. Falls back to
 #                          PAPERCLIP_API_KEY when set (a heartbeat run JWT).
 #                          Sent via a curl config pipe, never on argv.
+#   RED_MAIN_ROLLUP_PARENT_ID
+#                          optional bounded-read mode. When set to the UUID of
+#                          the pre-created rollup parent card the installer's
+#                          key is bound to, the board read uses only
+#                          single-issue routes (GET the parent, GET its
+#                          comments) and never touches the company-wide issue
+#                          list. That list answers 403 to least-privilege
+#                          bridge keys, so unattended timers must set this.
+#                          Incident tags are found in prior draft bodies and
+#                          filed-key mirrors posted as comments on the parent;
+#                          the filing routine (which holds a full read) still
+#                          owns the final dedupe check before opening a card.
+#                          Entries carry boardRead:"parent-comments" in this
+#                          mode vs "company-list" otherwise.
 #   GH_CI_STATUS_BIN       optional path to gh_ci_status.sh (default: same
 #                          directory as this script).
 # ===========================================================================
@@ -182,28 +196,86 @@ BOARD_LIMIT=1000
 # `backlog` included (a parked incident is still the one card for its key).
 BOARD_STATUSES="backlog,todo,in_progress,in_review,blocked"
 
-# board_titles -> prints open issue titles, one per line. Non-zero when the
-# board could not be read in full: the caller must NOT treat that as "no
-# incident". Unreadable covers transport errors, non-200 statuses, bodies that
-# are not a list of issues, and a page that hit BOARD_LIMIT.
+# BOARD_READ_MODE names the board source the last board_titles call used:
+# "seam" (INCIDENT_SOURCE_CMD), "parent-comments" (bounded rollup-thread
+# read) or "company-list" (legacy company-wide search). Entries carry it so
+# the filing routine knows whether incident dedupe was fully searched or
+# deferred to its own full read.
+BOARD_READ_MODE="unknown"
+
+# board_api_get <path> -> prints "body\n<http-code>" on stdout.
+# The credential travels in a config pipe, never on argv: `curl -H
+# "Bearer $key"` would expose it in /proc/<pid>/cmdline (see the shared
+# post_finding helper's non-disclosure rule). The status comes back through
+# -w: without it a 401 or 500 is an exit-0 curl with an error body, which
+# parses as "no issues".
+board_api_get() {
+  local path="$1" key="$2"
+  curl -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+    "${PAPERCLIP_API_URL%/}${path}" 2>/dev/null
+}
+
+# board_titles_bounded -> prints the rollup parent title plus every comment
+# body on it, one blob per line group. Callers grep this for dedupe tags, so
+# prior drafts and filed-key mirrors posted as comments count as "known".
+# Non-zero when the thread could not be read in full: the caller must NOT
+# treat that as "no incident". Unreadable covers transport errors, non-200
+# statuses, a missing or closed parent, and bodies that are not an issue or
+# a comment list. Uses only single-issue routes, which a parent-bound bridge
+# key is permitted; it never touches the company-wide list.
+board_titles_bounded() {
+  local parent_id="$1" key="$2" resp code raw title bodies
+  resp="$(board_api_get "/api/issues/${parent_id}" "$key")" || return 1
+  code="${resp##*$'\n'}"
+  raw="${resp%$'\n'*}"
+  [[ "$code" == "200" ]] || { echo "red_main_poll: rollup parent read answered HTTP $code" >&2; return 1; }
+  title="$(jq -r '.title // ""' <<<"$raw" 2>/dev/null)" || return 1
+  [[ -n "$title" ]] || { echo "red_main_poll: rollup parent body is not an issue" >&2; return 1; }
+  resp="$(board_api_get "/api/issues/${parent_id}/comments" "$key")" || return 1
+  code="${resp##*$'\n'}"
+  raw="${resp%$'\n'*}"
+  [[ "$code" == "200" ]] || { echo "red_main_poll: rollup comments read answered HTTP $code" >&2; return 1; }
+  bodies="$(jq -c 'if type == "array" then .
+                   elif type == "object" and (.comments | type) == "array" then .comments
+                   else error("unrecognised comments shape") end' <<<"$raw" 2>/dev/null)" || return 1
+  [[ -n "$bodies" ]] || return 1
+  printf '%s\n' "$title"
+  jq -r '.[] | .body // ""' <<<"$bodies" 2>/dev/null || return 1
+  return 0
+}
+
+# board_titles -> prints known issue titles (or parent-thread text in bounded
+# mode), for tag matching. Non-zero when the board could not be read in full:
+# the caller must NOT treat that as "no incident". Unreadable covers transport
+# errors, non-200 statuses, bodies that are not a list of issues, and a page
+# that hit BOARD_LIMIT.
 board_titles() {
   local raw rows n
   if [[ -n "${INCIDENT_SOURCE_CMD:-}" ]]; then
+    BOARD_READ_MODE="seam"
     raw="$($INCIDENT_SOURCE_CMD 2>/dev/null)" || return 1
+  elif [[ -n "${RED_MAIN_ROLLUP_PARENT_ID:-}" ]]; then
+    BOARD_READ_MODE="parent-comments"
+    [[ -n "${PAPERCLIP_API_URL:-}" ]] \
+      || { echo "red_main_poll: no board source (set PAPERCLIP_API_URL for the parent-thread read)" >&2; return 1; }
+    local key="${RED_MAIN_API_KEY:-${PAPERCLIP_API_KEY:-}}"
+    [[ -n "$key" ]] || { echo "red_main_poll: no board credential (set RED_MAIN_API_KEY)" >&2; return 1; }
+    board_titles_bounded "$RED_MAIN_ROLLUP_PARENT_ID" "$key" || return 1
+    return 0
   else
+    BOARD_READ_MODE="company-list"
     [[ -n "${PAPERCLIP_API_URL:-}" && -n "${PAPERCLIP_COMPANY_ID:-}" ]] \
       || { echo "red_main_poll: no board source (set INCIDENT_SOURCE_CMD or PAPERCLIP_API_URL/COMPANY_ID)" >&2; return 1; }
     local key="${RED_MAIN_API_KEY:-${PAPERCLIP_API_KEY:-}}"
     [[ -n "$key" ]] || { echo "red_main_poll: no board credential (set RED_MAIN_API_KEY)" >&2; return 1; }
-    # The key travels in a config pipe, never on argv: `curl -H "Bearer $key"`
-    # would expose it in /proc/<pid>/cmdline (see post_finding.sh non-disclosure rule).
-    # The status comes back through -w: without it a 401 or 500 is an exit-0
-    # curl with an error body, which parses as "no issues".
     local resp code
-    resp="$(curl -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
-      "${PAPERCLIP_API_URL%/}/api/companies/${PAPERCLIP_COMPANY_ID}/issues?status=${BOARD_STATUSES}&q=red-main:v1&limit=${BOARD_LIMIT}" 2>/dev/null)" || return 1
+    resp="$(board_api_get "/api/companies/${PAPERCLIP_COMPANY_ID}/issues?status=${BOARD_STATUSES}&q=red-main:v1&limit=${BOARD_LIMIT}" "$key")" || return 1
     code="${resp##*$'\n'}"
     raw="${resp%$'\n'*}"
+    if [[ "$code" == "403" ]]; then
+      echo "red_main_poll: board read answered HTTP 403 (company-wide list; a bridge key needs RED_MAIN_ROLLUP_PARENT_ID parent-thread mode)" >&2
+      return 1
+    fi
     [[ "$code" == "200" ]] || { echo "red_main_poll: board read answered HTTP $code" >&2; return 1; }
   fi
   rows="$(jq -c 'if type == "array" then .
@@ -282,9 +354,10 @@ poll_one() {
       jq -cn --arg repo "$slug" --arg sig "$sig" --arg tag "$tag" \
         --arg head "$head" --arg jobs "$key" --arg src "$sig_source" \
         --arg sev "$sev" --argjson tracked "$tracked" \
+        --arg boardread "${BOARD_READ_MODE:-unknown}" \
         '{repo:$repo, signature:$sig, dedupeTag:$tag, headSha:$head,
           failingJobs:$jobs, sigSource:$src, suggestedSeverity:$sev,
-          incidentExists:$tracked}' \
+          incidentExists:$tracked, boardRead:$boardread}' \
         | sed 's/^/ENTRY /'
       ;;
     0:pass) ;;
