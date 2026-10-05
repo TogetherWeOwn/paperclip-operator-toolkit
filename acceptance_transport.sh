@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TOG-199 acceptance — the epic's run driven through the REAL transport.
+# Transport acceptance — the whole provisioning-request run driven through the REAL transport.
 #
 # WHAT THIS ADDS OVER acceptance_rehearsal.sh
 # -------------------------------------------
@@ -16,7 +16,7 @@
 #
 # WHAT IT STILL DOES NOT PROVE, and nothing in a container can
 # ------------------------------------------------------------
-# Three layers sit above this one on the VPS and none of them are exercised:
+# Three layers sit above this one on the production host and none of them are exercised:
 #
 #   1. Caddy — TLS, the bearer, and the remote_ip source restriction.
 #   2. The Paperclip tool gateway — that it STAMPS x-paperclip-agent-id from
@@ -28,15 +28,16 @@
 #      whether the gateway sends it at all is a registration-time setting and
 #      cannot be observed from here.
 #   3. `requireLiveRun` — corroborating (agent, run, company) against
-#      heartbeat_runs needs `podman exec paperclip-db`. It is disabled here,
+#      heartbeat_runs needs a container exec into paperclip-db (docker or
+#      podman, per the transport's containerEngine). It is disabled here,
 #      which the server's own config comment sanctions for exactly this case.
 #      Section 1 asserts it is ON by default, so an operator who copies this
 #      suite's config cannot quietly ship with it off.
 #
 # So: everything below the gateway is proven end to end. The gateway boundary
-# itself needs the host install in `mcp/deploy/install-runbook.md`, and step 9 of
-# that runbook — `mcp/deploy/acceptance_live.sh` — is where these same assertions
-# get made against the live path.
+# itself needs the host install runbook (not part of this repository), whose
+# final step runs a live acceptance script where these same assertions get made
+# against the live path.
 #
 # Usage:  PAPERCLIP_API_KEY=... PAPERCLIP_API_URL=... COMPANY_ID=... ./acceptance_transport.sh
 set -uo pipefail
@@ -98,7 +99,7 @@ rpc() {
     hdrs+=(-H "x-paperclip-agent-id: $agent"
            -H "x-paperclip-company-id: $COMPANY_ID"
            -H "x-paperclip-run-id: $RUN_UUID"
-           -H "x-paperclip-correlation-id: tog-199-acceptance")
+           -H "x-paperclip-correlation-id: transport-acceptance")
   fi
   curl -s -o "$RESP" -w '%{http_code}' -X POST "${hdrs[@]}" "$@" -d "$body" "$URL"
 }
@@ -204,12 +205,12 @@ eq "tools/list answers anonymously (the gateway health check)" "$CODE" "200"
 TOOLS="$(jq -r '.result.tools[].name' "$RESP" | sort | tr '\n' ' ')"
 # Pinned literally, so a new tool on a DEPLOYED server is a deliberate edit
 # here and never a silent addition. Three front org_request_queue.sh and three
-# front capability_gate.sh; this line said "exactly two" until TOG-312, having
-# been left behind by TOG-387 and TOG-399, which is how an assertion becomes a
-# comment. There is still no provisioner tool and there never may be.
+# front capability_gate.sh; this line once said "exactly two" after the surface
+# grew, having been left behind by later additions, which is how an assertion
+# becomes a comment. There is still no provisioner tool and there never may be.
 eq "exactly the six sanctioned tools, and no provisioner tool" "$TOOLS" \
    "countersign_capability_request read_my_requests review_capability_request review_provisioning_request submit_capability_request submit_provisioning_request "
-# TOG-312. Five of the six are writes. A transport of writes alone makes the
+# Five of the six are writes. A transport of writes alone makes the
 # decision record write-only to the agent it is about, because an agent
 # principal has no shell on this host — see section 4b, which reads a real
 # denial back over the wire.
@@ -223,7 +224,7 @@ IDENT_PROPS="$(jq -r '[.result.tools[].inputSchema.properties | keys[]] | map(se
     | length' "$RESP")"
 eq "no tool advertises an identity argument" "$IDENT_PROPS" "0"
 # Counted against the tool count rather than a literal, because a literal that
-# rots reads as a pass: `2` stayed green through TOG-387 and TOG-399 by
+# rots reads as a pass: `2` stayed green as tools were added by
 # measuring two of five schemas and ignoring the rest.
 N_TOOLS="$(jq -r '.result.tools | length' "$RESP")"
 CLOSED="$(jq -r '[.result.tools[].inputSchema.additionalProperties] | map(select(. == false)) | length' "$RESP")"
@@ -314,10 +315,10 @@ grep -qF "$(fld 6 "$LD_ROW") [$LD_ID]" <<<"$TH" \
 [[ -n "${TRANSPORT_SHOW_THREAD:-}" ]] && { printf '\n'; sed 's/^/      /' <<<"$TH"; printf '\n'; }
 
 # ---------------------------------------------------------------------------
-hdr "4b. The requester READS the decision back — over the same wire (TOG-312)"
+hdr "4b. The requester READS the decision back — over the same wire"
 # ---------------------------------------------------------------------------
-# Everything above this line is a write. Until TOG-312 the run ended here, and
-# the requester — which has no shell on this host, the whole premise of the
+# Everything above this line is a write. Until this section existed the run
+# ended here, and the requester — which has no shell on this host, the whole premise of the
 # epic — had no way to learn any of it. review_provisioning_request's schema
 # says the reason is "readable by the requester, who may answer it"; this
 # section is the assertion that makes that sentence true instead of aspirational.
@@ -330,7 +331,7 @@ else
   grep -q "$R1" <<<"$INBOX" && ok "  ...and the DENIAL is in it" || bad "  ...but the denial is not in it"
   grep -q "Headcount case not made" <<<"$INBOX" \
     && ok "  ...carrying the reviewer's reason, verbatim, over the transport" \
-    || bad "  ...without the reason, so TOG-198's deny-with-reason is still write-only here"
+    || bad "  ...without the reason, so the deny-with-reason is still write-only here"
   grep -q "$R2" <<<"$INBOX" && ok "  ...and the APPROVAL of the amended request" \
     || bad "  ...but the approval is missing"
 fi
@@ -345,8 +346,8 @@ else
   ok "the reviewer's own inbox does not carry the requester's decisions"
 fi
 
-# A read must not be able to move a decision. Constraint 2 of the TOG-254
-# decision, measured the only honest way on an append-only file: the decision
+# A read must not be able to move a decision. Constraint 2 of the
+# requester-notification design, measured the only honest way on an append-only file: the decision
 # rows either side of the reads above are byte-identical.
 DEC_BEFORE="$(jq -c 'select(.event=="request.submitted" or .event=="request.reviewed")' "$QUEUE" | md5sum)"
 call "$RQ_ID" read_my_requests '{}' >/dev/null
@@ -377,7 +378,7 @@ grep -q identity_argument_refused <<<"$OUT" \
   || { bad "the refusal does not name the identity rule"; sed 's/^/        /' <<<"$OUT" | head -2; }
 eq "the forged submit appended nothing" "$(queue_lines)" "$BEFORE"
 
-# The CISO's case (TOG-341): an UNLISTED identity-ish name behaves differently
+# The CISO's case: an UNLISTED identity-ish name behaves differently
 # by design, and the difference is the thing worth pinning. Whatever the
 # disposition, the invariant is the same — the forged value must never become
 # the requester. Assert the OUTCOME, not the error, because an assertion that

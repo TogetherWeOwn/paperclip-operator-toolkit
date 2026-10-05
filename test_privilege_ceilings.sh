@@ -7,13 +7,14 @@
 #
 # NEEDS A COMPANY-SHAPED POSTGRES DATABASE. org_provisioner.sh has no
 # ORG_SNAPSHOT seam, so this suite cannot run as a purely offline unit test. CI
-# supplies a throwaway schema/org fixture plus a dumb recording CLI; the VPS run
-# remains necessary for the real Paperclip API contract. See the pcsql_preflight
-# guard below, and the header of test_request_queue.sh for the measurement that
-# motivated both (TOG-402): a refusal-shaped assertion accepts
-# ANY refusal, so a tool that dies at "caller not found" satisfies a case that
-# names the delegation ceiling. Here that produced 2 undeserved passes out of
-# 36 with no podman present; the sibling suite produced 15 of 31.
+# supplies a throwaway schema/org fixture plus a dumb recording CLI; a run
+# against the production host remains necessary for the real Paperclip API
+# contract. See the pcsql_preflight guard below, and the header of
+# test_request_queue.sh for the measurement that motivated both: a
+# refusal-shaped assertion accepts ANY refusal, so a tool that dies at "caller
+# not found" satisfies a case that names the delegation ceiling. Here that
+# produced 2 undeserved passes out of 36 with no podman present; the sibling
+# suite produced 15 of 31.
 #
 # refuses_because pins each case to the words of the gate it names.
 set -uo pipefail
@@ -66,11 +67,13 @@ ERROR: test_privilege_ceilings.sh cannot reach the company database, so it did n
 
   This suite provisions and tears down real agents through org_provisioner.sh.
   Running it without a reachable backend reports "caller not found" refusals as
-  if they were ceiling enforcement. See the header, and TOG-402.
+  if they were ceiling enforcement. See the header.
 
-  Backend selection: PAPERCLIP_SQL_BACKEND=${PAPERCLIP_SQL_BACKEND:-podman} (podman|psql)
+  Backend selection: PAPERCLIP_SQL_BACKEND=${PAPERCLIP_SQL_BACKEND:-podman} (podman|docker|psql)
     podman: needs podman on PATH and container \${PAPERCLIP_DB_CTR:-paperclip-db} running
+    docker: needs docker on PATH and container \${PAPERCLIP_DB_CTR:-paperclip-db} running (for hosts without podman)
     psql:   needs psql on PATH and DATABASE_URL or libpq PG* variables
+  CONTAINER_ENGINE overrides the binary the container backends invoke.
 EOF
   exit 3
 fi
@@ -91,9 +94,9 @@ create_call_payload_ok() { local title="$1"; jq -ser --arg title "$title" --arg 
 create_call_parent() { local title="$1"; jq -ser --arg title "$title" 'map(select(.command=="agent.create" and .payload.title==$title)) | last | .payload.reportsTo' "${PAPERCLIP_STUB_LOG:?PAPERCLIP_STUB_LOG required}" 2>/dev/null; }
 create_call_title_for() { q "SELECT title FROM agents WHERE id=:'agent_id'::uuid;" "$1"; }
 backend_is_recording_stub() { [[ -n "${PAPERCLIP_STUB_LOG:-}" && -r "${PAPERCLIP_STUB_LOG:-}" ]]; }
-# The assignment baseline these tests assert, TOG-984 (owner decision
-# 2026-09-05). Agents used to be born "protected" with canAssignTasks=false;
-# that posture 403'd every hand-back (TOG-54/69/586) and the owner abolished it.
+# The assignment baseline these tests assert (a company-wide policy decision
+# of 2026-09-05). Agents used to be born "protected" with canAssignTasks=false;
+# that posture 403'd every hand-back and was abolished.
 # Kept as variables, and read from the environment, so the reversal path is one
 # exported pair rather than an edit scattered across three assertions -- and so
 # these expectations move together with org_provisioner.sh's own two knobs.
@@ -168,7 +171,7 @@ must_allow "O1 may seat a functional chief" CHIEF \
   create --caller O1 --template B1_FUNCTION_CHIEF --title "TEST Interim Chief"
 if [[ -n "${CHIEF:-}" ]]; then
   keys="$(grant_keys "$CHIEF")"
-  # Template keys PLUS the TOG-984 assignment baseline. `tasks:assign` is not in
+  # Template keys PLUS the assignment baseline. `tasks:assign` is not in
   # TEMPLATES_JSON on purpose (it would break classify_risk's totality check --
   # see org_provisioner.sh), so it is unioned in here the same way the
   # provisioner unions it into grants_json. Still an EXACT match: the point of
@@ -222,19 +225,20 @@ else
 fi
 # `-eq 0` on an empty string is TRUE in bash, so this ZERO-grants claim used to
 # pass against no database at all. String-compare the digits instead.
-# A specialist's governance grants, EXCLUDING the TOG-984 assignment baseline
+# A specialist's governance grants, EXCLUDING the assignment baseline
 # that every agent now carries. The claim being made is still "this template
 # confers no organizational authority" -- tasks:assign is not template
-# authority, it is the company-wide floor the owner set so work can be handed
+# authority, it is the company-wide floor set so work can be handed
 # back. Subtracting it keeps the assertion about the template.
 want_s=0; [[ "$EXPECT_CAN_ASSIGN_TASKS" == "true" ]] && want_s=1
 [[ "$c_s" == "$want_s" ]] && ok "specialist has ZERO organizational-governance grants beyond the assignment baseline" \
                    || bad "specialist grant count is '$c_s', expected $want_s (baseline only)"
 
 hdr "7. No descendant holds a company-wide organizational grant beyond the baseline"
-# tasks:assign is deliberately NOT in this list any more -- see TOG-984. It is
-# asserted separately and positively in section 9 (has_assign_grant), so it is
-# still checked, just as a REQUIREMENT rather than a prohibition. Every other
+# tasks:assign is deliberately NOT in this list any more -- see the assignment
+# baseline in org_provisioner.sh. It is asserted separately and positively in
+# section 9 (has_assign_grant), so it is still checked, just as a REQUIREMENT
+# rather than a prohibition. Every other
 # company-wide privileged key must still be exactly zero; dropping one of those
 # from this list would be a real widening, not a baseline adjustment.
 for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
@@ -267,7 +271,7 @@ for pair in "DIRECTOR:${DIR:-}" "MANAGER:${MGR:-}" "SPECIALIST:${SPEC:-}"; do
   if [[ "$EXPECT_CAN_ASSIGN_TASKS" == "true" ]]; then
     [[ "$(has_assign_grant "$id")" == "yes" ]] \
       && ok "$lbl holds the company-wide tasks:assign grant (can hand work back up)" \
-      || bad "$lbl is missing the company-wide tasks:assign grant — hand-backs will 403 (TOG-54)"
+      || bad "$lbl is missing the company-wide tasks:assign grant — hand-backs will 403"
   fi
   [[ "$(creator_flags_off "$id")" == "yes" ]] \
     && ok "$lbl creator flags explicitly false" \

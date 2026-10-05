@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TOG-689 regression suite: a freshly provisioned agent must be BORN with an
+# Regression suite: a freshly provisioned agent must be BORN with an
 # explicitly falsy `effort` on its cheap model profile.
 #
 # WHY THIS EXISTS
@@ -12,8 +12,9 @@
 #   Supported config options: mode, model.
 #
 # An agent that downshifts to the cheap profile on the ACP lane therefore dies,
-# and cannot self-heal, because self-repair requires it to be running. TOG-685
-# swept the 47 existing agents; this suite closes the hole for NEW ones.
+# and cannot self-heal, because self-repair requires it to be running. A sweep
+# of the existing agents repaired the ones already provisioned; this suite
+# closes the hole for NEW ones.
 #
 # THE TRAP THIS SUITE EXISTS TO CATCH
 # -----------------------------------
@@ -44,8 +45,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 # --- stubs -----------------------------------------------------------------
 # `pc` records every create payload it is called with (one line per call, so a
-# TOG-3348 retry is distinguishable from a single call) and returns a
-# plausible agent id. When TOG3348_REJECT_MODELPROFILES=1 it simulates a host
+# retry without `modelProfiles` is distinguishable from a single call) and
+# returns a plausible agent id. When REJECT_MODELPROFILES=1 it simulates a host
 # already on migration 0236: a create payload naming `modelProfiles` comes
 # back as a validation rejection instead of an id, same as the real
 # `shared/validators/agent.ts` would after the upstream migration lands.
@@ -61,13 +62,13 @@ if [[ "${1:-}" == "agent" && "${2:-}" == "create" ]]; then
       j=$((i+1)); payload="${!j}"
     fi
   done
-  printf '%s' "$payload" >"$TOG689_PAYLOAD"
-  printf '%s\n' "$payload" >>"$TOG689_PAYLOAD_LOG"
-  if [[ "${TOG3348_REJECT_MODELPROFILES:-0}" == "1" ]] && grep -q '"modelProfiles"' <<<"$payload"; then
+  printf '%s' "$payload" >"$CREATE_PAYLOAD"
+  printf '%s\n' "$payload" >>"$CREATE_PAYLOAD_LOG"
+  if [[ "${REJECT_MODELPROFILES:-0}" == "1" ]] && grep -q '"modelProfiles"' <<<"$payload"; then
     echo '{"error":"Unrecognized key(s) in object: '"'"'modelProfiles'"'"'"}'
     exit 0
   fi
-  echo '{"id":"00000000-0000-4000-8000-000000000689"}'
+  echo '{"id":"00000000-0000-4000-8000-000000000001"}'
   exit 0
 fi
 echo '{}'
@@ -79,7 +80,9 @@ chmod +x "$WORK/bin/paperclipai"
 cat >"$WORK/bin/psql" <<'STUB'
 #!/usr/bin/env bash
 sql="$(cat)"
-if [[ "$sql" == *"permissionProfile"* ]]; then
+if [[ "$sql" == *"FROM company_secrets"* ]]; then
+  printf 't\n'
+elif [[ "$sql" == *"permissionProfile"* ]]; then
   printf '%s\t%s\t%s\n' "11111111-1111-4111-8111-111111111111" "P1_PRESIDENT_COO" "President & COO"
 fi
 exit 0
@@ -94,23 +97,24 @@ provision() {
   local payload_file="$WORK/payload.json" payload_log="$WORK/payload.log" rc_file="$WORK/rc.txt"
   : >"$payload_file"; : >"$payload_log"
   PATH="$WORK/bin:$PATH" \
-  TOG689_PAYLOAD="$payload_file" \
-  TOG689_PAYLOAD_LOG="$payload_log" \
-  TOG3348_REJECT_MODELPROFILES="${2:-0}" \
-  COMPANY_ID="00000000-0000-4000-8000-000000000000" \
+  CREATE_PAYLOAD="$payload_file" \
+  CREATE_PAYLOAD_LOG="$payload_log" \
+  REJECT_MODELPROFILES="${2:-0}" \
+  COMPANY_ID="00000000-0000-4000-8000-0000000000c0" \
+  PROVISIONER_CLAUDE_TRANSPORT_JSON='{"companyId":"00000000-0000-4000-8000-0000000000c0","baseUrl":"http://cliproxy:8317","secretId":"22222222-2222-4222-8222-222222222222","assignedModel":"test-assigned-model","smallFastModel":"test-small-model","apiTimeoutMs":"600000","maxContextTokens":"200000"}' \
   PAPERCLIP_CLI="$WORK/bin/paperclipai" \
   PAPERCLIP_SQL_BACKEND="psql" \
   PGHOST="stub-offline" \
   ADAPTER_TYPE="${1:-claude_local}" \
     bash "$PROV" create --caller P1_PRESIDENT_COO --template B1_FUNCTION_CHIEF \
-      --title "TOG-689 probe" >/dev/null 2>"$WORK/err.txt"
+      --title "cheap-profile probe" >/dev/null 2>"$WORK/err.txt"
   echo $? >"$rc_file"
   cat "$payload_file"
 }
 
 cheap_of() { jq -c '.runtimeConfig.modelProfiles.cheap // null' <<<"$1"; }
 
-printf '\n\033[1mTOG-689: a provisioned claude_local agent is born ACP-safe\033[0m\n'
+printf '\n\033[1ma provisioned claude_local agent is born ACP-safe\033[0m\n'
 
 PAYLOAD="$(provision claude_local)"
 if [[ -z "$PAYLOAD" ]]; then
@@ -161,17 +165,17 @@ else
 
   # Invariants that predate this change and must not regress.
   #
-  # The assignment mode expectation was INVERTED by the TOG-984 owner decision
-  # (2026-09-05): agents are now born `company_default` with canAssignTasks
-  # true, because the old born-protected posture made an agent's first hand-back
-  # up its own chain fail with 403 deny_policy_restricted (TOG-54/69/586).
+  # The assignment mode expectation was INVERTED by a company-wide policy
+  # decision (2026-09-05): agents are now born `company_default` with
+  # canAssignTasks true, because the old born-protected posture made an agent's
+  # first hand-back up its own chain fail with 403 deny_policy_restricted.
   # `canCreateAgents == false` is untouched by that decision and still holds —
   # the creator ceiling is a separate invariant from the assignment baseline.
   if jq -e '.permissions.canCreateAgents == false
             and .permissions.canAssignTasks == true
             and .permissions.authorizationPolicy.assignmentPolicy.mode == "company_default"' \
        <<<"$PAYLOAD" >/dev/null; then
-    ok "provisioning invariants hold: creator ceiling off, TOG-984 assignment baseline on"
+    ok "provisioning invariants hold: creator ceiling off, company-wide assignment baseline on"
   else
     bad "provisioning invariants regressed: $(jq -c '.permissions' <<<"$PAYLOAD")"
   fi
@@ -188,13 +192,13 @@ else
 $(jq -c '.runtimeConfig.modelProfiles' <<<"$OTHER")"
 fi
 
-printf '\n\033[1mTOG-3348: a host that already rejects modelProfiles gets retried without it\033[0m\n'
+printf '\n\033[1ma host that already rejects modelProfiles gets retried without it\033[0m\n'
 provision claude_local 1 >/dev/null
 ATTEMPTS="$(wc -l <"$WORK/payload.log" | tr -d ' ')"
 # Checked against stderr, not the script's overall exit status: the offline
 # psql stub answers only the caller lookup this suite needs, so the later,
-# unrelated grant-attribution write (TOG-870) legitimately fails here on every
-# path including the pre-existing TOG-689 case above. The assertion this test
+# unrelated grant-attribution write legitimately fails here on every
+# path including the pre-existing case above. The assertion this test
 # owns is narrower and precise -- did id resolution survive the retry.
 if ! grep -q "agent creation failed" "$WORK/err.txt"; then
   ok "creation still succeeds when the first attempt is rejected for carrying modelProfiles"
@@ -209,7 +213,7 @@ fi
 FIRST_ATTEMPT="$(sed -n '1p' "$WORK/payload.log")"
 SECOND_ATTEMPT="$(sed -n '2p' "$WORK/payload.log")"
 if jq -e '.runtimeConfig | has("modelProfiles")' <<<"$FIRST_ATTEMPT" >/dev/null 2>&1; then
-  ok "the first attempt still carries the legacy field (pre-upgrade TOG-689 protection is tried first)"
+  ok "the first attempt still carries the legacy field (pre-upgrade effort protection is tried first)"
 else
   bad "the first attempt did not carry runtimeConfig.modelProfiles at all: $FIRST_ATTEMPT"
 fi
@@ -219,7 +223,7 @@ else
   bad "the retry still carried runtimeConfig.modelProfiles: $SECOND_ATTEMPT"
 fi
 
-printf '\n\033[1mTOG-3348: an unrelated create failure is not retried\033[0m\n'
+printf '\n\033[1man unrelated create failure is not retried\033[0m\n'
 # The retry is gated on the host's response actually NAMING modelProfiles, so a
 # rejection for any other reason must surface immediately rather than loop.
 cat >"$WORK/bin/paperclipai" <<'STUB'
@@ -231,8 +235,8 @@ if [[ "${1:-}" == "agent" && "${2:-}" == "create" ]]; then
       j=$((i+1)); payload="${!j}"
     fi
   done
-  printf '%s' "$payload" >"$TOG689_PAYLOAD"
-  printf '%s\n' "$payload" >>"$TOG689_PAYLOAD_LOG"
+  printf '%s' "$payload" >"$CREATE_PAYLOAD"
+  printf '%s\n' "$payload" >>"$CREATE_PAYLOAD_LOG"
   echo '{"error":"title already in use"}'
   exit 0
 fi

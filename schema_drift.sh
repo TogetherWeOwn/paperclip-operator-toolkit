@@ -14,10 +14,10 @@
 # precisely because open-coding that call in each tool made them unrunnable
 # anywhere else. A drift detector that only runs on the CI side of its own
 # comparison is not a drift detector — the fixture it guards is a snapshot of
-# the VPS schema, so `fingerprint` on the VPS is the half that has to work, and
-# it was the half that refused. Failing closed made it visible rather than
-# wrong, but it left TOG-480's "the dump ships with a drift check or it does
-# not ship" unmet in practice.
+# the production schema, so `fingerprint` on the production host is the half
+# that has to work, and it was the half that refused. Failing closed made it
+# visible rather than wrong, but it left the rule "the dump ships with a drift
+# check or it does not ship" unmet in practice.
 #
 # The second direction is worse and is why this must not be fixed by telling
 # operators to install psql. A bare `psql` connects to whatever that psql
@@ -31,7 +31,7 @@ set -uo pipefail
 ME="$(basename "${BASH_SOURCE[0]}")"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TABLES="activity_log agents budget_policies company_memberships company_secret_bindings heartbeat_runs principal_permission_grants"
-# TOG-870 added activity_log as the seventh table. Until then TABLES was set
+# activity_log was added as the seventh table. Until then TABLES was set
 # here and never read, while the three queries below carried their own literal
 # copies of the list — so the count guard, the column fingerprint and the index
 # fingerprint could each disagree with this line and with each other, silently.
@@ -92,7 +92,7 @@ SQL
 # comparison against nothing. pcsql_preflight diagnoses on stderr; the exit
 # code here is REFUSED either way, never a verdict.
 require_backend() {
-  pcsql_backend >/dev/null || die "PAPERCLIP_SQL_BACKEND is not one of: podman, psql"
+  pcsql_backend >/dev/null || die "PAPERCLIP_SQL_BACKEND is not one of: podman, docker, psql"
   pcsql_preflight || die "the $(pcsql_backend) backend did not answer; nothing was measured"
 }
 
@@ -112,7 +112,7 @@ case "${1:-}" in
     ;;
   *) cat >&2 <<EOF
 Usage:
-  # 1. On the VPS. The default backend is podman, so this needs no arguments
+  # 1. On the production host. The default backend is podman, so this needs no arguments
   #    and no psql — the same 'podman exec paperclip-db' every operator tool uses.
   $ME fingerprint > production-schema.fp
 

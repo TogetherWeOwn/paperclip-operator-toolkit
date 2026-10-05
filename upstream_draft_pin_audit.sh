@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ===========================================================================
 # upstream_draft_pin_audit.sh — are the upstream defect drafts still the
-# bytes a disclosure grant would pin?  TOG-676.
+# bytes a disclosure grant would pin?
 #
 # THE FAILURE THIS EXISTS FOR
 #
@@ -105,46 +105,78 @@ resolve() {
 
 # ---------------------------------------------------------------------------
 # --update: recompute every pinned line, demoting replaced pins to superseded
+#
+# This is a TRANSACTION: every row is prepared and validated into a staging
+# file first, and the live pins file is replaced only when ALL rows resolve.
+# A single unresolvable artifact (missing ref/path, empty blob, failed read)
+# or a single unparseable line aborts the whole refresh with a non-zero exit
+# and leaves the original pins byte-identical.  An earlier version of this
+# code copied the good rows through, preserved the bad row unchanged, and
+# exited 0 -- a partial refresh reported as success against bytes a disclosure
+# grant pins.
 # ---------------------------------------------------------------------------
 if [ "$UPDATE" = 1 ]; then
   NEW="$WORK/pins.new"
-  : > "$NEW"
+  STAGED_NOTES="$WORK/repinned.notes"
+  : > "$NEW" || { echo "aborted: cannot stage refresh output" >&2; exit 4; }
+  : > "$STAGED_NOTES" || { echo "aborted: cannot stage refresh output" >&2; exit 4; }
   changed=0
   unparseable=0
+  unresolved=0
+  fail_update() { echo "aborted: $1; $PINS left untouched" >&2; exit 4; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       pinned[[:space:]]*)
         set -- $line
-        oldsha="$2"; target="$3"
-        ref="${target%%:*}"; path="${target#*:}"
-        if sha="$(resolve "$ref" "$path" 2>"$WORK/err")"; then
-          if [ "$sha" != "$oldsha" ]; then
-            printf 'superseded  %s  %s\n' "$oldsha" "$target" >> "$NEW"
-            changed=1
-            note "repinned $target"
-          fi
-          printf 'pinned  %s  %s\n' "$sha" "$target" >> "$NEW"
+        if [ "$#" -lt 3 ]; then
+          printf '%s\n' "$line" >> "$NEW" \
+            || fail_update "cannot stage refresh output"
+          unparseable=$((unparseable+1))
+          echo "REFUSING to complete: malformed pinned line (expected 'pinned <sha256> <ref>:<path>'), NOT repinned: $line" >&2
         else
-          echo "REFUSING to repin $target: $(cat "$WORK/err")" >&2
-          printf '%s\n' "$line" >> "$NEW"
+          oldsha="$2"; target="$3"
+          ref="${target%%:*}"; path="${target#*:}"
+          if sha="$(resolve "$ref" "$path" 2>"$WORK/err")"; then
+            if [ "$sha" != "$oldsha" ]; then
+              printf 'superseded  %s  %s\n' "$oldsha" "$target" >> "$NEW" \
+                || fail_update "cannot stage refresh output"
+              changed=1
+              # Staged, not printed: claiming a repin that a later row aborts
+              # would report an update that never landed.
+              printf 'repinned %s\n' "$target" >> "$STAGED_NOTES" \
+                || fail_update "cannot stage refresh output"
+            fi
+            printf 'pinned  %s  %s\n' "$sha" "$target" >> "$NEW" \
+              || fail_update "cannot stage refresh output"
+          else
+            echo "REFUSING to repin $target: $(cat "$WORK/err")" >&2
+            printf '%s\n' "$line" >> "$NEW" \
+              || fail_update "cannot stage refresh output"
+            unresolved=$((unresolved+1))
+          fi
         fi
         ;;
-      superseded[[:space:]]*|''|'#'*) printf '%s\n' "$line" >> "$NEW" ;;
+      superseded[[:space:]]*|''|'#'*) printf '%s\n' "$line" >> "$NEW" \
+        || fail_update "cannot stage refresh output" ;;
       *)
         # Same blind spot as the audit loop, but worse: --update would copy an
         # unparseable line through unchanged and print "no change", so a
         # dropped artifact survives the very command meant to refresh it.
-        printf '%s\n' "$line" >> "$NEW"
+        printf '%s\n' "$line" >> "$NEW" \
+          || fail_update "cannot stage refresh output"
         unparseable=$((unparseable+1))
         echo "REFUSING to complete: unparseable pin line, NOT repinned: $line" >&2
         ;;
     esac
   done < "$PINS"
-  if [ "$unparseable" != 0 ]; then
-    echo "aborted: $unparseable unparseable line(s); $PINS left untouched" >&2
+  if [ "$unparseable" != 0 ] || [ "$unresolved" != 0 ]; then
+    echo "aborted: $unparseable unparseable line(s), $unresolved unresolvable artifact(s); $PINS left untouched" >&2
     exit 4
   fi
-  cp "$NEW" "$PINS"
+  while IFS= read -r repinned || [ -n "$repinned" ]; do
+    note "$repinned"
+  done < "$STAGED_NOTES"
+  cp "$NEW" "$PINS" || { echo "aborted: could not replace $PINS" >&2; exit 4; }
   [ "$changed" = 1 ] && echo "pins updated: $PINS" || echo "no change: $PINS"
   exit 0
 fi
@@ -169,7 +201,7 @@ while IFS= read -r line || [ -n "$line" ]; do
       # artifact count goes DOWN and every remaining line still says OK, so
       # the run stays green while checking one thing fewer.
       #
-      # Found 2026-09-05 on TOG-1067.  The live temptation is concrete: a
+      # Found 2026-09-05.  The live temptation is concrete: a
       # SEND WITH EDITS verdict invites a third state ("needs_edits",
       # "reviewed") to record bytes that were reviewed but must not ship, and
       # nothing here would have said so.  Fail loudly and name the line.

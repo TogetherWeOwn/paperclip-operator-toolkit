@@ -1,0 +1,41 @@
+{
+  "operations": {
+    "create": {
+      "count": 0,
+      "max_ms": null,
+      "min_ms": null,
+      "p50_ms": null,
+      "p95_ms": null,
+      "samples": []
+    },
+    "delete": {
+      "count": 0,
+      "max_ms": null,
+      "min_ms": null,
+      "p50_ms": null,
+      "p95_ms": null,
+      "samples": []
+    }
+  },
+  "provenance": {
+    "recorded_at": null,
+    "recorded_by": null,
+    "refresh_cadence": "recompute after every >=30 new samples per operation or weekly, whichever comes first",
+    "source": "operator seed: no live GARM provider samples exist pre-migration; thresholds are provisional seeds pending first recalibration",
+    "total_samples": 0
+  },
+  "provisional": true,
+  "schema": "garm-provider-latency-baseline.v1",
+  "thresholds": {
+    "create": {
+      "p50_alert_ms": 600000,
+      "p95_alert_ms": 1200000,
+      "rationale": "Seed: create spans provider API, image boot, cloud-init and runner registration (minutes-scale healthy). Median past 10 min means the typical path is sick; 5% tail past 20 min spends a full CI budget on provisioning. Recalibrate after the first 30 live create samples."
+    },
+    "delete": {
+      "p50_alert_ms": 120000,
+      "p95_alert_ms": 300000,
+      "rationale": "Seed: delete is API call plus VM destroy with no boot phase (seconds-to-low-minutes healthy). Median past 2 min is provider distress; tail past 5 min predicts destroy pile-up for the reaper. Recalibrate after the first 30 live delete samples."
+    }
+  }
+}

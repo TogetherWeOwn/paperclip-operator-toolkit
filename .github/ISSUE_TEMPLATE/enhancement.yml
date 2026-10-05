@@ -1,0 +1,56 @@
+name: Enhancement proposal
+description: Propose an improvement to existing tooling
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An enhancement improves something that already exists — broader checks, clearer
+        output, faster runs, better docs. If you are proposing something new, use the
+        **Feature request** template instead.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-submission checklist
+      description: Please confirm each of these before filing.
+      options:
+        - label: I have confirmed this improves existing behavior — it does not add a new command, check, or concept.
+          required: true
+        - label: I have searched existing open and closed issues and this has not already been proposed.
+          required: true
+  - type: input
+    id: what_is_improved
+    attributes:
+      label: What existing behavior does this improve?
+      description: Name the specific script, check, or behavior.
+      placeholder: "e.g. sibling_guard.sh prepush phase, pr-lint commit check, README setup steps"
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: Describe exactly how it works today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe exactly how it should work after the enhancement.
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason and benefit
+      description: |
+        Why is the current behavior a problem, and what is the concrete benefit?
+        Vague answers like "it would be better" are not enough.
+    validations:
+      required: true
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Related issues, or anything else.

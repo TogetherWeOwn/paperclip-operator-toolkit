@@ -140,7 +140,7 @@ if [ "$rc" != 0 ]; then ok "empty pin set exits non-zero (rc=$rc)"; else
 
 # ---------------------------------------------------------------------------
 hdr "=== case 8: an UNKNOWN state word must fail, not silently drop the artifact ==="
-# TOG-1067.  The audit dispatches on the literal prefix `pinned`, so any other
+# The audit dispatches on the literal prefix `pinned`, so any other
 # first word made the line vanish: the artifact count dropped by one, every
 # remaining line still said OK, and the run stayed green while checking one
 # thing fewer.  A SEND WITH EDITS verdict is the live temptation to invent a
@@ -214,6 +214,101 @@ pinned  $TRUE_SHA  real-branch:docs/upstream/report.md"
 if [ "$(cat "$R/rc")" = 0 ]; then
   ok "superseded + comment + blank line still exit 0"; else
   bad "the guard broke the documented states"; sed 's/^/      /' "$R/out.log"; fi
+
+# Run --update inside repo $1 (pins file already staged at $1/pins.txt,
+# original snapshot at $1/pins.orig).  Records rc in $1/rc and output in
+# $1/out.log.  Every --update case asserts the pins file is left
+# byte-identical unless the refresh fully succeeded.
+run_update() {
+  local repo="$1"
+  cp "$AUDIT" "$repo/upstream_draft_pin_audit.sh"
+  chmod +x "$repo/upstream_draft_pin_audit.sh"
+  ( cd "$repo" && UPSTREAM_DRAFT_PINS="$repo/pins.txt" \
+      ./upstream_draft_pin_audit.sh --update ) > "$repo/out.log" 2>&1
+  echo $? > "$repo/rc"
+}
+
+# ---------------------------------------------------------------------------
+hdr "=== case 11: --update with valid drift PLUS a missing ref must ABORT ==="
+# Pre-fix behavior: printed REFUSING, copied the good row through, exited 0.
+R="$WORK/c11"; make_repo "$R" "original text"
+STALE="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+printf 'edited text\n' > "$R/docs/upstream/report.md"
+git -C "$R" add -A; git -C "$R" commit -qm edit; git -C "$R" branch -f real-branch HEAD
+printf 'pinned  %s  real-branch:docs/upstream/report.md\npinned  %s  no-such-ref:docs/upstream/report.md\n' \
+  "$STALE" "$EMPTY_SHA" > "$R/pins.txt"
+cp "$R/pins.txt" "$R/pins.orig"
+run_update "$R"
+if [ "$(cat "$R/rc")" != 0 ]; then ok "--update exits non-zero on mixed drift + missing ref (rc=$(cat "$R/rc"))"; else
+  bad "--update reported success over a PARTIAL refresh"; fi
+if cmp -s "$R/pins.txt" "$R/pins.orig"; then
+  ok "pins file left byte-identical — no partial refresh landed"; else
+  bad "PINS FILE WAS PARTIALLY REWRITTEN despite the missing ref"; fi
+if grep -q "REFUSING to repin no-such-ref" "$R/out.log"; then
+  ok "names the unresolvable ref"; else bad "did not name the missing ref"; fi
+
+# ---------------------------------------------------------------------------
+hdr "=== case 12: --update with a missing PATH must refuse the entire update ==="
+R="$WORK/c12"; make_repo "$R"
+TRUE_SHA="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+printf 'pinned  %s  real-branch:docs/upstream/report.md\npinned  %s  real-branch:docs/upstream/no-such-file.md\n' \
+  "$TRUE_SHA" "$EMPTY_SHA" > "$R/pins.txt"
+cp "$R/pins.txt" "$R/pins.orig"
+run_update "$R"
+if [ "$(cat "$R/rc")" != 0 ]; then ok "--update exits non-zero on a missing path"; else
+  bad "--update reported success with an unreadable path"; fi
+if cmp -s "$R/pins.txt" "$R/pins.orig"; then
+  ok "pins file left byte-identical"; else
+  bad "PINS FILE WAS REWRITTEN despite the missing path"; fi
+
+# ---------------------------------------------------------------------------
+hdr "=== case 13: --update over an EMPTY artifact must refuse the entire update ==="
+R="$WORK/c13"; mkdir -p "$R/docs/upstream"
+git -C "$R" init -q; git -C "$R" config user.email t@t.local; git -C "$R" config user.name t
+printf 'real content\n' > "$R/docs/upstream/report.md"
+git -C "$R" add -A; git -C "$R" commit -qm seed; git -C "$R" branch -f real-branch HEAD
+GOOD_SHA="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+: > "$R/docs/upstream/empty.md"
+git -C "$R" add -A; git -C "$R" commit -qm empty; git -C "$R" branch -f real-branch HEAD
+printf 'pinned  %s  real-branch:docs/upstream/report.md\npinned  %s  real-branch:docs/upstream/empty.md\n' \
+  "$GOOD_SHA" "$EMPTY_SHA" > "$R/pins.txt"
+cp "$R/pins.txt" "$R/pins.orig"
+run_update "$R"
+if [ "$(cat "$R/rc")" != 0 ]; then ok "--update exits non-zero on an empty artifact"; else
+  bad "--update reported success over an empty blob"; fi
+if cmp -s "$R/pins.txt" "$R/pins.orig"; then
+  ok "pins file left byte-identical"; else
+  bad "PINS FILE WAS REWRITTEN despite the empty artifact"; fi
+if grep -qE "EMPTY|empty-string" "$R/out.log"; then
+  ok "names emptiness as the cause"; else bad "did not name emptiness"; fi
+
+# ---------------------------------------------------------------------------
+hdr "=== case 14: --update with ALL rows valid must succeed and keep superseded history ==="
+R="$WORK/c14"; make_repo "$R" "original text"
+STALE="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+printf 'edited text\n' > "$R/docs/upstream/report.md"
+git -C "$R" add -A; git -C "$R" commit -qm edit; git -C "$R" branch -f real-branch HEAD
+FRESH="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+printf 'pinned  %s  real-branch:docs/upstream/report.md\n' "$STALE" > "$R/pins.txt"
+run_update "$R"
+if [ "$(cat "$R/rc")" = 0 ]; then ok "--update exits 0 when every row resolves"; else
+  bad "--update failed on fully valid input (rc=$(cat "$R/rc"))"; sed 's/^/      /' "$R/out.log"; fi
+if grep -q "superseded  $STALE  real-branch:docs/upstream/report.md" "$R/pins.txt" \
+  && grep -q "pinned  $FRESH  real-branch:docs/upstream/report.md" "$R/pins.txt"; then
+  ok "replaced pin demoted to superseded, fresh digest pinned"; else
+  bad "superseded history or fresh pin missing"; sed 's/^/      /' "$R/pins.txt"; fi
+
+# ---------------------------------------------------------------------------
+hdr "=== case 15: --update with no drift must succeed and leave bytes identical ==="
+R="$WORK/c15"; make_repo "$R"
+TRUE_SHA="$(git -C "$R" show real-branch:docs/upstream/report.md | sha256sum | cut -d' ' -f1)"
+printf 'pinned  %s  real-branch:docs/upstream/report.md\n' "$TRUE_SHA" > "$R/pins.txt"
+cp "$R/pins.txt" "$R/pins.orig"
+run_update "$R"
+if [ "$(cat "$R/rc")" = 0 ]; then ok "no-op refresh exits 0"; else
+  bad "no-op refresh failed (rc=$(cat "$R/rc"))"; fi
+if cmp -s "$R/pins.txt" "$R/pins.orig"; then
+  ok "no-op refresh leaves bytes identical"; else bad "no-op refresh rewrote the file"; fi
 
 # ---------------------------------------------------------------------------
 printf '\n\033[1mpassed %d, failed %d\033[0m\n' "$PASS" "$FAIL"

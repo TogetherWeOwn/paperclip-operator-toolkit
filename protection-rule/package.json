@@ -1,0 +1,15 @@
+{
+  "name": "protection-rule",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fail-closed deployment protection rule with explicit trusted policy, approver and reviewed plan scope; no live authorization defaults.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --import ./test/offline-guard.mjs --test test/*.test.mjs",
+    "check": "for file in src/*.js test/*.mjs; do node --check \"$file\" || exit; done"
+  },
+  "devDependencies": {}
+}

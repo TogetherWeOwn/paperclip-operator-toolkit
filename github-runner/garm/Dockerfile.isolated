@@ -1,0 +1,60 @@
+# GARM isolated-private runner image — source-only definition.
+#
+# Source-only slice of the GARM-only owned CI fleet work. This file is a
+# preparation artifact, NOT a built or admitted image: no live rebuild, no
+# host execution, no registry push is authorized from this source. The live
+# build-input and evidence contract (base fingerprint, package snapshot,
+# artifact checksums, profile hash) lives in README.md "Build-input and
+# evidence contract" §2; every real build input there is null (HOLD) until
+# an operator collects it through an installed authorized read/build path.
+#
+# It expresses github-runner/garm/isolated-image-profile.json in Dockerfile
+# form so the lint gate (garm_image_lint.sh, repo root) has something real
+# to check: ubuntu 24.04 minimal base, non-root `runner` user, no sudo, no
+# Docker surface, runner + Node 24 + cc + psql toolchain, PHP/Composer
+# absent by design. See MINIMAL-BASE.md for what stays and why.
+#
+# Version pins below are SHAPE placeholders, not verified live values: the
+# lint gate enforces that each apt package carries an `=version` pin, and
+# the operator replaces each pin with the exact version from the §2 package
+# snapshot at build time (unresolved pins never build). Do not read these
+# pins as attested versions.
+
+# pinned-at-build: operator appends @sha256:<64-hex> from the §2 base-image
+# fingerprint at build time; a floating base tag never builds. (GARM-BASE-01)
+FROM ubuntu:24.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Minimal toolchain only: TLS roots, native-build smoke (cc), native
+# PostgreSQL smoke (psql client). No sudo, no Docker, no PHP, no Composer —
+# those live on the privileged-private role only (MINIMAL-BASE.md §3).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates=20240203 \
+        gcc=4:13.2.0-7ubuntu1 \
+        make=4.3-4.1build2 \
+        postgresql-client=16+257build1.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Runner + Node 24 arrive as operator-verified build-context artifacts, never
+# by download inside the build: no curl|sh, no floating installer script.
+# <context>/runner-linux-x64.tar.gz + <context>/node24-linux-x64.tar.gz with
+# SHA-256 verification against the §2 download-artifact checksums. Runner
+# archive members are rooted at bin/; the standard Node archive has one
+# node-v24.<version>-linux-x64/ prefix, removed below to match PATH.
+COPY --chown=root:root runner-linux-x64.tar.gz node24-linux-x64.tar.gz /opt/stage/
+RUN mkdir -p /opt/runner /opt/node24 \
+    && tar -xzf /opt/stage/runner-linux-x64.tar.gz -C /opt/runner \
+    && tar -xzf /opt/stage/node24-linux-x64.tar.gz --strip-components=1 -C /opt/node24 \
+    && rm -rf /opt/stage
+
+ENV PATH="/opt/node24/bin:/opt/runner/bin:/usr/bin:/bin"
+
+# Non-root runtime: dedicated `runner` account, no sudo group, no login
+# shell (matches isolated-image-profile.json runtime_user).
+RUN useradd --create-home --shell /usr/sbin/nologin --user-group runner
+USER runner
+WORKDIR /home/runner
+
+ENTRYPOINT ["/opt/runner/bin/Runner.Listener", "run"]

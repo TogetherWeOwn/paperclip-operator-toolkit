@@ -1,0 +1,6 @@
+2026-09-26T10:01:01Z Install pinned host packages
+2026-09-26T10:01:02Z install ok: host packages present
+2026-09-26T10:01:03Z Capture acceptance
+2026-09-26T10:01:04Z running capture selftest
+2026-09-26T10:01:05Z ::error::capture evidence bundle is missing the render step
+2026-09-26T10:01:06Z selftest: 41 passed, 1 failed

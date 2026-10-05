@@ -4,7 +4,8 @@ set -euo pipefail
 # ===========================================================================
 # Constrained Org Provisioner
 # ---------------------------------------------------------------------------
-# Implements section 8 of paperclipai_enterprise_org_operating_model.md for the
+# Implements the constrained-provisioning design of the enterprise org operating
+# model (section 8; that design document is not part of this repository) for the
 # Paperclip installation on this machine (Podman/Quadlet, containerized
 # PostgreSQL, authenticated deployment mode, server v2026.817.0).
 #
@@ -52,13 +53,14 @@ set -euo pipefail
 #   8. Paperclip RBAC never implies external tool or data access.
 #   9. Every operation is appended to an immutable grant log.
 #  10. No agent receives raw database credentials.
-#  11. Agents are born on the owner-decided assignment baseline (TOG-984):
+#  11. Agents are born on the company-wide assignment baseline:
 #      company_default + a company-wide tasks:assign, so hand-backs work.
 #  12. Kill switch: see PROVISIONER_DISABLED below.
 #
 # USAGE
 #   ./org_provisioner.sh create --caller <ROLE_ID> --template <TEMPLATE> \
 #                               --title "..." [--capabilities "..."]
+#   ./org_provisioner.sh verify-transport --target <AGENT_UUID> --smoke-run <RUN_UUID>
 #   ./org_provisioner.sh access <ROLE_ID|AGENT_UUID>
 #   ./org_provisioner.sh tree
 #   ./org_provisioner.sh deactivate --caller <ROLE_ID> --target <ROLE_ID>
@@ -114,14 +116,15 @@ assert_enabled() {
 }
 
 # ---------------------------------------------------------------------------
-# ASSIGNMENT BASELINE — owner decision, TOG-984, 2026-09-05.
+# ASSIGNMENT BASELINE — a deliberate, dated, company-wide policy decision
+# (2026-09-05).
 #
 # Agents used to be born with assignmentPolicy.mode="protected" and
 # canAssignTasks=false (old invariant 11). That posture broke hand-backs: on
-# 2026-09-04, TOG-54, TOG-69 and TOG-586 each finished their work and then got
+# 2026-09-04, several agents each finished their work and then got
 # 403 deny_policy_restricted -- "Target agent is protected and requires an
-# explicit assignment grant" -- trying to hand the card back up the chain. Each
-# card sat `blocked` under the wrong assignee until a human reassigned it.
+# explicit assignment grant" -- trying to hand the task back up the chain. Each
+# task sat `blocked` under the wrong assignee until a human reassigned it.
 #
 # The mechanism has two halves, and BOTH have to be right or the hand-back
 # fails again (server/src/services/authorization.ts):
@@ -146,10 +149,10 @@ assert_enabled() {
 #      one dated company-wide decision. Encoding it once, here, keeps it
 #      auditable as the single fact it is instead of 15 copies that can drift.
 #
-# TO REVERSE THIS you need a NEW owner decision, not a quiet edit. Set
+# TO REVERSE THIS you need a NEW explicit policy decision, not a quiet edit. Set
 # ASSIGNMENT_BASELINE_MODE=protected and BASELINE_CAN_ASSIGN_TASKS=false, and
 # flip the matching expectations in org_access_review.sh. Nobody may re-protect
-# agents piecemeal: a partially-protected fleet reproduces the TOG-54 failure
+# agents piecemeal: a partially-protected fleet reproduces the hand-back 403
 # for exactly the agents that were re-protected, which is the hardest version
 # of this bug to see, because the review stays green for everyone else.
 # ---------------------------------------------------------------------------
@@ -350,7 +353,7 @@ SQL
 
 # apply_exact_grants <agent_id> <grants_json> <requesting_agent_id>
 #
-# TOG-870. This function used to write grants with a raw INSERT that named no
+# This function used to write grants with a raw INSERT that named no
 # grantor at all, and it is the reason 25 rows on this board are the only ones
 # whose author cannot be recovered by ANY means. Every other anonymous row can
 # be recovered by joining activity_log on (entity_id, timestamp); these could
@@ -375,7 +378,7 @@ SQL
 # to pass it — which is precisely how the original 25 were written.
 apply_exact_grants() {
   local agent_id="$1" grants_json="$2" requested_by="${3:-}" operator
-  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (TOG-870: an unattributed grant is unrecoverable)."
+  [[ -n "$requested_by" ]] || die "apply_exact_grants: refusing to write grants with no requesting agent (an unattributed grant is unrecoverable)."
   operator="$(resolve_operator_user_id)" || return 1
   PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="$agent_id" PGV_GRANTS="$grants_json" \
   PGV_A="$operator" PGV_B="$requested_by" \
@@ -439,6 +442,152 @@ ORDER BY 4;
 SQL
 }
 
+# Operator-owned input only. This CLI already runs in the bootstrap trust zone;
+# never discover transport from a mutable agent row or inherit ANTHROPIC_* from
+# the invoking process. No credential value is read, copied, or logged here.
+read_claude_transport_env() {
+  local config="${PROVISIONER_CLAUDE_TRANSPORT_JSON:-}" secret_id exists
+  [[ -n "$config" ]] || die "set operator-owned PROVISIONER_CLAUDE_TRANSPORT_JSON for claude_local provisioning."
+  # Exact origin equality intentionally excludes redirects, userinfo, paths,
+  # alternate ports, and the retired OmniRoute lane. Unknown keys fail closed.
+  if ! jq -e --arg company "$COMPANY_ID" '
+    def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+    def model: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$");
+    def positive_integer: type == "string" and test("^[1-9][0-9]{0,8}$");
+    type == "object"
+    and keys == (["companyId","baseUrl","secretId","assignedModel","smallFastModel","apiTimeoutMs","maxContextTokens"] | sort)
+    and (.companyId == $company) and (.companyId | uuid)
+    and (.baseUrl == "http://cliproxy:8317")
+    and (.secretId | uuid)
+    and (.assignedModel | model) and (.smallFastModel | model)
+    and (.apiTimeoutMs | positive_integer)
+    and (.maxContextTokens | positive_integer)
+  ' <<<"$config" >/dev/null 2>&1; then
+    die "invalid operator Claude transport config (company, CLIProxy origin, secret UUID, model aliases, or numeric limits)."
+  fi
+  secret_id="$(jq -r '.secretId' <<<"$config")"
+  exists="$(PGV_COMPANY_ID="$COMPANY_ID" PGV_TEXT="$secret_id" pcsql -Atq <<'SQL'
+SELECT EXISTS (
+  SELECT 1 FROM company_secrets
+  WHERE company_id = :'company_id'::uuid
+    AND id = :'text'::uuid
+    AND key = 'cliproxy_agent_api_key' AND status = 'active'
+);
+SQL
+)" || die "cannot validate the company CLIProxy secret reference."
+  [[ "$exists" == "t" ]] || die "operator transport secret must be this company's cliproxy_agent_api_key."
+  jq -c '{
+    ANTHROPIC_BASE_URL:.baseUrl,
+    ANTHROPIC_AUTH_TOKEN:{type:"secret_ref",secretId:.secretId,version:"latest"},
+    PAPERCLIP_ASSIGNED_MODEL:.assignedModel,
+    CLAUDE_CODE_SUBAGENT_MODEL:.assignedModel,
+    ANTHROPIC_DEFAULT_OPUS_MODEL:.assignedModel,
+    ANTHROPIC_DEFAULT_SONNET_MODEL:.assignedModel,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL:.smallFastModel,
+    ANTHROPIC_SMALL_FAST_MODEL:.smallFastModel,
+    API_TIMEOUT_MS:.apiTimeoutMs,
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS:.maxContextTokens
+  }' <<<"$config"
+}
+
+# Read back the persisted API representation, then prove the durable projection
+# exists too. A redacted token is not proof of a secret reference. Do not print
+# API bodies or CLI/SQL stderr: a failed or older host may return plaintext env.
+verify_claude_transport() {
+  local agent_id="$1" expected_env="$2" actual secret_id bound
+  actual="$(pc agent get "$agent_id" --json 2>/dev/null)" || {
+    echo "Transport verification: agent API read failed." >&2; return 1;
+  }
+  if ! jq -se --arg id "$agent_id" --arg company "$COMPANY_ID" --argjson expected "$expected_env" '
+    length == 1 and (.[0] |
+      .id == $id and .companyId == $company and .adapterType == "claude_local"
+      and (.adapterConfig.env | type == "object")
+      and (.adapterConfig.env as $env | all($expected | keys[]; . as $key | $env[$key] == $expected[$key])))
+  ' <<<"$actual" >/dev/null 2>&1; then
+    echo "Transport verification: persisted agent identity or transport does not match operator config." >&2
+    return 1
+  fi
+  secret_id="$(jq -r '.ANTHROPIC_AUTH_TOKEN.secretId' <<<"$expected_env")"
+  bound="$(PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="$agent_id" PGV_TEXT="$secret_id" pcsql -Atq 2>/dev/null <<'SQL'
+SELECT EXISTS (
+  SELECT 1 FROM company_secret_bindings b
+  JOIN company_secrets s ON s.id = b.secret_id AND s.company_id = b.company_id
+  WHERE b.company_id = :'company_id'::uuid
+    AND b.target_type = 'agent' AND b.target_id = :'agent_id'
+    AND b.secret_id = :'text'::uuid
+    AND b.config_path = 'env.ANTHROPIC_AUTH_TOKEN'
+    AND b.version_selector = 'latest' AND b.required = true
+    AND s.key = 'cliproxy_agent_api_key' AND s.status = 'active'
+);
+SQL
+)" || {
+    echo "Transport verification: binding metadata read failed." >&2; return 1;
+  }
+  [[ "$bound" == "t" ]] || {
+    echo "Transport verification: required company CLIProxy binding is absent or mismatched." >&2; return 1;
+  }
+}
+
+# Verification is read-only and bounded: the operator supplies the exact run
+# they invoked, and may retry this command after it finishes. Never choose the
+# latest run or invoke another heartbeat as a side effect of checking readiness.
+cmd_verify_transport() {
+  local target="" run_id="" transport_env secret_id ready
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target) target="${2:-}"; [[ $# -ge 2 ]] || die "--target requires an agent UUID"; shift 2;;
+      --smoke-run) run_id="${2:-}"; [[ $# -ge 2 ]] || die "--smoke-run requires a run UUID"; shift 2;;
+      *) die "unknown argument: $1";;
+    esac
+  done
+  local uuid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  [[ "$target" =~ $uuid && "$run_id" =~ $uuid ]] \
+    || die "usage: verify-transport --target <AGENT_UUID> --smoke-run <RUN_UUID>"
+  transport_env="$(read_claude_transport_env)" || return 2
+  verify_claude_transport "$target" "$transport_env" || die "current transport is not verified for agent $target."
+  secret_id="$(jq -r '.ANTHROPIC_AUTH_TOKEN.secretId' <<<"$transport_env")"
+  # Any configuration revision invalidates older smoke evidence, conservatively
+  # including unrelated edits. agents.updated_at is NOT a config clock: normal
+  # heartbeat activity changes it. Binding changes and secret rotation also
+  # invalidate evidence; compare run creation as well as start to exclude work
+  # queued with an older snapshot. Recheck stored env in this SQL snapshot.
+  ready="$(PGV_COMPANY_ID="$COMPANY_ID" PGV_AGENT_ID="$target" PGV_TEXT="$run_id" \
+    PGV_A="$transport_env" PGV_B="$secret_id" pcsql -Atq 2>/dev/null <<'SQL'
+WITH freshness AS (
+  SELECT GREATEST(a.created_at, b.created_at, b.updated_at, s.updated_at,
+    COALESCE((SELECT max(r.created_at) FROM agent_config_revisions r
+      WHERE r.company_id = a.company_id AND r.agent_id = a.id), a.created_at)) AS configured_at
+  FROM agents a
+  JOIN company_secret_bindings b ON b.company_id = a.company_id
+    AND b.target_type = 'agent' AND b.target_id = a.id::text
+  JOIN company_secrets s ON s.id = b.secret_id AND s.company_id = b.company_id
+  WHERE a.company_id = :'company_id'::uuid AND a.id = :'agent_id'::uuid
+    AND a.status <> 'terminated' AND a.adapter_type = 'claude_local'
+    AND a.adapter_config->'env' @> :'a'::jsonb
+    AND b.secret_id = :'b'::uuid AND b.config_path = 'env.ANTHROPIC_AUTH_TOKEN'
+    AND b.version_selector = 'latest' AND b.required = true
+    AND s.key = 'cliproxy_agent_api_key' AND s.status = 'active'
+)
+SELECT EXISTS (
+  SELECT 1 FROM heartbeat_runs h CROSS JOIN freshness f
+  WHERE h.id = :'text'::uuid AND h.company_id = :'company_id'::uuid
+    AND h.agent_id = :'agent_id'::uuid AND h.status = 'succeeded'
+    AND h.error_code IS NULL AND h.error IS NULL
+    AND (h.exit_code IS NULL OR h.exit_code = 0)
+    AND h.created_at > f.configured_at AND h.started_at > f.configured_at
+    AND h.finished_at >= h.started_at AND h.finished_at <= now()
+    AND jsonb_typeof(h.usage_json->'inputTokens') = 'number'
+    AND jsonb_typeof(h.usage_json->'outputTokens') = 'number'
+    AND (h.usage_json->>'inputTokens')::numeric >= 0
+    AND (h.usage_json->>'outputTokens')::numeric >= 0
+    AND ((h.usage_json->>'inputTokens')::numeric + (h.usage_json->>'outputTokens')::numeric) > 0
+);
+SQL
+)" || die "cannot verify smoke metadata for agent $target; no readiness claim."
+  [[ "$ready" == "t" ]] || die "agent $target is NOT READY: run $run_id is not fresh successful nonzero-usage evidence for its current transport."
+  echo "TRANSPORT_READY $target smoke-run=$run_id (API, binding, and fresh nonzero-usage success verified)"
+}
+
 cmd_create() {
   assert_enabled
   local caller_ref="" template="" title="" capabilities=""
@@ -480,7 +629,7 @@ cmd_create() {
 
   # Create natively. Invariant 1/3: reportsTo is the CALLER, chosen here.
   #
-  # Invariant 13 (TOG-689): the cheap model profile is born with an explicitly
+  # Invariant 13: the cheap model profile is born with an explicitly
   # FALSY `effort`. `effort` is valid on the claude_local CLI lane and ships in
   # that adapter's own default cheap profile, but the ACP engine lane refuses
   # it -- "does not advertise config option 'effort'" -- and an agent that dies
@@ -504,20 +653,24 @@ cmd_create() {
   # then have to validate. Adapters are opted in here explicitly, never by
   # default -- a new adapter with the same defect must be added to this list.
   #
-  # TOG-3348: Paperclip migration 0236 (v2026.916.0) deletes
+  # Paperclip migration 0236 (v2026.916.0) deletes
   # runtime_config.modelProfiles outright -- upstream PR #12683 removes the
   # cheap/recovery model distinction entirely (recovery work now runs on the
   # agent's single configured model, there is no replacement field) -- and
   # `shared/validators/agent.ts` rejects the key on every write from then on.
-  # Dropping this block pre-upgrade would reopen TOG-689 today; sending it
+  # Dropping this block pre-upgrade would reopen the ACP-lane `effort` failure today; sending it
   # unconditionally post-upgrade would 400 every claude_local agent creation.
   # Neither timing is known in advance from here, so `build_create_payload`
   # is tried WITH the legacy field first and, only if the host's response
   # names `modelProfiles` as the rejection, retried once WITHOUT it -- "attempt
   # the action and read the failure reason," not a version guess.
-  local payload out new_id cheap_profile_json='{}'
+  local payload out new_id cheap_profile_json='{}' adapter_config_json='{}' transport_env
   case "$ADAPTER_TYPE" in
-    claude_local) cheap_profile_json='{"cheap":{"enabled":false,"adapterConfig":{"effort":""}}}' ;;
+    claude_local)
+      cheap_profile_json='{"cheap":{"enabled":false,"adapterConfig":{"effort":""}}}'
+      transport_env="$(read_claude_transport_env)" || return 2
+      adapter_config_json="$(jq -cn --argjson env "$transport_env" '{env:$env}')"
+      ;;
   esac
 
   build_create_payload() {
@@ -525,13 +678,13 @@ cmd_create() {
     jq -cn \
       --arg name "$title" --arg title "$title" --arg parent "$caller_id" \
       --arg adapter "$ADAPTER_TYPE" --arg tpl "$template" --arg cap "$capabilities" \
-      --argjson cheap "$cheap" \
+      --argjson cheap "$cheap" --argjson config "$adapter_config_json" \
       --arg mode "$ASSIGNMENT_BASELINE_MODE" \
       --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
       --argjson budget "$AGENT_BUDGET_CENTS" '
       {
         name:$name, role:"general", title:$title, capabilities:$cap,
-        adapterType:$adapter, adapterConfig:{},
+        adapterType:$adapter, adapterConfig:$config,
         runtimeConfig:({heartbeat:{enabled:false, wakeOnDemand:false}}
                        + (if ($cheap|length) > 0 then {modelProfiles:$cheap} else {} end)),
         budgetMonthlyCents:$budget,
@@ -551,28 +704,32 @@ cmd_create() {
   new_id="$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)"
 
   if [[ -z "$new_id" && "$cheap_profile_json" != '{}' ]] && grep -qi 'modelprofiles' <<<"$out"; then
-    echo "NOTE: host rejected legacy runtimeConfig.modelProfiles (TOG-3348, migration 0236) -- retrying create without it" >&2
+    echo "NOTE: host rejected legacy runtimeConfig.modelProfiles (migration 0236) -- retrying create without it" >&2
     payload="$(build_create_payload '{}')"
     out="$(try_create "$payload")"
     new_id="$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)"
   fi
   [[ -n "$new_id" && "$new_id" != "null" ]] || die "agent creation failed: $out"
 
-  # Invariant 11 (as amended by TOG-984): the assignment baseline, plus legacy
+  if [[ "$ADAPTER_TYPE" == "claude_local" ]] && ! verify_claude_transport "$new_id" "$transport_env"; then
+    die "agent $new_id exists but transport verification failed; do not repeat create; repair and verify this agent."
+  fi
+
+  # Invariant 11 (as amended by the 2026-09-05 baseline decision): the assignment baseline, plus legacy
   # creator flags still off. Must run BEFORE the grant replacement, because this
   # route itself rewrites the tasks:assign grant -- and apply_exact_grants below
   # is a REPLACE, so whatever this route writes is authoritative only until then.
   # That is why the baseline key is also injected into grants_json: setting the
   # flag here and stopping would leave the agent on the right MODE with the
   # wrong GRANTS, which fails the actor-side half of the check and reproduces
-  # the TOG-54 403 on the agent's first hand-back.
+  # the 403 on the agent's first hand-back.
   pc agent permissions:update "$new_id" --payload-json \
     "$(jq -cn --arg mode "$ASSIGNMENT_BASELINE_MODE" --argjson can_assign "$BASELINE_CAN_ASSIGN_TASKS" \
        '{canCreateAgents:false, canCreateSkills:false, canAssignTasks:$can_assign,
          authorizationPolicy:{assignmentPolicy:{mode:$mode}}}')" --json >/dev/null
 
   # Invariant 5: resolve SELF to the NEW agent's id.
-  # The template set, plus the company-wide assignment baseline (TOG-984). The
+  # The template set, plus the company-wide assignment baseline. The
   # baseline is unioned in HERE rather than added to TEMPLATES_JSON on purpose
   # -- see the ASSIGNMENT BASELINE block above; putting `tasks:assign` in a
   # template breaks classify_risk's totality check and stops the request queue.
@@ -595,9 +752,15 @@ cmd_create() {
     '{event:"create.applied",callerAgentId:$cid,callerTemplate:$ct,
       newAgentId:$nid,template:$t,title:$title,reportsTo:$cid,
       previousGrants:["tasks:assign (server default, replaced)"],newGrants:$g,
-      assignmentBaseline:{mode:$mode,canAssignTasks:$ca,decision:"TOG-984 owner decision 2026-09-05"}}')"
+      assignmentBaseline:{mode:$mode,canAssignTasks:$ca,decision:"company-wide assignment baseline decision 2026-09-05"}}')"
 
-  echo "PROVISIONED $template -> $new_id ($title), reports to $caller_ref"
+  # PROVISIONED is the request queue's inventory marker, not model readiness.
+  if [[ "$ADAPTER_TYPE" == "claude_local" ]]; then
+    echo "PROVISIONED $template -> $new_id ($title), reports to $caller_ref (configuration only)"
+    echo "NOT READY: successful nonzero-usage smoke still required; transport API and binding verified."
+  else
+    echo "PROVISIONED $template -> $new_id ($title), reports to $caller_ref"
+  fi
   echo "--- effective access ---"
   read_effective_access "$new_id" | awk -F'\t' '{printf "  %-28s %-14s %s\n", $4, $5, ""}'
 }
@@ -666,12 +829,13 @@ SQL
 # org_request_queue.sh's may_create(), which means on such a box every ceiling
 # check answered "not in the ceiling" and every request was refused at submit.
 # Fail-closed, so nothing was ever wrongly granted, but it is still a catalog
-# that silently reads as empty, and the risk classifier added in TOG-388 must
-# never inherit that failure mode. Ugly and complete beats pretty and absent.
+# that silently reads as empty, and the risk classifier must never inherit
+# that failure mode. Ugly and complete beats pretty and absent.
 tabulate() { if command -v column >/dev/null 2>&1; then column -t -s$'\t'; else cat; fi; }
 
 case "${1:-}" in
   create)     shift; cmd_create "$@";;
+  verify-transport) shift; cmd_verify_transport "$@";;
   deactivate) shift; cmd_deactivate "$@";;
   access)     shift; read_effective_access "${1:?agent ref}" \
                 | awk -F'\t' 'NR==1{printf "%s  [%s]  parent=%s\n",$1,$2,$3} {printf "  %-30s %s\n",$4,$5}';;

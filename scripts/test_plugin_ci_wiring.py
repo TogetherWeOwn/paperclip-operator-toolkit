@@ -22,7 +22,7 @@ class PluginWiring(unittest.TestCase):
         self.text = WORKFLOW.read_text()
 
     def test_changed_heavy_jobs_are_gated(self):
-        for name in ("model-selection-impact", "cliproxy-insight-suite"):
+        for name in ("model-selection-impact", "cliproxy-insight-suite", "ported-suites", "ported-mutation-gates"):
             with self.subTest(job=name):
                 block = job(self.text, name)
                 self.assertIn("needs: [changes]", block)
@@ -41,6 +41,38 @@ class PluginWiring(unittest.TestCase):
                 self.assertNotRegex(header, r"(?m)^    if:")
                 self.assertNotIn("outputs.heavy", block)
                 self.assertIn("runs-on: ubuntu-latest", block)
+
+    def test_nonplugin_disclosure_coverage_is_always_measured(self):
+        block = job(self.text, "disclosure-scan")
+        self.assertIn('run: python3 scripts/test_nonplugin_disclosure_scan.py', block)
+        self.assertIn('run: python3 scripts/nonplugin-disclosure-scan.py --manifest scripts/nonplugin-disclosure-files.txt', block)
+        self.assertIn('run: bash scripts/disclosure-scan.sh plugins', block)
+        self.assertLess(block.index('test_nonplugin_disclosure_scan.py'),
+                        block.index('nonplugin-disclosure-scan.py --manifest'))
+        manifest = WORKFLOW.parents[2] / 'scripts/nonplugin-disclosure-files.txt'
+        names = manifest.read_text().splitlines()
+        self.assertTrue(names)
+        self.assertEqual(names, sorted(set(names)))
+        selected = set(names)
+        for name in ('scripts/nonplugin-disclosure-scan.py',
+                     'scripts/test_nonplugin_disclosure_scan.py',
+                     'scripts/nonplugin-disclosure-files.txt',
+                     'docs/nonplugin-disclosure-scan.md',
+                     'ci_required_checks_audit.py', 'test_ci_required_checks_audit.py',
+                     'runner_disk_pressure.sh', 'lib/runner_disk_pressure.py',
+                     'test_runner_disk_pressure.py', 'test_provisioned_transport_db.py',
+                     'test_transport_db_guards.py', 'docs/transport-database-proof.md',
+                     'red_main_poll.sh', 'red_main_poll.py', 'test_red_main_poll.py'):
+            self.assertIn(name, selected)
+        root = WORKFLOW.parents[2]
+        for component in ('protection-rule', 'gh-event-capture'):
+            paths = {path.relative_to(root).as_posix()
+                     for path in (root / component).rglob('*')
+                     if path.is_file() and '__pycache__' not in path.parts
+                     and not path.name.endswith('.pyc')
+                     and not any(part.startswith('.offline-tests-') for part in path.parts)}
+            self.assertTrue(paths, component)
+            self.assertFalse(paths - selected, sorted(paths - selected))
 
     def test_secret_scan_keeps_pinned_scanner_controls_and_full_history(self):
         block = job(self.text, "secret-scan")
@@ -67,7 +99,8 @@ class PluginWiring(unittest.TestCase):
     def test_ci_ok_refuses_a_skipped_or_failed_scan(self):
         everything = ("changes", "privilege-suites", "offline-suites", "long-mutation-gates",
                       "runbook-gates", "broker-suite", "omniroute-broker-suite", "dispatch-suite",
-                      "mcp-suite", "cliproxy-insight-suite", "disclosure-scan", "secret-scan",
+                      "mcp-suite", "ported-suites", "ported-mutation-gates",
+                      "cliproxy-insight-suite", "disclosure-scan", "secret-scan",
                       "model-selection-impact", "model-selection-mutants", "model-selection-suite")
         gated = {n: "skipped" for n in everything}
         gated.update({"changes": "success", "disclosure-scan": "success", "secret-scan": "success"})
@@ -79,6 +112,71 @@ class PluginWiring(unittest.TestCase):
                     result = self.run_ci_ok(results)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(scan, result.stdout + result.stderr)
+
+    def test_ported_jobs_are_needed_by_aggregation_and_failure_drain(self):
+        for consumer in ("ci-ok", "failure-log-drain"):
+            for name in ("ported-suites", "ported-mutation-gates"):
+                with self.subTest(consumer=consumer, job=name):
+                    self.assertIn(f"      - {name}\n", job(self.text, consumer))
+        success = {"changes": "success", "disclosure-scan": "success",
+                   "secret-scan": "success"}
+        for name in ("ported-suites", "ported-mutation-gates"):
+            for state in ("failure", "cancelled"):
+                with self.subTest(job=name, result=state):
+                    self.assertNotEqual(
+                        self.run_ci_ok(dict(success, **{name: state})).returncode, 0)
+
+    def test_upgrade_proof_supplies_schema_and_disposable_database(self):
+        block = job(self.text, "ported-suites")
+        self.assertIn("image: postgres:17", block)
+        self.assertIn("POSTGRES_USER: agent_test", block)
+        self.assertIn("POSTGRES_HOST_AUTH_METHOD: trust", block)
+        self.assertIn("repository: TogetherWeOwn/paperclip", block)
+        self.assertRegex(block, r"ref: [0-9a-f]{40}\n")
+        self.assertIn("persist-credentials: false", block)
+        self.assertIn("PAPERCLIP_UPGRADE_MIGRATIONS_DIR: public-schema/packages/db/src/migrations", block)
+        self.assertIn("PGHOST: localhost", block)
+        self.assertIn("PGUSER: agent_test", block)
+        self.assertIn("python-version: '3.12'", block)
+        self.assertIn("pip install --isolated psycopg2-binary==2.9.10", block)
+        self.assertNotIn("DATABASE_URL:", block)
+        self.assertNotIn("PGPASSWORD:", block)
+
+    def test_transport_database_proof_has_disposable_native_client_prerequisites(self):
+        block = job(self.text, "ported-suites")
+        self.assertIn("name: transport database proof", block)
+        proof = block.split("name: transport database proof", 1)[1].split("      - ", 1)[0]
+        clean = 'env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture '
+        self.assertIn(clean + 'createdb --no-password toolkit_transport_fixture', proof)
+        self.assertIn(clean + 'python3 test_provisioned_transport_db.py --init', proof)
+        self.assertIn(clean + 'python3 -m unittest -v test_provisioned_transport_db', proof)
+        self.assertLess(proof.index('createdb --no-password'), proof.index('test_provisioned_transport_db.py --init'))
+        self.assertLess(proof.index('test_provisioned_transport_db.py --init'), proof.index('-m unittest -v test_provisioned_transport_db'))
+        self.assertEqual(block.count('python3 -m unittest -v test_provisioned_transport_db'), 1)
+
+    def test_protection_rule_suite_has_offline_guard_and_clean_environment(self):
+        block = job(self.text, "ported-suites")
+        self.assertIn("node-version: '24'", block)
+        self.assertIn('env -i PATH="$PATH" node --import ./protection-rule/test/offline-guard.mjs', block)
+        self.assertIn('--test protection-rule/test/*.test.mjs', block)
+        self.assertIn('node --check "$source"', block)
+        self.assertNotIn('npm install', block)
+
+    def test_capture_suite_uses_supported_node_and_hermetic_entrypoints(self):
+        block = job(self.text, "ported-suites")
+        self.assertIn("node-version: '24'", block)
+        self.assertIn('env -i PATH="$PATH" node gh-event-capture/scripts/check-source.mjs', block)
+        self.assertIn('env -i PATH="$PATH" node gh-event-capture/scripts/run-offline-tests.mjs', block)
+        self.assertNotIn('--test-name-pattern', block)
+
+    def test_private_deployment_gates_are_not_ported_ci(self):
+        block = job(self.text, "ported-mutation-gates")
+        self.assertIn("verification/platform-watchdog-gate.sh", block)
+        self.assertIn("verification/process-lost-mutation-gate.py", block)
+        for private in ("recovery-writer-mutation-gate.sh",
+                        "filing-strip-mutation-gate.sh",
+                        "upstream-bundle-filing-strip-gate.sh"):
+            self.assertNotIn(private, block)
 
     def test_plugin_aggregator_runs_after_failed_impacted_sweep(self):
         block = job(self.text, "model-selection-suite")

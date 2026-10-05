@@ -1,0 +1,28 @@
+{
+  "operations": {
+    "startup": {
+      "count": 0,
+      "max_ms": null,
+      "min_ms": null,
+      "p50_ms": null,
+      "p95_ms": null,
+      "samples": []
+    }
+  },
+  "provenance": {
+    "indirect_evidence": "three GARM canary queue waits 111s/117s/163s (PR #483 run 2, 2026-10-02); 15 min per-job canary ceiling (garm-canary.yml); 30 min reaper provisioning-stuck bound; provider-create seed p50 10 min / p95 20 min; Wave-0 min-idle 0->1->0 VM create+reclaim (no timing recorded)",
+    "recorded_at": null,
+    "recorded_by": null,
+    "refresh_cadence": "recompute after every >=30 new samples or weekly, whichever comes first",
+    "source": "operator seed: no direct VM create-to-ready sample exists pre-migration; thresholds are provisional seeds pending first recalibration",
+    "total_samples": 0
+  },
+  "provisional": true,
+  "schema": "garm-ready-time-baseline.v1",
+  "thresholds": {
+    "p50_alert_ms": 600000,
+    "p95_alert_ms": 1200000,
+    "rationale": "Seed: startup spans LXD create, image boot, cloud-init and runner registration (minutes-scale healthy); only indirect timing exists (three canary queue waits 111s/117s/163s). p50 alert at 10 min is ~5x that indirect median; p95 at 20 min spends a full CI budget on provisioning; per-VM ready deadline 10 min, inside the 15 min canary job ceiling and the 30 min reaper provisioning-stuck bound. Recalibrate after the first 30 live startup samples.",
+    "ready_timeout_ms": 600000
+  }
+}

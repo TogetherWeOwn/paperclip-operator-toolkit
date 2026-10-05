@@ -1,12 +1,18 @@
 name: PR lint
 
-# Org convention for every change that lands on main (TogetherWeOwn GitHub standard):
+# Convention for every change that lands on main:
 #   * PR title = Conventional Commits header: `type(scope): summary`, <= 100 chars, no trailing period.
 #     Types: feat fix perf refactor test docs build ci chore revert style security.
-#     Put the card ID in the body (`Refs: TOG-1234`), not in the title.
-#   * PR body explains what changed, why, and how it was tested.
-#   * Repos are squash-merge only and the squash commit title is the PR title, so the history on
-#     main is one conventional commit per PR. The push job below flags any commit that bypasses it
+#   * PR body follows the PR template (Thinking Path, Linked Issues or Issue Description, What
+#     Changed, Verification, Risks, Model Used, Checklist). The checks live in
+#     .github/scripts/pr_standards.py with their tests next to it; this job runs both. This repo is
+#     public: no internal ticket ids, instance links, private hostnames or branch names carrying a
+#     card id in a title, body, commit or branch name.
+#   * CI change-gating policy: heavy jobs without job-level gating, and workflow-level `paths:` on
+#     required-check producers, warn here (fail once the mode is flipped). The code is
+#     .github/scripts/ci_policy.py with its tests next to it.
+#   * The repo is squash-merge only and the squash commit title is the PR title, so history on
+#     main is one conventional commit per PR. The push run flags any commit that bypasses it
 #     (for example a merge call that passes its own commit_title).
 
 on:
@@ -23,7 +29,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # A public repo never asks for an internal card reference.
   REQUIRE_CARD_REF: "false"
+  # "error": a title, an empty body, an unfilled template and an internal reference all fail.
+  PR_STANDARDS_MODE: "error"
+  # "warn" until the change-gating policy is confirmed for this repo, then "error".
+  CI_POLICY_MODE: "warn"
 
 jobs:
   pr-lint:
@@ -31,67 +42,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: true
+
+      - name: Unit-test the lint
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_pr_standards.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_ci_policy.py'
+
       - name: Check title, body and commits
         env:
           EVENT: ${{ github.event_name }}
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
           COMMITS: ${{ toJSON(github.event.commits) }}
-        shell: python3 {0}
-        run: |
-          import json, os, re, sys
+        run: python3 .github/scripts/pr_standards.py
 
-          TYPES = "feat|fix|perf|refactor|test|docs|build|ci|chore|revert|style|security"
-          HEADER = re.compile(rf"^({TYPES})(\([A-Za-z0-9._/,-]+\))?!?: \S.*$")
-          HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
-                  "sessions' or 'feat(events): shareable event page'. Allowed types: "
-                  + TYPES.replace("|", ", ") + ". Put the card ID in the body as 'Refs: TOG-1234'.")
-
-          def header_errors(text):
-              errs = []
-              if not HEADER.match(text):
-                  errs.append("not a Conventional Commits header")
-              if len(text) > 100:
-                  errs.append(f"{len(text)} chars (max 100)")
-              if text.rstrip().endswith("."):
-                  errs.append("ends with a period")
-              return errs
-
-          failed = False
-          if os.environ["EVENT"] == "pull_request":
-              title = os.environ.get("TITLE", "").strip()
-              body = os.environ.get("BODY", "") or ""
-              author = os.environ.get("AUTHOR", "")
-              if author.endswith("[bot]") and author.startswith(("dependabot", "renovate")):
-                  if header_errors(title):
-                      print(f"::warning::{author} title '{title}' is not conventional; set "
-                            "commit-message.prefix (e.g. chore(deps)) in the bot config.")
-                  sys.exit(0)
-              errs = header_errors(title)
-              if errs:
-                  failed = True
-                  print(f"::error title=PR title::'{title}': {'; '.join(errs)}. {HELP}")
-              text = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-              if len(re.sub(r"\s", "", text)) < 40:
-                  failed = True
-                  print("::error title=PR body::The description is empty. Say what changed, why, "
-                        "and how it was tested (see the PR template).")
-              if not re.search(r"\bTOG-\d+\b", body):
-                  level = "error" if os.environ["REQUIRE_CARD_REF"] == "true" else "warning"
-                  failed = failed or level == "error"
-                  print(f"::{level} title=Card reference::Add 'Refs: TOG-1234' to the PR body.")
-          else:
-              for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
-                  subject = (c.get("message") or "").splitlines()[0] if c.get("message") else ""
-                  if subject.startswith(("Merge ", "Revert \"")):
-                      continue
-                  errs = header_errors(subject)
-                  if errs:
-                      failed = True
-                      print(f"::error title=Commit on main::{c.get('id','')[:10]} '{subject}': "
-                            f"{'; '.join(errs)}. Merge PRs with squash and the PR title as the "
-                            "commit title.")
-          if failed:
-              sys.exit(1)
-          print("PR conventions OK")
+      - name: Check CI change-gating policy
+        run: python3 .github/scripts/ci_policy.py
