@@ -27,19 +27,10 @@ READ_ONLY = "ReadOnlyContractTest."
 
 # (label, anchor, replacement, tests that must fail). An id also matches its
 # subTest failures. Each anchor must occur exactly once in the target.
+# The desk/host-coverage refusal layer was intentionally not ported to the
+# public tree, so its three mutants (anchors absent here) are dropped rather
+# than kept failing. If that layer is ever ported, restore them with it.
 MUTANTS = [
-    ("desk-config-guessed",
-     '    value = (os.environ.get(CEO_DESK_ENV) or "").strip()',
-     '    value = (os.environ.get(CEO_DESK_ENV) or "").strip() or "ISSUE-100"',
-     [REFUSAL + "test_missing_desk_config_exits_2"]),
-    ("empty-host-coverage-accepted",
-     '    if not hosts:\n        raise ConfigError(',
-     '    if hosts is None:\n        raise ConfigError(',
-     [REFUSAL + "test_missing_host_coverage_config_exits_2"]),
-    ("missing-host-section-skips-config",
-     '    required_hosts()\n    now = parse_time(snapshot.get("now"))',
-     '    now = parse_time(snapshot.get("now"))',
-     [REFUSAL + "test_missing_host_coverage_config_exits_2"]),
     ("unreadable-snapshot-exits-0",
      '        print(f"watchdog: cannot read snapshot: {exc}", file=sys.stderr)\n'
      '        return 2',
