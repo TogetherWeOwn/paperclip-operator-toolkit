@@ -669,7 +669,7 @@ jobs:
         with:
           clean: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -3123,7 +3123,7 @@ jobs:
       # gh-event-capture's suites run on 24 (validated there; the unit also
       # supports the pinned 20). The rest of this job stays on the pinned
       # 20 it was validated against.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -3131,7 +3131,7 @@ jobs:
       - name: event capture suites
         run: node --test gh-event-capture/test/*.test.mjs
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -3215,7 +3215,7 @@ jobs:
       # The embedded node resolver in effective-build-check executes under
       # the installed Node; the capture slice already proved job-pinned
       # Node 20 is the wrong runtime for ported suites that need newer.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -4021,7 +4021,7 @@ jobs:
       # on, and `node --test` semantics have moved between those majors. Testing
       # the broker on a Node the host does not run would be testing the wrong
       # thing.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -4113,7 +4113,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -4180,7 +4180,7 @@ jobs:
       # Node 24: the version the instance runs plugins on. `node --test`
       # semantics have moved between majors, so testing on another one would be
       # testing a different program than the one installed.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -4324,7 +4324,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -4658,7 +4658,7 @@ jobs:
 
       # Node 24: the same runtime the sweep uses. The script imports only node
       # builtins and the gate runtime, so there is no install step here.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -4705,7 +4705,7 @@ jobs:
           clean: true
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -4773,7 +4773,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -4824,7 +4824,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Node 24: the version the instance runs plugins on.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
