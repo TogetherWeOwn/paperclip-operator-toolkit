@@ -3053,6 +3053,11 @@ jobs:
       - name: router pin cleanup suite
         run: python3 -m unittest -v test_model_pin_cleanup.py
 
+      # Append-only pacer admission audit writer; shadow mode only, temp-dir
+      # confined, every case pins its timestamp.
+      - name: pacer admission audit suite
+        run: python3 -m unittest -v test_pacer_admission_audit
+
       # Fixture-driven through the audit's offline env seams; the live-board
       # section stays out of the ported suite.
       - name: permission-narrowing audit suite
