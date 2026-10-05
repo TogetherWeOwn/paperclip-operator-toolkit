@@ -141,6 +141,7 @@ import {
   activeOperatorOverride,
   activeZaiPaceOverride,
   blendedListPrice,
+  deadVetoExcluded,
   hardStopExcluded,
   isBehindPace,
   isLaneOutageActive,
@@ -221,8 +222,8 @@ import {
 } from "./dispatch-reporting.js";
 
 /**
- * The SDK this package builds against (2026.824.1) predates the
- * run-model hook; the fork's SDK () adds `onResolveRunModel` to
+ * . The SDK this package builds against (2026.824.1) predates the
+ * run-model hook; the fork's SDK adds `onResolveRunModel` to
  * `PluginDefinition`. Widen the definition here so the handler type-checks on
  * both, and the host's own validator stays the authority on the wire shape.
  */
@@ -245,7 +246,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
- * The Paperclip tool gateway maps a plugin result to
+ * . The Paperclip tool gateway maps a plugin result to
  * `structuredContent: result?.data ?? null`, and the Claude client rejects a
  * null `structuredContent` — every tool call that returned only `{content}`
  * (or an explicit `data: null`) failed schema validation in Claude Code.
@@ -295,9 +296,14 @@ function summary(decision: SelectionDecision): string {
     const wakeNote = decision.wakeScopedTier
       ? ` — wake-scoped floor ${decision.wakeScopedTier} (card tier ${decision.judgement.tier} unchanged)`
       : "";
+    //  (D1e): a bypassed all-dead window admitted as today — the
+    // tool answer must say the poller is suspect, not report a routine pick.
+    const bypassNote = decision.deadVeto.bypassedAllDead
+      ? " — dead-lane veto bypassed: every configured lane met the dead condition, poller-side outage suspect"
+      : "";
     return `${decision.modelId} at ${decision.effectiveTier} (tier via ${decision.judgement.source})${
       decision.advisory ? " — advisory, nothing written" : ""
-    }${wakeNote}`;
+    }${wakeNote}${bypassNote}`;
   }
   if (decision.outcome === "held-at-floor") {
     return `Held at the agent floor: ${decision.heldReason}`;
@@ -325,7 +331,7 @@ export function createPlugin() {
    *  reopen: `ctx.companies.list()` is a wildcard host call that,
    * unlike every other call this worker makes, is not carried by the
    * per-company `proactiveCompanyScopes` authorization the host seeds
-   * from this plugin's configured companies (/695). A scheduled
+   * from this plugin's configured companies. A scheduled
    * job's `companies.list()` call therefore only succeeds when no other
    * invocation happens to be active in the worker process at that exact
    * moment — nondeterministic, and observed failing from the real
@@ -348,7 +354,7 @@ export function createPlugin() {
   });
 
   /**
-   * Bound by `setup()`; the SDK calls `onResolveRunModel` on the
+   * . Bound by `setup()`; the SDK calls `onResolveRunModel` on the
    * definition, which has no access to the setup closure. Until setup has run
    * the honest answer is `defer`, never a guess.
    */
@@ -416,7 +422,7 @@ export function createPlugin() {
       };
 
       /**
-       * second failure shape: the lane-evidence term's input.
+       * , second failure shape: the lane-evidence term's input.
        *
        * Short-TTL and re-read rather than cached in config, for the same reason
        * the availability term is. The TTL exists only so the three scheduled
@@ -558,7 +564,7 @@ export function createPlugin() {
       };
 
       /**
-       * Defect 2. `tier-exhausted` is a capacity dead end — every
+       * , Defect 2. `tier-exhausted` is a capacity dead end — every
        * model from the required tier through the T1 ceiling is
        * pace-unserviceable, and there is nowhere left for the ladder walk in
        * `select.ts` to climb to. `ctx.metrics.write` records the outcome for
@@ -567,7 +573,7 @@ export function createPlugin() {
        *
        * This reuses the instance's existing `Operator: <title>` + `operator`
        * label issue-creation convention (confirmed against 20+ live examples
-       * — , etc. — all plain `manual`-origin
+       * — , , , etc. — all plain `manual`-origin
        * issues, usually a child of the blocked issue, usually unassigned).
        * That is a materially different mechanism from a same-issue
        * confirmation card: it is a real, separately-triaged unit of work, and
@@ -616,10 +622,70 @@ export function createPlugin() {
         await ctx.state.set(tierExhaustedAlarmsKey(companyId), { ...alarms, [issueId]: new Date().toISOString() });
       };
 
+      /**
+       *  (D1e). The CEO fail-open's operator half: the veto bypassed
+       * an all-lanes-dead window and admitted as today, which means the
+       * failure is poller-side until proven otherwise (the  API
+       * slowness, `lane-secret-unavailable`). That suspicion must reach an
+       * operator card — never a silent admit — with the poller, not per-lane
+       * capacity, as the named suspect. Same one-card-per-streak dedup as
+       * `raiseOrClearTierExhaustedAlarm` above, on its own key: the two are
+       * different streaks (bypass vs. exhaustion) answering different owner
+       * questions, and sharing a key would suppress one while the other runs.
+       */
+      const deadVetoPollerAlarmsKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.deadVetoPollerAlarms,
+      });
+
+      const raiseOrClearDeadVetoPollerAlarm = async (
+        companyId: string,
+        issueId: string,
+        issueTitle: string,
+        issueIdentifier: string | null,
+        decision: SelectionDecision,
+        authorAgentId: string | null,
+      ): Promise<void> => {
+        const stored = asRecord(await ctx.state.get(deadVetoPollerAlarmsKey(companyId)));
+        const alarms: Record<string, string> = {};
+        for (const [id, at] of Object.entries(stored)) {
+          if (typeof at === "string") alarms[id] = at;
+        }
+        if (!decision.deadVeto.bypassedAllDead) {
+          if (issueId in alarms) {
+            const { [issueId]: _dropped, ...rest } = alarms;
+            await ctx.state.set(deadVetoPollerAlarmsKey(companyId), rest);
+          }
+          return;
+        }
+        if (issueId in alarms) return;
+
+        const config = await companyConfig(companyId);
+        const reference = issueIdentifier ? `${issueIdentifier} (${issueTitle})` : issueTitle;
+        await ctx.issues.create({
+          companyId,
+          parentId: issueId,
+          title: `Operator: lane poller suspect on ${reference}`,
+          description:
+            `Every configured lane met the dead-lane veto condition for ${reference} in the same window, ` +
+            `so Model Selection admitted as today instead of vetoing all dispatch — a poller-side failure ` +
+            `(lane poller outage, fleet-wide API slowness as in , or a lane secret outage) is suspect, ` +
+            `not per-lane death.\n\n` +
+            "Intervene to unblock: check the lane poller and lane status endpoints, then the lane secrets " +
+            "(`lane-secret-unavailable` fails every lane together). This escalation stays open until a fresh " +
+            "`model_selection_advise`/`apply` call on the original issue no longer bypasses an all-lanes-dead window.",
+          priority: "critical",
+          labelIds: config.operatorLabelId ? [config.operatorLabelId] : undefined,
+          actor: { actorAgentId: authorAgentId ?? undefined },
+        });
+        await ctx.state.set(deadVetoPollerAlarmsKey(companyId), { ...alarms, [issueId]: new Date().toISOString() });
+      };
+
       // --- /2138/2504, shards : paired decision emitter --
 
       /**
-       * Hourly shard name, UTC, zero-padded so lexical order is
+       * . Hourly shard name, UTC, zero-padded so lexical order is
        * chronological order: `decisions-2026-10-03-14Z.jsonl`. Shard names are
        * derived from the record timestamp, never from wall-clock at write
        * time, so a late or replayed decision lands in its own hour.
@@ -654,7 +720,7 @@ export function createPlugin() {
       // serialize their read-modify-write against the same shard file instead
       // of racing: two emits that both read the same "before" content and then
       // both write collapse to whichever write lands last, silently dropping
-      // the other's record ().
+      // the other's record.
       const decisionEmitChains = new Map<string, Promise<void>>();
 
       /**
@@ -663,7 +729,7 @@ export function createPlugin() {
        * UTC-hour shard, capped at `shardMaxRecords` — `ctx.localFolders` has
        * no native append, and the host only offers whole-file atomic replace.
        *
-       * the pre-shard design rewrote one `decisions.jsonl` whole on
+       * : the pre-shard design rewrote one `decisions.jsonl` whole on
        * every append. At `maxRecords: 5000` with ~16 KB live-shape records that
        * is a ~38 MB single `writeTextAtomic` RPC arg — one newline-delimited
        * JSON-RPC line on the worker's stdout — which timed out after 30 s
@@ -794,7 +860,7 @@ export function createPlugin() {
       };
 
       /**
-       * Provenance for the `tier:*` labels this job wrote:
+       * . Provenance for the `tier:*` labels this job wrote:
        * `{issueId: "T2"}`. Same shape and lifecycle as the exclusions map
        * above, and read in the same place — the classify job's per-candidate
        * loop — so the job can distinguish its own recorded verdict from an
@@ -943,7 +1009,7 @@ export function createPlugin() {
       };
 
       /**
-       * The one genuinely expensive read behind a descriptor: the
+       * . The one genuinely expensive read behind a descriptor: the
        * last heartbeat run's context usage for an issue.
        *
        * It is kept OUT of `describeIssue`'s eager path and behind a per-pass
@@ -1033,7 +1099,7 @@ export function createPlugin() {
         /** : the assignment signal a creation-time pin keys on. */
         assigneeAgentId: string | null;
         /**
-         * the human assignment, if any. A card with a user
+         * : the human assignment, if any. A card with a user
          * assignee rejects `issues.update` with an agent override
          * ("Issue can only have one assignee"), so the scheduled pin
          * passes skip it — SQL first, this field as the per-row backstop.
@@ -1068,9 +1134,9 @@ export function createPlugin() {
         // Stays `null` unless we actually read the agent row. An unreadable or
         // absent assignee must not be reported as "the agent has no env vars":
         // the override write replaces the whole env object, so that conflation
-        // would wipe the agent's real bindings for the run ().
+        // would wipe the agent's real bindings for the run.
         let agentEnv: Record<string, unknown> | null = null;
-        // Same UNKNOWN discipline: the effort a pin may legally write
+        // . Same UNKNOWN discipline: the effort a pin may legally write
         // depends on the assignee's adapter, so an unreadable agent means we
         // write no effort rather than guess one.
         let agentAdapterType: string | null = null;
@@ -1098,7 +1164,7 @@ export function createPlugin() {
           labelNames,
           pinnedModelId,
           agentFloorModelId,
-          // adapter-compatibility gate (`devin/*` vs `claude_local`)
+          // : adapter-compatibility gate (`devin/*` vs `claude_local`)
           // and the earn-in guard (priority + review/gate title) both read
           // these. Recorded from the issue/agent rows, never inferred.
           agentAdapterType,
@@ -1117,7 +1183,7 @@ export function createPlugin() {
           // the passes that only decide repinnability never pay for it.
           requiredContextTokens:
             typeof supplied.requiredContextTokens === "number" ? supplied.requiredContextTokens : undefined,
-          // the caller's PAPERCLIP_WAKE_REASON for this run, if any.
+          // : the caller's PAPERCLIP_WAKE_REASON for this run, if any.
           // Feeds SelectionConfig.wakeScopedFloor only — resolveTier() never
           // reads it, so it can never change the card's own judged tier.
           wakeReason: typeof supplied.wakeReason === "string" ? supplied.wakeReason : undefined,
@@ -1281,7 +1347,7 @@ export function createPlugin() {
          */
         suppressSticky = false,
         /**
-         * The owning pass's per-issue context memo. A scheduled pass
+         * . The owning pass's per-issue context memo. A scheduled pass
          * has almost always described this issue already; passing its cache
          * means `advise` reuses that `heartbeat_runs` read instead of
          * repeating it. Omitted on the interactive tool path, which describes
@@ -1312,7 +1378,7 @@ export function createPlugin() {
         agentAdapterConfig: Record<string, unknown> | null;
         existingOverrideEnv: Record<string, unknown>;
         /**
-         * target for the haiku-class sub-call env keys on this
+         * : target for the haiku-class sub-call env keys on this
          * card's override write — the cheapest healthy T3 model under the
          * CURRENT outage state, or null when none qualifies (the write then
          * falls back to the pin; see `ModelOverrideInput.cheapModelId`).
@@ -1329,7 +1395,7 @@ export function createPlugin() {
         // A deliberate repin keeps the caller's effective tier even when the
         // old pin's lane is dead. Merely replacing labels cannot do this:
         // resolveTier gives a serviceable pin precedence over those labels.
-        // a forced tier can never create a T0 opt-in. The synthetic
+        // : a forced tier can never create a T0 opt-in. The synthetic
         // label below would read as an explicit `tier:T0` judgement, so T0 is
         // honoured only when the card already carries that label itself.
         const forcedTier: Tier | undefined =
@@ -1342,12 +1408,24 @@ export function createPlugin() {
         const { profiles, signals } = await readProfiles(companyId);
         const laneLedger = await readLaneLedger(companyId);
         const pacingActive = config.pacing.mode !== "off";
+        //  (D1e). The pin fall-through must see the veto too: a pin
+        // whose every row sits on a dead-vetoed lane falls through to the
+        // label/floor, the same Defect-6 discipline as the hard stop. The
+        // configured set is the primitive here (fail-open when absent), and
+        // the all-dead bypass does not apply to a pin read — a pin that
+        // cannot serve is not saved by the poller being suspect.
+        const deadVetoScope = {
+          configuredLaneIds: config.pacing.lanes.map((lane) => lane.laneId),
+          bypassAllDead: false,
+        };
         const profileTier = resolveTier(
           selectionDescriptor,
           config.models,
           config.selection.defaultTier,
           {
-            isLaneUnserviceable: (model) => pacingActive && hardStopExcluded(laneLedger, model),
+            isLaneUnserviceable: (model) =>
+              pacingActive &&
+              (hardStopExcluded(laneLedger, model) || deadVetoExcluded(laneLedger, model, deadVetoScope)),
           },
         ).tier;
         const profile = profiles.find((entry) => entry.tier === profileTier) ?? null;
@@ -1380,7 +1458,7 @@ export function createPlugin() {
           config: {
             enforcementEnabled: selectionWritesAllowed(config),
             defaultTier: config.selection.defaultTier,
-            // the roster's hand-placed tier is overlaid with the tier
+            // : the roster's hand-placed tier is overlaid with the tier
             // `refreshScores` derived from the model's posterior. Unscored models
             // and scores from a superseded spec version keep the configured tier.
             models: applyDerivedTiers(config.models, modelScores),
@@ -1388,6 +1466,10 @@ export function createPlugin() {
             stickyWithinIssue: config.selection.stickyModelWithinIssue,
             pacingMode: config.pacing.mode,
             laneLedger,
+            //  (D1e). The configured lane set the dead-veto reads:
+            // without it an unconfigured lane cannot be told apart from a
+            // dead one, so the veto stays fail-open (see `configuredLaneIds`).
+            configuredLaneIds: config.pacing.lanes.map((lane) => lane.laneId),
             slotFloorFraction: config.pacing.slotFloorFraction,
             operatorOverrideModelId: liveOverride?.modelId ?? null,
             laneAvoidConfig: config.pacing.avoid,
@@ -1446,9 +1528,21 @@ export function createPlugin() {
         );
         const pinnedModel = config.models.find((model) => model.id === pinnedModelId);
         const isServiceabilityHardStop =
-          config.pacing.mode !== "off" && !!pinnedModel && hardStopExcluded(laneLedger, pinnedModel);
+          config.pacing.mode !== "off" &&
+          !!pinnedModel &&
+          (hardStopExcluded(laneLedger, pinnedModel) ||
+            deadVetoExcluded(laneLedger, pinnedModel, deadVetoScope));
 
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
+        //  (D1e), the operational half of the veto: count what it
+        // takes out, so "which term is excluding right now" stays answerable
+        // without reparsing the decision stream.
+        if (decision.rejections.some((rejection) => rejection.stage === "lane-dead-veto")) {
+          await ctx.metrics.write("model_selection.lane_excluded.dead-veto", 1);
+        }
+        if (decision.deadVeto.bypassedAllDead) {
+          await ctx.metrics.write("model_selection.dead_veto_bypassed_all_dead", 1);
+        }
 
         //  AC-6, the operational half: the term is the metric name, so
         // "which term is taking candidates out right now" is answerable without
@@ -1518,7 +1612,7 @@ export function createPlugin() {
           }
         }
 
-        // resolve the cheap-key target once per advise so every
+        // : resolve the cheap-key target once per advise so every
         // override write site consumes the same answer. Pure — every input is
         // already in scope here, so this adds no IO to the advise path.
         const ancillaryModelId = cheapestHealthyModelIdForTier({
@@ -1586,6 +1680,14 @@ export function createPlugin() {
             result.decision,
             runCtx.agentId ?? null,
           );
+          await raiseOrClearDeadVetoPollerAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null,
+          );
           return { content: summary(result.decision), data: result.decision };
         },
       );
@@ -1620,6 +1722,14 @@ export function createPlugin() {
             result.decision,
             runCtx.agentId ?? null,
           );
+          await raiseOrClearDeadVetoPollerAlarm(
+            runCtx.companyId,
+            result.issueId,
+            result.title,
+            result.identifier,
+            result.decision,
+            runCtx.agentId ?? null,
+          );
 
           // The repin exception is itself a pace CONSEQUENCE, gated the same as
           // every other pace consequence: only in `enforce`. In `off`/`shadow`
@@ -1638,7 +1748,7 @@ export function createPlugin() {
               // from "the label decided it" would re-add a duplicate.
               hasExistingTierLabel: result.hasTierLabel,
               status: result.status,
-              // Consulted only when the pin path declines: an
+              // . Consulted only when the pin path declines: an
               // existing override that binds secret refs the assignee does not
               // carry cannot start a run, so it is rebuilt on the SAME model.
               envRepair: {
@@ -1872,7 +1982,7 @@ export function createPlugin() {
         },
       );
 
-      //  (P2,  D4). Prepare/validate/diff only: the
+      //  ( P2,  D4). Prepare/validate/diff only: the
       // SDK has no compare-and-set primitive, so nothing proves a write would
       // land on one authoritative revision. The tool therefore never touches
       // ctx.state or config and never changes routing; the log line is the audit.
@@ -1922,16 +2032,16 @@ export function createPlugin() {
         const payload = asRecord(event.payload);
         const changes = asRecord(payload.changes);
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
-        // any change may be a label or assignee change the next
+        // : any change may be a label or assignee change the next
         // run-scoped decision must see.
         if (issueId) runIssueCache.invalidate(runIssueKey(event.companyId, issueId));
 
-        // fresh assignment (null -> agent id) is the other
+        // : fresh assignment (null -> agent id) is the other
         // "creation moment" — cards are frequently created unassigned and
         // assigned by a later PATCH, after `issue.created` already fired and
         // found no assignee. Agent-to-agent reassignment is not a creation
         // moment (the card had one under the previous assignee), so it does
-        // not re-decide the model; it only re-homes the pin's env ().
+        // not re-decide the model; it only re-homes the pin's env.
         const assignment = asRecord(changes.assigneeAgentId);
         const assignedTo = typeof assignment.to === "string" ? assignment.to : null;
         let didAssignmentPin = false;
@@ -1962,7 +2072,7 @@ export function createPlugin() {
         const status = asRecord(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
-        // todo re-entry (e.g. backlog -> todo) is the third
+        // : todo re-entry (e.g. backlog -> todo) is the third
         // creation moment — the card missed both `issue.created` and the
         // assignment arm, so it rides the agent floor until the next
         // 10-minute pass. Reuse `pinAtDecisionTime` itself (single
@@ -2024,7 +2134,7 @@ export function createPlugin() {
       // the first turn either (the bus is fire-and-forget and loses the same
       // measured race); they pin every card the passes were missing as soon
       // as it is idle — exactly the release mechanism the core-side dispatch
-      // gate (half 1) needs once it lands.
+      // gate ( half 1) needs once it lands.
 
       /**
        *  AC3. One visible activity notice per throttle window for a
@@ -2096,7 +2206,7 @@ export function createPlugin() {
       };
 
       /**
-       * True when run-scoped decisions are live for this company:
+       * . True when run-scoped decisions are live for this company:
        * the flag is on AND the install enforces. Only then are the legacy pin
        * writers retired — an advisory install writes no pin anyway, and
        * retiring them while the handler answers `keep` would leave nothing
@@ -2106,7 +2216,7 @@ export function createPlugin() {
         config.runResolve.enabled && selectionWritesAllowed(config);
 
       /**
-       * Classifications this worker has started and not finished,
+       * . Classifications this worker has started and not finished,
        * by issue. The run-scoped hook may WAIT (<= 1 s) on one that is already
        * running so a card created a moment ago gets its classified tier; it
        * never starts one ( §6). Entries remove themselves on settle.
@@ -2159,7 +2269,7 @@ export function createPlugin() {
         if (described.hasOperatorPin) return;
         if (described.descriptor.pinnedModelId) return;
 
-        // with run-scoped decisions live, the pin is retired but the
+        // : with run-scoped decisions live, the pin is retired but the
         // classification still runs and still writes the label — the hook reads
         // it (or waits on it) at the run boundary.
         const runScoped = runResolveActive(config);
@@ -2295,7 +2405,7 @@ export function createPlugin() {
         config: ResolvedConfig,
         attempt: { tier: Tier; expectedPinnedModelId: string | null; receivedAtMs: number },
       ): Promise<string | null> => {
-        // the creation/assignment pin is retired once run-scoped
+        // : the creation/assignment pin is retired once run-scoped
         // decisions are live; the run boundary decides instead.
         if (runResolveActive(config)) return null;
         const { tier, expectedPinnedModelId, receivedAtMs } = attempt;
@@ -2313,7 +2423,7 @@ export function createPlugin() {
         }
         // `advise` re-described the card: trust its fresher status/pin
         // reads, not the pre-decision ones — but NOT its idle read.
-        // the assignment wake's run is queued, and often already
+        // : the assignment wake's run is queued, and often already
         // claimed, by now, so strict idleness aborts nearly every pin.
         // `pinnableBeforeStart` re-reads the card's live runs and allows the
         // queued-but-unstarted window, which is safe because Paperclip reads
@@ -2344,11 +2454,11 @@ export function createPlugin() {
         //  P2: candidate-carrying recovery (see the apply path).
         const selectedModel = recoverSelectedCandidate(config.models, result.decision);
         if (!selectedModel) return null;
-        // the creation path's own final read — the shared
+        // : the creation path's own final read — the shared
         // `balanceWriteStillSafe` below stays strict-idle for the scheduled
         // passes, and would veto this pin on the wake's queued run.
         if (!(await creationWriteStillSafe(companyId, issueId, config.models, expectedPinnedModelId))) return null;
-        // the creation path classifies and labels in every
+        // : the creation path classifies and labels in every
         // posture, but the override write needs enforcement. Advisory
         // installs decide and report; they pin nothing.
         const writesAllowed = selectionWritesAllowed(config);
@@ -2370,7 +2480,7 @@ export function createPlugin() {
         // first pin; a re-pin carries the classifier's latency by design.
         const latencyMs = Date.now() - receivedAtMs;
         if (writesAllowed) {
-          // the run may have STARTED between the final gate and the
+          // : the run may have STARTED between the final gate and the
           // write. The pin still landed and applies from the next run, so say
           // so — informational, never a failure. Only meaningful after a write.
           const afterRows = (await ctx.db.query(CREATION_PIN_LIVE_RUNS_SQL, [
@@ -2399,7 +2509,7 @@ export function createPlugin() {
         }
         await ctx.activity.log({
           companyId,
-          // name the card that was actually pinned. This message
+          // : name the card that was actually pinned. This message
           // hardcoded  (the card that built this path), so every
           // creation-time pin pointed at the wrong card.
           message: isRepin
@@ -2419,7 +2529,7 @@ export function createPlugin() {
             //  P2: the served leg of the v2 identity — which
             // curated candidate this pin actually served (null on legacy).
             candidateId: selectedModel.candidateId,
-            // present only when the gate above skipped the write.
+            // : present only when the gate above skipped the write.
             ...(writesAllowed ? {} : { advisory: true, written: false }),
           },
         });
@@ -2460,7 +2570,7 @@ export function createPlugin() {
       //
       // Anything the handler cannot get inside its budget becomes `defer`: the
       // host parks the run for a bounded retry and never falls back to the
-      // agent default (owner directive).
+      // agent default (owner directive, ).
 
       /** Time kept back from the host deadline for the answer's own trip. */
       const RUN_RESOLVE_DEADLINE_MARGIN_MS = 150;
@@ -2687,7 +2797,7 @@ export function createPlugin() {
           // Off, or advisory: the handler routes nothing and says so. The
           // legacy paths (still live in this posture) own the pin.
           if (!runResolveActive(config)) return finish({ kind: "keep" }, "keep.inactive");
-          // the engine re-checks the override against the roster
+          // : the engine re-checks the override against the roster
           // (an orphan falls through to a fresh decision); this early return
           // only skips the snapshot reads for a live override on an enabled
           // row. The engine is the authority — the identical predicate here
@@ -2981,8 +3091,8 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled lane-capacity poll () ---------------------------
-      // runs every 2 minutes, inside the tightest publisher-declared
+      // --- scheduled lane-capacity poll ---------------------------
+      // : runs every 2 minutes, inside the tightest publisher-declared
       // freshness budget (180s live). At 5 minutes, picks older than 180s read
       // every lane UNKNOWN ~half the time. One company's failure, or one
       // lane's failure within a company, must never block any other company
@@ -2994,7 +3104,7 @@ export function createPlugin() {
             const config = await companyConfig(company.id);
             if (config.pacing.lanes.length === 0) continue;
 
-            // resolve each lane's optional secret before it is
+            // : resolve each lane's optional secret before it is
             // polled. Resolution failure fails only that lane — it is
             // recorded as a lane-scoped poll error, never thrown, so one
             // bad secret ref cannot abort the company's whole poll.
@@ -3009,7 +3119,7 @@ export function createPlugin() {
                     companyId: company.id,
                     // Must match the array-index path plugin-secrets-handler.ts's
                     // extractSecretRefBindingsFromConfig binds on config write
-                    // () — a laneId-keyed path here reads back nothing
+                    // — a laneId-keyed path here reads back nothing
                     // because syncSecretRefsForTarget replaceAll wipes non-matching rows.
                     configPath: `pacing.lanes.${laneIndex}.apiKeySecretRef`,
                   });
@@ -3041,7 +3151,7 @@ export function createPlugin() {
             }
             await ctx.state.set(laneLedgerKey(company.id), ledger);
 
-            // Per-tier poll-outcome counters: read-only telemetry,
+            // . Per-tier poll-outcome counters: read-only telemetry,
             // never consulted by selection. Each lane result increments the
             // tiers that lane serves (roster `laneId` map). Fail-closed on a
             // corrupt stored value (normalize fails open to empty counters)
@@ -3105,7 +3215,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled aa.ai Intelligence Index refresh () -------------
+      // --- scheduled aa.ai Intelligence Index refresh -------------
       // Fetched once at instance scope (aa.ai data is not company-specific),
       // then diffed per company against that company's roster. A fetch/parse
       // failure preserves the prior snapshot untouched and just records the
@@ -3116,7 +3226,7 @@ export function createPlugin() {
       //
       // Extracted to a plain function (not just the job callback) so the
       // `refreshAaIndexNow` tool below can run the identical sweep on demand
-      // (reopen AC4) without duplicating the fetch/diff/surface
+      // ( reopen AC4) without duplicating the fetch/diff/surface
       // logic or waiting for the next cron tick.
       const runAaIndexRefresh = async (): Promise<{ fetchedAt: string | null; error: string | null; modelsFetched: number }> => {
         const nowIso = new Date().toISOString();
@@ -3236,7 +3346,7 @@ export function createPlugin() {
         await runAaIndexRefresh();
       });
 
-      // Manual operator escalation for the same sweep (reopen AC4):
+      // Manual operator escalation for the same sweep ( reopen AC4):
       // aa.ai revises rankings between scheduled ticks, and an operator who
       // just saw a revision shouldn't have to wait up to 6 hours to fold it
       // in. Runs the exact same fetch/diff/surface path as the cron job.
@@ -3260,7 +3370,7 @@ export function createPlugin() {
         },
       );
 
-      // --- scheduled models.dev price reconciliation () ------------
+      // --- scheduled models.dev price reconciliation ------------
       //
       // ADR-0001's cost term is a sorter, and it reads `costPerMTokIn` /
       // `costPerMTokOut` / `costPerMTokCacheRead` straight off hand-entered
@@ -3274,7 +3384,7 @@ export function createPlugin() {
       // This job closes the detection gap and nothing else. It REPORTS. A
       // price change reorders the entire fleet's routing, so the output is a
       // diff an operator approves — deliberately the same posture as the
-      // thirteen change-review-marked rows shipped disabled rather than let an
+      // thirteen pricing-confirmation rows shipped disabled rather than let an
       // estimated price silently win cost-sort over a proven model.
       //
       // Structured like `runAaIndexRefresh` above and for the same reasons:
@@ -3418,7 +3528,7 @@ export function createPlugin() {
         await runPriceReconcile();
       });
 
-      // --- scheduled free-list sync (P2) ---------------------------
+      // --- scheduled free-list sync ( P2) ---------------------------
       //
       // Default-off at every layer: the job returns before any network when
       // no company enables `aaFreeSync`, and per-company diffs are computed
@@ -3721,7 +3831,7 @@ export function createPlugin() {
         },
       );
 
-      // Per-tier lane-poll outcome counters, queryable from agent
+      // . Per-tier lane-poll outcome counters, queryable from agent
       // runs. Read-only: reads the counters the `pollLaneCapacity` job
       // maintains, never touches selection, the ledger, or the roster. No
       // "no report yet" failure — a company whose lanes have never polled
@@ -3779,7 +3889,7 @@ export function createPlugin() {
         },
       );
 
-      // First-party accepted-work posterior report. Read-only: reads
+      // . First-party accepted-work posterior report. Read-only: reads
       // the overlay the `refreshScores` job maintains, never touches selection,
       // the ledger, or the roster. A company that never enabled the producer
       // gets an honest "no overlay yet", not an error — same discipline as the
@@ -3910,7 +4020,7 @@ export function createPlugin() {
             }
 
             const tierByIssue = new Map<string, Tier | null>();
-            // post-hoc cohort coordinates for the accepted-work
+            // : post-hoc cohort coordinates for the accepted-work
             // overlay. Read in the same per-issue pass as the tier label, so
             // the producer adds no extra `issues.get` calls: label names for
             // the `class:` task-class cell, and the pin's `adapterConfig` for
@@ -3955,7 +4065,7 @@ export function createPlugin() {
               return null;
             };
 
-            // `usage_json.costUsd` is the serving CLI's own figure,
+            // : `usage_json.costUsd` is the serving CLI's own figure,
             // and the Claude CLI lane stamps provider=anthropic for every
             // model it serves — so a CLIProxy-served Meta/Devin model lands an
             // Anthropic-priced cost. Drop those observations instead of
@@ -4039,8 +4149,8 @@ export function createPlugin() {
               const live = aaSnapshot.bySlug[slug]?.intelligenceIndex;
               return typeof live === "number" ? live : model.aaIndex;
             };
-            // the  five-benchmark basket, superseding the
-            //  agentic sub-score average. Frozen `benchmark-v1` vectors —
+            // : the  five-benchmark basket, superseding the
+            //  agentic sub-score average. Frozen `benchmark-prior-v1` vectors —
             // three of the five benchmarks are not aa.ai columns at all, and
             // mixing live aa.ai rows with the capture would blend effort levels
             // (see `benchmark-data.ts`). The composite index half stays live.
@@ -4092,7 +4202,7 @@ export function createPlugin() {
                 latestClosingRunByIssue.set(run.issueId, run);
               }
             }
-            // the raw closing-run identity per issue, WITHOUT the
+            // : the raw closing-run identity per issue, WITHOUT the
             // `resolveConfiguredModelId` pre-filter above. The overlay resolves
             // the served model itself — exact roster id or `unknown` — so an
             // alias-ambiguous or unrostered identity lands in the unknown cell
@@ -4159,7 +4269,7 @@ export function createPlugin() {
               blendedListPriceByModel,
             );
 
-            // first-party accepted-work posterior overlay,
+            // : first-party accepted-work posterior overlay,
             // shadow-only. Built from the SAME rows the ledger above already
             // read — no new query, no new `issues.get` calls — and only when
             // the operator enables it. The overlay is stored under its own
@@ -4224,7 +4334,7 @@ export function createPlugin() {
               companyId: company.id,
               models: modelScores.length,
               cardsInLedger: cardRows.length,
-              // runs whose recorded cost was priced against the
+              // : runs whose recorded cost was priced against the
               // wrong provider's table and therefore excluded. Non-zero means
               // the upstream claude-local `provider: "anthropic"` literal is
               // still live; zero means it was fixed or no such runs landed.
@@ -4247,7 +4357,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled LLM tier classification (tier_dispatcher.py
+      // --- scheduled LLM tier classification (, tier_dispatcher.py
       // main()) -----------------------------------------------------------
       // For every open, agent-assigned issue with no per-issue override, no
       // `pin:operator`, and no running/queued run, classify it with the RUBRIC
@@ -4263,7 +4373,7 @@ export function createPlugin() {
       // is re-examined and replaced. `classification.reclassifyForeignLabels:
       // false` is the one-key rollback to the old unconditional skip.
       ctx.jobs.register(JOB_KEYS.classifyIssues, async () => {
-        // ONE budget for the whole firing. A per-company budget
+        // : ONE budget for the whole firing. A per-company budget
         // multiplied the 200 s by the company count while the host's 300 s
         // `runJob` wall covers the firing, not a company.
         const classifyJobStartedAt = Date.now();
@@ -4307,7 +4417,7 @@ export function createPlugin() {
             // (PLUGIN_DATABASE_CORE_READ_TABLES), so label/pin state is read via
             // `ctx.issues.get()` per row below rather than a live SQL join.
             //
-            // over-fetch. Because every label-based skip happens
+            // : over-fetch. Because every label-based skip happens
             // per-row AFTER this query, a `limit batchSize` returns the same
             // top-N skipped rows on every run and never reaches row N+1. The
             // walk below stops at `batchSize` actual classifications instead.
@@ -4315,7 +4425,7 @@ export function createPlugin() {
               config.classification.batchSize * CLASSIFY_FETCH_MULTIPLIER,
               CLASSIFY_FETCH_LIMIT_MAX,
             );
-            // incremental scan — only issues updated since this
+            // : incremental scan — only issues updated since this
             // pass's own watermark. A bare `updated_at` predicate on the
             // existing row query: strictly fewer rows than before, same shape.
             const classifyFiringStartMs = Date.now();
@@ -4347,7 +4457,7 @@ export function createPlugin() {
               [company.id, String(classifyFetchLimit), classifySinceIso],
             )) as unknown[];
             if (candidateRows.length === 0) {
-              // the observable skip — nothing changed since the
+              // : the observable skip — nothing changed since the
               // watermark, so the firing costs one row query and zero
               // per-candidate reads. Logger only, never activity: a skip is
               // routine, not a state change.
@@ -4363,7 +4473,7 @@ export function createPlugin() {
             const classifierLabeled = await readClassifierLabeled(company.id);
             let classified = 0;
             let reclassified = 0;
-            // the shared hard-return walk (`row-walk.ts`) — a
+            // : the shared hard-return walk (`row-walk.ts`) — a
             // classify row (`ctx.issues.get` plus the classifier HTTP call)
             // pays the same contended host-RPC cost as an advise row, and
             // this pass hit 288 s max over the last 4 h. The WHOLE row body
@@ -4399,7 +4509,7 @@ export function createPlugin() {
                 // alone" — unchanged, and checked before anything else.
                 if (labelNames.includes(OPERATOR_PIN_LABEL)) return "settled";
 
-                // An existing tier:* label used to end the candidate
+                // . An existing tier:* label used to end the candidate
                 // here unconditionally, which made classification a one-shot
                 // stamp. Measured 2026-09-17: 120 of 126 eligible open cards
                 // carried one, 97% of them agent self-assessments rather than
@@ -4421,7 +4531,7 @@ export function createPlugin() {
                 // wrongly calling it ours just leaves the card on the tier we
                 // ourselves assigned. So a disagreement resolves to "ours".
                 const existingLabelTier = tierFromLabels(labelNames);
-                // the classifier cannot emit T0, so re-classifying a
+                // : the classifier cannot emit T0, so re-classifying a
                 // `tier:T0` label would only ever DROP an explicit opt-in.
                 if (existingLabelTier === "T0") return "settled";
                 const ourRecordedTier = classifierLabeled[issueId];
@@ -4470,7 +4580,7 @@ export function createPlugin() {
                   t3ConfidenceFloor: config.classification.t3ConfidenceFloor,
                   t2ConfidenceFloor: config.classification.t2ConfidenceFloor,
                 });
-                void pickTier; // consumed by the apply-sweep (task #6/#7), not this job
+                void pickTier; // consumed by the apply-sweep ( task #6/#7), not this job
 
                 //  write gate: the host fires at 300 s regardless, so
                 // a write with no budget left — or after burning more than the
@@ -4490,7 +4600,7 @@ export function createPlugin() {
 
                 const labelId = config.tierLabelIds[labelTier];
                 if (labelId) {
-                  // adding is only correct when there was no tier label
+                  // : adding is only correct when there was no tier label
                   // to begin with. Replacing a foreign one means DROPPING it —
                   // leaving both would be a two-tier card, and `tierFromLabels`
                   // resolves that by taking the most capable, so an additive
@@ -4604,7 +4714,7 @@ export function createPlugin() {
       };
 
       /**
-       * incremental-scan watermarks. Each router pass reads only
+       * : incremental-scan watermarks. Each router pass reads only
        * issues updated since its own mark and advances the mark past what it
        * scanned. Three fail-open rules keep a broken clock from starving a
        * pass:
@@ -4612,7 +4722,7 @@ export function createPlugin() {
        *   - an unreadable or unparseable mark reads as epoch (full scan);
        *   - the mark advances to the firing start only when the fetch did NOT
        *     hit its row limit (drained) and every row was settled; otherwise
-       *     it is a cursor past the settled prefix (
+       *     it is a cursor past the settled prefix (,
        *     `scanMarkAfterWalk`), so unreached and unsettled rows stay
        *     visible next firing;
        *   - rows without a parseable `updated_at` never move the mark.
@@ -4653,7 +4763,7 @@ export function createPlugin() {
       };
 
       /**
-       * the pin lifecycle's only clock. Pins carry no timestamp
+       * : the pin lifecycle's only clock. Pins carry no timestamp
        * (`adapterConfig.model` is a bare string) and `issues.updated_at`
        * moves on any comment, so this `issueId -> pinnedAt ISO` map —
        * written on every pin and clear, read by the repin pass — is what
@@ -4676,7 +4786,7 @@ export function createPlugin() {
       };
 
       /**
-       * a pin older than PIN_MAX_AGE_MS must be re-validated
+       * : a pin older than PIN_MAX_AGE_MS must be re-validated
        * through `advise` even when the pinned lane still reads usable.
        * Missing entry = expired: fail-safe toward re-validation, never
        * toward keeping a pin whose age we cannot prove.
@@ -4690,7 +4800,7 @@ export function createPlugin() {
       };
 
       /**
-       * stamp the lifecycle clock after a pin lands, or remove
+       * : stamp the lifecycle clock after a pin lands, or remove
        * the entry when the pin is cleared. Bounded like the
        * `maybeLogUnpinnableCard` throttle map: entries older than a week
        * can never make a pin look FRESH again, so drop them on write.
@@ -4720,7 +4830,7 @@ export function createPlugin() {
        *  ( §7 item 4). The fallback lease's bookkeeping.
        * A pin on a `fallbackOnly` model carries a provenance stamp in its
        * override env (`PIN_PROVENANCE_ENV_KEY`), and this index of stamped
-       * issue ids lets the lease pass visit only those issues ().
+       * issue ids lets the lease pass visit only those issues.
        * The stamp is the authority; the index is a pointer to it, and an
        * entry whose `decisionId` no longer matches the issue's stamp is
        * dropped on its next visit.
@@ -4805,7 +4915,7 @@ export function createPlugin() {
       };
 
       /**
-       * Whether the creation-time pin may write this card's
+       * . Whether the creation-time pin may write this card's
        * override right now.
        *
        * The classifier and `advise` are slower than the assignment wake's
@@ -4848,7 +4958,7 @@ export function createPlugin() {
       };
 
       /**
-       * The creation pin's final fail-closed read: the same
+       * . The creation pin's final fail-closed read: the same
        * status/operator/pin checks as `balanceWriteStillSafe`, but the
        * run-attachment check goes through `pinnableBeforeStart` so the
        * assignment wake's already-queued run does not veto its own pin.
@@ -4886,7 +4996,7 @@ export function createPlugin() {
        * as pinned — only the env under it moves.
        *
        * Rebuild from the new assignee's env when the pin can be rewritten
-       * before the next run starts (`pinnableBeforeStart`), so the
+       * before the next run starts (`pinnableBeforeStart`, ), so the
        * context ceiling and sub-call keys follow the pin. Otherwise (run
        * already started, operator pin, closed card, unknown assignee env, a
        * pin outside the roster, or classification off) drop the env and keep
@@ -4908,7 +5018,7 @@ export function createPlugin() {
         const rawPinnedModelId = typeof adapterConfig.model === "string" ? adapterConfig.model : null;
 
         const config = await companyConfig(companyId);
-        // the re-home is an override write like any other, so it
+        // : the re-home is an override write like any other, so it
         // takes the same single gate as the five scheduled/event pin sites.
         // Advisory installs log the re-home and write nothing — the previous
         // assignee's env stays until enforcement (or the  repair
@@ -4958,7 +5068,7 @@ export function createPlugin() {
             freshModel === adapterConfig.model &&
             (await pinnableBeforeStart(companyId, issueId))
           ) {
-            // advisory installs decide and report; they pin
+            // : advisory installs decide and report; they pin
             // nothing — including here, on the rebuild.
             if (writesAllowed) {
               await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
@@ -4998,7 +5108,7 @@ export function createPlugin() {
         delete keptAdapterConfig.env;
         delete overrides.adapterConfig;
         if (Object.keys(keptAdapterConfig).length > 0) overrides.adapterConfig = keptAdapterConfig;
-        // the clear mutates the override exactly like a repin, so
+        // : the clear mutates the override exactly like a repin, so
         // it is gated too — there is deliberately no hygiene exception (see
         // selectionWritesAllowed). Advisory installs keep the stale env on
         // paper and log the would-be clear.
@@ -5035,7 +5145,7 @@ export function createPlugin() {
       };
 
       /**
-       * Fail-closed pre-write quarantine re-check. A pass loop can
+       * . Fail-closed pre-write quarantine re-check. A pass loop can
        * run for minutes between its pass-start `readLaneOutage` and any one
        * card's write; an auto-quarantine written in between (the 2026-09-24
        * 15:20:46Z codex quarantine, 28s before a 15:21:14Z repin INTO that
@@ -5151,7 +5261,7 @@ export function createPlugin() {
       };
 
       /**
-       *  (root cause #3, 2026-09-16 16:40Z incident).
+       *  ( root cause #3, 2026-09-16 16:40Z incident).
        * `labelOnlyPass`/`repinPass`/`balancePass` used to gate on
        * `tierFromLabels(...)` alone and `continue` when it returned null — so
        * a card with no tier:* label at all (label inherited-and-cleared,
@@ -5165,11 +5275,11 @@ export function createPlugin() {
        * During a repin, retain that recorded requirement even if its lane is
        * unusable, and let a stronger label supersede a stale weaker pin.
        *
-       * The fallback itself is `tierWithFallback` in `engine/tier.ts` (),
+       * The fallback itself is `tierWithFallback` in `engine/tier.ts`,
        * so the scheduled passes share `selectModel`'s T0 admission boundary and
        * the boundary is unit-testable.
        */
-      // --- scheduled label-only pass (tier_dispatcher.py
+      // --- scheduled label-only pass (, tier_dispatcher.py
       // label_only_pass()) --------------------------------------------------
       // 2026-09-07 01:0xZ owner rule: a card that already carries a tier:*
       // label but no pin (label inherited/copied from a parent card, e.g.
@@ -5181,7 +5291,7 @@ export function createPlugin() {
       // re-classifying.
       ctx.jobs.register(JOB_KEYS.labelOnlyPass, async () => {
         const companies = listKnownCompanies();
-        // the 2026-09-27 incident — this pass fetched 100 rows and
+        // : the 2026-09-27 incident — this pass fetched 100 rows and
         // walked every one with no elapsed-time budget, so a slow board ran
         // past the host's 300 s job RPC wall (two firings hit 300061 ms and
         // 300085 ms while the worker kept walking rows it could never
@@ -5205,12 +5315,12 @@ export function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
-            // retired once run-scoped decisions are live.
+            // : retired once run-scoped decisions are live.
             if (runResolveActive(config)) {
               ctx.logger.info("label-only pass skipped: run-scoped model decisions are live", { companyId: company.id });
               continue;
             }
-            // advisory installs walk the same rows and log the
+            // : advisory installs walk the same rows and log the
             // same decisions, but write no override.
             const writesAllowed = selectionWritesAllowed(config);
             const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
@@ -5220,7 +5330,7 @@ export function createPlugin() {
             // "has no override" candidates here, and confirms the tier:*
             // label (and absence of pin:operator) per row via
             // `ctx.issues.get()` below, exactly like `describeIssue` does.
-            // incremental scan on this pass's own watermark.
+            // : incremental scan on this pass's own watermark.
             const labelOnlyFiringStartMs = Date.now();
             const labelOnlySinceIso = new Date(
               await readScanMark(company.id, PLUGIN_STATE_KEYS.labelOnlyLastScanAt),
@@ -5261,7 +5371,7 @@ export function createPlugin() {
               continue;
             }
 
-            // Read fresh, right before the floor-equality check
+            // . Read fresh, right before the floor-equality check
             // below — not reused from `advise()`'s own internal read — so a
             // lane that went bad between that internal read and this pass's
             // write decision is still caught.
@@ -5270,7 +5380,7 @@ export function createPlugin() {
             const modelScores = await readModelScores(company.id);
             const nowIso = new Date().toISOString();
 
-            // One memo per company per pass: `advise` re-describes
+            // . One memo per company per pass: `advise` re-describes
             // the rows that survive the cheap rejections, and without this it
             // would repeat their `heartbeat_runs` read.
             const contextUsageCache: ContextUsageCache = new Map();
@@ -5303,7 +5413,7 @@ export function createPlugin() {
                 const described = await describeIssue(company.id, issueId, {}, contextUsageCache);
                 if (!described) return "settled";
                 if (described.hasOperatorPin) return "settled";
-                // backstop for the `assignee_user_id is null`
+                // : backstop for the `assignee_user_id is null`
                 // predicate above — a user-assigned card rejects issues.update
                 // with an agent override ("Issue can only have one assignee").
                 if (described.assigneeUserId) return "settled";
@@ -5333,7 +5443,7 @@ export function createPlugin() {
                     nowIso,
                   )
                 ) {
-                  // elide only while the floor is actually serviceable.
+                  // : elide only while the floor is actually serviceable.
                   // An implicit NULL-override pin to a dead-lane floor is exactly
                   // the invariant violation this pass exists to close, and a
                   // NULL override is invisible to `repinPass` going forward.
@@ -5366,7 +5476,7 @@ export function createPlugin() {
                   });
                   return "unsettled";
                 }
-                // the label-only pass previously wrote whatever
+                // : the label-only pass previously wrote whatever
                 // `advise()` returned with no re-check — a quarantine landing
                 // between select and write pinned straight into a dead lane.
                 // Write branch only (an advisory install writes nothing); an
@@ -5388,7 +5498,7 @@ export function createPlugin() {
                 if (Date.now() >= deadlineAt || Date.now() - rowStartedAt >= LABEL_ONLY_PASS_ROW_TIMEOUT_MS) {
                   return "unsettled";
                 }
-                // one bad card must not abort the pass (and skip the
+                // : one bad card must not abort the pass (and skip the
                 // scan-mark advance below, re-hitting the same card forever).
                 if (writesAllowed) {
                   try {
@@ -5400,7 +5510,7 @@ export function createPlugin() {
                       agentAdapterType: described.agentAdapterType,
                       agentAdapterConfig: described.agentAdapterConfig,
                       existingOverrideEnv: described.existingOverrideEnv,
-                      // haiku-class sub-call keys follow the cheapest
+                      // : haiku-class sub-call keys follow the cheapest
                       // healthy T3 pick (falls back to the pin when none).
                       cheapModelId: result.ancillaryModelId,
                       provenance: fallbackPinProvenance(selectedModel, described.assigneeAgentId),
@@ -5481,7 +5591,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled repin pass (tier_dispatcher.py repin_pass()) --
+      // --- scheduled repin pass (, tier_dispatcher.py repin_pass()) --
       // Idle issues pinned to a model whose lane is now unusable, or that has
       // been measurably demoted for their tier, get re-pinned within the same
       // tier. Capped at REPIN_PASS_WRITE_LIMIT writes per run, same as the
@@ -5495,7 +5605,7 @@ export function createPlugin() {
        * rejects a run, instead of waiting out the remainder of the
        * ten-minute cron. There is exactly one repin rule and it lives here.
        *
-       * the scheduled job passes its incremental watermark
+       * : the scheduled job passes its incremental watermark
        * (`sinceIso` + `firingStartMs`) so the scan covers only issues updated
        * since the last firing, plus the firing's  `deadlineAt`. The
        * reactive `agent.run.failed` caller passes none of it — a lane
@@ -5514,15 +5624,15 @@ export function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };
-            // the repin passes (scheduled and `agent.run.failed`)
+            // : the repin passes (scheduled and `agent.run.failed`)
             // are retired once run-scoped decisions are live: capacity is read
             // at the next run boundary instead.
             if (runResolveActive(config)) return { repinned: 0, budgetExhausted: false, slowestRowMs: repinSlowestRowMs };
-            // advisory installs walk the same rows and log the
+            // : advisory installs walk the same rows and log the
             // same decisions, but write no override.
             const writesAllowed = selectionWritesAllowed(config);
             const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
-            // this pass had NO job budget — it walked up to 400
+            // : this pass had NO job budget — it walked up to 400
             // fetched rows bounded only by the 6-write cap, and failed 2/24
             // firings at 301 s over the last 4 h. The scheduled caller passes
             // the firing's deadline (200 s beneath the host's 300 s wall);
@@ -5569,16 +5679,16 @@ export function createPlugin() {
             const modelScores = await readModelScores(company.id);
             const nowIso = new Date().toISOString();
             const nowMs = Date.parse(nowIso);
-            // the pin lifecycle's clock, read once per pass.
+            // : the pin lifecycle's clock, read once per pass.
             const pinPinnedAt = await readPinPinnedAt(company.id);
 
-            // One memo per company per pass: `advise` re-describes
+            // . One memo per company per pass: `advise` re-describes
             // the rows that survive the cheap rejections, and without this it
             // would repeat their `heartbeat_runs` read.
             const contextUsageCache: ContextUsageCache = new Map();
 
             let repinned = 0;
-            // the write gate. A row whose own host calls consumed
+            // : the write gate. A row whose own host calls consumed
             // the budget — or burned more than its own row slice, same
             // per-row-slice half as the label-only and balance gates —
             // commits no mutation past the deadline: the orphaned-write half
@@ -5589,7 +5699,7 @@ export function createPlugin() {
             const rowSliceSpent = (rowStartedAt: number): boolean =>
               repinDeadlineAt !== null &&
               (Date.now() >= repinDeadlineAt || Date.now() - rowStartedAt >= REPIN_PASS_ROW_TIMEOUT_MS);
-            // the shared hard-return walk (`row-walk.ts`). The
+            // : the shared hard-return walk (`row-walk.ts`). The
             // WHOLE row body — describe, the clear-on-blocked write, the
             // context measurement and the advise — races the remaining
             // budget; `deadlineAt: null` (reactive path) walks unbounded.
@@ -5630,7 +5740,7 @@ export function createPlugin() {
                     });
                     return "unsettled";
                   }
-                  // clearing a pin mutates a selection variable like
+                  // : clearing a pin mutates a selection variable like
                   // any other write — advisory reports it without doing it.
                   if (writesAllowed) {
                     await ctx.issues.update(
@@ -5673,7 +5783,7 @@ export function createPlugin() {
                 // applies, so expiry can only ever re-affirm or move the pin,
                 // never blank it.
                 const pinExpired = isPinExpired(pinPinnedAt, issueId, nowMs);
-                // a usable fallback-only pin must not ride the
+                // : a usable fallback-only pin must not ride the
                 // usability `return` below forever. While every normal lane
                 // is down the fallback is the right place to be (and holding
                 // it costs zero advise calls); once any non-fallback model is
@@ -5750,7 +5860,7 @@ export function createPlugin() {
                 //  P2: candidate-carrying recovery (see the apply path).
                 const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                 if (!selectedModel) return "settled";
-                // recovery moves back to a normal lane, never
+                // : recovery moves back to a normal lane, never
                 // sideways to another fallback-only row — that churn buys no
                 // recovery. Re-stamp an expired pin so the sideways case does
                 // not re-pay advise on every pass, mirroring the same-model
@@ -5777,10 +5887,10 @@ export function createPlugin() {
                 //  (#457, merged): final write-safety re-read — the
                 // pin must still be safe after the row's own host calls.
                 if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) return "settled";
-                // the write needs enforcement; the decision and its
+                // : the write needs enforcement; the decision and its
                 // log do not.
                 if (writesAllowed) {
-                  // the decision above was computed on snapshots read
+                  // : the decision above was computed on snapshots read
                   // up to a full pass-loop ago; refuse to land it on a lane a
                   // quarantine written since has taken out. Write branch only,
                   // and an unwritten row remains retryable, never re-pinned.
@@ -5880,7 +5990,7 @@ export function createPlugin() {
        * for up to a day after its primary comes back. This pass re-decides a
        * stamped fallback pin as soon as some regular model for its tier is
        * serviceable again, and touches nothing else: it walks only the
-       * stamped-issue index (never all open issues), examines at
+       * stamped-issue index (never all open issues, ), examines at
        * most `FALLBACK_LEASE_EXAMINE_LIMIT` entries, least recently checked
        * first, and writes at most `FALLBACK_LEASE_WRITE_LIMIT` pins.
        *
@@ -5896,7 +6006,7 @@ export function createPlugin() {
           if (indexed.length === 0) return 0;
           const config = await companyConfig(companyId);
           if (!config.classification.enabled) return 0;
-          // the lease release re-pins the card off the fallback,
+          // : the lease release re-pins the card off the fallback,
           // so it takes the same single gate as every other override write.
           // Advisory installs walk the index and log the release; the lease
           // holds (the pin and its index entry stay, the visit is recorded).
@@ -5979,7 +6089,7 @@ export function createPlugin() {
               cheapModelId: result.ancillaryModelId,
               provenance: null,
             });
-            // `advise` already refuses advisory decisions for
+            // : `advise` already refuses advisory decisions for
             // writes that flow through `planApply`; this pass writes
             // directly, so it honors the same gate here. The index entry is
             // dropped only with the write: an unwritten release keeps the
@@ -6038,7 +6148,7 @@ export function createPlugin() {
       };
 
       ctx.jobs.register(JOB_KEYS.repinPass, async () => {
-        // ONE budget for the whole firing — the host's 300 s
+        // : ONE budget for the whole firing — the host's 300 s
         // `runJob` wall covers the firing, not a company.
         const jobStartedAt = Date.now();
         const deadlineAt = jobStartedAt + REPIN_PASS_JOB_BUDGET_MS;
@@ -6052,14 +6162,14 @@ export function createPlugin() {
             });
             break;
           }
-          // the scheduled firing scans incrementally; the reactive
+          // : the scheduled firing scans incrementally; the reactive
           // `agent.run.failed` caller below passes no cursor (full sweep).
           const firingStartMs = Date.now();
           const sinceIso = new Date(await readScanMark(company.id, PLUGIN_STATE_KEYS.repinLastScanAt)).toISOString();
           const sweep = await runRepinPassForCompany(company.id, { sinceIso, firingStartMs, deadlineAt, slowestRowMs });
           slowestRowMs = sweep.slowestRowMs;
           if (sweep.budgetExhausted) break;
-          // independent of the incremental scan, which skips a
+          // : independent of the incremental scan, which skips a
           // firing when no issue changed; a lane recovering changes no issue.
           await runFallbackLeasePass(company.id);
         }
@@ -6113,7 +6223,7 @@ export function createPlugin() {
         try {
           await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
         } catch (cause) {
-          // a card with a user assignee rejects an agent override.
+          // : a card with a user assignee rejects an agent override.
           ctx.logger.warn("pin env repair write rejected", {
             companyId,
             issueId,
@@ -6167,7 +6277,7 @@ export function createPlugin() {
         }
         if (config.models.length === 0) return;
 
-        // A binding refusal is never a lane-capacity verdict, so it
+        // . A binding refusal is never a lane-capacity verdict, so it
         // takes its own path and skips the lane read below entirely.
         if (payload.errorCode === "configuration_incomplete") {
           if (issueId) {
@@ -6248,7 +6358,7 @@ export function createPlugin() {
         ctx.logger.info("lane quarantine repin complete", { companyId, laneId: verdict.laneId, repinned });
       });
 
-      // --- scheduled balance pass (tier_dispatcher.py
+      // --- scheduled balance pass (, tier_dispatcher.py
       // balance_pass()) ------------------------------------------------------
       // Owner rule 2026-09-05 23:05Z (spread across all accounts): idle cards
       // that carry a tier label but no override were left on the floor by the
@@ -6262,7 +6372,7 @@ export function createPlugin() {
         const companies = listKnownCompanies();
         const jobStartedAt = Date.now();
         const deadlineAt = jobStartedAt + BALANCE_PASS_JOB_BUDGET_MS;
-        // admission is 1.5x the slowest row of the FIRING, so the
+        // : admission is 1.5x the slowest row of the FIRING, so the
         // slowest row carries from one company's walk into the next.
         let slowestRowMs = 0;
         for (const company of companies) {
@@ -6278,17 +6388,17 @@ export function createPlugin() {
           try {
             const config = await companyConfig(company.id);
             if (!config.classification.enabled) continue;
-            // retired once run-scoped decisions are live.
+            // : retired once run-scoped decisions are live.
             if (runResolveActive(config)) {
               ctx.logger.info("balance pass skipped: run-scoped model decisions are live", { companyId: company.id });
               continue;
             }
-            // advisory installs walk the same rows and log the
+            // : advisory installs walk the same rows and log the
             // same decisions, but write no override.
             const writesAllowed = selectionWritesAllowed(config);
             const advisorySuffix = writesAllowed ? "" : " — advisory, nothing written";
 
-            // incremental gate — one aggregate row before the page
+            // : incremental gate — one aggregate row before the page
             // fetch. When nothing in the candidate statuses changed since the
             // last scan, the whole per-row cycle (describe + advise per card)
             // is skipped. The keyset id-cycle below is untouched: a skip
@@ -6369,7 +6479,7 @@ export function createPlugin() {
             const nowIso = new Date().toISOString();
             const now = Date.now();
 
-            // One memo per company per pass: `advise` re-describes
+            // . One memo per company per pass: `advise` re-describes
             // the rows that survive the cheap rejections, and without this it
             // would repeat their `heartbeat_runs` read.
             const contextUsageCache: ContextUsageCache = new Map();
@@ -6386,7 +6496,7 @@ export function createPlugin() {
             let pacePullZaiMargin: number | null = null;
             const pacePullFreeSlots = new Map<string, number>();
             const pacePullMoved = new Map<string, number>();
-            // the whole row body runs inside the shared walk
+            // : the whole row body runs inside the shared walk
             // (`row-walk.ts`) — adaptive admission (remaining budget must
             // cover the fixed slice AND 1.5x the slowest row this firing), a
             // HARD RETURN racing every host call of the row (describe,
@@ -6410,7 +6520,7 @@ export function createPlugin() {
                 if (!balanceOpenStatuses.has(described.status)) return "settled";
                 if (!described.isIdle) return "settled";
                 if (described.hasOperatorPin) return "settled";
-                // backstop for the `assignee_user_id is null`
+                // : backstop for the `assignee_user_id is null`
                 // predicate above — a user-assigned card rejects issues.update
                 // with an agent override ("Issue can only have one assignee").
                 if (described.assigneeUserId) return "settled";
@@ -6418,7 +6528,7 @@ export function createPlugin() {
                 const labelTier = tierFromLabels(described.descriptor.labelNames);
                 const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
                 const pinnedModel = pinnedModelId ? config.models.find((m) => m.id === pinnedModelId) : undefined;
-                // the unpinned branch below force-pins T1 for a
+                // : the unpinned branch below force-pins T1 for a
                 // *recorded* former-exclusion judgement (an explicit tier:*
                 // label with no pin yet) — that is a floor-lift, not a
                 // rebalance, and must stay gated on an actual label rather than
@@ -6452,7 +6562,7 @@ export function createPlugin() {
                   if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
                   if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
                   if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) return "settled";
-                  // A card whose pin is already correct but whose
+                  // . A card whose pin is already correct but whose
                   // sub-call env is frozen on a dead lane must still be written.
                   // This is checked BEFORE the same-model short-circuit below,
                   // not alongside cheaper/incapable/busier: those are all
@@ -6593,7 +6703,7 @@ export function createPlugin() {
                   const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                   if (!selectedModel) return "settled";
 
-                  // 2026-09-17 08:10:14Z this pass moved  off
+                  // . 2026-09-17 08:10:14Z this pass moved  off
                   // `claude-haiku-4-5-20251001` (the only healthy T3 lane) onto
                   // `deepseek-v4-flash` (0/3) for `cost-down`, and did the same to
                   // seven more cards in eleven hours. `selectModel` now excludes a
@@ -6634,15 +6744,15 @@ export function createPlugin() {
                   }
                   if (!(await balanceWriteStillSafe(company.id, issueId, pinnedModelId, config.models))) return "settled";
                   if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(tier);
-                  // one bad card must not abort the pass (and skip
+                  // : one bad card must not abort the pass (and skip
                   // the cursor/scan-mark writes below, re-hitting the same
                   // card forever).
-                  // the write needs enforcement — including the
+                  // : the write needs enforcement — including the
                   // env-evacuation, which mutates the override like any repin.
                   // The decision and its log do not.
                   if (writesAllowed) {
                     try {
-                      // `balanceWriteStillSafe` guards the pin
+                      // : `balanceWriteStillSafe` guards the pin
                       // expectation, not a quarantine that landed after select.
                       // Write branch only; an unwritten row remains retryable
                       // and never counts as balanced or against the pace-pull cap.
@@ -6664,7 +6774,7 @@ export function createPlugin() {
                         agentAdapterType: result.agentAdapterType,
                         agentAdapterConfig: result.agentAdapterConfig,
                         existingOverrideEnv: result.existingOverrideEnv,
-                        // haiku-class sub-call keys follow the
+                        // : haiku-class sub-call keys follow the
                         // cheapest healthy T3 pick (falls back to the pin).
                         cheapModelId: result.ancillaryModelId,
                         provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
@@ -6720,7 +6830,7 @@ export function createPlugin() {
                       ...(writesAllowed ? {} : { advisory: true, written: false }),
                     },
                   });
-                  // a shadow install writes nothing, so neither the
+                  // : a shadow install writes nothing, so neither the
                   // pass counter nor the per-lane pace-pull cap may count it.
                   if (writesAllowed) {
                     balanced += 1;
@@ -6738,7 +6848,7 @@ export function createPlugin() {
                 // T1-class pin instead of leaving it on the agent floor.
                 // `pick("T1", floor)` in Python — always T1, never this row's
                 // own tier label.
-                // an explicit `tier:T0` card is never pinned DOWN to T1.
+                // : an explicit `tier:T0` card is never pinned DOWN to T1.
                 const balancedTier: Tier = labelTier === "T0" ? "T0" : "T1";
                 const result = await advise(company.id, { issueId }, false, balancedTier, false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
@@ -6751,7 +6861,7 @@ export function createPlugin() {
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
                 if (result.pinnedModelId !== null) return "settled";
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-                // only elide onto the implicit NULL-override floor
+                // : only elide onto the implicit NULL-override floor
                 // pin while that floor's own lane is serviceable right now —
                 // otherwise write the explicit pin `result.decision.modelId`
                 // already resolved to, same as `floorModelId` in that case,
@@ -6775,11 +6885,11 @@ export function createPlugin() {
                 if (!selectedModel) return "settled";
                 if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) return "settled";
                 if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(balancedTier);
-                // same per-issue isolation as the pinned branch.
-                // this branch's write is gated like the pinned one.
+                // : same per-issue isolation as the pinned branch.
+                // : this branch's write is gated like the pinned one.
                 if (writesAllowed) {
                   try {
-                    // same pre-write quarantine re-check as the pinned
+                    // : same pre-write quarantine re-check as the pinned
                     // branch above.
                     if (config.pacing.mode !== "off" && !(await writeStillSafeFromQuarantine(company.id, selectedModel))) {
                       ctx.logger.info("balance pass skipped: quarantine landed on the selected lane after select", {
@@ -6799,7 +6909,7 @@ export function createPlugin() {
                       agentAdapterType: result.agentAdapterType,
                       agentAdapterConfig: result.agentAdapterConfig,
                       existingOverrideEnv: result.existingOverrideEnv,
-                      // haiku-class sub-call keys follow the
+                      // : haiku-class sub-call keys follow the
                       // cheapest healthy T3 pick (falls back to the pin).
                       cheapModelId: result.ancillaryModelId,
                       provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
@@ -6832,7 +6942,7 @@ export function createPlugin() {
                   //  P2: the served leg of the v2 identity (null on legacy).
                   metadata: { from: floorModelId, modelId: result.decision.modelId, tier: balancedTier, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
                 });
-                // a shadow install writes nothing, so the pass
+                // : a shadow install writes nothing, so the pass
                 // counter must not count it.
                 if (writesAllowed) balanced += 1;
                 return balanced >= BALANCE_PASS_WRITE_LIMIT ? "stop" : "settled";
@@ -6848,7 +6958,7 @@ export function createPlugin() {
               });
             }
 
-            // the id cursor passes every EXAMINED row (an
+            // : the id cursor passes every EXAMINED row (an
             // unsettled one included — the cycle re-reads it on wrap) and
             // stops before an abandoned or unreached one, so a row the timer
             // abandoned is the first row of the next firing, not skipped.
@@ -6868,7 +6978,7 @@ export function createPlugin() {
               ...(retryPending ? { retryPending: true } : {}),
               ...(!cycleComplete && unsettledInCycle ? { unsettledInCycle: true } : {}),
             });
-            // the id-cycle cursor above preserves position; the
+            // : the id-cycle cursor above preserves position; the
             // scan mark records that this firing SAW the board, so the next
             // firing's aggregate gate can skip a quiet board. :
             // written only when the cycle completes — a mark written mid-cycle
@@ -6903,7 +7013,7 @@ export function createPlugin() {
         }
       });
 
-      // --- scheduled dispatch sweep (absorption of the standalone
+      // --- scheduled dispatch sweep ( absorption of the standalone
       // `dispatch` plugin, /) -----------------------------------
       // Ported wholesale, not reimplemented: `dispatch-selection.ts` carries
       // the ADR 0001/0003/0004/Q2/Q5 owner decisions as comments, and this job
@@ -6911,7 +7021,7 @@ export function createPlugin() {
       // ran, so the `plugins` table shows one dispatcher instead of two.
       ctx.jobs.register(JOB_KEYS.dispatchSweep, async (job) => {
         const companies = listKnownCompanies();
-        // cooperative deadline mirroring the classify/balance
+        // : cooperative deadline mirroring the classify/balance
         // passes — stop starting new work with a full minute left before
         // the host's 300 s job RPC wall. Partial firings still emit their
         // metrics/summary with a partial-coverage note below.
@@ -6976,7 +7086,7 @@ export function createPlugin() {
 
             const assigned = nonTerminal.filter((issue) => issue.assigneeAgentId);
             const population: DispatchPopulationEntry[] = [];
-            // assignees with a running/queued run seen in this
+            // : assignees with a running/queued run seen in this
             // firing's orchestration reads. Union'd with the firing-wide
             // `agent_id` query below — an agent is busy if EITHER source says
             // so. A run on an unreadable or terminal card still keeps its
@@ -6985,7 +7095,7 @@ export function createPlugin() {
             let unreadable = 0;
             let budgetExhausted = false;
             let budgetStopLogged = false;
-            // one warn per partial company firing — later
+            // : one warn per partial company firing — later
             // checkpoints still break, but only the first logs.
             const stopOnBudget = (extra: Record<string, unknown>): boolean => {
               if (Date.now() < deadlineAt) return false;
@@ -7015,7 +7125,7 @@ export function createPlugin() {
                 population.push({ issue });
                 continue;
               }
-              // the row already answers the descriptor and
+              // : the row already answers the descriptor and
               // monitor rails — skip both per-issue RPCs for cards
               // `classifyIssue` will refuse on row data alone. This is a
               // pure RPC saving, not a policy change: classification
@@ -7030,7 +7140,7 @@ export function createPlugin() {
                   companyId: company.id,
                 });
                 const relation = orchestration.relations[issue.id];
-                // re-check the cooperative deadline between the
+                // : re-check the cooperative deadline between the
                 // two per-issue RPCs. The top-of-loop checkpoint passed
                 // before `getOrchestration`, which can itself outlast the
                 // budget — without this, `listInteractions` still fires
@@ -7045,7 +7155,7 @@ export function createPlugin() {
                 ) {
                   break;
                 }
-                // neither a future monitor check nor a pending
+                // : neither a future monitor check nor a pending
                 // interaction is on the orchestration summary — a monitor
                 // wake and a human-only ask are both invisible to
                 // getOrchestration, which is exactly how  and
@@ -7058,7 +7168,7 @@ export function createPlugin() {
                   startedAt: r.startedAt,
                   createdAt: r.createdAt,
                 }));
-                // an active run scoped to this card keeps its
+                // : an active run scoped to this card keeps its
                 // assignee busy even if the firing-wide `agent_id` query
                 // misses it — union'd into `busyAssignees` below.
                 if (
@@ -7094,7 +7204,7 @@ export function createPlugin() {
               notes.push(`${unreadable} assigned issues could not be read and are excluded from selection`);
             }
 
-            // firing-wide agent busyness. The orchestration union
+            // : firing-wide agent busyness. The orchestration union
             // above sees runs on gathered cards; this query sees runs
             // ANYWHERE (terminal/unreadable cards included). One indexed
             // `(company_id, status)` scan per firing, not per issue.
@@ -7128,12 +7238,12 @@ export function createPlugin() {
               if (assignee && !busyAssignees.has(assignee)) idleAssignees.add(assignee);
             }
 
-            // lane-down gate, read once per firing. Three signals,
+            // : lane-down gate, read once per firing. Three signals,
             // OR'd: the pace-ledger hard stop (a measured exhaustion), the
-            // operator outage override (quarantine), and the
+            // operator outage override ( quarantine), and the
             // collector availability snapshot's `unavailable` state. UNKNOWN
             // availability never gates — fail-neutral, a broken instrument
-            // must not take dispatch down (policy).
+            // must not take dispatch down ( policy).
             const laneLedger = await readLaneLedger(company.id);
             const laneOutageOverride = await readLaneOutage(company.id);
             const availability = await readAvailability(company.id, sweepNowMs);
@@ -7152,7 +7262,7 @@ export function createPlugin() {
               return unavailableLanes.has(laneId);
             };
 
-            // the lane a wake would run on, from rows already in
+            // : the lane a wake would run on, from rows already in
             // hand — pin model first, agent floor second, unknown last (and
             // unknown stays selectable). Agent rows are fetched once per
             // distinct assignee and cached for the firing; an unreadable
@@ -7250,7 +7360,7 @@ export function createPlugin() {
                   const message = cause instanceof Error ? cause.message : String(cause);
                   const code = wakeFailureCodeFor(message);
                   wakeOutcomes.push({ issueId: pick.issue.id, queued: false, error: { code, message } });
-                  // the plugin_logs half of failure persistence —
+                  // : the plugin_logs half of failure persistence —
                   // code + message on the host log line, matching what lands
                   // in `dispatchLastFiring` via the summary.
                   ctx.logger.error("dispatch sweep: wake failed", {
@@ -7363,7 +7473,7 @@ export function createPlugin() {
      */
     async onConfigChanged(_newConfig, changeContext) {
       const companyId = changeContext?.companyId;
-      // a config save (the flag, the roster, the tier policy) must
+      // : a config save (the flag, the roster, the tier policy) must
       // not wait out the snapshot TTL.
       if (companyId) invalidateRunSnapshot?.(companyId);
       if (!companyId || knownCompanyIds.has(companyId)) return;

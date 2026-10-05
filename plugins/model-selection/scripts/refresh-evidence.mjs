@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Evidence: run one real refreshAaIndex + refreshScores cycle
+//  AC3 evidence: run one real refreshAaIndex + refreshScores cycle
 // against the actual reviewed-roster.json, with a real fetch to aa.ai.
 // Read-only against the live system: uses the in-process test harness, never
 // touches the deployed plugin's runtime state.

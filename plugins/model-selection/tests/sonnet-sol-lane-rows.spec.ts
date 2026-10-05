@@ -9,10 +9,10 @@ import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 
 /**
- * Lane-bound rows for the two bridge models plus the bare-prefix
+ * : lane-bound rows for the two bridge models plus the bare-prefix
  * lane-inference matrix (fixtures only).
  *
- * The rows already live in
+ * Slice of , decomposed from . The rows already live in
  * `config/reviewed-roster.json` (`claude-sonnet-5-5` T2 enabled, `gpt-6.1-sol`
  * T1 enabled); this spec pins that shape field-for-field, proves
  * `assembleAdditiveConfig` binds each row to its lane with nothing unlaned,
@@ -37,10 +37,13 @@ import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
  *   that lane exhausted the hard stop excludes it on the SAME lane the
  *   assembly bound, naming that lane in the rejection.
  *
- * NON-GOALS (owned elsewhere, do not duplicate): the Muse row (tracked
- * separately); the bridge-vs-selector harness (this spec is
- * row-level only); pacing.lanes wiring (rows must assemble laned without it);
- * the enforce path. No roster writes, no pin changes, no enforce flip:
+ * NON-GOALS (owned elsewhere, do not duplicate): Muse row (,
+ * blocked, PR #602 in review ); sonnet+sol rows 
+ * (cancelled — this leaf supersedes that row scope with added
+ * inference-matrix coverage); bridge-vs-selector harness (,
+ * blocked — this card is row-level only); pacing.lanes wiring (,
+ * in_progress — rows must assemble laned without it); enforce path
+ * (, blocked). No roster writes, no pin changes, no enforce flip:
  * `selection.mode` is untouched and every decision here runs without a
  * ledger pace mode, i.e. hard-stop-only admission.
  */
@@ -165,12 +168,12 @@ function decide(models: ModelEntry[], laneLedger: LaneLedger, tier: "T1" | "T2")
     profiles: PROFILES,
     signals: NO_ESCALATION,
     now: NOW,
-    descriptor: { issueId: `ex-14410-${tier.toLowerCase()}`, labelNames: [`tier:${tier}`] },
+    descriptor: { issueId: `-${tier.toLowerCase()}`, labelNames: [`tier:${tier}`] },
     config: config({ models, laneLedger }),
   });
 }
 
-describe("Sonnet-5-5 + 6.1-sol lane-bound rows", () => {
+describe(" sonnet-5-5 + 6.1-sol lane-bound rows", () => {
   it("reviewed roster carries both rows enabled with the pinned shape", () => {
     expect(reviewedRow("claude-sonnet-5-5")).toMatchObject({ ...SONNET_ROW });
     expect(reviewedRow("gpt-6.1-sol")).toMatchObject({ ...SOL_ROW });
@@ -224,7 +227,7 @@ describe("Sonnet-5-5 + 6.1-sol lane-bound rows", () => {
   );
 });
 
-describe("Bare-prefix lane-inference matrix", () => {
+describe(" bare-prefix lane-inference matrix", () => {
   it.each([
     ["claude-sonnet-9", "cliproxy-claude"],
     ["gpt-7-turbo", "cliproxy-codex"],
@@ -261,7 +264,7 @@ describe("Bare-prefix lane-inference matrix", () => {
   });
 });
 
-describe("Row-level select agreement", () => {
+describe(" row-level select agreement", () => {
   it.each([
     ["claude-sonnet-5-5", "T2", "cliproxy-claude", "cliproxy-codex"],
     ["gpt-6.1-sol", "T1", "cliproxy-codex", "cliproxy-claude"],

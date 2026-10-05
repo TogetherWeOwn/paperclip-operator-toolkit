@@ -92,7 +92,7 @@
       "costPerMTokOut": 15,
       "costPerMTokCacheRead": 0.3,
       "aaIndex": null,
-      "note": "2026-10-04 : Claude route for the fleet-quota-balancer PRIMARY choice. Pricing mirrors claude-sonnet-5 (3/15/0.3) as a same-family placeholder pending a confirmed 5-5 meter; unscored (aaIndex null) so tier is retained, never inferred. T2 with a dated carve-out of the 2026-09-08 never-Claude-T2/T3-while-sol/luna rule, which predates the bridge ranking Claude second and forced FALLBACK on T2 work during the Go exhaustion. Pace gates still fail closed: chosen only while a Claude account is fresh, 5h <95% and weekly on-pace.",
+      "note": "2026-10-04 ex-14410: Claude route for the fleet-quota-balancer PRIMARY choice. Pricing mirrors claude-sonnet-5 (3/15/0.3) as a same-family placeholder pending a confirmed 5-5 meter; unscored (aaIndex null) so tier is retained, never inferred. T2 with a dated carve-out of the 2026-09-08 never-Claude-T2/T3-while-sol/luna rule, which predates the bridge ranking Claude second and forced FALLBACK on T2 work during the Go exhaustion. Pace gates still fail closed: chosen only while a Claude account is fresh, 5h <95% and weekly on-pace.",
       "releasedAt": "2026-06-24",
       "fallbackOnly": false,
       "earnIn": null
@@ -153,7 +153,7 @@
       "costPerMTokCacheRead": 0.028,
       "aaIndex": 41,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work | opencode-go fallback-tier policy: $30-tier \u2014 fallbackOnly until Go plan restored",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (/1409/1411/1459) | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $30-tier \u2014 fallbackOnly until Go plan restored",
       "releasedAt": "2026-08-01",
       "fallbackOnly": true,
       "earnIn": null
@@ -194,7 +194,7 @@
       "costPerMTokOut": 20,
       "costPerMTokCacheRead": 0.4,
       "aaIndex": null,
-      "note": "2026-10-04 : Codex route for the fleet-quota-balancer FALLBACK choice (fail-closed default when no Muse headroom and no serviceable Claude account). Pricing mirrors gpt-5.6-sol (4/20/0.4) as a same-family placeholder pending a confirmed 6.1 meter; unscored (aaIndex null) so tier is retained, never inferred. Regular T1 row, NOT fallbackOnly: fallbackOnly is last-resort-after-regular-exhaustion, while the bridge FALLBACK is a serviceable-lane pick that must compete on pace with the other quota lanes. Same-price-family rule applies to the 5.6/6.1 pair once 6.1 pricing is confirmed.",
+      "note": "2026-10-04 ex-14410: Codex route for the fleet-quota-balancer FALLBACK choice (fail-closed default when no Muse headroom and no serviceable Claude account). Pricing mirrors gpt-5.6-sol (4/20/0.4) as a same-family placeholder pending a confirmed 6.1 meter; unscored (aaIndex null) so tier is retained, never inferred. Regular T1 row, NOT fallbackOnly: fallbackOnly is last-resort-after-regular-exhaustion, while the bridge FALLBACK is a serviceable-lane pick that must compete on pace with the other quota lanes. Same-price-family rule applies to the 5.6/6.1 pair once 6.1 pricing is confirmed.",
       "releasedAt": "2026-06-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -252,7 +252,7 @@
       "costPerMTokIn": 1.74,
       "costPerMTokOut": 3.48,
       "costPerMTokCacheRead": 0.145,
-      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work | opencode-go fallback-tier policy: $15-tier \u2014 fallbackOnly until Go plan restored",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (/1409/1411/1459) | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $15-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": 42,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "2026-08-13",
@@ -292,7 +292,7 @@
       "costPerMTokIn": 2,
       "costPerMTokOut": 6,
       "costPerMTokCacheRead": 0.2,
-      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | DISABLED 2026-09-19 : 44/45 calls failed [data_inspection_failed] Alibaba content inspection; lane falls back to deepseek-v4-* set | opencode-go fallback-tier policy: $15-tier \u2014 fallbackOnly until Go plan restored",
+      "note": "opencode-go lane; added 2026-09-06 08:40Z for owner's spread-across-accounts rule; passed direct cliproxy plain+tool-call probe | DISABLED 2026-09-19 ex-3213: 44/45 calls failed [data_inspection_failed] Alibaba content inspection; lane falls back to deepseek-v4-* set | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $15-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": 47,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
@@ -352,7 +352,7 @@
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
-      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work",
+      "note": "2026-09-08 01:25Z operator: T3 only \u2014 4 runs emitted raw DSML tool markup or empty responses on T2 code work (/1409/1411/1459)",
       "aaIndex": 41,
       "aaIndexUpdatedAt": "2026-09-09",
       "releasedAt": "1970-01-01",
@@ -426,7 +426,7 @@
       "costPerMTokIn": 0,
       "costPerMTokOut": 0,
       "costPerMTokCacheRead": 0,
-      "note": "2026-10-03  (MUSE slice of ): subscription Meta route for the fleet-quota-balancer MUSE choice (bridge pins xhigh at the agent row, not here); distinct access path from the disabled Zen -free rows below. T3 by family precedent; unscored (aaIndex null) so tier is retained, never inferred. $0 marginal under quota while under ceiling; pace orders quota lanes, not list price (spend source of record is cost_events). 1,048,576 window per the agent-env cap note.",
+      "note": "2026-10-03 ex-14066 (MUSE slice of ): subscription Meta route for the fleet-quota-balancer MUSE choice (bridge pins xhigh at the agent row, not here); distinct access path from the disabled Zen -free rows below. T3 by family precedent; unscored (aaIndex null) so tier is retained, never inferred. $0 marginal under quota while under ceiling; pace orders quota lanes, not list price (spend source of record is cost_events). 1,048,576 window per the agent-env cap note.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null,
@@ -589,7 +589,7 @@
       "costPerMTokIn": 0.2,
       "costPerMTokOut": 0.4,
       "costPerMTokCacheRead": 0.04,
-      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it |  audit: aaIndex left null, no exact aa.ai v4.3 row distinct from 'Qwen3.8-Flash-Next' (idx 42*); kept existing T3 placement pending eval. | opencode-go fallback-tier policy: $30-tier \u2014 fallbackOnly until Go plan restored",
+      "note": "opencode-go lane; added 2026-09-07 for the owner's maximize-Go-usage rule; est. from Go table: 13,500 req/wk; T3 until the scorer proves it |  audit: aaIndex left null, no exact aa.ai v4.3 row distinct from 'Qwen3.8-Flash-Next' (idx 42*); kept existing T3 placement pending eval. | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $30-tier \u2014 fallbackOnly until Go plan restored",
       "aaIndex": null,
       "releasedAt": "1970-01-01",
       "fallbackOnly": true,
@@ -1136,7 +1136,7 @@
       "costPerMTokCacheRead": 0.14,
       "aaIndex": 42,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.6 Terra (max) idx 42, cost/task 1.40 (cheapest of the Sol/Terra/Luna trio at max effort). Codex-lane sibling of gpt-5.6-sol/luna. Owner flagged this as served+live-in-traffic but untiered \u2014 added at T1 on aa.ai admission floor (idx>=40); pricing estimated from aa.ai cost/task ratio against gpt-5.6-sol pending exact CLIProxy metadata (blocked on ).",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.6 Terra (max) idx 42, cost/task 1.40 (cheapest of the Sol/Terra/Luna trio at max effort). Codex-lane sibling of gpt-5.6-sol/luna. Owner flagged this as served+live-in-traffic but untiered \u2014 added at T1 on aa.ai admission floor (idx>=40); pricing estimated from aa.ai cost/task ratio against gpt-5.6-sol pending exact CLIProxy metadata (blocked on pricing confirmation).",
       "releasedAt": "2026-06-15",
       "fallbackOnly": false,
       "earnIn": null
@@ -1157,7 +1157,7 @@
       "costPerMTokCacheRead": 0.15,
       "aaIndex": 27,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.5 Instant idx 27 (below T1 floor of 40, at/above T3 floor of 27) -> T2 by admission-floor rounding since it clears 27 comfortably above T3-only band and is a full-size model, not an Instant/mini variant confusion; keep conservative pending eval. Pricing estimated pending CLIProxy metadata ( blocked).",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.5 Instant idx 27 (below T1 floor of 40, at/above T3 floor of 27) -> T2 by admission-floor rounding since it clears 27 comfortably above T3-only band and is a full-size model, not an Instant/mini variant confusion; keep conservative pending eval. Pricing estimated pending CLIProxy metadata (pricing-confirmation blocked).",
       "releasedAt": "2026-04-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1177,7 +1177,7 @@
       "costPerMTokCacheRead": 0.05,
       "aaIndex": 33,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.3 Codex (xhigh) idx 33 (below T1/T2 floors of 40/34... actually 33<34 so below T2 floor too) -> T3. Codex-lane spark/mini variant; pricing estimated pending CLIProxy metadata ( blocked).",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: GPT-5.3 Codex (xhigh) idx 33 (below T1/T2 floors of 40/34... actually 33<34 so below T2 floor too) -> T3. Codex-lane spark/mini variant; pricing estimated pending CLIProxy metadata (pricing-confirmation blocked).",
       "releasedAt": "2026-03-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1198,7 +1198,7 @@
       "costPerMTokCacheRead": 0.12,
       "aaIndex": 41,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.8 Flash (high) idx 41, cost/task 1.24. Clears T1 admission floor (>=40). Antigravity-subscription lane per model-tier-list doc notes some Gemini access is telemetry-blind \u2014 this CLIProxy-served id is the metered route, kept distinct.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.8 Flash (high) idx 41, cost/task 1.24. Clears T1 admission floor (>=40). Antigravity-subscription lane per model-tier-list doc notes some Gemini access is telemetry-blind \u2014 this CLIProxy-served id is the metered route, kept distinct.",
       "releasedAt": "2026-08-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1219,7 +1219,7 @@
       "costPerMTokCacheRead": 0.09,
       "aaIndex": 39,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.7 Flash (high) idx 39 (just under T1 floor 40, well above T2 floor 34) -> keep at T2 boundary judgment call, rounding to T1 given proximity and observed 48h traffic (4 calls) already succeeding at this id; will re-tier down on eval evidence if it underperforms.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.7 Flash (high) idx 39 (just under T1 floor 40, well above T2 floor 34) -> keep at T2 boundary judgment call, rounding to T1 given proximity and observed 48h traffic (4 calls) already succeeding at this id; will re-tier down on eval evidence if it underperforms.",
       "releasedAt": "2026-06-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1239,7 +1239,7 @@
       "costPerMTokCacheRead": 0.09,
       "aaIndex": 34,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.6 Flash idx 34, exactly at T2 admission floor.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Gemini 3.6 Flash idx 34, exactly at T2 admission floor.",
       "releasedAt": "2026-04-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1258,7 +1258,7 @@
       "costPerMTokOut": 0.3,
       "costPerMTokCacheRead": 0.03,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Older/base Gemini 3 Flash generation, no direct aa.ai v4.3 row (superseded by 3.1/3.6/3.7/3.8 flash variants). T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Older/base Gemini 3 Flash generation, no direct aa.ai v4.3 row (superseded by 3.1/3.6/3.7/3.8 flash variants). T3 pending eval.",
       "releasedAt": "2026-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1278,7 +1278,7 @@
       "costPerMTokCacheRead": 0.1,
       "aaIndex": 30,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor 'Gemini 3.1 Pro Preview' idx 30 (just under T2 floor of 34 but existing 48h traffic shows 4 real calls already succeeding) -> T2 pending eval evidence either way; already in live use.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: nearest neighbor 'Gemini 3.1 Pro Preview' idx 30 (just under T2 floor of 34 but existing 48h traffic shows 4 real calls already succeeding) -> T2 pending eval evidence either way; already in live use.",
       "releasedAt": "2026-02-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1296,7 +1296,7 @@
       "costPerMTokOut": 0.4,
       "costPerMTokCacheRead": 0.02,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Lite/low-cost Gemini variant, no aa.ai v4.3 row. T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Lite/low-cost Gemini variant, no aa.ai v4.3 row. T3 pending eval.",
       "releasedAt": "2026-02-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1315,7 +1315,7 @@
       "costPerMTokOut": 2,
       "costPerMTokCacheRead": 0.1,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Agent-tuned Gemini Pro variant, no aa.ai v4.3 row (family estimate from Gemini 3.1 Pro Preview). T2 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] Agent-tuned Gemini Pro variant, no aa.ai v4.3 row (family estimate from Gemini 3.1 Pro Preview). T2 pending eval.",
       "releasedAt": "2026-03-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1354,7 +1354,7 @@
       "costPerMTokOut": 4.5,
       "costPerMTokCacheRead": 0.15,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row for 3.7 Max (3.7 Plus idx 26 is the nearest documented sibling, well below T2 floor \u2014 placed at T2 provisionally pending eval since 'Max' variants typically outperform 'Plus' within a generation; will demote on evidence). | opencode-go fallback-tier policy: $30-tier \u2014 fallbackOnly until Go plan restored (also gated by )",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row for 3.7 Max (3.7 Plus idx 26 is the nearest documented sibling, well below T2 floor \u2014 placed at T2 provisionally pending eval since 'Max' variants typically outperform 'Plus' within a generation; will demote on evidence). | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $30-tier \u2014 fallbackOnly until Go plan restored (also gated by pricing-confirmation)",
       "releasedAt": "1970-01-01",
       "fallbackOnly": true,
       "earnIn": null
@@ -1373,7 +1373,7 @@
       "costPerMTokOut": 1.4,
       "costPerMTokCacheRead": 0.035,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.6 27B' idx 22, well below floors). T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.6 27B' idx 22, well below floors). T3 pending eval.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1392,7 +1392,7 @@
       "costPerMTokOut": 1.2,
       "costPerMTokCacheRead": 0.03,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.5 397B A17B' idx 19-21, below floors). T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (nearest documented sibling 'Qwen3.5 397B A17B' idx 19-21, below floors). T3 pending eval.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1411,7 +1411,7 @@
       "costPerMTokOut": 0.4,
       "costPerMTokCacheRead": 0.04,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row (nearest sibling DeepSeek V4 Flash 0731 idx 35, above T3 floor but id/version not confirmed identical). T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no exact aa.ai v4.3 row (nearest sibling DeepSeek V4 Flash 0731 idx 35, above T3 floor but id/version not confirmed identical). T3 pending eval.",
       "releasedAt": "2026-07-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1430,7 +1430,7 @@
       "costPerMTokOut": 0.3,
       "costPerMTokCacheRead": 0.03,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; base/older Flash generation predating v4, no aa.ai v4.3 row. T3 pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; base/older Flash generation predating v4, no aa.ai v4.3 row. T3 pending eval.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1451,7 +1451,7 @@
       "costPerMTokCacheRead": 0.06,
       "aaIndex": 35,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: DeepSeek V4 Flash Vision (max) idx 35 (just under T2 floor 34... actually 35>=34) -> T2. Experimental vision-capable variant. | opencode-go fallback-tier policy: $15-tier \u2014 fallbackOnly until Go plan restored (also gated by )",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: DeepSeek V4 Flash Vision (max) idx 35 (just under T2 floor 34... actually 35>=34) -> T2. Experimental vision-capable variant. | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $15-tier \u2014 fallbackOnly until Go plan restored (also gated by pricing-confirmation)",
       "releasedAt": "2026-06-01",
       "fallbackOnly": true,
       "earnIn": null
@@ -1470,7 +1470,7 @@
       "costPerMTokCacheRead": 0.01,
       "aaIndex": 24,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2-Omni idx 24* (provisional \u2605), below T3 floor of 27 but kept T3-enabled per existing OpenCode-Go maximize-usage convention (near-free lane); scorer will demote on evidence.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2-Omni idx 24* (provisional \u2605), below T3 floor of 27 but kept T3-enabled per existing OpenCode-Go maximize-usage convention (near-free lane); scorer will demote on evidence.",
       "releasedAt": "2026-05-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1489,7 +1489,7 @@
       "costPerMTokCacheRead": 0.01,
       "aaIndex": 26,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (nearest documented sibling; below T2 floor of 34) -> placed T2 provisionally since it is the 'Pro' variant with a large 1M context per CLIProxy's own served listing; will demote on eval evidence.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (nearest documented sibling; below T2 floor of 34) -> placed T2 provisionally since it is the 'Pro' variant with a large 1M context per CLIProxy's own served listing; will demote on eval evidence.",
       "releasedAt": "2026-05-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1507,7 +1507,7 @@
       "costPerMTokOut": 1.2,
       "costPerMTokCacheRead": 0.06,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row for this point version (nearest sibling family MiniMax-M3 idx 30). T3 pending eval, per existing minimax-m2.7/m3 convention.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row for this point version (nearest sibling family MiniMax-M3 idx 30). T3 pending eval, per existing minimax-m2.7/m3 convention.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1526,7 +1526,7 @@
       "costPerMTokCacheRead": 0.014,
       "aaIndex": 26,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Hy3 idx 26 (nearest documented sibling; preview tag). T3, consistent with existing cliproxy/hy3 placement.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: Hy3 idx 26 (nearest documented sibling; preview tag). T3, consistent with existing cliproxy/hy3 placement.",
       "releasedAt": "1970-01-01",
       "fallbackOnly": false,
       "earnIn": null
@@ -1544,7 +1544,7 @@
       "costPerMTokOut": 0.2,
       "costPerMTokCacheRead": 0.02,
       "aaIndex": null,
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (next-gen preview beyond Hy3, idx 26). T3 pending eval. | opencode-go fallback-tier policy: $30-tier \u2014 fallbackOnly until Go plan restored (also gated by )",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] OpenCode Go lane, new to roster; no aa.ai v4.3 row (next-gen preview beyond Hy3, idx 26). T3 pending eval. | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $30-tier \u2014 fallbackOnly until Go plan restored (also gated by pricing-confirmation)",
       "releasedAt": "1970-01-01",
       "fallbackOnly": true,
       "earnIn": null
@@ -1563,7 +1563,7 @@
       "costPerMTokCacheRead": 0.02,
       "aaIndex": 12,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: gpt-oss-120b (high) idx 12 nearest documented variant, well below all admission floors. T3, likely fallback-only candidate pending eval.",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: gpt-oss-120b (high) idx 12 nearest documented variant, well below all admission floors. T3, likely fallback-only candidate pending eval.",
       "releasedAt": "2026-01-01",
       "fallbackOnly": true,
       "earnIn": null
@@ -1655,7 +1655,7 @@
       "costPerMTokCacheRead": 0.01,
       "aaIndex": 26,
       "aaIndexUpdatedAt": "2026-09-09",
-      "note": "[Would enable once CLIProxy pricing is confirmed \u2014  blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (below T2 floor of 34) -> placed T2 provisionally: large 1M context, near-free cost, 'Pro' variant per CLIProxy's own served listing. Distinct from cliproxy/mimo-v2-pro (also added this pass) -- both are genuinely separate served ids. | opencode-go fallback-tier policy: $15-tier \u2014 fallbackOnly until Go plan restored (also gated by )",
+      "note": "[Would enable once CLIProxy pricing is confirmed \u2014 pricing-confirmation blocked; shipped disabled to avoid an estimated price silently winning cost-sort over already-proven models with zero measured runs.] aa.ai Intelligence Index v4.3, snapshot 2026-09-09: MiMo-V2.5-Pro idx 26 (below T2 floor of 34) -> placed T2 provisionally: large 1M context, near-free cost, 'Pro' variant per CLIProxy's own served listing. Distinct from cliproxy/mimo-v2-pro (also added this pass) -- both are genuinely separate served ids. | opencode-go fallback-tier policy (, owner directive 2026-09-20 05:25Z, ): $15-tier \u2014 fallbackOnly until Go plan restored (also gated by pricing-confirmation)",
       "releasedAt": "2026-05-01",
       "fallbackOnly": true,
       "earnIn": null

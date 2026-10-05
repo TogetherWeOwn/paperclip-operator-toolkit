@@ -26,7 +26,7 @@ export interface LaneLedgerEntry {
   /** Null on a clean poll. A failed poll degrades `verdict` to null, never overwrites a good one with a stale guess (see `mergeLedgerEntry`). */
   error: string | null;
   /**
-   * When a SUCCESSFUL poll last found this lane unserviceable, and
+   * . When a SUCCESSFUL poll last found this lane unserviceable, and
    * why — the onset timestamp, held across subsequent failed polls.
    *
    * `verdict` alone cannot carry this. A failed poll degrades `verdict` to
@@ -52,7 +52,7 @@ export interface LaneLedgerEntry {
   /** The `verdict.reason` carried by the observation that set `unserviceableSince`. */
   unserviceableReason?: LanePaceVerdict["reason"] | null;
   /**
-   * The lane's combined utilization (see `laneCombinedUtilization`),
+   * . The lane's combined utilization (see `laneCombinedUtilization`),
    * written only from a verdict a poll actually returned and carried across
    * failed polls, for the same reason as `unserviceableSince`: a flapping poll
    * must not move a withdrawn lane back to admissible. It is bounded by
@@ -67,11 +67,20 @@ export interface LaneLedgerEntry {
     staleAfterSeconds: number;
     entries: ModelCooldown[];
   }>;
+  /**
+   *  (D1e). Consecutive lane-capacity polls with zero successes, where
+   * success is a clean poll (`error === null`) whose verdict says
+   * `serviceable === true`. Any poll error, `serviceable === false`, or
+   * null/indeterminate verdict increments; any success resets to zero.
+   * Optional so a ledger persisted before this field existed reads as zero
+   * (`?? 0`) instead of vetoing every lane it holds.
+   */
+  consecutiveNonSuccess?: number;
 }
 
 export type LaneLedger = Record<string, LaneLedgerEntry>;
 
-/**. One lane-wide utilization reading, with the instant it stops being evidence. */
+/** . One lane-wide utilization reading, with the instant it stops being evidence. */
 export interface LaneCombinedUtilization {
   /** Capacity-weighted mean account utilization, 0-1, unserviceable accounts counted as fully spent. */
   utilization: number;
@@ -84,7 +93,7 @@ export interface LaneCombinedUtilization {
 }
 
 /**
- * The lane's combined utilization: the capacity-weighted mean of its
+ * . The lane's combined utilization: the capacity-weighted mean of its
  * accounts' governing-window utilization, where an account the pace engine calls
  * unserviceable counts as fully spent (1.0).
  *
@@ -155,7 +164,7 @@ export type OperatorOverrideLedger = Record<string, OperatorOverrideEntry>;
  * "we don't know" rather than a fabricated one. One lane's failure has no
  * effect on any other lane's entry — callers merge one result at a time.
  *
- * that honesty is right for `verdict` and wrong as the ONLY record
+ * : that honesty is right for `verdict` and wrong as the ONLY record
  * of serviceability, because it silently discards a measurement already
  * taken. `unserviceableSince` is the durable half — updated only from a
  * verdict this poll actually returned, carried forward untouched when the
@@ -196,6 +205,14 @@ export function mergeLedgerEntry(
     unserviceableReason = null;
   }
 
+  //  (D1e). A failed poll can never MOVE a lane from excluded to
+  // admissible (see above); the same discipline applies to the streak — only
+  // a clean poll whose verdict says `serviceable === true` resets it. A
+  // `lane-secret-unavailable` merge carries a null verdict, so it increments
+  // like any other non-success rather than freezing the streak in place.
+  const pollSucceeded = result.error === null && result.verdict?.serviceable === true;
+  const consecutiveNonSuccess = pollSucceeded ? 0 : (previous?.consecutiveNonSuccess ?? 0) + 1;
+
   const combined =
     (result.verdict ? laneCombinedUtilization(result.verdict, result.fetchedAt) : null) ??
     previous?.combinedUtilization ??
@@ -211,13 +228,14 @@ export function mergeLedgerEntry(
       error: result.error,
       unserviceableSince,
       unserviceableReason,
-      // a verdict that yields no reading (free lane, unreadable
+      // : a verdict that yields no reading (free lane, unreadable
       // accounts) is evidence of nothing, so the prior reading stands until its
       // window resets; only a poll that measured the lane replaces it.
       ...(combined ? { combinedUtilization: combined } : {}),
       modelCooldownEvidence: result.verdict
         ? cooldownEvidence(result.observation ?? null)
         : previous?.modelCooldownEvidence ?? cooldownEvidence(previous?.observation ?? null),
+      consecutiveNonSuccess,
     },
   };
 }
@@ -251,7 +269,7 @@ function paceStateOf(ledger: LaneLedger, model: ModelEntry | undefined): PaceSta
 }
 
 /**
- * the only lane states the balance pass pulls idle pins toward —
+ * : the only lane states the balance pass pulls idle pins toward —
  * a lane trailing its fair-share pace should get volume routed to it before
  * its allowance window closes unused. Everything else (including `on`,
  * `ahead`, and `unknown`) is never a pace-pull target.
@@ -264,7 +282,7 @@ export function isBehindPace(ledger: LaneLedger, model: ModelEntry | undefined):
 }
 
 /**
- * this model's lane rank in the new-pin preference order (lower =
+ * : this model's lane rank in the new-pin preference order (lower =
  * more preferred). The balance-pass pace-pull gate requires the target's rank
  * to be strictly better (lower) than the pinned lane's, so a pull never moves
  * a card sideways between equally-behind lanes or backwards onto a
@@ -285,14 +303,14 @@ function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntr
 }
 
 /**
- * Defect 5. Fraction of a governing window's duration (0-1) after
+ * , Defect 5. Fraction of a governing window's duration (0-1) after
  * which a trailing lane is considered close enough to reset that its unused
  * allowance is at risk of being wasted. 0.8 = the last 20% of the window.
  */
 export const PREFERRED_ELAPSED_THRESHOLD = 0.8;
 
 /**
- * Defect 5: the pace engine was brake-only. `hardStopExcluded`
+ * , Defect 5: the pace engine was brake-only. `hardStopExcluded`
  * excludes an exhausted lane and `slotFactorFor` throttles a lane running
  * `ahead` — both only ever hold a lane BACK. Nothing on the other side ever
  * PREFERS a lane, so a lane trailing its elapsed-fraction trajectory can
@@ -456,7 +474,7 @@ const INDETERMINATE_CAPACITY_REASONS: ReadonlySet<LanePaceVerdict["reason"]> = n
  * the pace engine reports (malformed document, stale snapshot, no records,
  * unusable account identity): those are a verdict saying "I could not tell".
  *
- * what is NOT fail-neutral any more is a lane this plugin HAS
+ * : what is NOT fail-neutral any more is a lane this plugin HAS
  * observed unserviceable and has since lost the reading for. `verdict` goes
  * null on every failed poll, and reading serviceability solely off `verdict`
  * meant a flapping poll silently readmitted a lane measured exhausted minutes
@@ -495,6 +513,75 @@ export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry, nowMs = 
   // `?? null` so a ledger persisted before this field existed reads as "never
   // observed" rather than excluding every lane it holds.
   return (entry.unserviceableSince ?? null) !== null;
+}
+
+/**
+ *  (D1e). How many consecutive non-success polls dead-veto a lane.
+ * Held equal to `EVIDENCE_ZERO_SUCCESS_SAMPLES` (lane-evidence.ts) on purpose:
+ * the same evidence weight that condemns a lane on run outcomes condemns one
+ * on poll outcomes. Kept as its own constant so the two can retune apart.
+ */
+export const DEAD_LANE_VETO_NON_SUCCESS_POLLS = 5;
+
+/**
+ *  (D1e). The company scope a dead-veto read needs beyond the ledger.
+ * Both fields are what keep the veto from firing where it must not: the
+ * configured set keeps unconfigured lanes out, and the bypass keeps a
+ * poller-side outage from vetoing every lane at once.
+ */
+export interface DeadVetoScope {
+  /**
+   * The lanes configured for this company (`pacing.lanes[].laneId`). Null
+   * (absent) fails the veto OPEN: without the configured set an unconfigured
+   * lane cannot be told apart from a dead one, so vetoing anything would risk
+   * vetoing everything.
+   */
+  readonly configuredLaneIds?: readonly string[] | null;
+  /** True when every configured lane is dead in the same window — admit as today. */
+  readonly bypassAllDead?: boolean;
+}
+
+/**
+ *  (D1e). Whether a lane is dead-vetoed: its last
+ * `DEAD_LANE_VETO_NON_SUCCESS_POLLS` consecutive lane-capacity polls contain
+ * zero successes. Self-healing — any success resets the streak in
+ * `mergeLedgerEntry`, so recovery clears the veto with no operator action.
+ * Fail-open throughout: no ledger entry (never polled, or a missing ledger),
+ * a lanless model, an unconfigured lane, or an absent configured set vetoes
+ * nothing, matching `hardStopExcluded`'s posture for unobserved lanes.
+ */
+export function deadVetoExcluded(
+  ledger: LaneLedger,
+  model: ModelEntry,
+  scope?: DeadVetoScope,
+): boolean {
+  const laneId = model.laneId ?? null;
+  if (!laneId) return false;
+  if (scope?.bypassAllDead) return false;
+  const configured = scope?.configuredLaneIds ?? null;
+  if (configured === null) return false;
+  if (!configured.includes(laneId)) return false;
+  return (ledger[laneId]?.consecutiveNonSuccess ?? 0) >= DEAD_LANE_VETO_NON_SUCCESS_POLLS;
+}
+
+/**
+ *  (D1e). CEO fail-open: when every configured lane meets the dead
+ * condition in the same window, the failure is poller-side (the  API
+ * slowness, `lane-secret-unavailable`), not per-lane. Vetoing all of them
+ * would stop dispatch through `tier-exhausted`, so selection admits as today
+ * and the worker raises the operator card as "poller suspect" instead.
+ * A configured lane with no ledger entry was never polled — not evidence of
+ * an outage, and with no streak it cannot be vetoed either — so it blocks the
+ * bypass: dispatch still has somewhere to go.
+ */
+export function allLanesDeadVetoed(
+  ledger: LaneLedger,
+  configuredLaneIds: readonly string[] | null | undefined,
+): boolean {
+  if (!configuredLaneIds || configuredLaneIds.length === 0) return false;
+  return configuredLaneIds.every(
+    (laneId) => (ledger[laneId]?.consecutiveNonSuccess ?? 0) >= DEAD_LANE_VETO_NON_SUCCESS_POLLS,
+  );
 }
 
 /**
@@ -617,7 +704,7 @@ export interface LaneAvoidConfig {
   defaultThreshold: number;
   perLane: Record<string, number>;
   /**
-   * Per-lane withdrawal ceiling, from `pacing.lanes[].withdrawAtUtilization`.
+   * . Per-lane withdrawal ceiling, from `pacing.lanes[].withdrawAtUtilization`.
    * A lane absent here is never withdrawn, which is the default. It rides in this
    * config because every site that asks "may NEW work go to this lane" already
    * receives it.
@@ -651,7 +738,7 @@ export function laneAvoidExcluded(ledger: LaneLedger, model: ModelEntry, config:
   return score.utilization >= avoidThresholdFor(config, model.laneId) && score.deviation > DEFAULT_MARGIN;
 }
 
-/**. A lane whose combined utilization is at or above its withdrawal ceiling. */
+/** . A lane whose combined utilization is at or above its withdrawal ceiling. */
 export interface LaneWithdrawal {
   laneId: string;
   utilization: number;
@@ -665,7 +752,7 @@ function atOrAbove(value: number, ceiling: number): boolean {
 }
 
 /**
- * Whether a lane is withdrawn from NEW dispatch, and why. The
+ * . Whether a lane is withdrawn from NEW dispatch, and why. The
  * selector otherwise keeps a lane open while any one account can serve
  * (`hardStopExcluded`) and prefers a trailing lane near its reset
  * (`orderCandidatesByPace`), so a lane with 7 of 8 accounts exhausted still

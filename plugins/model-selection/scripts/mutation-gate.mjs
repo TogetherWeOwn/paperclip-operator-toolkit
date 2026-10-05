@@ -36,7 +36,7 @@ const mutants = [
     from: "score.deviation > DEFAULT_MARGIN;",
     to: "score.deviation >= DEFAULT_MARGIN;",
   },
-  // lane withdrawal ceiling. The rule withdraws a lane from NEW
+  // : lane withdrawal ceiling. The rule withdraws a lane from NEW
   // dispatch once its combined utilization reaches a configured ceiling; each
   // mutant breaks one property the replay and unit specs pin.
   {
@@ -93,8 +93,8 @@ const mutants = [
     // a capacity outage, so nobody is told. Killed by the tier-exhausted spec.
     name: "lane-withdrawal-not-a-capacity-stage",
     file: "src/engine/select.ts",
-    from: '"lane-evidence", "lane-withdrawn"]);',
-    to: '"lane-evidence"]);',
+    from: '"lane-evidence", "lane-dead-veto", "lane-withdrawn"]);',
+    to: '"lane-evidence", "lane-dead-veto"]);',
   },
   {
     // The sub-call env evacuation ignores a withdrawn lane, so a card keeps
@@ -129,7 +129,7 @@ const mutants = [
     from: "        if (laneWithdrawnExcluded(laneLedger, model, config.pacing.avoid, Date.parse(nowIso))) return false;\n",
     to: "",
   },
-  // counts-only is a validated producer schema, and cooldowns are
+  // : counts-only is a validated producer schema, and cooldowns are
   // exact-model evidence whose expiry is checked at selection time.
   {
     name: "counts-only-inferred-without-tag",
@@ -184,7 +184,7 @@ const mutants = [
     to: '      const exhausted = account.health === "exhausted" || account.health === "unavailable";',
   },
   {
-    // restores the pre-fix defect — ANY trip condemns the lane even
+    // : restores the pre-fix defect — ANY trip condemns the lane even
     // with a healthy sibling serving. Killed by the healthy-peer-carries test
     // (lane level) and the  dispatch-level regression.
     name: "serviceability-any-trip-poisons-lane",
@@ -193,7 +193,7 @@ const mutants = [
     to: "  if (internal.some((entry) => entry.tripped)) {",
   },
   {
-    // off-by-one on the count — condemns while one account can still
+    // : off-by-one on the count — condemns while one account can still
     // serve. Killed by the same sibling-serve tests; the all-tripped tests
     // still pass under it (count 0 condemns either way), so its killer set is
     // disjoint from the remove-lane-hard-stop mutant below.
@@ -203,7 +203,7 @@ const mutants = [
     to: "  if (internal.some((entry) => entry.tripped) && serviceableAccountCount <= 1) {",
   },
   {
-    // an indeterminate peer must not mask the trip via the count.
+    // : an indeterminate peer must not mask the trip via the count.
     // Counting every account as serviceable re-opens the lane whenever the
     // peer is merely unknown. Killed by the indeterminate-peer tests.
     name: "serviceability-indeterminate-account-counts-as-serviceable",
@@ -224,7 +224,7 @@ const mutants = [
     to: "urgentResetAt: null",
   },
   {
-    // removes the count-gated hard stop entirely. The all-tripped
+    // : removes the count-gated hard stop entirely. The all-tripped
     // lane then falls through to `all-accounts-unserviceable` (no reset), so
     // the all-tripped and opencode-go-monthly tests (reason + earliest reset)
     // kill it.
@@ -417,7 +417,7 @@ const mutants = [
     to: "",
   },
   {
-    // a one-sided stream must not pass merely because the existing
+    // : a one-sided stream must not pass merely because the existing
     // plugin-shadow emitter still writes a schema-valid record. Removing the
     // host projection must fail the worker-level paired-stream assertion.
     name: "drop-host-projection-from-decision-pair",
@@ -567,7 +567,7 @@ const mutants = [
     to: "    raise(enabledTop, model.id, model.tier);",
   },
   {
-    // the legacy policy is pinned to the SERVING build, whose T1
+    // : the legacy policy is pinned to the SERVING build, whose T1
     // capability bar is 0.8 (the operator's t1baseline carry-forward), not to the
     // 0.85 tier cut. Reverting it re-introduces the source/serving split the
     // zero-diff replay exists to catch.
@@ -616,7 +616,7 @@ const mutants = [
     from: "    if (!(upper.legacy?.scoreThreshold > lower.legacy?.scoreThreshold)) {",
     to: "    if (!(upper.legacy?.scoreThreshold >= lower.legacy?.scoreThreshold)) {",
   },
-  // the `model_selection_tier_policy` edit path. Each guard below is
+  // : the `model_selection_tier_policy` edit path. Each guard below is
   // one  D3/D4/D6 refusal; killed by tests/tier-policy/tier-policy-edit.spec.ts
   // (and, for the worker log, tests/tool-error-shape-part2.spec.ts).
   {
@@ -720,7 +720,7 @@ const mutants = [
     to: "      ? summarize(stats, tier, pp, capability.priorK, capability.provenN, scoreThresholds, capability.vetoMargin)",
   },
   {
-    // an exhausted account with utilization 1 must not dilute a
+    // : an exhausted account with utilization 1 must not dilute a
     // serviceable account at 0.02 into a fake lane utilization of 0.51.
     name: "blend-exhausted-accounts-into-lane-pace",
     file: "src/lane-capacity/pace.ts",
@@ -730,7 +730,7 @@ const mutants = [
     to: "    entry.utilizationMilli !== null &&\n",
   },
   {
-    // the paired decision stream must retain account-level posture;
+    // : the paired decision stream must retain account-level posture;
     // lane-only rows cannot explain which accounts were excluded from pace.
     name: "drop-account-rows-from-decision-log",
     file: "src/shadow-emit.ts",
@@ -738,7 +738,7 @@ const mutants = [
     to: "      accounts: [],\n",
   },
   {
-    // `explanations` must name the gate that rejected each
+    // : `explanations` must name the gate that rejected each
     // candidate — this failure is silent in production (the job still
     // reports `succeeded`), so only the suite can distinguish an empty
     // explanations array from a populated one.
@@ -748,7 +748,7 @@ const mutants = [
     to: "    explanations: [],\n",
   },
   {
-    // a Go account at 0.99 monthly must bind on monthly even when its
+    // : a Go account at 0.99 monthly must bind on monthly even when its
     // weekly allowance reads empty. Choosing the largest window resurrects the
     // exact weekly-low/monthly-full routing defect.
     name: "bind-on-longest-window-instead-of-clear-rate",
@@ -763,7 +763,7 @@ const mutants = [
       "  )[0] ?? null;",
   },
   {
-    // the per-lane `weekly`/`fiveHour` columns must each read their
+    // : the per-lane `weekly`/`fiveHour` columns must each read their
     // OWN named window. Copying one governing-window score into both is the
     // defect measured at 32aa30b9 — identical in 25,000/25,000 lane
     // observations — and it put a governing number on the quota page under a
@@ -778,7 +778,7 @@ const mutants = [
       "      fiveHour: verdict?.score?.utilization ?? null,\n",
   },
   {
-    // an unobserved window must report `null`, never `0`. Reusing
+    // : an unobserved window must report `null`, never `0`. Reusing
     // pacing.ts's fail-neutral-to-0 gate helper here would render "the 5-hour
     // window is untouched" for a window nobody measured.
     name: "fail-neutral-lane-window-columns-to-zero",
@@ -787,7 +787,7 @@ const mutants = [
     to: "  return utilizations.length > 0 ? Math.max(...utilizations) : 0;\n",
   },
   {
-    // final-24h accounts must enter the hard priority tier; leaving
+    // : final-24h accounts must enter the hard priority tier; leaving
     // them at priority zero loses the explicit reset-clearing behavior.
     name: "remove-final-24h-account-priority",
     file: "src/shadow-emit.ts",
@@ -795,7 +795,7 @@ const mutants = [
     to: "  return 0;\n",
   },
   {
-    // a weekly-only governor would reproduce the current defect on
+    // : a weekly-only governor would reproduce the current defect on
     // D02/D03/D04 by ignoring their staggered monthly hard limits entirely.
     name: "go-weekly-only-governor",
     file: "src/lane-capacity/pace.ts",
@@ -808,7 +808,7 @@ const mutants = [
       "    window.role === \"allowance\" &&\n",
   },
   {
-    // production collector rows report plan_weight. Dropping it from
+    // : production collector rows report plan_weight. Dropping it from
     // the default turns Max 20x and Max 5x into equal-capacity accounts.
     name: "drop-plan-weight-from-default-fields",
     file: "src/constants.ts",
@@ -816,7 +816,7 @@ const mutants = [
     to: 'export const DEFAULT_PACE_WEIGHT_FIELDS = ["weight"] as const;\n',
   },
   {
-    // unknown production capacity is indeterminate, never an
+    // : unknown production capacity is indeterminate, never an
     // implicit one-unit subscription.
     name: "default-unknown-account-weight-to-one",
     file: "src/lane-capacity/pace.ts",
@@ -830,7 +830,7 @@ const mutants = [
       '    : { weight: reported, source: "reported" };',
   },
   {
-    // a window with no account or allowance weight must remain
+    // : a window with no account or allowance weight must remain
     // unknown at normalization rather than regaining an implicit unit weight.
     name: "default-unknown-allowance-weight-to-one",
     file: "src/lane-capacity/pace.ts",
@@ -858,7 +858,7 @@ const mutants = [
       '          "allowance_weight" in nested &&\n',
   },
   {
-    // equal logical-account round-robin strands allowance at the
+    // : equal logical-account round-robin strands allowance at the
     // earliest deadline; the Go fixture's 87.35/4.38/8.27 split must kill it.
     name: "equal-logical-account-round-robin",
     file: "src/lane-capacity/pace.ts",
@@ -870,7 +870,7 @@ const mutants = [
       "      : 1 / serviceableAccountCount,\n",
   },
   {
-    // stable logical-account identity is part of the collector
+    // : stable logical-account identity is part of the collector
     // contract. Missing ids must invalidate the document, never use position.
     name: "synthesize-missing-account-id-from-position",
     file: "src/lane-capacity/pace.ts",
@@ -878,7 +878,7 @@ const mutants = [
     to: "  const accountKeys = validRecords.map((record, index) => accountKey(record, accountKeyFields) ?? `record-${index + 1}`);\n",
   },
   {
-    // subscription-pool owns the Go account decision. Replacing its
+    // : subscription-pool owns the Go account decision. Replacing its
     // reported target with a locally recomputed window rate must fail.
     name: "ignore-reported-account-target-rate",
     file: "src/lane-capacity/pace.ts",
@@ -896,7 +896,7 @@ const mutants = [
     to: "    const declaredGoverns = account.governingWindow !== null;\n",
   },
   {
-    // reported subscription-pool share is authoritative. Falling
+    // : reported subscription-pool share is authoritative. Falling
     // through to locally recomputed deficits restores a competing selector.
     name: "ignore-reported-account-share",
     file: "src/lane-capacity/pace.ts",
@@ -1013,7 +1013,7 @@ const mutants = [
     to: "",
   },
   {
-    // provider capacity is additive across serviceable subscription
+    // : provider capacity is additive across serviceable subscription
     // accounts. Averaging account rates understates the pool target.
     name: "average-account-target-rates",
     file: "src/lane-capacity/pace.ts",
@@ -1027,7 +1027,7 @@ const mutants = [
       "  0) / accounts.length;\n",
   },
   {
-    // one serviceable account in its final 24 hours elevates the
+    // : one serviceable account in its final 24 hours elevates the
     // provider even when a larger account leaves the weighted aggregate ahead.
     name: "mask-final-24h-push-with-ahead-aggregate",
     file: "src/lane-capacity/pace.ts",
@@ -1035,7 +1035,7 @@ const mutants = [
     to: '  if ((state === "behind" || state === "on") && urgent) state = "behind-urgent";\n',
   },
   {
-    // bare GLM models are the Z.ai subscription route, never Go.
+    // : bare GLM models are the Z.ai subscription route, never Go.
     name: "route-bare-glm-to-go",
     file: "scripts/assemble-additive-config.mjs",
     from: '    [/^glm-/, "cliproxy-zai"],\n',
@@ -1112,7 +1112,7 @@ const mutants = [
     to: "  if (false && droppedLiveSettings.length > 0) {\n",
   },
   {
-    // zero-cost Zen traffic does not debit the Go subscription. The
+    // : zero-cost Zen traffic does not debit the Go subscription. The
     // additive assembler must keep those rows on their free lane.
     name: "charge-zen-to-go-lane",
     file: "scripts/assemble-additive-config.mjs",
@@ -1129,7 +1129,7 @@ const mutants = [
     // to two cards, and a card inherits another card's context estimate.
     name: "drop-issueid-precedence-guard",
     file: "src/sql.ts",
-    // the creation pin's live-runs lookup reuses this exact
+    // : the creation pin's live-runs lookup reuses this exact
     // guarded shape, so the bare guard line now matches twice. Anchor on the
     // trailing `finished_at is not null`, which only the context-lookup query
     // has after it — the mutant still drops exactly the precedence guard.
@@ -1139,7 +1139,7 @@ const mutants = [
     to: "\n            and finished_at is not null",
   },
   {
-    // `repinPass` reads the context estimate in `describeIssue` and
+    // : `repinPass` reads the context estimate in `describeIssue` and
     // again inside the `advise()` call it then makes. Dropping the shared
     // per-pass cache restores two unindexed heartbeat_runs reads per
     // re-pinnable candidate — the shape that hit the host's 300 s RPC wall.
@@ -1156,30 +1156,30 @@ const mutants = [
     to: "\n                const result = await advise(company.id, { issueId }, false, tier, true);",
   },
   {
-    // a dead pin must not lose its recorded tier during selection.
-    // the repin body is a row callback, one indent deeper.
+    // : a dead pin must not lose its recorded tier during selection.
+    // : the repin body is a row callback, one indent deeper.
     name: "repin-drops-effective-tier",
     file: "src/worker.ts",
     from: "\n                const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);",
     to: "\n                const result = await advise(company.id, { issueId }, false, undefined, true, contextUsageCache);",
   },
   {
-    // a regular candidate at a stronger rung preempts fallback.
+    // : a regular candidate at a stronger rung preempts fallback.
     name: "fallback-preempts-stronger-regular",
     file: "src/engine/select.ts",
     from: "const selectionPool = regularModels.length > 0 ? regularModels : qualified;",
     to: "const selectionPool = qualified;",
   },
   {
-    // fresh pins still have to satisfy the effective requirement.
-    // 8-space indentation on the #457 base is unchanged here.
+    // : fresh pins still have to satisfy the effective requirement.
+    // : 8-space indentation on the #457 base is unchanged here.
     name: "repin-keeps-fresh-weaker-pin",
     file: "src/worker.ts",
     from: "if (!model || tierIndex(model.tier) < tierIndex(tier)) return false;",
     to: "if (!model) return false;"
   },
   {
-    // the recovery opener is dropped, so a fresh fallback pin
+    // : the recovery opener is dropped, so a fresh fallback pin
     // rides the usability `continue` forever after its normal lane heals.
     // Killed by the recovery test in tests/repin-fallback-recovery.spec.ts
     // (verified by hand: 2 failures with the opener removed).
@@ -1189,14 +1189,14 @@ const mutants = [
     to: "",
   },
   {
-    // recovery may move sideways to another fallback-only row —
+    // : recovery may move sideways to another fallback-only row —
     // churn that buys no recovery. Killed by the never-sideways test in
     // tests/repin-fallback-recovery.spec.ts (verified by hand: 2 failures
     // with the guard removed).
     name: "repin-moves-fallback-sideways",
     file: "src/worker.ts",
     from:
-      "                // recovery moves back to a normal lane, never\n" +
+      "                // : recovery moves back to a normal lane, never\n" +
       "                // sideways to another fallback-only row — that churn buys no\n" +
       "                // recovery. Re-stamp an expired pin so the sideways case does\n" +
       "                // not re-pay advise on every pass, mirroring the same-model\n" +
@@ -1227,7 +1227,7 @@ const mutants = [
   {
     // (a) clears bypass the write budget: with no increment the limit break
     // never fires and one pass can clear the whole board.
-    // the clear block is a row callback — it returns "stop" at
+    // : the clear block is a row callback — it returns "stop" at
     // the write cap instead of `continue`-ing past it. Re-anchored
     //  to the gated increment: in advisory mode the clear itself is
     // skipped, so the budget counts actual writes. The anchor removes only
@@ -1305,7 +1305,7 @@ const mutants = [
   },
   {
     // AC-1, measured: this IS the router's `normalizeHealth` bucketing, where
-    // "cooldown" is degraded -> `avoid` -> still selectable ().
+    // "cooldown" is degraded -> `avoid` -> still selectable.
     name: "cooldown-health-merely-down-ranked",
     file: "src/engine/availability.ts",
     from: '  if (health !== "healthy" && !(countsOnly && health === "unknown")) {',
@@ -1370,11 +1370,12 @@ const mutants = [
   {
     // Integration with : a wholly-unserviceable tier reported as
     // `no-eligible-model` sends a capacity outage to the wrong owner.
+    // : widened with the `lane-dead-veto` stage the D1e slice adds.
     name: "availability-exclusion-not-counted-as-capacity",
     file: "src/engine/select.ts",
     from:
-      'const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-withdrawn"]);',
-    to: 'const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-withdrawn"]);',
+      'const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-dead-veto", "lane-withdrawn"]);',
+    to: 'const CAPACITY_STAGES = new Set(["lane-unserviceable"]);',
   },
   {
     // AC-3, after the  merge. 's floor exit tests the floor's
@@ -1447,7 +1448,7 @@ const mutants = [
     // The original defect, exactly: skip any card carrying a tier:* label. 120
     // of 126 eligible open cards carried one and 97.1% of those labels were not
     // this plugin's, so this single skip starved the job completely.
-    // the classify body is a row callback returning "settled".
+    // : the classify body is a row callback returning "settled".
     name: "skip-any-tier-label-unconditionally",
     file: "src/worker.ts",
     from: "                if (existingLabelTier !== null) {\n                  if (!config.classification.reclassifyForeignLabels) return \"settled\";\n                  if (!isForeignLabel) return \"settled\";\n                }",
@@ -1533,7 +1534,7 @@ const mutants = [
     name: "creation-pin-ignores-floor-equal",
     file: "src/worker.ts",
     from:
-      // the check now lives in `pinAtTier`; the same-pick guard
+      // : the check now lives in `pinAtTier`; the same-pick guard
       // above it keeps this anchor clear of the balance/repin passes' deeper-
       // indented floor reads.
       "        if (result.decision.modelId === expectedPinnedModelId) return null;\n" +
@@ -1777,7 +1778,7 @@ const mutants = [
   {
     //  (inverted by the fix). The pin carries ONLY plugin-owned
     // keys; the agent's env reaches the run through the base env under the
-    // deployed per-key merge (). Re-adding the spread re-snapshots
+    // deployed per-key merge. Re-adding the spread re-snapshots
     // the agent's secret_refs into every pin — the exact 155-of-155 defect
     // this card removes. Killed by the  allowlist test ("writes no
     // key outside the allowlist"), which feeds an agent env full of
@@ -1876,13 +1877,13 @@ const mutants = [
     to: "",
   },
   {
-    // remediation half. The balance pass short-circuits on
+    // , remediation half. The balance pass short-circuits on
     // "the pin is already what we would pick". Restoring that short-circuit
     // without the envDrifted escape makes the drain unreachable for the exact
     // 149-card population it exists for — pin healthy, sub-call env frozen —
     // while every other test stays green. This is the regression that would
     // ship the fix inert, so it gets its own mutant.
-    // the balance body is a row callback returning "settled".
+    // : the balance body is a row callback returning "settled".
     name: "short-circuit-a-healthy-pin-before-the-env-drift-check",
     file: "src/worker.ts",
     from: "if (result.decision.modelId === pinnedModelId && !envDrifted) return \"settled\";",
@@ -1944,7 +1945,7 @@ const mutants = [
       "        Math.max(1, Math.floor(modelWindow * ratio)),\n" +
       "      ),",
   },
-  // price-reconciliation invariants whose failure mode is
+  // : price-reconciliation invariants whose failure mode is
   // a confidently-wrong number rather than an error. Each one, broken, still
   // produces a plausible-looking report.
   {
@@ -1976,7 +1977,7 @@ const mutants = [
     to: "        cacheRead: finiteNumber(cost.cache_read) ?? 0,",
   },
 
-  // the card-accept-rate exclusion. Both halves have to hold — the
+  // : the card-accept-rate exclusion. Both halves have to hold — the
   // gate has to FIRE on a proven-bad row, and it has to stay silent on every
   // row we cannot read as proven-bad. The costly mistake is the second one: a
   // wrong exclusion cuts off ordinary traffic; maturity and bounded expiry
@@ -2074,10 +2075,11 @@ const mutants = [
     // Classify the quality exclusion as capacity. A tier where every row is a
     // proven reject is `no-eligible-model`; calling it `tier-exhausted` sends
     // an operator to buy capacity that is already there.
+    // : widened with the `lane-dead-veto` stage the D1e slice adds.
     name: "card-accept-gate-counted-as-capacity",
     file: "src/engine/select.ts",
-    from: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-withdrawn"]);',
-    to: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-withdrawn", "card-accept-rate"]);',
+    from: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-dead-veto", "lane-withdrawn"]);',
+    to: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-dead-veto", "lane-withdrawn", "card-accept-rate"]);',
   },
   {
     // Sort a null costPerAcceptedCard FIRST — the card's stated defect, made
@@ -2097,7 +2099,7 @@ const mutants = [
     to: "  const byCard = orderByCostPerAcceptedCard(candidates, ledger);",
   },
 
-  // the effort half of a pin. Each of these is a way to emit a
+  // : the effort half of a pin. Each of these is a way to emit a
   // model/effort pair the model cannot honour — the 2026-09-22 failure — and
   // each must be visibly fatal, or `effort.ts` is decoration.
   {
@@ -2176,7 +2178,7 @@ const mutants = [
     to: "    inheritedEffort: null,",
   },
 
-  // the cost-attribution guard has two ways to fail silently, and
+  // : the cost-attribution guard has two ways to fail silently, and
   // both of them end at routing order rather than at a red test. Either it
   // stops rejecting (and `costPerAcceptedCard` goes back to averaging an
   // Anthropic-priced cost for a Meta model), or it over-rejects (and it
@@ -2293,12 +2295,12 @@ const mutants = [
     // Without the backstop, labelOnlyPass attempts the pin on a card the
     // host will reject. The skip test seeds assigneeUserId and asserts no
     // write happens.
-    // the label-only body is a row callback returning "settled".
+    // : the label-only body is a row callback returning "settled".
     name: "label-only-pins-user-assigned-cards",
     file: "src/worker.ts",
     from:
       "                if (described.hasOperatorPin) return \"settled\";\n" +
-      "                // backstop for the `assignee_user_id is null`\n" +
+      "                // : backstop for the `assignee_user_id is null`\n" +
       "                // predicate above — a user-assigned card rejects issues.update\n" +
       "                // with an agent override (\"Issue can only have one assignee\").\n" +
       "                if (described.assigneeUserId) return \"settled\";\n" +
@@ -2310,12 +2312,12 @@ const mutants = [
   {
     // Same hole in balancePass: without the backstop the pass attempts the
     // write on a user-assigned card instead of skipping it.
-    // the balance body is a row callback returning "settled".
+    // : the balance body is a row callback returning "settled".
     name: "balance-pins-user-assigned-cards",
     file: "src/worker.ts",
     from:
       "                if (described.hasOperatorPin) return \"settled\";\n" +
-      "                // backstop for the `assignee_user_id is null`\n" +
+      "                // : backstop for the `assignee_user_id is null`\n" +
       "                // predicate above — a user-assigned card rejects issues.update\n" +
       "                // with an agent override (\"Issue can only have one assignee\").\n" +
       "                if (described.assigneeUserId) return \"settled\";\n" +
@@ -2459,7 +2461,7 @@ const mutants = [
     name: "repin-clear-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                  // clearing a pin mutates a selection variable like\n" +
+      "                  // : clearing a pin mutates a selection variable like\n" +
       "                  // any other write — advisory reports it without doing it.\n" +
       "                  if (writesAllowed) {\n" +
       "                    await ctx.issues.update(\n" +
@@ -2467,7 +2469,7 @@ const mutants = [
       "                      { assigneeAdapterOverrides: null } as Parameters<typeof ctx.issues.update>[1],\n" +
       "                      company.id,\n",
     to:
-      "                  // clearing a pin mutates a selection variable like\n" +
+      "                  // : clearing a pin mutates a selection variable like\n" +
       "                  // any other write — advisory reports it without doing it.\n" +
       "                  if (true) {\n" +
       "                    await ctx.issues.update(\n" +
@@ -2483,11 +2485,11 @@ const mutants = [
     name: "repin-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                // the write needs enforcement; the decision and its\n" +
+      "                // : the write needs enforcement; the decision and its\n" +
       "                // log do not.\n" +
       "                if (writesAllowed) {\n",
     to:
-      "                // the write needs enforcement; the decision and its\n" +
+      "                // : the write needs enforcement; the decision and its\n" +
       "                // log do not.\n" +
       "                if (true) {\n",
   },
@@ -2499,12 +2501,12 @@ const mutants = [
     name: "balance-pinned-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                  // the write needs enforcement — including the\n" +
+      "                  // : the write needs enforcement — including the\n" +
       "                  // env-evacuation, which mutates the override like any repin.\n" +
       "                  // The decision and its log do not.\n" +
       "                  if (writesAllowed) {\n",
     to:
-      "                  // the write needs enforcement — including the\n" +
+      "                  // : the write needs enforcement — including the\n" +
       "                  // env-evacuation, which mutates the override like any repin.\n" +
       "                  // The decision and its log do not.\n" +
       "                  if (true) {\n",
@@ -2516,12 +2518,12 @@ const mutants = [
     name: "balance-unpinned-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                // same per-issue isolation as the pinned branch.\n" +
-      "                // this branch's write is gated like the pinned one.\n" +
+      "                // : same per-issue isolation as the pinned branch.\n" +
+      "                // : this branch's write is gated like the pinned one.\n" +
       "                if (writesAllowed) {\n",
     to:
-      "                // same per-issue isolation as the pinned branch.\n" +
-      "                // this branch's write is gated like the pinned one.\n" +
+      "                // : same per-issue isolation as the pinned branch.\n" +
+      "                // : this branch's write is gated like the pinned one.\n" +
       "                if (true) {\n",
   },
 
@@ -2743,7 +2745,7 @@ const mutants = [
     to: "  if (plan.write || !context.hasExistingOverride || !context.envRepair) return plan;",
   },
   {
-    // A stale-ref verdict without the assignee env is a guess ().
+    // A stale-ref verdict without the assignee env is a guess.
     name: "stale-refs-read-unknown-agent-env",
     file: "src/engine/context.ts",
     from: "  if (!existingOverrideEnv || agentEnv === null || agentEnv === undefined) return [];",
@@ -2974,7 +2976,7 @@ const mutants = [
     from: "    const score = tierScoreFor(modelScore, requiredTier);",
     to: "    const score = modelScore?.tiers?.[requiredTier];",
   },
-  // the lane quota snapshot -> shadow observation adapter. Utilization-only
+  // : the lane quota snapshot -> shadow observation adapter. Utilization-only
   // observations are advisory attainment; identity is the committed table only.
   {
     name: "obs-cached-observation-not-stale",
@@ -3037,7 +3039,7 @@ const mutants = [
     to: "resetAt - observedAt > WINDOW_MS[window.kind] * 100",
   },
   {
-    // numeric epochs above 8.64e15 must be rejected, not thrown on.
+    // : numeric epochs above 8.64e15 must be rejected, not thrown on.
     name: "obs-epoch-above-max-accepted",
     file: "src/admission-observation.ts",
     from: "  if (finiteObserved(value)) return value >= 0 && value <= MAX_EPOCH_MS ? value : null;",
@@ -3140,7 +3142,7 @@ const mutants = [
     to: "      void { schema, evidenceKind",
   },
   {
-    // the committed Meta lanes come from live-document evidence.
+    // : the committed Meta lanes come from live-document evidence.
     // Dropping one must surface as unmapped, never as a silent pass.
     name: "obs-meta-binding-dropped",
     file: "src/admission-lane-bindings.ts",
@@ -3400,8 +3402,75 @@ const mutants = [
       "              await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);\n" +
       "              dropped.set(issueId, entry.decisionId);",
   },
+  // ---  (D1e) dead-lane veto --------------------------------------
+  // Each mutant below breaks one half of a behavioural pair in
+  // tests/dead-lane-veto.spec.ts: the streak accounting, the gate, the
+  // fail-open scope, or the all-dead bypass.
   {
-    // the pre-write quarantine re-check is the only thing between
+    // A success must reset the streak to zero, not freeze it: without the
+    // reset a recovered lane stays vetoed forever and the self-heal probe
+    // (success after veto clears it) goes red.
+    name: "dead-veto-streak-never-resets",
+    file: "src/engine/pacing.ts",
+    from: "  const consecutiveNonSuccess = pollSucceeded ? 0 : (previous?.consecutiveNonSuccess ?? 0) + 1;",
+    to: "  const consecutiveNonSuccess = (previous?.consecutiveNonSuccess ?? 0) + 1;",
+  },
+  {
+    // Only a CLEAN success resets — a failed poll that still carries a stale
+    // serviceable verdict must not clear the streak, or a flapping poller
+    // launders a dead lane back into rotation on its error path.
+    name: "dead-veto-error-with-stale-verdict-resets",
+    file: "src/engine/pacing.ts",
+    from: "  const pollSucceeded = result.error === null && result.verdict?.serviceable === true;",
+    to: "  const pollSucceeded = result.verdict?.serviceable === true;",
+  },
+  {
+    // The gate must actually exclude: without the `continue` the rejection is
+    // recorded and the model stays qualified — the probe's escalation
+    // assertion (dead T3 lane yields the T2 pick) goes red.
+    name: "dead-veto-records-but-admits",
+    file: "src/engine/select.ts",
+    from: "    if (paceActive && deadVetoExcluded(ledger, model, deadVetoScope)) {",
+    to: "    if (false) {",
+  },
+  {
+    // The veto is gated on paceActive like the hard stop: in `off` mode the
+    // ledger is not consulted and nothing is excluded. Dropping the gate
+    // makes the veto fire where the operator disabled all pace involvement.
+    name: "dead-veto-fires-when-pacing-off",
+    file: "src/engine/select.ts",
+    from: "    if (paceActive && deadVetoExcluded(ledger, model, deadVetoScope)) {",
+    to: "    if (deadVetoExcluded(ledger, model, deadVetoScope)) {",
+  },
+  {
+    // Without the configured set the veto stays fail-open: an unconfigured
+    // lane cannot be told apart from a dead one, so vetoing it would risk
+    // vetoing everything (the ghost-lane probe goes red).
+    name: "dead-veto-fires-without-configured-set",
+    file: "src/engine/pacing.ts",
+    from: "  if (configured === null) return false;",
+    to: "",
+  },
+  {
+    // The all-dead bypass must actually bypass: without it a poller-side
+    // outage vetoes every lane at once and stops dispatch through
+    // `tier-exhausted` (the CEO fail-open probe goes red).
+    name: "dead-veto-all-dead-stops-dispatch",
+    file: "src/engine/pacing.ts",
+    from: "  if (scope?.bypassAllDead) return false;",
+    to: "",
+  },
+  {
+    // A wholly-vetoed tier is a capacity dead end: without the stage in
+    // CAPACITY_STAGES it degrades to `no-eligible-model` and the operator
+    // card never fires (the wholly-vetoed-T1 probe goes red).
+    name: "dead-veto-exclusion-not-counted-as-capacity",
+    file: "src/engine/select.ts",
+    from: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-dead-veto", "lane-withdrawn"]);',
+    to: '    const CAPACITY_STAGES = new Set(["lane-unserviceable", "lane-availability", "lane-evidence", "lane-withdrawn"]);',
+  },
+  {
+    // : the pre-write quarantine re-check is the only thing between
     // a stale-snapshot decision and a pin onto a quarantined lane. Inverting
     // it restores the 15:21:14Z defect exactly: every pass writes into the
     // dead lane and skips every healthy one.
@@ -3410,7 +3479,7 @@ const mutants = [
     from: "        return !laneOutageExcluded(freshOutage, new Date().toISOString(), selectedModel);\n",
     to: "        return laneOutageExcluded(freshOutage, new Date().toISOString(), selectedModel);\n",
   },
-  // T0 is an explicit-only rung. Each mutant removes one of the
+  // : T0 is an explicit-only rung. Each mutant removes one of the
   // admission boundaries, so a regression that lets implicit dispatch, derivation,
   // explore, earn-in or the router's own writes reach T0 goes red.
   {
@@ -3527,7 +3596,7 @@ const mutants = [
     from: "      if (isImplicitlyAdmittedTier(t)) {",
     to: "      if (true) {",
   },
-  // the guarded live migration moves three exact ids and nothing
+  // : the guarded live migration moves three exact ids and nothing
   // else. Each mutant removes one of its refusals.
   {
     name: "t0-migration-leaves-fallback-only",
@@ -3577,7 +3646,7 @@ const mutants = [
     from: "    if (model.tier !== INTERIM.tier || model.fallbackOnly !== INTERIM.fallbackOnly) {",
     to: "    if (false) {",
   },
-  // the shadow verifier must not pass vacuously.
+  // : the shadow verifier must not pass vacuously.
   {
     name: "t0-shadow-counts-optin-as-violation",
     file: "scripts/verify-t0-shadow.mjs",
@@ -3602,7 +3671,7 @@ const mutants = [
     from: "  else if (summary.decisions < minDecisions) verdict = \"insufficient-evidence\";\n",
     to: "",
   },
-  // spawnSync's default 1 MiB output cap SIGKILLs a mutant the suite
+  // : spawnSync's default 1 MiB output cap SIGKILLs a mutant the suite
   // catches loudly and reports it as a host kill (BROKEN GATE). Each mutant is
   // killed by tests/mutation-gate-runtime.spec.ts.
   {
@@ -3623,7 +3692,7 @@ const mutants = [
     from: "    maxBuffer,\n  });\n}\n",
     to: "  });\n}\n",
   },
-  // the shard split and the impact gate decide what the sweep covers
+  // : the shard split and the impact gate decide what the sweep covers
   // and whether it may be skipped, so each is killed by a named spec in
   // tests/mutation-gate-runtime.spec.ts or tests/mutation-impact.spec.ts.
   {
@@ -3684,7 +3753,7 @@ const mutants = [
 // while a second run shared the host.
 
 /**
- * Optional comma-separated name filter, e.g.
+ * . Optional comma-separated name filter, e.g.
  * `MUTANTS=skip-any-tier-label-unconditionally node scripts/mutation-gate.mjs`.
  *
  * The full sweep takes ~25 minutes, and the same sibling sweeper described
@@ -3702,7 +3771,7 @@ const mutantFilter = (process.env.MUTANTS ?? "")
   .filter((name) => name.length > 0);
 
 /**
- * `MUTATION_SHARD=i/N` runs the i-th of N round-robin slices of the
+ * . `MUTATION_SHARD=i/N` runs the i-th of N round-robin slices of the
  * list, so CI can spread the ~300-mutant sweep over N jobs instead of one
  * serial ~3h step. Everything else stays per shard — both baselines, the
  * per-mutant deadline, the fork cap, every assertion — and a shard is never
@@ -3745,13 +3814,13 @@ function runTests(cwd = root) {
     cwd,
     encoding: "utf8",
     env,
-    // bound each run individually. Without this one wedged mutant
+    // : bound each run individually. Without this one wedged mutant
     // spends the job's whole `timeout-minutes` and the job dies with no mutant
     // name; `completed()` below turns the timeout kill into a BROKEN GATE that
     // says which one.
     timeout,
     killSignal,
-    // spawnSync's 1 MiB default turns a mutant that fails loudly into
+    // : spawnSync's 1 MiB default turns a mutant that fails loudly into
     // a SIGKILL that looks like a host kill; see the constant's note.
     maxBuffer,
   });
@@ -3801,7 +3870,7 @@ try {
   await copyMutationTree(root, mutationRoot);
   await stageRepoFixtures(repoRoot, scratch);
 
-  // Positive control (). The loop below scores EVERY nonzero exit as a
+  // Positive control. The loop below scores EVERY nonzero exit as a
   // kill, so a suite that cannot run from the copy at all reports a clean sweep
   // while proving nothing — which is exactly what shipped: a spec reading
   // ../../../.github/workflows/ci.yml threw ENOENT here, and `18/18 killed`

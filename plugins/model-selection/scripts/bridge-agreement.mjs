@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Selector-vs-bridge agreement (productized under ).
+ * Selector-vs-bridge agreement (, productized under ).
  *
  * Joins the selector's shadow stream (`writer: "plugin-shadow"` decisions of
  * schema paired-decision-v1) to the live host bridge's log
@@ -11,7 +11,7 @@
  * Read-only: it opens the shadow files and the bridge log for reading and
  * writes nothing. `host`-writer records are skipped on purpose: `host` and
  * `plugin-shadow` both project one `advise()` call, so their agreement says
- * nothing about the bridge (measured 100% on 2,494 pairs).
+ * nothing about the bridge ( measured 100% on 2,494 pairs).
  *
  * Models are compared by class, not by id, because the bridge sets a model and
  * the selector picks a roster row:
@@ -181,8 +181,6 @@ export async function shadowFiles(dir, includeLegacy) {
   return [...(includeLegacy ? ["decisions.jsonl"] : []), ...names].map((name) => join(dir, name));
 }
 
-// Fully env-provided: no hardcoded host prefix. Operators point
-// MODEL_SELECTION_SHADOW_DIR at the checkout, or set MODEL_SELECTION_STATE_ROOT.
 function defaultShadowDir(env) {
   if (env.MODEL_SELECTION_SHADOW_DIR) return env.MODEL_SELECTION_SHADOW_DIR;
   if (env.PAPERCLIP_COMPANY_ID) {

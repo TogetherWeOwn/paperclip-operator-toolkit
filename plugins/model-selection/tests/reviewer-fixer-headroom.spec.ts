@@ -4,17 +4,18 @@ import { snapshotReviewerFixerHeadroom } from "../src/reviewer-fixer-headroom.js
 import { baseInput, fixer, reviewer } from "./reviewer-fixer-headroom-fixtures.js";
 
 /**
- * Pacer reviewer/fixer load headroom readout (read-only).
+ * : pacer reviewer/fixer load headroom readout (read-only).
  *
- * Joint-controller input. Pure snapshot only: no admission change, no
- * pacing change, no reassignment.
+ * Parent  via fan-out ; joint-controller input for
+ * . Pure snapshot only: no admission change, no pacing change,
+ * no reassignment.
  *
- * NON-GOALS (owned elsewhere): the GARM eligible-vs-queued snapshot
- * (pressure/host/quotas/hysteresis); the admission audit log; the
- * burn-down readout.
+ * NON-GOALS (owned elsewhere):  GARM eligible-vs-queued snapshot
+ * (pressure/host/quotas/hysteresis);  admission audit log;
+ *  burn-down readout (done).
  */
 
-describe("Reviewer/fixer headroom readout", () => {
+describe(" reviewer/fixer headroom readout", () => {
   it("reports healthy headroom when both roles have room", () => {
     const snap = snapshotReviewerFixerHeadroom(baseInput());
     expect(snap.reviewers.headroom).toBe(4);

@@ -1,6 +1,6 @@
 /**
- * Absorbed from the standalone `dispatch` plugin — the selection policy, as
- * pure functions, ported verbatim.
+ * : absorbed from the standalone `dispatch` plugin (, design
+ * ) — the selection policy, as pure functions, ported verbatim.
  *
  * Nothing here calls the host. The sweep gathers rows, this decides, and
  * `worker.ts`'s `dispatchSweep` job acts. That split is what lets the policy
@@ -18,9 +18,9 @@
  * We mirror ALL FOUR so a refusal is COUNTED instead of being discovered by
  * calling requestWakeup and catching a string. Mirroring the server's denylist
  * rather than inventing an allowlist is the whole reason the first cut of the
- * original probe undercounted the wakeable surface by 88%.
+ *  probe undercounted the wakeable surface by 88%.
  *
- * Three more rails are added that the SERVER does not enforce — a wake it
+ *  adds three more rails the SERVER does not enforce — a wake it
  * would happily accept, but that is still a wasted run because nothing an
  * agent does on that card can move it forward this firing:
  *
@@ -80,12 +80,12 @@ export const TERMINAL_STATUSES = ["done", "cancelled"] as const;
 export const BUDGET_RAIL_MIRROR_SOURCE = "issues.summaries.getOrchestration#invocationBlocks";
 
 /**
- * The selection counters (Q5), in report order. Originally five; a later
- * change added refused_monitor_armed / parked_on_human_ask /
- * refused_in_review, so this is now eight, but the report-order and
- * diffability guarantees are unchanged.
+ * The selection counters (Q5), in report order. Originally five; 
+ * added refused_monitor_armed / parked_on_human_ask / refused_in_review, so
+ * this is now eight, but the report-order and diffability guarantees are
+ * unchanged.
  *
- * Two further counters are appended before `woken` so every existing counter
+ *  adds two more, appended before `woken` so every existing counter
  * keeps its position:
  *
  *   - `actionable_idle_assignee`: the new candidate class — todo/in_progress,
@@ -113,7 +113,7 @@ export const SELECTION_COUNTERS = [
 export type SelectionCounter = (typeof SELECTION_COUNTERS)[number];
 
 /**
- * The three counters the retired script printed, preserved so
+ * The three counters the retired script printed ( output), preserved so
  * a firing is diffable against pasted script output during the parallel week.
  *
  * `deadlocked_agents` has NO native equivalent. Per Q5 it is reported as null —
@@ -138,15 +138,15 @@ export interface DispatchIssue {
   createdAt: string | Date;
   updatedAt?: string | Date;
   /**
-   * A future monitor check is the card's OWN scheduled wake — e.g. a
-   * deliberate 48h observation window re-armed by the CTO run the sweep
-   * spawned. `null`/`undefined` both mean "no monitor armed".
+   * : a future monitor check is the card's OWN scheduled wake — the
+   *  case, a deliberate 48h observation window re-armed by the CTO
+   * run the sweep spawned. `null`/`undefined` both mean "no monitor armed".
    */
   monitorNextCheckAt?: string | Date | null;
 }
 
 /**
- * The fields of `IssueThreadInteraction` the sweep needs to decide
+ * : the fields of `IssueThreadInteraction` the sweep needs to decide
  * whether a card is waiting on something only a human (or a specific named
  * reviewer) can resolve. A separate read from `getOrchestration`, which does
  * not carry interaction data at all.
@@ -236,9 +236,9 @@ export function isParkedOnNamedOwner(issue: DispatchIssue): boolean {
 }
 
 /**
- * Rail 5: the card already has its own wake scheduled.
+ *  fix 1: the card already has its own wake scheduled.
  *
- * The case this exists for is a deliberate 48h observation window
+ *  is the case this exists for — a deliberate 48h observation window
  * (`monitor_next_check_at` 2026-09-16 09:40) that the sweep woke anyway,
  * spawning a run that just re-read state and re-armed the same monitor.
  */
@@ -250,9 +250,9 @@ export function isMonitorArmed(issue: DispatchIssue, nowMs: number): boolean {
 const PENDING_INTERACTION_STATUS = "pending";
 
 /**
- * Rail 6: a pending interaction that only a human (or a specific
+ *  fix 2: a pending interaction that only a human (or a specific
  * other agent) can resolve. `effectiveResolverPolicy === "human_only"` is
- * the human-only case, taken verbatim from the issue text. The addressee
+ * the /2455/1677 case verbatim from the issue text. The addressee
  * check catches the same "no agent run can advance this" fact by a
  * different route: an interaction addressed to someone other than the
  * assignee is not this agent's to answer, regardless of resolver policy. A
@@ -271,7 +271,7 @@ export function isParkedOnHumanAsk(
 }
 
 /**
- * Rail 7: an `in_review` card only gets woken if the assignee is the
+ *  fix 3: an `in_review` card only gets woken if the assignee is the
  * reviewer actually named on the pending interaction — mirrors the retired
  * dispatcher's treatment of review-state cards (no surviving source; ported
  * from the issue's description of that behavior, since `dispatcher.py` was a
@@ -298,7 +298,7 @@ export interface ClassifyIssueInput {
   idle: IdleResult;
   nowMs: number;
   /**
-   * `true` when the assignee holds NO running/queued run right now
+   * : `true` when the assignee holds NO running/queued run right now
    * (read once per firing from `heartbeat_runs`, not per issue). The new
    * candidate class keys on agent-idleness rather than issue-idleness: an
    * idle agent holding an executable card gets woken even when the card
@@ -362,22 +362,23 @@ export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
   // Past this line the server's rails 1-3 would accept it. That is the
   // `runnable_queue` the fact base measured at 26, and the number the retired
   // script's output is diffable against — so `wakeable` is pinned to rails 1-3
-  // and rail 4 are counted on their own lines
+  // and rail 4 (and the  rails below) are counted on their own lines
   // rather than being folded in. Widening a legacy counter's meaning would
   // make the parallel-week comparison compare two different things while
   // looking like it compared one.
 
-  // Rail 5: the card already has its own wake scheduled — waking it
+  //  fix 1: the card already has its own wake scheduled — waking it
   // again is pure noise.
   if (isMonitorArmed(issue, nowMs)) {
     return { outcome: "refused_monitor_armed", wakeable: true };
   }
-  // Rail 6: waiting on a human, or on someone other than the
-  // assignee — no agent run the sweep can request will advance this.
+  //  fix 2: waiting on a human, or on someone other than the
+  // assignee — no agent run the sweep can request will advance this
+  // (/2455/1677).
   if (isParkedOnHumanAsk(pendingInteractions, issue.assigneeAgentId)) {
     return { outcome: "parked_on_human_ask", wakeable: true };
   }
-  // Rail 7: an in_review card only gets woken if the assignee is the
+  //  fix 3: an in_review card only gets woken if the assignee is the
   // reviewer actually named on the pending interaction.
   if (issue.status === "in_review" && !isReviewerNamedAssignee(pendingInteractions, issue.assigneeAgentId)) {
     return { outcome: "refused_in_review", wakeable: true };
@@ -389,7 +390,7 @@ export function classifyIssue(input: ClassifyIssueInput): ClassifyResult {
     return { outcome: "parked_on_named_owner", wakeable: true };
   }
   if (idle.idleMs < idleMinutes * 60_000) {
-    // Below the threshold, but the assignee holds no running run —
+    // : below the threshold, but the assignee holds no running run —
     // an idle agent with an executable card. Eligible regardless of
     // `idleMinutes`, but only for todo/in_progress: in_review, armed-monitor
     // and human-ask cards were already refused above and stay refused.
@@ -474,7 +475,7 @@ export interface SelectDispatchOptions {
   focusProjectIds?: string[];
   now: number | Date;
   /**
-   * The set of assignee agent ids holding NO running/queued run at
+   * : the set of assignee agent ids holding NO running/queued run at
    * sweep time (one `heartbeat_runs` read per firing, not per issue). Entries
    * whose assignee is in this set skip the `idleMinutes` threshold via the
    * `actionable_idle_assignee` class. Omitted/empty = the old behavior: only
@@ -482,7 +483,7 @@ export interface SelectDispatchOptions {
    */
   idleAssignees?: ReadonlySet<string>;
   /**
-   * Per-issue lane the wake would run on, for the lane-down gate.
+   * : per-issue lane the wake would run on, for the lane-down gate.
    * When set for an issue, a down lane demotes the pick to
    * `skipped_lane_down` instead of waking into it. Issues with no entry are
    * lane-unknown and stay selectable (fail-neutral — a broken instrument must
@@ -490,7 +491,7 @@ export interface SelectDispatchOptions {
    */
   laneByIssueId?: ReadonlyMap<string, string | null>;
   /**
-   * `true` when the issue's lane reads down. Read once per firing
+   * : `true` when the issue's lane reads down. Read once per firing
    * from the lane ledger (hard stop), the outage override and the collector
    * availability snapshot — NOT re-derived per issue, so the gate is O(lanes),
    * not O(issues).
@@ -530,14 +531,14 @@ export interface SelectDispatchResult {
   budgetBlocked: BudgetBlockedEntry[];
   actionable: ActionableCandidate[];
   /**
-   * The subset of `actionable` riding the new idle-assignee class
+   * : the subset of `actionable` riding the new idle-assignee class
    * (below the `idleMinutes` threshold, assignee holding no run). Reported
    * alongside, never folded in — the operator report shows how much of each
    * firing the new class contributes.
    */
   idleAssigneeActionable: ActionableCandidate[];
   /**
-   * Picks the lane-down gate refused to wake. Counted as
+   * : picks the lane-down gate refused to wake. Counted as
    * `skipped_lane_down` and listed here with the lane that refused them, so
    * "wakes into a lane reading exhausted = 0" is checkable per firing.
    */
@@ -599,7 +600,7 @@ export function selectDispatch(
   for (const entry of population) {
     const { issue, blockedBy = [], runs = [], invocationBlock = null, pendingInteractions } = entry;
     const idle = computeIdleMs(issue, runs, nowMs);
-    // Agent-idle comes from the firing-wide set, never from the
+    // : agent-idle comes from the firing-wide set, never from the
     // issue's own runs. An ACTIVE run scoped to this issue means idle 0 and
     // keeps the card under the threshold (the assignee is busy ON this card);
     // the new class is for agents with no running run at all.
@@ -645,7 +646,7 @@ export function selectDispatch(
       continue;
     }
 
-    // Lane-down gate: a pick whose lane reads down is refused BEFORE
+    //  lane-down gate: a pick whose lane reads down is refused BEFORE
     // the wake, counted as `skipped_lane_down` and listed with the lane — the
     // acceptance "wakes into a lane reading exhausted = 0" is only checkable
     // if the skips are visible. Lane-unknown (no entry) stays selectable:
@@ -668,7 +669,7 @@ export function selectDispatch(
     counters,
     legacy: {
       // The set we would select from: rails passed, not parked, not
-      // lane-down, in focus — both the threshold class and the
+      // lane-down, in focus — both the threshold class and the 
       // idle-assignee class.
       candidates_ready: actionable.length,
       // The wakeable surface: rails 1-3 passed, before our two own rails. This

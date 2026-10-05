@@ -236,13 +236,13 @@ Every model pin is paired with a context-safe runtime envelope:
   binding and inherits the agent env instead.
 
 The fork merges the issue `adapterConfig.env` over the agent's `env` per key
-(deployed), so the agent's bindings reach the run through the base
+(, deployed), so the agent's bindings reach the run through the base
 env. The write helper therefore never copies the agent env into the pin: a pin
 carries only the plugin-owned keys in `PIN_ENV_ALLOWLIST` (the compaction
 ceiling, the fallback provenance stamp and the six model-valued sub-call
 surfaces). Copying the agent's `secret_ref` bindings snapshotted them into
 every pin and failed the run-agent binding check after a reassignment or an
-unbind (). A sub-call surface the assignee binds to a secret vetoes
+unbind. A sub-call surface the assignee binds to a secret vetoes
 the plain pin for that key, so the pin never shadows the agent's live binding.
 Unrelated bindings survive both initial pins and idle repins because they stay
 on the agent record.
@@ -260,7 +260,7 @@ change two live selection variables in one measurement window** — if
 enforcement flips while the Stage 2 slice is still moving, neither result is
 readable.
 
-**Measured Stage 2 state as of 2026-08-31 (review):** the three company
+**Measured Stage 2 state as of 2026-08-31 ( review):** the three company
 labels `tier:T1` / `tier:T2` / `tier:T3` exist (created 07:38:46Z), but **0 of
 300 issues carry any tier label** — every issue returns an empty `labels` and
 `labelIds`. Stage 2 is *created*, not *rolled out*. Consequences, both by design:
@@ -387,11 +387,11 @@ no label surface anywhere in the plugin SDK, and `labels` is absent from
 `PLUGIN_DATABASE_CORE_READ_TABLES`, so a name→id query is rejected outright by
 `assertAllowedPublicRead` (`plugin-database.ts:157-168`). Leaving it unset is
 supported — the override is still written, just without the label, which is
-additive information rather than a gate .
+additive information rather than a gate (ADR-0008).
 
 ---
 
-## Slices 2–4 (): scores, cost shadowing, bounded T1 earn-in
+## Slices 2–4: scores, cost shadowing, bounded T1 earn-in
 
 Approved decisions A and B, implemented **without changing production
 selection** — objective stays `list-price` and earn-in stays disabled until
@@ -532,7 +532,7 @@ fire-and-forget and loses the same measured dispatch race — the handler runs a
 the passes were structurally missing gets labelled and pinned the moment it is
 idle (between turns), which shrinks the unpinned window from "the whole first
 turn" to "one turn at most" — and is the release mechanism the core-side
-dispatch gate needs once it lands (half 1,
+dispatch gate needs once it lands ( half 1,
 `docs/upstream/paperclip-dispatch-gate-unpinned-issues.md`: defer
 issue-bound agent-assigned wakes until the card carries an
 `adapterConfig.model` pin).
@@ -591,7 +591,7 @@ scheduler. A mature accepted card also lifts the zero-accept exclusion.
 
 ## : the model is decided when the run starts
 
-Pins race the run they are meant to steer (). With the fork's run-model
+Pins race the run they are meant to steer. With the fork's run-model
 hook installed, `onResolveRunModel` decides each issue run's model at its start, from
 hot caches only, under a sticky rule, and returns plain plugin-owned env. It is off
 by default (`runResolve.enabled`), needs `selection.mode: "enforce"`, and, once on,

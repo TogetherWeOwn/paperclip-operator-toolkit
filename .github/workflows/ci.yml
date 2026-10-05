@@ -4719,8 +4719,10 @@ jobs:
   # each run is separately bounded by MUTATION_GATE_RUN_TIMEOUT_MS, which fails
   # loudly and NAMES the mutant. The danger a mis-sized ceiling introduces is
   # the inverse of a wedge — an honest-but-slow shard turned into a silent
-  # "cancelled" with no mutant named. When the sweep grows past ~10% headroom,
-  # raise the shard count, not this number.
+  # "cancelled" with no mutant named. 399 mutants over 16 shards is ~25 mutants
+  # plus two baselines per shard, the same shape as the private sweep that
+  # justified the ceiling. When the sweep grows past ~10% headroom, raise the
+  # shard count, not this number.
   model-selection-mutants:
     name: model-selection mutants (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: model-selection-impact
@@ -4732,7 +4734,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     defaults:
       run:
         working-directory: plugins/model-selection

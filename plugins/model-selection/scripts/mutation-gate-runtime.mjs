@@ -2,13 +2,13 @@ import { copyFile, cp, mkdir, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 // The job and step that actually execute this gate on the private runner.
-// the refusal first named `Offline suites`, which never runs this
+// : the refusal first named `Offline suites`, which never runs this
 // plugin's mutants — that job runs the repo-level verification/*-mutation-gate.sh
 // set. An agent told to cite a job that cannot hold the evidence has no
 // alternative to running the gate locally, which is the storm this refusal
 // exists to stop. `mutation-gate-runtime.spec.ts` pins both names to ci.yml.
 //
-// the sweep is sharded, so the step now lives in the
+// : the sweep is sharded, so the step now lives in the
 // `model-selection mutants` matrix (one job per shard) rather than in the
 // required `model-selection suite` job, which only aggregates their verdict.
 export const MUTATION_GATE_CI_JOB = "model-selection mutants";
@@ -39,26 +39,24 @@ export async function copyMutationTree(sourceRoot, targetRoot) {
 // it honest, because a new out-of-copy dependency fails there rather than
 // silently passing here.
 //
-// that honesty has now been paid out once. `test/fixtures/orgdb/
+// : that honesty has now been paid out once. `test/fixtures/orgdb/
 // schema.sql` is read by `context-lookup.spec.ts`, which did not exist on this
-// branch — it arrived from main in the merge-forward ( #205). The gate
+// branch — it arrived from main in the merge-forward (, #205). The gate
 // went red on the isolated baseline at 21s, before the first mutant, rather
 // than inflating to a clean 20/20 on an unstaged fixture. Expect this list to
 // need an entry whenever main adds an out-of-plugin read; the
 // "stages every repo file the suite reads from outside the plugin" spec names
 // the missing path, so the fix is mechanical.
-// `CONTRIBUTING.md` is read by tests/fixture-scan-control/
+// : `CONTRIBUTING.md` is read by tests/fixture-scan-control/
 // nested-out-of-plugin-read.spec.ts, a spec deliberately nested one directory
 // under tests/ so the scan test proves it walks subdirectories and resolves
 // `../` depth relative to each spec's own location, not a fixed count.
-// `tests/fixtures/bridge/bridge-assembled-rows.json` is read by
+// : `tests/fixtures/bridge/bridge-assembled-rows.json` is read by
 // assembled-snapshot-freshness.spec.ts via `../../../` from the
 // plugin tests dir; without staging, the isolated baseline throws ENOENT and
 // the gate reports BROKEN GATE.
-// No `ops/` entry: the public tree has no ops directory, and the only suite
-// consumer (paired-summary.spec.ts) takes the harness path from
-// PAIRED_DECISION_GATE_HARNESS, never from the checkout.
 export const MUTATION_TREE_REPO_FIXTURES = Object.freeze([
+  "ops/gate_harness.py",
   ".github/workflows/ci.yml",
   "test/fixtures/orgdb/schema.sql",
   "CONTRIBUTING.md",
@@ -73,7 +71,7 @@ export async function stageRepoFixtures(repoRoot, scratchRoot, fixtures = MUTATI
   }
 }
 
-// `MUTATION_SHARD=i/N` splits the sweep across N independent jobs.
+// . `MUTATION_SHARD=i/N` splits the sweep across N independent jobs.
 // Three properties are the whole contract, and each has a spec:
 //   * COVERAGE: for any N, the N shards are pairwise disjoint and their union is
 //     the whole list — a mutant that falls between shards is a mutant nobody
@@ -124,7 +122,7 @@ export async function runSequentially(items, run) {
 // flags. Either alone would be fragile: the flags without the pool would cap an
 // idle pool again, and the env var without the flags depends on a config
 // default that is not ours to hold still.
-// the default used to be conditional — `if (env.CI !== "true")` — so
+// : the default used to be conditional — `if (env.CI !== "true")` — so
 // the cap applied everywhere EXCEPT the one context the refusal above permits.
 // `ci.yml` sets no VITEST_* for the `model-selection suite` job, and that job
 // runs on `[self-hosted, two-selfhosted]`, so bare `{ CI: "true" }` produced
@@ -133,7 +131,7 @@ export async function runSequentially(items, run) {
 // an explicit VITEST_MAX_FORKS/VITEST_MAX_THREADS still wins over it.
 export const MUTATION_GATE_DEFAULT_FORKS = 2;
 
-// A single wedged run must not be able to spend the whole job budget.
+// . A single wedged run must not be able to spend the whole job budget.
 // `spawnSync` with no `timeout` blocks forever, so one hung mutant consumed
 // `timeout-minutes` and the job died with an opaque "cancelled" and no mutant
 // name — the aggregate budget was the only bound on an individual run. Each run
@@ -146,7 +144,7 @@ export const MUTATION_GATE_DEFAULT_FORKS = 2;
 // ~45x headroom and cannot fire on a merely slow runner.
 export const MUTATION_GATE_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
-// `spawnSync` caps each of stdout and stderr at 1 MiB by default and,
+// . `spawnSync` caps each of stdout and stderr at 1 MiB by default and,
 // past that, SIGKILLs the child and reports `{ status: null, signal: "SIGKILL",
 // error: ENOBUFS }` — byte for byte what a host OOM kill or a sibling sweeper
 // looks like. A mutant the suite catches LOUDLY (the shard-split spec prints
@@ -182,7 +180,7 @@ export function mutationGateVitestInvocation(env = process.env) {
   const args = [
     "node_modules/vitest/vitest.mjs",
     "run",
-    // no results cache. The gate scores each run from process
+    // : no results cache. The gate scores each run from process
     // exit/stdout, never from the cache — and a nested vitest resolving
     // `node_modules/.vite/vitest/results.json` through a root-owned shared
     // install (package-root symlink chain) dies EACCES on write even when the
