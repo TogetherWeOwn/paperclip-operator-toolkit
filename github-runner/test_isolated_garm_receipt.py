@@ -385,11 +385,11 @@ class CanarySpecTest(unittest.TestCase):
 
     def test_checked_in_synthetic_spec_never_authorizes(self):
         spec = self.spec()
-        self.assertEqual(spec["host"], "fixture-host-b")
+        self.assertEqual(spec["host"], "garm-host-a")
         self.assertEqual(set(spec["pool"]["tags"]), {"self-hosted", "garm-managed"})
         self.assertEqual(set(spec["pool"]["forbidden_tags"]), {
-            "example-ephemeral", "example-isolated", "example-selfhosted",
-            "garm-fixture-host-b",
+            "two-ephemeral", "two-isolated", "two-selfhosted",
+            "garm-host-a",
         })
         result = validate_canary_spec(spec)
         self.assertEqual(result["result"], "offline_canary_spec_valid")
@@ -405,20 +405,20 @@ class CanarySpecTest(unittest.TestCase):
                 validate_canary_spec(spec)
 
     def test_forbidden_labels_still_separate_trust_classes(self):
-        for label in ("example-ephemeral", "example-isolated", "example-selfhosted"):
+        for label in ("two-ephemeral", "two-isolated", "two-selfhosted"):
             spec = self.spec()
             spec["pool"]["forbidden_tags"].remove(label)
             with self.subTest(label=label), self.assertRaisesRegex(
                     InvalidCanarySpec, "missing trust-separation label"):
                 validate_canary_spec(spec)
-        for label, reason in (("example-isolated", "duplicate tag"),
+        for label, reason in (("two-isolated", "duplicate tag"),
                               ("garm-managed", "tag in both sets")):
             spec = self.spec()
             spec["pool"]["forbidden_tags"].append(label)
             with self.subTest(label=label), self.assertRaisesRegex(InvalidCanarySpec, reason):
                 validate_canary_spec(spec)
         spec = self.spec()
-        spec["pool"]["tags"] = ["self-hosted", "example-isolated"]
+        spec["pool"]["tags"] = ["self-hosted", "two-isolated"]
         with self.assertRaisesRegex(InvalidCanarySpec, "^pool.tags:"):
             validate_canary_spec(spec)
 

@@ -137,7 +137,6 @@ hooks/muse-stop-guard/smoke/run-smoke.mjs
 hooks/muse-stop-guard/smoke/stub-anthropic.mjs
 hooks/muse-stop-guard/summarize-decisions.mjs
 lib/pcsql.sh
-lib/runner_disk_pressure.py
 mcp/README.md
 mcp/org-request-mcp.mjs
 mcp/test/org-request-mcp.test.mjs
@@ -231,7 +230,6 @@ test_public_comment_hygiene_gate.sh
 test_recovery_writer.py
 test_red_main_poll.py
 test_request_queue.sh
-test_runner_disk_pressure.py
 test_runner_disk_triage.sh
 test_sql_backend.sh
 test_transport_db_guards.py

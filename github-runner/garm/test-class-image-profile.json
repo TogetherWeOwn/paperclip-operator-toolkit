@@ -72,7 +72,7 @@
     "ram_mib": 4096,
     "safe_max": 1
   },
-  "role": "test",
+  "role": "test-private",
   "runtime_user": {
     "login_shell": false,
     "name": "runner",

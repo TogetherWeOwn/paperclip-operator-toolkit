@@ -10,7 +10,7 @@ from pathlib import Path
 SCHEMA = "garm-test-profile-receipt.v1"
 PAIR_SCHEMAS = {"garm-test-profile-receipt.v1", "garm-rehearsal-receipt.v1"}
 MAX_BYTES = 1024 * 1024
-ROLE = "test"
+ROLE = "test-private"
 TOOLS = {"runner", "node", "php", "composer", "psql", "cc"}
 PROBES = {"native_build", "native_postgres", "sudo_denied",
           "docker_unix_denied", "docker_tcp_denied", "sibling_data_denied",
@@ -79,7 +79,7 @@ def validate(receipt):
                       "toolchain", "actions"}, "receipt")
     require(r["schema"] == SCHEMA, "schema")
     require(r["evidence_class"] == "synthetic", "evidence_class: synthetic only")
-    require(r["role"] == ROLE, "role: test only")
+    require(r["role"] == ROLE, "role: test-private only")
 
     s = obj(r["source"], {"revision", "bundle_sha256"}, "source")
     digest(s["revision"], 40, "source.revision")

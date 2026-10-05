@@ -13,7 +13,7 @@
 #     defaults a missing wait to 0 (or to slo) reports a PASS it never
 #     measured; §2 pins UNKNOWN plus exit 3.
 # §3  Cross-checks each refuse their own lie: wrong schema, non-garm
-#     runner, missing example-ephemeral label, bad clocks, picked-up before
+#     runner, missing two-ephemeral label, bad clocks, picked-up before
 #     dispatched, non-positive SLO, out-of-range wait. A checker that only
 #     compares two numbers passes fabricated green reports (§3a pins the
 #     static-runner lie explicitly).
@@ -46,7 +46,7 @@ def report(**overrides):
     doc = {"schema": SCHEMA,
            "run_id": "0",
            "repository": "example/synthetic",
-           "pool_labels": ["self-hosted", "example-ephemeral"],
+           "pool_labels": ["self-hosted", "two-ephemeral"],
            "runner_name": "garm-example-synthetic",
            "dispatched_at": "2026-10-03T22:00:00Z",
            "picked_up_at": "2026-10-03T22:03:11Z",
@@ -98,7 +98,7 @@ class CrossChecks(unittest.TestCase):
             evaluate(report(schema="garm-first-pickup-report.v0"))
 
     def test_static_runner_refused(self):
-        # §3a: a example-ephemeral label on a static runner name is the exact
+        # §3a: a two-ephemeral label on a static runner name is the exact
         # lie this canary exists to catch; numbers alone must not pass it.
         with self.assertRaises(Exception):
             evaluate(report(runner_name="ci-fixture-host-a-iso-1"))

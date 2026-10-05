@@ -59,7 +59,7 @@
     "ram_mib": 4096,
     "safe_max": 1
   },
-  "role": "isolated",
+  "role": "isolated-private",
   "runtime_user": {
     "login_shell": false,
     "name": "runner",

@@ -11,13 +11,13 @@ from pathlib import Path
 SCHEMA = "garm-rehearsal-receipt.v1"
 MAX_BYTES = 1024 * 1024
 ROLES = {
-    "privileged": {
+    "privileged-private": {
         "sudo": True, "docker": True,
         "tools": {"runner", "node", "php", "composer", "psql", "docker"},
         "probes": {"native_build", "ci_postgres", "service_loopback",
                    "metadata_denied", "host_services_denied"},
     },
-    "isolated": {
+    "isolated-private": {
         "sudo": False, "docker": False,
         "tools": {"runner", "node", "cc", "psql"},
         "probes": {"native_build", "native_postgres", "sudo_denied",
@@ -95,7 +95,7 @@ def validate(receipt, at):
     t = obj(r["target"], {"host", "pool", "provider", "garm_version",
                           "provider_version", "lxd_version", "selector",
                           "inventory_complete", "enabled_pools"}, "target")
-    require(t["host"] == "garm-host-b", "target.host: contract is garm-host-b only")
+    require(t["host"] == "fixture-host-a", "target.host: synthetic contract is fixture-host-a only")
     for key in ("pool", "provider", "selector"):
         text(t[key], "target." + key)
     require(t["garm_version"] == "0.2.1", "target.garm_version")
@@ -138,7 +138,7 @@ def validate(receipt, at):
         require(re.fullmatch(r"\d+\.\d+\.\d+(?:[.+-][A-Za-z0-9.-]+)?", version)
                 is not None, "tool_version." + name + ": exact version required")
     require(versions["node"].startswith("24."), "tool_version.node: Node24 required")
-    if r["role"] == "privileged":
+    if r["role"] == "privileged-private":
         require(versions["php"].startswith("8.5."), "tool_version.php: PHP8.5 required")
         require(versions["composer"].startswith("2."), "tool_version.composer")
 
@@ -150,8 +150,8 @@ def validate(receipt, at):
     require(re.fullmatch(r"TogetherWeOwn/[A-Za-z0-9_.-]+", tr["repository"])
             is not None, "trust.repository")
     require(tr["repository"].lower() not in {
-        "togetherweown/two-web-next", "togetherweown/two-bot-next",
-    }, "trust.repository: public Next repositories stay hosted")
+        "togetherweown/example-public-web", "togetherweown/example-public-bot",
+    }, "trust.repository: denied public example repositories stay hosted")
     require(tr["visibility"] == "private", "trust.visibility")
     for key in ("runner_group_verified", "trusted_ref_policy_verified", "public_pr_excluded",
                 "required_checks_verified", "blocking_gate_unchanged"):

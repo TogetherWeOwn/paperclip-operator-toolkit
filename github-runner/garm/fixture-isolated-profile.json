@@ -99,7 +99,7 @@
     "ram_mib": 4096,
     "safe_max": 1
   },
-  "role": "isolated",
+  "role": "isolated-private",
   "runtime": {
     "login_shell": false,
     "root": false,

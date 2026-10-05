@@ -45,8 +45,8 @@ def profile_fixture():
                          for name in NETWORK_DENIES},
         "probes": {name: {"result": "pass", "positive_control_passed": True}
                    for name in PROBES},
-        "labels": {"eligible": ["self-hosted", "example-isolated"],
-                   "ineligible": ["example-ephemeral", "example-selfhosted"]},
+        "labels": {"eligible": ["self-hosted", "two-isolated"],
+                   "ineligible": ["two-ephemeral", "two-selfhosted"]},
         "resources": dict(RESOURCES),
         "toolchain": {"psql_on_path": True, "php_provides": False,
                       "composer_provides": False, "extensions_provided": [],

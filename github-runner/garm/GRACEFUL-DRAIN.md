@@ -1,14 +1,14 @@
 # GARM ephemeral VM graceful job-drain and shutdown-timeout spec
 
-Source-only proposal note. This note specifies graceful job-drain on
-scale-down: the drain signal, the grace period/timeout, what happens to a
-running job at timeout, and how the reaper distinguishes drained vs
-orphaned VMs. Propose-only; no live LXD/GARM mutation.
+Source-only slice of the GARM-only owned CI fleet work. This note specifies
+graceful job-drain on scale-down: the drain signal, the grace period/timeout,
+what happens to a running job at timeout, and how the reaper distinguishes
+drained vs orphaned VMs. Propose-only; no live LXD/GARM mutation.
 
 Enforced structurally by `drain-contracts.json` (machine-readable stub of the
-proposed constants) and `validate_drain.py` (offline checker). Sibling
-offline regression suites follow the existing `test_isolated_*.py`
-discovery pattern outside this slice. No CI workflow change ships here.
+proposed constants) and `validate_drain.py` (offline checker), covered by
+`../test_isolated_garm_drain.py`, which CI discovers with the existing
+`test_isolated_*.py` pattern. No CI workflow change was needed.
 
 ## 0. Vocabulary (upstream, not invented here)
 
@@ -55,10 +55,11 @@ signal aborts or orphans work and is never a drain.
 
 ## 2. Grace period and timeout
 
-- `drain_grace_min: 150` — proposed floor, covering the longest eligible job
-  (150-minute timeout class). The floor moves if the longest eligible
-  timeout moves.
-- `poll_interval_min: 5` — matches the 5-minute pool-monitor cadence.
+- `drain_grace_min: 150` — proposed floor, covering the longest eligible job:
+  `Offline suites` carries `timeout-minutes: 150` in this repo's `ci.yml`.
+  The floor moves if the longest eligible timeout moves.
+- `poll_interval_min: 5` — matches the existing pool monitor's 5-minute
+  cadence.
 - `runner_bootstrap_timeout_min: 20` — upstream pool default; bounds startup,
   never the drain. Naming it here stops the "20-minute" value from being
   misread as a drain grace later.
@@ -71,7 +72,7 @@ fleet only shrinks, never grows, past the deadline. `force_delete` at or
 after timeout is a separate reviewed operator action with its own action
 ref — never an automatic escalation, never inferred from queue depth. This
 is the same "a timeout is a HOLD, never permission to stop/kill jobs"
-rule the runbook already states.
+rule the operator runbook in `README.md` already states.
 
 ## 4. How the reaper distinguishes drained vs orphaned VMs
 
@@ -84,7 +85,7 @@ A VM counts as **drained** only when all of these hold:
 4. artifacts are complete (job/artifact completion, not registration absence);
 5. `vm_absent` and `registration_absent` are observed together and correlated
    to the same run/runner/VM — registration absence alone is not VM
-   reclamation (runbook §4-5).
+   reclamation (operator runbook in `README.md`, steps 4-5).
 
 A VM counts as **orphaned** when any of these hold:
 
@@ -105,17 +106,16 @@ record is the action ref above. No monitor change ships in this slice.
 
 ```sh
 python3 -B github-runner/garm/validate_drain.py github-runner/garm/drain-contracts.json
+python3 -B -m unittest discover -s github-runner -p 'test_isolated_garm_drain.py' -v
+# Offline CI uses this broader discovery command, unchanged:
+python3 -B -m unittest discover -s github-runner -p 'test_isolated_*.py'
 ```
 
-(Sibling offline regression suites follow the `test_isolated_*.py`
-discovery pattern outside this slice.)
-
-The checker pins the grace floor, the poll/bootstrap values, the exact
-signal sets, the exact graceful/force edge sets against the upstream legal
-map, the exact reaper rule lists, and one rejection per gate (lowered
-grace, zero poll, bootstrap-mistaken-for-grace, missing action ref,
-force-inside-grace, illegal transition, half-cleanup). A passing file
-still returns
+The suite pins the grace floor, the poll/bootstrap values, the exact signal
+sets, the exact graceful/force edge sets against the upstream legal map, the
+exact reaper rule lists, and one rejection per gate (lowered grace, zero
+poll, bootstrap-mistaken-for-grace, missing action ref, force-inside-grace,
+illegal transition, half-cleanup). A passing file still returns
 `admission_authorized:false`, `host_verified:false`, `installed:false`:
 validation is structural agreement with this proposal, never authorization
 to scale, drain, or delete.

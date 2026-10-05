@@ -59,8 +59,7 @@ class PluginWiring(unittest.TestCase):
                      'scripts/nonplugin-disclosure-files.txt',
                      'docs/nonplugin-disclosure-scan.md',
                      'ci_required_checks_audit.py', 'test_ci_required_checks_audit.py',
-                     'runner_disk_pressure.sh', 'lib/runner_disk_pressure.py',
-                     'test_runner_disk_pressure.py', 'test_provisioned_transport_db.py',
+                     'runner_disk_pressure.sh', 'test_provisioned_transport_db.py',
                      'test_transport_db_guards.py', 'docs/transport-database-proof.md',
                      'red_main_poll.sh', 'red_main_poll.py', 'test_red_main_poll.py'):
             self.assertIn(name, selected)

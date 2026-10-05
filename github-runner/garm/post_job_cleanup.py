@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """GARM post-job cleanup + isolation probe, source-only offline form.
 
-Implements the GARM cleanup/isolation-probe runbook spec as repository
-source ONLY:
+Part of the GARM-only owned CI fleet work. Implements the cleanup and
+isolation-probe runbook spec as repository source ONLY:
 
 - ``cleanup`` removes temp/container residue inside ONE explicit synthetic
   job directory and proves log retention.
@@ -39,7 +39,7 @@ RESIDUE_PATTERNS = (
     "*.sock-stub",
 )
 
-# Check B applies to isolated only; A and C apply to both roles.
+# Check B applies to isolated-private only; A and C apply to both roles.
 B_REQUIRED = ("sudo_denied", "docker_unix_denied", "docker_tcp_denied",
               "sibling_data_denied")
 C_REQUIRED = ("metadata_denied", "host_services_denied", "production_denied")
@@ -212,9 +212,9 @@ def check_denials(doc, check, required, allowed_reason):
 
 
 def check_b(doc):
-    """Spec check B: no-Docker/no-sudo isolation (isolated only)."""
+    """Spec check B: no-Docker/no-sudo isolation (isolated-private only)."""
     role, job = doc.get("role"), doc.get("job")
-    if role != "isolated":
+    if role != "isolated-private":
         print("garm-cleanup-probe: SKIP check=B role=%s job=%s "
               "reason=not-applicable" % (role, job))
         return "SKIP"
@@ -281,7 +281,7 @@ def main(argv=None):
         print("garm-cleanup-probe: REFUSED check=load reason=%s" % error,
               file=sys.stderr)
         return 2
-    if doc.get("role") not in ("isolated", "privileged"):
+    if doc.get("role") not in ("isolated-private", "privileged-private"):
         print("garm-cleanup-probe: REFUSED check=load reason=unknown-role",
               file=sys.stderr)
         return 2

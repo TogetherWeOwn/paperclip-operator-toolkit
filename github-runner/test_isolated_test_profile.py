@@ -48,9 +48,9 @@ def profile_fixture():
                          for name in NETWORK_DENIES},
         "probes": {name: {"result": "pass", "positive_control_passed": True}
                    for name in PROBES},
-        "labels": {"eligible": ["self-hosted", "example-test"],
-                   "ineligible": ["example-ephemeral", "example-selfhosted",
-                                  "example-isolated"]},
+        "labels": {"eligible": ["self-hosted", "two-test"],
+                   "ineligible": ["two-ephemeral", "two-selfhosted",
+                                  "two-isolated"]},
         "resources": dict(RESOURCES),
         "ephemeral": {"runner_ephemeral": True, "one_job_then_deregister": True,
                       "vm_absent_after_job": True,

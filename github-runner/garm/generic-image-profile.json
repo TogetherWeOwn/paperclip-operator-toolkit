@@ -65,7 +65,7 @@
     "ram_mib": 8192,
     "safe_max": 1
   },
-  "role": "generic",
+  "role": "generic-private",
   "runtime_user": {
     "login_shell": false,
     "name": "runner",
