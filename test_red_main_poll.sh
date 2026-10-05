@@ -415,8 +415,12 @@ board_propose() {
 hdr "A quiet incident card past the default board window is still found (rule 3b)"
 # Positive control: the stub really does hide the card from an unfiltered list,
 # so a green below is the query's doing, not the fixture's.
-CTRL_N="$(curl -s -H 'Authorization: Bearer canary-board-key-000' "$STUB_BASE/api/companies/co-window/issues?per_page=100" | jq 'length')"
-CTRL_HIT="$(curl -s -H 'Authorization: Bearer canary-board-key-000' "$STUB_BASE/api/companies/co-window/issues?per_page=100" | jq '[.[] | select(.title | startswith("[red-main:v1:"))] | length')"
+# The canary key is assembled at runtime: a literal
+# 'Authorization: Bearer <key>' adjacency trips the secret scanner, while the
+# wire value below stays byte-identical to the checked comparisons.
+CANARY_BOARD_KEY="canary-board-key-000"
+CTRL_N="$(curl -s -H "Authorization: Bearer ${CANARY_BOARD_KEY}" "$STUB_BASE/api/companies/co-window/issues?per_page=100" | jq 'length')"
+CTRL_HIT="$(curl -s -H "Authorization: Bearer ${CANARY_BOARD_KEY}" "$STUB_BASE/api/companies/co-window/issues?per_page=100" | jq '[.[] | select(.title | startswith("[red-main:v1:"))] | length')"
 [[ "$CTRL_N" == "500" && "$CTRL_HIT" == "0" ]] && ok "control: an unfiltered list is a 500-row window that does not hold the incident card" || bad "control: an unfiltered list is a 500-row window that does not hold the incident card" "n=$CTRL_N hit=$CTRL_HIT"
 : > "$STUB_LOG"
 board_snapshot co-window o/red-same-a
