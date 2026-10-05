@@ -4721,20 +4721,9 @@ jobs:
     if: needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: agent_test
-          POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # No service containers: the runner-label gate forbids them, so the one
+    # suite that needs Postgres gets an ephemeral cluster below (same pattern
+    # as privilege-suites, but trust auth like the container this replaces).
     steps:
       - uses: actions/checkout@v4
         with:
@@ -4759,19 +4748,35 @@ jobs:
         with:
           node-version: '24'
 
+      # Ephemeral PostgreSQL for the two database-backed steps below (same
+      # throwaway pattern as privilege-suites). The port is kernel-assigned:
+      # two jobs on one host must never choose the same number.
+      - name: Start an ephemeral PostgreSQL cluster
+        run: |
+          set -euo pipefail
+          PGBIN=/usr/lib/postgresql/16/bin
+          PGDATA="$RUNNER_TEMP/transport-pgdata"
+          PGPORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+          rm -rf "$PGDATA"
+          install -d -m 700 "$PGDATA"
+          "$PGBIN/initdb" -D "$PGDATA" -U agent_test --auth-host=trust --auth-local=trust >/dev/null
+          "$PGBIN/pg_ctl" -D "$PGDATA" -w -l "$RUNNER_TEMP/transport-pg.log" \
+            -o "-p $PGPORT -h 127.0.0.1 -k $PGDATA" start >/dev/null
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+
       - name: upgrade rehearsal offline suite
         env:
           PAPERCLIP_UPGRADE_MIGRATIONS_DIR: public-schema/packages/db/src/migrations
           PGHOST: localhost
-          PGPORT: '5432'
+          PGPORT: ${{ env.PGPORT }}
           PGUSER: agent_test
         run: ./paperclip-upgrade/test-offline.sh
 
       - name: transport database proof
         run: |
-          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture createdb --no-password toolkit_transport_fixture
-          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 test_provisioned_transport_db.py --init
-          env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 -m unittest -v test_provisioned_transport_db
+          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture createdb --no-password toolkit_transport_fixture
+          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 test_provisioned_transport_db.py --init
+          env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture python3 -m unittest -v test_provisioned_transport_db
 
       - name: Stop guard hook suite
         run: node --test hooks/muse-stop-guard/muse-stop-guard.test.mjs

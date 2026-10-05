@@ -128,9 +128,13 @@ class PluginWiring(unittest.TestCase):
 
     def test_upgrade_proof_supplies_schema_and_disposable_database(self):
         block = job(self.text, "ported-suites")
-        self.assertIn("image: postgres:17", block)
-        self.assertIn("POSTGRES_USER: agent_test", block)
-        self.assertIn("POSTGRES_HOST_AUTH_METHOD: trust", block)
+        # No service containers: the runner-label gate forbids them, so the
+        # disposable database is an ephemeral initdb cluster (same throwaway
+        # pattern as privilege-suites), not a postgres image.
+        self.assertNotIn("services:", block)
+        self.assertIn("-U agent_test --auth-host=trust --auth-local=trust", block)
+        self.assertIn("pg_ctl", block)
+        self.assertIn('echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"', block)
         self.assertIn("repository: TogetherWeOwn/paperclip", block)
         self.assertRegex(block, r"ref: [0-9a-f]{40}\n")
         self.assertIn("persist-credentials: false", block)
@@ -146,13 +150,15 @@ class PluginWiring(unittest.TestCase):
         block = job(self.text, "ported-suites")
         self.assertIn("name: transport database proof", block)
         proof = block.split("name: transport database proof", 1)[1].split("      - ", 1)[0]
-        clean = 'env -i PATH="$PATH" PGHOST=localhost PGPORT=5432 PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture '
+        clean = 'env -i PATH="$PATH" PGHOST=localhost PGPORT="$PGPORT" PGUSER=agent_test PGPASSWORD= PGDATABASE=toolkit_transport_fixture '
         self.assertIn(clean + 'createdb --no-password toolkit_transport_fixture', proof)
         self.assertIn(clean + 'python3 test_provisioned_transport_db.py --init', proof)
         self.assertIn(clean + 'python3 -m unittest -v test_provisioned_transport_db', proof)
         self.assertLess(proof.index('createdb --no-password'), proof.index('test_provisioned_transport_db.py --init'))
         self.assertLess(proof.index('test_provisioned_transport_db.py --init'), proof.index('-m unittest -v test_provisioned_transport_db'))
         self.assertEqual(block.count('python3 -m unittest -v test_provisioned_transport_db'), 1)
+        self.assertLess(block.index('Start an ephemeral PostgreSQL cluster'),
+                        block.index('name: transport database proof'))
 
     def test_protection_rule_suite_has_offline_guard_and_clean_environment(self):
         block = job(self.text, "ported-suites")
