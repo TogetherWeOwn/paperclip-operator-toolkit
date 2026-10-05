@@ -1,0 +1,68 @@
+{
+  "admission_authorized": false,
+  "covers": {
+    "build-class": "isolated-image-profile.json",
+    "generic-role": "role-contracts.json"
+  },
+  "covers_notes": {
+    "build-class": "isolated build-class image profile",
+    "generic-role": "isolated and privileged role contracts"
+  },
+  "evidence_class": "synthetic",
+  "images": {
+    "base/ubuntu-24.04": {
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pinned_ref": "ubuntu:24.04@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "profile": "isolated-image-profile.json:base.distribution",
+      "provenance": {
+        "attested": false,
+        "disposition": "HOLD; synthetic placeholder, never resolved live. Replace with the measured base digest through the approved read path before any operator build.",
+        "predicate": null
+      },
+      "role": "base"
+    },
+    "runner/isolated": {
+      "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "inputs_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "pinned_ref": "garm-runner-isolated@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "profile": "role-contracts.json:roles.isolated + fixture-isolated.json",
+      "profile_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "provenance": {
+        "attested": false,
+        "disposition": "HOLD; synthetic rehearsal trio only. No live build, no live attestation.",
+        "predicate": null
+      },
+      "role": "isolated"
+    },
+    "runner/isolated-profile-build-class": {
+      "digest": "9999999999999999999999999999999999999999999999999999999999999999",
+      "inputs_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "pinned_ref": "garm-runner-isolated-profile@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "profile": "isolated-image-profile.json + fixture-isolated-profile.json",
+      "profile_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "provenance": {
+        "attested": false,
+        "disposition": "HOLD; synthetic rehearsal trio only. No live build, no live attestation.",
+        "predicate": null
+      },
+      "role": "isolated"
+    },
+    "runner/privileged": {
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inputs_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "pinned_ref": "garm-runner-privileged@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile": "role-contracts.json:roles.privileged + fixture-privileged.json",
+      "profile_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "provenance": {
+        "attested": false,
+        "disposition": "HOLD; synthetic rehearsal trio only. No live build, no live attestation.",
+        "predicate": null
+      },
+      "role": "privileged"
+    }
+  },
+  "missing_digest_disposition": "REFUSE; a mutable tag or a missing digest fails the check and never authorizes admission",
+  "ref_policy": "digest-only",
+  "schema": "garm-image-digest-pins.v1",
+  "status": "synthetic-preparation-only"
+}
