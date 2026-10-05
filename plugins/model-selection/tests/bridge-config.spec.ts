@@ -82,6 +82,83 @@ describe("bridge-only packet v3", () => {
     expect(() => assembleBridgeConfig(roster, live)).toThrow("lacks enabled bridge row");
   });
 
+  it.each(["cost-in", "cost-out", "capabilities", "fallback-only"])("preflight pins addition %s to the reviewed roster", (field) => {
+    const live = bridgeLiveShape();
+    const artifact = structuredClone(assembleBridgeConfig(reviewedRoster, live).config);
+    if (field === "cost-in") artifact.models[124]!.costPerMTokIn = 999;
+    if (field === "cost-out") artifact.models[125]!.costPerMTokOut = 999;
+    if (field === "capabilities") artifact.models[124]!.capabilities = ["tools"];
+    if (field === "fallback-only") artifact.models[125]!.fallbackOnly = true;
+    expect(() => validateBridgeConfig(live, artifact)).toThrow();
+  });
+
+  it("assembly fails closed when the roster drifts off the pinned cost/capability/fallbackOnly", () => {
+    const live = bridgeLiveShape();
+    const roster = structuredClone(reviewedRoster);
+    roster.models.find((row: any) => row.id === "claude-sonnet-5-5" && row.tier === "T2").costPerMTokIn = 999;
+    expect(() => assembleBridgeConfig(roster, live)).toThrow("costPerMTokIn");
+    const roster2 = structuredClone(reviewedRoster);
+    roster2.models.find((row: any) => row.id === "muse-spark-1.3-contributor").fallbackOnly = true;
+    expect(() => assembleBridgeConfig(roster2, live)).toThrow("fallbackOnly");
+  });
+
+  it.each(["swap-live-order", "additions-first", "swap-additions"])("preflight enforces live-row order and addition position (%s)", (field) => {
+    const live = bridgeLiveShape();
+    const artifact = structuredClone(assembleBridgeConfig(reviewedRoster, live).config);
+    if (field === "swap-live-order") {
+      const first = artifact.models[0]!;
+      const rest = artifact.models.slice(1);
+      artifact.models = [...rest.slice(0, 10), first, ...rest.slice(10)];
+    }
+    if (field === "additions-first") {
+      artifact.models = [...artifact.models.slice(124), ...artifact.models.slice(0, 124)];
+    }
+    if (field === "swap-additions") {
+      const tail = artifact.models.slice(124).reverse();
+      artifact.models = [...artifact.models.slice(0, 124), ...tail];
+    }
+    expect(() => validateBridgeConfig(live, artifact)).toThrow();
+  });
+
+  it.each(["live-only-section", "shadow-emit", "new-top-level-key"])("preflight pins top-level-key drift beyond selection+pacing (%s)", (field) => {
+    const live = bridgeLiveShape();
+    const artifact = structuredClone(assembleBridgeConfig(reviewedRoster, live).config);
+    if (field === "live-only-section") artifact.liveOnlySection.keep = ["changed"];
+    if (field === "shadow-emit") artifact.shadowEmit.enabled = false;
+    if (field === "new-top-level-key") artifact.brandNewSection = { invented: true };
+    expect(() => validateBridgeConfig(live, artifact)).toThrow();
+  });
+
+  it("rejects duplicate CLI flags instead of first-wins", () => {
+    const live = bridgeLiveShape();
+    const root = process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? process.env.PAPERCLIP_SCRATCH_DIR ?? process.cwd();
+    const dir = mkdtempSync(join(root, "bridge-config-test-"));
+    directories.push(dir);
+    const rosterPath = join(dir, "roster.json");
+    const livePath = join(dir, "before.json");
+    const output = join(dir, "artifact.json");
+    const counts = join(dir, "counts.json");
+    writeFileSync(rosterPath, JSON.stringify(reviewedRoster));
+    writeFileSync(livePath, JSON.stringify(live));
+    const script = new URL("../scripts/assemble-additive-config.mjs", import.meta.url).pathname;
+    const dup = spawnSync(process.execPath, [
+      script, "--roster", rosterPath, "--live", livePath, "--live", livePath,
+      "--out", output, "--counts", counts, "--bridge-only",
+    ], { encoding: "utf8", timeout: 10000 });
+    expect(dup.status).toBe(1);
+    expect(dup.stderr).toContain("duplicate --live");
+    expect(existsSync(output)).toBe(false);
+    expect(existsSync(counts)).toBe(false);
+    const { result, output: goodOutput } = runCli(live, true);
+    expect(result.status).toBe(0);
+    const verifyScript = new URL("../scripts/verify-bridge-config.mjs", import.meta.url).pathname;
+    const verifyDup = spawnSync(process.execPath, [
+      verifyScript, "--live", livePath, "--live", livePath, "--artifact", goodOutput,
+    ], { encoding: "utf8", timeout: 10000 });
+    expect(verifyDup.status).toBe(1);
+    expect(verifyDup.stderr).toContain("duplicate --live");
+  });
+
   it.each(["selection", "pacing", "row-enabled", "row-lane", "extra-row", "addition-lane"])("preflight independently catches %s drift", (field) => {
     const live = bridgeLiveShape();
     const artifact = structuredClone(assembleBridgeConfig(reviewedRoster, live).config);
@@ -115,7 +192,9 @@ describe("bridge-only packet v3", () => {
     const drift = readback();
     expect(drift.status).toBe(1);
     expect(drift.stdout).toBe("");
-    expect(drift.stderr).toContain("readback differs");
+    // (a): the pinned cost guard now fails closed before the
+    // readback deep-equality check; either refusal proves the drift is caught.
+    expect(drift.stderr).toMatch(/readback differs|changed costPerMTokIn/);
     artifact.selection.mode = "enforce";
     writeFileSync(after, JSON.stringify(artifact));
     expect(readback().status).toBe(1);

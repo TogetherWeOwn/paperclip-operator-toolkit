@@ -61,10 +61,14 @@ paths are local files, not credentials:
 ```sh
 set -eu
 umask 077
+# Define the private packet directory first; every path below lives under it.
+export PACKET_DIR="$(mktemp -d)"
 # Run from the verified plugins/model-selection source directory.
 sha256sum config/reviewed-roster.json scripts/assemble-additive-config.mjs \
   scripts/verify-bridge-config.mjs > "$PACKET_DIR/source.sha256"
+sha256sum -c "$PACKET_DIR/source.sha256"
 sha256sum "$PACKET_DIR/BEFORE.json" > "$PACKET_DIR/before.sha256"
+sha256sum -c "$PACKET_DIR/before.sha256"
 node scripts/assemble-additive-config.mjs --bridge-only \
   --roster config/reviewed-roster.json --live "$PACKET_DIR/BEFORE.json" \
   --out "$PACKET_DIR/artifact.json" --counts "$PACKET_DIR/counts.json"
@@ -80,14 +84,22 @@ No application command is supplied here; the named versioned-install vehicle,
 its id and separate live-apply authorization remain prerequisites.
 
 Immediately before any authorized apply, take another fresh snapshot through
-the same read vehicle and compare it to BEFORE (JSON deep equality, not merely
-counts). If it drifted, discard the prepared packet and regenerate/revalidate;
-never overwrite intervening config. An installation vehicle lacking a
-conditional-update or exclusive-write guarantee must be dispositioned by CEO
-before applying. Hash the validated artifact again before handing it to the
-vehicle. Apply **only that artifact**; never the full-roster output or a
-hand-edited JSON file. Do not change package paths, models, pins, timers, modes
-or bindings outside this +2 scope.
+the same read vehicle as `FRESH.json` and compare it to BEFORE (JSON deep
+equality, not merely counts). If it drifted, discard the prepared packet and
+regenerate/revalidate; never overwrite intervening config. An installation
+vehicle lacking a conditional-update or exclusive-write guarantee must be
+dispositioned by CEO before applying. Hash the validated artifact again before
+handing it to the vehicle. Apply **only that artifact**; never the full-roster
+output or a hand-edited JSON file. Do not change package paths, models, pins,
+timers, modes or bindings outside this +2 scope.
+
+```sh
+# Drift check: FRESH.json must deep-equal BEFORE.json; hash-compare the artifact.
+node -e 'const fs = require("fs"), util = require("util"); const [aPath, bPath] = process.argv.slice(1); const a = JSON.parse(fs.readFileSync(aPath, "utf8")); const b = JSON.parse(fs.readFileSync(bPath, "utf8")); if (!util.isDeepStrictEqual(a, b)) { console.error("drift: FRESH.json differs from BEFORE.json"); process.exit(1); } console.log("no drift: FRESH.json deep-equals BEFORE.json");' \
+  "$PACKET_DIR/BEFORE.json" "$PACKET_DIR/FRESH.json"
+sha256sum "$PACKET_DIR/artifact.json" > "$PACKET_DIR/artifact.sha256"
+sha256sum -c "$PACKET_DIR/artifact.sha256"
+```
 
 ## Independent AFTER readback and rollback gate
 
