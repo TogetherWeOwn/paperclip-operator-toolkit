@@ -9,7 +9,7 @@
 # card standing in for a wake, malformed envelope coerced to zero).
 #
 # Deterministic: no network, no clock read, no env. Imports only the pure
-# functions of tog3846_acceptance.py. Network wrappers (fetch_all/_get) are
+# functions of dispatch-acceptance-measurement.py. Network wrappers (fetch_all/_get) are
 # exercised only through monkeypatched module attributes — never a socket.
 # ===========================================================================
 from __future__ import annotations
@@ -20,8 +20,8 @@ import sys
 import unittest
 
 MODULE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "tog3846_acceptance.py")
-SPEC = importlib.util.spec_from_file_location("tog3846_acceptance", MODULE_PATH)
+                           "dispatch-acceptance-measurement.py")
+SPEC = importlib.util.spec_from_file_location("dispatch_acceptance_measurement", MODULE_PATH)
 ACC = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ACC)
 

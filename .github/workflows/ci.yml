@@ -698,7 +698,10 @@ jobs:
           # glob does not descend, and operator-run deploy scripts are checked
           # in their source repo with their suites
           # of their own syntax.
-          for f in *.sh lib/*.sh omniroute/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
+          # omniroute/ holds only the rehearsal package now (checked as .mjs
+          # below), so no .sh glob here: an unmatched glob would pass its
+          # literal text to bash -n and fail the step.
+          for f in *.sh lib/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           for f in scripts/*.sh; do bash -n "$f" || { echo "::error file=$f::bash parse error"; rc=1; }; done
           # verification/ holds offline gates with suites of their own; same
           # argument as scripts/*.sh above — the bare globs do not descend.
@@ -714,7 +717,9 @@ jobs:
           # have a suite, but the glob must cover the directory rather than that
           # one file, or the next root-level Python lands here unparsed and
           # nobody notices until it is in front of an operator.
-          for f in omniroute/*.py *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          # omniroute/ holds no Python (rehearsal package is .mjs, checked
+          # below), so only root *.py is globbed here for the same reason.
+          for f in *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
           # Ported toolkit trees: offline checkers, detectors, gates and the
           # migration gate. Same argument as the globs above.
           for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done

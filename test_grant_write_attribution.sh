@@ -22,8 +22,8 @@
 # regresses, which is a false green with extra steps. §0 proves the extraction
 # guard fires, because a suite that extracts nothing tests nothing and passes.
 #
-# EVERY ASSERTION HAS ONE LABEL, pass or fail. verification/tog-870-mutation-
-# gate.sh identifies WHICH case reddened by name; a failure branch that prints
+# EVERY ASSERTION HAS ONE LABEL, pass or fail. verification/grant-
+# attribution-resolver-mutation-gate.sh identifies WHICH case reddened by name; a failure branch that prints
 # a differently-worded label is unmatchable, and every mutation then reports
 # "went red, but not on the case that covers it".
 #

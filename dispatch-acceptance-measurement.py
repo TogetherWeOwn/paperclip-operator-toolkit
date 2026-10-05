@@ -69,7 +69,7 @@
 #
 # Credential-free testable: every computation is a pure function over plain
 # dicts; only fetch_* / main touch the network. Unit tests import the pure
-# functions and never need PAPERCLIP_API_KEY. See test_tog3846_acceptance.py.
+# functions and never need PAPERCLIP_API_KEY. See test-dispatch-acceptance-measurement.py.
 # ===========================================================================
 from __future__ import annotations
 

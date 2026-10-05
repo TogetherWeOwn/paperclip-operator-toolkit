@@ -4,8 +4,8 @@
 # Re-cut 2026-09-02 -- the original 2026-08-31 run of this script was never
 # committed (only reported done in an issue comment) and its output was lost
 # along with the script itself in this shared workspace. Numbers below are
-# fresh, not a copy of the 2026-08-31 figures cited in
-# docs/tog-782-retention-proposal.md -- rerun before trusting either.
+# fresh, not a copy of the 2026-08-31 figures cited in the retention proposal
+# kept with the ops tooling -- rerun before trusting either.
 #
 # Covers the three consumers named in the card: DB backups (unbounded growth
 # risk), run-scratch workspace dirs (~1,195 UUID dirs at card-authoring time),
@@ -89,4 +89,4 @@ else
 fi
 
 hr "Done"
-echo "Rerun this script before acting on docs/tog-782-retention-proposal.md -- all four consumers churn continuously."
+echo "Rerun this script before acting on the retention proposal kept with the ops tooling -- all four consumers churn continuously."
