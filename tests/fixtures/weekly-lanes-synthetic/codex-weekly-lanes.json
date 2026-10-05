@@ -1,0 +1,9 @@
+{
+  "_provenance": "SYNTHETIC. Weekly utilizations and resets re-express the 3 committed Codex rows of the synthetic lane-quota snapshot (plugins/model-selection/tests/fixtures/lane-quota-snapshot.synthetic-2026-10-03T0201Z.json: codex-lane-1 0.71, codex-lane-2 0.88, codex-lane-3 1.0/exhausted, resets 2026-10-07T11:12:45Z/11:14:09Z/11:12:50Z) as Codex weekly countdown rows. NOT a live reading, not a byte copy of any production document. No emails, credentials, display names, or model ids — opaque lane ids only.",
+  "observedAt": "2026-10-03T02:01:00Z",
+  "lanes": [
+    {"lane": "codex-lane-1", "weekly_utilization": 0.71, "weekly_reset_utc": "2026-10-07T11:12:45Z"},
+    {"lane": "codex-lane-2", "weekly_utilization": 0.88, "weekly_reset_utc": "2026-10-07T11:14:09Z"},
+    {"lane": "codex-lane-3", "weekly_utilization": 1.0, "weekly_reset_utc": "2026-10-07T11:12:50Z"}
+  ]
+}
