@@ -34,6 +34,27 @@ import { resolve } from "node:path";
 export const T0_MIGRATION_TARGETS = Object.freeze(["gpt-6-astra", "claude-opus-5-5", "claude-fable-5-1"]);
 
 const RECEIPT_SCHEMA = "sanitized-roster-receipt-v1";
+/**
+ * Historical receipts issued before the schema name was made generic carry a
+ * namespaced variant of the same contract (`<namespace>-sanitized-roster-receipt-v1`).
+ * The fields are identical; only the namespace prefix was dropped when the
+ * name was scrubbed. Accept any such variant so hash-attested historical
+ * receipts keep verifying, and treat them as the canonical schema downstream.
+ * Normalization lives in this comparison only: receipt bytes (and any pinned
+ * sha256) are untouched, and every other shape guard still applies.
+ */
+const RECEIPT_SCHEMA_SUFFIX = `-${RECEIPT_SCHEMA}`;
+const NAMESPACED_SCHEMA = /^[a-z0-9-]+$/;
+
+export function isReceiptSchema(schema) {
+  if (schema === RECEIPT_SCHEMA) return true;
+  return (
+    typeof schema === "string" &&
+    schema.length > RECEIPT_SCHEMA_SUFFIX.length &&
+    schema.endsWith(RECEIPT_SCHEMA_SUFFIX) &&
+    NAMESPACED_SCHEMA.test(schema)
+  );
+}
 const INTERIM = Object.freeze({ tier: "T1", fallbackOnly: true });
 const MIGRATED = Object.freeze({ tier: "T0", fallbackOnly: false });
 const MIN_SHA_PREFIX = 12;
@@ -55,7 +76,7 @@ function receiptRowFor(receipt, id) {
 }
 
 function checkReceiptShape(receipt) {
-  if (!isRecord(receipt) || receipt.schema !== RECEIPT_SCHEMA || !Array.isArray(receipt.rows)) {
+  if (!isRecord(receipt) || !isReceiptSchema(receipt.schema) || !Array.isArray(receipt.rows)) {
     throw new Error(`receipt is not a ${RECEIPT_SCHEMA} document`);
   }
   if (receipt.opus55Attestation?.distinctRosterRowExists !== true) {

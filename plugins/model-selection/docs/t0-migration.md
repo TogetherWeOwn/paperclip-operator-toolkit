@@ -42,13 +42,19 @@ edits the **live** config; it must never be assembled from `reviewed-roster.json
      --live live.json --receipt receipt.json --receipt-sha256 a6252507ad93a8e7dbbfee04acc2437a9ce2f57d018e0a21137c688c2f0c8445 \
      --out migrated.json --rollback rollback.json
    ```
-   It refuses (writing nothing) when: the receipt hash differs; a target row is missing, duplicated or
+   It refuses (writing nothing) when: the receipt hash differs; the receipt schema is neither the
+   canonical `sanitized-roster-receipt-v1` nor a namespaced historical variant of the same contract;
+   a target row is missing, duplicated or
    has drifted from the receipt (lane, capabilities, window, index); `claude-opus-5-5` is not attested as
    a distinct row; a target is not in the interim state; a target has no lane. Matching is by exact id.
    Review `migrated.json` against `live.json`: exactly 3 rows x 2 fields differ.
 4. **Apply `migrated.json`** through the board config API (operator). Re-running step 3 on the migrated
    config plans nothing (idempotent).
-5. **Refresh scores and profiles** (`refreshScores` job; `npm run profiles:refresh`). `buildVolumeProfiles`
+5. **Refresh scores and profiles** via the production plugin jobs (`refreshScores` and
+   `refreshVolumeProfiles`) — not `npm run profiles:refresh`. That script
+   (`scripts/refresh-volume-profiles.mjs`) is the offline reporter: it prints volume aggregates
+   from `heartbeat_runs` and writes no serving state, so it exists for checking numbers before
+   enforcement, not for producing them. `buildVolumeProfiles`
    attributes runs to a row's *current* tier, so the three rows' own history builds the T0 volume
    profile. Until it exists an explicit `tier:T0` card is refused (`no volume profile recorded for T0`)
    rather than costed off another tier's numbers.
