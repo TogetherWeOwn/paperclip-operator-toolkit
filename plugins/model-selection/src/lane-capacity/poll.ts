@@ -41,6 +41,13 @@ export interface LaneSourceDefinition {
    * as `Authorization: Bearer` (CLIProxy's management auth), instead of `X-Api-Key`.
    */
   authFilesProvider?: AuthFilesProvider | null;
+  /**
+   * Plan allowance weights by account key, from lane config. Only used with
+   * `authFilesProvider`: the converted document's `plan_weight` per account.
+   * Accounts without an entry carry no pace weight (pace reports the lane
+   * indeterminate honestly) — the routing weight is never substituted.
+   */
+  planWeights?: Readonly<Record<string, number>> | null;
 }
 
 export interface LanePollResult {
@@ -178,7 +185,12 @@ async function pollOne(
   }
 
   if (source.authFilesProvider) {
-    document = authFilesToLaneDocument(document, source.authFilesProvider, Date.parse(fetchedAt));
+    document = authFilesToLaneDocument(
+      document,
+      source.authFilesProvider,
+      Date.parse(fetchedAt),
+      source.planWeights ?? undefined,
+    );
   }
 
   const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);

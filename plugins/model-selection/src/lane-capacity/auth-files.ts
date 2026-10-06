@@ -60,6 +60,25 @@ function windowFields(
   return { [`${name}_utilization`]: clampFraction(utilization), [`${name}_resets_at`]: resetsAt };
 }
 
+/**
+ * CLIProxy's scheduler routing weight for one credential. Credentials default
+ * to 1; a value <= 0 normalizes to 0, meaning the credential is excluded from
+ * routing and takes no traffic. It says nothing about plan size, so it must
+ * never be emitted as the pace allowance weight. Absent/unparseable means the
+ * default: the credential routes normally.
+ */
+function routingWeight(auth: Json): number | null {
+  if (auth.weight === null || auth.weight === undefined) return null;
+  return num(auth.weight);
+}
+
+/** A lane-config plan weight is usable only as a strictly positive number. */
+function planWeightFor(accountKey: string, planWeights: Readonly<Record<string, number>> | undefined): number | null {
+  if (!planWeights) return null;
+  const raw = planWeights[accountKey];
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
 function health(auth: Json): string {
   if (auth.unavailable === true) return "exhausted";
   const status = typeof auth.status === "string" ? auth.status : "";
@@ -100,29 +119,39 @@ function codexWindows(signals: Json, nowMs: number): Json | null {
 }
 
 /**
- * Build a lane document for one provider from a CLIProxy auth-files response. Disabled credentials are not
- * part of the serving pool and are omitted. A credential with no recorded signals yet is emitted with
- * health only, so the pace engine sees the account but no fabricated utilization.
+ * Build a lane document for one provider from a CLIProxy auth-files response. Disabled credentials, and
+ * credentials with a routing weight <= 0 (parked: they take no traffic), are not part of the serving pool
+ * and are omitted — emitting a zero pace weight would make the whole lane indeterminate. A credential with
+ * no recorded signals yet is emitted with health only, so the pace engine sees the account but no
+ * fabricated utilization. The pace allowance weight comes only from `planWeights` (lane config, keyed by
+ * account key): the routing weight is scheduler state and is never emitted.
  */
 export function authFilesToLaneDocument(
   response: unknown,
   provider: AuthFilesProvider,
   nowMs: number,
+  planWeights?: Readonly<Record<string, number>>,
 ): { observedAt: string; staleAfterSeconds: number; source: string; records: Json[] } {
   const files = Array.isArray(asRecord(response).files) ? (asRecord(response).files as unknown[]) : [];
   const auths = files
     .map(asRecord)
-    .filter((auth) => auth.provider === provider && auth.disabled !== true && auth.status !== "disabled")
+    .filter((auth) => {
+      if (auth.provider !== provider || auth.disabled === true || auth.status === "disabled") return false;
+      const weight = routingWeight(auth);
+      return weight === null || weight > 0;
+    })
     .sort((a, b) => String(a.auth_index ?? "").localeCompare(String(b.auth_index ?? "")));
   const records = auths.map((auth, i) => {
     const quota = asRecord(auth.quota);
     const signals = asRecord(quota.signals);
     const windows = provider === "claude" ? claudeWindows(signals, nowMs) : codexWindows(signals, nowMs);
+    const accountKey = typeof auth.auth_index === "string" ? auth.auth_index : `${provider}-lane-${i + 1}`;
+    const planWeight = planWeightFor(accountKey, planWeights);
     const record: Json = {
       lane: `${provider}-lane-${i + 1}`,
-      account_key: typeof auth.auth_index === "string" ? auth.auth_index : `${provider}-lane-${i + 1}`,
+      account_key: accountKey,
       health: health(auth),
-      weight: num(auth.weight) ?? 1,
+      ...(planWeight !== null ? { plan_weight: planWeight } : {}),
       observationQuality: windows ? "cliproxy-passive" : "absent",
       observedAt: typeof quota.observed_at === "string" ? quota.observed_at : null,
       ...(windows ?? {}),

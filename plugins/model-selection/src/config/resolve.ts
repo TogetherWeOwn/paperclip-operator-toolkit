@@ -49,6 +49,13 @@ export interface LaneSourceConfig {
   /** Read this lane straight from CLIProxy `/v0/management/auth-files` quota signals. */
   authFilesProvider: "claude" | "codex" | null;
   /**
+   * Plan allowance weights by account key for an auth-files lane. The
+   * response carries no plan sizes, so the operator maps each account key
+   * (auth index) to its plan weight here. Null when the lane is not an
+   * auth-files lane or no mapping is configured.
+   */
+  planWeights: Record<string, number> | null;
+  /**
    * . Combined utilization (0-1] at or above which the lane is
    * withdrawn from NEW dispatch. Omitted (the default) never withdraws.
    */
@@ -235,6 +242,21 @@ function secretRef(value: unknown): SecretRef | null {
   return value === undefined ? null : (value as SecretRef | null);
 }
 
+/**
+ * Keep only strictly positive finite plan weights; anything else can never
+ * serve as a pace allowance weight. Non-object values survive untouched so
+ * schema validation can reject them with a specific reason.
+ */
+function planWeights(value: unknown): Record<string, number> | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return value as Record<string, number> | null;
+  const out: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === "number" && Number.isFinite(entry) && entry > 0) out[key] = entry;
+  }
+  return out;
+}
+
 function tier(value: unknown, fallback: Tier): Tier {
   return typeof value === "string" && (TIERS as readonly string[]).includes(value)
     ? (value as Tier)
@@ -346,6 +368,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
               (record(rawLane.source).provider === "claude" || record(rawLane.source).provider === "codex")
                 ? (record(rawLane.source).provider as "claude" | "codex")
                 : null,
+            planWeights: planWeights(rawLane.planWeights),
             // Kept as written, finite numbers only: `validateConfig` reports an
             // out-of-range ceiling rather than this dropping it silently.
             ...(typeof rawLane.withdrawAtUtilization === "number" && Number.isFinite(rawLane.withdrawAtUtilization)

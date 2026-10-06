@@ -236,6 +236,15 @@ export const SELECTION_CONFIG_SCHEMA = {
                   provider: { type: "string", enum: ["claude", "codex"] },
                 },
               },
+              /**
+               * Plan allowance weights by account key for an auth-files lane.
+               * The response carries no plan sizes, so each entry maps an
+               * account key (auth index) to its strictly positive plan weight.
+               */
+              planWeights: {
+                type: "object",
+                additionalProperties: { type: "number", exclusiveMinimum: 0 },
+              },
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
               healthFields: {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { authFilesToLaneDocument } from "../src/lane-capacity/auth-files.js";
 import { pollLanes, type LanePollHttpClient, type LaneSourceDefinition } from "../src/lane-capacity/poll.js";
+import { evaluateLanePace, normalizeLaneDocument } from "../src/lane-capacity/pace.js";
 import type { LanePaceDefinition } from "../src/lane-capacity/pace.js";
 
 const NOW = Date.parse("2026-10-04T21:55:00Z");
@@ -162,5 +163,63 @@ describe("pollLanes with a cliproxy-auth-files source", () => {
     });
     expect(seen[0]).toMatchObject({ "X-Api-Key": "k" });
     expect(seen[0]).not.toHaveProperty("Authorization");
+  });
+});
+
+describe("auth-files routing weight is scheduler state, not pace weight", () => {
+  const weeklyLane: LanePaceDefinition = {
+    laneId: "cliproxy-claude",
+    healthFields: ["health"],
+    windows: [
+      { name: "seven_day", role: "allowance", utilizationFields: ["seven_day_utilization"], resetFields: ["seven_day_resets_at"], defaultWindowSeconds: 604800 },
+    ],
+  };
+
+  function evaluateWeekly(response: unknown, planWeights?: Record<string, number>) {
+    const observedAt = new Date(NOW).toISOString();
+    return evaluateLanePace({
+      observation: normalizeLaneDocument({
+        document: authFilesToLaneDocument(response, "claude", NOW, planWeights),
+        definition: weeklyLane,
+      }),
+      asOf: observedAt,
+    });
+  }
+
+  it("omits a routing-weight-0 credential so one parked account cannot poison the lane", () => {
+    const response = {
+      files: [
+        claudeAuth("aaa", "0.46", "0.62"),
+        { ...claudeAuth("zzz", "0.10", "0.20"), weight: 0 },
+      ],
+    };
+    const doc = authFilesToLaneDocument(response, "claude", NOW, { aaa: 20 });
+    expect(doc.records).toHaveLength(1);
+    expect(doc.records[0]).toMatchObject({ account_key: "aaa", plan_weight: 20 });
+    const result = evaluateWeekly(response, { aaa: 20 });
+    expect(result.state).not.toBe("unknown");
+  });
+
+  it("never emits the routing weight as the pace weight", () => {
+    const doc = authFilesToLaneDocument(
+      { files: [{ ...claudeAuth("aaa", "0.46", "0.62"), weight: 7 }] },
+      "claude",
+      NOW,
+      { aaa: 20 },
+    );
+    expect(doc.records[0]).toMatchObject({ plan_weight: 20 });
+    expect(doc.records[0]).not.toHaveProperty("weight");
+    const unmapped = authFilesToLaneDocument({ files: [claudeAuth("aaa", "0.46", "0.62")] }, "claude", NOW);
+    expect(unmapped.records[0]).not.toHaveProperty("weight");
+    expect(unmapped.records[0]).not.toHaveProperty("plan_weight");
+  });
+
+  it("weights mixed plans by lane-config plan weight (0.26, not 0.50)", () => {
+    const response = {
+      files: [claudeAuth("max-20x", "0.10", "0.10"), claudeAuth("max-5x", "0.90", "0.90")],
+    };
+    const result = evaluateWeekly(response, { "max-20x": 20, "max-5x": 5 });
+    expect(result.score?.utilization).toBe(0.26);
+    expect(result.knownWeight).toBe(25);
   });
 });
