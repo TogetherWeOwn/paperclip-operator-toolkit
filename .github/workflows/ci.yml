@@ -4769,6 +4769,13 @@ jobs:
       - name: Verify the plugin builds
         run: npm run build
 
+      # Every manifest-declared path must be in the distributable. A checksum
+      # list that agrees with an incomplete archive cannot catch a missing
+      # directory, so this compares the evaluated manifest against the actual
+      # pack output. Offline: npm pack --dry-run only, no registry access.
+      - name: Verify the package ships manifest-declared paths
+        run: npm run package:verify
+
       # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access.
       # It is designed for the operator's environment, not for CI. The operator
       # must run it separately on the archive extract.

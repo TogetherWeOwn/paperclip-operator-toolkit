@@ -15,10 +15,12 @@
   "files": [
     "config",
     "dist",
+    "migrations",
     "README.md"
   ],
   "scripts": {
     "build": "node esbuild.config.mjs",
+    "package:verify": "node scripts/verify-package-completeness.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "guard:mutation-ci": "node scripts/require-mutation-ci.mjs",
