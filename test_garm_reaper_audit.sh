@@ -206,6 +206,19 @@ run_audit --json "$WORK/nullage.json"
 pool_doc "$WORK/emptyrs.json" 0 5 true "$(inst2 vm-nors running '' 600 ABSENT)"
 run_audit --json "$WORK/emptyrs.json"
 [[ "$RC" == "1" ]] && grep -q 'vm-nors.*busy orphan' <<<"$OUT" && ok "3p. empty runner_status keeps its column" || bad "3p. empty runner_status keeps its column" "rc=$RC out=$OUT"
+# Orphan-age backstop for stuck states: a drain looping in provider-delete
+# retries keeps refreshing updated_at (state age 15m) but keeps aging from
+# creation (600m past orphan) — it must still breach.
+pool_doc "$WORK/drainloop.json" 0 5 true "$(inst2 vm-drainloop pending_delete deleting 600 15)"
+run_audit --json "$WORK/drainloop.json"
+[[ "$RC" == "1" ]] && grep -q 'vm-drainloop.*drain orphan' <<<"$OUT" && ok "3q. retry-looping drain breaches via orphan backstop" || bad "3q. retry-looping drain breaches via orphan backstop" "rc=$RC out=$OUT"
+# Same backstop for a stale failure state and a stale provisioning state.
+pool_doc "$WORK/errloop.json" 0 5 true "$(inst2 vm-errloop error active 600 15)"
+run_audit --json "$WORK/errloop.json"
+[[ "$RC" == "1" ]] && grep -q 'vm-errloop.*prov-fail orphan' <<<"$OUT" && ok "3r. stale prov-fail breaches via orphan backstop" || bad "3r. stale prov-fail breaches via orphan backstop" "rc=$RC out=$OUT"
+pool_doc "$WORK/provloop.json" 0 5 true "$(inst2 vm-provloop creating installing 600 15)"
+run_audit --json "$WORK/provloop.json"
+[[ "$RC" == "1" ]] && grep -q 'vm-provloop.*provisioning orphan' <<<"$OUT" && ok "3s. stale provisioning breaches via orphan backstop" || bad "3s. stale provisioning breaches via orphan backstop" "rc=$RC out=$OUT"
 
 # === 4. warm-spare exemption ======================================================
 echo "=== 4. warm-spare exemption ==="

@@ -24,11 +24,14 @@
 #                 past TTL, breach past orphan age
 #   provisioning  pending_create/creating, or runner_status installing —
 #                 info while young, breach past GARM_PROV_STUCK_MIN in state
+#                 or past orphan age from creation
 #   draining      pending_delete/pending_force_delete/deleting — info while
-#                 young, breach past GARM_DRAIN_STUCK_MIN in state (a stuck
-#                 drain is the cleanup failure this audit exists to surface)
+#                 young, breach past GARM_DRAIN_STUCK_MIN in state or past
+#                 orphan age from creation (a stuck drain is the cleanup
+#                 failure this audit exists to surface; the orphan backstop
+#                 catches delete-retry loops that keep refreshing updated_at)
 #   prov-fail     status error, or runner_status failed — info while young,
-#                 breach past GARM_DRAIN_STUCK_MIN in state
+#                 breach past GARM_DRAIN_STUCK_MIN in state or past orphan age
 # Stuck-state timers run on updated_at (time in state), falling back to
 # created_at when updated_at is absent or older than creation: a runner
 # whose job ran long must not breach the moment teardown begins.
@@ -236,6 +239,10 @@ for pi in "${!POOL_DOCS[@]}"; do
     # a runner whose job ran 120m breaches the moment GARM starts deleting it
     # otherwise. updated_at older than created_at (skew) or absent falls back
     # to created_at, preserving the previous behaviour in those cases.
+    # The orphan-age backstop stays on: GARM resaves a failed delete as
+    # pending_delete on every retry, refreshing updated_at, so a drain stuck
+    # in a provider-delete retry loop can never age in state past DRAIN_MIN —
+    # but it keeps aging from creation, and breaches as an orphan.
     state_s="$created_s"
     if [[ -n "$up" ]]; then
       up_s="$(date -u -d "$up" +%s 2>/dev/null)" || up_s=""
@@ -251,6 +258,9 @@ for pi in "${!POOL_DOCS[@]}"; do
       if (( state_min > 10#$DRAIN_MIN )); then
         add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "prov-fail" "$cr"
         breach "pool $short/$nm: prov-fail stuck ${state_min}m in state"
+      elif (( past_orphan )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "prov-fail" "$cr"
+        breach "pool $short/$nm: prov-fail orphan ${age_min}m"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> prov-fail (young, info only)")
       fi
@@ -258,6 +268,9 @@ for pi in "${!POOL_DOCS[@]}"; do
       if (( state_min > 10#$DRAIN_MIN )); then
         add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "draining" "$cr"
         breach "pool $short/$nm: drain stuck ${state_min}m in state"
+      elif (( past_orphan )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "draining" "$cr"
+        breach "pool $short/$nm: drain orphan ${age_min}m (retry loop suspected)"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> draining (young, info only)")
       fi
@@ -265,6 +278,9 @@ for pi in "${!POOL_DOCS[@]}"; do
       if (( state_min > 10#$PROV_MIN )); then
         add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "provisioning" "$cr"
         breach "pool $short/$nm: provisioning stuck ${state_min}m in state"
+      elif (( past_orphan )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "provisioning" "$cr"
+        breach "pool $short/$nm: provisioning orphan ${age_min}m"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> provisioning (young, info only)")
       fi
