@@ -2,23 +2,16 @@
 set -uo pipefail
 
 # ===========================================================================
-# GitHub App installation-token minter
+# GitHub App installation-token minter — HOST-OPERATOR path.
 #
-#   SUPERSEDED BY: plugins/gh-token-broker
+#   Agents authenticate to GitHub through the Paperclip built-in GitHub
+#   connection, never through this script. The per-call agent stack
+#   (gh-app-token.js, gh-shim, plugins/gh-token-broker) is retired.
 #
-#   Still live, still supported, do not delete. The broker is not installed
-#   yet, and eight agents currently reach GitHub through this path.
-#
-#   Why it is going away: this script only works because GH_APP_PRIVATE_KEY is
-#   projected into the environment it runs in. That is the whole problem —
-#   any same-uid process can read the PEM out of /proc, so the per-agent
-#   binding list is not a boundary. The broker inverts the flow: the host holds
-#   the key and hands back a short-lived, repo-scoped token, so the signing key
-#   never enters an agent address space at all.
-#
-#   Removal is NOT a cleanup task to be done opportunistically. It is gated on
-#   unbinding GH_APP_PRIVATE_KEY from those eight agents first. Deleting this
-#   before then takes eight agents offline.
+#   This script remains for host automation run by the operator: it signs with
+#   GH_APP_PRIVATE_KEY from the operator environment, where the key belongs.
+#   Never bind that key into an agent environment — any same-uid process can
+#   read it out of /proc, so a per-agent binding list is not a boundary.
 # ---------------------------------------------------------------------------
 # A GitHub App has no static token. The flow is:
 #

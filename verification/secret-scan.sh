@@ -4,8 +4,8 @@
 # gating, because a committed secret can land in any file.
 # Scans TRACKED files only: anything .gitignore covers is by definition not in
 # the repo, and scanning the working tree would fail on an operator's local
-# scratch files. test_gh_app_token.sh assembles its canaries from fragments at
-# runtime precisely so this scan does not trip on the suite.
+# scratch files. Suites that need token-shaped canaries assemble them from
+# fragments at runtime precisely so this scan does not trip on the suite.
 # Exit 0 clean, 1 finding. Offline, git + grep only.
 set -uo pipefail
 

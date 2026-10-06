@@ -14,23 +14,13 @@ breaking something.
   this box shares the host. CI scans every tracked file for token-shaped strings and private key
   material, and asserts that `.gitignore` still covers `*.env`, `*.pem`, `*.key`, `*.jsonl` and
   `.gh-app-token.json`.
-- **`gh-app-token.js` must never fall through to a mint.** An earlier version printed a real
-  org-admin-capable installation token when invoked as `--help`. `test_gh_app_token.sh` now fails if
-  any unrecognised argument produces anything token-shaped.
+- **Retired: the per-call agent minter is gone.** `gh-app-token.js` once printed a real
+  org-admin-capable installation token when invoked as `--help`. The minter, its shim and its
+  broker are retired; agents authenticate through the Paperclip built-in GitHub connection.
 - **Scope every mint, on BOTH axes.** `GH_APP_PERMISSIONS` / `GH_APP_REPOS`, with
-  `GH_APP_SCOPE_STRICT=1` — which requires both halves, not either one (TOG-238). If you touch
-  `currentScope()`, re-run the mutation check in `test_gh_app_token.sh` §6: restore the old
-  `Object.keys(scope).length > 0` condition and confirm the suite goes red. A strict-mode test that
-  stays green against that mutation is asserting nothing.
-- **Changing `DEFAULT_PERMISSION_PROFILE` is a fan-out, not an edit.** A project's
-  `GH_APP_PERMISSIONS` **replaces** the broker default (`projectPermissions ?? defaultPermissions`),
-  and since TOG-296 all **7 of 7** projects pin one — so editing the default changes no grant
-  anywhere and nothing says so. Adding a permission that way disappoints; *removing* one for a
-  security reason looks shipped and does nothing. Update the `baseline` line in
-  `permission_pins.txt` in the same commit, then `./gh_permission_pin_audit.sh --fanout-plan` for
-  the value each project must now carry, and re-run the audit with no flags once they are applied.
-  Two suites go red if you skip this — `broker-suite` and `test_gh_permission_pin_audit.sh` — and
-  neither is satisfied by deleting the other.
+  `GH_APP_SCOPE_STRICT=1` — which requires both halves, not either one (TOG-238). Narrowing *what*
+  a token may do is not a substitute for narrowing *where* it may do it. This still governs the
+  host-operator `gh_token.sh` path.
 - **Back up before mutating, and verify the backup** — `gzip -t` plus a row count, not just exit 0.
 - **Assert on exit status, not printed output.** A validator that printed `REFUSED` and exited 0
   shipped once. Tests pin exit codes; they must not pin human-readable message text, which drifts.
@@ -51,17 +41,6 @@ every `git push`. Treat a non-zero exit as a stop.**
 | 1 | a sibling was found | read the report; do not implement or push |
 | 3 | **indeterminate** — a detector could not run | **not a pass.** Fix what it names, or proceed knowing you are unguarded |
 | 2 | usage error | fix the invocation |
-
-**Also check the push will get a credential — `./gh_push_preflight.sh`.** The broker derives
-the push credential's repository scope from the issue's project; an issue with no project 409s
-at `git push`, after the work is done (TOG-291, TOG-995). Run it before implementing and again
-before pushing, alongside the guard above:
-
-```bash
-./gh_push_preflight.sh --issue <uuid>   # 0 push can get a credential · 1 no scope / lifecycle refusal, message names the fix · 2 could not measure — not a pass
-```
-
-Full contract, oracle, and lifecycle terms: the header of `gh_push_preflight.sh` (TOG-918).
 
 **Why this is a required step and not a suggestion.** Two runs of one agent have implemented one
 issue end to end, independently, twice: TOG-253 (PRs #15 and #16) and TOG-258 (PRs #27 and #28). In
@@ -448,14 +427,14 @@ would write. Neither may go green.
 
 ## What "done" means for a change to a credential-handling tool
 
-`gh-app-token.js`, `gh_token.sh`, `gh_access.sh` and anything else that touches a secret. Meeting
+`gh_token.sh`, `gh_access.sh` and anything else that touches a secret. Meeting
 "the tests pass" is necessary and not sufficient.
 
 1. **The default is refusal.** Any input the tool does not explicitly recognise must be refused with
    a non-zero exit. Never let an unhandled case reach the code that emits a credential — that is the
    exact shape of the 2026-08-23 bug, and it was one missing `if`.
-2. **A new argument means a new test.** Adding a mode, flag or verb without adding a case to
-   `test_gh_app_token.sh` is not done. The fuzz section covers arguments nobody anticipated; it does
+2. **A new argument means a new test.** Adding a mode, flag or verb without adding a case to that
+   tool's regression suite is not done. A fuzz section covers arguments nobody anticipated; it does
    not cover a real mode you forgot to constrain.
 3. **The test must be able to fail.** Prove it by reintroducing the bug in a *throwaway copy* and
    watching the suite go red. CI does this on every run — see the last step of
@@ -467,9 +446,9 @@ would write. Neither may go green.
    and what ends up in an error path. `omniroute_combo_cli.sh` writes its `Authorization` header into
    a `curl --config` file for this reason — copy that pattern rather than inventing another.
 6. **Test without credentials.** If a change can only be tested against real GitHub, it is not
-   testable and it will stop being tested. The seams that make this possible today are `GH_API_URL`
-   and `GH_APP_TOKEN_CACHE`; they are load-bearing for the suite, so removing either breaks CI on
-   purpose.
+   testable and it will stop being tested. The seams that make this possible today are loopback stub
+   servers plus complete fake credential environments (see `test_gh_token_dispatch.sh`); they are
+   load-bearing for the suites, so removing one breaks CI on purpose.
 7. **State the blast radius in the PR.** If a token could be minted, printed, cached or widened by
    the change, say so explicitly. If a credential was exposed at any point while developing, revoke
    it first, confirm the revocation (`DELETE /installation/token`, then prove reuse returns 401), and
