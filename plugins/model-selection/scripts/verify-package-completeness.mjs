@@ -34,9 +34,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgDir = path.resolve(here, "..");
 
+// Fail by throwing, never by exiting: every function in this module is
+// importable (unit tests run it without a built dist present), so only the
+// CLI entrypoint below may convert a failure into a process exit code.
 function failHarness(message) {
-  console.error(`FATAL: ${message}`);
-  process.exit(2);
+  throw new Error(message);
 }
 
 // Strip a manifest-style relative path (`./dist/worker.js`) to a
@@ -246,10 +248,16 @@ async function main() {
 }
 
 // Run the CLI only when executed directly; importing this module (unit tests,
-// release tooling) must not shell out to npm as an import side effect.
+// release tooling) must not shell out to npm as an import side effect, and
+// must never hard-exit the importing process.
 const invokedDirectly =
   typeof process.argv[1] === "string" &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
-  await main();
+  try {
+    await main();
+  } catch (err) {
+    console.error(`FATAL: ${err.message}`);
+    process.exit(2);
+  }
 }

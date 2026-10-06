@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   checkCompleteness,
@@ -15,9 +15,21 @@ import {
 
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The evaluated package inputs: package.json pointers plus the built manifest
-// they resolve to — the same source the guard checks.
-const { pkg, manifest } = await loadPackageInputs();
+// dist/ is build output, not a checkout member, so jobs that never build
+// (for example the mutant shards) run this file without it. Tests that need
+// the evaluated manifest skip there; the new `package:verify` CI step after
+// build covers the real check on every run.
+const hasBuiltManifest = existsSync(join(pkgDir, "dist", "manifest.js"));
+
+// Package pointers and manifest shape mirroring the real ones, for tests
+// that must run with no build present.
+const SYNTHETIC_PKG = {
+  paperclipPlugin: { manifest: "./dist/manifest.js", worker: "./dist/worker.js" },
+};
+const SYNTHETIC_MANIFEST = {
+  entrypoints: { worker: "./dist/worker.js" },
+  database: { migrationsDir: "./migrations" },
+};
 
 // Tarball contents observed from the pre-fix packaging, which shipped
 // config, dist and README.md but no migrations directory. The evaluated
@@ -35,19 +47,33 @@ const PRE_FIX_PACKED_FILES = [
 
 const asRef = (req: RequiredPath): string => `${req.kind}:${req.rel}`;
 
-describe("package completeness guard", () => {
-  it("derives the migrations directory from the evaluated manifest", () => {
-    const required = requiredPaths(pkg, manifest);
-    const dirs = required.filter((req: RequiredPath) => req.kind === "dir").map(asRef);
-    expect(dirs).toContain("dir:migrations");
+describe("package completeness guard (pure)", () => {
+  it("derives the migrations directory from manifest-declared paths", () => {
+    const required = requiredPaths(SYNTHETIC_PKG, SYNTHETIC_MANIFEST);
+    expect(required.map(asRef)).toContain("dir:migrations");
     expect(normalizeRel("./migrations")).toBe("migrations");
   });
 
   it("fails the pre-fix file set: the omitted directory is reported missing", () => {
-    const required = requiredPaths(pkg, manifest);
+    const required = requiredPaths(SYNTHETIC_PKG, SYNTHETIC_MANIFEST);
     expect(required.length).toBeGreaterThan(0);
     const { missing } = checkCompleteness(required, PRE_FIX_PACKED_FILES);
     expect(missing.map(asRef)).toContain("dir:migrations");
+  });
+});
+
+describe.skipIf(!hasBuiltManifest)("package completeness guard (pack integration)", () => {
+  let pkg: Record<string, any>;
+  let manifest: Record<string, any>;
+
+  beforeAll(async () => {
+    ({ pkg, manifest } = await loadPackageInputs());
+  });
+
+  it("derives the migrations directory from the evaluated manifest", () => {
+    const required = requiredPaths(pkg, manifest);
+    const dirs = required.filter((req: RequiredPath) => req.kind === "dir").map(asRef);
+    expect(dirs).toContain("dir:migrations");
   });
 
   it(
