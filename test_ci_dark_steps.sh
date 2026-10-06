@@ -14,7 +14,11 @@
 # `actions/jobs/{id}` response for the two runs named in TOG-910:
 #
 #   job-100695318458-dark.json    pristine main e9dea118 — 13 success, 1 failure,
-#                                 79 skipped. The outage itself.
+#                                 79 skipped. The outage itself. One of the 79 is
+#                                 the runner's `Post Run actions/setup-node@v4`
+#                                 teardown, which TOG-13080 exempts from the dark
+#                                 set (teardown is not a gate), so the tool
+#                                 reports 78 dark here.
 #   job-100786202472-green.json   PR #198 d794f39c — 95 steps, 0 skipped. The
 #                                 same job once the expiry was re-issued.
 #   job-105959891748-abort-null.json  run 35466576547, Offline suites, TOG-3427:
@@ -25,6 +29,13 @@
 #                                 which is exactly the state that hid the bug, so
 #                                 re-recording this fixture from the API would
 #                                 un-write the test. Counts match the card.
+#   job-live-green-reporter-inflight.json  TOG-13080: the at-report-time view of
+#                                 a GREEN job — 3 success, the reporter itself
+#                                 still in_progress (conclusion null), 2 `Post`
+#                                 teardown steps still queued. CONSTRUCTED: the
+#                                 finalised job object rewrites those nulls, so
+#                                 re-recording it from the API would un-write the
+#                                 test. Must read 0 dark with no ::error.
 #
 # Re-record with:
 #   gh api repos/TogetherWeOwn/paperclip-ops-tooling/actions/jobs/<id> > <fixture>
@@ -44,6 +55,7 @@ FIXTURES="$HERE/test/fixtures/ci_dark_steps"
 DARK="$FIXTURES/job-100695318458-dark.json"
 GREEN="$FIXTURES/job-100786202472-green.json"
 ABORT_NULL="$FIXTURES/job-105959891748-abort-null.json"
+LIVE_GREEN="$FIXTURES/job-live-green-reporter-inflight.json"
 PASS=0; FAIL=0
 
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -63,7 +75,7 @@ command -v jq >/dev/null 2>&1 || { echo "test_ci_dark_steps: jq is required" >&2
 [[ -x "$TOOL" ]] || { echo "test_ci_dark_steps: $TOOL is not executable" >&2; exit 2; }
 # A missing fixture is a hard error, never a skip. A skipped test is a deleted
 # test that still prints a zero exit (TOG-339).
-for f in "$DARK" "$GREEN" "$ABORT_NULL"; do
+for f in "$DARK" "$GREEN" "$ABORT_NULL" "$LIVE_GREEN"; do
   [[ -s "$f" ]] || { echo "test_ci_dark_steps: recorded fixture missing or empty: $f" >&2; exit 2; }
 done
 
@@ -78,9 +90,11 @@ OUT="$("$TOOL" report --job-json "$DARK" 2>&1)"; RC=$?
 assert $? "a dark run still exits 0" \
   "got exit $RC — the reporter must not replace the real failure's attribution"
 
-grep -q '79 of 93 steps never ran' <<< "$OUT"
+# 79 skipped minus the exempted `Post Run actions/setup-node@v4` teardown
+# (TOG-13080) = 78 reported dark.
+grep -q '78 of 93 steps never ran' <<< "$OUT"
 assert $? "the dark run names the count of steps that did not execute" \
-  "expected '79 of 93 steps never ran'"
+  "expected '78 of 93 steps never ran'"
 
 grep -q 'OmniRoute rehearsal package suite' <<< "$OUT"
 assert $? "the dark run names the step that aborted the job" \
@@ -99,9 +113,10 @@ grep -qi 'mutation-gated' <<< "$OUT"
 assert $? "the dark list names the mutation gates" \
   "no mutation-gated step is reported, so vacuity protection looks intact when it is not"
 
-# 13 success + 1 failure + 79 skipped = 93. If the arithmetic drifts, the
-# report is worse than nothing because it looks authoritative.
-grep -q 'Executed: 13 passed, 1 failed. Not run: 79.' <<< "$OUT"
+# 13 success + 1 failure + 78 dark (+ 1 exempted Post teardown) = 93. If the
+# arithmetic drifts, the report is worse than nothing because it looks
+# authoritative.
+grep -q 'Executed: 13 passed, 1 failed. Not run: 78.' <<< "$OUT"
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
 
@@ -161,6 +176,29 @@ assert $? "a fully-executed run reports no un-run steps" \
 
 grep -q 'all 95 steps executed' <<< "$OUT_G"
 assert $? "a fully-executed run states the number of steps it confirmed" \
+  "the positive confirmation is missing, so 'no news' is ambiguous"
+
+# ---------------------------------------------------------------------------
+hdr "The live view — the reporter exempts itself and teardown (TOG-13080)"
+
+# At report time the live job object always holds the reporter's OWN step
+# (in_progress, conclusion null) plus queued `Post` teardown steps. Before the
+# exemption every green job printed an ::error annotation about itself — the
+# cry-wolf failure this entire tool exists to prevent.
+OUT_L="$("$TOOL" report --job-json "$LIVE_GREEN" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a live green run with the reporter in flight exits 0" "got exit $RC"
+
+! grep -q '::error' <<< "$OUT_L"
+assert $? "a live green run with the reporter in flight raises no error annotation" \
+  "the reporter annotates itself on a clean run, which trains reviewers to ignore it"
+
+! grep -qi 'never ran' <<< "$OUT_L"
+assert $? "a live green run with the reporter in flight reports no un-run steps" \
+  "the reporter counts itself or teardown as dark"
+
+grep -q 'all 6 steps executed' <<< "$OUT_L"
+assert $? "a live green run with the reporter in flight states the number of steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
 
 # ---------------------------------------------------------------------------

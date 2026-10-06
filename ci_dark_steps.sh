@@ -151,12 +151,21 @@ FAILED="$(jq  '[.steps[] | select(.conclusion=="failure")] | length'  "$TMP/job.
 # 0 dark on exactly the runs this tool exists to describe, and prints the clean
 # banner over them. In a fail-fast job with no `if:` steps, `skipped` and `null`
 # both mean "never reached"; the distinction belongs to the reader.
-DARK="$(jq    '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")] | length' "$TMP/job.json")"
+#
+# Two entries are exempt from the dark set (TOG-13080), because at report time
+# the live view always contains steps that are not gates and never will be:
+# this reporter's OWN step (`Report steps that never ran`, still in_progress
+# with conclusion null while it runs) and the runner's `Post ...` teardown
+# steps (still queued). Without the exemption every green job prints an
+# ::error annotation about itself, which is the cry-wolf failure TOG-910
+# exists to prevent.
+DARK_EXEMPT='select(.name != "Report steps that never ran" and (.name | startswith("Post ") | not))'
+DARK="$(jq    '[.steps[] | select(.conclusion != "success" and .conclusion != "failure") | '"$DARK_EXEMPT"'] | length' "$TMP/job.json")"
 
 CULPRIT="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/job.json")"
 CULPRIT_NO="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/job.json")"
 
-jq -r '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")][] | "  \(.number)\t\(.name)"' \
+jq -r '[.steps[] | select(.conclusion != "success" and .conclusion != "failure") | '"$DARK_EXEMPT"'][] | "  \(.number)\t\(.name)"' \
    "$TMP/job.json" > "$TMP/dark.txt"
 
 # --- report -------------------------------------------------------------------
