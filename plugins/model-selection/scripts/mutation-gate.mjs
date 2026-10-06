@@ -342,6 +342,129 @@ const mutants = [
     from: "  const lanePosture = lanePostureByTier[card.tier];",
     to: '  const lanePosture = lanePostureByTier.T3;',
   },
+  // --- earn-in worker-wiring mutants ------------------------------------
+  // The worker hookup wires `planEarnIn`/`recordEarnInOutcome` into `worker.ts`
+  // (`maybeAdmitEarnIn`, the balancePass unpinned branch, and the resolve
+  // folds). Wiring with no mutant stays green when disabled — each mutant
+  // below breaks one wire and is killed by a named test in
+  // `tests/earnInWorker.spec.ts` (hand-proven before push).
+  {
+    // A non-due cadence turn advances only the counter, never admission.
+    name: "earn-in-refusal-still-dispatches",
+    file: "src/worker.ts",
+    from: "                  const earnInWinner = earnInDecision?.decision.dispatch ? earnInDecision.model : null;",
+    to: "                  const earnInWinner = earnInDecision ? earnInDecision.model : null;",
+  },
+  {
+    // "drop earn-in dispatch state write" — the admission must record its
+    // counter/key/slot state, or every later fold resolves against nothing.
+    // Killed by "admits the unproven rival ... and records dispatch state".
+    name: "drop-earn-in-dispatch-state-write",
+    file: "src/worker.ts",
+    from: "            await writeEarnInState(companyId, next);",
+    to: "            await Promise.resolve();",
+  },
+  {
+    // "earn-in winner never pins" — the balancePass branch must actually take
+    // the admitted rival instead of its own pick. Killed by "admits the
+    // unproven rival on the balancePass unpinned branch".
+    name: "earn-in-winner-never-pins",
+    file: "src/worker.ts",
+    from: "                  const earnInWinner = earnInDecision?.decision.dispatch ? earnInDecision.model : null;",
+    to: "                  const earnInWinner = null;",
+  },
+  {
+    // "earn-in winner ignored at pin" — same wire, broken at the pin target
+    // rather than the branch: the balanced pick stands and no experimental
+    // traffic flows. Killed by "admits the unproven rival on the
+    // balancePass unpinned branch".
+    name: "earn-in-winner-ignored-at-pin",
+    file: "src/worker.ts",
+    from: "                  const pinTarget = earnInWinner ?? selectedModel;",
+    to: "                  const pinTarget = selectedModel;",
+  },
+  {
+    // "earn-in run failure never resolves" — the `agent.run.failed` fold must
+    // run before the lane-exhaustion path can return early. Killed by
+    // "releases the slot and folds a model-attributable run failure"
+    // (and the infra companion).
+    name: "earn-in-run-failure-never-resolves",
+    file: "src/worker.ts",
+    from:
+      "        if (issueId) {\n" +
+      "          try {\n" +
+      "            await resolveEarnInForIssue(companyId, issueId, {\n",
+    to:
+      "        if (false) {\n" +
+      "          try {\n" +
+      "            await resolveEarnInForIssue(companyId, issueId, {\n",
+  },
+  {
+    // "earn-in reopen never resolves" — a card leaving done/cancelled must
+    // release its earn-in slot. Killed by "resolves a reopened earn-in card
+    // as a rejection without touching the rework signal".
+    name: "earn-in-reopen-never-resolves",
+    file: "src/worker.ts",
+    from: '        if (issueId && (from === "done" || from === "cancelled") && to && to !== "done" && to !== "cancelled") {',
+    to: "        if (false) {",
+  },
+  {
+    // "earn-in rejection never resolves" — a rejection comment on an
+    // actively-dispatched card must fold as a material failure. Killed by
+    // "resolves a rejection comment on an earn-in card as a material failure".
+    name: "earn-in-rejection-never-resolves",
+    file: "src/worker.ts",
+    from: "        if (!REJECTION_RE.test(snippet)) return;",
+    to: "        if (true) return;",
+  },
+  {
+    name: "earn-in-cadence-never-advances",
+    file: "src/worker.ts",
+    from: "            : { ...state, counter: { ...state.counter, [model.id]: (state.counter[model.id] ?? 0) + 1 } };",
+    to: "            : state;",
+  },
+  {
+    name: "earn-in-completion-never-resolves",
+    file: "src/worker.ts",
+    from: '        if (issueId && from !== to && (to === "done" || to === "cancelled")) {',
+    to: "        if (false) {",
+  },
+  {
+    name: "earn-in-failed-pin-keeps-reservation",
+    file: "src/worker.ts",
+    from: "                    if (earnInDecision && !pinCommitted) {",
+    to: "                    if (false) {",
+  },
+  {
+    name: "earn-in-bypasses-selection-survivors",
+    file: "src/worker.ts",
+    from: "          !model.fallbackOnly && input.candidateModelIds.includes(model.id),",
+    to: "          !model.fallbackOnly,",
+  },
+  {
+    name: "earn-in-ignores-late-rejection",
+    file: "src/worker.ts",
+    from: "          await writeEarnInState(companyId, recordEarnInOutcome(",
+    to: "          await Promise.resolve(recordEarnInOutcome(",
+  },
+  {
+    name: "earn-in-late-safety-stop-ignored",
+    file: "src/worker.ts",
+    from: "          const safetyStop = resolution.safetyOrAuthorityViolation && !state.stopped[modelId];",
+    to: "          const safetyStop = false;",
+  },
+  {
+    name: "earn-in-outcome-lock-does-not-wait",
+    file: "src/worker.ts",
+    from: "        await previous;",
+    to: "        await Promise.resolve();",
+  },
+  {
+    name: "earn-in-ignores-highest-prior",
+    file: "src/worker.ts",
+    from: "        ).sort((a, b) => (modelScores[b.id]?.priorP ?? 0) - (modelScores[a.id]?.priorP ?? 0));",
+    to: "        );",
+  },
   {
     // "read disallowed activity_log" — reopen/rejection signals must be
     // sourced from captured ctx.events state, never a live join against
@@ -2378,28 +2501,8 @@ const mutants = [
     // Re-anchored ; still matches once.
     name: "balance-unpinned-pin-failure-aborts-pass",
     file: "src/worker.ts",
-    from:
-      "                  } catch (cause) {\n" +
-      '                    ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
-      "                      companyId: company.id,\n" +
-      "                      issue: identifier,\n" +
-      "                      error: cause instanceof Error ? cause.message : String(cause),\n" +
-      "                    });\n" +
-      '                    return "settled";\n' +
-      "                  }\n" +
-      "                } else {\n" +
-      '                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {\n',
-    to:
-      "                  } catch (cause) {\n" +
-      '                    ctx.logger.warn("balance pass skipped a card it could not pin", {\n' +
-      "                      companyId: company.id,\n" +
-      "                      issue: identifier,\n" +
-      "                      error: cause instanceof Error ? cause.message : String(cause),\n" +
-      "                    });\n" +
-      "                    throw cause;\n" +
-      "                  }\n" +
-      "                } else {\n" +
-      '                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {\n',
+    from: '                        if (!pinCommitted) return "settled";',
+    to: "                        if (!pinCommitted) throw cause;",
   },
 
   // --- : selection gate on every router-owned pin write ---------
@@ -2518,13 +2621,13 @@ const mutants = [
     name: "balance-unpinned-ignores-selection-gate",
     file: "src/worker.ts",
     from:
-      "                // : same per-issue isolation as the pinned branch.\n" +
-      "                // : this branch's write is gated like the pinned one.\n" +
-      "                if (writesAllowed) {\n",
+      "                    // : same per-issue isolation as the pinned branch.\n" +
+      "                    // : this branch's write is gated like the pinned one.\n" +
+      "                    if (writesAllowed) {\n",
     to:
-      "                // : same per-issue isolation as the pinned branch.\n" +
-      "                // : this branch's write is gated like the pinned one.\n" +
-      "                if (true) {\n",
+      "                    // : same per-issue isolation as the pinned branch.\n" +
+      "                    // : this branch's write is gated like the pinned one.\n" +
+      "                    if (true) {\n",
   },
 
   // ---  P2: opt-in free-list sync/discovery/shadow ------------------

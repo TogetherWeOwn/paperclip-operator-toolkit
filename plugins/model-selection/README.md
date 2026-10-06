@@ -465,11 +465,14 @@ them fail.
 
 ### Bounded T1 earn-in (`src/actuate/earnIn.ts`)
 
-`planEarnIn` / `recordEarnInOutcome` are pure decision functions —  §3
-/  decision B — covered by `tests/earnIn.spec.ts` but **not called
-from any job or tool**. Earn-in ships fully inert; `worker.ts` never invokes
-these functions, and the shipped config keeps `earnIn.enabled: false`
-regardless. Gates implemented, in order: enabled check → sticky stop state →
+`planEarnIn` / `recordEarnInOutcome` are pure decision functions — §3
+/ decision B — covered by `tests/earnIn.spec.ts` and wired into
+`worker.ts` (`maybeAdmitEarnIn` on the balancePass unpinned branch;
+`resolveEarnInForIssue` on completion/cancellation, reopen,
+rejection comment, and run failure — `tests/earnInWorker.spec.ts`). Earn-in still ships inert in practice:
+the shipped config keeps `earnIn.enabled: false`, and the pure translators in
+`src/actuate/earnInWiring.ts` (`tests/earnInWiring.spec.ts`) own every
+board-to-card mapping the wiring reads. Gates implemented, in order: enabled check → sticky stop state →
 T1-only → work-class allowlist (`research`/`review`) → todo status → excludes
 (running run, operator pin, capability exclusion, credentials,
 permissions/approvals) → model must be unproven-but-capable at T1 → idempotency
@@ -483,6 +486,33 @@ pace gate (`pacePosture === "behind"` required, ignored for non-Claude models)
 `Math.random()`). `recordEarnInOutcome` stops a model (sticky) on 2 material
 first-submission failures within its first 8 outcomes, or immediately on any
 safety/authority violation.
+
+The worker considers only selection gate survivors, checks the rival's own lane,
+and chooses the highest-prior eligible rival (stable roster-order ties). It never
+admits Devin, protected/user-assigned/pinned work, or AA-free-sync v2 traffic:
+legacy earn-in cannot invent a rival's effort identity. Advisory/shadow mode
+writes neither an experimental pin nor earn-in bookkeeping.
+
+Eligible picks advance the per-model counter even on non-dispatch turns. Counter
+zero is the bootstrap admission; the next is counter twelve. Only admissions
+consume rolling/active budgets. The worker reserves state before pinning and
+restores it if the pin or final safety guard fails. Admission activity is emitted
+only after a pin lands; later bookkeeping errors never erase a landed pin's
+reservation. Eligible floor selections get explicit pins to avoid recounting
+an unchanged unpinned card.
+
+Card `done` supplies acceptance, not `agent.run.succeeded`. Cancellation and
+infrastructure failures release capacity without quality evidence. Duplicate
+resolutions fold once; later rejection/reopen corrects the known first-eight
+slot rather than appending a second outcome. `outcomeSlots` is optional on legacy
+state and bounded to eight records per model; old outcomes without recorded card
+identity cannot be retroactively corrected by guessing.
+
+Admission/pin/rollback and resolution folds share a per-company worker-local
+mutex because the SDK state API has no CAS. This is **not** a cross-process or
+crash-atomic transaction: a worker crash after reservation may leave capacity
+reserved. A failed rollback is logged as retained capacity, never a successful
+admission. This implementation does not enable the policy or change host config.
 
 ---
 
@@ -643,7 +673,7 @@ root: `ctx.issues`, `ctx.agents`, `ctx.companies`, `ctx.db`, `ctx.state`, ….
 npm test -- tests/<changed>.spec.ts --pool=forks --maxWorkers=2  # local review: one spec only
 npm run verify        # CI/private runner only: typecheck + tests + named mutants + build
 npm test              # unit + reviewed live-config fixture
-npm run test:mutants  # CI/private runner only: 115 named mutants, one per acceptance-criterion trap, including:
+npm run test:mutants  # Named-mutant inventory (anchor checker prints the count), including:
                        # tier order, fallback revival, releasedAt removal,
                        # rework-as-n, 14-day censor, missing-acceptance default,
                        # cohort randomization, run/card conflation, rolling-clock
