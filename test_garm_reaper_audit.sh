@@ -17,7 +17,10 @@
 #   3. CLASSIFICATION — fixed-clock fixtures: healthy ages to OK; past-TTL
 #                 busy/idle-excess/stale to PROPOSE (exit 0); orphan, stuck
 #                 provisioning, stuck drain, unknown-age, and over-max to
-#                 BREACH (exit 1) naming the instance.
+#                 BREACH (exit 1) naming the instance. Stuck-state timers run
+#                 on time in state (fresh drain/failure on an old instance is
+#                 info only); null/absent fields fail closed without shifting
+#                 columns.
 #   4. WARM-SPARE EXEMPTION — the newest min_idle idle instances stay exempt
 #                 whatever their age; only the oldest excess idle ages into
 #                 candidacy. min_idle 1 over two ancient idles breaches on
@@ -70,6 +73,19 @@ inst() {
     jq -cn --arg n "$1" --arg s "$2" --arg r "$3" --arg c "$(ago "$4")" \
       '{name:$n,status:$s,runner_status:$r,created_at:$c,updated_at:$c}'
   fi
+}
+# inst2 <name> <status> <runner_status> <created_age_min|NULL|ABSENT> <updated_age_min|ABSENT>
+# Distinct created/updated clocks for state-age and fail-closed guards.
+inst2() {
+  local filter='{name:$n,status:$s,runner_status:$r}' args=(--arg n "$1" --arg s "$2" --arg r "$3")
+  if [[ "$4" != "ABSENT" ]]; then
+    if [[ "$4" == "NULL" ]]; then filter+=' | .created_at = null';
+    else args+=(--arg c "$(ago "$4")"); filter+=' | .created_at = $c'; fi
+  fi
+  if [[ "$5" != "ABSENT" ]]; then
+    args+=(--arg u "$(ago "$5")"); filter+=' | .updated_at = $u'
+  fi
+  jq -cn "${args[@]}" "$filter"
 }
 
 run_audit() {  # run_audit [--json] <pool-json>... → stdout in $OUT, exit in $RC
@@ -171,6 +187,25 @@ run_audit --json "$WORK/overmax.json"
 pool_doc "$WORK/stopped.json" 0 5 true "$(inst vm-stop stopped stopped 300)"
 run_audit --json "$WORK/stopped.json"
 [[ "$RC" == "0" && "$(verdict_of "$OUT")" == "PROPOSE" ]] && ok "3l. stale stopped past TTL proposes" || bad "3l. stale stopped past TTL proposes" "rc=$RC out=$OUT"
+# Stuck-state timers run on time IN STATE: a drain that started 1m ago on a
+# 120m-old runner (long job, fresh teardown) is info only, not a breach.
+pool_doc "$WORK/drainfresh.json" 0 5 true "$(inst2 vm-drainfresh deleting deleting 120 1)"
+run_audit --json "$WORK/drainfresh.json"
+[[ "$RC" == "0" && "$(verdict_of "$OUT")" == "OK" ]] && ok "3m. fresh drain after long job is info only" || bad "3m. fresh drain after long job is info only" "rc=$RC out=$OUT"
+# Same for a fresh failure state on an old instance.
+pool_doc "$WORK/errfresh.json" 0 5 true "$(inst2 vm-errfresh error active 200 2)"
+run_audit --json "$WORK/errfresh.json"
+[[ "$RC" == "0" && "$(verdict_of "$OUT")" == "OK" ]] && ok "3n. fresh prov-fail on old instance is info only" || bad "3n. fresh prov-fail on old instance is info only" "rc=$RC out=$OUT"
+# Null created_at with a fresh updated_at still fails closed (unknown-age),
+# never aged from updated_at via a shifted column.
+pool_doc "$WORK/nullage.json" 0 5 true "$(inst2 vm-nullage running active NULL 1)"
+run_audit --json "$WORK/nullage.json"
+[[ "$RC" == "1" ]] && grep -q 'unknown-age' <<<"$OUT" && grep -q 'vm-nullage' <<<"$OUT" && ok "3o. null created_at fails closed" || bad "3o. null created_at fails closed" "rc=$RC out=$OUT"
+# Empty runner_status must not shift columns: old running instance still
+# breaches as a named busy orphan.
+pool_doc "$WORK/emptyrs.json" 0 5 true "$(inst2 vm-nors running '' 600 ABSENT)"
+run_audit --json "$WORK/emptyrs.json"
+[[ "$RC" == "1" ]] && grep -q 'vm-nors.*busy orphan' <<<"$OUT" && ok "3p. empty runner_status keeps its column" || bad "3p. empty runner_status keeps its column" "rc=$RC out=$OUT"
 
 # === 4. warm-spare exemption ======================================================
 echo "=== 4. warm-spare exemption ==="

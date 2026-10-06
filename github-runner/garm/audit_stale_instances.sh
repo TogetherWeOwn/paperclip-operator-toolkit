@@ -23,12 +23,15 @@
 #   busy          running, runner_status neither idle nor failed — candidate
 #                 past TTL, breach past orphan age
 #   provisioning  pending_create/creating, or runner_status installing —
-#                 info while young, breach past GARM_PROV_STUCK_MIN
+#                 info while young, breach past GARM_PROV_STUCK_MIN in state
 #   draining      pending_delete/pending_force_delete/deleting — info while
-#                 young, breach past GARM_DRAIN_STUCK_MIN (a stuck drain is
-#                 the cleanup failure this card exists to surface)
+#                 young, breach past GARM_DRAIN_STUCK_MIN in state (a stuck
+#                 drain is the cleanup failure this audit exists to surface)
 #   prov-fail     status error, or runner_status failed — info while young,
-#                 breach past GARM_DRAIN_STUCK_MIN
+#                 breach past GARM_DRAIN_STUCK_MIN in state
+# Stuck-state timers run on updated_at (time in state), falling back to
+# created_at when updated_at is absent or older than creation: a runner
+# whose job ran long must not breach the moment teardown begins.
 #   stale         anything else (stopped/unknown) — candidate past TTL,
 #                 breach past orphan age
 #   unknown-age   created_at unreadable or absent — BREACH, always. A silent
@@ -186,18 +189,22 @@ for pi in "${!POOL_DOCS[@]}"; do
     breach "pool $short: enabled/min/max shape unreadable"
     continue
   fi
-  inst_tsv="$(jq -r '.instances[]? | [(.status // "?"), (.runner_status // "?"), (.name // "?"), ((.created_at // .createdAt // "") | tostring), ((.updated_at // .updatedAt // "") | tostring)] | @tsv' <<<"$doc" 2>/dev/null)" \
+  # Fields are joined on U+001F (unit separator), a non-whitespace byte, so
+  # empty fields survive the read below. TSV would collapse here: tab is IFS
+  # whitespace, so a null created_at would shift updated_at into its column
+  # and defeat the unknown-age fail-closed rule.
+  inst_rows="$(jq -r '.instances[]? | [(.status // "?"), (.runner_status // "?"), (.name // "?"), ((.created_at // .createdAt // "") | tostring), ((.updated_at // .updatedAt // "") | tostring)] | map(tostring | gsub("\u001f"; "?")) | join("\u001f")' <<<"$doc" 2>/dev/null)" \
     || { ERROR_LIST+=("$(jq -cn --arg p "$short" '{pool:$p,error:"instances unreadable"}')"); breach "pool $short: instances unreadable"; continue; }
 
   # Materialise instance rows for two-pass idle-excess ranking.
   declare -a I_ST=() I_RS=() I_NM=() I_CR=() I_UP=()
-  while IFS=$'\t' read -r st rs nm cr up; do
+  while IFS=$'\x1f' read -r st rs nm cr up; do
     [[ -n "$st" ]] || continue
     # VM names are operator-controlled; anything outside the safe alphabet is
     # addressed by index so a hostile name never reaches a proposal verbatim.
     [[ "$nm" =~ ^[A-Za-z0-9_.-]+$ ]] || nm="inst-${#I_ST[@]}"
     I_ST+=("$st"); I_RS+=("$rs"); I_NM+=("$nm"); I_CR+=("$cr"); I_UP+=("$up")
-  done <<<"$inst_tsv"
+  done <<<"$inst_rows"
   actual="${#I_ST[@]}"
   (( actual <= 10#$max_run )) \
     || breach "pool $short holds $actual instances over max $max_run (size-cap violation)"
@@ -225,28 +232,39 @@ for pi in "${!POOL_DOCS[@]}"; do
     fi
     age_min=$(( (now_s - created_s) / 60 ))
     (( age_min < 0 )) && age_min=0   # future clock skew reads as newborn, never as orphan
+    # Stuck-state timers measure time IN STATE (updated_at), not instance age:
+    # a runner whose job ran 120m breaches the moment GARM starts deleting it
+    # otherwise. updated_at older than created_at (skew) or absent falls back
+    # to created_at, preserving the previous behaviour in those cases.
+    state_s="$created_s"
+    if [[ -n "$up" ]]; then
+      up_s="$(date -u -d "$up" +%s 2>/dev/null)" || up_s=""
+      [[ -n "$up_s" ]] && (( up_s >= created_s )) && state_s="$up_s"
+    fi
+    state_min=$(( (now_s - state_s) / 60 ))
+    (( state_min < 0 )) && state_min=0
     past_ttl=0; past_orphan=0
     (( age_min > 10#$TTL_MIN )) && past_ttl=1
     (( age_min > ORPHAN_MIN )) && past_orphan=1
 
     if [[ "$st" == "error" || "$rs" == "failed" ]]; then
-      if (( age_min > 10#$DRAIN_MIN )); then
-        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "prov-fail" "$cr"
-        breach "pool $short/$nm: prov-fail ${age_min}m old"
+      if (( state_min > 10#$DRAIN_MIN )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "prov-fail" "$cr"
+        breach "pool $short/$nm: prov-fail stuck ${state_min}m in state"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> prov-fail (young, info only)")
       fi
     elif [[ "$st" == "pending_delete" || "$st" == "pending_force_delete" || "$st" == "deleting" ]]; then
-      if (( age_min > 10#$DRAIN_MIN )); then
-        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "draining" "$cr"
-        breach "pool $short/$nm: drain stuck ${age_min}m"
+      if (( state_min > 10#$DRAIN_MIN )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "draining" "$cr"
+        breach "pool $short/$nm: drain stuck ${state_min}m in state"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> draining (young, info only)")
       fi
     elif [[ "$st" == "pending_create" || "$st" == "creating" || "$rs" == "installing" ]]; then
-      if (( age_min > 10#$PROV_MIN )); then
-        add_candidate "$short" "$nm" "$st" "$rs" "$age_min" "provisioning" "$cr"
-        breach "pool $short/$nm: provisioning stuck ${age_min}m"
+      if (( state_min > 10#$PROV_MIN )); then
+        add_candidate "$short" "$nm" "$st" "$rs" "$state_min" "provisioning" "$cr"
+        breach "pool $short/$nm: provisioning stuck ${state_min}m in state"
       else
         HUMAN_ROWS+=("$short $nm age=${age_min}m status=${st}/${rs} -> provisioning (young, info only)")
       fi
