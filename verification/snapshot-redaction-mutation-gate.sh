@@ -3,10 +3,10 @@
 # snapshot-redaction-mutation-gate.sh — proof that the snapshot-sections selftest is
 # not vacuous.
 #
-# The suite it guards is 29 green assertions about the two redaction builders that feed
+# The suite it guards is 30 green assertions about the two redaction builders that feed
 # the world-readable operator snapshot file. Green is worth nothing until somebody
 # breaks the redaction and
-# watches it go red. Each mutation below reverts exactly ONE of the five review fixes in
+# watches it go red. Each mutation below reverts exactly ONE of the six review fixes in
 # a THROWAWAY COPY and asserts the NAMED check reddens.
 #
 # The unmutated copy is asserted green FIRST, in the same staging directory: "the
@@ -53,6 +53,14 @@
 #      standard way to make a suite vacuous: break the assembly and "no credential
 #      survives redaction" passes by planting nothing a pattern can find. Check 2b is
 #      what stops that, so it gets a mutation of its own.
+#
+#   6. THE UNSUPPORTED-ROW / MALFORMED-LIST DIGEST (review F1 follow-up). A non-dict
+#      combo, mapping or step, a non-list str-list, and a non-scalar smuggled into a
+#      scalar position all used to collapse to the same bare bytes -- "row-A" vs
+#      "row-C" redacted identically with no warning and --build exited 0. The same
+#      defect class as F1a/F1b one level up, and the same temptation to delete: the
+#      digest beside the warning reads as belt-and-braces until a rewrite diffs as
+#      no-change. Check 26 owns it.
 #
 # Usage: ./verification/snapshot-redaction-mutation-gate.sh
 # Exit:  0 all mutations caught · 1 a mutation survived · 2 the baseline is broken
@@ -138,7 +146,7 @@ from pathlib import Path
 p = Path(os.environ["MUT_PATH"]); s = p.read_text()
 start = s.find("    if not isinstance(config, dict):")
 if start < 0: raise SystemExit("anchor missing: non-dict config branch")
-finish = s.find("    kept, dropped = _copy_allowed(config, CONFIG_SCALARS", start)
+finish = s.find("    kept, dropped, cfg_warnings = _copy_allowed(config, CONFIG_SCALARS", start)
 if finish < 0: raise SystemExit("anchor missing: end of non-dict config branch")
 p.write_text(s[:start] + "    if not isinstance(config, dict):\n        return {}\n" + s[finish:])
 ' || rc=1
@@ -185,6 +193,105 @@ if needle not in s: raise SystemExit("anchor missing: _GH_CANARY assembly")
 p.write_text(s.replace(needle, "_GH_CANARY = \"gh\" \"p_\" + \"C\" * 4", 1))
 ' || rc=1
 
+# 6. unsupported-row / malformed-list digest+warning (F1 follow-up) — restore the bare
+#    returns and the drop-only list handling. Check 26 is the owner: with the fix
+#    reverted, "row-A" vs "row-C" (and the step / str-list / scalar pairs) serialize
+#    identically again and the check goes red.
+mutate "F1-followup bare rows and drop-only lists restored" \
+  "unsupported rows and malformed str-lists warn with digests" '
+import os
+from pathlib import Path
+p = Path(os.environ["MUT_PATH"]); s = p.read_text()
+old_combo = """    if not isinstance(combo, dict):
+        return {
+            "_unsupportedComboType": type(combo).__name__,
+            "_comboDigest": _digest(combo),
+"""
+if old_combo not in s: raise SystemExit("anchor missing: combo non-dict digest")
+s = s.replace(old_combo, "    if not isinstance(combo, dict):\n        return {\"_unsupportedComboType\": type(combo).__name__}\n", 1)
+old_combo_warn = """            "_WARNING": (
+                f"`combo` present but of type {type(combo).__name__}, not object. "
+                "This row is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_comboDigest` to see whether the value changed."
+            ),
+        }
+"""
+if old_combo_warn not in s: raise SystemExit("anchor missing: combo non-dict warning")
+s = s.replace(old_combo_warn, "", 1)
+old_mapping = """    if not isinstance(mapping, dict):
+        return {
+            "_unsupportedMappingType": type(mapping).__name__,
+            "_mappingDigest": _digest(mapping),
+"""
+if old_mapping not in s: raise SystemExit("anchor missing: mapping non-dict digest")
+s = s.replace(old_mapping, "    if not isinstance(mapping, dict):\n        return {\"_unsupportedMappingType\": type(mapping).__name__}\n", 1)
+old_mapping_warn = """            "_WARNING": (
+                f"`mapping` present but of type {type(mapping).__name__}, not object. "
+                "This row is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_mappingDigest` to see whether the value changed."
+            ),
+        }
+"""
+if old_mapping_warn not in s: raise SystemExit("anchor missing: mapping non-dict warning")
+s = s.replace(old_mapping_warn, "", 1)
+old_step = """    if not isinstance(step, dict):
+        return {
+            "_unsupportedStepType": type(step).__name__,
+            "_stepDigest": _digest(step),
+"""
+if old_step not in s: raise SystemExit("anchor missing: step non-dict digest")
+s = s.replace(old_step, "    if not isinstance(step, dict):\n        return {\"_unsupportedStepType\": type(step).__name__}\n", 1)
+old_step_warn = """            "_WARNING": (
+                f"`step` present but of type {type(step).__name__}, not object. "
+                "This step is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_stepDigest` to see whether the value changed."
+            ),
+        }
+"""
+if old_step_warn not in s: raise SystemExit("anchor missing: step non-dict warning")
+s = s.replace(old_step_warn, "", 1)
+old_scalar = """            else:
+                dropped.append(_safe_key_name(key))
+                kept[key + "_digest"] = _digest(value)
+                warnings.append(
+                    f"`{key}` present but of type {type(value).__name__}, not scalar. "
+"""
+if old_scalar not in s: raise SystemExit("anchor missing: scalar-smuggled digest")
+wstart = s.find(old_scalar)
+wfinish = s.find("compare `{key}_digest` to see whether the value changed.\"", wstart)
+if wfinish < 0: raise SystemExit("anchor missing: end of scalar-smuggled warning")
+wend = s.find(")", wfinish) + 1
+s = s[:wstart] + "            else:\n                dropped.append(_safe_key_name(key))\n" + s[wend+1:]
+old_mixed = """                if any(not isinstance(v, str) for v in value):
+                    dropped.append(_safe_key_name(key) + "[]")
+                    kept[key + "_digest"] = _digest(value)
+"""
+if old_mixed not in s: raise SystemExit("anchor missing: mixed str-list digest")
+s = s.replace(old_mixed, "                if any(not isinstance(v, str) for v in value):\n                    dropped.append(_safe_key_name(key) + \"[]\")\n", 1)
+old_mixed_warn = """                    warnings.append(
+                        f"`{key}` contains non-string members, not identifiers. "
+"""
+if old_mixed_warn not in s: raise SystemExit("anchor missing: mixed str-list warning")
+mstart = s.find(old_mixed_warn)
+mfinish = s.find("compare `{key}_digest` to see whether the value changed.\"", mstart)
+if mfinish < 0: raise SystemExit("anchor missing: end of mixed str-list warning")
+mend = s.find(")", mfinish) + 1
+s = s[:mstart] + s[mend+1:]
+old_strlist = """            else:
+                dropped.append(_safe_key_name(key))
+                kept[key + "_digest"] = _digest(value)
+                warnings.append(
+                    f"`{key}` present but of type {type(value).__name__}, not list. "
+"""
+if old_strlist not in s: raise SystemExit("anchor missing: non-list str-list digest")
+lstart = s.find(old_strlist)
+lfinish = s.find("compare `{key}_digest` to see whether the value changed.\"", lstart)
+if lfinish < 0: raise SystemExit("anchor missing: end of non-list str-list warning")
+lend = s.find(")", lfinish) + 1
+s = s[:lstart] + "            else:\n                dropped.append(_safe_key_name(key))\n" + s[lend+1:]
+p.write_text(s)
+' || rc=1
+
 # --- control ------------------------------------------------------------------------
 # An all-kills run looks identical to a gate that is failing closed — every mutant red
 # because the harness itself is broken. Restore the pristine copy and require it green
@@ -198,7 +305,7 @@ fi
 echo "  control: restored copy is green again"
 
 if [ $rc -eq 0 ]; then
-  echo "snapshot-redaction-gate: all 5 review fixes are load-bearing"
+  echo "snapshot-redaction-gate: all 6 review fixes are load-bearing"
 else
   echo "::error::snapshot-redaction-gate: at least one review fix is NOT load-bearing"
 fi

@@ -257,17 +257,21 @@ def _digest(value: Any) -> dict[str, Any]:
 
 def _copy_allowed(
     row: Any, scalars: tuple[str, ...], str_lists: tuple[str, ...]
-) -> tuple[dict[str, Any], list[str]]:
-    """Copy allowlisted keys from one row. Returns (kept, dropped-key-names).
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Copy allowlisted keys from one row. Returns (kept, dropped-key-names, warnings).
 
     Scalars are copied only when they are genuinely scalar; a dict or list smuggled into
-    a scalar position is dropped and reported, because copying it would copy whatever it
-    nests. String lists are filtered to their string members for the same reason.
+    a scalar position is dropped, digested and warned about, because copying it would copy
+    whatever it nests and dropping it silently would make two different smuggled values
+    serialize identically -- a false clean baseline. String lists get the same treatment:
+    a non-list value, or a list with non-string members, is digested and warned about
+    (the models-treatment: value digest plus _WARNING so --build exits 3).
     """
     kept: dict[str, Any] = {}
     dropped: list[str] = []
+    warnings: list[str] = []
     if not isinstance(row, dict):
-        return kept, dropped
+        return kept, dropped, warnings
 
     for key, value in row.items():
         if key in scalars:
@@ -275,16 +279,34 @@ def _copy_allowed(
                 kept[key] = value
             else:
                 dropped.append(_safe_key_name(key))
+                kept[key + "_digest"] = _digest(value)
+                warnings.append(
+                    f"`{key}` present but of type {type(value).__name__}, not scalar. "
+                    "This field is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                    f"baseline; compare `{key}_digest` to see whether the value changed."
+                )
         elif key in str_lists:
             if isinstance(value, list):
                 kept[key] = [v for v in value if isinstance(v, str)]
                 if any(not isinstance(v, str) for v in value):
                     dropped.append(_safe_key_name(key) + "[]")
+                    kept[key + "_digest"] = _digest(value)
+                    warnings.append(
+                        f"`{key}` contains non-string members, not identifiers. "
+                        "This list is FILTERED BY FAILURE, not by fact. Do not diff as a "
+                        f"baseline; compare `{key}_digest` to see whether the value changed."
+                    )
             else:
                 dropped.append(_safe_key_name(key))
+                kept[key + "_digest"] = _digest(value)
+                warnings.append(
+                    f"`{key}` present but of type {type(value).__name__}, not list. "
+                    "This list is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                    f"baseline; compare `{key}_digest` to see whether the value changed."
+                )
         else:
             dropped.append(_safe_key_name(key))
-    return kept, dropped
+    return kept, dropped, warnings
 
 
 def _redact_step(step: Any) -> dict[str, Any]:
@@ -293,9 +315,17 @@ def _redact_step(step: Any) -> dict[str, Any]:
         # Legacy bare-string step: the whole value is a model id.
         return {"kind": "model", "model": step, "_legacyString": True}
     if not isinstance(step, dict):
-        return {"_unsupportedStepType": type(step).__name__}
+        return {
+            "_unsupportedStepType": type(step).__name__,
+            "_stepDigest": _digest(step),
+            "_WARNING": (
+                f"`step` present but of type {type(step).__name__}, not object. "
+                "This step is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_stepDigest` to see whether the value changed."
+            ),
+        }
 
-    kept, dropped = _copy_allowed(step, STEP_SCALARS, STEP_STR_LISTS)
+    kept, dropped, str_warnings = _copy_allowed(step, STEP_SCALARS, STEP_STR_LISTS)
     for field in STEP_DIGEST_FIELDS:
         if field in step:
             kept[field + "_digest"] = _digest(step.get(field))
@@ -303,6 +333,8 @@ def _redact_step(step: Any) -> dict[str, Any]:
                 dropped.remove(field)
     if dropped:
         kept["_unknownKeysDropped"] = sorted(dropped)
+    if str_warnings:
+        kept["_WARNING"] = " ".join(str_warnings)
     return kept
 
 
@@ -326,17 +358,28 @@ def _redact_config(config: Any) -> dict[str, Any]:
                 "baseline; compare `_configDigest` to see whether the value changed."
             ),
         }
-    kept, dropped = _copy_allowed(config, CONFIG_SCALARS, ())
+    kept, dropped, cfg_warnings = _copy_allowed(config, CONFIG_SCALARS, ())
     if dropped:
         kept["_unknownKeysDropped"] = sorted(dropped)
+    if cfg_warnings:
+        kept["_WARNING"] = " ".join(cfg_warnings)
     return kept
 
 
 def _redact_combo(combo: Any) -> dict[str, Any]:
     if not isinstance(combo, dict):
-        return {"_unsupportedComboType": type(combo).__name__}
+        return {
+            "_unsupportedComboType": type(combo).__name__,
+            "_comboDigest": _digest(combo),
+            "_WARNING": (
+                f"`combo` present but of type {type(combo).__name__}, not object. "
+                "This row is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_comboDigest` to see whether the value changed."
+            ),
+        }
 
-    kept, dropped = _copy_allowed(combo, COMBO_SCALARS, COMBO_STR_LISTS)
+    kept, dropped, str_warnings = _copy_allowed(combo, COMBO_SCALARS, COMBO_STR_LISTS)
+    row_warnings: list[str] = list(str_warnings)
 
     for field in COMBO_DIGEST_FIELDS:
         if field in combo:
@@ -360,7 +403,7 @@ def _redact_combo(combo: Any) -> dict[str, Any]:
         # rewritten step list still changes the bytes, without copying its content --
         # the same trade this module makes for free text everywhere else.
         kept["models_digest"] = _digest(models)
-        kept["_WARNING"] = (
+        row_warnings.append(
             f"`models` present but of type {type(models).__name__}, not list. Step list "
             "is EMPTY BY FAILURE, not by fact. Do not diff as a baseline; compare "
             "`models_digest` to see whether the malformed value itself changed."
@@ -378,6 +421,9 @@ def _redact_combo(combo: Any) -> dict[str, Any]:
         kept["data_digest"] = _digest(combo.get("data"))
         dropped.remove("data")
 
+    if row_warnings:
+        kept["_WARNING"] = " ".join(row_warnings)
+
     kept["_unknownKeysDropped"] = sorted(dropped)
     kept["_dbPresence"] = {
         "absent": sorted(f for f in COMBO_DIGEST_FIELDS if f not in combo),
@@ -393,13 +439,23 @@ def _redact_combo(combo: Any) -> dict[str, Any]:
 
 def _redact_mapping(mapping: Any) -> dict[str, Any]:
     if not isinstance(mapping, dict):
-        return {"_unsupportedMappingType": type(mapping).__name__}
-    kept, dropped = _copy_allowed(mapping, MAPPING_SCALARS, ())
+        return {
+            "_unsupportedMappingType": type(mapping).__name__,
+            "_mappingDigest": _digest(mapping),
+            "_WARNING": (
+                f"`mapping` present but of type {type(mapping).__name__}, not object. "
+                "This row is EMPTY BY FAILURE, not by fact. Do not diff as a "
+                "baseline; compare `_mappingDigest` to see whether the value changed."
+            ),
+        }
+    kept, dropped, map_warnings = _copy_allowed(mapping, MAPPING_SCALARS, ())
     for field in MAPPING_DIGEST_FIELDS:
         if field in mapping:
             kept[field + "_digest"] = _digest(mapping.get(field))
             if field in dropped:
                 dropped.remove(field)
+    if map_warnings:
+        kept["_WARNING"] = " ".join(map_warnings)
     kept["_unknownKeysDropped"] = sorted(dropped)
     return kept
 
@@ -866,6 +922,61 @@ def _selftest() -> int:
     ):
         check(f"auditor detects a {_label} credential shape",
               len(audit({"name": _sample})) > 0, f"sample={_sample[:10]}...")
+
+    # 26. F1 follow-up (review): unsupported-type rows, non-dict steps and malformed
+    #     str-lists must digest + warn, never collapse to identical bytes. Before the
+    #     fix, "row-A" vs "row-C", step 42 vs 43, and allowedProviders "anthropic" vs
+    #     "openai" all serialized byte-identically with no warning and --build exited 0.
+    def _dump(section: Any) -> str:
+        return json.dumps(section, sort_keys=True)
+
+    _cA = build_combos_section({"items": ["row-A"], "total": 1})
+    _cC = build_combos_section({"items": ["row-C"], "total": 1})
+    _mA = build_mappings_section({"items": ["row-A"], "total": 1})
+    _mC = build_mappings_section({"items": ["row-C"], "total": 1})
+    _s42 = build_combos_section(
+        {"items": [{"id": "c", "name": "n", "models": [42]}], "total": 1})
+    _s43 = build_combos_section(
+        {"items": [{"id": "c", "name": "n", "models": [43]}], "total": 1})
+    _lA = build_combos_section(
+        {"items": [{"id": "c", "name": "n",
+                    "allowedProviders": "anthropic"}], "total": 1})
+    _lO = build_combos_section(
+        {"items": [{"id": "c", "name": "n",
+                    "allowedProviders": "openai"}], "total": 1})
+    _lMix1 = build_combos_section(
+        {"items": [{"id": "c", "name": "n",
+                    "allowedProviders": ["anthropic", {"x": 1}]}], "total": 1})
+    _lMix2 = build_combos_section(
+        {"items": [{"id": "c", "name": "n",
+                    "allowedProviders": ["anthropic", {"y": 2}]}], "total": 1})
+    # Same class one level down: a dict smuggled into a scalar position must not
+    # read as an absent field either.
+    _sm1 = build_combos_section(
+        {"items": [{"id": "c", "name": {"a": 1}}], "total": 1})
+    _sm2 = build_combos_section(
+        {"items": [{"id": "c", "name": {"b": 2}}], "total": 1})
+    _proc26 = subprocess.run(
+        [sys.executable, __file__, "--build", "-", "--kind", "combos"],
+        input=json.dumps({"items": ["row-A"], "total": 1}),
+        capture_output=True, text=True,
+    )
+    check("unsupported rows and malformed str-lists warn with digests",
+          _dump(_cA) != _dump(_cC)
+          and _dump(_mA) != _dump(_mC)
+          and _dump(_s42) != _dump(_s43)
+          and _dump(_lA) != _dump(_lO)
+          and _dump(_lMix1) != _dump(_lMix2)
+          and _dump(_sm1) != _dump(_sm2)
+          and len(integrity_warnings(_cA)) > 0
+          and len(integrity_warnings(_mA)) > 0
+          and len(integrity_warnings(_s42)) > 0
+          and len(integrity_warnings(_lA)) > 0
+          and len(integrity_warnings(_lMix1)) > 0
+          and len(integrity_warnings(_sm1)) > 0
+          and _proc26.returncode == 3 and _proc26.stdout == "",
+          f"cA==cC:{_dump(_cA) == _dump(_cC)} "
+          f"warn={len(integrity_warnings(_cA))} rc={_proc26.returncode}")
 
     print()
     if failures:
