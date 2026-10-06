@@ -2202,8 +2202,11 @@ export function createPlugin() {
       // fold. Active cards release capacity exactly once. Known first-eight
       // completions are later corrected only by explicit human evidence — a
       // rejection/reopen or a safety violation; duplicate, unrelated or late
-      // run-failure events write nothing. A successful heartbeat alone is not
-      // delivered work, so `agent.run.succeeded` never folds acceptance.
+      // run-failure events write nothing. A card dispatched before the flag
+      // went off still releases (and folds) when it completes while
+      // disabled, so re-enabling never finds wedged active caps. A
+      // successful heartbeat alone is not delivered work, so
+      // `agent.run.succeeded` never folds acceptance.
       //
       // `modelId` may be null when the caller does not know the served model
       // (reopen/rejection signals carry no model). The active entry names the
@@ -2220,22 +2223,34 @@ export function createPlugin() {
           modelId: string | null;
         },
       ): Promise<{ modelId: string; lane: string | null; outcome: "ok" | "material-failure" | "ignore" } | null> => {
-        // Disabled earn-in is fully inert: no lock, no state read. The
-        // `agent.run.failed` hook funnels through here before the
-        // latency-sensitive lane quarantine, so even lock contention is a
-        // production cost while the flag is off.
-        if (!(await companyConfig(companyId)).earnIn.enabled) return null;
+        const enabled = (await companyConfig(companyId)).earnIn.enabled;
+        // The dispatch-time key names the model; match this issue's key
+        // (caller-known model first, any active key for the issue second).
+        const matchActiveKey = (state: EarnInState) => signal.modelId
+          ? `${issueId}:${signal.modelId}:earnin`
+          : state.dispatchedKeys.find((key) => key.startsWith(`${issueId}:`) && key.endsWith(":earnin")) ?? null;
+        const activeLaneOf = (state: EarnInState) =>
+          Object.entries(state.activePerLane).find(([, ids]) => ids.includes(issueId))?.[0] ?? null;
+        if (!enabled) {
+          // Disabled earn-in admits nothing, so an issue with no live entry
+          // needs no serialization: return before the lock with no state
+          // write. The `agent.run.failed` hook funnels through here before
+          // the latency-sensitive lane quarantine, so even lock contention
+          // is a production cost while the flag is off. An issue dispatched
+          // before the flag went off still holds an active entry — it falls
+          // through to the locked path below so its release + fold stays
+          // serialized, and it never corrects a recorded outcome while off.
+          const state = await readEarnInState(companyId);
+          const activeKey = matchActiveKey(state);
+          if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
+          if (!activeLaneOf(state)) return null;
+        }
         return withEarnInLock(companyId, async () => {
           const state = await readEarnInState(companyId);
-          // The dispatch-time key names the model; match this issue's key
-          // (caller-known model first, any active key for the issue second).
-          const activeKey = signal.modelId
-            ? `${issueId}:${signal.modelId}:earnin`
-            : state.dispatchedKeys.find((key) => key.startsWith(`${issueId}:`) && key.endsWith(":earnin")) ?? null;
+          const activeKey = matchActiveKey(state);
           if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
           const modelId = activeKey.slice(issueId.length + 1, -":earnin".length);
-          const lane =
-            Object.entries(state.activePerLane).find(([, ids]) => ids.includes(issueId))?.[0] ?? null;
+          const lane = activeLaneOf(state);
           const resolution = classifyEarnInResolution({ ...signal, modelId });
           if (!lane) {
             // Done releases capacity. A later rejection replaces that card's
@@ -2243,6 +2258,8 @@ export function createPlugin() {
             // A late run failure (e.g. a timeout landing after the card
             // resolved) is not a quality verdict on delivered work, so it
             // never rewrites a recorded outcome toward the stop circuit.
+            // Nothing corrects a recorded outcome while disabled, either.
+            if (!enabled) return null;
             const slot = state.outcomeSlots?.[activeKey];
             const safetyStop = resolution.safetyOrAuthorityViolation && !state.stopped[modelId];
             if (slot && slot.modelId !== modelId) return null;

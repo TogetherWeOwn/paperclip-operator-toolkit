@@ -887,6 +887,52 @@ describe("earn-in worker hookup", () => {
     expect(await readEarnInState(harness)).toBeNull();
   });
 
+  it("releases an active entry that completes while disabled, and admits again after re-enable", async () => {
+    const card = issue("i1", {
+      labels: [tierLabel("T1"), classLabel("research")],
+      labelIds: ["lbl-T1", "lbl-class-research"],
+    });
+    const harness = await boot(baseConfig(), [card], [agentRow()]);
+    await seedScores(harness);
+    stubBoard(harness);
+    await harness.runJob("balancePass");
+    expect(await pinnedModel(harness, "i1")).toBe(RIVAL);
+
+    // Incident rollback: the flag goes off with a card still dispatched.
+    harness.setConfig(baseConfig({ earnIn: { enabled: false } }));
+
+    // Completion while disabled still releases the slot and folds the
+    // outcome — otherwise the per-model/per-lane active caps stay wedged
+    // after re-enable (both default to 1) and nothing ever admits again.
+    await harness.emit("issue.updated", { changes: { status: { from: "in_progress", to: "done" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+    const released = await readEarnInState(harness);
+    expect(released.activePerModel[RIVAL] ?? 0).toBe(0);
+    expect(released.activePerLane[RIVAL_LANE] ?? []).toEqual([]);
+    expect(released.firstEightOutcomes[RIVAL]).toEqual(["ok"]);
+
+    // Re-enabled world (fresh boot, carried state — an incident rollback is
+    // a restart) with the next dispatch turn due: the rival admits a fresh
+    // card, proving the caps were not wedged by the disabled completion.
+    // A second pass on the same harness would trip the quiet-board skip, so
+    // this mirrors the replay test's one-boot-per-pass shape.
+    const reopened = await boot(baseConfig(), [issue("i4", {
+      labels: [tierLabel("T1"), classLabel("research")],
+      labelIds: ["lbl-T1", "lbl-class-research"],
+    })], [agentRow()]);
+    await seedScores(reopened);
+    await reopened.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.earnInState },
+      { ...released, counter: { [RIVAL]: 12 } },
+    );
+    stubBoard(reopened, "i4");
+    await reopened.runJob("balancePass");
+    expect(await pinnedModel(reopened, "i4")).toBe(RIVAL);
+    const readmitted = await readEarnInState(reopened);
+    expect(readmitted.activePerModel[RIVAL]).toBe(1);
+    expect(readmitted.activePerLane[RIVAL_LANE]).toEqual(["i4"]);
+  });
+
   it("pins subCallPins env on the earn-in winner like any other pin", async () => {
     const card = issue("i1", {
       labels: [tierLabel("T1"), classLabel("research")],
