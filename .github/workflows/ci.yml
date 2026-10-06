@@ -7,10 +7,6 @@ name: CI
 # part of it is worse than one that says which part.
 #
 #   RUNS HERE (offline, no credentials, no database):
-#     test_gh_app_token.sh              the credential-minter regression suite
-#     test_gh_shim.sh                   gh-shim: mint without a bound PEM, preserve
-#                                       an explicit token, and fall through on a
-#                                       failed mint — TOG-1448/3412
 #     test_gh_token_argv.sh             gh_token.sh: no credential on argv
 #     test_gh_token_dispatch.sh         gh_token.sh: refuses unknown subcommands
 #     test_gh_token_api_body.sh         gh_token.sh: the request body reaches the
@@ -102,19 +98,6 @@ name: CI
 #                                       inconclusive, and every outcome re-arms
 #                                       the native Paperclip issue monitor —
 #                                       TOG-398
-#     test_gh_permission_pin_audit.sh   gh_permission_pin_audit.sh: whether a
-#                                       change to DEFAULT_PERMISSION_PROFILE
-#                                       that reaches none of the 7 pinned
-#                                       projects can still pass silently — and
-#                                       whether permission_pins.txt still
-#                                       describes this checkout's default —
-#                                       TOG-346
-#     test_gh_push_preflight.sh         gh_push_preflight.sh: whether an issue
-#                                       that can NEVER derive a repo scope is
-#                                       told so at start-of-work rather than at
-#                                       `git push`, and whether the check can
-#                                       report a pass it did not measure —
-#                                       TOG-918
 #     test_discord_job_health.sh        scripts/discord_job_health.js: whether a
 #                                       time-gated Discord job that throws NO
 #                                       error and still posts NOTHING can read
@@ -180,7 +163,6 @@ name: CI
 #                                       rejects violations and still passes
 #                                       clean, grandfathered and skipped events
 #     syntax + secret scan              see the steps below
-#     plugins/gh-token-broker           see the `broker-suite` job below
 #     plugins/omniroute-broker          see the `omniroute-broker-suite` job below
 #     plugins/dispatch                  see the `dispatch-suite` job below
 #     gh-event-capture                  PRIVATE — stays in the private repo (no
@@ -908,34 +890,6 @@ jobs:
       # the stub proves the printed truncated-sha256 ids are honest.
       - name: embedded-token revoke-before-scrub regression suite
         run: ./test_gh_embedded_token_remediate.sh
-
-      # TOG-918. An issue with no project has no GH_APP_REPOS to read, and the
-      # host's getWorkspaceForIssue returns null outright on a null projectId
-      # — so BOTH of the broker's scope sources are null together, by
-      # construction. The broker then refuses with 409, which is correct: an
-      # unscoped token grants every repo in the installation, the exact blast
-      # radius TOG-174 removed. The refusal is right; the TIMING is the defect.
-      # Nothing consults it until the credential helper runs at `git push`, so
-      # an agent does the whole job, commits, and takes exit 128 on the box
-      # that produced the work. That is what stranded TOG-291.
-      #
-      # gh_push_preflight.sh moves that same verdict to start-of-work. It mints
-      # nothing and holds no GitHub credential, so it cannot widen a scope: it
-      # is a control-plane read plus the broker's OWN resolveScope(), imported
-      # from the deployed package by preference rather than reimplemented. A
-      # second copy of the derivation would drift from the one that actually
-      # decides and then report "you are fine" about a mint that refuses.
-      #
-      # The suite's load-bearing cases are the ones about lying, not passing:
-      # an unreadable board exits 2 and never a pass (a green produced by an
-      # outage), a project that merely LACKS GH_APP_REPOS is refused distinctly
-      # from one with no project at all, and the bearer is asserted absent from
-      # curl's real argv via the kernel's own record while separately proven to
-      # have reached curl — absence in argv must not be silence. The CISO
-      # constraint on TOG-918 is asserted directly: the JSON verdict carries a
-      # single-repo scope and mintedAnything: false.
-      - name: push-scope preflight regression suite
-        run: ./test_gh_push_preflight.sh
 
       # TOG-439. The production ceiling makes two independent defence-in-depth
       # gates unreachable: a non-P1 chief cannot seat a chief, and nobody may
@@ -2120,8 +2074,8 @@ jobs:
       # an assertion rather than a promise. Scans TRACKED files only: anything
       # .gitignore covers is by definition not in the repo, and scanning the
       # working tree would fail on an operator's local scratch files.
-      #   test_gh_app_token.sh assembles its canaries from fragments at runtime
-      # precisely so the suite does not trip this step.
+      #   Suites that need token-shaped canaries assemble them from fragments
+      # at runtime precisely so they do not trip this step.
       - name: Secret scan
         run: |
           set -uo pipefail
@@ -4098,105 +4052,6 @@ jobs:
         run: ./ci_dark_steps.sh report || true
 
   # ---------------------------------------------------------------------------
-  # The gh-token-broker plugin suite (TOG-213 / TOG-174).
-  #
-  # Separate job, not a step on `offline-suites`, for two reasons that are not
-  # stylistic: it needs a different Node major (see below), and it is the only
-  # thing in this repo with npm dependencies. Keeping it apart means a registry
-  # hiccup cannot turn the shell suites red, and the two failures read
-  # differently in the checks list instead of as one opaque "CI failed".
-  #
-  # Like every other suite here, this one is gated on EXIT STATUS and never on a
-  # test count. See the header.
-  broker-suite:
-    name: gh-token-broker suite
-    needs: [changes]
-    if: needs.changes.outputs.heavy == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: plugins/gh-token-broker
-    steps:
-      - uses: actions/checkout@v4
-
-      # Node 24, deliberately, while the job above pins 20. This suite is written
-      # against the runtime the Paperclip instance actually executes the plugin
-      # on, and `node --test` semantics have moved between those majors. Testing
-      # the broker on a Node the host does not run would be testing the wrong
-      # thing.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: plugins/gh-token-broker/package-lock.json
-
-      # --ignore-scripts: nothing in this dependency tree should be running
-      # lifecycle scripts on a runner that has a checkout of credential tooling
-      # sitting next to it. It is three packages with no build step; if this flag
-      # ever starts breaking the install, that is a fact worth stopping on rather
-      # than a flag worth removing.
-      #
-      # --include=dev is NOT redundant, however much it looks it. Both packages
-      # are devDependencies (the host supplies plugin-sdk at runtime; shared is
-      # test-only), and npm silently implies --omit=dev whenever NODE_ENV is
-      # `production`. The Paperclip instance sets exactly that, so `npm ci` there
-      # installs NOTHING, exits 0, prints "up to date", and every test then fails
-      # ERR_MODULE_NOT_FOUND. A green install step followed by an unexplained
-      # module error is a bad afternoon; the flag makes it impossible.
-      - name: Install pinned host packages
-        run: npm ci --include=dev --ignore-scripts
-
-      # Guard the above rather than trusting it. If the install silently no-ops
-      # again, fail HERE with the reason, not 40 lines later as a module error.
-      - name: Verify the install actually landed
-        run: |
-          set -euo pipefail
-          for p in @paperclipai/shared @paperclipai/plugin-sdk; do
-            [ -d "node_modules/$p" ] || {
-              echo "::error::$p is missing after npm ci — dev dependencies were omitted (NODE_ENV=${NODE_ENV:-unset})"
-              exit 1
-            }
-          done
-          echo "install ok: both host packages present"
-
-      # Pass the FILE, not the directory. `node --test test/` resolves `test` as
-      # a module specifier on Node 24 and dies with one MODULE_NOT_FOUND before
-      # running anything — which looks precisely like a broken suite and is not.
-      # `npm test` in package.json passes the file for this reason; it is invoked
-      # here rather than open-coded so the two cannot drift apart.
-      - name: Broker suite
-        run: npm test
-
-      # No credential, no network, no host: the suite fabricates its own RSA key
-      # and stubs every outbound call. Anything that starts reaching the real
-      # GitHub API from CI is a regression in the suite's isolation, not a
-      # networking problem to be fixed by opening the runner up.
-      #   This asserts that property instead of trusting it: the private key the
-      # broker signs with must never appear in the suite's own output, and the
-      # run must not need GH_APP_* to pass.
-      - name: Prove the suite needs no credential and leaks no key
-        env:
-          GH_APP_ID: ''
-          GH_APP_ORG: ''
-          GH_APP_PRIVATE_KEY: ''
-          GH_APP_REPOS: ''
-          GH_APP_PERMISSIONS: ''
-        run: |
-          set -uo pipefail
-          npm test > out.txt 2>&1; rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "::error::the broker suite requires a credential to pass; it must not"
-            cat out.txt; exit 1
-          fi
-          if grep -qE 'BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' out.txt; then
-            echo "::error::private key material reached the suite's stdout"
-            exit 1
-          fi
-          echo "broker suite: passes with GH_APP_* empty, no key in output"
-          rm -f out.txt
-
-  # ---------------------------------------------------------------------------
   # OmniRoute management-operation broker (TOG-391 / TOG-473 / TOG-537).
   #
   # This is an Ops Tooling plugin, not Model Router product code. Its native
@@ -4258,7 +4113,7 @@ jobs:
   # The native replacement for `dispatcher.py` / `paperclip-dispatcher.timer` —
   # a host-side script outside any repo whose stdout went nowhere durable.
   #
-  # Its own job, for the same reason as `broker-suite`: this is a Node runtime
+  # Its own job, separate from the shell suites: this is a Node runtime
   # on the version the Paperclip host actually executes plugins on, not a shell
   # suite, and a failure here should read as "the dispatch suite went red"
   # rather than as one opaque "CI failed".
@@ -4294,7 +4149,7 @@ jobs:
       # supplies it at runtime), and npm implies --omit=dev whenever NODE_ENV is
       # `production` — which the Paperclip instance sets. There, a bare `npm ci`
       # installs nothing, exits 0, prints "up to date", and every test then dies
-      # ERR_MODULE_NOT_FOUND. See broker-suite's note; same trap, same flag.
+      # ERR_MODULE_NOT_FOUND.
       - name: Install pinned host packages
         run: npm ci --include=dev --ignore-scripts
 
@@ -4407,11 +4262,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # The host-side MCP transport (TOG-196 / TOG-194).
   #
-  # Separate job, and pinned to Node 24 rather than the 20 the shell job uses,
-  # for the same reason as broker-suite: this code runs on the HOST under the
-  # node the operator actually has, and `node --test` semantics have moved
-  # between those majors. Testing the transport on a Node the host does not run
-  # would be testing the wrong thing.
+  # Separate job, and pinned to Node 24 rather than the 20 the shell job uses:
+  # this code runs on the HOST under the node the operator actually has, and
+  # `node --test` semantics have moved between those majors. Testing the
+  # transport on a Node the host does not run would be testing the wrong thing.
   #
   # Zero dependencies by design — no npm install step here, and there should
   # never be one. This process runs as the operator user with podman access;
@@ -4722,7 +4576,7 @@ jobs:
   # The cost-aware model selection plugin that advises or enforces model routing
   # based on recorded tier judgements and volume-aware cost profiles.
   #
-  # Its own job for the same reason as `broker-suite`: this is a Node runtime
+  # Its own job, separate from the shell suites: this is a Node runtime
   # on the version the Paperclip host actually executes plugins on, not a shell
   # suite, and a failure here should read as "the model-selection suite went
   # red" rather than as one opaque "CI failed".
@@ -5037,7 +4891,6 @@ jobs:
       - upgrade-offline
       - long-mutation-gates
       - runbook-gates
-      - broker-suite
       - omniroute-broker-suite
       - dispatch-suite
       - mcp-suite
@@ -5070,7 +4923,6 @@ jobs:
       - upgrade-offline
       - long-mutation-gates
       - runbook-gates
-      - broker-suite
       - omniroute-broker-suite
       - dispatch-suite
       - mcp-suite

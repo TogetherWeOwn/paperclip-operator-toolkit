@@ -33,7 +33,23 @@ set -Eeuo pipefail
 
 : "${PAPERCLIP_API_URL:?PAPERCLIP_API_URL must be set (EnvironmentFile)}"
 : "${PAPERCLIP_AGENT_API_KEY:?PAPERCLIP_AGENT_API_KEY must be set (EnvironmentFile)}"
-: "${PAPERCLIP_ROLLUP_PARENT_ID:?PAPERCLIP_ROLLUP_PARENT_ID must be set (EnvironmentFile) -- the rollup card this bridge key is bound to}"
+
+# The rollup parent is resolved at CALL time, not source time. Host-cron
+# wrappers source this file before exporting the writer's alias (live
+# 2026-10-05: the private wrapper sources at its line 55 but exports
+# PAPERCLIP_ROLLUP_PARENT_ID at its line 81; the installed env carries only
+# RED_MAIN_ROLLUP_PARENT_ID). A source-time `: "${PAPERCLIP_ROLLUP_PARENT_ID:?}"`
+# turns that order into exit 1 before any transport, with zero comments
+# attempted. Either name is accepted; both must name the same bound rollup
+# card. Neither set is a usage error (exit 2), not a failed delivery.
+resolve_rollup_parent() {
+  local pid="${PAPERCLIP_ROLLUP_PARENT_ID:-${RED_MAIN_ROLLUP_PARENT_ID:-}}"
+  [[ -n "$pid" ]] || {
+    echo "post_rollup_comment: no rollup parent (set PAPERCLIP_ROLLUP_PARENT_ID or RED_MAIN_ROLLUP_PARENT_ID to the bound rollup card)" >&2
+    return 2
+  }
+  printf '%s' "$pid"
+}
 
 # Statuses that count as "the rollup thread is open for proposals". Anything
 # else (done, cancelled, or a status this helper does not recognise) refuses
@@ -61,13 +77,37 @@ _prc_api() {
     return 1
   fi
   local code="${raw##*$'\n'}"
-  printf '%s' "${raw%$'\n'*}"
+  local body_text="${raw%$'\n'*}"
+  printf '%s' "$body_text"
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-    # Path only, never the query string or the response body: the second can
-    # echo request content back into the journal.
-    echo "post_rollup_comment: API rejected ${method} ${path%%\?*} with HTTP ${code}" >&2
+    # Surface the server's refusal reason (sanitized): the 2026-10-05 host
+    # retest discarded the POST body and left the 403 unexplained. Only the
+    # RESPONSE's error/code fields are echoed (at most 300 chars) -- never
+    # the request path's query string, the key, or the comment body.
+    local detail=""
+    detail="$(jq -r '[.error // empty, ((.details.code // .code // empty) | select(. != "") | "(code \(.))")] | join(" ")' <<<"$body_text" 2>/dev/null | cut -c1-300)" || detail=""
+    if [[ -n "$detail" ]]; then
+      echo "post_rollup_comment: API rejected ${method} ${path%%\?*} with HTTP ${code}: ${detail}" >&2
+    else
+      echo "post_rollup_comment: API rejected ${method} ${path%%\?*} with HTTP ${code}" >&2
+    fi
     return 1
   fi
+}
+
+# run_gate_hint <response-body> -> names the run-context fix when the refusal
+# is the deployed cross-issue-influence gate. Agent comment/update routes
+# require a valid heartbeat run (X-Paperclip-Run-Id); a durable bridge key
+# fired runless from systemd has none, so GETs on the bound thread answer
+# 200 while the POST answers 403. That split is the gate, not the boundary:
+# the thread is readable and correctly assigned. A runless timer key reads
+# but cannot post; the post belongs to a runful routine (CEO hourly routine
+# with its run JWT), or to a CEO/CISO decision widening runless writes.
+run_gate_hint() {
+  local body_text="$1"
+  [[ "$body_text" == *"cross_issue_influence_run_context"* || "$body_text" == *"valid heartbeat run"* ]] || return 1
+  echo "post_rollup_comment: comment writes require a heartbeat run context -- a runless timer key reads but cannot post (have the CEO routine post with its run JWT, or route a runless-write decision via CEO/CISO; see docs/red-main-task-bridge-contract.md)" >&2
+  return 0
 }
 
 # post_rollup_comment TAG TITLE BODY_FILE
@@ -84,6 +124,11 @@ post_rollup_comment() {
   [[ -s "$body_file" ]] \
     || { echo "post_rollup_comment: body file is empty; refusing to post an empty proposal (tag ${tag})" >&2; return 2; }
 
+  # The parent binding resolves here (see resolve_rollup_parent): wrappers
+  # may source this file before the alias exists in their environment.
+  local rollup_parent
+  rollup_parent="$(resolve_rollup_parent)" || return 2
+
   # 1. The rollup thread must exist and be open. An unreadable or closed
   # parent is NOT "posted nowhere, carry on": the finding is NOT recorded.
   # A 403 here is a boundary refusal, not an empty thread: live 2026-10-05
@@ -91,8 +136,8 @@ post_rollup_comment() {
   # the thread must be assigned to the key's triage owner (or be an assigned
   # descendant of the bound parent).
   local parent_raw parent_status
-  parent_raw="$(_prc_api GET "/api/issues/${PAPERCLIP_ROLLUP_PARENT_ID}")" || {
-    echo "post_rollup_comment: rollup thread unreadable -- assign it to the key's triage owner, or repoint PAPERCLIP_ROLLUP_PARENT_ID at an assigned descendant of the bound parent (see docs/red-main-task-bridge-contract.md)" >&2
+  parent_raw="$(_prc_api GET "/api/issues/${rollup_parent}")" || {
+    echo "post_rollup_comment: rollup thread unreadable -- assign it to the key's triage owner, or repoint the rollup parent at an assigned descendant of the bound parent (see docs/red-main-task-bridge-contract.md)" >&2
     return 1
   }
   parent_status="$(jq -r '.status // ""' <<<"$parent_raw" 2>/dev/null)" || {
@@ -110,13 +155,25 @@ post_rollup_comment() {
 
   # 2. Post the proposal as one comment. The tag rides in the first line
   # because comments have no title field to carry it.
+  # NOTE: the deployed API requires a heartbeat run context for agent
+  # comment writes. A durable bridge key fired runless from systemd has no
+  # run, so this POST answers 403 (cross_issue_influence_run_context_required)
+  # even when both GETs above answer 200. That split is the run gate, not
+  # the boundary: fail closed, name it, and leave the write to a runful
+  # routine -- see docs/red-main-task-bridge-contract.md.
   local comment payload reply comment_id
   comment="$(printf '%s %s\n\n' "$tag" "$title"; cat "$body_file")"
   payload="$(jq -n --arg b "$comment" '{body: $b}')"
-  reply="$(_prc_api POST "/api/issues/${PAPERCLIP_ROLLUP_PARENT_ID}/comments" "$payload")" || {
+  reply="$(_prc_api POST "/api/issues/${rollup_parent}/comments" "$payload")" || {
+    # _prc_api already logged the HTTP status plus the server's sanitized
+    # error/code. $reply still holds the refusal body here (it was printed
+    # before the non-zero return), so when the refusal is the deployed
+    # run-context gate, name the fix explicitly: GETs succeed runless,
+    # only writes need the run.
+    run_gate_hint "${reply:-}" || true
     echo "post_rollup_comment: FAILED to post (tag ${tag}) -- finding NOT recorded" >&2
     return 1
   }
   comment_id="$(jq -r '.id // "unidentified"' <<<"$reply" 2>/dev/null)"
-  echo "post_rollup_comment: posted comment ${comment_id} on ${PAPERCLIP_ROLLUP_PARENT_ID} (tag ${tag})" >&2
+  echo "post_rollup_comment: posted comment ${comment_id} on ${rollup_parent} (tag ${tag})" >&2
 }
