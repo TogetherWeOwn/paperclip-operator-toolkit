@@ -38,6 +38,11 @@ MUTANTS = [
      '        return 0',
      [REFUSAL + "test_unreadable_snapshot_exits_2",
       REFUSAL + "test_invalid_json_exits_2"]),
+    ("non-utf8-snapshot-tracebacks",
+     "    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:",
+     "    except (OSError, json.JSONDecodeError) as exc:",
+     [REFUSAL + "test_non_utf8_snapshot_exits_2",
+      REFUSAL + "test_refusals_never_echo_snapshot_content"]),
     ("non-object-snapshot-exits-0",
      '        print("watchdog: snapshot must be a JSON object", '
      'file=sys.stderr)\n        return 2',

@@ -683,7 +683,7 @@ def main(argv=None):
     try:
         with open(args.snapshot, encoding="utf-8") as handle:
             snapshot = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         print(f"watchdog: cannot read snapshot: {exc}", file=sys.stderr)
         return 2
     if not isinstance(snapshot, dict):

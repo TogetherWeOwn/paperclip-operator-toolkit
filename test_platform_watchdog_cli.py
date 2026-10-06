@@ -181,6 +181,20 @@ class CliRefusalTest(CliCase):
                 self.assert_refused(proc)
                 self.assertIn("cannot read snapshot", proc.stderr)
 
+    def test_non_utf8_snapshot_exits_2(self):
+        # json.load raises UnicodeDecodeError (a ValueError, not a
+        # JSONDecodeError) on bytes that are not UTF-8; without its own
+        # except clause the CLI exits 1 with a traceback.
+        for label, data in (
+                ("invalid-start-byte", b"\xff\xfe{\x80"),
+                ("utf-16-with-bom", "{}".encode("utf-16")),
+                ("latin-1-high-byte", b'{"agents": ["caf\xe9"]}'),
+                ("truncated-multibyte", b'{"a": "\xe2\x82')):
+            with self.subTest(label):
+                proc = self.run_snapshot(self.write(data))
+                self.assert_refused(proc)
+                self.assertIn("cannot read snapshot", proc.stderr)
+
     def test_non_object_json_exits_2(self):
         for label, text in (("array", "[]"), ("array-of-objects", "[{}]"),
                             ("string", '"snapshot"'), ("number", "7"),
@@ -201,6 +215,7 @@ class CliRefusalTest(CliCase):
             "invalid-json": '{"note": "' + MARKER + '", ',
             "array": json.dumps([MARKER]),
             "string": json.dumps(MARKER),
+            "non-utf8": MARKER.encode("utf-8") + b"\xff\xfe{\x80",
         }
         for label, text in hostile.items():
             with self.subTest(label):
