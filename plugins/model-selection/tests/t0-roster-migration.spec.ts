@@ -183,6 +183,34 @@ describe("planT0Migration", () => {
     expect(() => planT0Migration(live, receipt)).toThrow(/not a sanitized-roster/);
   });
 
+  it("accepts a namespaced historical schema variant and migrates identically to the canonical one", () => {
+    // Pre-scrub receipts namespace the same contract (e.g. "<archive>-sanitized-roster-receipt-v1").
+    // The fixture prefix is generic; the mechanism accepts any such variant.
+    const live = liveConfig();
+    const canonical = receiptFor(live);
+    const historical = { ...canonical, schema: "example-archive-sanitized-roster-receipt-v1" };
+    const viaCanonical = planT0Migration(structuredClone(live), canonical);
+    const viaHistorical = planT0Migration(structuredClone(live), historical);
+    expect(viaHistorical.config).toEqual(viaCanonical.config);
+    expect(viaHistorical.changes).toEqual(viaCanonical.changes);
+    expect(viaHistorical.rollback).toEqual(viaCanonical.rollback);
+    expect(verifyT0Roster(viaHistorical.config, historical)).toEqual([]);
+  });
+
+  it("refuses a schema suffix with an empty namespace", () => {
+    const live = liveConfig();
+    const receipt = { ...receiptFor(live), schema: "-sanitized-roster-receipt-v1" };
+    expect(() => planT0Migration(live, receipt)).toThrow(/not a sanitized-roster/);
+  });
+
+  it("refuses a non-string schema and a non-lowercase namespace", () => {
+    const live = liveConfig();
+    expect(() => planT0Migration(live, { ...receiptFor(live), schema: 42 })).toThrow(/not a sanitized-roster/);
+    expect(() => planT0Migration(live, { ...receiptFor(live), schema: "Legacy_sanitized-roster-receipt-v1" })).toThrow(
+      /not a sanitized-roster/,
+    );
+  });
+
   it("refuses a target that is neither interim nor migrated (tier T2)", () => {
     const live = liveConfig();
     const receipt = receiptFor(live);

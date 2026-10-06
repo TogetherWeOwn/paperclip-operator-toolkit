@@ -742,12 +742,12 @@ jobs:
           # have a suite, but the glob must cover the directory rather than that
           # one file, or the next root-level Python lands here unparsed and
           # nobody notices until it is in front of an operator.
-          # omniroute/ holds no Python (rehearsal package is .mjs, checked
-          # below), so only root *.py is globbed here for the same reason.
+          # omniroute/ Python ships beside the rehearsal package and is compiled
+          # in the ported-trees loop below, so only root *.py is globbed here.
           for f in *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
           # Ported toolkit trees: offline checkers, detectors, gates and the
           # migration gate. Same argument as the globs above.
-          for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py omniroute/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
           rm -rf omniroute/__pycache__ __pycache__ scripts/__pycache__ paperclip-upgrade/__pycache__ verification/__pycache__ watchdog/__pycache__ github-runner/garm/__pycache__ hooks/muse-stop-guard/measure/__pycache__
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
@@ -815,6 +815,16 @@ jobs:
             fi
           done
           echo "selftest is prefix-independent: $base across 5 prefixes"
+
+      # Snapshot-section redaction is a structural allowlist over operator
+      # combo data: hostile fixtures prove no planted credential survives, and
+      # the mutation gate reverts each review fix in a staging copy and
+      # requires the owning check to go red. Fully offline, stdlib only.
+      - name: snapshot-section redaction selftest
+        run: python3 omniroute/snapshot_sections.py --selftest
+
+      - name: snapshot-section redaction is load-bearing (mutation-gated)
+        run: ./verification/snapshot-redaction-mutation-gate.sh
 
       # The TOG-226 standing gate. Offline: the board and GitHub reads are
       # redirected to fixtures, and the argv assertions use a stub curl that
@@ -3164,6 +3174,13 @@ jobs:
             exit 1
           fi
 
+      # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
+      # The audit is read-only by construction (pool-show reads only, no
+      # host access); the cron push wrapper stays private with the
+      # monitoring stack, so CI pins the audit only.
+      - name: garm reaper audit suite
+        run: ./test_garm_reaper_audit.sh
+
       # gh-event-capture's suites run on 24 (validated there; the unit also
       # supports the pinned 20). The rest of this job stays on the pinned
       # 20 it was validated against.
@@ -4761,6 +4778,13 @@ jobs:
       # Verify the plugin still builds.
       - name: Verify the plugin builds
         run: npm run build
+
+      # Every manifest-declared path must be in the distributable. A checksum
+      # list that agrees with an incomplete archive cannot catch a missing
+      # directory, so this compares the evaluated manifest against the actual
+      # pack output. Offline: npm pack --dry-run only, no registry access.
+      - name: Verify the package ships manifest-declared paths
+        run: npm run package:verify
 
       # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access.
       # It is designed for the operator's environment, not for CI. The operator

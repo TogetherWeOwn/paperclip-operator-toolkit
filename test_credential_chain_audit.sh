@@ -341,6 +341,11 @@ hdr "6b. The pin file shipped in this repo must stay in step with the helper"
 # gets muted."  CI is what keeps this list from being that: a PR that changes
 # the helper without moving the `expected` line fails here, in the PR that
 # caused it, not weeks later on someone else's console.
+#
+# Retirement: the App-token minter was deleted (pushes use the Paperclip
+# built-in GitHub connection), so a checkout with NEITHER file is the
+# expected end state, not drift -- there is nothing left to pin. Exactly one
+# file present is a half-finished removal and still fails.
 REAL_PINS="$HERE/credential_chain_pins.txt"
 REAL_HELPER="$HERE/gh-app-token.js"
 if [[ -r "$REAL_PINS" && -r "$REAL_HELPER" ]]; then
@@ -367,8 +372,12 @@ if [[ -r "$REAL_PINS" && -r "$REAL_HELPER" ]]; then
   else
     bad "every line of credential_chain_pins.txt parses as <state> <sha256>" "$malformed"
   fi
+elif [[ ! -e "$REAL_PINS" && ! -e "$REAL_HELPER" ]]; then
+  ok "minter retired: no pin file and no helper, nothing to pin"
+elif [[ -e "$REAL_PINS" ]]; then
+  bad "credential_chain_pins.txt is present but gh-app-token.js is gone -- finish the retirement, delete the pin file too"
 else
-  bad "credential_chain_pins.txt or gh-app-token.js is missing from the checkout"
+  bad "gh-app-token.js is present but credential_chain_pins.txt is gone -- an unpinned helper is what this section exists to catch, repin it in THIS PR"
 fi
 
 # ---------------------------------------------------------------------------

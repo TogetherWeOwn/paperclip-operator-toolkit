@@ -640,7 +640,7 @@ export interface CardLedgerEntry {
 
 /** Per-model bookkeeping for the Slice-4 bounded T1 earn-in policy (default off). */
 export interface EarnInState {
-  /** Deterministic per-model dispatch counter. Never `Math.random()`. */
+  /** Deterministic per-model eligible-pick counter. Never `Math.random()`. */
   counter: Record<string, number>;
   /** Dispatch timestamps (ms) in the current rolling 7-day window, per model. */
   dispatchedThisWeek: Record<string, number[]>;
@@ -654,4 +654,6 @@ export interface EarnInState {
   stopped: Record<string, boolean>;
   /** Idempotency keys already dispatched (`${issueId}:${modelId}:earnin`). */
   dispatchedKeys: readonly string[];
+  /** First-eight slot by dispatch key; later rejection revises, never double-counts, a card. Absent on legacy state. */
+  outcomeSlots?: Record<string, { modelId: string; lane: string; index: number }>;
 }
