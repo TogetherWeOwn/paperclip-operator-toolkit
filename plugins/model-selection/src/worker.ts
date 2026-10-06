@@ -914,8 +914,9 @@ export function createPlugin() {
       // parallels `scoresKey` above: the worker owns the read/write, and the
       // pure translators in `actuate/earnInWiring.ts` build cards, resolve
       // postures, and fold outcomes around the pure `planEarnIn` decision
-      // function. Default off — `planEarnIn` refuses every card while
-      // `config.earnIn.enabled` is false, so this seam is inert until an
+      // function. Default off — while `config.earnIn.enabled` is false the
+      // resolve hooks return before the lock (no lock, no state read) and the
+      // balance row skips the lock entirely, so this seam is inert until an
       // operator enables it.
       const earnInStateKey = (companyId: string) => ({
         scopeKind: "company" as const,
@@ -2199,8 +2200,9 @@ export function createPlugin() {
       //
       // Completion/cancellation, reopen, rejection and run failure share this
       // fold. Active cards release capacity exactly once. Known first-eight
-      // completions can later be corrected by adverse evidence; duplicate or
-      // unrelated events write nothing. A successful heartbeat alone is not
+      // completions are later corrected only by explicit human evidence — a
+      // rejection/reopen or a safety violation; duplicate, unrelated or late
+      // run-failure events write nothing. A successful heartbeat alone is not
       // delivered work, so `agent.run.succeeded` never folds acceptance.
       //
       // `modelId` may be null when the caller does not know the served model
@@ -2217,37 +2219,48 @@ export function createPlugin() {
           rejected: boolean;
           modelId: string | null;
         },
-      ): Promise<{ modelId: string; lane: string | null; outcome: "ok" | "material-failure" | "ignore" } | null> => withEarnInLock(companyId, async () => {
-        const state = await readEarnInState(companyId);
-        // The dispatch-time key names the model; match this issue's key
-        // (caller-known model first, any active key for the issue second).
-        const activeKey = signal.modelId
-          ? `${issueId}:${signal.modelId}:earnin`
-          : state.dispatchedKeys.find((key) => key.startsWith(`${issueId}:`) && key.endsWith(":earnin")) ?? null;
-        if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
-        const modelId = activeKey.slice(issueId.length + 1, -":earnin".length);
-        const lane =
-          Object.entries(state.activePerLane).find(([, ids]) => ids.includes(issueId))?.[0] ?? null;
-        const resolution = classifyEarnInResolution({ ...signal, modelId });
-        if (!lane) {
-          // Done releases capacity. A later rejection replaces that card's
-          // known first-eight slot, rather than vanishing or counting twice.
-          const slot = state.outcomeSlots?.[activeKey];
-          const safetyStop = resolution.safetyOrAuthorityViolation && !state.stopped[modelId];
-          if (slot && slot.modelId !== modelId) return null;
-          if (resolution.outcome !== "material-failure") return null;
-          if (!safetyStop && (!slot || state.firstEightOutcomes[modelId]?.[slot.index] !== "ok")) return null;
-          // Safety stops bind beyond the first eight too. With no known slot,
-          // stop without inventing another card outcome or a historical lane.
-          await writeEarnInState(companyId, recordEarnInOutcome(
-            state, modelId, "material-failure", resolution.safetyOrAuthorityViolation, slot?.index ?? -1,
-          ));
-          return { modelId, lane: slot?.lane ?? null, outcome: resolution.outcome };
-        }
-        const next = nextEarnInStateOnResolve(state, modelId, lane, issueId, resolution);
-        await writeEarnInState(companyId, next);
-        return { modelId, lane, outcome: resolution.outcome };
-      });
+      ): Promise<{ modelId: string; lane: string | null; outcome: "ok" | "material-failure" | "ignore" } | null> => {
+        // Disabled earn-in is fully inert: no lock, no state read. The
+        // `agent.run.failed` hook funnels through here before the
+        // latency-sensitive lane quarantine, so even lock contention is a
+        // production cost while the flag is off.
+        if (!(await companyConfig(companyId)).earnIn.enabled) return null;
+        return withEarnInLock(companyId, async () => {
+          const state = await readEarnInState(companyId);
+          // The dispatch-time key names the model; match this issue's key
+          // (caller-known model first, any active key for the issue second).
+          const activeKey = signal.modelId
+            ? `${issueId}:${signal.modelId}:earnin`
+            : state.dispatchedKeys.find((key) => key.startsWith(`${issueId}:`) && key.endsWith(":earnin")) ?? null;
+          if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
+          const modelId = activeKey.slice(issueId.length + 1, -":earnin".length);
+          const lane =
+            Object.entries(state.activePerLane).find(([, ids]) => ids.includes(issueId))?.[0] ?? null;
+          const resolution = classifyEarnInResolution({ ...signal, modelId });
+          if (!lane) {
+            // Done releases capacity. A later rejection replaces that card's
+            // known first-eight slot, rather than vanishing or counting twice.
+            // A late run failure (e.g. a timeout landing after the card
+            // resolved) is not a quality verdict on delivered work, so it
+            // never rewrites a recorded outcome toward the stop circuit.
+            const slot = state.outcomeSlots?.[activeKey];
+            const safetyStop = resolution.safetyOrAuthorityViolation && !state.stopped[modelId];
+            if (slot && slot.modelId !== modelId) return null;
+            if (!signal.rejected && !resolution.safetyOrAuthorityViolation) return null;
+            if (resolution.outcome !== "material-failure") return null;
+            if (!safetyStop && (!slot || state.firstEightOutcomes[modelId]?.[slot.index] !== "ok")) return null;
+            // Safety stops bind beyond the first eight too. With no known slot,
+            // stop without inventing another card outcome or a historical lane.
+            await writeEarnInState(companyId, recordEarnInOutcome(
+              state, modelId, "material-failure", resolution.safetyOrAuthorityViolation, slot?.index ?? -1,
+            ));
+            return { modelId, lane: slot?.lane ?? null, outcome: resolution.outcome };
+          }
+          const next = nextEarnInStateOnResolve(state, modelId, lane, issueId, resolution);
+          await writeEarnInState(companyId, next);
+          return { modelId, lane, outcome: resolution.outcome };
+        });
+      };
 
       ctx.events.on("issue.updated", async (event) => {
         const payload = asRecord(event.payload);
@@ -7155,50 +7168,70 @@ export function createPlugin() {
                 // own tier label.
                 // : an explicit `tier:T0` card is never pinned DOWN to T1.
                 const balancedTier: Tier = labelTier === "T0" ? "T0" : "T1";
-                return withEarnInLock(company.id, async () => {
-                  const result = await advise(company.id, { issueId }, false, balancedTier, false, contextUsageCache);
-                  if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
-                    if (Date.now() >= deadlineAt) return "unsettled";
-                    //  AC3: same visibility as the label-only pass —
-                    // this branch previously `continue`d without a trace.
-                    await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
-                    return "settled";
-                  }
-                  if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
-                  if (result.pinnedModelId !== null) return "settled";
-                  const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
-                  // : only elide onto the implicit NULL-override floor
-                  // pin while that floor's own lane is serviceable right now —
-                  // otherwise write the explicit pin `result.decision.modelId`
-                  // already resolved to, same as `floorModelId` in that case,
-                  // so `repinPass` can see and repair it later.
-                  const floorHealthy =
-                    result.decision.modelId === floorModelId &&
-                    isUsableAndCapable(
-                      floorModelId,
-                      tier,
-                      described.descriptor.requiredContextTokens,
-                      config,
-                      laneLedger,
-                      laneOutageOverride,
-                      modelScores,
-                      nowIso,
-                    );
-                  //  P2: candidate-carrying recovery (see the apply path).
-                  const selectedModel = recoverSelectedCandidate(config.models, result.decision);
-                  if (!selectedModel) return "settled";
-                  // Recorded exclusions and selection survivors constrain earn-in.
-                  // T0 cards exit inside `maybeAdmitEarnIn` (T1 label gate, no
-                  // state I/O), so T0 keeps main's floor-elide behavior below.
-                  const earnInExclusions = await readClassificationExclusions(company.id);
-                  const earnInDecision = await maybeAdmitEarnIn(company.id, {
-                    described,
-                    exclusionExcluded: earnInExclusions[issueId] === true,
-                    agentAdapterType: described.agentAdapterType,
-                    candidateModelIds: result.decision.candidates.map((candidate) => candidate.modelId),
-                    nowMs: now,
+                // `advise()` costs a full row of host RPC whether or not
+                // earn-in is on — it always runs outside the earn-in lock. The
+                // lock guards the reservation → pin → rollback section only,
+                // and only when the card screens as an earn-in candidate at
+                // all, so a disabled flag means no lock and no earn-in state
+                // I/O anywhere on this path.
+                const result = await advise(company.id, { issueId }, false, balancedTier, false, contextUsageCache);
+                if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
+                  if (Date.now() >= deadlineAt) return "unsettled";
+                  //  AC3: same visibility as the label-only pass —
+                  // this branch previously `continue`d without a trace.
+                  await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
+                  return "settled";
+                }
+                if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
+                if (result.pinnedModelId !== null) return "settled";
+                const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
+                // : only elide onto the implicit NULL-override floor
+                // pin while that floor's own lane is serviceable right now —
+                // otherwise write the explicit pin `result.decision.modelId`
+                // already resolved to, same as `floorModelId` in that case,
+                // so `repinPass` can see and repair it later.
+                const floorHealthy =
+                  result.decision.modelId === floorModelId &&
+                  isUsableAndCapable(
+                    floorModelId,
+                    tier,
+                    described.descriptor.requiredContextTokens,
+                    config,
+                    laneLedger,
+                    laneOutageOverride,
+                    modelScores,
                     nowIso,
+                  );
+                //  P2: candidate-carrying recovery (see the apply path).
+                const selectedModel = recoverSelectedCandidate(config.models, result.decision);
+                if (!selectedModel) return "settled";
+                // Recorded exclusions and selection survivors constrain earn-in.
+                // T0 cards exit inside `maybeAdmitEarnIn` (T1 label gate, no
+                // state I/O), so T0 keeps main's floor-elide behavior below.
+                const earnInExclusions = await readClassificationExclusions(company.id);
+                // Cheap screen on config + recorded card facts (no earn-in
+                // state I/O): anything failing here makes `maybeAdmitEarnIn`
+                // return null without writing, so skipping the lock changes
+                // nothing but contention.
+                const earnInScreen =
+                  config.earnIn.enabled &&
+                  selectionWritesAllowed(config) &&
+                  !config.aaFreeSync.enabled &&
+                  result.decision.candidates.length > 0 &&
+                  isEarnInCandidateIssue({
+                    status: described.status,
+                    isIdle: described.isIdle,
+                    hasOperatorPin: described.hasOperatorPin,
+                    exclusionExcluded: earnInExclusions[issueId] === true,
+                    hasExistingOverride: described.hasOverride,
+                    assigneeUserId: described.assigneeUserId,
+                    labelNames: described.descriptor.labelNames ?? [],
+                    priority: described.descriptor.priority ?? null,
+                    title: described.title,
                   });
+                const pinUnpinnedRow = async (
+                  earnInDecision: Awaited<ReturnType<typeof maybeAdmitEarnIn>>,
+                ) => {
                   const earnInWinner = earnInDecision?.decision.dispatch ? earnInDecision.model : null;
                   const pinTarget = earnInWinner ?? selectedModel;
                   let pinCommitted = false;
@@ -7296,7 +7329,18 @@ export function createPlugin() {
                       }
                     }
                   }
-                });
+                };
+                if (!earnInScreen) return pinUnpinnedRow(null);
+                return withEarnInLock(company.id, async () =>
+                  pinUnpinnedRow(await maybeAdmitEarnIn(company.id, {
+                    described,
+                    exclusionExcluded: earnInExclusions[issueId] === true,
+                    agentAdapterType: described.agentAdapterType,
+                    candidateModelIds: result.decision.candidates.map((candidate) => candidate.modelId),
+                    nowMs: now,
+                    nowIso,
+                  })),
+                );
               },
             );
             slowestRowMs = walk.slowestRowMs;

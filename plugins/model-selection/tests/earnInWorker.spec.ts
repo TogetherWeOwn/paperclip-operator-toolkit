@@ -810,6 +810,83 @@ describe("earn-in worker hookup", () => {
     expect(await readEarnInState(harness)).toBeNull();
   });
 
+  it("a late run failure after completion never rewrites a recorded outcome", async () => {
+    const harness = await boot(baseConfig());
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.earnInState },
+      {
+        counter: { [RIVAL]: 1 },
+        dispatchedThisWeek: { [RIVAL]: [NOW] },
+        activePerModel: { [RIVAL]: 1 },
+        activePerLane: { [RIVAL_LANE]: ["i1"] },
+        firstEightOutcomes: {},
+        stopped: {},
+        dispatchedKeys: [`i1:${RIVAL}:earnin`],
+      },
+    );
+    // Completion folds "ok" and records the card's first-eight slot.
+    await harness.emit("issue.updated", { changes: { status: { from: "in_progress", to: "done" } } },
+      { entityId: "i1", companyId: COMPANY, entityType: "issue" });
+    // A model-kind run failure landing AFTER the card resolved (a run that
+    // marked the card done and then timed out, or a later failed run on the
+    // done card) is not a quality verdict on delivered work: the "ok" slot
+    // stands and the stop circuit does not move. Only an explicit
+    // rejection/reopen or a safety violation corrects a recorded outcome.
+    await harness.emit("agent.run.failed",
+      { issueId: "i1", errorCode: "timeout", error: "run timed out after delivery" },
+      { companyId: COMPANY });
+    const state = await readEarnInState(harness);
+    expect(state.firstEightOutcomes[RIVAL]).toEqual(["ok"]);
+    expect(state.activePerModel[RIVAL]).toBe(0);
+    expect(state.activePerLane[RIVAL_LANE]).toEqual([]);
+    expect(state.stopped[RIVAL] ?? false).toBe(false);
+  });
+
+  it("a run failure never waits on an in-flight balance row while disabled", async () => {
+    const card = issue("i1", {
+      labels: [tierLabel("T1"), classLabel("research")],
+      labelIds: ["lbl-T1", "lbl-class-research"],
+    });
+    const harness = await boot(baseConfig({ earnIn: { enabled: false } }), [card], [agentRow()]);
+    await seedScores(harness);
+    stubBoard(harness);
+    // Park the row inside its pin write: with earn-in disabled the row must
+    // hold NO earn-in lock, so the latency-sensitive run-failure hook (which
+    // funnels through the earn-in resolve seam before the lane quarantine)
+    // sails through instead of queueing behind the row.
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => { releaseUpdate = resolve; });
+    const innerUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+    let updateCalls = 0;
+    let updateEntered = false;
+    harness.ctx.issues.update = (async (...args: Parameters<typeof innerUpdate>) => {
+      updateCalls += 1;
+      if (updateCalls === 1) {
+        updateEntered = true;
+        await updateGate;
+      }
+      return innerUpdate(...args);
+    }) as typeof innerUpdate;
+    const pass = harness.runJob("balancePass");
+    for (let i = 0; i < 400 && !updateEntered; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(updateEntered).toBe(true);
+    try {
+      const verdict = await Promise.race([
+        harness.emit("agent.run.failed",
+          { issueId: "i9", errorCode: "timeout", error: "run timed out elsewhere" },
+          { companyId: COMPANY }).then(() => "resolved"),
+        new Promise((resolve) => setTimeout(() => resolve("blocked"), 3000)),
+      ]);
+      expect(verdict).toBe("resolved");
+    } finally {
+      releaseUpdate();
+    }
+    await pass;
+    expect(await readEarnInState(harness)).toBeNull();
+  });
+
   it("pins subCallPins env on the earn-in winner like any other pin", async () => {
     const card = issue("i1", {
       labels: [tierLabel("T1"), classLabel("research")],
