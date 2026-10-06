@@ -3136,6 +3136,8 @@ export function createPlugin() {
                 lane: lane.lane,
                 policy: lane.policy,
                 apiKey,
+                authFilesProvider: lane.authFilesProvider,
+                planWeights: lane.planWeights,
               });
             }
 
