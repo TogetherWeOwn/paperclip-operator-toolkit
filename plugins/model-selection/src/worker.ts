@@ -3,6 +3,20 @@ import { randomUUID } from "node:crypto";
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 
 import { planApply, planEnvRepair, selectionWritesAllowed } from "./actuate/apply.js";
+import { planEarnIn, recordEarnInOutcome } from "./actuate/earnIn.js";
+import {
+  buildEarnInCandidateCard,
+  classifyEarnInResolution,
+  isEarnInCandidateIssue,
+  isEarnInCandidateModel,
+  laneAvailableForEarnIn,
+  lanePostureByTier,
+  nextEarnInStateOnDispatch,
+  nextEarnInStateOnResolve,
+  normalizeEarnInState,
+  pacePostureForModel,
+  resolveIsClaudeModel,
+} from "./actuate/earnInWiring.js";
 import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
@@ -126,6 +140,7 @@ import { FROZEN_BENCHMARK_ROWS } from "./engine/benchmark-data.js";
 import type {
   AaEffortEvidence,
   CardLedgerEntry,
+  EarnInState,
   IssueDescriptor,
   ModelEntry,
   ModelScore,
@@ -893,6 +908,159 @@ export function createPlugin() {
         const byModelId: Record<string, ModelScore> = {};
         for (const score of scores) byModelId[score.modelId] = score;
         return byModelId;
+      };
+
+      // Bounded T1 earn-in admission (§3 / decision B). The `earnInState` key
+      // parallels `scoresKey` above: the worker owns the read/write, and the
+      // pure translators in `actuate/earnInWiring.ts` build cards, resolve
+      // postures, and fold outcomes around the pure `planEarnIn` decision
+      // function. Default off — while `config.earnIn.enabled` is false the
+      // resolve hooks return before the lock (no lock, no state read) and the
+      // balance row skips the lock entirely, so this seam is inert until an
+      // operator enables it.
+      const earnInStateKey = (companyId: string) => ({
+        scopeKind: "company" as const,
+        scopeId: companyId,
+        stateKey: PLUGIN_STATE_KEYS.earnInState,
+      });
+
+      const readEarnInState = async (companyId: string): Promise<EarnInState> =>
+        normalizeEarnInState(await ctx.state.get(earnInStateKey(companyId)));
+
+      const writeEarnInState = async (companyId: string, state: EarnInState): Promise<void> => {
+        await ctx.state.set(earnInStateKey(companyId), { ...state });
+      };
+
+      // Serialize admission/pin/rollback and outcome folds in this worker.
+      // The SDK state API has no CAS; parallel events must not lose counters.
+      const earnInLocks = new Map<string, Promise<void>>();
+      const withEarnInLock = async <T>(companyId: string, work: () => Promise<T>): Promise<T> => {
+        const previous = earnInLocks.get(companyId) ?? Promise.resolve();
+        let release!: () => void;
+        const current = new Promise<void>((resolve) => { release = resolve; });
+        earnInLocks.set(companyId, current);
+        await previous;
+        try {
+          return await work();
+        } finally {
+          release();
+          if (earnInLocks.get(companyId) === current) earnInLocks.delete(companyId);
+        }
+      };
+
+      // Reserve one eligible pick. The caller rolls back if no pin lands.
+      // Every eligible pick advances cadence, including non-dispatch turns;
+      // only admissions consume weekly/active budgets. Highest prior wins,
+      // with roster order breaking ties (never randomness).
+      const maybeAdmitEarnIn = async (
+        companyId: string,
+        input: {
+          described: NonNullable<Awaited<ReturnType<typeof describeIssue>>>;
+          exclusionExcluded: boolean;
+          agentAdapterType: string | null;
+          candidateModelIds: readonly string[];
+          nowMs: number;
+          nowIso: string;
+        },
+      ): Promise<{
+        decision: ReturnType<typeof planEarnIn>;
+        model: ModelEntry & { candidateId: string | null };
+        priorState: EarnInState;
+      } | null> => {
+        const config = await companyConfig(companyId);
+        // Legacy earn-in cannot synthesize another candidate's effort identity.
+        if (!config.earnIn.enabled || !selectionWritesAllowed(config) || config.aaFreeSync.enabled) return null;
+        const { described, exclusionExcluded, agentAdapterType, nowMs, nowIso } = input;
+        if (
+          !isEarnInCandidateIssue({
+            status: described.status,
+            isIdle: described.isIdle,
+            hasOperatorPin: described.hasOperatorPin,
+            exclusionExcluded,
+            hasExistingOverride: described.hasOverride,
+            assigneeUserId: described.assigneeUserId,
+            labelNames: described.descriptor.labelNames ?? [],
+            priority: described.descriptor.priority ?? null,
+            title: described.title,
+          })
+        ) {
+          return null;
+        }
+        const [state, modelScores, laneLedger, availability, laneEvidence, laneOutageOverride] =
+          await Promise.all([
+            readEarnInState(companyId),
+            readModelScores(companyId),
+            readLaneLedger(companyId),
+            readAvailability(companyId, nowMs),
+            readLaneEvidence(companyId, config.models, nowMs),
+            readLaneOutage(companyId),
+          ]);
+        const laneInputs = {
+          ledger: laneLedger,
+          availability,
+          laneEvidence,
+          laneAvoidConfig: config.pacing.avoid,
+          laneOutageOverride,
+          pacingActive: config.pacing.mode !== "off",
+          trafficScale: "issue" as const,
+          nowMs,
+          nowIso,
+        };
+        const posture = lanePostureByTier(config.models, laneInputs);
+        // Only selection's gate survivors may compete: earn-in never bypasses
+        // context, capabilities, mature-card evidence or fallback-only holds.
+        const rivals = config.models.filter((model) =>
+          !model.fallbackOnly && input.candidateModelIds.includes(model.id),
+        ).sort((a, b) => (modelScores[b.id]?.priorP ?? 0) - (modelScores[a.id]?.priorP ?? 0));
+        for (const model of rivals) {
+          if (!isEarnInCandidateModel({ model, modelScores, agentAdapterType })) continue;
+          if (!laneAvailableForEarnIn(model, laneInputs)) continue;
+          const card = buildEarnInCandidateCard({
+            issueId: described.descriptor.issueId,
+            status: described.status,
+            hasRunningRun: !described.isIdle,
+            hasOperatorPin: described.hasOperatorPin,
+            exclusionExcluded,
+            labelNames: described.descriptor.labelNames ?? [],
+            model: { id: model.id, laneId: model.laneId ?? null },
+          });
+          if (!card) continue;
+          const decision = planEarnIn(
+            card,
+            modelScores[model.id] ?? null,
+            state,
+            config.earnIn,
+            posture,
+            pacePostureForModel(laneLedger, model),
+            resolveIsClaudeModel(model.id),
+            nowMs,
+          );
+          // Recheck eligibility without cadence: other refusals do not advance
+          // the counter, while an eligible non-due pick must reach its next turn.
+          const eligible = planEarnIn(
+            card, modelScores[model.id] ?? null,
+            { ...state, counter: { ...state.counter, [model.id]: 0 } },
+            config.earnIn, posture, pacePostureForModel(laneLedger, model),
+            resolveIsClaudeModel(model.id), nowMs,
+          );
+          if (!eligible.dispatch) continue;
+          const next = decision.dispatch
+            ? nextEarnInStateOnDispatch(state, card, nowMs)
+            : { ...state, counter: { ...state.counter, [model.id]: (state.counter[model.id] ?? 0) + 1 } };
+          try {
+            await writeEarnInState(companyId, next);
+          } catch (cause) {
+            ctx.logger.warn("earn-in dispatch state write failed; balanced pick stands", {
+              companyId,
+              issue: described.identifier ?? described.descriptor.issueId,
+              modelId: model.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+            return null;
+          }
+          return { decision, model: { ...model, candidateId: null }, priorState: state };
+        }
+        return null;
       };
 
       const shadowDiffsKey = (companyId: string) => ({
@@ -2028,6 +2196,89 @@ export function createPlugin() {
         await ctx.state.set(reworkSignalsKey(companyId), { signals: [...pruned, signal] });
       };
 
+      // Resolve one earn-in card.
+      //
+      // Completion/cancellation, reopen, rejection and run failure share this
+      // fold. Active cards release capacity exactly once. Known first-eight
+      // completions are later corrected only by explicit human evidence — a
+      // rejection/reopen or a safety violation; duplicate, unrelated or late
+      // run-failure events write nothing. A card dispatched before the flag
+      // went off still releases (and folds) when it completes while
+      // disabled, so re-enabling never finds wedged active caps. A
+      // successful heartbeat alone is not delivered work, so
+      // `agent.run.succeeded` never folds acceptance.
+      //
+      // `modelId` may be null when the caller does not know the served model
+      // (reopen/rejection signals carry no model). The active entry names the
+      // model — the dispatch-time idempotency key `${issueId}:${modelId}:earnin`
+      // is the lookup, so resolution never guesses.
+      const resolveEarnInForIssue = async (
+        companyId: string,
+        issueId: string,
+        signal: {
+          runStatus: string | null;
+          errorText: string | null;
+          errorCode: string | null;
+          rejected: boolean;
+          modelId: string | null;
+        },
+      ): Promise<{ modelId: string; lane: string | null; outcome: "ok" | "material-failure" | "ignore" } | null> => {
+        const enabled = (await companyConfig(companyId)).earnIn.enabled;
+        // The dispatch-time key names the model; match this issue's key
+        // (caller-known model first, any active key for the issue second).
+        const matchActiveKey = (state: EarnInState) => signal.modelId
+          ? `${issueId}:${signal.modelId}:earnin`
+          : state.dispatchedKeys.find((key) => key.startsWith(`${issueId}:`) && key.endsWith(":earnin")) ?? null;
+        const activeLaneOf = (state: EarnInState) =>
+          Object.entries(state.activePerLane).find(([, ids]) => ids.includes(issueId))?.[0] ?? null;
+        if (!enabled) {
+          // Disabled earn-in admits nothing, so an issue with no live entry
+          // needs no serialization: return before the lock with no state
+          // write. The `agent.run.failed` hook funnels through here before
+          // the latency-sensitive lane quarantine, so even lock contention
+          // is a production cost while the flag is off. An issue dispatched
+          // before the flag went off still holds an active entry — it falls
+          // through to the locked path below so its release + fold stays
+          // serialized, and it never corrects a recorded outcome while off.
+          const state = await readEarnInState(companyId);
+          const activeKey = matchActiveKey(state);
+          if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
+          if (!activeLaneOf(state)) return null;
+        }
+        return withEarnInLock(companyId, async () => {
+          const state = await readEarnInState(companyId);
+          const activeKey = matchActiveKey(state);
+          if (!activeKey || !state.dispatchedKeys.includes(activeKey)) return null;
+          const modelId = activeKey.slice(issueId.length + 1, -":earnin".length);
+          const lane = activeLaneOf(state);
+          const resolution = classifyEarnInResolution({ ...signal, modelId });
+          if (!lane) {
+            // Done releases capacity. A later rejection replaces that card's
+            // known first-eight slot, rather than vanishing or counting twice.
+            // A late run failure (e.g. a timeout landing after the card
+            // resolved) is not a quality verdict on delivered work, so it
+            // never rewrites a recorded outcome toward the stop circuit.
+            // Nothing corrects a recorded outcome while disabled, either.
+            if (!enabled) return null;
+            const slot = state.outcomeSlots?.[activeKey];
+            const safetyStop = resolution.safetyOrAuthorityViolation && !state.stopped[modelId];
+            if (slot && slot.modelId !== modelId) return null;
+            if (!signal.rejected && !resolution.safetyOrAuthorityViolation) return null;
+            if (resolution.outcome !== "material-failure") return null;
+            if (!safetyStop && (!slot || state.firstEightOutcomes[modelId]?.[slot.index] !== "ok")) return null;
+            // Safety stops bind beyond the first eight too. With no known slot,
+            // stop without inventing another card outcome or a historical lane.
+            await writeEarnInState(companyId, recordEarnInOutcome(
+              state, modelId, "material-failure", resolution.safetyOrAuthorityViolation, slot?.index ?? -1,
+            ));
+            return { modelId, lane: slot?.lane ?? null, outcome: resolution.outcome };
+          }
+          const next = nextEarnInStateOnResolve(state, modelId, lane, issueId, resolution);
+          await writeEarnInState(companyId, next);
+          return { modelId, lane, outcome: resolution.outcome };
+        });
+      };
+
       ctx.events.on("issue.updated", async (event) => {
         const payload = asRecord(event.payload);
         const changes = asRecord(payload.changes);
@@ -2072,6 +2323,39 @@ export function createPlugin() {
         const status = asRecord(changes.status);
         const from = typeof status.from === "string" ? status.from : null;
         const to = typeof status.to === "string" ? status.to : null;
+        // Delivery, not a successful heartbeat, completes an earn-in card.
+        // Cancellation releases capacity but supplies no quality evidence.
+        if (issueId && from !== to && (to === "done" || to === "cancelled")) {
+          try {
+            await resolveEarnInForIssue(event.companyId, issueId, {
+              runStatus: to === "done" ? "succeeded" : "cancelled",
+              errorText: null, errorCode: null, rejected: false, modelId: null,
+            });
+          } catch (cause) {
+            ctx.logger.error("earn-in resolve on completion failed", {
+              companyId: event.companyId, issueId,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+        // Resolve earn-in before the rework early return or todo re-entry pin.
+        if (issueId && (from === "done" || from === "cancelled") && to && to !== "done" && to !== "cancelled") {
+          try {
+            await resolveEarnInForIssue(event.companyId, issueId, {
+              runStatus: null,
+              errorText: null,
+              errorCode: null,
+              rejected: true,
+              modelId: null,
+            });
+          } catch (cause) {
+            ctx.logger.error("earn-in resolve on reopen failed", {
+              companyId: event.companyId,
+              issueId,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
         // : todo re-entry (e.g. backlog -> todo) is the third
         // creation moment — the card missed both `issue.created` and the
         // assignment arm, so it rides the agent floor until the next
@@ -2115,6 +2399,25 @@ export function createPlugin() {
         if (!REJECTION_RE.test(snippet)) return;
         const issueId = typeof event.entityId === "string" ? event.entityId : null;
         if (!issueId) return;
+        // A rejection on an actively-dispatched earn-in card resolves it as
+        // a material failure (the card did not stay accepted). Runs before
+        // the rework-signal append so the slot releases even if the append
+        // below throws.
+        try {
+          await resolveEarnInForIssue(event.companyId, issueId, {
+            runStatus: null,
+            errorText: null,
+            errorCode: null,
+            rejected: true,
+            modelId: null,
+          });
+        } catch (cause) {
+          ctx.logger.error("earn-in resolve on rejection failed", {
+            companyId: event.companyId,
+            issueId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
         await appendReworkSignal(event.companyId, {
           issueId,
           atMs: Date.parse(event.occurredAt) || Date.now(),
@@ -6279,6 +6582,38 @@ export function createPlugin() {
         }
         if (config.models.length === 0) return;
 
+        // Fold the failure into the earn-in ledger FIRST, before the
+        // lane-exhaustion path below can `return` early (no verdict) or
+        // quarantine-and-sweep. `classifyEarnInResolution` separates model
+        // evidence (folds into the first-8 window) from infra noise (releases
+        // the slot, moves nothing) — so a dead lane cannot spend a model's
+        // earn-in window, and a flaky host cannot stop it. A card with no
+        // active earn-in entry resolves to null and writes nothing.
+        if (issueId) {
+          try {
+            await resolveEarnInForIssue(companyId, issueId, {
+              runStatus: "failed",
+              errorText: typeof payload.error === "string" ? payload.error : null,
+              errorCode: typeof payload.errorCode === "string" ? payload.errorCode : null,
+              rejected: false,
+              // The served model when the failure names one (payload
+              // model/modelId); else null — the active entry names it.
+              modelId:
+                typeof payload.model === "string"
+                  ? payload.model
+                  : typeof payload.modelId === "string"
+                    ? payload.modelId
+                    : null,
+            });
+          } catch (cause) {
+            ctx.logger.error("earn-in resolve on run failure failed", {
+              companyId,
+              issueId,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+
         // . A binding refusal is never a lane-capacity verdict, so it
         // takes its own path and skips the lane read below entirely.
         if (payload.errorCode === "configuration_incomplete") {
@@ -6852,6 +7187,12 @@ export function createPlugin() {
                 // own tier label.
                 // : an explicit `tier:T0` card is never pinned DOWN to T1.
                 const balancedTier: Tier = labelTier === "T0" ? "T0" : "T1";
+                // `advise()` costs a full row of host RPC whether or not
+                // earn-in is on — it always runs outside the earn-in lock. The
+                // lock guards the reservation → pin → rollback section only,
+                // and only when the card screens as an earn-in candidate at
+                // all, so a disabled flag means no lock and no earn-in state
+                // I/O anywhere on this path.
                 const result = await advise(company.id, { issueId }, false, balancedTier, false, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
                   if (Date.now() >= deadlineAt) return "unsettled";
@@ -6880,74 +7221,145 @@ export function createPlugin() {
                     modelScores,
                     nowIso,
                   );
-                if (floorHealthy) return "settled";
-
                 //  P2: candidate-carrying recovery (see the apply path).
                 const selectedModel = recoverSelectedCandidate(config.models, result.decision);
                 if (!selectedModel) return "settled";
-                if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) return "settled";
-                if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(balancedTier);
-                // : same per-issue isolation as the pinned branch.
-                // : this branch's write is gated like the pinned one.
-                if (writesAllowed) {
+                // Recorded exclusions and selection survivors constrain earn-in.
+                // T0 cards exit inside `maybeAdmitEarnIn` (T1 label gate, no
+                // state I/O), so T0 keeps main's floor-elide behavior below.
+                const earnInExclusions = await readClassificationExclusions(company.id);
+                // Cheap screen on config + recorded card facts (no earn-in
+                // state I/O): anything failing here makes `maybeAdmitEarnIn`
+                // return null without writing, so skipping the lock changes
+                // nothing but contention.
+                const earnInScreen =
+                  config.earnIn.enabled &&
+                  selectionWritesAllowed(config) &&
+                  !config.aaFreeSync.enabled &&
+                  result.decision.candidates.length > 0 &&
+                  isEarnInCandidateIssue({
+                    status: described.status,
+                    isIdle: described.isIdle,
+                    hasOperatorPin: described.hasOperatorPin,
+                    exclusionExcluded: earnInExclusions[issueId] === true,
+                    hasExistingOverride: described.hasOverride,
+                    assigneeUserId: described.assigneeUserId,
+                    labelNames: described.descriptor.labelNames ?? [],
+                    priority: described.descriptor.priority ?? null,
+                    title: described.title,
+                  });
+                const pinUnpinnedRow = async (
+                  earnInDecision: Awaited<ReturnType<typeof maybeAdmitEarnIn>>,
+                ) => {
+                  const earnInWinner = earnInDecision?.decision.dispatch ? earnInDecision.model : null;
+                  const pinTarget = earnInWinner ?? selectedModel;
+                  let pinCommitted = false;
                   try {
-                    // : same pre-write quarantine re-check as the pinned
-                    // branch above.
-                    if (config.pacing.mode !== "off" && !(await writeStillSafeFromQuarantine(company.id, selectedModel))) {
-                      ctx.logger.info("balance pass skipped: quarantine landed on the selected lane after select", {
+                    // An eligible cadence turn gets an explicit pin even at the
+                    // floor, so the next scan cannot count the same pick again.
+                    if (floorHealthy && !earnInDecision) return "settled";
+                    if (!(await balanceWriteStillSafe(company.id, issueId, null, config.models))) return "settled";
+                    if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(balancedTier);
+                    // : same per-issue isolation as the pinned branch.
+                    // : this branch's write is gated like the pinned one.
+                    if (writesAllowed) {
+                      try {
+                        // : re-check the actual winner, including earn-in.
+                        if (config.pacing.mode !== "off" && !(await writeStillSafeFromQuarantine(company.id, pinTarget))) {
+                          ctx.logger.info("balance pass skipped: quarantine landed on the selected lane after select", {
+                            companyId: company.id,
+                            issue: identifier,
+                            modelId: pinTarget.id,
+                            laneId: pinTarget.laneId ?? null,
+                          });
+                          return "unsettled";
+                        }
+                        if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite(balancedTier);
+                        const balancePatch = modelOverrideForContext({
+                          model: pinTarget,
+                          agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                          compactionRatio: config.selection.compactionRatio,
+                          agentEnv: result.agentEnv,
+                          agentAdapterType: result.agentAdapterType,
+                          agentAdapterConfig: result.agentAdapterConfig,
+                          existingOverrideEnv: result.existingOverrideEnv,
+                          // : sub-call keys follow the healthy T3 pick.
+                          cheapModelId: result.ancillaryModelId,
+                          provenance: fallbackPinProvenance(pinTarget, result.assigneeAgentId),
+                        });
+                        await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
+                        // A landed pin remains accounted even if later logging fails.
+                        pinCommitted = true;
+                        await recordFallbackPin(company.id, issueId, balancePatch);
+                      } catch (cause) {
+                        ctx.logger.warn(pinCommitted
+                          ? "balance pass pinned card but bookkeeping failed"
+                          : "balance pass skipped a card it could not pin", {
+                          companyId: company.id,
+                          issue: identifier,
+                          pinCommitted,
+                          error: cause instanceof Error ? cause.message : String(cause),
+                        });
+                        if (!pinCommitted) return "settled";
+                      }
+                    } else {
+                      ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {
                         companyId: company.id,
                         issue: identifier,
-                        modelId: selectedModel.id,
-                        laneId: selectedModel.laneId ?? null,
+                        modelId: pinTarget.id,
                       });
-                      return "unsettled";
                     }
-                    if (isPastWriteDeadline(rowStartedAt)) return skipSlowWrite("T1");
-                    const balancePatch = modelOverrideForContext({
-                      model: selectedModel,
-                      agentEnvContextTokens: config.selection.agentEnvContextTokens,
-                      compactionRatio: config.selection.compactionRatio,
-                      agentEnv: result.agentEnv,
-                      agentAdapterType: result.agentAdapterType,
-                      agentAdapterConfig: result.agentAdapterConfig,
-                      existingOverrideEnv: result.existingOverrideEnv,
-                      // : haiku-class sub-call keys follow the
-                      // cheapest healthy T3 pick (falls back to the pin).
-                      cheapModelId: result.ancillaryModelId,
-                      provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
-                    });
-                    await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
-                    await recordFallbackPin(company.id, issueId, balancePatch);
-                  } catch (cause) {
-                    ctx.logger.warn("balance pass skipped a card it could not pin", {
+                    await ctx.activity.log({
                       companyId: company.id,
-                      issue: identifier,
-                      error: cause instanceof Error ? cause.message : String(cause),
+                      message:
+                        (earnInWinner
+                          ? `Model Selection earn-in admitted and pinned ${earnInWinner.id} (${balancedTier}): ${earnInDecision?.decision.reason}`
+                          : pinTarget.id === floorModelId
+                            ? `Model Selection explicitly pinned ${pinTarget.id} (${balancedTier}): ${floorHealthy ? "eligible earn-in cadence turn" : "floor lane unserviceable"}`
+                            : `Model Selection balanced floor -> ${pinTarget.id} (${balancedTier}): unpinned labelled card given a balanced ${balancedTier} pin`) + advisorySuffix,
+                      entityType: "issue",
+                      entityId: issueId,
+                      metadata: {
+                        from: floorModelId, modelId: pinTarget.id, tier: balancedTier, candidateId: pinTarget.candidateId,
+                        ...(earnInDecision ? { earnInReason: earnInDecision.decision.reason } : {}),
+                        ...(earnInWinner ? {
+                          earnIn: true,
+                          cohortTag: earnInDecision?.decision.cohortTag ?? null,
+                          idempotencyKey: earnInDecision?.decision.idempotencyKey ?? null,
+                        } : {}),
+                        ...(writesAllowed ? {} : { advisory: true, written: false }),
+                      },
                     });
-                    return "settled";
+                    // : a shadow install writes nothing, so the pass
+                    // counter must not count it.
+                    if (writesAllowed) balanced += 1;
+                    return balanced >= BALANCE_PASS_WRITE_LIMIT ? "stop" : "settled";
+                  } finally {
+                    if (earnInDecision && !pinCommitted) {
+                      try {
+                        await writeEarnInState(company.id, earnInDecision.priorState);
+                      } catch (cause) {
+                        ctx.logger.error("earn-in reservation rollback failed; capacity remains reserved", {
+                          companyId: company.id,
+                          issue: identifier,
+                          modelId: earnInDecision.model.id,
+                          error: cause instanceof Error ? cause.message : String(cause),
+                        });
+                      }
+                    }
                   }
-                } else {
-                  ctx.logger.info("balance pass advisory: would pin unpinned card, nothing written", {
-                    companyId: company.id,
-                    issue: identifier,
-                    modelId: result.decision.modelId,
-                  });
-                }
-                await ctx.activity.log({
-                  companyId: company.id,
-                  message:
-                    (result.decision.modelId === floorModelId
-                      ? `Model Selection explicitly pinned ${result.decision.modelId} (${balancedTier}): floor lane unserviceable`
-                      : `Model Selection balanced floor -> ${result.decision.modelId} (${balancedTier}): unpinned labelled card given a balanced ${balancedTier} pin`) + advisorySuffix,
-                  entityType: "issue",
-                  entityId: issueId,
-                  //  P2: the served leg of the v2 identity (null on legacy).
-                  metadata: { from: floorModelId, modelId: result.decision.modelId, tier: balancedTier, candidateId: selectedModel.candidateId, ...(writesAllowed ? {} : { advisory: true, written: false }) },
-                });
-                // : a shadow install writes nothing, so the pass
-                // counter must not count it.
-                if (writesAllowed) balanced += 1;
-                return balanced >= BALANCE_PASS_WRITE_LIMIT ? "stop" : "settled";
+                };
+                if (!earnInScreen) return pinUnpinnedRow(null);
+                return withEarnInLock(company.id, async () =>
+                  pinUnpinnedRow(await maybeAdmitEarnIn(company.id, {
+                    described,
+                    exclusionExcluded: earnInExclusions[issueId] === true,
+                    agentAdapterType: described.agentAdapterType,
+                    candidateModelIds: result.decision.candidates.map((candidate) => candidate.modelId),
+                    nowMs: now,
+                    nowIso,
+                  })),
+                );
               },
             );
             slowestRowMs = walk.slowestRowMs;

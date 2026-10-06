@@ -182,9 +182,13 @@ export function recordEarnInOutcome(
   modelId: string,
   outcome: "ok" | "material-failure",
   safetyOrAuthorityViolation: boolean,
+  /** A known card's first-eight slot, when correcting an accepted outcome. */
+  outcomeIndex?: number,
 ): EarnInState {
   const prior = state.firstEightOutcomes[modelId] ?? [];
-  const outcomes = prior.length < 8 ? [...prior, outcome] : prior;
+  const outcomes = outcomeIndex !== undefined
+    ? prior.map((entry, index) => index === outcomeIndex ? outcome : entry)
+    : prior.length < 8 ? [...prior, outcome] : prior;
   const materialFailures = outcomes.filter(isMaterialFailure).length;
   const stopped =
     state.stopped[modelId] === true || safetyOrAuthorityViolation || (outcomes.length <= 8 && materialFailures >= 2);
