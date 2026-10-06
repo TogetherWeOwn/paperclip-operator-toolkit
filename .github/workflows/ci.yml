@@ -3164,6 +3164,13 @@ jobs:
             exit 1
           fi
 
+      # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
+      # The audit is read-only by construction (pool-show reads only, no
+      # host access); the cron push wrapper stays private with the
+      # monitoring stack, so CI pins the audit only.
+      - name: garm reaper audit suite
+        run: ./test_garm_reaper_audit.sh
+
       # gh-event-capture's suites run on 24 (validated there; the unit also
       # supports the pinned 20). The rest of this job stays on the pinned
       # 20 it was validated against.
