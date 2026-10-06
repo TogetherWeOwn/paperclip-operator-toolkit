@@ -46,6 +46,8 @@ export interface LaneSourceConfig {
   policy: PacePolicy;
   /** : resolved via `ctx.secrets.resolve()` before each poll, sent as `X-Api-Key`. Null for an unauthenticated lane. */
   apiKeySecretRef: SecretRef | null;
+  /** Read this lane straight from CLIProxy `/v0/management/auth-files` quota signals. */
+  authFilesProvider: "claude" | "codex" | null;
   /**
    * . Combined utilization (0-1] at or above which the lane is
    * withdrawn from NEW dispatch. Omitted (the default) never withdraws.
@@ -339,6 +341,11 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
             requestTimeoutMs: num(rawLane.requestTimeoutMs, 5000),
             maxResponseBytes: num(rawLane.maxResponseBytes, 262_144),
             apiKeySecretRef: secretRef(rawLane.apiKeySecretRef),
+            authFilesProvider:
+              record(rawLane.source).kind === "cliproxy-auth-files" &&
+              (record(rawLane.source).provider === "claude" || record(rawLane.source).provider === "codex")
+                ? (record(rawLane.source).provider as "claude" | "codex")
+                : null,
             // Kept as written, finite numbers only: `validateConfig` reports an
             // out-of-range ceiling rather than this dropping it silently.
             ...(typeof rawLane.withdrawAtUtilization === "number" && Number.isFinite(rawLane.withdrawAtUtilization)

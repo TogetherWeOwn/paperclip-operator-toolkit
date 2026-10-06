@@ -1,6 +1,7 @@
 import type { LanePaceDefinition, LanePaceObservation, LanePaceVerdict, PacePolicy } from "./pace.js";
 import { evaluateLanePace, normalizeLaneDocument } from "./pace.js";
 import { isReservedLiteralHost } from "./url-policy.js";
+import { authFilesToLaneDocument, type AuthFilesProvider } from "./auth-files.js";
 
 /**
  * Same shape as `@paperclipai/plugin-sdk`'s `PluginHttpClient.fetch` (a plain
@@ -34,6 +35,12 @@ export interface LaneSourceDefinition {
    * `x-api-key` header. Null/absent polls unauthenticated.
    */
   apiKey?: string | null;
+  /**
+   * When set, `statusUrl` is CLIProxy's `/v0/management/auth-files` and the response is converted with
+   * `authFilesToLaneDocument` for this provider. The resolved key is then the CLIProxy management key, sent
+   * as `Authorization: Bearer` (CLIProxy's management auth), instead of `X-Api-Key`.
+   */
+  authFilesProvider?: AuthFilesProvider | null;
 }
 
 export interface LanePollResult {
@@ -118,7 +125,11 @@ async function pollOne(
         headers: {
           Accept: "application/json",
           "Accept-Encoding": "identity",
-          ...(source.apiKey ? { "X-Api-Key": source.apiKey } : {}),
+          ...(source.apiKey
+            ? source.authFilesProvider
+              ? { Authorization: `Bearer ${source.apiKey}` }
+              : { "X-Api-Key": source.apiKey }
+            : {}),
         },
         redirect: "manual",
       }),
@@ -164,6 +175,10 @@ async function pollOne(
   }
   if (document === null || typeof document !== "object") {
     return fail("lane-invalid-json");
+  }
+
+  if (source.authFilesProvider) {
+    document = authFilesToLaneDocument(document, source.authFilesProvider, Date.parse(fetchedAt));
   }
 
   const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);

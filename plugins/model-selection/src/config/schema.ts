@@ -222,6 +222,20 @@ export const SELECTION_CONFIG_SCHEMA = {
               maxResponseBytes: { type: "integer", minimum: 1, default: 262144 },
               /** : resolved via `ctx.secrets.resolve()` and sent as `X-Api-Key` before each poll. */
               apiKeySecretRef: SECRET_REF_SCHEMA,
+              /**
+               * Read usage directly from CLIProxy instead of a published lane document.
+               * `statusUrl` must then be CLIProxy's `/v0/management/auth-files` and `apiKeySecretRef` the
+               * CLIProxy management key (sent as `Authorization: Bearer`).
+               */
+              source: {
+                type: "object",
+                additionalProperties: false,
+                required: ["kind", "provider"],
+                properties: {
+                  kind: { type: "string", enum: ["cliproxy-auth-files"] },
+                  provider: { type: "string", enum: ["claude", "codex"] },
+                },
+              },
               /** True for a lane with no consumption ceiling — always serviceable, pace state `free`. */
               free: { type: "boolean", default: false },
               healthFields: {
