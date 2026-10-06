@@ -195,6 +195,18 @@ class CliRefusalTest(CliCase):
                 self.assert_refused(proc)
                 self.assertIn("cannot read snapshot", proc.stderr)
 
+    def test_pathological_json_snapshot_exits_2(self):
+        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
+        # 4300-digit int limit; RecursionError covers deep nesting. Both
+        # escape a narrower clause with exit 1 plus a traceback.
+        for label, data in (
+                ("oversized-int", b'{"agents": [' + b"9" * 5000 + b"]}"),
+                ("deeply-nested", b"[" * 100000)):
+            with self.subTest(label):
+                proc = self.run_snapshot(self.write(data))
+                self.assert_refused(proc)
+                self.assertIn("cannot read snapshot", proc.stderr)
+
     def test_non_object_json_exits_2(self):
         for label, text in (("array", "[]"), ("array-of-objects", "[{}]"),
                             ("string", '"snapshot"'), ("number", "7"),
