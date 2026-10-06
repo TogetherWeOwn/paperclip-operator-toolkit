@@ -3222,11 +3222,15 @@ jobs:
       # did not happen must never read as clean.
       #
       # Pinned by test_ci_dark_steps.sh, which asserts this wiring so a future
-      # edit cannot quietly drop the `if:` and re-blind the job.
+      # edit cannot quietly drop the `if:` and re-blind the job. GITHUB_JOB_NAME
+      # carries this job's display name because the API lists jobs by display
+      # name while GITHUB_JOB is the key — without it the tool falls back to
+      # whichever parallel job is still running and annotates the wrong job.
       - name: Report steps that never ran
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_JOB_NAME: Offline suites
         run: ./ci_dark_steps.sh report || true
 
   # Upgrade rehearsal offline suite (paperclip-upgrade/). A separate required
@@ -4045,10 +4049,13 @@ jobs:
       # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
       # abort skipped, never fail the build for it. This job is small, but it is
       # the one whose steps going dark caused TOG-1141 in the first place.
+      # GITHUB_JOB_NAME carries this job's display name: without it the tool
+      # falls back to whichever parallel job is still running.
       - name: Report steps that never ran
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_JOB_NAME: Operator runbook gates
         run: ./ci_dark_steps.sh report || true
 
   # ---------------------------------------------------------------------------

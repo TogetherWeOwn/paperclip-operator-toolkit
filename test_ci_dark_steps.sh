@@ -14,7 +14,10 @@
 # `actions/jobs/{id}` response for the two runs named in TOG-910:
 #
 #   job-100695318458-dark.json    pristine main e9dea118 — 13 success, 1 failure,
-#                                 79 skipped. The outage itself. One of the 79 is
+#                                 79 skipped. The outage itself. Two of the 93
+#                                 are runner teardown (`Post ...`), which the
+#                                 gate set excludes, so the tool reports 78 dark
+#                                 of 91 gate steps with a 12/1/78 tally. One of the 79 is
 #                                 the runner's `Post Run actions/setup-node@v4`
 #                                 teardown, which TOG-13080 exempts from the dark
 #                                 set (teardown is not a gate), so the tool
@@ -90,11 +93,11 @@ OUT="$("$TOOL" report --job-json "$DARK" 2>&1)"; RC=$?
 assert $? "a dark run still exits 0" \
   "got exit $RC — the reporter must not replace the real failure's attribution"
 
-# 79 skipped minus the exempted `Post Run actions/setup-node@v4` teardown
-# (TOG-13080) = 78 reported dark.
-grep -q '78 of 93 steps never ran' <<< "$OUT"
+# 91 gate steps (93 registered minus 2 `Post` teardowns): 12 passed, 1 failed,
+# 78 dark. The tally must add up over the same set the banner counts.
+grep -q '78 of 91 steps never ran' <<< "$OUT"
 assert $? "the dark run names the count of steps that did not execute" \
-  "expected '78 of 93 steps never ran'"
+  "expected '78 of 91 steps never ran'"
 
 grep -q 'OmniRoute rehearsal package suite' <<< "$OUT"
 assert $? "the dark run names the step that aborted the job" \
@@ -113,12 +116,16 @@ grep -qi 'mutation-gated' <<< "$OUT"
 assert $? "the dark list names the mutation gates" \
   "no mutation-gated step is reported, so vacuity protection looks intact when it is not"
 
-# 13 success + 1 failure + 78 dark (+ 1 exempted Post teardown) = 93. If the
-# arithmetic drifts, the report is worse than nothing because it looks
-# authoritative.
-grep -q 'Executed: 13 passed, 1 failed. Not run: 78.' <<< "$OUT"
+# 12 + 1 + 78 = 91: the tally adds up over the gate set (one of the 13
+# recorded successes is an exempted `Post` teardown). If the arithmetic drifts,
+# the report is worse than nothing because it looks authoritative.
+grep -q 'Executed: 12 passed, 1 failed. Not run: 78.' <<< "$OUT"
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
+
+grep -q '2 non-gate steps excluded' <<< "$OUT"
+assert $? "the dark report discloses the excluded non-gate steps" \
+  "the exemption is silent, so the banner looks like it covers all 93 steps"
 
 # ---------------------------------------------------------------------------
 hdr "The fail-fast abort as the reporter sees it — null conclusions are dark (TOG-3427)"
@@ -174,9 +181,13 @@ assert $? "a fully-executed run raises no error annotation" \
 assert $? "a fully-executed run reports no un-run steps" \
   "a clean run is being described as dark"
 
-grep -q 'all 95 steps executed' <<< "$OUT_G"
+grep -q 'all 93 steps executed' <<< "$OUT_G"
 assert $? "a fully-executed run states the number of steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
+
+grep -q '2 non-gate steps excluded' <<< "$OUT_G"
+assert $? "a fully-executed run discloses the excluded non-gate steps" \
+  "the banner claims 93 while the job registered 95"
 
 # ---------------------------------------------------------------------------
 hdr "The live view — the reporter exempts itself and teardown (TOG-13080)"
@@ -197,9 +208,13 @@ assert $? "a live green run with the reporter in flight raises no error annotati
 assert $? "a live green run with the reporter in flight reports no un-run steps" \
   "the reporter counts itself or teardown as dark"
 
-grep -q 'all 6 steps executed' <<< "$OUT_L"
-assert $? "a live green run with the reporter in flight states the number of steps it confirmed" \
+grep -q 'all 3 steps executed' <<< "$OUT_L"
+assert $? "a live green run with the reporter in flight states the number of gate steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
+
+grep -q '3 non-gate steps excluded' <<< "$OUT_L"
+assert $? "a live green run with the reporter in flight discloses the excluded non-gate steps" \
+  "the banner claims 3 while the job registered 6"
 
 # ---------------------------------------------------------------------------
 hdr "Refusal — a check that did not happen must never read as clean (TOG-357)"
@@ -261,6 +276,41 @@ if [[ -s "$CI" ]]; then
 
   grep -q 'ci_dark_steps.sh' <<< "$STEP"
   assert $? "the reporter step invokes ci_dark_steps.sh" "the step does not call the tool"
+
+  # Each reporter step must carry its containing job's DISPLAY name. GITHUB_JOB
+  # is the key (`offline-suites`) while the API lists the display name
+  # (`Offline suites`); without GITHUB_JOB_NAME the key-vs-name match misses
+  # and the fallback reports on whichever parallel job is still running — a
+  # cross-job annotation that says nothing true about either job. The expected
+  # name is read from the job itself, so renaming the job (or the env) fails
+  # this assertion instead of silently misreporting.
+  WIRING="$(awk '
+    /^  [A-Za-z0-9_-]+:/ { job=$1; sub(/:$/, "", job); jname="" }
+    /^    name: / { jname=$0; sub(/^    name: /, "", jname) }
+    /^      - name: Report steps that never ran$/ { inrep=1; repjob=job; repname=jname; n=0; val="" }
+    inrep == 1 { n++
+      if ($0 ~ /GITHUB_JOB_NAME:/) { val=$0; sub(/^.*GITHUB_JOB_NAME:[ ]*/, "", val) }
+      if (n >= 8) { print repjob "|" repname "|" val; inrep=0 }
+    }
+  ' "$CI")"
+
+  [[ -n "$WIRING" ]]
+  assert $? "every reporter step resolves to the job that contains it" \
+    "no reporter wiring found, so the job-name assertions below would be vacuous"
+
+  WIRING_COUNT="$(printf '%s\n' "$WIRING" | wc -l)"
+  [[ "$WIRING_COUNT" -eq 2 ]]
+  assert $? "both reporter wirings carry a job-name pin" \
+    "expected 2 reporter steps, found $WIRING_COUNT — a wiring was added or removed without a pin"
+
+  while IFS='|' read -r rj rn vv; do
+    [[ -n "$vv" ]]
+    assert $? "the $rj reporter step sets GITHUB_JOB_NAME" \
+      "without it the tool falls back to whichever parallel job is still running"
+    [[ -n "$rn" && "$vv" == "$rn" ]]
+    assert $? "the $rj reporter step names its job's display name" \
+      "sets '$vv' but the job is named '$rn' — the key-vs-name match misses"
+  done <<< "$WIRING"
 else
   bad "ci.yml is readable for the wiring assertions"
 fi

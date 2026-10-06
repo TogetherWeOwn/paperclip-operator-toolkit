@@ -137,10 +137,20 @@ jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
   || refuse "the job object carries no step list; nothing was measured"
 
 # --- classify -----------------------------------------------------------------
+# Every count below is taken over the GATE set: registered steps minus the
+# exempted non-gates (this reporter's own step and the runner's `Post`
+# teardown steps, TOG-13080). TOTAL over all steps with DARK over the gate set
+# stops adding up — the outage fixture would print "78 of 93" beside a tally
+# covering 92 — and a live green job would print "all 6 steps executed" when
+# only 3 gates ran. The gate set is the set whose execution this tool
+# certifies; teardown is not a gate, so it is counted separately, not silently.
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
-TOTAL="$(jq   '[.steps[]] | length'                                   "$TMP/job.json")"
-RAN="$(jq     '[.steps[] | select(.conclusion=="success")] | length'  "$TMP/job.json")"
-FAILED="$(jq  '[.steps[] | select(.conclusion=="failure")] | length'  "$TMP/job.json")"
+GATE='select(.name != "Report steps that never ran" and (.name | startswith("Post ") | not))'
+jq '[.steps[] | '"$GATE"']' "$TMP/job.json" > "$TMP/gate.json"
+FULL="$(jq     '[.steps[]] | length'                              "$TMP/job.json")"
+TOTAL="$(jq    'length'                                          "$TMP/gate.json")"
+RAN="$(jq      '[.[] | select(.conclusion=="success")] | length' "$TMP/gate.json")"
+FAILED="$(jq   '[.[] | select(.conclusion=="failure")] | length' "$TMP/gate.json")"
 # Dark means "registered but never executed". A step that ran to a verdict has
 # conclusion `success` or `failure`; everything else — `skipped` on a finalised
 # job, `cancelled`, and above all `null` — is dark. The `null` case is the
@@ -151,22 +161,14 @@ FAILED="$(jq  '[.steps[] | select(.conclusion=="failure")] | length'  "$TMP/job.
 # 0 dark on exactly the runs this tool exists to describe, and prints the clean
 # banner over them. In a fail-fast job with no `if:` steps, `skipped` and `null`
 # both mean "never reached"; the distinction belongs to the reader.
-#
-# Two entries are exempt from the dark set (TOG-13080), because at report time
-# the live view always contains steps that are not gates and never will be:
-# this reporter's OWN step (`Report steps that never ran`, still in_progress
-# with conclusion null while it runs) and the runner's `Post ...` teardown
-# steps (still queued). Without the exemption every green job prints an
-# ::error annotation about itself, which is the cry-wolf failure TOG-910
-# exists to prevent.
-DARK_EXEMPT='select(.name != "Report steps that never ran" and (.name | startswith("Post ") | not))'
-DARK="$(jq    '[.steps[] | select(.conclusion != "success" and .conclusion != "failure") | '"$DARK_EXEMPT"'] | length' "$TMP/job.json")"
+DARK="$(jq     '[.[] | select(.conclusion != "success" and .conclusion != "failure")] | length' "$TMP/gate.json")"
+EXEMPT="$((FULL - TOTAL))"
 
-CULPRIT="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/job.json")"
-CULPRIT_NO="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/job.json")"
+CULPRIT="$(jq -r '[.[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/gate.json")"
+CULPRIT_NO="$(jq -r '[.[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/gate.json")"
 
-jq -r '[.steps[] | select(.conclusion != "success" and .conclusion != "failure") | '"$DARK_EXEMPT"'][] | "  \(.number)\t\(.name)"' \
-   "$TMP/job.json" > "$TMP/dark.txt"
+jq -r '[.[] | select(.conclusion != "success" and .conclusion != "failure")][] | "  \(.number)\t\(.name)"' \
+   "$TMP/gate.json" > "$TMP/dark.txt"
 
 # --- report -------------------------------------------------------------------
 emit() { printf '%s\n' "$1"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; return 0; }
@@ -174,7 +176,11 @@ emit() { printf '%s\n' "$1"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n
 if [[ "$DARK" -eq 0 ]]; then
   emit "### ✅ ${JOB_NAME}: all ${TOTAL} steps executed"
   emit ""
-  emit "No step was skipped, so every gate in this job is load-bearing on this run."
+  emit "No gate step was skipped, so every gate in this job is load-bearing on this run."
+  if [[ "$EXEMPT" -gt 0 ]]; then
+    emit ""
+    emit "(${EXEMPT} non-gate steps excluded from this count: this reporter and runner teardown.)"
+  fi
   exit 0
 fi
 
@@ -196,6 +202,10 @@ else
 fi
 emit ""
 emit "Executed: ${RAN} passed, ${FAILED} failed. Not run: ${DARK}."
+if [[ "$EXEMPT" -gt 0 ]]; then
+  emit ""
+  emit "(${EXEMPT} non-gate steps excluded from this count: this reporter and runner teardown.)"
+fi
 emit ""
 emit '<details><summary>Steps that did not run</summary>'
 emit ""
