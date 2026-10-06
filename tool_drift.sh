@@ -56,10 +56,11 @@ FP_EXTENSIONS=(sh js mjs cjs yml yaml md json)
 # Never read these, whatever their extension says. Hashing a secret does not
 # print it, but it does publish an oracle for it into an issue comment, and
 # there is no reason to read one at all. Mirrors .gitignore's secret patterns.
-# token-cache.json is a neutral permanent stand-in, not a file any tool
-# writes: it keeps a .json prover case for is_secretish after the retired
-# minter cache name was removed.
-FP_NEVER=(.env .pem .key .jsonl token-cache.json)
+# Legacy guard: the retired minter cache name stays excluded because stale
+# copies with live tokens can sit in old checkouts where fingerprint runs.
+# Neutral prover: token-cache.json is a permanent stand-in no tool writes, so
+# the .json exclusion keeps a live prover case that is not tied to any tool.
+FP_NEVER=(.env .pem .key .jsonl .gh-app-token.json token-cache.json)
 
 # Directories that are never anybody's source of truth.
 FP_PRUNE_DIRS=(.git node_modules .venv __pycache__)
