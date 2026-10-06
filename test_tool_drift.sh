@@ -165,11 +165,16 @@ mk "$SRC/x.key"                'canary
 '
 mk "$SRC/audit.jsonl"          '{"canary":1}
 '
+# The legacy cache name stays a fixture because stale copies must keep being
+# skipped; token-cache.json is the neutral .json prover for is_secretish. Both
+# match the *.json fingerprint glob, so only the exclusion keeps them out.
 mk "$SRC/.gh-app-token.json"   '{"token":"canary"}
+'
+mk "$SRC/token-cache.json"      '{"token":"canary"}
 '
 fp > "$WORK/secret.fp"
 leaked=0
-for p in creds.env id.pem x.key audit.jsonl .gh-app-token.json; do
+for p in creds.env id.pem x.key audit.jsonl .gh-app-token.json token-cache.json; do
   grep -qF "$p" "$WORK/secret.fp" && { leaked=1; echo "    fingerprinted: $p"; }
 done
 [ "$leaked" -eq 0 ] && ok "no secret-shaped file is fingerprinted" || bad "a secret-shaped file was fingerprinted"
