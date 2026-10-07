@@ -298,6 +298,61 @@ function deviationOf(ledger: LaneLedger, model: ModelEntry | undefined): number 
   return laneVerdictFor(ledger, model.laneId ?? null)?.score?.deviation ?? 0;
 }
 
+/**
+ * Floor on hours-to-reset, shared with the pace engine's clear rate
+ * (`Math.max(1, remainingSeconds / 3600)` in lane-capacity/pace.ts): a window
+ * minutes from reset must not score arbitrarily high and swamp real headroom
+ * on another lane.
+ */
+const EXPIRY_PULL_MIN_HOURS = 1;
+
+/**
+ * Use-before-expiry pull: headroom-per-hour for one lane's allowance windows —
+ * remaining headroom (points of the window) divided by hours to reset, summed
+ * over every serviceable allowance window the lane reports. 50 points that
+ * expire in 42 h pull harder (1.19/h) than 75 points that expire in 84 h
+ * (0.89/h).
+ *
+ * Scope: this is a tie-break, not a rank. `orderCandidatesByPace` consults it
+ * only after pace state AND deviation compare equal, so it separates lanes
+ * that sit at the same distance from pace but differ in how soon the unused
+ * headroom lapses. It does NOT reorder lanes that share one reset and differ
+ * in utilization: deviation (utilization - elapsed) already ranks those
+ * roomiest-first, so the 2026-10-03 Muse 7/5/2 shape never reaches this
+ * comparator.
+ *
+ * Pure capacity math, not an admission gate: the 5h brake, the weekly-pace
+ * rule, and `hardStopExcluded` all run upstream and unchanged. Windows at or
+ * past full (utilization >= 1) or already past their reset contribute nothing
+ * — an exhausted window has no headroom to spend and a stale observation has
+ * no hours to spend it in. A lane with no computable window scores 0, exactly
+ * like the `unknown` rank it already carries. Higher pulls first; ties fall
+ * through to cost below.
+ */
+export function expiryPull(verdict: LanePaceVerdict | null, nowMs: number): number {
+  if (!verdict || verdict.serviceable !== true) return 0;
+  let pull = 0;
+  for (const account of verdict.accounts) {
+    if (!account.serviceable || !Array.isArray(account.windows)) continue;
+    for (const window of account.windows) {
+      if (window.role !== "allowance" || !window.serviceable) continue;
+      if (typeof window.utilization !== "number" || typeof window.resetsAt !== "string") continue;
+      if (window.utilization >= 1) continue;
+      const resetMs = Date.parse(window.resetsAt);
+      const hoursLeft = (resetMs - nowMs) / 3_600_000;
+      // Also rejects NaN from an unparseable `resetsAt`.
+      if (!(hoursLeft > 0)) continue;
+      pull += ((1 - window.utilization) * 100) / Math.max(EXPIRY_PULL_MIN_HOURS, hoursLeft);
+    }
+  }
+  return pull;
+}
+
+function expiryPullOf(ledger: LaneLedger, model: ModelEntry | undefined, nowMs: number): number {
+  if (!model) return 0;
+  return expiryPull(laneVerdictFor(ledger, model.laneId ?? null), nowMs);
+}
+
 function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntry | undefined {
   return models.find((model) => model.id === candidate.modelId);
 }
@@ -387,9 +442,11 @@ export function orderCandidatesByPace(
   candidates: readonly Candidate[],
   models: readonly ModelEntry[],
   ledger: LaneLedger,
-  options?: { preferredElapsedThreshold?: number },
+  options?: { preferredElapsedThreshold?: number; nowMs?: number; expiryTiebreak?: boolean },
 ): Candidate[] {
   const elapsedThreshold = options?.preferredElapsedThreshold ?? PREFERRED_ELAPSED_THRESHOLD;
+  const nowMs = options?.nowMs ?? Date.now();
+  const expiryTiebreak = options?.expiryTiebreak ?? true;
   const byTier = new Map<Candidate["tier"], Candidate[]>();
   const orderedTierKeys: Candidate["tier"][] = [];
   for (const candidate of candidates) {
@@ -418,6 +475,17 @@ export function orderCandidatesByPace(
 
       const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
       if (deviationDelta !== 0) return deviationDelta;
+
+      // Use-before-expiry: same pace state AND same deviation — the lane
+      // whose unused headroom lapses sooner (more headroom-per-hour) wins the
+      // group. Below cost on purpose: this only fires when state AND deviation
+      // already tied, and pace preference outranks price inside a tier group.
+      // Lanes sharing one reset never tie here unless they are equally
+      // utilized; deviation has already ordered them.
+      if (expiryTiebreak) {
+        const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);
+        if (pullDelta !== 0) return pullDelta;
+      }
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
 
