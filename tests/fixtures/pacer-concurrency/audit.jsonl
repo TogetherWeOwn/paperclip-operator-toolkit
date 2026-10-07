@@ -1,0 +1,4 @@
+{"decision": "deny", "headroom": 0.02, "lane": "claude-lane-2", "mode": "shadow", "reason": "window exhausted", "ts": "2026-10-04T11:40:00Z", "v": 1}
+{"decision": "allow", "headroom": 0.42, "lane": "claude-lane-1", "mode": "shadow", "reason": "under pace", "ts": "2026-10-04T11:40:00Z", "v": 1}
+not json at all
+{"decision": "deny", "headroom": 0.01, "lane": "codex-lane-1", "mode": "shadow", "reason": "old", "ts": "2026-10-04T09:00:00Z", "v": 1}

@@ -742,12 +742,12 @@ jobs:
           # have a suite, but the glob must cover the directory rather than that
           # one file, or the next root-level Python lands here unparsed and
           # nobody notices until it is in front of an operator.
-          # omniroute/ holds no Python (rehearsal package is .mjs, checked
-          # below), so only root *.py is globbed here for the same reason.
+          # omniroute/ Python ships beside the rehearsal package and is compiled
+          # in the ported-trees loop below, so only root *.py is globbed here.
           for f in *.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
           # Ported toolkit trees: offline checkers, detectors, gates and the
           # migration gate. Same argument as the globs above.
-          for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
+          for f in scripts/*.py paperclip-upgrade/*.py verification/*.py watchdog/*.py github-runner/garm/*.py hooks/muse-stop-guard/measure/*.py omniroute/*.py; do python3 -m py_compile "$f" || { echo "::error file=$f::python parse error"; rc=1; }; done
           rm -rf omniroute/__pycache__ __pycache__ scripts/__pycache__ paperclip-upgrade/__pycache__ verification/__pycache__ watchdog/__pycache__ github-runner/garm/__pycache__ hooks/muse-stop-guard/measure/__pycache__
           # mcp/ is ES modules, so --check needs to be told; without the flag
           # node parses them as CommonJS and every `export` is a syntax error.
@@ -815,6 +815,16 @@ jobs:
             fi
           done
           echo "selftest is prefix-independent: $base across 5 prefixes"
+
+      # Snapshot-section redaction is a structural allowlist over operator
+      # combo data: hostile fixtures prove no planted credential survives, and
+      # the mutation gate reverts each review fix in a staging copy and
+      # requires the owning check to go red. Fully offline, stdlib only.
+      - name: snapshot-section redaction selftest
+        run: python3 omniroute/snapshot_sections.py --selftest
+
+      - name: snapshot-section redaction is load-bearing (mutation-gated)
+        run: ./verification/snapshot-redaction-mutation-gate.sh
 
       # The TOG-226 standing gate. Offline: the board and GitHub reads are
       # redirected to fixtures, and the argv assertions use a stub curl that
@@ -1096,6 +1106,16 @@ jobs:
       - name: task liveness reconciler suite
         run: python3 -m unittest -v test_liveness_reconciler.py
 
+      # Admitted-PR closeout ledger: explicit registry (never a body parse),
+      # exact-SHA check/review evidence, drafts and releases as owned
+      # non-auto-merge work, bounded diagnostic-only proposals. Pure
+      # fixtures: no API, database, credential or timer.
+      - name: admitted-PR closeout ledger suite
+        run: python3 -m unittest -v test_pr_closeout_ledger.py
+
+      - name: admitted-PR closeout gates are load-bearing (mutation-gated)
+        run: ./verification/closeout-ledger-mutation-gate.sh
+
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
 
@@ -1364,6 +1384,14 @@ jobs:
       # boundary: MANIFEST_DROP is 3 and pages; quota/transport is 4 and does not.
       - name: web_search lane passthrough probe suite
         run: python3 -m unittest -v test_websearch_lane_probe.py
+
+      # Quota-aware auth weight controller: contract canonicalization, weight
+      # planning and the apply/rollback path against an in-process fake
+      # management API. The credential never reaches argv, environ, logs or
+      # files (the live-process canary reads the controller's own /proc
+      # entries; the companion test sweeps argv, logs and every output file).
+      - name: cliproxy quota controller suite
+        run: python3 -m unittest -v test_cliproxy_quota_controller.py
 
       # TOG-894 ask 2. opencode_shared_budget_probe.sh decides whether the paid
       # OpenCode budget is SHARED across lanes or throttled per lane. The two
@@ -3055,6 +3083,13 @@ jobs:
       - name: pacer admission audit suite
         run: python3 -m unittest -v test_pacer_admission_audit
 
+      # Per-agent concurrency target reconciler (slow path of the capacity
+      # orchestrator). Offline: fixtures plus pure pace/hysteresis/cooldown
+      # logic over weekly + 5h lane headroom. Shadow by default; enforce
+      # emits PATCH intents only, never writes.
+      - name: pacer concurrency hostile suite
+        run: python3 ./test_pacer_concurrency.py
+
       # Approval-queue executor (Part B3): allowlist-bound execution with
       # approval re-verification; fully offline on tmp-confined fixtures
       # with a pinned clock. SHADOW refusal, replay, and boundary cases.
@@ -3125,6 +3160,15 @@ jobs:
       - name: watchdog cli mutation gate
         run: python3 verification/platform-watchdog-cli-mutation-gate.py
 
+      # Recovery-writer dry-run harness: detector rows to propose/skip
+      # decisions with a stable dedupe key, no apply path. The gate runs the
+      # suite, a positive control, a repeat-poll control and a dedupe mutant.
+      - name: recovery dry-run harness suite
+        run: python3 -m unittest -v test_recovery_dryrun
+
+      - name: recovery dry-run harness gate
+        run: ./verification/recovery-dryrun-gate.sh
+
       # Public-fork provenance audit, hermetic self-test on synthetic
       # identities and fixtures; runs its own consistency suite inside.
       - name: fork provenance audit
@@ -3163,6 +3207,13 @@ jobs:
             echo "::error::storage_auto_reclaim accepted a write-intent flag" >&2
             exit 1
           fi
+
+      # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
+      # The audit is read-only by construction (pool-show reads only, no
+      # host access); the cron push wrapper stays private with the
+      # monitoring stack, so CI pins the audit only.
+      - name: garm reaper audit suite
+        run: ./test_garm_reaper_audit.sh
 
       # gh-event-capture's suites run on 24 (validated there; the unit also
       # supports the pinned 20). The rest of this job stays on the pinned
@@ -4768,6 +4819,13 @@ jobs:
       # Verify the plugin still builds.
       - name: Verify the plugin builds
         run: npm run build
+
+      # Every manifest-declared path must be in the distributable. A checksum
+      # list that agrees with an incomplete archive cannot catch a missing
+      # directory, so this compares the evaluated manifest against the actual
+      # pack output. Offline: npm pack --dry-run only, no registry access.
+      - name: Verify the package ships manifest-declared paths
+        run: npm run package:verify
 
       # OFFLINE NOTE: the gate:stage2 check requires live Paperclip API access.
       # It is designed for the operator's environment, not for CI. The operator

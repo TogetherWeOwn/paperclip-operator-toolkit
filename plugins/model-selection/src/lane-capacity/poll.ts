@@ -1,6 +1,7 @@
 import type { LanePaceDefinition, LanePaceObservation, LanePaceVerdict, PacePolicy } from "./pace.js";
 import { evaluateLanePace, normalizeLaneDocument } from "./pace.js";
 import { isReservedLiteralHost } from "./url-policy.js";
+import { authFilesToLaneDocument, type AuthFilesProvider } from "./auth-files.js";
 
 /**
  * Same shape as `@paperclipai/plugin-sdk`'s `PluginHttpClient.fetch` (a plain
@@ -34,6 +35,19 @@ export interface LaneSourceDefinition {
    * `x-api-key` header. Null/absent polls unauthenticated.
    */
   apiKey?: string | null;
+  /**
+   * When set, `statusUrl` is CLIProxy's `/v0/management/auth-files` and the response is converted with
+   * `authFilesToLaneDocument` for this provider. The resolved key is then the CLIProxy management key, sent
+   * as `Authorization: Bearer` (CLIProxy's management auth), instead of `X-Api-Key`.
+   */
+  authFilesProvider?: AuthFilesProvider | null;
+  /**
+   * Plan allowance weights by account key, from lane config. Only used with
+   * `authFilesProvider`: the converted document's `plan_weight` per account.
+   * Accounts without an entry carry no pace weight (pace reports the lane
+   * indeterminate honestly) — the routing weight is never substituted.
+   */
+  planWeights?: Readonly<Record<string, number>> | null;
 }
 
 export interface LanePollResult {
@@ -118,7 +132,11 @@ async function pollOne(
         headers: {
           Accept: "application/json",
           "Accept-Encoding": "identity",
-          ...(source.apiKey ? { "X-Api-Key": source.apiKey } : {}),
+          ...(source.apiKey
+            ? source.authFilesProvider
+              ? { Authorization: `Bearer ${source.apiKey}` }
+              : { "X-Api-Key": source.apiKey }
+            : {}),
         },
         redirect: "manual",
       }),
@@ -164,6 +182,15 @@ async function pollOne(
   }
   if (document === null || typeof document !== "object") {
     return fail("lane-invalid-json");
+  }
+
+  if (source.authFilesProvider) {
+    document = authFilesToLaneDocument(
+      document,
+      source.authFilesProvider,
+      Date.parse(fetchedAt),
+      source.planWeights ?? undefined,
+    );
   }
 
   const evaluated = verdictFor(document, source.lane, source.policy, fetchedAt);

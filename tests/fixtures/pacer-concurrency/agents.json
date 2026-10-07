@@ -1,0 +1,76 @@
+{
+  "agents": [
+    {
+      "id": "a-behind",
+      "name": "agent-behind",
+      "lanes": ["claude-lane-1"],
+      "maxConcurrentRuns": 2,
+      "baseline": 3,
+      "critical": false,
+      "status": "idle"
+    },
+    {
+      "id": "a-ahead",
+      "name": "agent-ahead",
+      "lanes": ["claude-lane-2"],
+      "maxConcurrentRuns": 3,
+      "baseline": 3,
+      "critical": false,
+      "status": "running"
+    },
+    {
+      "id": "a-crit",
+      "name": "agent-crit",
+      "lanes": ["claude-lane-2"],
+      "maxConcurrentRuns": 2,
+      "baseline": 2,
+      "critical": true,
+      "status": "running"
+    },
+    {
+      "id": "a-mixed",
+      "name": "agent-mixed",
+      "lanes": ["claude-lane-1", "claude-lane-2"],
+      "maxConcurrentRuns": 2,
+      "baseline": 2,
+      "critical": false,
+      "status": "idle"
+    },
+    {
+      "id": "a-stale",
+      "name": "agent-stale",
+      "lanes": ["meta-lane-4"],
+      "maxConcurrentRuns": 2,
+      "baseline": 2,
+      "critical": false,
+      "status": "idle"
+    },
+    {
+      "id": "a-unmapped",
+      "name": "agent-unmapped",
+      "lanes": ["ghost-lane"],
+      "maxConcurrentRuns": 2,
+      "baseline": 2,
+      "critical": false,
+      "status": "idle"
+    },
+    {
+      "id": "a-paused",
+      "name": "agent-paused",
+      "lanes": ["claude-lane-1"],
+      "maxConcurrentRuns": 2,
+      "baseline": 2,
+      "critical": false,
+      "status": "paused"
+    },
+    {
+      "id": "a-cool",
+      "name": "agent-cool",
+      "lanes": ["claude-lane-1"],
+      "maxConcurrentRuns": 2,
+      "baseline": 3,
+      "critical": false,
+      "status": "idle"
+    }
+  ]
+}

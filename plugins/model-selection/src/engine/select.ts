@@ -42,6 +42,7 @@ import {
   laneHasRoom,
   laneOutageExcluded,
   laneVerdictFor,
+  expiryPull,
   orderCandidatesByPace,
   preferredCandidateId,
   slotAllowed,
@@ -1240,7 +1241,9 @@ export function selectModel(input: SelectInput): SelectionDecision {
   // move a candidate ahead of one in a group that already sorted earlier.
   let orderedCandidates = candidates;
   if (paceActive) {
-    const paceOrdered = orderCandidatesByPace(candidates, config.models, ledger);
+    // `now` (the decision clock) threads into the expiry tie-break
+    // so the same input decides the same order on every run.
+    const paceOrdered = orderCandidatesByPace(candidates, config.models, ledger, { nowMs: now });
     const changed = paceOrdered.some((candidate, index) => candidate.modelId !== candidates[index]?.modelId);
     trace.push(
       changed
@@ -1255,6 +1258,25 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const preferredId = preferredCandidateId(candidates, config.models, ledger);
     if (preferredId) {
       trace.push(`${preferredId}'s lane is trailing pace near its reset window close — preferred for new dispatch`);
+    }
+    // Name the expiry tie-break only when it decided the order: re-sort with
+    // the tie-break off and report the first slot the pull changed. A pull
+    // that is nonzero but never reached a comparator (state or deviation
+    // already separated the lanes) is not a cause and is not traced.
+    if (paceEnforced) {
+      const withoutPull = orderCandidatesByPace(candidates, config.models, ledger, { nowMs: now, expiryTiebreak: false });
+      const slot = paceOrdered.findIndex((candidate, index) => candidate.modelId !== withoutPull[index]?.modelId);
+      if (slot >= 0) {
+        const pullOf = (modelId: string): number => {
+          const model = config.models.find((entry) => entry.id === modelId);
+          return expiryPull(laneVerdictFor(ledger, model?.laneId), now);
+        };
+        const promoted = paceOrdered[slot]!.modelId;
+        const displaced = withoutPull[slot]!.modelId;
+        trace.push(
+          `use-before-expiry: ${promoted} (${pullOf(promoted).toFixed(2)} headroom-points/hour toward reset) ranks ahead of ${displaced} (${pullOf(displaced).toFixed(2)})`,
+        );
+      }
     }
     if (paceEnforced) orderedCandidates = paceOrdered;
   }
