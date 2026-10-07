@@ -11,6 +11,9 @@ omniroute/rehearsal/private-db/
 # state. They must exist in a clean checkout or the stale-feed guards are not
 # exercised in CI.
 !tests/dead-feed-2026-08-26.jsonl
+# The pacer concurrency suite replays a synthetic audit log (one garbage line
+# included on purpose); it must exist in a clean checkout.
+!tests/fixtures/pacer-concurrency/audit.jsonl
 secure-drop/
 *.bak
 *.bak-*
