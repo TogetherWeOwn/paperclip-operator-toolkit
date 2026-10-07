@@ -132,7 +132,8 @@ export function weeklyLaneReadingsForLedger(ledger: LaneLedger): FleetHistoryLan
         window.role === "allowance" && window.windowSeconds === WEEK_SECONDS,
       );
       if (!weekly) continue;
-      const weight = positive(weekly.allowanceWeight ?? account.weight);
+      const weight = weekly.allowanceWeightSource === "unknown" ? null
+        : positive(weekly.allowanceWeight ?? account.weight);
       const resetAt = weekly.resetsAt;
       const utilization = weekly.utilization;
       const resetMs = Date.parse(resetAt ?? "");
@@ -260,9 +261,9 @@ function fleetWindowAnchors(history: readonly FleetHistoryEntry[], asOf: string)
           resetMs < asOfMs - FLEET_EVIDENCE_RETENTION_MS) continue;
       const key = JSON.stringify([lane.laneId, lane.resetAt]);
       const window = windows.get(key) ?? {};
-      if (!window.endpoint || observedMs > Date.parse(window.endpoint.observedAt!)) window.endpoint = lane;
+      if (!window.endpoint || observedMs >= Date.parse(window.endpoint.observedAt!)) window.endpoint = lane;
       if (observedMs <= resetMs - FLEET_PROJECTION_LEAD_MS &&
-          (!window.forecast || observedMs > Date.parse(window.forecast.observedAt!))) window.forecast = lane;
+          (!window.forecast || observedMs >= Date.parse(window.forecast.observedAt!))) window.forecast = lane;
       windows.set(key, window);
     }
   }
@@ -279,8 +280,7 @@ export function appendFleetHistory(
   if (!proposal || proposal.asOf === null) return history;
   const lanes = ledger ? weeklyLaneReadingsForLedger(ledger)
     : proposal.lanes.map((lane) => ({ laneId: lane.laneId, projected: lane.projected }));
-  if (ledger && JSON.stringify(lanes.map(readingIdentity)) ===
-      JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;
+  if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;
   const next: FleetHistoryEntry[] = [
     ...history,
     {

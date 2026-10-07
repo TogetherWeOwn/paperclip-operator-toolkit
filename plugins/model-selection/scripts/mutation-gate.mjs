@@ -3894,6 +3894,24 @@ const mutants = [
     to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
   },
   {
+    name: "fleet-shadow-invalid-weekly-weight-replaced",
+    file: "src/fleet-admission-shadow.ts",
+    from: 'const weight = weekly.allowanceWeightSource === "unknown" ? null\n        : positive(weekly.allowanceWeight ?? account.weight);',
+    to: "const weight = positive(weekly.allowanceWeight ?? account.weight);",
+  },
+  {
+    name: "fleet-shadow-same-clock-corrections-discarded",
+    file: "src/fleet-admission-shadow.ts",
+    from: "if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;",
+    to: "if (ledger && JSON.stringify(lanes.map(readingIdentity)) === JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;",
+  },
+  {
+    name: "fleet-shadow-same-clock-correction-loses-tie",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "if (ms >= bestMs) {",
+    to: "if (ms > bestMs) {",
+  },
+  {
     name: "fleet-shadow-forecast-lead-ignored",
     file: "src/fleet-predicted-vs-actual.ts",
     from: "Math.min(resetMs - FLEET_PROJECTION_LEAD_MS, asOfMs)",
@@ -3902,7 +3920,7 @@ const mutants = [
   {
     name: "fleet-shadow-repeated-readings-appended",
     file: "src/fleet-admission-shadow.ts",
-    from: "if (ledger && JSON.stringify(lanes.map(readingIdentity)) ===\n      JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;",
+    from: "if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;",
     to: "if (false) return history;",
   },
   {

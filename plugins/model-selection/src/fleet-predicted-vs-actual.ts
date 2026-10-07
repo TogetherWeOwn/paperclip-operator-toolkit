@@ -65,7 +65,7 @@ function latestAtOrBefore<T extends { asOf: string | null }>(
   for (const entry of entries) {
     const ms = Date.parse(entry.asOf ?? "");
     if (!Number.isFinite(ms) || ms > atOrBeforeMs || ms < notBeforeMs) continue;
-    if (ms > bestMs) {
+    if (ms >= bestMs) {
       best = entry;
       bestMs = ms;
     }

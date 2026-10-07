@@ -5,12 +5,13 @@ import { appendFleetHistory, fleetLaneInputsForLedger, fleetProposalRecord, MAX_
   proposeShadowFleetAdmission, type FleetHistoryEntry } from "../src/fleet-admission-shadow.js";
 import { evaluateLanePace, normalizeLaneDocument } from "../src/lane-capacity/pace.js";
 
-function appendObservation(history: FleetHistoryEntry[], utilization: number, observedAt: string, resetAt = WINDOW_RESET) {
+function appendObservation(history: FleetHistoryEntry[], utilization: number, observedAt: string, resetAt = WINDOW_RESET,
+  extraRecords: Record<string, unknown>[] = []) {
   const observation = normalizeLaneDocument({ definition: { laneId: "alpha", healthFields: ["health"],
     accountKeyFields: ["account_key"], weightFields: ["weight"], windows: [
       { name: "weekly", role: "allowance", utilizationFields: ["weekly_u"], resetFields: ["weekly_reset"], defaultWindowSeconds: 604800 },
     ] }, document: { observedAt, records: [{ account_key: "account", health: "healthy", weight: 1,
-      weekly_u: utilization, weekly_reset: resetAt }] } });
+      weekly_u: utilization, weekly_reset: resetAt }, ...extraRecords] } });
   const verdict = evaluateLanePace({ observation, asOf: observedAt });
   const ledger = { alpha: { laneId: "alpha", observation, verdict, fetchedAt: observedAt, error: null } };
   const proposal = fleetProposalRecord(proposeShadowFleetAdmission({ lanes: fleetLaneInputsForLedger(ledger), asOf: observedAt }), null);
@@ -78,6 +79,18 @@ describe("daily predicted-vs-actual report", () => {
     expect(history).toHaveLength(2);
     expect(reportForHistory(history, "2026-10-06T06:13:00.000Z").rows.find(row => row.resetAt === WINDOW_RESET))
       .toMatchObject({ status: "reset-observed", actualUtilization: 0.81 });
+  });
+
+  it("keeps a corrected same-clock receipt and refuses newly incomplete account coverage", () => {
+    const complete = appendObservation([], 0.99, NEAR_RESET);
+    const incomplete = appendObservation(complete, 0.99, NEAR_RESET, WINDOW_RESET, [{
+      account_key: "added-heavy", health: "healthy", weight: 100, weekly_reset: WINDOW_RESET,
+    }]);
+    expect(incomplete).toHaveLength(2);
+    expect(incomplete.at(-1)!.lanes[0]!.utilization).toBeNull();
+    expect(reportForHistory(incomplete).rows[0]).toMatchObject({
+      status: "reset-reading-unavailable", actualUtilization: null, withinTargetBand: null,
+    });
   });
 
   it("retains forecast and reset anchors when more than 200 new observations arrive before reporting", () => {
@@ -165,7 +178,7 @@ describe("daily predicted-vs-actual report", () => {
     expect(report.rows[0]).toMatchObject({ status: "unknown-window", projected: null, projectedAsOf: null });
   });
 
-  it.each(["missing-weekly", "monthly-governed", "missing-reset"])("never certifies a healthy sibling as the whole lane (%s)", scenario => {
+  it.each(["missing-weekly", "monthly-governed", "missing-reset", "invalid-weight"])("never certifies a healthy sibling as the whole lane (%s)", scenario => {
     const definition = { laneId: "alpha", healthFields: ["health"], accountKeyFields: ["account_key"],
       weightFields: ["weight"], windows: [
         { name: "weekly", role: "allowance" as const, utilizationFields: ["weekly_u"], resetFields: ["weekly_reset"], defaultWindowSeconds: 604800 },
@@ -177,8 +190,9 @@ describe("daily predicted-vs-actual report", () => {
         weekly_u: scenario === "missing-weekly" ? undefined : 0.2,
         weekly_reset: scenario === "missing-reset" ? undefined : WINDOW_RESET,
         monthly_u: scenario !== "missing-weekly" ? 0.99 : undefined,
-        monthly_reset: "2026-10-26T00:00:00.000Z", five_u: scenario === "missing-weekly" ? 1 : 0.1,
-        five_reset: "2026-10-06T03:00:00.000Z" },
+        monthly_reset: "2026-10-26T00:00:00.000Z", five_u: scenario === "missing-weekly" || scenario === "invalid-weight" ? 1 : 0.1,
+        five_reset: "2026-10-06T03:00:00.000Z",
+        windows: scenario === "invalid-weight" ? [{ name: "weekly", allowance_weight: 0 }] : [] },
       { account_key: "light", health: "healthy", weight: 1, weekly_u: 0.99, weekly_reset: WINDOW_RESET,
         five_u: 0.1, five_reset: "2026-10-06T03:00:00.000Z" },
     ] } });
