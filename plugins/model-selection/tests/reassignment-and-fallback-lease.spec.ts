@@ -436,6 +436,134 @@ describe(" reassignment re-homes the pin env", () => {
   });
 });
 
+describe("exempt emergency pin recovery", () => {
+  const exempt = "11111111-2222-3333-4444-aaaaaaaaaaaa";
+  const agents = () => [agent(exempt, A_ENV)];
+  const selection = { exemptAgentIds: [exempt] };
+  const emergencyStamp = (inherited = true) => ({
+    ...stampFor("d-emergency", exempt),
+    exemptRecovery: { pinnedModelId: fallback, returnModelId: inherited ? weak : normal, inherited },
+  });
+  const emergencyCard = (stamp: PinProvenance, overrides: Partial<Issue> = {}) => leaseCard(ISSUE, stamp, { assigneeAgentId: exempt, ...overrides });
+
+  it("holds and keeps the lease indexed until the designated return model recovers", async () => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), {}, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await outage(harness, ["lane-weak"]);
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]).toMatchObject({ decisionId: stamp.decisionId, checkedAt: new Date(NOW).toISOString() });
+    expect((await override(harness))?.adapterConfig?.model).toBe(fallback);
+
+    await outage(harness, []);
+    await harness.runJob("repinPass");
+    expect(await override(harness)).toBeNull();
+    expect(await index(harness)).toEqual({});
+    expect(harness.activity.some((entry) => entry.metadata?.reason === "exempt-recovery")).toBe(true);
+  });
+
+  it("restores the original explicit model rather than clearing it to the agent default", async () => {
+    const stamp = emergencyStamp(false);
+    const { harness } = await boot([emergencyCard(stamp)], agents(), {}, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await harness.runJob("repinPass");
+    expect((await override(harness))?.adapterConfig?.model).toBe(normal);
+    expect(readPinProvenance((await override(harness))?.adapterConfig?.env)).toBeNull();
+    expect(await index(harness)).toEqual({});
+  });
+
+  it("preserves an unstamped explicit model across exempt reassignment and expiry", async () => {
+    const { harness } = await boot([card(ISSUE, {
+      assigneeAgentId: exempt, assigneeAdapterOverrides: aPin(normal),
+    })], [...agents(), agent(AGENT_A, A_ENV)], { repinCandidates: [ISSUE] }, selection);
+    await reassign(harness, AGENT_A, exempt);
+    await harness.runJob("repinPass");
+    expect((await override(harness))?.adapterConfig?.model).toBe(normal);
+  });
+
+  it("rejects malformed emergency recovery metadata rather than inventing a target", () => {
+    const stamp = { ...emergencyStamp(), exemptRecovery: { returnModelId: weak } };
+    expect(readPinProvenance(stampEnv(stamp as PinProvenance))).toBeNull();
+  });
+
+  it("keeps ambiguous legacy fallback pins and their tracking instead of guessing ownership", async () => {
+    const stamp = stampFor("d-legacy", exempt);
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), {}, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+    expect((await override(harness))?.adapterConfig?.model).toBe(fallback);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it.each(["assignee", "model", "operator", "running"])("does not release an emergency pin after its %s changes", async (changed) => {
+    const stamp = emergencyStamp();
+    const changes: Partial<Issue> = changed === "assignee" ? { assigneeAgentId: AGENT_B }
+      : changed === "model" ? { assigneeAdapterOverrides: { adapterConfig: { model: normal, env: stampEnv(stamp) } } }
+      : changed === "operator" ? { labels: [operatorLabel], labelIds: [operatorLabel.id] } as Partial<Issue>
+      : { executionRunId: "live-run" };
+    const { harness, writes } = await boot([emergencyCard(stamp, changes)], [...agents(), agent(AGENT_B, B_ENV)], {}, { exemptAgentIds: [exempt] });
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+  });
+
+  it.each(["recovery target", "blocked status", "agent default"])("rechecks the %s before restoring an emergency pin", async (changed) => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), {}, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    let reads = 0;
+    const getIssue = harness.ctx.issues.get.bind(harness.ctx.issues);
+    harness.ctx.issues.get = (async (id: string, companyId: string) => {
+      const issue = await getIssue(id, companyId);
+      if (!issue || ++reads < 2) return issue;
+      if (changed === "blocked status") return { ...issue, status: "blocked" } as Issue;
+      if (changed === "recovery target") return { ...issue, assigneeAdapterOverrides: { adapterConfig: {
+        model: fallback, env: stampEnv({ ...stamp, exemptRecovery: { ...stamp.exemptRecovery, returnModelId: normal } }),
+      } } } as Issue;
+      return issue;
+    }) as typeof getIssue;
+    const getAgent = harness.ctx.agents.get.bind(harness.ctx.agents);
+    harness.ctx.agents.get = (async (id: string, companyId: string) => {
+      const current = await getAgent(id, companyId);
+      return changed === "agent default" && reads >= 2 && current
+        ? { ...current, adapterConfig: { ...current.adapterConfig, model: normal } } : current;
+    }) as typeof getAgent;
+    await harness.runJob("repinPass");
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it("leaves the pin and lease unchanged in advisory mode", async () => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), {}, { ...selection, mode: "advise" });
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+    expect((await override(harness))?.adapterConfig?.model).toBe(fallback);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it("stamps a hard-stop exception even when it selects a regular model", async () => {
+    const { harness } = await boot([card(ISSUE, {
+      status: "in_progress", assigneeAgentId: exempt, assigneeAdapterOverrides: { adapterConfig: { model: incumbent } },
+    })], agents(), { repinCandidates: [ISSUE] }, selection);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      { "lane-dead": { laneId: "lane-dead", verdict: { laneId: "lane-dead", state: "exhausted", serviceable: false, serviceableAccountCount: 0, accounts: [], knownAccountCount: 1, knownWeight: 1 } } },
+    );
+    await harness.runJob("repinPass");
+    const after = await override(harness);
+    expect(after?.adapterConfig?.model).toBe(normal);
+    expect(readPinProvenance(after?.adapterConfig?.env)).toMatchObject({
+      agentId: exempt, exemptRecovery: { pinnedModelId: normal, returnModelId: incumbent, inherited: false },
+    });
+    expect((await index(harness))[ISSUE]).toBeDefined();
+  });
+});
+
 describe(" fallback lease", () => {
   it("stamps and indexes the fallback pin the repin pass writes", async () => {
     const { harness } = await boot([card(ISSUE, {

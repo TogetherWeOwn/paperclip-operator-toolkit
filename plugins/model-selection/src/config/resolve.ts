@@ -279,7 +279,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 function exemptAgentIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string");
+  return value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.toLowerCase());
 }
 
 /**
@@ -294,7 +294,7 @@ export function isAgentExempt(
   config: Pick<ResolvedConfig, "selection">,
 ): boolean {
   if (!assigneeAgentId) return false;
-  return config.selection.exemptAgentIds.includes(assigneeAgentId);
+  return config.selection.exemptAgentIds.includes(assigneeAgentId.toLowerCase());
 }
 
 /**

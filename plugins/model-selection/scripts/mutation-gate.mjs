@@ -3355,15 +3355,15 @@ const mutants = [
     // Killed by: stamps and indexes the fallback pin the repin pass writes.
     name: "provenance-never-stamps",
     file: "src/worker.ts",
-    from: "        model.fallbackOnly === true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
-    to: "        false\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+    from: "        if (model.fallbackOnly !== true && !exemptRecovery) return null;",
+    to: "        if (true) return null;",
   },
   {
     // Killed by: writes no stamp and no index entry for a regular pin.
     name: "provenance-stamps-every-pin",
     file: "src/worker.ts",
-    from: "        model.fallbackOnly === true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
-    to: "        true\n          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }",
+    from: "        if (model.fallbackOnly !== true && !exemptRecovery) return null;",
+    to: "        if (false) return null;",
   },
   {
     // Killed by: bounds the index, evicting the oldest decision.

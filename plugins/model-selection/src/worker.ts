@@ -120,6 +120,7 @@ import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
 import { selectModel } from "./engine/select.js";
 import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
+import { activeModelCooldown } from "./lane-capacity/counts-only.js";
 import { resolveTier, tierFromLabels, tierOfModel, tierWithFallback } from "./engine/tier.js";
 import {
   accumulateRunStats,
@@ -2002,7 +2003,7 @@ export function createPlugin() {
             agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
             cheapModelId: result.ancillaryModelId,
-            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId, result),
           });
           let labelNote = "";
           if (plan.labelName && result.decision.effectiveTier) {
@@ -2833,7 +2834,7 @@ export function createPlugin() {
             agentAdapterType: result.agentAdapterType,
             agentAdapterConfig: result.agentAdapterConfig,
             existingOverrideEnv: result.existingOverrideEnv,
-            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+            provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId, result),
           });
           await ctx.issues.update(issueId, creationPatch as Parameters<typeof ctx.issues.update>[1], companyId);
           await recordFallbackPin(companyId, issueId, creationPatch);
@@ -3159,12 +3160,30 @@ export function createPlugin() {
           // Off, or advisory: the handler routes nothing and says so. The
           // legacy paths (still live in this posture) own the pin.
           if (!runResolveActive(config)) return finish({ kind: "keep" }, "keep.inactive");
+          // Exempt agents keep their default or explicit override, not the
+          // previous routed decision. Only a known serviceability hard stop
+          // permits a run-scoped exception; recovery automatically says keep.
+          const agentExempt = isAgentExempt(params.agentId, config);
+          const exemptModelId = resolveConfiguredModelId(params.issueOverrideModel ?? params.agentDefaultModel, config.models);
+          const exemptModel = config.models.find((model) => model.id === exemptModelId);
+          const now = Date.now();
+          const availability = agentExempt ? normalizeAvailability(snapshot.availabilityRaw, now) : null;
+          const exemptModelStopped = (model: ModelEntry | undefined): boolean => {
+            if (!model) return false;
+            const lane = availability?.lanes.find((entry) => entry.laneId === model.laneId);
+            return hardStopExcluded(snapshot.laneLedger, model, now) ||
+              deadVetoExcluded(snapshot.laneLedger, model, { configuredLaneIds: config.pacing.lanes.map((entry) => entry.laneId), bypassAllDead: false }) ||
+              lane?.state === "unavailable" ||
+              activeModelCooldown(lane?.modelCooldowns ?? [], model.id, now);
+          };
+          const exemptHardStop = agentExempt && exemptModelStopped(exemptModel);
+          if (agentExempt && !exemptHardStop) return finish({ kind: "keep" }, "keep.exempt");
           // : the engine re-checks the override against the roster
           // (an orphan falls through to a fresh decision); this early return
           // only skips the snapshot reads for a live override on an enabled
           // row. The engine is the authority — the identical predicate here
           // is a fast path, never a second policy.
-          if (params.issueOverrideModel) {
+          if (params.issueOverrideModel && !exemptHardStop) {
             const liveOverride = resolveConfiguredModelId(params.issueOverrideModel, config.models);
             if (liveOverride && config.models.some((model) => model.id === liveOverride && model.enabled)) {
               return finish({ kind: "keep" }, "keep.override");
@@ -3199,7 +3218,7 @@ export function createPlugin() {
           const peak = runPeakCache.peek(runIssueKey(companyId, issueId))?.value ?? null;
 
           const resolution = resolveRunDecision({
-            params,
+            params: exemptHardStop ? { ...params, issueOverrideModel: null } : params,
             issue,
             agent,
             snapshot,
@@ -3209,12 +3228,22 @@ export function createPlugin() {
             now: Date.now(),
           });
 
-          if (resolution.kind === "keep") return finish({ kind: "keep" }, "keep.engine");
+          if (resolution.kind === "keep") {
+            if (exemptHardStop) return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason: "exempt agent model is unserviceable; no safe run decision" }, "defer");
+            return finish({ kind: "keep" }, "keep.engine");
+          }
           if (resolution.kind === "defer") {
             return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason: resolution.reason }, "defer");
           }
 
           const { result } = resolution;
+          if (exemptHardStop) {
+            if (exemptModelStopped(config.models.find((model) => model.id === result.model))) {
+              return finish({ kind: "defer", retryAfterMs: deferRetryMs, reason: "exempt agent fallback is also unserviceable" }, "defer");
+            }
+            result.reason = `exempt agent: serviceability hard stop; ${result.reason ?? ""}`;
+            resolution.trace = [...resolution.trace, `exempt: serviceability hard stop on ${exemptModelId}`];
+          }
           runDecisionCache.set(result.decisionId, {
             decisionId: result.decisionId,
             model: result.model,
@@ -5227,14 +5256,26 @@ export function createPlugin() {
         return out;
       };
 
-      /** The stamp a new pin on `model` must carry, or null for a non-fallback pin. */
+      /** Fallbacks and exempt emergency pins are leased, never permanent. */
       const fallbackPinProvenance = (
-        model: { fallbackOnly?: boolean },
+        model: Pick<ModelEntry, "id" | "fallbackOnly">,
         agentId: string | null,
-      ): PinProvenance | null =>
-        model.fallbackOnly === true
-          ? { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString() }
-          : null;
+        advice?: NonNullable<Awaited<ReturnType<typeof advise>>>,
+      ): PinProvenance | null => {
+        let exemptRecovery: PinProvenance["exemptRecovery"];
+        if (advice?.isAgentExempt && advice.isServiceabilityHardStop) {
+          const previous = readPinProvenance(advice.existingOverrideEnv);
+          const priorRecovery = previous?.agentId === agentId ? previous.exemptRecovery : undefined;
+          const returnModelId = priorRecovery?.returnModelId ?? advice.pinnedModelId ?? advice.agentFloorModelId;
+          if (returnModelId) exemptRecovery = {
+            pinnedModelId: model.id,
+            returnModelId,
+            inherited: priorRecovery?.inherited ?? advice.pinnedModelId === null,
+          };
+        }
+        if (model.fallbackOnly !== true && !exemptRecovery) return null;
+        return { decisionId: randomUUID(), agentId, fallback: true, decidedAt: new Date().toISOString(), ...(exemptRecovery ? { exemptRecovery } : {}) };
+      };
 
       /**
        * Mirror what was just written into the index: add the issue when the
@@ -6304,7 +6345,7 @@ export function createPlugin() {
                     agentAdapterConfig: described.agentAdapterConfig,
                     existingOverrideEnv: described.existingOverrideEnv,
                     cheapModelId: result.ancillaryModelId,
-                    provenance: fallbackPinProvenance(selectedModel, described.assigneeAgentId),
+                    provenance: fallbackPinProvenance(selectedModel, described.assigneeAgentId, result),
                   });
                   await ctx.issues.update(issueId, repinPatch as Parameters<typeof ctx.issues.update>[1], company.id);
                   await recordPinTimestamp(company.id, issueId, nowIso);
@@ -6436,13 +6477,68 @@ export function createPlugin() {
               dropped.set(issueId, entry.decisionId);
               continue;
             }
-            // Designated agents are exempt from router pinning: stop tracking
-            // the lease without writing — the release would move the pin.
-            if (isAgentExempt(described.assigneeAgentId, config)) {
+            const recovery = stamp?.exemptRecovery;
+            if (recovery && (stamp.agentId !== described.assigneeAgentId || recovery.pinnedModelId !== pinnedModelId)) {
               dropped.set(issueId, entry.decisionId);
               continue;
             }
             checked.set(issueId, entry.decisionId);
+            // Exemption cannot identify ordinary explicit pins. Only a stamped
+            // emergency exception has a known rollback target; ambiguous legacy
+            // pins stay untouched and indexed rather than guessing ownership.
+            if (isAgentExempt(described.assigneeAgentId, config)) {
+              if (!recovery || !described.isIdle || described.status === "blocked") continue;
+              const returnModelId = resolveConfiguredModelId(
+                recovery.inherited ? described.descriptor.agentFloorModelId : recovery.returnModelId,
+                config.models,
+              );
+              const returnModel = config.models.find((model) => model.id === returnModelId);
+              if (!returnModel || !returnModel.enabled) continue;
+              const availability = await readAvailability(companyId, Date.now());
+              const lane = availability.lanes.find((candidate) => candidate.laneId === returnModel.laneId);
+              if (lane?.state === "unavailable" || activeModelCooldown(lane?.modelCooldowns ?? [], returnModel.id, Date.now())) continue;
+              const usage = await described.contextUsage(config.selection.contextRunLogRoot);
+              const requiredContextTokens = estimateIssueContext({
+                lastRunPeakTokens: usage.lastRunPeakTokens,
+                history: usage.history,
+                fleetCeilingTokens: config.selection.fleetContextCeilingTokens,
+              }).tokens ?? undefined;
+              if (!isUsableAndCapable(returnModel.id, returnModel.tier, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso)) continue;
+              if (!(await balanceWriteStillSafe(companyId, issueId, pinnedModelId, config.models))) continue;
+              const current = await describeIssue(companyId, issueId, {}, contextUsageCache);
+              const currentStamp = current ? readPinProvenance(current.existingOverrideEnv) : null;
+              if (!current || current.assigneeAgentId !== stamp.agentId || currentStamp?.decisionId !== stamp.decisionId ||
+                currentStamp.exemptRecovery?.pinnedModelId !== pinnedModelId ||
+                currentStamp.exemptRecovery.returnModelId !== recovery.returnModelId || currentStamp.exemptRecovery.inherited !== recovery.inherited ||
+                current.hasOperatorPin || !current.isIdle || !balanceOpenStatuses.has(current.status) || current.status === "blocked" ||
+                resolveConfiguredModelId(current.descriptor.pinnedModelId, config.models) !== pinnedModelId ||
+                (recovery.inherited && resolveConfiguredModelId(current.descriptor.agentFloorModelId, config.models) !== returnModel.id)) continue;
+              if (writesAllowed) {
+                if (config.pacing.mode !== "off" && !(await writeStillSafeFromQuarantine(companyId, returnModel))) continue;
+                const patch = recovery.inherited ? { assigneeAdapterOverrides: null } : modelOverrideForContext({
+                  model: returnModel,
+                  agentEnvContextTokens: config.selection.agentEnvContextTokens,
+                  compactionRatio: config.selection.compactionRatio,
+                  agentEnv: current.agentEnv,
+                  agentAdapterType: current.agentAdapterType,
+                  agentAdapterConfig: current.agentAdapterConfig,
+                  existingOverrideEnv: current.existingOverrideEnv,
+                  provenance: null,
+                });
+                await ctx.issues.update(issueId, patch as Parameters<typeof ctx.issues.update>[1], companyId);
+                dropped.set(issueId, entry.decisionId);
+                await recordPinTimestamp(companyId, issueId, recovery.inherited ? null : nowIso);
+                released += 1;
+              }
+              await ctx.activity.log({
+                companyId,
+                entityType: "issue",
+                entityId: issueId,
+                message: `Model Selection restored exempt agent ${described.identifier ?? issueId} off emergency ${pinnedModelId} -> ${returnModel.id}: designated model serviceable again${advisorySuffix}`,
+                metadata: { from: pinnedModelId, modelId: returnModel.id, decisionId: entry.decisionId, reason: "exempt-recovery", inherited: recovery.inherited, ...(writesAllowed ? {} : { advisory: true, written: false }) },
+              });
+              continue;
+            }
             // Blocked cards are the repin pass's: it releases their pin.
             if (!described.isIdle || described.status === "blocked") continue;
 
@@ -7217,7 +7313,7 @@ export function createPlugin() {
                         // : haiku-class sub-call keys follow the
                         // cheapest healthy T3 pick (falls back to the pin).
                         cheapModelId: result.ancillaryModelId,
-                        provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId),
+                        provenance: fallbackPinProvenance(selectedModel, result.assigneeAgentId, result),
                       });
                       await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
                       await recordFallbackPin(company.id, issueId, balancePatch);
@@ -7399,7 +7495,7 @@ export function createPlugin() {
                           existingOverrideEnv: result.existingOverrideEnv,
                           // : sub-call keys follow the healthy T3 pick.
                           cheapModelId: result.ancillaryModelId,
-                          provenance: fallbackPinProvenance(pinTarget, result.assigneeAgentId),
+                          provenance: fallbackPinProvenance(pinTarget, result.assigneeAgentId, result),
                         });
                         await ctx.issues.update(issueId, balancePatch as Parameters<typeof ctx.issues.update>[1], company.id);
                         // A landed pin remains accounted even if later logging fails.

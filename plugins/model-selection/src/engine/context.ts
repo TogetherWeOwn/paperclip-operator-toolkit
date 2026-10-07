@@ -45,6 +45,8 @@ export interface PinProvenance {
   agentId: string | null;
   fallback: true;
   decidedAt: string;
+  /** Exact rollback target for an exempt agent's serviceability exception. */
+  exemptRecovery?: { pinnedModelId: string; returnModelId: string; inherited: boolean };
 }
 
 /**
@@ -73,7 +75,16 @@ export function readPinProvenance(env: AdapterEnv | null | undefined): PinProven
   if (record.fallback !== true) return null;
   if (typeof record.decidedAt !== "string" || !Number.isFinite(Date.parse(record.decidedAt))) return null;
   const agentId = typeof record.agentId === "string" ? record.agentId : null;
-  return { decisionId: record.decisionId, agentId, fallback: true, decidedAt: record.decidedAt };
+  let exemptRecovery: PinProvenance["exemptRecovery"];
+  if (record.exemptRecovery !== undefined) {
+    if (!record.exemptRecovery || typeof record.exemptRecovery !== "object") return null;
+    const recovery = record.exemptRecovery as Record<string, unknown>;
+    if (typeof recovery.pinnedModelId !== "string" || !recovery.pinnedModelId ||
+      typeof recovery.returnModelId !== "string" || !recovery.returnModelId ||
+      typeof recovery.inherited !== "boolean") return null;
+    exemptRecovery = { pinnedModelId: recovery.pinnedModelId, returnModelId: recovery.returnModelId, inherited: recovery.inherited };
+  }
+  return { decisionId: record.decisionId, agentId, fallback: true, decidedAt: record.decidedAt, ...(exemptRecovery ? { exemptRecovery } : {}) };
 }
 
 export interface ContextEstimate {

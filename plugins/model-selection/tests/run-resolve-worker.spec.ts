@@ -11,6 +11,7 @@ import { stoppedLane } from "./run-resolve-helpers.js";
 
 const COMPANY = "co-1";
 const AGENT = "agent-1";
+const EXEMPT_AGENT = "11111111-2222-3333-4444-aaaaaaaaaaaa";
 const ISSUE = "issue-1";
 
 beforeEach(() => {
@@ -99,7 +100,7 @@ type Handler = (params: ResolveRunModelParams) => Promise<ResolveRunModelResult>
 
 async function boot(cfg: Record<string, unknown>, issues: Issue[] = [issue(ISSUE)]) {
   const harness = createTestHarness({ manifest, config: cfg });
-  harness.seed({ issues, agents: [agentRow()], companies: [{ id: COMPANY, name: "Co" } as never] });
+  harness.seed({ issues, agents: [agentRow(), agentRow({ id: EXEMPT_AGENT })], companies: [{ id: COMPANY, name: "Co" } as never] });
   const plugin = createPlugin();
   await plugin.definition.setup?.(harness.ctx);
   await plugin.definition.onConfigChanged?.(cfg, { companyId: COMPANY });
@@ -173,6 +174,72 @@ describe("onResolveRunModel on the worker ()", () => {
     it("answers keep for a run with no issue", async () => {
       const { resolve } = await boot(config());
       expect(await resolve(params({ issueId: null }))).toEqual({ kind: "keep" });
+    });
+  });
+
+  describe("designated agent exemption", () => {
+    const exemptConfig = () => config({
+      selection: { enabled: true, mode: "enforce", exemptAgentIds: [EXEMPT_AGENT] },
+      pacing: { mode: "enforce" },
+    });
+    const exemptCard = () => issue(ISSUE, { assigneeAgentId: EXEMPT_AGENT });
+    const exemptParams = (overrides: Partial<ResolveRunModelParams> = {}) => params({ agentId: EXEMPT_AGENT, ...overrides });
+
+    it("keeps the agent default instead of routing by tier, and records the exemption", async () => {
+      const { resolve, harness } = await boot(exemptConfig(), [exemptCard()]);
+      expect(await resolve(exemptParams())).toEqual({ kind: "keep" });
+      await vi.waitFor(() => expect(harness.metrics).toContainEqual(expect.objectContaining({ name: "model_selection.run_resolve.keep.exempt", value: 1 })));
+      const counts = countHostCalls(harness);
+      expect(await resolve(exemptParams({ runId: "run-2" }))).toEqual({ kind: "keep" });
+      expect(counts).toEqual({ state: 0, issues: 0, agents: 0, db: 0, http: 0, config: 0 });
+    });
+
+    it("preserves an explicit healthy override even when it is outside the roster", async () => {
+      const { resolve } = await boot(exemptConfig(), [exemptCard()]);
+      expect(await resolve(exemptParams({ issueOverrideModel: "operator-chosen-model" }))).toEqual({ kind: "keep" });
+    });
+
+    it.each(["quota", "cooldown"])("routes off a published %s stop without changing the exempt override", async (stop) => {
+      const { resolve, harness } = await boot(exemptConfig(), [exemptCard()]);
+      const blocked = stop === "quota" ? { health: "exhausted" } : {
+        model_cooldowns: [{ model: "claude-haiku-4-5-20251001", scope: "model", reason: "quota", retry_at: new Date(NOW + 60_000).toISOString() }],
+      };
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneAvailability },
+        laneDoc([account("lane-haiku", "a", blocked), account("lane-sonnet", "b"), account("lane-opus", "c")]),
+      );
+      const result = decide(await resolve(exemptParams({ issueOverrideModel: "claude-haiku-4-5-20251001" })));
+      expect(result.model).not.toBe("claude-haiku-4-5-20251001");
+      expect(result.reason).toContain("exempt");
+      expect((await harness.ctx.issues.get(ISSUE, COMPANY))?.assigneeAdapterOverrides).toBeNull();
+    });
+
+    it("defers rather than serving a known stopped fallback even with pacing disabled", async () => {
+      const { resolve, harness } = await boot({ ...exemptConfig(), pacing: { mode: "off" } }, [exemptCard()]);
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        Object.fromEntries(Object.values(LANE).map((lane) => [lane, stoppedLane(lane)])),
+      );
+      expect(await resolve(exemptParams())).toMatchObject({ kind: "defer" });
+    });
+
+    it.each([false, true])("routes off a stopped exempt model (issue override: %s), then returns to the default after recovery", async (override) => {
+      const { resolve, harness } = await boot(exemptConfig(), [exemptCard()]);
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        { "lane-haiku": stoppedLane("lane-haiku") },
+      );
+      const result = decide(await resolve(exemptParams({ issueOverrideModel: override ? "claude-haiku-4-5-20251001" : null })));
+      expect(result.model).not.toBe("claude-haiku-4-5-20251001");
+      expect(result.reason).toContain("exempt");
+      expect((await harness.ctx.issues.get(ISSUE, COMPANY))?.assigneeAdapterOverrides).toBeNull();
+
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        {},
+      );
+      await harness.runJob(JOB_KEYS.refreshRunResolve);
+      expect(await resolve(exemptParams({ runId: "run-2", previous: { runId: "run-1", model: result.model, decisionId: result.decisionId } }))).toEqual({ kind: "keep" });
     });
   });
 

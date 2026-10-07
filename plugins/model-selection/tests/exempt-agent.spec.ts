@@ -145,6 +145,16 @@ describe("exemptAgentIds config", () => {
     expect(validateConfig(config).errors).toEqual([]);
   });
 
+  it("normalizes UUID letter case on both config and assignee lookup", () => {
+    const id = "11111111-2222-3333-4444-aaaaaaaaaaaa";
+    const config = resolveConfig({ selection: { exemptAgentIds: [id.toUpperCase()] } });
+    expect(validateConfig(config).errors).toEqual([]);
+    expect(config.selection.exemptAgentIds).toEqual([id]);
+    expect(isAgentExempt(id, config)).toBe(true);
+    expect(isAgentExempt(id.toUpperCase(), config)).toBe(true);
+    expect(isAgentExempt("11111111-2222-3333-4444-bbbbbbbbbbbb", config)).toBe(false);
+  });
+
   it("rejects non-UUID items", () => {
     const config = resolveConfig({ selection: { exemptAgentIds: ["agent-1", "not-a-uuid"] } });
     const { errors } = validateConfig(config);
