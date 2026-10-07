@@ -298,6 +298,47 @@ function deviationOf(ledger: LaneLedger, model: ModelEntry | undefined): number 
   return laneVerdictFor(ledger, model.laneId ?? null)?.score?.deviation ?? 0;
 }
 
+/**
+ * Use-before-expiry pull: headroom-per-hour for one lane's
+ * allowance windows — remaining weekly headroom divided by hours to reset,
+ * summed over every serviceable behind-pace window the lane reports. A lane
+ * with 89 points of weekly headroom expiring in 48 h pulls harder (1.85/h)
+ * than a lane with 83 points expiring in 168 h (0.49/h), even though both
+ * read "behind" — the Muse use-before-expiry case from 2026-10-03, where
+ * lanes 7/5/2 held 89/39/26 points of headroom to the same 10-05 reset while
+ * the plain elapsed/deviation rank saw them as interchangeable.
+ *
+ * Pure capacity math, not an admission gate: the 5h brake, the weekly-pace
+ * rule, and `hardStopExcluded` all run upstream and unchanged. Windows at or
+ * past full (utilization >= 1) contribute nothing — an exhausted window has no
+ * headroom to spend. A lane with no computable window scores 0, exactly like
+ * the `unknown` rank it already carries. Higher pulls first; ties fall
+ * through to cost below.
+ */
+export function expiryPull(verdict: LanePaceVerdict | null, nowMs: number): number {
+  if (!verdict || verdict.serviceable !== true) return 0;
+  let pull = 0;
+  for (const account of verdict.accounts) {
+    if (!account.serviceable || !Array.isArray(account.windows)) continue;
+    for (const window of account.windows) {
+      if (window.role !== "allowance" || !window.serviceable) continue;
+      if (typeof window.utilization !== "number" || typeof window.resetsAt !== "string") continue;
+      if (window.utilization >= 1) continue;
+      const resetMs = Date.parse(window.resetsAt);
+      if (!Number.isFinite(resetMs)) continue;
+      const hoursLeft = (resetMs - nowMs) / 3_600_000;
+      if (!(hoursLeft > 0)) continue;
+      pull += ((1 - window.utilization) * 100) / hoursLeft;
+    }
+  }
+  return pull;
+}
+
+function expiryPullOf(ledger: LaneLedger, model: ModelEntry | undefined, nowMs: number): number {
+  if (!model) return 0;
+  return expiryPull(laneVerdictFor(ledger, model.laneId ?? null), nowMs);
+}
+
 function modelOf(models: readonly ModelEntry[], candidate: Candidate): ModelEntry | undefined {
   return models.find((model) => model.id === candidate.modelId);
 }
@@ -387,9 +428,10 @@ export function orderCandidatesByPace(
   candidates: readonly Candidate[],
   models: readonly ModelEntry[],
   ledger: LaneLedger,
-  options?: { preferredElapsedThreshold?: number },
+  options?: { preferredElapsedThreshold?: number; nowMs?: number },
 ): Candidate[] {
   const elapsedThreshold = options?.preferredElapsedThreshold ?? PREFERRED_ELAPSED_THRESHOLD;
+  const nowMs = options?.nowMs ?? Date.now();
   const byTier = new Map<Candidate["tier"], Candidate[]>();
   const orderedTierKeys: Candidate["tier"][] = [];
   for (const candidate of candidates) {
@@ -418,6 +460,14 @@ export function orderCandidatesByPace(
 
       const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
       if (deviationDelta !== 0) return deviationDelta;
+
+      // Use-before-expiry: same pace state AND same deviation (the
+      // common Muse case — lanes 7/5/2 all "behind" toward one shared
+      // reset) — the lane with more headroom-per-hour wins the group. Below
+      // cost on purpose: pace preference outranks price inside a tier group,
+      // and this tie-break only fires when state AND deviation already tied.
+      const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);
+      if (pullDelta !== 0) return pullDelta;
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
 
