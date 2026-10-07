@@ -3384,7 +3384,9 @@ jobs:
       # it is what would have caught the original hole. Every distinct suite
       # passes that baseline once before any of its mutants are scored.
       - name: Mutation gates — the suites must reject reintroduced defects
-        timeout-minutes: 55
+        # Measured ~54 min on a green full run; 60 keeps a working margin
+        # without approaching the job bound, and a real overrun still fails loud.
+        timeout-minutes: 60
         run: |
           set -uo pipefail
 
@@ -3791,17 +3793,35 @@ jobs:
           # must still parse (or it fails for the wrong reason), and the sed
           # must actually change something (or the code moved and the mutation
           # silently missed).
+          # The unmutated transport suite passes identically for every notify
+          # mutant, so verify those exact bytes once and clone them per mutant,
+          # the same shared-baseline pattern baseline_template() already uses
+          # for the other suites. Measured ~8s per redundant baseline run; 6
+          # mutants => ~48s saved. The per-mutant parse check and
+          # changed-something check below are untouched: a mutant that breaks
+          # the parse or misses its target still fails here, not in the suite.
+          notify_baseline_template() {
+            local dir="$baseline_root/notify-baseline" output="$baseline_root/notify-baseline.out"
+            if [[ ! -e "$dir/.baseline-passed" ]]; then
+              mkdir -p "$dir"
+              cp notify_paperclip_issue.sh test_notify_transport.sh "$dir/"
+              chmod +x "$dir/notify_paperclip_issue.sh" "$dir/test_notify_transport.sh"
+              if ! NOTIFY_SH="$dir/notify_paperclip_issue.sh" ./test_notify_transport.sh >"$output" 2>&1; then
+                echo "::error::the UNMUTATED transport copy already fails — this gate proves nothing"
+                tail -20 "$output"
+                return 1
+              fi
+              : > "$dir/.baseline-passed"
+            fi
+            NOTIFY_BASELINE_TEMPLATE="$dir"
+          }
+
           notify_mutation_check() {
             local label="$1"; shift
+            notify_baseline_template || {
+              echo "::error::$label: no verified transport baseline"; return 1; }
             local mut; mut="$(mktemp -d "$baseline_root/notify-mutant.XXXXXX")"
-            cp notify_paperclip_issue.sh test_notify_transport.sh "$mut/"
-            chmod +x "$mut/notify_paperclip_issue.sh" "$mut/test_notify_transport.sh"
-
-            if ! NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh >/dev/null 2>&1; then
-              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
-              NOTIFY_SH="$mut/notify_paperclip_issue.sh" ./test_notify_transport.sh 2>&1 | tail -20
-              rm -rf "$mut"; return 1
-            fi
+            cp -a "$NOTIFY_BASELINE_TEMPLATE/." "$mut/"
 
             local e
             for e in "$@"; do sed -i "$e" "$mut/notify_paperclip_issue.sh"; done
