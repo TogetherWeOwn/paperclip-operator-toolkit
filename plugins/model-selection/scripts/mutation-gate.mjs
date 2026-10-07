@@ -4029,6 +4029,154 @@ const mutants = [
     from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
     to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
   },
+  {
+    name: "fleet-shadow-invalid-weekly-weight-replaced",
+    file: "src/fleet-admission-shadow.ts",
+    from: 'const weight = weekly.allowanceWeightSource === "unknown" ? null\n        : positive(weekly.allowanceWeight ?? account.weight);',
+    to: "const weight = positive(weekly.allowanceWeight ?? account.weight);",
+  },
+  {
+    name: "fleet-shadow-same-clock-corrections-discarded",
+    file: "src/fleet-admission-shadow.ts",
+    from: "if (ledger && previousLanes &&\n      JSON.stringify(lanes.map(readingValueIdentity)) === JSON.stringify(previousLanes.map(readingValueIdentity))) return history;",
+    to: "if (ledger && previousLanes && JSON.stringify(lanes.map(readingIdentity)) === JSON.stringify(previousLanes.map(readingIdentity))) return history;",
+  },
+  {
+    name: "fleet-shadow-same-clock-correction-loses-tie",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "if (ms >= bestMs) {",
+    to: "if (ms > bestMs) {",
+  },
+  {
+    name: "fleet-shadow-forecast-lead-ignored",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "Math.min(resetMs - FLEET_PROJECTION_LEAD_MS, asOfMs)",
+    to: "Math.min(resetMs, asOfMs)",
+  },
+  {
+    name: "fleet-shadow-repeated-readings-appended",
+    file: "src/fleet-admission-shadow.ts",
+    from: "if (ledger && previousLanes &&\n      JSON.stringify(lanes.map(readingValueIdentity)) === JSON.stringify(previousLanes.map(readingValueIdentity))) return history;",
+    to: "if (false) return history;",
+  },
+  {
+    name: "fleet-shadow-reset-anchors-evicted",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const carried = fleetWindowAnchors(next, proposal.asOf)\n    .filter(lane => !present.has(readingIdentity(lane)));",
+    to: "const carried: FleetHistoryLane[] = [];",
+  },
+  {
+    name: "fleet-shadow-weekly-measurement-governor-only",
+    file: "src/fleet-admission-shadow.ts",
+    from: 'const weekly = (account.windows ?? []).find(window =>\n        window.role === "allowance" && window.windowSeconds === WEEK_SECONDS,\n      );',
+    to: "const weekly = weeklyAllowanceWindow(account);",
+  },
+  {
+    name: "fleet-shadow-partial-reset-coverage-ignored",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const utilization = group.complete && !unassignedWeeklyAccount && group.weight > 0",
+    to: "const utilization = !unassignedWeeklyAccount && group.weight > 0",
+  },
+  {
+    name: "fleet-shadow-unassigned-reset-coverage-ignored",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const utilization = group.complete && !unassignedWeeklyAccount && group.weight > 0",
+    to: "const utilization = group.complete && group.weight > 0",
+  },
+  {
+    name: "fleet-shadow-report-future-readings-accepted",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "if (!Number.isFinite(ms) || ms > atOrBeforeMs || ms < notBeforeMs) continue;",
+    to: "if (!Number.isFinite(ms) || ms < notBeforeMs) continue;",
+  },
+  // Worker-level wiring must carry the state; helper-only tests cannot prove it.
+  {
+    name: "fleet-worker-drops-previous-level",
+    file: "src/worker.ts",
+    from: "            const fleetPreviousLevel = storedFleetPreviousLevel(previous);",
+    to: "            const fleetPreviousLevel = null;",
+  },
+  {
+    name: "fleet-worker-previous-level-rescoped-away-from-proposer",
+    file: "src/worker.ts",
+    from: "{ lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: fleetPreviousLevel, asOf: nowIso },",
+    to: "{ lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: null, asOf: nowIso },",
+  },
+  {
+    name: "fleet-worker-drops-history",
+    file: "src/worker.ts",
+    from: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),",
+    to: "fleetHistory: [],",
+  },
+  {
+    name: "fleet-worker-drops-weekly-observation-wiring",
+    file: "src/worker.ts",
+    from: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),",
+    to: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal),",
+  },
+  {
+    name: "fleet-worker-daily-artifact-written-to-wrong-scope",
+    file: "src/worker.ts",
+    from: "              stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,\n            }, { ranAt, report });",
+    to: "              stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,\n            }, { ranAt, report });",
+  },
+  {
+    name: "fleet-shadow-backstop-cap-rescoped-to-larger-inventory",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      capped: proposal.backstop.capped,",
+    to: "      capped: proposal.backstop.capped && proposal.inventory.knownAccountCount > 2,",
+  },
+  // Shadow fleet admission wiring: the proposal is advisory, so every one of
+  // these mutants still produces a plausible-looking report — the level just
+  // stops meaning what the deadband and the backstop say. Killed by the
+  // fleet-admission-shadow spec (real normalizer/evaluator verdicts through
+  // the shadow call).
+  {
+    // The carried level never reaches the proposal: upgrades apply at the
+    // raw boundary and the fleet flaps on noisy snapshots. Killed by the
+    // two-cycle hysteresis test (carried hold gates the 0.96-projection
+    // upgrade; without it the same snapshot boosts).
+    name: "fleet-shadow-drops-previous-level",
+    file: "src/fleet-admission-shadow.ts",
+    from: "    previousLevel: input.previousLevel ?? null,",
+    to: "    previousLevel: null,",
+  },
+  {
+    // The report mislabels which deadband applied: the level still carries,
+    // but the audit field claims no level did. Killed by the hysteresis
+    // test's previousLevel assertions on both the held and fresh proposals.
+    name: "fleet-shadow-report-drops-carried-level",
+    file: "src/admission-shadow.ts",
+    from: "const record = fleetProposalRecord(proposeShadowFleetAdmission(fleet), previousLevel);",
+    to: "const record = fleetProposalRecord(proposeShadowFleetAdmission(fleet), null);",
+  },
+  {
+    // An unreadable cycle resets the deadband instead of preserving it: one
+    // stale poll erases the carried level the next cycle needed. Killed by
+    // the unknown no-op test (stored normal survives a null proposal).
+    name: "fleet-shadow-unknown-resets-previous-level",
+    file: "src/fleet-admission-shadow.ts",
+    from: "  if (!proposal) return stored;",
+    to: "  return proposal?.level ?? null;",
+  },
+  {
+    // The backstop never reports that it capped the fleet: a majority
+    // five-hour trip still holds the level, but the report reads as a weekly
+    // decision. Killed by the majority-trip test (capped must be true).
+    name: "fleet-shadow-backstop-cap-unreported",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      capped: proposal.backstop.capped,",
+    to: "      capped: false,",
+  },
+  {
+    // The backstop names no lanes: the cap (if any) is unattributable and a
+    // minority trip is indistinguishable from none. Killed by the
+    // majority/minority trip tests (trippedLanes names the withheld lane).
+    name: "fleet-shadow-backstop-trips-unnamed",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      trippedLanes: [...proposal.backstop.trippedLanes],",
+    to: "      trippedLanes: [],",
+  },
 ];
 
 // `--maxWorkers=2` is load-bearing, not tuning. At vitest's default worker

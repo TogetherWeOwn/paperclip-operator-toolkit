@@ -235,6 +235,13 @@ const baseManifest: PaperclipPluginManifestV1 = {
         ": reload the hot caches (volume profiles, lane ledger, scores, availability, lane evidence, live lane weights) the run-scoped model decision reads, so the decision path never loads them inline. Reads only; a no-op for a company that has not enabled runResolve.",
       schedule: "* * * * *",
     },
+    {
+      jobKey: JOB_KEYS.fleetAdmissionDaily,
+      displayName: "Fleet predicted-vs-actual report",
+      description:
+        "Build the daily shadow fleet predicted-vs-actual mismatch table: per-lane end-of-window projections against reset utilization, and the shadow proposal level against the host governor level. Read-only artifact; it never writes admission state and never actuates.",
+      schedule: "13 6 * * *",
+    },
   ],
   tools: [
     {
@@ -311,6 +318,12 @@ const baseManifest: PaperclipPluginManifestV1 = {
       name: TOOL_NAMES.admissionShadowReport,
       displayName: "Account admission shadow report",
       description: "Read the last opt-in bounded account admission shadow snapshot. No reservations, host start coverage or served-account proof; never invokes selection or actuation.",
+      parametersSchema: { type: "object", additionalProperties: false } as unknown as Record<string, unknown>,
+    },
+    {
+      name: TOOL_NAMES.fleetAdmissionDailyReport,
+      displayName: "Fleet predicted-vs-actual report",
+      description: "Read the latest daily shadow fleet predicted-vs-actual mismatch table. Read-only; never actuates.",
       parametersSchema: { type: "object", additionalProperties: false } as unknown as Record<string, unknown>,
     },
     {
