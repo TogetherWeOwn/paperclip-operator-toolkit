@@ -1378,7 +1378,8 @@ jobs:
       # Quota-aware auth weight controller: contract canonicalization, weight
       # planning and the apply/rollback path against an in-process fake
       # management API. The credential never reaches argv, environ, logs or
-      # files (the canary tests read /proc and every output file).
+      # files (the live-process canary reads the controller's own /proc
+      # entries; the companion test sweeps argv, logs and every output file).
       - name: cliproxy quota controller suite
         run: python3 -m unittest -v test_cliproxy_quota_controller.py
 

@@ -8,7 +8,6 @@ import socketserver
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from unittest import mock
@@ -862,32 +861,112 @@ class ControllerIntegrationTests(unittest.TestCase):
 
     @unittest.skipUnless(pathlib.Path("/proc").exists(), "Linux /proc is required")
     def test_running_process_hides_credential_from_cmdline_and_environ(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            canary = "process-canary-credential"
-            script = pathlib.Path(tmp, "read-fd.py")
-            script.write_text(
-                "import os,time\n"
-                "fd=int(os.environ['CLIPROXY_MANAGEMENT_KEY_FD'])\n"
-                "value=os.read(fd,16384)\n"
-                "time.sleep(2)\n"
-            )
-            read_fd, write_fd = os.pipe()
-            os.write(write_fd, canary.encode())
-            os.close(write_fd)
-            process = subprocess.Popen(
-                ["python3", str(script)],
-                env={**os.environ, "CLIPROXY_MANAGEMENT_KEY_FD": str(read_fd)},
-                pass_fds=(read_fd,),
-            )
-            os.close(read_fd)
-            try:
-                time.sleep(0.2)
-                cmdline = pathlib.Path(f"/proc/{process.pid}/cmdline").read_bytes()
-                environ = pathlib.Path(f"/proc/{process.pid}/environ").read_bytes()
-                self.assertNotIn(canary.encode(), cmdline)
-                self.assertNotIn(canary.encode(), environ)
-            finally:
-                process.wait(timeout=5)
+        # Runs the real controller as a child process and inspects that
+        # child's own /proc entries while it is blocked inside its first
+        # management-API read. A stand-in script cannot prove this: only the
+        # controller's cmdline/environ can show the pipe-fd credential was
+        # never passed there by the parent. /proc shows the initial
+        # environment only, so a runtime `os.environ[...] = credential` leak
+        # inside the controller is pinned by the companion test below.
+        state = FakeState()
+        arrived = threading.Event()
+        release = threading.Event()
+
+        class GatedHandler(Handler):
+            def do_GET(self):
+                if not arrived.is_set():
+                    arrived.set()
+                    # Bound the block so a wedged child cannot hang CI; the
+                    # test fails on the arrival assertion or the exit code.
+                    release.wait(timeout=15)
+                return Handler.do_GET(self)
+
+        server = socketserver.TCPServer(("127.0.0.1", 0), GatedHandler)
+        server.state = state
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            with tempfile.TemporaryDirectory() as tmp:
+                telemetry = self.write_fixture(tmp)
+                log = pathlib.Path(tmp, "decisions.jsonl")
+                rollback = pathlib.Path(tmp, "rollback.json")
+                command = [
+                    "python3",
+                    str(pathlib.Path(__file__).with_name("cliproxy_quota_controller.py")),
+                    "apply",
+                    "--telemetry",
+                    str(telemetry),
+                    "--now",
+                    NOW,
+                    "--management-url",
+                    url,
+                    "--decision-log",
+                    str(log),
+                    "--rollback-state",
+                    str(rollback),
+                ]
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, state.bearer.encode())
+                os.close(write_fd)
+                process = subprocess.Popen(
+                    command,
+                    env={**os.environ, "CLIPROXY_MANAGEMENT_KEY_FD": str(read_fd)},
+                    pass_fds=(read_fd,),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                os.close(read_fd)
+                try:
+                    self.assertTrue(
+                        arrived.wait(timeout=15),
+                        "controller never reached the management API",
+                    )
+                    cmdline = pathlib.Path(f"/proc/{process.pid}/cmdline").read_bytes()
+                    environ = pathlib.Path(f"/proc/{process.pid}/environ").read_bytes()
+                    self.assertNotIn(state.bearer.encode(), cmdline)
+                    self.assertNotIn(state.bearer.encode(), environ)
+                finally:
+                    release.set()
+                try:
+                    stdout, stderr = process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    self.fail(f"controller did not exit: {stderr[-2000:]}")
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertNotIn(state.bearer, stdout + stderr)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_controller_does_not_place_credential_in_environ(self):
+        # /proc/<pid>/environ reflects the initial environment only: a
+        # runtime `os.environ["LEAKED_KEY"] = credential` after the fd read
+        # is invisible there (verified: a child that setenvs then sleeps
+        # shows no trace in /proc). This in-process apply runs through
+        # client_from_args in this process, so such a leak stays visible in
+        # os.environ and fails here.
+        with tempfile.TemporaryDirectory() as tmp, fake_server() as (state, url):
+            document = contract.canonicalize_document(mixed_fixture())
+            args = self.args("apply", tmp, url)
+            before = dict(os.environ)
+            with self.credential(state.bearer), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    controller.run_apply(
+                        document, contract.parse_timestamp(NOW, "now"), args
+                    ),
+                    0,
+                )
+                leaked = [
+                    key
+                    for key, value in os.environ.items()
+                    if state.bearer in value
+                    and (key not in before or state.bearer not in before[key])
+                ]
+                self.assertEqual(leaked, [], f"credential leaked into environ: {leaked}")
 
     def test_management_credential_is_absent_from_argv_logs_and_files(self):
         with tempfile.TemporaryDirectory() as tmp, fake_server() as (state, url):
