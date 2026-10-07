@@ -3842,6 +3842,142 @@ const mutants = [
     from: "    maxBuffer,\n  });\n}\n",
     to: "  });\n}\n",
   },
+  // `selection.exemptAgentIds`: the router never routes an agent on the list. Each
+  // mutant removes, weakens or rescopes one guard; all are killed by
+  // tests/exempt-agent-ids.spec.ts.
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt assignee still gets a model selected.
+    name: "exempt-agent-engine-gate-removed",
+    file: "src/engine/select.ts",
+    from: "  if (isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {\n    const reason",
+    to: "  if (false) {\n    const reason",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the gate keys on something other than the assignee id.
+    name: "exempt-agent-gate-reads-wrong-field",
+    file: "src/engine/select.ts",
+    from: "isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {\n    const reason",
+    to: "isExemptAgent(config.exemptAgentIds, descriptor.agentName)) {\n    const reason",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt agent's card that already ran on a model is routed again.
+    name: "exempt-agent-gate-skipped-when-sticky",
+    file: "src/engine/select.ts",
+    from: "isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {\n    const reason",
+    to: "isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId) && !descriptor.stickyModelId) {\n    const reason",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a live operator override routes an exempt agent.
+    name: "exempt-agent-gate-skipped-with-operator-override",
+    file: "src/engine/select.ts",
+    from: "isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {\n    const reason",
+    to: "isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId) && !config.operatorOverrideModelId) {\n    const reason",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: any non-empty list exempts every agent.
+    name: "exempt-agent-matches-every-assignee",
+    file: "src/engine/select.ts",
+    from: "return !!agentId && !!exemptAgentIds && exemptAgentIds.includes(agentId);",
+    to: "return !!agentId && !!exemptAgentIds && exemptAgentIds.length > 0;",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an empty id on both sides counts as exempt.
+    name: "exempt-agent-empty-id-matches",
+    file: "src/engine/select.ts",
+    from: "return !!agentId && !!exemptAgentIds && exemptAgentIds.includes(agentId);",
+    to: "return !!exemptAgentIds && exemptAgentIds.includes(agentId as string);",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt agent's new card is still classified.
+    name: "exempt-agent-creation-guard-removed",
+    file: "src/worker.ts",
+    from: "        if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return;\n",
+    to: "",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: repinPass clears the pin on an exempt agent's blocked card.
+    name: "exempt-agent-repin-clear-guard-removed",
+    file: "src/worker.ts",
+    from: "                if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return \"settled\";\n",
+    to: "",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: advise never tells the engine who is exempt.
+    name: "exempt-agent-advise-config-dropped",
+    file: "src/worker.ts",
+    from: "            exemptAgentIds: config.selection.exemptAgentIds,\n          },\n          profiles,",
+    to: "          },\n          profiles,",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the descriptor never carries the assignee.
+    name: "exempt-agent-describe-drops-assignee",
+    file: "src/worker.ts",
+    from: "keys on it.\n          assigneeAgentId: typeof assigneeAgentId === \"string\" ? assigneeAgentId : null,",
+    to: "keys on it.\n          assigneeAgentId: null,",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the run-scoped hook never tells the engine who is exempt.
+    name: "exempt-agent-run-config-dropped",
+    file: "src/engine/run-resolve.ts",
+    from: "    exemptAgentIds: config.selection.exemptAgentIds,\n  };\n}",
+    to: "  };\n}",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the run-scoped hook never names the agent it decides for.
+    name: "exempt-agent-run-descriptor-drops-assignee",
+    file: "src/engine/run-resolve.ts",
+    from: "    assigneeAgentId: params.agentId,\n  };",
+    to: "  };",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the configured list never reaches the router.
+    name: "exempt-agent-resolver-drops-list",
+    file: "src/config/resolve.ts",
+    from: "      exemptAgentIds: lowercaseIds(stringList(selection.exemptAgentIds)),",
+    to: "      exemptAgentIds: [],",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an uppercase paste passes validation yet exempts nobody.
+    name: "exempt-agent-resolver-skips-lowercase",
+    file: "src/config/resolve.ts",
+    from: "    const lower = id.toLowerCase();",
+    to: "    const lower = id;",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a padded id never matches the agent.
+    name: "exempt-agent-resolver-skips-trim",
+    file: "src/config/resolve.ts",
+    from: "    const id = entry.trim();",
+    to: "    const id = entry;",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a repeated id survives into the resolved list.
+    name: "exempt-agent-resolver-skips-dedupe",
+    file: "src/config/resolve.ts",
+    from: "if (!out.includes(lower)) out.push(lower);",
+    to: "out.push(lower);",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the schema accepts a list with a repeated id.
+    name: "exempt-agent-schema-drops-unique-items",
+    file: "src/config/schema.ts",
+    from: "          items: { type: \"string\", minLength: 1 },\n          uniqueItems: true,\n          default: [],",
+    to: "          items: { type: \"string\", minLength: 1 },\n          default: [],",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the host schema rejects the key the router reads.
+    name: "exempt-agent-schema-renames-property",
+    file: "src/config/schema.ts",
+    from: "        exemptAgentIds: {\n          type: \"array\",",
+    to: "        exemptAgentIdsX: {\n          type: \"array\",",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a truncated agent id is accepted without a word.
+    name: "exempt-agent-uuid-warning-dropped",
+    file: "src/config/resolve.ts",
+    from: "    if (!AGENT_ID_PATTERN.test(agentId)) {",
+    to: "    if (false) {",
+  },
   // : the shard split and the impact gate decide what the sweep covers
   // and whether it may be skipped, so each is killed by a named spec in
   // tests/mutation-gate-runtime.spec.ts or tests/mutation-impact.spec.ts.

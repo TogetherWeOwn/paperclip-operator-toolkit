@@ -230,6 +230,12 @@ export interface IssueDescriptor {
    * wake-scoped decision never touches the recorded `tier:*` label/pin.
    */
   wakeReason?: string | null;
+  /**
+   * The agent this decision serves, as the board records it. Read only by the
+   * `exemptAgentIds` gate in `selectModel`; null/absent (an unassigned card, or
+   * a caller that did not read it) is never exempt.
+   */
+  assigneeAgentId?: string | null;
 }
 
 export interface CostBreakdown {

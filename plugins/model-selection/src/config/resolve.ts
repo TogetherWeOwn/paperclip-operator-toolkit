@@ -99,6 +99,8 @@ export interface ResolvedConfig {
     /** : agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
     agentEnvContextTokens: number;
     compactionRatio: number;
+    /** Agent ids the router never routes (`selection.exemptAgentIds`). Empty exempts nobody. */
+    exemptAgentIds: string[];
   };
   models: ModelEntry[];
   /**
@@ -198,6 +200,8 @@ export interface ResolvedConfig {
   };
 }
 
+const AGENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -221,6 +225,39 @@ function fieldList(value: unknown, fallback: readonly string[]): string[] {
     ? value.filter((field): field is string => typeof field === "string" && field.length > 0)
     : [];
   return fields.length > 0 ? fields : [...fallback];
+}
+
+/**
+ * Trimmed, non-empty strings, in order. Anything that is not a string is
+ * dropped here; the config schema is what rejects it loudly
+ * (`items: { type: "string" }`), so a malformed list never reaches this far on
+ * the install path.
+ */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const id = entry.trim();
+    if (id.length > 0) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Host agent ids are lowercase UUIDs. An operator-pasted uppercase id passes
+ * the UUID check (which ignores case) yet never matches, so the router would
+ * pin the agent it was meant to leave alone. Lowercasing at read keeps the
+ * match working. This is also where the list is de-duplicated, case-insensitively
+ * and in first-seen order.
+ */
+function lowercaseIds(ids: string[]): string[] {
+  const out: string[] = [];
+  for (const id of ids) {
+    const lower = id.toLowerCase();
+    if (!out.includes(lower)) out.push(lower);
+  }
+  return out;
 }
 
 function nullableNum(value: unknown): number | null {
@@ -423,6 +460,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         num(selection.fleetContextCeilingTokens, 1_000_000),
       ),
       compactionRatio: num(selection.compactionRatio, 0.75),
+      exemptAgentIds: lowercaseIds(stringList(selection.exemptAgentIds)),
     },
     models,
     tierLabelIds,
@@ -665,6 +703,18 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
 
   if (config.selection.contextRunLogRoot && !isAbsolute(config.selection.contextRunLogRoot)) {
     errors.push("selection.contextRunLogRoot must be an absolute path");
+  }
+
+  // An exemption that names no real agent protects nothing, and the failure is
+  // silent: the router simply pins the agent it was meant to leave alone. Agent
+  // ids are UUIDs, so an entry that is not one is almost certainly a truncated
+  // or mistyped paste. A warning, not an error: a non-UUID id is not unsafe.
+  for (const agentId of config.selection.exemptAgentIds) {
+    if (!AGENT_ID_PATTERN.test(agentId)) {
+      warnings.push(
+        `selection.exemptAgentIds entry "${agentId}" is not a full agent UUID; it will exempt no agent unless it matches an agent id exactly`,
+      );
+    }
   }
 
   if (config.selection.enabled && config.models.length === 0) {

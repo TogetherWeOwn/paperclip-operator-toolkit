@@ -215,6 +215,7 @@ export function buildRunSelectionConfig(
     allowExplore: false,
     holdOnUnknownAvailability: config.selection.holdOnUnknownAvailability,
     wakeScopedFloor: config.wakeScopedFloor,
+    exemptAgentIds: config.selection.exemptAgentIds,
   };
 }
 
@@ -323,6 +324,10 @@ export function resolveRunDecision(input: RunResolveInput): RunResolution {
     title: issue.title,
     agentName: agent.name,
     wakeReason: params.wakeReason ?? undefined,
+    // `selection.exemptAgentIds` is read by `selectModel`, whose
+    // `held-at-floor` the `unselected` mapping below turns into `keep` on every
+    // path (first decision, tier change, sticky probe) — no second guard here.
+    assigneeAgentId: params.agentId,
   };
 
   const estimate = estimateIssueContext({

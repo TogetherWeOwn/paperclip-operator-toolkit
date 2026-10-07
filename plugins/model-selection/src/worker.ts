@@ -118,7 +118,7 @@ import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { tierIndex } from "./engine/cost.js";
 import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
-import { selectModel } from "./engine/select.js";
+import { isExemptAgent, selectModel } from "./engine/select.js";
 import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
 import { resolveTier, tierFromLabels, tierOfModel, tierWithFallback } from "./engine/tier.js";
 import {
@@ -1332,6 +1332,8 @@ export function createPlugin() {
           labelNames,
           pinnedModelId,
           agentFloorModelId,
+          // The `selection.exemptAgentIds` gate in `selectModel` keys on it.
+          assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
           // : adapter-compatibility gate (`devin/*` vs `claude_local`)
           // and the earn-in guard (priority + review/gate title) both read
           // these. Recorded from the issue/agent rows, never inferred.
@@ -1660,6 +1662,7 @@ export function createPlugin() {
             allowExplore,
             holdOnUnknownAvailability: config.selection.holdOnUnknownAvailability,
             wakeScopedFloor: config.wakeScopedFloor,
+            exemptAgentIds: config.selection.exemptAgentIds,
           },
           profiles,
           signals,
@@ -2571,6 +2574,10 @@ export function createPlugin() {
         if (!balanceOpenStatuses.has(described.status)) return;
         if (described.hasOperatorPin) return;
         if (described.descriptor.pinnedModelId) return;
+        // An exempt agent is never routed: no first pin, and no classifier call
+        // spent on a decision nothing will act on. `selectModel` holds it at the
+        // floor on its own, so this is the cheap early exit, not the guard.
+        if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return;
 
         // : with run-scoped decisions live, the pin is retired but the
         // classification still runs and still writes the label — the hook reads
@@ -6026,6 +6033,10 @@ export function createPlugin() {
                 //  (#457, merged): preserve manual pins and active
                 // runs with the idle guard — a non-idle card is not repinnable.
                 if (described.hasOperatorPin || !described.isIdle) return "settled";
+                // An exempt agent's cards are not this pass's to touch: the
+                // clear-on-blocked write below never reaches `selectModel`, so
+                // the engine's own exemption cannot stop it.
+                if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return "settled";
                 const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
                 const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);
