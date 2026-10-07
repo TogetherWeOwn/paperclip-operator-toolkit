@@ -23,7 +23,7 @@ import {
   storedFleetHistory, storedFleetPreviousLevel,
 } from "./fleet-admission-shadow.js";
 import {
-  buildPredictedVsActualReport, historyToSnapshots, resetActualsForLedger,
+  buildPredictedVsActualReport, historyToSnapshots, historyToResetActuals,
 } from "./fleet-predicted-vs-actual.js";
 import type { FleetAdmissionLevel } from "./lane-capacity/fleet-admission.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
@@ -1794,7 +1794,8 @@ export function createPlugin() {
               evaluatedAt: now,
               report,
               fleetPreviousLevel: nextFleetPreviousLevel(fleetPreviousLevel, report.fleetProposal),
-              fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal),
+              fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),
+              governorLevels: asRecord(previous).governorLevels,
             });
           } catch {
             // Do not echo potentially sensitive caller input in logs.
@@ -3544,15 +3545,10 @@ export function createPlugin() {
 
       // --- daily fleet predicted-vs-actual report (shadow only) ------
       //
-      // Read-only artifact: per-lane end-of-window projections snapshotted
-      // during the week (the rolling shadow history) against the current
-      // weekly utilization, plus the shadow proposal level against the host
-      // governor level. It writes the artifact and nothing else — no
-      // admission state, no selection input, no actuation. A company with no
-      // shadow history yet gets an honest empty table, not an error. The host
-      // governor snapshots live outside this plugin's state; until an
-      // ingestion records them on the stored shadow document the level
-      // compare reads governor-unknown rather than guessing.
+      // Compare recorded projections and source readings from each completed
+      // weekly window. Never substitute today's ledger or a future reset for
+      // an endpoint measurement. Missing history/governor ingestion remains
+      // explicit unknown. Only the report artifact is written; no actuation.
       ctx.jobs.register(JOB_KEYS.fleetAdmissionDaily, async () => {
         const ranAt = new Date().toISOString();
         for (const company of listKnownCompanies()) {
@@ -3565,32 +3561,15 @@ export function createPlugin() {
               stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
             }));
             const history = storedFleetHistory(shadowStored);
-            const ledger = await readLaneLedger(company.id);
-            const lastProposal = (shadowStored.report as
-              | { fleetProposal?: { soonestResetAt?: unknown } }
-              | undefined)?.fleetProposal;
-            const soonestReset = typeof lastProposal?.soonestResetAt === "string"
-              ? lastProposal.soonestResetAt
-              : null;
-            const windowReset = soonestReset ?? ranAt;
-            const windowStart = new Date(Date.parse(windowReset) - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const inWindow = history.filter((entry) => entry.asOf >= windowStart && entry.asOf <= windowReset);
             const report = buildPredictedVsActualReport({
-              windowStart,
-              windowReset,
               asOf: ranAt,
-              snapshots: historyToSnapshots(inWindow),
-              actuals: resetActualsForLedger(ledger, ranAt),
+              snapshots: historyToSnapshots(history),
+              actuals: historyToResetActuals(history),
               proposals: history.map((entry) => ({ level: entry.level, asOf: entry.asOf })),
               governorLevels: Array.isArray((shadowStored as Record<string, unknown>).governorLevels)
                 ? (shadowStored as Record<string, unknown>).governorLevels as Array<{ level: FleetAdmissionLevel; asOf: string }>
                 : [],
             });
-            if (soonestReset === null) {
-              report.limitations.push(
-                "No shadow proposal reset on record: the window edges are inferred from the run time, not a lane reset.",
-              );
-            }
             await ctx.state.set({
               scopeKind: "company" as const,
               scopeId: company.id,

@@ -145,6 +145,41 @@ describe("fleet admission shadow wiring", () => {
     expect(typeof fleet.asOf).toBe("string");
   });
 
+  it("weights projections by the weekly allowance rather than equal-weight fallback", () => {
+    const heavy = { ...healthyRecord("heavy", 0.9), weight: undefined,
+      windows: [{ name: "weekly", allowance_weight: 100 }] };
+    const light = { ...healthyRecord("light", 0.1), weight: undefined,
+      windows: [{ name: "weekly", allowance_weight: 1 }] };
+    const verdict = verdictFor("alpha", [heavy, light]);
+    expect(verdict.serviceable).toBe(true);
+    expect(verdict.accounts.map(account => account.weight)).toEqual([null, null]);
+    const lanes = fleetLaneInputsForLedger(ledgerOf(verdict));
+    const report = reportDecisionAdmissionShadow(shadowInput(), Date.parse(AS_OF), [], { lanes })!;
+    expect(report.fleetProposal!.projected).toBeCloseTo((0.9 * 100 + 0.1) / 101 / (4.5 / 7));
+    expect(report.fleetProposal!.level).toBe("hold");
+    expect(verdict.accounts.map(account => account.weight)).toEqual([null, null]);
+  });
+
+  it("withholds unknown and five-hour-only lanes without losing their inventory", () => {
+    const unknown = verdictFor("unknown", [healthyRecord("known-peer", 0.1),
+      { ...healthyRecord("unknown", 0.1), weight: undefined }]);
+    const fiveHour = verdictFor("five-hour-only", [{
+      lane: "five", health: "healthy", weight: 20,
+      five_hour_utilization: 0.1, five_hour_resets_at: "2026-10-03T15:00:00.000Z",
+    }]);
+    const healthy = verdictFor("healthy", [healthyRecord("weekly", 0.3)]);
+    expect(unknown.serviceable).toBeNull();
+    expect(fiveHour.accounts[0]!.governingWindow).toBe("five-hour");
+    const report = reportDecisionAdmissionShadow(shadowInput(), Date.parse(AS_OF), [], {
+      lanes: fleetLaneInputsForLedger(ledgerOf(unknown, fiveHour, healthy)),
+    })!;
+    expect(report.fleetProposal!.spendOrder).toEqual(["healthy"]);
+    expect(report.fleetProposal!.withheld).toEqual(["unknown", "five-hour-only"]);
+    expect(report.fleetProposal!.soonestResetAt).toBe(RESET_AT);
+    expect(report.fleetProposal!.inventory.lanes).toHaveLength(3);
+    expect(report.fleetProposal!.inventory.computableAccountCount).toBe(1);
+  });
+
   it("unknown records nothing and changes nothing", () => {
     const stale = verdictFor("alpha", [healthyRecord("alpha-1", 0.3)], AS_OF, "2026-09-01T12:00:00.000Z");
     expect(stale.reason).toBe("snapshot-stale");

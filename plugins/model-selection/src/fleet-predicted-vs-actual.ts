@@ -1,30 +1,23 @@
-import { laneCombinedUtilization, type LaneLedger } from "./engine/pacing.js";
+import type { LaneLedger } from "./engine/pacing.js";
 import { BURN_DOWN_TARGET_HIGH, BURN_DOWN_TARGET_LOW } from "./lane-capacity/burn-down.js";
 import type { FleetAdmissionLevel } from "./lane-capacity/fleet-admission.js";
-import type { FleetHistoryEntry } from "./fleet-admission-shadow.js";
+import { WEEK_SECONDS, weeklyLaneReadingsForLedger, type FleetHistoryEntry } from "./fleet-admission-shadow.js";
 
-/**
- * Daily predicted-vs-actual report (read-only artifact). Compares, per lane,
- * the end-of-window `projected` snapshotted during the week against the
- * actual weekly utilization read at the reset, and the shadow proposal level
- * against the host weekly-quota governor level — as a mismatch table.
- *
- * Pure and read-only: every input is caller-supplied. Missing inputs read as
- * unknown, never as a guess. In particular the host governor snapshots live
- * outside this plugin's state; until an ingestion writes them into the stored
- * document the level-compare column reports governor-unknown rather than
- * inventing agreement or mismatch.
- */
+/** Source observations within one normal poll freshness budget of reset can validate the landing. */
+export const RESET_READING_MAX_AGE_MS = 15 * 60 * 1000;
 
 export interface LaneProjectionSnapshot {
   laneId: string;
   projected: number | null;
+  resetAt: string | null;
   asOf: string;
 }
 
 export interface LaneResetActual {
   laneId: string;
   utilization: number | null;
+  resetAt: string | null;
+  asOf: string | null;
 }
 
 export interface LevelSnapshot {
@@ -34,27 +27,26 @@ export interface LevelSnapshot {
 
 export interface PredictedVsActualRow {
   laneId: string;
-  /** Latest end-of-window projection snapshotted at or before the reset. */
+  windowStart: string | null;
+  resetAt: string | null;
+  status: "unknown-window" | "pending-reset" | "reset-reading-unavailable" | "reset-observed";
   projected: number | null;
   projectedAsOf: string | null;
-  /** Weekly utilization read at the reset. */
   actualUtilization: number | null;
-  /** actual minus projected; null when either side is unknown. */
+  actualAsOf: string | null;
   projectionError: number | null;
-  /** Whether the actual landed in the 98-100% band; null when unknown. */
   withinTargetBand: boolean | null;
 }
 
 export interface PredictedVsActualReport {
   mode: "read-only";
-  windowStart: string;
-  windowReset: string;
   asOf: string;
   rows: PredictedVsActualRow[];
   fleetLevels: {
     proposalLevel: Exclude<FleetAdmissionLevel, "unknown"> | null;
+    proposalAsOf: string | null;
     governorLevel: Exclude<FleetAdmissionLevel, "unknown"> | null;
-    /** True/false when both levels are known, else null (never a guess). */
+    governorAsOf: string | null;
     match: boolean | null;
   };
   limitations: string[];
@@ -64,12 +56,14 @@ function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function latestAtOrBefore<T extends { asOf: string }>(entries: readonly T[], atOrBeforeMs: number): T | null {
+function latestAtOrBefore<T extends { asOf: string | null }>(
+  entries: readonly T[], atOrBeforeMs: number, notBeforeMs = Number.NEGATIVE_INFINITY,
+): T | null {
   let best: T | null = null;
   let bestMs = Number.NEGATIVE_INFINITY;
   for (const entry of entries) {
-    const ms = Date.parse(entry.asOf);
-    if (!Number.isFinite(ms) || ms > atOrBeforeMs) continue;
+    const ms = Date.parse(entry.asOf ?? "");
+    if (!Number.isFinite(ms) || ms > atOrBeforeMs || ms < notBeforeMs) continue;
     if (ms > bestMs) {
       best = entry;
       bestMs = ms;
@@ -79,100 +73,98 @@ function latestAtOrBefore<T extends { asOf: string }>(entries: readonly T[], atO
 }
 
 function knownLevel(snapshot: LevelSnapshot | null): Exclude<FleetAdmissionLevel, "unknown"> | null {
-  if (!snapshot || snapshot.level === "unknown") return null;
-  return snapshot.level;
+  const level = snapshot?.level;
+  return level === "boost" || level === "normal" || level === "hold" || level === "conserve" ? level : null;
 }
 
 export function historyToSnapshots(history: readonly FleetHistoryEntry[]): LaneProjectionSnapshot[] {
-  return history.flatMap((entry) =>
-    entry.lanes.map((lane) => ({ laneId: lane.laneId, projected: lane.projected, asOf: entry.asOf })),
-  );
+  return history.flatMap(entry => entry.lanes.map(lane => ({
+    laneId: lane.laneId, projected: lane.projected, resetAt: lane.resetAt ?? null,
+    asOf: lane.observedAt ?? entry.asOf,
+  })));
+}
+
+export function historyToResetActuals(history: readonly FleetHistoryEntry[]): LaneResetActual[] {
+  return history.flatMap(entry => entry.lanes.map(lane => ({
+    laneId: lane.laneId, utilization: lane.utilization ?? null,
+    resetAt: lane.resetAt ?? null, asOf: lane.observedAt ?? null,
+  })));
+}
+
+/** Reads weekly usage, never the serviceability-adjusted combined-utilization score. */
+export function resetActualsForLedger(ledger: LaneLedger, asOf: string): LaneResetActual[] {
+  return weeklyLaneReadingsForLedger(ledger)
+    .filter(reading => Date.parse(reading.observedAt!) <= Date.parse(asOf))
+    .map(reading => ({ laneId: reading.laneId, utilization: reading.utilization ?? null,
+      resetAt: reading.resetAt ?? null, asOf: reading.observedAt ?? null }));
 }
 
 /**
- * Current weekly utilization per lane, from the live pace ledger: the
- * capacity-weighted governing-window reading (unserviceable accounts count
- * as fully spent). Lanes with no reading report null, never a guess. Read
- * at the reset this is the "actual" the projections are judged against;
- * mid-window it is a point-in-time reading, labelled by `asOf`.
+ * Read-only mismatch table, keyed by lane AND weekly reset. Pending windows,
+ * missing endpoint samples and old history without reset identity are explicit
+ * unknowns. The daily clock never relabels a mid-week reading as a reset actual.
  */
-export function resetActualsForLedger(ledger: LaneLedger, asOf: string): LaneResetActual[] {
-  return Object.values(ledger)
-    .filter((entry) => entry.verdict !== null)
-    .map((entry) => {
-      let utilization: number | null = null;
-      try {
-        utilization = laneCombinedUtilization(entry.verdict!, entry.fetchedAt)?.utilization ?? null;
-      } catch {
-        utilization = null;
-      }
-      return { laneId: entry.laneId, utilization };
-    })
-    .sort((a, b) => a.laneId.localeCompare(b.laneId));
-}
-
 export function buildPredictedVsActualReport(input: {
-  windowStart: string;
-  windowReset: string;
   asOf: string;
   snapshots: readonly LaneProjectionSnapshot[];
   actuals: readonly LaneResetActual[];
   proposals: readonly LevelSnapshot[];
   governorLevels: readonly LevelSnapshot[];
 }): PredictedVsActualReport {
-  const resetMs = Date.parse(input.windowReset);
-  const laneIds = [...new Set([...input.snapshots.map((s) => s.laneId), ...input.actuals.map((a) => a.laneId)])].sort();
-  const actualByLane = new Map(input.actuals.map((a) => [a.laneId, a.utilization]));
-
-  const rows: PredictedVsActualRow[] = laneIds.map((laneId) => {
-    const snapshot = latestAtOrBefore(
-      input.snapshots.filter((s) => s.laneId === laneId),
-      resetMs,
-    );
-    const actual = actualByLane.get(laneId) ?? null;
-    const projected = snapshot?.projected ?? null;
-    const actualUtilization = finite(actual) ? actual : null;
-    const projectionError = finite(projected) && actualUtilization !== null ? actualUtilization - projected : null;
-    return {
-      laneId,
-      projected: finite(projected) ? projected : null,
-      projectedAsOf: snapshot ? snapshot.asOf : null,
-      actualUtilization,
-      projectionError,
-      withinTargetBand:
-        actualUtilization === null
-          ? null
+  const asOfMs = Date.parse(input.asOf);
+  const windows = new Map<string, { laneId: string; resetAt: string | null }>();
+  for (const entry of [...input.snapshots, ...input.actuals]) {
+    const resetAt = Number.isFinite(Date.parse(entry.resetAt ?? "")) ? entry.resetAt : null;
+    windows.set(JSON.stringify([entry.laneId, resetAt]), { laneId: entry.laneId, resetAt });
+  }
+  const rows: PredictedVsActualRow[] = [...windows.values()]
+    .sort((a, b) => a.laneId.localeCompare(b.laneId) || (a.resetAt ?? "").localeCompare(b.resetAt ?? ""))
+    .map(({ laneId, resetAt }) => {
+      const resetMs = Date.parse(resetAt ?? "");
+      const startMs = resetMs - WEEK_SECONDS * 1000;
+      const snapshot = latestAtOrBefore(input.snapshots.filter(s => s.laneId === laneId && s.resetAt === resetAt),
+        Math.min(resetMs, asOfMs), startMs);
+      const actual = latestAtOrBefore(input.actuals.filter(a => a.laneId === laneId && a.resetAt === resetAt),
+        Math.min(resetMs, asOfMs), startMs);
+      const completed = Number.isFinite(resetMs) && Number.isFinite(asOfMs) && resetMs <= asOfMs;
+      const resetObserved = completed && actual !== null && finite(actual.utilization) &&
+        resetMs - Date.parse(actual.asOf ?? "") <= RESET_READING_MAX_AGE_MS;
+      const actualUtilization = resetObserved ? actual!.utilization : null;
+      const projected = finite(snapshot?.projected) ? snapshot.projected : null;
+      return {
+        laneId, resetAt, windowStart: Number.isFinite(startMs) ? new Date(startMs).toISOString() : null,
+        status: resetAt === null ? "unknown-window" : !completed ? "pending-reset"
+          : resetObserved ? "reset-observed" : "reset-reading-unavailable",
+        projected, projectedAsOf: snapshot?.asOf ?? null,
+        actualUtilization, actualAsOf: resetObserved ? actual!.asOf : null,
+        projectionError: projected !== null && actualUtilization !== null ? actualUtilization - projected : null,
+        withinTargetBand: actualUtilization === null ? null
           : actualUtilization >= BURN_DOWN_TARGET_LOW && actualUtilization <= BURN_DOWN_TARGET_HIGH,
-    };
-  });
+      };
+    });
 
-  const proposalLevel = knownLevel(latestAtOrBefore(input.proposals, resetMs));
-  const governorLevel = knownLevel(latestAtOrBefore(input.governorLevels, resetMs));
-
+  // Compare levels from the same observation horizon, never a current proposal
+  // against an arbitrarily old governor snapshot (or the soonest lane reset).
+  const proposal = latestAtOrBefore(input.proposals, asOfMs);
+  const governor = latestAtOrBefore(input.governorLevels, asOfMs);
+  const proposalLevel = knownLevel(proposal);
+  const governorLevel = knownLevel(governor);
+  const aligned = proposal !== null && governor !== null &&
+    Math.abs(Date.parse(proposal.asOf) - Date.parse(governor.asOf)) <= RESET_READING_MAX_AGE_MS;
   const limitations = [
     "Projections are linear spot readouts (utilization/elapsed), not forecasts; bursty consumption deviates from them.",
-    "Actuals are point-in-time weekly utilization readings; only a reading taken at the reset validates the landing.",
+    "Reset actuals use the last source observation at or before a completed weekly reset, within 15 minutes; older or missing readings are unknown, not a validated landing.",
   ];
-  if (input.governorLevels.length === 0) {
-    limitations.push(
-      "Host governor snapshots unavailable for this window: level compare is governor-unknown, not agreement.",
-    );
+  if (governorLevel === null || !aligned) {
+    limitations.push("Host governor snapshots unavailable or unaligned: level compare is governor-unknown, not agreement.");
   }
-  if (input.proposals.length === 0) {
-    limitations.push("No shadow proposal recorded for this window: level compare is deferred, not agreement.");
-  }
+  if (proposalLevel === null) limitations.push("No shadow proposal recorded: level compare is deferred, not agreement.");
 
   return {
-    mode: "read-only",
-    windowStart: input.windowStart,
-    windowReset: input.windowReset,
-    asOf: input.asOf,
-    rows,
-    fleetLevels: {
-      proposalLevel,
-      governorLevel,
-      match: proposalLevel !== null && governorLevel !== null ? proposalLevel === governorLevel : null,
-    },
+    mode: "read-only", asOf: input.asOf, rows,
+    fleetLevels: { proposalLevel, proposalAsOf: proposal?.asOf ?? null,
+      governorLevel, governorAsOf: governor?.asOf ?? null,
+      match: proposalLevel !== null && governorLevel !== null && aligned ? proposalLevel === governorLevel : null },
     limitations,
   };
 }

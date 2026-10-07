@@ -3846,6 +3846,43 @@ const mutants = [
     from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
     to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
   },
+  // Worker-level wiring must carry the state; helper-only tests cannot prove it.
+  {
+    name: "fleet-worker-drops-previous-level",
+    file: "src/worker.ts",
+    from: "            const fleetPreviousLevel = storedFleetPreviousLevel(previous);",
+    to: "            const fleetPreviousLevel = null;",
+  },
+  {
+    name: "fleet-worker-previous-level-rescoped-away-from-proposer",
+    file: "src/worker.ts",
+    from: "{ lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: fleetPreviousLevel, asOf: nowIso },",
+    to: "{ lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: null, asOf: nowIso },",
+  },
+  {
+    name: "fleet-worker-drops-history",
+    file: "src/worker.ts",
+    from: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),",
+    to: "fleetHistory: [],",
+  },
+  {
+    name: "fleet-worker-drops-weekly-observation-wiring",
+    file: "src/worker.ts",
+    from: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),",
+    to: "fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal),",
+  },
+  {
+    name: "fleet-worker-daily-artifact-written-to-wrong-scope",
+    file: "src/worker.ts",
+    from: "              stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,\n            }, { ranAt, report });",
+    to: "              stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,\n            }, { ranAt, report });",
+  },
+  {
+    name: "fleet-shadow-backstop-cap-rescoped-to-larger-inventory",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      capped: proposal.backstop.capped,",
+    to: "      capped: proposal.backstop.capped && proposal.inventory.knownAccountCount > 2,",
+  },
   // Shadow fleet admission wiring: the proposal is advisory, so every one of
   // these mutants still produces a plausible-looking report — the level just
   // stops meaning what the deadband and the backstop say. Killed by the
