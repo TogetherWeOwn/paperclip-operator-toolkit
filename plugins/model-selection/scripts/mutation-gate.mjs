@@ -3907,8 +3907,8 @@ const mutants = [
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a repeated id survives into the resolved list.
     name: "exempt-agent-resolver-skips-dedupe",
     file: "src/config/resolve.ts",
-    from: "if (id.length > 0 && !out.includes(id)) out.push(id);",
-    to: "if (id.length > 0) out.push(id);",
+    from: "if (!out.includes(lower)) out.push(lower);",
+    to: "out.push(lower);",
   },
   {
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the schema accepts a list with a repeated id.

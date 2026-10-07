@@ -228,8 +228,8 @@ function fieldList(value: unknown, fallback: readonly string[]): string[] {
 }
 
 /**
- * Trimmed, de-duplicated, non-empty strings, in first-seen order. Anything that
- * is not a string is dropped here; the config schema is what rejects it loudly
+ * Trimmed, non-empty strings, in order. Anything that is not a string is
+ * dropped here; the config schema is what rejects it loudly
  * (`items: { type: "string" }`), so a malformed list never reaches this far on
  * the install path.
  */
@@ -239,7 +239,7 @@ function stringList(value: unknown): string[] {
   for (const entry of value) {
     if (typeof entry !== "string") continue;
     const id = entry.trim();
-    if (id.length > 0 && !out.includes(id)) out.push(id);
+    if (id.length > 0) out.push(id);
   }
   return out;
 }
@@ -248,7 +248,8 @@ function stringList(value: unknown): string[] {
  * Host agent ids are lowercase UUIDs. An operator-pasted uppercase id passes
  * the UUID check (which ignores case) yet never matches, so the router would
  * pin the agent it was meant to leave alone. Lowercasing at read keeps the
- * match working; de-duplication is case-insensitive to match.
+ * match working. This is also where the list is de-duplicated, case-insensitively
+ * and in first-seen order.
  */
 function lowercaseIds(ids: string[]): string[] {
   const out: string[] = [];
