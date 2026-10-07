@@ -210,6 +210,26 @@ export interface SelectionConfig {
     /** The lower floor a matching wake reason gets. Must be below the card's judged tier to take effect. */
     floorTier: Tier;
   };
+  /**
+   * `selection.exemptAgentIds`. A decision for an assignee on this list holds at
+   * the agent's own model: the router makes no first pin and no repin for it.
+   * Absent or empty = no agent is exempt, and every decision is byte-identical
+   * to the engine before this field existed.
+   *
+   * This is the agent-level counterpart of the `pin:operator` label. The label
+   * is a per-card mark that lands after the card exists, so it protects only a
+   * repin; this list is read at decision time, so it protects the first pin too.
+   */
+  exemptAgentIds?: readonly string[];
+}
+
+/**
+ * True when `agentId` is on the `exemptAgentIds` list. A null/empty agent id is
+ * never exempt (an unassigned card has no agent to exempt), and an absent list
+ * exempts nobody.
+ */
+export function isExemptAgent(exemptAgentIds: readonly string[] | undefined, agentId: string | null | undefined): boolean {
+  return !!agentId && !!exemptAgentIds && exemptAgentIds.includes(agentId);
 }
 
 export interface SelectInput {
@@ -552,6 +572,18 @@ export function selectModel(input: SelectInput): SelectionDecision {
   if (config.models.length === 0) {
     trace.push("no models configured for this company");
     return { ...base, outcome: "disabled" };
+  }
+
+  // An exempt agent is never routed: no pin, no repin, no run-scoped switch.
+  // Before every gate below on purpose — an exempt agent must not reach the
+  // sticky or operator-override branches either, because both can end in a
+  // write. `held-at-floor` is the outcome every caller already reads as "write
+  // nothing; the agent's own model answers" (planApply declines it, the pin
+  // passes skip it, the run-scoped hook returns `keep`).
+  if (isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {
+    const reason = "assignee is on selection.exemptAgentIds: the router makes no pin and the agent's own model is used";
+    trace.push(reason);
+    return { ...base, outcome: "held-at-floor", heldReason: reason };
   }
 
   // Tiers are minimum capability requirements. T1 is the highest requirement;

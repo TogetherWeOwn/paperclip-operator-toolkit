@@ -78,6 +78,19 @@ export const SELECTION_CONFIG_SCHEMA = {
         agentEnvContextTokens: { type: "integer", minimum: 1, default: 1000000 },
         /** Fraction of a narrower model's context window where Claude Code should compact. */
         compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 },
+        /**
+         * Agent ids the router never routes: no first pin, no repin, no
+         * run-scoped switch for a card or run assigned to one of them, so the
+         * agent's own model is used. The agent-level counterpart of the
+         * per-card `pin:operator` label, which lands after the card exists and
+         * so protects only a repin. Empty (default) exempts nobody.
+         */
+        exemptAgentIds: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          uniqueItems: true,
+          default: [],
+        },
       },
       default: {},
     },
