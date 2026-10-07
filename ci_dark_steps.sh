@@ -45,8 +45,8 @@ set -uo pipefail
 # check that did not happen must never read as a clean answer (TOG-357).
 #
 # Reads: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_JOB,
-#        GITHUB_STEP_SUMMARY, GH_TOKEN (needs actions:read).
-# Requires curl and jq. No credential ever reaches argv (TOG-200).
+#        GITHUB_JOB_NAME, GITHUB_STEP_SUMMARY, GH_TOKEN (needs actions:read).
+# Requires curl and jq; live API retries also require sleep. Credentials stay in a header file.
 # ===========================================================================
 
 ME="$(basename "${BASH_SOURCE[0]}")"
@@ -98,6 +98,41 @@ trap 'rm -rf "$TMP"' EXIT
 # --- obtain the job object ----------------------------------------------------
 # Either from a reporter-instrumented file (tests and re-analysis of a run with
 # this reporter) or from the API for the job this script is running inside.
+LIVE_API=0
+fetch_api_job() {
+  local -a timeout_args=()
+  if [[ $# -gt 0 ]]; then
+    timeout_args=(--connect-timeout "$1" --max-time "$1")
+  fi
+  CODE="$(curl "${timeout_args[@]}" -sS -o "$TMP/jobs.json" -w '%{http_code}' -H @"$HDR" "$URL" 2>"$TMP/curl.err")"
+  [[ "$CODE" == "200" ]] || refuse "listing jobs returned HTTP $CODE (actions:read missing?)"
+
+  if [[ -n "${API_JOB_ID:-}" ]]; then
+    jq --arg id "$API_JOB_ID" \
+       '[.jobs[] | select((.id | tostring) == $id)] | first // empty' \
+       "$TMP/jobs.json" > "$TMP/job.json"
+  else
+    # Match by the workflow KEY where the API exposes it, else by display name.
+    # `GITHUB_JOB` is the key (`offline-suites`); `.name` is the display name
+    # ("Offline suites"), so try both rather than assuming they match.
+    jq --arg key "$GITHUB_JOB" --arg nm "${GITHUB_JOB_NAME:-}" \
+       '[.jobs[] | select(.name == $key or .name == $nm)] | first // empty' \
+       "$TMP/jobs.json" > "$TMP/job.json"
+    if [[ ! -s "$TMP/job.json" ]]; then
+      # Fall back to the only still-running job, which is this one.
+      jq '[.jobs[] | select(.status != "completed")] | first // empty' \
+         "$TMP/jobs.json" > "$TMP/job.json"
+    fi
+  fi
+  [[ -s "$TMP/job.json" ]] || refuse "could not identify job '${GITHUB_JOB:-?}' in run ${GITHUB_RUN_ID:-?}"
+}
+
+validate_job() {
+  jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
+     "$TMP/job.json" >/dev/null 2>&1 \
+    || refuse "the job object carries no step list; nothing was measured"
+}
+
 if [[ -n "$JOB_JSON" ]]; then
   [[ -s "$JOB_JSON" ]] || refuse "job json is missing or empty: $JOB_JSON"
   cp "$JOB_JSON" "$TMP/job.json"
@@ -107,6 +142,7 @@ else
   [[ -n "${GITHUB_JOB:-}" ]]     || refuse "GITHUB_JOB is unset"
   [[ -n "${GH_TOKEN:-}" ]]       || refuse "GH_TOKEN is unset; actions:read is required to list job steps"
 
+  LIVE_API=1
   ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
   # The token goes in a header FILE, never in argv — /proc/*/cmdline is
   # world-readable and this host is shared (TOG-200).
@@ -115,26 +151,11 @@ else
   printf 'Accept: application/vnd.github+json\n' >> "$HDR"
 
   URL="$API/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$ATTEMPT/jobs?per_page=100"
-  CODE="$(curl -sS -o "$TMP/jobs.json" -w '%{http_code}' -H @"$HDR" "$URL" 2>"$TMP/curl.err")"
-  [[ "$CODE" == "200" ]] || refuse "listing jobs returned HTTP $CODE (actions:read missing?)"
-
-  # Match the job by its workflow KEY where the API exposes it, else by name.
-  # `GITHUB_JOB` is the key (`offline-suites`); `.name` is the display name
-  # ("Offline suites"), so try both rather than assuming they match.
-  jq --arg key "$GITHUB_JOB" --arg nm "${GITHUB_JOB_NAME:-}" \
-     '[.jobs[] | select(.name == $key or .name == $nm)] | first // empty' \
-     "$TMP/jobs.json" > "$TMP/job.json"
-  if [[ ! -s "$TMP/job.json" ]]; then
-    # Fall back to the only still-running job, which is this one.
-    jq '[.jobs[] | select(.status != "completed")] | first // empty' \
-       "$TMP/jobs.json" > "$TMP/job.json"
-  fi
-  [[ -s "$TMP/job.json" ]] || refuse "could not identify job '$GITHUB_JOB' in run $GITHUB_RUN_ID"
+  fetch_api_job 5
+  API_JOB_ID="$(jq -r '.id // empty' "$TMP/job.json")"
 fi
 
-jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
-   "$TMP/job.json" >/dev/null 2>&1 \
-  || refuse "the job object carries no step list; nothing was measured"
+validate_job
 
 # --- classify -----------------------------------------------------------------
 # Every count below is taken over workflow gates: steps before the reporter,
@@ -144,16 +165,85 @@ jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
 # than a `Post ` name prefix: a workflow gate can legitimately start with that.
 # TOTAL and DARK must use the same set; otherwise the outage fixture reports a
 # dark count that cannot be reconciled with its executed-step tally.
+load_gate_set() {
+  REPORTER_NO="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .number] | last // empty' "$TMP/job.json")"
+  REPORTER_STATUS="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .status] | last // empty' "$TMP/job.json")"
+  REPORTER_VALID=0
+  if [[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "$LIVE_API" -eq 0 || "$REPORTER_STATUS" == "in_progress" ]]; then
+      REPORTER_VALID=1
+    fi
+  fi
+  if [[ "$REPORTER_VALID" -ne 1 ]]; then
+    [[ "$LIVE_API" -eq 1 ]] \
+      || refuse "the reporter step is missing; runner lifecycle boundary is unknown"
+    : > "$TMP/gate.json"
+    TOTAL=0
+    return 0
+  fi
+  jq --argjson reporter "$REPORTER_NO" \
+    '[.steps[] | select((.name != "Set up job" or .number != 1) and .number < $reporter)]' \
+    "$TMP/job.json" > "$TMP/gate.json"
+  TOTAL="$(jq 'length' "$TMP/gate.json")"
+  [[ "$TOTAL" -gt 0 ]] || refuse "the gate set is empty; nothing was measured"
+}
+
+has_ambiguous_gate() {
+  if [[ "$LIVE_API" -eq 1 && "$REPORTER_VALID" -ne 1 ]]; then
+    return 0
+  fi
+  jq -e '[.[] | select(.conclusion == null)] | length > 0' \
+    "$TMP/gate.json" >/dev/null
+}
+
+load_gate_set
+if [[ "$LIVE_API" -eq 1 ]] && has_ambiguous_gate; then
+  command -v sleep >/dev/null 2>&1 || refuse "sleep is required to settle live step data"
+  # A null conclusion can mean an unreached fail-fast gate or a just-run gate
+  # whose API update has not landed yet. The reporter runs after every gate, so
+  # even an in_progress gate status may be stale. Re-read the live view five
+  # times. Only stable nulls after a confirmed failed gate are safe to call dark;
+  # otherwise refuse rather than emit a false error on a green job. Five
+  # 1-second sleeps and 2-second request limits bound refreshes to 15 seconds.
+  previous_signature="$(jq -c '[.steps[] | [.number, .name, .status, .conclusion]]' "$TMP/job.json")"
+  stable_repeats=0
+  settled=0
+  for ((poll=1; poll<=5; poll++)); do
+    sleep 1
+    fetch_api_job 2
+    validate_job
+    load_gate_set
+    if ! has_ambiguous_gate; then
+      settled=1
+      break
+    fi
+
+    signature="$(jq -c '[.steps[] | [.number, .name, .status, .conclusion]]' "$TMP/job.json")"
+    if [[ "$signature" == "$previous_signature" ]]; then
+      stable_repeats=$((stable_repeats + 1))
+    else
+      stable_repeats=0
+    fi
+    previous_signature="$signature"
+  done
+  if [[ "$stable_repeats" -ge 2 ]]; then
+    [[ "$REPORTER_VALID" -eq 1 ]] \
+      || refuse "reporter boundary did not settle within 15 seconds; refusing to guess which steps are gates"
+    jq -e '
+      . as $steps
+      | ([$steps[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .number) as $abort
+      | $abort != null
+        and ([$steps[] | select(.conclusion == null)] | all(.number > $abort and .status != "in_progress"))
+    ' "$TMP/gate.json" >/dev/null \
+      || refuse "stable null gate steps do not follow a confirmed abort; refusing to classify them as dark"
+    settled=1
+  fi
+  [[ "$settled" -eq 1 ]] \
+    || refuse "gate steps did not settle within 15 seconds; refusing to guess which null conclusions are dark"
+fi
+
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
-REPORTER_NO="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .number] | last // empty' "$TMP/job.json")"
-[[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]] \
-  || refuse "the reporter step is missing; runner lifecycle boundary is unknown"
-jq --argjson reporter "$REPORTER_NO" \
-  '[.steps[] | select((.name != "Set up job" or .number != 1) and .number < $reporter)]' \
-  "$TMP/job.json" > "$TMP/gate.json"
-FULL="$(jq     '[.steps[]] | length'                              "$TMP/job.json")"
-TOTAL="$(jq 'length' "$TMP/gate.json")"
-[[ "$TOTAL" -gt 0 ]] || refuse "the gate set is empty; nothing was measured"
+FULL="$(jq '[.steps[]] | length' "$TMP/job.json")"
 RAN="$(jq '[.[] | select(.conclusion == "success")] | length' "$TMP/gate.json")"
 FAILED="$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | length' "$TMP/gate.json")"
 # Dark means "registered but never executed": a skipped step, or a null

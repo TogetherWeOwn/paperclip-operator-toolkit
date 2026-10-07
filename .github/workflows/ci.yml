@@ -1643,6 +1643,52 @@ jobs:
             's/] | last \/\/ empty/] | first \/\/ empty/' \
             'a same-named reporter label gate remains in the gate count' || rc=1
 
+          # 15. A just-completed gate can still read pending/null from the API.
+          #     Removing the live refresh must make the lag fixture raise ::error.
+          dark_mutation "api-lagging-view-classified-dark" ci_dark_steps.sh \
+            's/if \[\[.*has_ambiguous_gate; then/if false; then/' \
+            'lagging pending/null API view is retried before dark classification' || rc=1
+
+          # 16. A preceding gate can remain in_progress in a stale API snapshot.
+          dark_mutation "live-in-progress-gate-not-refreshed" ci_dark_steps.sh \
+            's/select(.conclusion == null)/select(.conclusion == null and .status != "in_progress")/' \
+            'the live in-progress gate settles after one refresh' || rc=1
+
+          # 17. Stable nulls without an observed abort must not become a false error.
+          dark_mutation "stable-stale-green-reported-dark" ci_dark_steps.sh \
+            's/|| refuse "stable null gate steps do not follow a confirmed abort; refusing to classify them as dark"/|| true/' \
+            'a stable stale-green API view is refused rather than called dark' || rc=1
+
+          # 18. An invalid reporter boundary must keep the live view unsettled.
+          dark_mutation "stale-reporter-boundary-not-refreshed" ci_dark_steps.sh \
+            's/if \[\[ "\$LIVE_API" -eq 1 && "\$REPORTER_VALID" -ne 1 \]\]; then/if false; then/' \
+            'the refreshed reporter boundary includes every workflow gate' || rc=1
+
+          # 19. A same-named completed gate cannot stand in for the live reporter.
+          dark_mutation "stale-same-name-reporter-accepted" ci_dark_steps.sh \
+            's/if \[\[ "\$LIVE_API" -eq 0 || "\$REPORTER_STATUS" == "in_progress" \]\]; then/if true; then/' \
+            'the refreshed reporter boundary includes every workflow gate' || rc=1
+
+          # 20. Keep the second reporter under if: always(), independently pinned.
+          dark_mutation "runbook-reporter-if-always-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran/{n;/if: always()/d;} }' \
+            'the runbook-gates reporter step is wired with if: always\(\)' || rc=1
+
+          # 21. The second reporter also needs its own Actions token mapping.
+          dark_mutation "runbook-reporter-token-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran/{n;n;n;/GH_TOKEN:/d;} }' \
+            'the runbook-gates reporter step receives the Actions token' || rc=1
+
+          # 22. The second reporter must keep invoking the script.
+          dark_mutation "runbook-reporter-command-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran/{n;n;n;n;n;s#ci_dark_steps.sh report#true#;} }' \
+            'the runbook-gates reporter step invokes ci_dark_steps.sh' || rc=1
+
+          # 23. Listing job steps must stay within the read-only Actions grant.
+          dark_mutation "actions-read-permission-dropped" .github/workflows/ci.yml \
+            's/^  actions: read$/  actions: write/' \
+            'the workflow grants actions: read for the live reporter' || rc=1
+
           exit $rc
 
       # TOG-345. Whether two runs of one agent can implement one issue twice.

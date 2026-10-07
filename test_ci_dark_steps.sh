@@ -54,8 +54,9 @@
 # every reviewer learns to scroll past, which is the same failure as not having
 # it. So the green case is pinned as hard as the dark one.
 #
-# Offline by construction: every case is served from a recorded file via
-# --job-json. No network, no credential. Requires jq.
+# Offline by construction: file fixtures use --job-json, and the live API
+# polling cases use PATH-stubbed curl/sleep with a dummy token. No network or
+# real credential. Requires jq.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -303,7 +304,7 @@ assert $? "a Post-named workflow gate appears in the dark-step list" \
 # the configured reporter; an earlier same-named gate remains inside its boundary.
 jq '.steps = (.steps[0:4] + [{"conclusion":"skipped","name":"Report steps that never ran","number":5,"status":"completed"}] + (.steps[4:] | map(.number += 1)))' \
   "$LIVE_GREEN" > "$TMP/live-reporter-name-gate.json"
-OUT_R="$($TOOL report --job-json "$TMP/live-reporter-name-gate.json" 2>&1)"; RC=$?
+OUT_R="$("$TOOL" report --job-json "$TMP/live-reporter-name-gate.json" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a workflow gate sharing the reporter name still reports normally" "got exit $RC"
 grep -q '1 of 4 steps never ran' <<< "$OUT_R"
@@ -362,6 +363,328 @@ assert $? "the mixed live view omits its in-progress gate from the dark list" \
 grep -q 'Executed: 4 passed, 0 failed. In progress: 1. Not run: 1. Other outcomes: 0.' <<< "$OUT_M"
 assert $? "the mixed live view tally separates all gate states" \
   "the tally does not account for four passed, one running, and one dark gate"
+
+# ---------------------------------------------------------------------------
+hdr "The live API — allow completed gate updates to settle before classifying"
+
+mkdir -p "$TMP/mock-bin"
+cat > "$TMP/mock-bin/curl" <<'CURL_STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" >> "${CURL_ARGS_FILE:?}"
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$out" ]] || exit 97
+count=0
+if [[ -s "${CURL_COUNT_FILE:?}" ]]; then
+  IFS= read -r count < "$CURL_COUNT_FILE"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$CURL_COUNT_FILE"
+case "$count" in
+  1) response="${CURL_FIRST_RESPONSE:?}" ;;
+  2) response="${CURL_SECOND_RESPONSE:?}" ;;
+  *)
+    if [[ "${CURL_ALTERNATE_RESPONSES:-}" == "1" ]] && (( count % 2 == 0 )); then
+      response="${CURL_SECOND_RESPONSE:?}"
+    else
+      response="${CURL_REST_RESPONSE:-${CURL_SECOND_RESPONSE:?}}"
+    fi
+    ;;
+esac
+cp "$response" "$out"
+printf '200'
+CURL_STUB
+cat > "$TMP/mock-bin/sleep" <<'SLEEP_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SLEEP_ARGS_FILE:?}"
+exit 0
+SLEEP_STUB
+chmod +x "$TMP/mock-bin/curl" "$TMP/mock-bin/sleep"
+
+# If a stale live step list omits the running reporter but contains a
+# same-named workflow gate, that gate is not a safe lifecycle boundary.
+jq '(.steps[] | select(.name == "Finalize operator report")) |= (.status = "completed" | .conclusion = "success") | .id=41' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/reporter-settled-job.json"
+jq '{jobs:[.]}' "$TMP/reporter-settled-job.json" > "$TMP/reporter-settled-jobs.json"
+jq -n '{jobs:[{id:41,name:"Operator runbook gates",status:"in_progress",conclusion:null,steps:[{conclusion:"success",name:"Set up job",number:1,status:"completed"},{conclusion:"success",name:"Checkout",number:2,status:"completed"},{conclusion:"success",name:"Report steps that never ran",number:3,status:"completed"},{conclusion:"skipped",name:"Late workflow gate",number:4,status:"completed"},{conclusion:null,name:"Post Run cleanup",number:5,status:"queued"},{conclusion:null,name:"Complete job",number:6,status:"queued"}]}]}' \
+  > "$TMP/stale-reporter-jobs.json"
+OUT_STALE_REPORTER="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/stale-reporter-jobs.json" \
+  CURL_SECOND_RESPONSE="$TMP/reporter-settled-jobs.json" \
+  CURL_REST_RESPONSE="$TMP/reporter-settled-jobs.json" \
+  CURL_COUNT_FILE="$TMP/stale-reporter-count" \
+  CURL_ARGS_FILE="$TMP/stale-reporter-args" \
+  SLEEP_ARGS_FILE="$TMP/stale-reporter-sleeps" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="4" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a stale same-named gate is not accepted as the running reporter" "got exit $RC"
+! grep -q '::error' <<< "$OUT_STALE_REPORTER"
+assert $? "a stale reporter boundary is refreshed before dark-step classification" \
+  "the reporter classified the step list using a same-named gate"
+grep -q 'all 5 steps executed' <<< "$OUT_STALE_REPORTER"
+assert $? "the refreshed reporter boundary includes every workflow gate" \
+  "the report used the stale, earlier name match as its boundary"
+[[ "$(<"$TMP/stale-reporter-count")" -eq 2 ]]
+assert $? "a stale reporter boundary settles after one refresh" \
+  "expected an initial read and one refreshed API view"
+[[ "$(<"$TMP/stale-reporter-sleeps")" == "1" ]]
+assert $? "the stale reporter boundary waits before refreshing" \
+  "the reporter boundary was retried without a one-second wait"
+
+# A reporter marker that remains stale through the bounded window is refused,
+# not mistaken for the live reporter or reported as a clean gate set.
+OUT_UNSETTLED_REPORTER="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/stale-reporter-jobs.json" \
+  CURL_SECOND_RESPONSE="$TMP/stale-reporter-jobs.json" \
+  CURL_REST_RESPONSE="$TMP/stale-reporter-jobs.json" \
+  CURL_COUNT_FILE="$TMP/stale-reporter-stable-count" \
+  CURL_ARGS_FILE="$TMP/stale-reporter-stable-args" \
+  SLEEP_ARGS_FILE="$TMP/stale-reporter-stable-sleeps" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="6" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 3 ]]
+assert $? "a reporter boundary that stays stale is refused" "got exit $RC"
+grep -q 'reporter boundary did not settle' <<< "$OUT_UNSETTLED_REPORTER"
+assert $? "the unsettled reporter boundary explains the refusal" \
+  "the refusal did not identify the missing live reporter marker"
+! grep -q '::error' <<< "$OUT_UNSETTLED_REPORTER"
+assert $? "an unsettled reporter boundary is not misreported as a dark-step finding" \
+  "the reporter classified gates using a stale boundary"
+[[ "$(<"$TMP/stale-reporter-stable-count")" -eq 6 ]]
+assert $? "the stale reporter boundary stops after the bounded refresh window" \
+  "expected an initial read plus five refreshes"
+
+jq '(.steps[] | select(.name == "Finalize operator report")) |= (.status = "pending" | .conclusion = null)' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/lagging-job.json"
+jq '.id=41' "$TMP/lagging-job.json" > "$TMP/lagging-job-id.json"
+jq '{jobs:[.]}' "$TMP/lagging-job-id.json" > "$TMP/lagging-jobs-first.json"
+jq '(.steps[] | select(.name == "Finalize operator report")) |= (.status = "completed" | .conclusion = "success")' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/settled-job.json"
+jq -n --slurpfile target "$TMP/lagging-job-id.json" '{jobs:[($target[0] | .id=42), $target[0]]}' \
+  > "$TMP/lagging-jobs-decoy.json"
+jq '.id=41' "$TMP/settled-job.json" > "$TMP/settled-job-id.json"
+jq -n --slurpfile target "$TMP/settled-job-id.json" '{jobs:[($target[0] | .id=42), $target[0]]}' \
+  > "$TMP/settled-jobs-decoy.json"
+jq '.id=41' "$LIVE_GATE_INFLIGHT" > "$TMP/inprogress-job-id.json"
+jq '{jobs:[.]}' "$TMP/inprogress-job-id.json" > "$TMP/inprogress-jobs-first.json"
+
+# Clear shell startup hooks so the test curl/sleep stubs stay first on PATH.
+OUT_POLL="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/lagging-jobs-first.json" \
+  CURL_SECOND_RESPONSE="$TMP/lagging-jobs-decoy.json" \
+  CURL_REST_RESPONSE="$TMP/settled-jobs-decoy.json" \
+  CURL_COUNT_FILE="$TMP/lag-poll-count" \
+  CURL_ARGS_FILE="$TMP/lag-curl-args" \
+  SLEEP_ARGS_FILE="$TMP/lag-sleep-args" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="1" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "the live API settles a lagging pending/null gate before reporting" "got exit $RC: $OUT_POLL"
+
+! grep -q '::error' <<< "$OUT_POLL"
+assert $? "a lagging pending/null API view does not raise a false error" \
+  "the reporter called a completed gate dark"
+grep -q 'all 5 steps executed' <<< "$OUT_POLL"
+assert $? "a lagging pending/null API view is retried before dark classification" \
+  "the settled green gate was not confirmed"
+grep -q 'Executed: 5 passed, 0 failed. In progress: 0. Not run: 0. Other outcomes: 0.' <<< "$OUT_POLL"
+assert $? "the settled API view reports the completed gate as passed" \
+  "the post-poll tally does not match the settled gate state"
+LAG_CALLS="$(<"$TMP/lag-poll-count")"
+[[ "$LAG_CALLS" -ge 3 ]]
+assert $? "the API view is checked again after repeated stale snapshots" \
+  "expected at least 3 calls, got $LAG_CALLS"
+grep -q -- '--connect-timeout 5 --max-time 5' "$TMP/lag-curl-args"
+assert $? "the initial live API request has a finite timeout" \
+  "the first request did not carry its five-second timeout"
+[[ "$(grep -c -- '--connect-timeout 2 --max-time 2' "$TMP/lag-curl-args")" -eq 2 ]]
+assert $? "each live refresh request has a finite timeout" \
+  "expected two two-second refreshes in: $(<"$TMP/lag-curl-args")"
+[[ "$(<"$TMP/lag-sleep-args")" == $'1\n1' ]]
+assert $? "the live refresh waits one second between requests" \
+  "unexpected refresh delays: $(<"$TMP/lag-sleep-args")"
+
+# A preceding gate still marked in progress while the reporter is running is
+# another stale live view; refresh until that gate reaches its verdict.
+OUT_INFLIGHT_API="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/inprogress-jobs-first.json" \
+  CURL_SECOND_RESPONSE="$TMP/settled-jobs-decoy.json" \
+  CURL_REST_RESPONSE="$TMP/settled-jobs-decoy.json" \
+  CURL_COUNT_FILE="$TMP/inprogress-poll-count" \
+  CURL_ARGS_FILE="$TMP/inprogress-curl-args" \
+  SLEEP_ARGS_FILE="$TMP/inprogress-sleep-args" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="5" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a live in-progress gate is refreshed before reporting" "got exit $RC"
+! grep -q '::error' <<< "$OUT_INFLIGHT_API"
+assert $? "a stale in-progress gate does not raise a false error" \
+  "the reporter classified a gate before its API status settled"
+! grep -q 'still in progress' <<< "$OUT_INFLIGHT_API"
+assert $? "a live in-progress gate is not left stale in the final report" \
+  "the settled gate is still reported as in progress"
+grep -q 'all 5 steps executed' <<< "$OUT_INFLIGHT_API"
+assert $? "a live in-progress gate resolves to the settled gate count" \
+  "the reporter did not confirm all five completed gates"
+[[ "$(<"$TMP/inprogress-poll-count")" -eq 2 ]]
+assert $? "the live in-progress gate settles after one refresh" \
+  "expected initial and one refreshed API read"
+
+# A real fail-fast abort remains dark when its null-conclusion snapshot is
+# stable across repeated reads.
+jq '(.steps[] | select(.name == "Report steps that never ran")) |= (.status = "in_progress") | {jobs:[.]}' \
+  "$ABORT_NULL_REPORTABLE" > "$TMP/abort-jobs.json"
+OUT_ABORT_API="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/abort-jobs.json" \
+  CURL_SECOND_RESPONSE="$TMP/abort-jobs.json" \
+  CURL_REST_RESPONSE="$TMP/abort-jobs.json" \
+  CURL_COUNT_FILE="$TMP/abort-poll-count" \
+  CURL_ARGS_FILE="$TMP/abort-curl-args" \
+  SLEEP_ARGS_FILE="$TMP/abort-sleep-args" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="2" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="offline-suites" \
+  GITHUB_JOB_NAME="Offline suites" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a stable abort-null API view still exits 0" "got exit $RC"
+grep -q '55 of 136 steps never ran' <<< "$OUT_ABORT_API"
+assert $? "pending/null steps remain dark after the API view stabilizes" \
+  "the reporter lost the fail-fast abort's unrun gates"
+grep -q '::error' <<< "$OUT_ABORT_API"
+assert $? "a stable abort-null API view keeps its error annotation" \
+  "the abort was silently presented as clean"
+ABORT_CALLS="$(<"$TMP/abort-poll-count")"
+[[ "$ABORT_CALLS" -eq 6 ]]
+assert $? "the stable abort-null view is checked for the full bounded refresh window" \
+  "expected the initial read plus five refreshes, got $ABORT_CALLS calls"
+[[ "$(grep -c -- '--connect-timeout 2 --max-time 2' "$TMP/abort-curl-args")" -eq 5 ]]
+assert $? "every abort-null refresh remains time-bounded" \
+  "expected five two-second refresh requests"
+[[ "$(grep -c '^1$' "$TMP/abort-sleep-args")" -eq 5 ]]
+assert $? "a stable abort-null view waits through the full refresh window" \
+  "expected five one-second waits"
+
+# A stable pending/null view without a preceding gate failure could still be a
+# green run whose API updates are delayed; refuse rather than call it dark.
+jq '(.steps[] | select(.name == "Finalize operator report")) |= (.status = "pending" | .conclusion = null) | .id=41' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/stale-green-job-id.json"
+jq '{jobs:[.]}' "$TMP/stale-green-job-id.json" > "$TMP/stale-green-jobs.json"
+OUT_STALE_GREEN="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/stale-green-jobs.json" \
+  CURL_SECOND_RESPONSE="$TMP/stale-green-jobs.json" \
+  CURL_REST_RESPONSE="$TMP/stale-green-jobs.json" \
+  CURL_COUNT_FILE="$TMP/stale-green-poll-count" \
+  CURL_ARGS_FILE="$TMP/stale-green-curl-args" \
+  SLEEP_ARGS_FILE="$TMP/stale-green-sleep-args" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="7" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 3 ]]
+assert $? "a stable stale-green API view is refused rather than called dark" "got exit $RC"
+grep -q 'do not follow a confirmed abort' <<< "$OUT_STALE_GREEN"
+assert $? "a stable stale-green refusal requires a confirmed failed gate" \
+  "the reporter treated an unresolved green view as a fail-fast abort"
+! grep -q '::error' <<< "$OUT_STALE_GREEN"
+assert $? "a stable stale-green view raises no dark-step error annotation" \
+  "stale pending/null data was reported as a real dark-step finding"
+[[ "$(<"$TMP/stale-green-poll-count")" -eq 6 ]]
+assert $? "a stable stale-green view waits through the bounded refresh window" \
+  "expected an initial read plus five refreshes"
+
+# A changing ambiguous view must refuse rather than guess that it is dark.
+jq '(.steps[] | select(.name == "Finalize operator report")) |= (.status = "queued" | .conclusion = null)' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/unstable-job-queued.json"
+jq '.id=41' "$TMP/unstable-job-queued.json" > "$TMP/unstable-job-queued-id.json"
+jq '{jobs:[.]}' "$TMP/lagging-job-id.json" > "$TMP/unstable-jobs-pending.json"
+jq '{jobs:[.]}' "$TMP/unstable-job-queued-id.json" > "$TMP/unstable-jobs-queued.json"
+OUT_UNSTABLE="$(
+  env -u BASH_ENV \
+  PATH="$TMP/mock-bin:$PATH" \
+  CURL_FIRST_RESPONSE="$TMP/unstable-jobs-pending.json" \
+  CURL_SECOND_RESPONSE="$TMP/unstable-jobs-queued.json" \
+  CURL_REST_RESPONSE="$TMP/unstable-jobs-pending.json" \
+  CURL_ALTERNATE_RESPONSES="1" \
+  CURL_COUNT_FILE="$TMP/unstable-poll-count" \
+  CURL_ARGS_FILE="$TMP/unstable-curl-args" \
+  SLEEP_ARGS_FILE="$TMP/unstable-sleep-args" \
+  GH_TOKEN="test-token" \
+  GITHUB_REPOSITORY="TogetherWeOwn/paperclip-operator-toolkit" \
+  GITHUB_RUN_ID="3" \
+  GITHUB_RUN_ATTEMPT="1" \
+  GITHUB_JOB="operator-runbook-gates" \
+  GITHUB_JOB_NAME="Operator runbook gates" \
+  GITHUB_API_URL="https://api.github.test" \
+  "$TOOL" report 2>&1
+)"; RC=$?
+[[ "$RC" -eq 3 ]]
+assert $? "a changing ambiguous API view refuses to guess" "got exit $RC"
+grep -q 'gate steps did not settle within 15 seconds' <<< "$OUT_UNSTABLE"
+assert $? "the unsettled API view explains why classification was refused" \
+  "the refusal does not name the unsettled gate data"
+! grep -q '::error' <<< "$OUT_UNSTABLE"
+assert $? "an unsettled API view is not mislabeled as a dark-step finding" \
+  "the reporter classified an API view that never stabilized"
+[[ "$(<"$TMP/unstable-poll-count")" -eq 6 ]]
+assert $? "the unsettled API view stops after the bounded refresh window" \
+  "expected one initial read plus five refreshes"
 
 # ---------------------------------------------------------------------------
 hdr "Refusal — a check that did not happen must never read as clean (TOG-357)"
@@ -459,10 +782,13 @@ if [[ -s "$CI" ]]; then
   WIRING="$(awk '
     /^  [A-Za-z0-9_-]+:/ { job=$1; sub(/:$/, "", job); jname="" }
     /^    name: / { jname=$0; sub(/^    name: /, "", jname) }
-    /^      - name: Report steps that never ran$/ { inrep=1; repjob=job; repname=jname; n=0; val="" }
+    /^      - name: Report steps that never ran$/ { inrep=1; repjob=job; repname=jname; n=0; val=""; always=0; token=0; command=0 }
     inrep == 1 { n++
       if ($0 ~ /GITHUB_JOB_NAME:/) { val=$0; sub(/^.*GITHUB_JOB_NAME:[ ]*/, "", val) }
-      if (n >= 8) { print repjob "|" repname "|" val; inrep=0 }
+      if ($0 ~ /if: always\(\)/) always=1
+      if ($0 ~ /GH_TOKEN: \$\{\{ github.token \}\}/) token=1
+      if ($0 ~ /run: \.\/ci_dark_steps\.sh report \|\| true/) command=1
+      if (n >= 8) { print repjob "|" repname "|" val "|" always "|" token "|" command; inrep=0 }
     }
   ' "$CI")"
 
@@ -475,14 +801,33 @@ if [[ -s "$CI" ]]; then
   assert $? "both reporter wirings carry a job-name pin" \
     "expected 2 reporter steps, found $WIRING_COUNT — a wiring was added or removed without a pin"
 
-  while IFS='|' read -r rj rn vv; do
+  while IFS='|' read -r rj rn vv has_always has_token has_command; do
     [[ -n "$vv" ]]
     assert $? "the $rj reporter step sets GITHUB_JOB_NAME" \
       "without it the tool falls back to whichever parallel job is still running"
     [[ -n "$rn" && "$vv" == "$rn" ]]
     assert $? "the $rj reporter step names its job's display name" \
       "sets '$vv' but the job is named '$rn' — the key-vs-name match misses"
+    [[ "$has_always" == 1 ]]
+    assert $? "the $rj reporter step is wired with if: always()" \
+      "without it the reporter is skipped on exactly the runs that need it"
+    [[ "$has_token" == 1 ]]
+    assert $? "the $rj reporter step receives the Actions token" \
+      "without GH_TOKEN the reporter cannot list its job steps"
+    [[ "$has_command" == 1 ]]
+    assert $? "the $rj reporter step invokes ci_dark_steps.sh" \
+      "the reporter command is missing from this job"
   done <<< "$WIRING"
+
+  ACTIONS_READ="$(awk '
+    /^permissions:$/ { inperm=1; next }
+    inperm && /^[^ ]/ { inperm=0 }
+    inperm && /^  actions: read$/ { found=1 }
+    END { print found+0 }
+  ' "$CI")"
+  [[ "$ACTIONS_READ" == 1 ]]
+  assert $? "the workflow grants actions: read for the live reporter" \
+    "the reporter cannot list job steps without the read-only Actions permission"
 
   AFTER_REPORTER="$(awk '
     /^  [A-Za-z0-9_-]+:/ { job=$1; sub(/:$/, "", job); checking=0 }
