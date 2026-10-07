@@ -37,27 +37,51 @@ const mutants = [
     to: "score.deviation >= DEFAULT_MARGIN;",
   },
   {
-    // The use-before-expiry tie-break must order same-state,
-    // same-deviation lanes by headroom-per-hour. Removing it collapses the
-    // 2026-10-03 Muse case (lanes 7/5/2 all "behind" to one reset) back to
-    // price order — the roomy lane loses to the cheap full one.
+    // The use-before-expiry tie-break must order same-state, same-deviation
+    // lanes by headroom-per-hour. Removing it hands the group back to price
+    // order: the lane whose headroom lapses sooner loses to the cheaper one.
     name: "remove-expiry-pull-ordering",
     file: "src/engine/pacing.ts",
     from:
-      "      const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);\n" +
-      "      if (pullDelta !== 0) return pullDelta;\n",
+      "        const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);\n" +
+      "        if (pullDelta !== 0) return pullDelta;\n",
     to: "",
   },
   {
     // The pull sums headroom over LIVE allowance windows only.
     // Inverting the full-window skip counts only exhausted windows — every
     // healthy lane scores 0 and use-before-expiry collapses to price order.
-    // (Utilization is normalized to [0,1] upstream, so a dropped `>= 1` guard
-    // would be vacuous here: exact-1.0 windows contribute 0 either way.)
     name: "expiry-pull-counts-only-full-windows",
     file: "src/engine/pacing.ts",
     from: "      if (window.utilization >= 1) continue;\n",
     to: "      if (window.utilization < 1) continue;\n",
+  },
+  {
+    // Hours-to-reset is floored at 1 h, like the pace engine's clear rate.
+    // Without the floor a window minutes from reset scores arbitrarily high
+    // and swamps real headroom on another lane.
+    name: "expiry-pull-drops-hours-floor",
+    file: "src/engine/pacing.ts",
+    from: "Math.max(EXPIRY_PULL_MIN_HOURS, hoursLeft)",
+    to: "hoursLeft",
+  },
+  {
+    // The `use-before-expiry:` trace must come from a re-sort with the
+    // tie-break OFF. Leaving it on makes both orders identical, so the trace
+    // never names a decision the pull actually made.
+    name: "expiry-trace-compares-against-itself",
+    file: "src/engine/select.ts",
+    from: "{ nowMs: now, expiryTiebreak: false }",
+    to: "{ nowMs: now }",
+  },
+  {
+    // The trace fires on the first slot the pull CHANGED. Inverting the
+    // comparison names a slot where nothing changed (or none at all), so the
+    // trace goes silent when the pull decided and speaks when it did not.
+    name: "expiry-trace-reports-unchanged-slot",
+    file: "src/engine/select.ts",
+    from: "candidate.modelId !== withoutPull[index]?.modelId",
+    to: "candidate.modelId === withoutPull[index]?.modelId",
   },
   // : lane withdrawal ceiling. The rule withdraws a lane from NEW
   // dispatch once its combined utilization reaches a configured ceiling; each

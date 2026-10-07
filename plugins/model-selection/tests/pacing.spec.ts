@@ -31,7 +31,9 @@ import {
   type ZaiPaceOverride,
 } from "../src/engine/pacing.js";
 import { resolveConfig } from "../src/config/resolve.js";
+import { selectModel } from "../src/engine/select.js";
 import type { Candidate, ModelEntry } from "../src/engine/types.js";
+import { MODELS, NO_ESCALATION, NOW, PROFILES, config } from "./fixtures.js";
 import { evaluateLanePace, normalizeLaneDocument, type LanePaceObservation, type LanePaceVerdict, type PaceAccountObservation, type PaceWindowObservation, type PaceWindowVerdict } from "../src/lane-capacity/pace.js";
 
 function verdict(overrides: Partial<LanePaceVerdict> = {}): LanePaceVerdict {
@@ -2207,138 +2209,229 @@ describe(" pacer admission hysteresis (shadow-mode unit pins, no enforcement cha
 });
 
 describe("use-before-expiry: headroom-per-hour pull", () => {
-  // The 2026-10-03 Muse shape: lanes 7/5/2 held 89/39/26 points of weekly
-  // headroom toward the same 10-05 reset. Plain state+deviation rank sees
-  // three interchangeable "behind" lanes; the pull separates them.
-  const NOW_MS = Date.parse("2026-10-03T16:40:00.000Z");
-  const RESET = "2026-10-05T00:00:00.000Z";
+  // Every lane verdict below comes out of the real pace engine
+  // (`normalizeLaneDocument` -> `evaluateLanePace`), never a hand-set score,
+  // so the ordering tests only tie where the engine can actually produce a tie.
+  const NOW_ISO = new Date(NOW).toISOString();
+  const HOUR_MS = 3_600_000;
+  const WEEK_SECONDS = 604_800;
+  const weeklyDefinition = {
+    laneId: "lane-x",
+    healthFields: ["health"],
+    accountKeyFields: ["lane"],
+    weightFields: ["weight"],
+    governingWindowField: "governing_window",
+    windows: [
+      {
+        name: "weekly",
+        role: "allowance" as const,
+        utilizationFields: ["weekly_utilization"],
+        resetFields: ["weekly_resets_at"],
+        defaultWindowSeconds: WEEK_SECONDS,
+      },
+    ],
+  };
 
-  function windowVerdict(utilization: number): PaceWindowVerdict {
-    return {
-      name: "weekly",
-      role: "allowance",
-      utilization,
-      resetsAt: RESET,
-      windowSeconds: 604_800,
-      allowanceWeight: 1,
-      allowanceWeightSource: "reported",
-      sourcePath: "weekly_utilization",
-      elapsed: 0.7,
-      normalizedRemaining: 1 - utilization,
-      paceDebt: 0,
-      clearRate: 0.5,
-      serviceable: true,
-    };
-  }
-
-  function behindLane(laneId: string, utilization: number): LanePaceVerdict {
-    return verdict({
-      laneId,
-      state: "behind",
-      serviceable: true,
-      score: { utilization, elapsed: 0.7, deviation: utilization - 0.7 },
-      accounts: [
-        {
-          accountKey: `${laneId}-acct`,
-          authKey: `auth-${laneId}`,
-          plan: "power",
-          health: "healthy",
-          weight: 1,
-          weightSource: "reported",
-          governingWindow: "weekly",
-          governingResetAt: RESET,
-          bindingWindow: "weekly",
-          bindingResetAt: RESET,
-          serviceable: true,
-          state: "behind",
-          score: { utilization, elapsed: 0.7, deviation: utilization - 0.7 },
-          windows: [windowVerdict(utilization)],
+  function paceVerdict(laneId: string, utilization: number, hoursToReset: number): LanePaceVerdict {
+    return evaluateLanePace({
+      observation: normalizeLaneDocument({
+        document: {
+          observedAt: NOW_ISO,
+          records: [
+            {
+              lane: `${laneId}-acct`,
+              health: "healthy",
+              weight: 1,
+              governing_window: "weekly",
+              weekly_utilization: utilization,
+              weekly_resets_at: new Date(NOW + hoursToReset * HOUR_MS).toISOString(),
+            },
+          ],
         },
-      ],
+        definition: { ...weeklyDefinition, laneId },
+      }),
+      asOf: NOW_ISO,
     });
   }
 
-  it("pulls harder on the lane with more headroom per hour to the same reset", () => {
-    // 89 headroom / ~31.3 h vs 26 headroom / ~31.3 h: lane-7 wins outright.
-    const lane7 = behindLane("lane-7", 0.11);
-    const lane2 = behindLane("lane-2", 0.74);
-    expect(expiryPull(lane7, NOW_MS)).toBeGreaterThan(expiryPull(lane2, NOW_MS));
-    expect(expiryPull(lane7, NOW_MS)).toBeCloseTo(89 / ((Date.parse(RESET) - NOW_MS) / 3_600_000), 6);
-  });
-
-  it("orders same-state, same-deviation lanes by expiry pull ahead of cost", () => {
-    // Identical lane scores (same state AND same deviation), different
-    // headroom: the pull — not the cheaper cost — decides the group.
-    const models = [
-      model({ id: "cheap-model", tier: "T1", laneId: "lane-full" }),
-      model({ id: "roomy-model", tier: "T1", laneId: "lane-roomy" }),
-    ];
-    const ledger: LaneLedger = {
-      "lane-full": {
-        laneId: "lane-full", fetchedAt: "t", error: null, observation: null,
-        verdict: behindLane("lane-full", 0.9),
-      },
-      "lane-roomy": {
-        laneId: "lane-roomy", fetchedAt: "t", error: null, observation: null,
-        verdict: behindLane("lane-roomy", 0.1),
-      },
-    };
-    // Same governing score on both lanes, so state AND deviation tie.
-    for (const laneId of ["lane-full", "lane-roomy"] as const) {
-      ledger[laneId]!.verdict!.score = { utilization: 0.5, elapsed: 0.7, deviation: -0.2 };
+  function ledgerOf(verdicts: Record<string, LanePaceVerdict>): LaneLedger {
+    const ledger: LaneLedger = {};
+    for (const [laneId, laneVerdict] of Object.entries(verdicts)) {
+      ledger[laneId] = { laneId, fetchedAt: "t", error: null, observation: null, verdict: laneVerdict };
     }
-    const candidates = [
-      candidate({ modelId: "cheap-model", tier: "T1", expectedCostUsd: 0.5 }),
-      candidate({ modelId: "roomy-model", tier: "T1", expectedCostUsd: 2 }),
-    ];
-    const ordered = orderCandidatesByPace(candidates, models, ledger, { nowMs: NOW_MS });
-    expect(ordered[0]!.modelId).toBe("roomy-model");
+    return ledger;
+  }
+
+  function pairedWindow(overrides: Partial<PaceWindowVerdict>): LanePaceVerdict {
+    const base = paceVerdict("lane-w", 0.5, 24);
+    const account = base.accounts[0]!;
+    return { ...base, accounts: [{ ...account, windows: [{ ...account.windows![0]!, ...overrides }] }] };
+  }
+
+  const hoursFromNow = (hours: number) => new Date(NOW + hours * HOUR_MS).toISOString();
+
+  describe("expiryPull", () => {
+    it("is headroom points per hour to reset, read off the pace engine's own windows", () => {
+      // 75 points expiring in 84 h vs 50 points expiring in 42 h.
+      expect(expiryPull(paceVerdict("a", 0.25, 84), NOW)).toBeCloseTo(75 / 84, 9);
+      expect(expiryPull(paceVerdict("b", 0.5, 42), NOW)).toBeCloseTo(50 / 42, 9);
+      expect(expiryPull(paceVerdict("b", 0.5, 42), NOW)).toBeGreaterThan(expiryPull(paceVerdict("a", 0.25, 84), NOW));
+    });
+
+    it("floors hours-to-reset at 1 h, like the pace engine's clear rate", () => {
+      // 6 minutes from reset must not read as 500 points/hour: same 1 h floor
+      // as `Math.max(1, remainingSeconds / 3600)` in lane-capacity/pace.ts.
+      expect(expiryPull(paceVerdict("soon", 0.5, 0.1), NOW)).toBeCloseTo(50, 9);
+      expect(expiryPull(paceVerdict("soon", 0.5, 0.5), NOW)).toBeCloseTo(50, 9);
+      expect(expiryPull(paceVerdict("hour", 0.5, 1), NOW)).toBeCloseTo(50, 9);
+      expect(expiryPull(paceVerdict("two", 0.5, 2), NOW)).toBeCloseTo(25, 9);
+    });
+
+    it("never pulls an exhausted or unserviceable lane, and scores unknown lanes 0", () => {
+      expect(expiryPull(verdict({ state: "exhausted", serviceable: false }), NOW)).toBe(0);
+      expect(expiryPull(verdict({ state: "unknown", serviceable: null, score: null }), NOW)).toBe(0);
+      expect(expiryPull(null, NOW)).toBe(0);
+    });
+
+    // One window per guard: each case is removed by exactly one guard, so
+    // deleting any single guard leaves a nonzero pull and fails here.
+    it("skips an account that cannot serve", () => {
+      const base = paceVerdict("lane-w", 0.5, 24);
+      const dead: LanePaceVerdict = { ...base, accounts: [{ ...base.accounts[0]!, serviceable: false }] };
+      expect(expiryPull(dead, NOW)).toBe(0);
+    });
+
+    it("skips a window whose role is not allowance", () => {
+      expect(expiryPull(pairedWindow({ role: "serviceability", serviceable: true, utilization: 0.1, resetsAt: hoursFromNow(24) }), NOW)).toBe(0);
+    });
+
+    it("skips an allowance window the engine marks unserviceable", () => {
+      expect(expiryPull(pairedWindow({ role: "allowance", serviceable: false, utilization: 0.1, resetsAt: hoursFromNow(24) }), NOW)).toBe(0);
+    });
+
+    it("skips a window at or past full utilization instead of subtracting from the pull", () => {
+      expect(expiryPull(pairedWindow({ serviceable: true, utilization: 1, resetsAt: hoursFromNow(24) }), NOW)).toBe(0);
+      // Over-full would go negative if the guard were gone.
+      expect(expiryPull(pairedWindow({ serviceable: true, utilization: 1.2, resetsAt: hoursFromNow(24) }), NOW)).toBe(0);
+    });
+
+    it("skips a window already past its reset (a stale observation has no hours left to spend it in)", () => {
+      expect(expiryPull(pairedWindow({ serviceable: true, utilization: 0.1, resetsAt: hoursFromNow(-3) }), NOW)).toBe(0);
+    });
+
+    it("skips a window with an unreadable reset or utilization", () => {
+      expect(expiryPull(pairedWindow({ serviceable: true, utilization: 0.1, resetsAt: "not-a-date" }), NOW)).toBe(0);
+      expect(expiryPull(pairedWindow({ serviceable: true, utilization: null, resetsAt: hoursFromNow(24) }), NOW)).toBe(0);
+    });
   });
 
-  it("never pulls an exhausted or unserviceable lane, and scores unknown lanes 0", () => {
-    expect(expiryPull(verdict({ state: "exhausted", serviceable: false }), NOW_MS)).toBe(0);
-    expect(expiryPull(verdict({ state: "unknown", serviceable: null, score: null }), NOW_MS)).toBe(0);
-    expect(expiryPull(null, NOW_MS)).toBe(0);
-  });
-
-  it("ignores full windows, serviceability windows, and windows already past reset", () => {
-    const full: LanePaceVerdict = {
-      ...behindLane("lane-full", 1),
-      accounts: [
-        {
-          ...behindLane("lane-full", 1).accounts[0]!,
-          windows: [
-            { ...windowVerdict(1), serviceable: false },
-            { ...windowVerdict(0.1), name: "five-hour", role: "serviceability", resetsAt: "2026-10-03T10:00:00.000Z" },
-          ],
-        },
-      ],
-    };
-    // The full allowance window contributes 0, the serviceability window is
-    // not allowance, and both predate/void: pull is 0, not NaN or negative.
-    expect(expiryPull(full, NOW_MS)).toBe(0);
-  });
-
-  it("stays tier-partitioned: a high-pull T2 lane never outranks a zero-pull T1 lane", () => {
+  describe("orderCandidatesByPace", () => {
     const models = [
-      model({ id: "t1-model", tier: "T1", laneId: "lane-t1" }),
-      model({ id: "t2-model", tier: "T2", laneId: "lane-t2" }),
+      model({ id: "cheap-model", tier: "T1", laneId: "lane-cheap" }),
+      model({ id: "dear-model", tier: "T1", laneId: "lane-dear" }),
     ];
-    const ledger: LaneLedger = {
-      "lane-t1": {
-        laneId: "lane-t1", fetchedAt: "t", error: null, observation: null,
-        verdict: verdict({ laneId: "lane-t1", state: "on" }),
-      },
-      "lane-t2": {
-        laneId: "lane-t2", fetchedAt: "t", error: null, observation: null,
-        verdict: behindLane("lane-t2", 0.02),
-      },
-    };
-    const candidates = [
-      candidate({ modelId: "t1-model", tier: "T1", expectedCostUsd: 5 }),
-      candidate({ modelId: "t2-model", tier: "T2", expectedCostUsd: 0.1 }),
+    const byCost = [
+      candidate({ modelId: "cheap-model", tier: "T1", expectedCostUsd: 0.5 }),
+      candidate({ modelId: "dear-model", tier: "T1", expectedCostUsd: 2 }),
     ];
-    const ordered = orderCandidatesByPace(candidates, models, ledger, { nowMs: NOW_MS });
-    expect(ordered.map((c) => c.modelId)).toEqual(["t1-model", "t2-model"]);
+
+    it("equal state and deviation: the lane whose headroom lapses sooner wins, ahead of cost", () => {
+      // Both lanes sit 0.2 behind pace, neither within the near-reset preferred
+      // window. cheap: 80 points over 100.8 h; dear: 60 points over 67.2 h.
+      const cheap = paceVerdict("lane-cheap", 0.2, 100.8);
+      const dear = paceVerdict("lane-dear", 0.4, 67.2);
+      expect(cheap.state).toBe("behind");
+      expect(dear.state).toBe("behind");
+      expect(cheap.score!.deviation).toBe(dear.score!.deviation);
+      expect(cheap.score!.deviation).toBeCloseTo(-0.2, 9);
+      expect(cheap.score!.elapsed).toBeLessThan(0.8);
+      expect(dear.score!.elapsed).toBeLessThan(0.8);
+      const ledger = ledgerOf({ "lane-cheap": cheap, "lane-dear": dear });
+
+      // Without the tie-break cost decides; with it, the sooner expiry does.
+      expect(orderCandidatesByPace(byCost, models, ledger, { nowMs: NOW, expiryTiebreak: false }).map((c) => c.modelId)).toEqual(["cheap-model", "dear-model"]);
+      expect(orderCandidatesByPace(byCost, models, ledger, { nowMs: NOW }).map((c) => c.modelId)).toEqual(["dear-model", "cheap-model"]);
+    });
+
+    it("lanes with equal pull still fall through to cost", () => {
+      const ledger = ledgerOf({ "lane-cheap": paceVerdict("lane-cheap", 0, 84), "lane-dear": paceVerdict("lane-dear", 0, 84) });
+      expect(orderCandidatesByPace(byCost, models, ledger, { nowMs: NOW }).map((c) => c.modelId)).toEqual(["cheap-model", "dear-model"]);
+    });
+
+    it("the 2026-10-03 shape (one shared reset, roomier lane pricier) is ordered by deviation already, so the pull is not what decides it", () => {
+      // Lanes 7/5/2 at 11/61/74% to the same reset. Deviation ranks them
+      // roomiest-first without any help; the tie-break changes nothing here.
+      const lanes = { "lane-7": 0.11, "lane-5": 0.61, "lane-2": 0.74 };
+      const verdicts = Object.fromEntries(Object.entries(lanes).map(([laneId, utilization]) => [laneId, paceVerdict(laneId, utilization, 31.3)]));
+      const deviations = Object.values(verdicts).map((entry) => entry.score!.deviation);
+      expect(deviations[0]!).toBeLessThan(deviations[1]!);
+      expect(deviations[1]!).toBeLessThan(deviations[2]!);
+      const trio = [
+        model({ id: "m7", tier: "T1", laneId: "lane-7" }),
+        model({ id: "m5", tier: "T1", laneId: "lane-5" }),
+        model({ id: "m2", tier: "T1", laneId: "lane-2" }),
+      ];
+      const trioByCost = [
+        candidate({ modelId: "m2", tier: "T1", expectedCostUsd: 1 }),
+        candidate({ modelId: "m5", tier: "T1", expectedCostUsd: 2 }),
+        candidate({ modelId: "m7", tier: "T1", expectedCostUsd: 3 }),
+      ];
+      const ledger = ledgerOf(verdicts);
+      const withPull = orderCandidatesByPace(trioByCost, trio, ledger, { nowMs: NOW }).map((c) => c.modelId);
+      const withoutPull = orderCandidatesByPace(trioByCost, trio, ledger, { nowMs: NOW, expiryTiebreak: false }).map((c) => c.modelId);
+      expect(withoutPull).toEqual(["m7", "m5", "m2"]);
+      expect(withPull).toEqual(withoutPull);
+    });
+
+    it("stays tier-partitioned: a high-pull T2 lane never outranks a zero-pull T1 lane", () => {
+      const tiered = [
+        model({ id: "t1-model", tier: "T1", laneId: "lane-t1" }),
+        model({ id: "t2-model", tier: "T2", laneId: "lane-t2" }),
+      ];
+      const ledger = ledgerOf({ "lane-t1": verdict({ laneId: "lane-t1", state: "on" }), "lane-t2": paceVerdict("lane-t2", 0.02, 24) });
+      const candidates = [
+        candidate({ modelId: "t1-model", tier: "T1", expectedCostUsd: 5 }),
+        candidate({ modelId: "t2-model", tier: "T2", expectedCostUsd: 0.1 }),
+      ];
+      expect(orderCandidatesByPace(candidates, tiered, ledger, { nowMs: NOW }).map((c) => c.modelId)).toEqual(["t1-model", "t2-model"]);
+    });
+  });
+
+  describe("selectModel trace", () => {
+    const t1 = MODELS.find((entry) => entry.tier === "T1")!;
+    function select(models: ModelEntry[], ledger: LaneLedger) {
+      return selectModel({
+        profiles: PROFILES,
+        signals: NO_ESCALATION,
+        now: NOW,
+        descriptor: { issueId: "use-before-expiry", labelNames: ["tier:T1"] },
+        config: config({ models, pacingMode: "enforce", laneLedger: ledger, stickyWithinIssue: false }),
+      });
+    }
+    const cheap = { ...t1, id: "cheap-model", laneId: "lane-cheap", costPerMTokIn: 0.1, costPerMTokOut: 0.1, costPerMTokCacheRead: 0.01 } satisfies ModelEntry;
+    const dear = { ...t1, id: "dear-model", laneId: "lane-dear", costPerMTokIn: 2, costPerMTokOut: 8, costPerMTokCacheRead: 0.2 } satisfies ModelEntry;
+
+    it("names the tie-break when the pull decided the order", () => {
+      const ledger = ledgerOf({ "lane-cheap": paceVerdict("lane-cheap", 0.2, 100.8), "lane-dear": paceVerdict("lane-dear", 0.4, 67.2) });
+      const decision = select([cheap, dear], ledger);
+      expect(decision.modelId).toBe("dear-model");
+      const line = decision.trace.find((entry) => entry.startsWith("use-before-expiry:"));
+      expect(line).toContain("dear-model");
+      expect(line).toContain("ranks ahead of cheap-model");
+    });
+
+    it("stays silent when state or deviation already separated the lanes", () => {
+      const ledger = ledgerOf({ "lane-cheap": paceVerdict("lane-cheap", 0.74, 31.3), "lane-dear": paceVerdict("lane-dear", 0.11, 31.3) });
+      const decision = select([cheap, dear], ledger);
+      expect(decision.modelId).toBe("dear-model");
+      expect(decision.trace.some((entry) => entry.includes("use-before-expiry"))).toBe(false);
+    });
+
+    it("stays silent when the pull is nonzero everywhere but separates nothing", () => {
+      const ledger = ledgerOf({ "lane-cheap": paceVerdict("lane-cheap", 0.3, 84), "lane-dear": paceVerdict("lane-dear", 0.3, 84) });
+      const decision = select([cheap, dear], ledger);
+      expect(decision.modelId).toBe("cheap-model");
+      expect(decision.trace.some((entry) => entry.includes("use-before-expiry"))).toBe(false);
+    });
   });
 });

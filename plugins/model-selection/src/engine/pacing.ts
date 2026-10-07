@@ -299,20 +299,34 @@ function deviationOf(ledger: LaneLedger, model: ModelEntry | undefined): number 
 }
 
 /**
- * Use-before-expiry pull: headroom-per-hour for one lane's
- * allowance windows — remaining weekly headroom divided by hours to reset,
- * summed over every serviceable behind-pace window the lane reports. A lane
- * with 89 points of weekly headroom expiring in 48 h pulls harder (1.85/h)
- * than a lane with 83 points expiring in 168 h (0.49/h), even though both
- * read "behind" — the Muse use-before-expiry case from 2026-10-03, where
- * lanes 7/5/2 held 89/39/26 points of headroom to the same 10-05 reset while
- * the plain elapsed/deviation rank saw them as interchangeable.
+ * Floor on hours-to-reset, shared with the pace engine's clear rate
+ * (`Math.max(1, remainingSeconds / 3600)` in lane-capacity/pace.ts): a window
+ * minutes from reset must not score arbitrarily high and swamp real headroom
+ * on another lane.
+ */
+const EXPIRY_PULL_MIN_HOURS = 1;
+
+/**
+ * Use-before-expiry pull: headroom-per-hour for one lane's allowance windows —
+ * remaining headroom (points of the window) divided by hours to reset, summed
+ * over every serviceable allowance window the lane reports. 50 points that
+ * expire in 42 h pull harder (1.19/h) than 75 points that expire in 84 h
+ * (0.89/h).
+ *
+ * Scope: this is a tie-break, not a rank. `orderCandidatesByPace` consults it
+ * only after pace state AND deviation compare equal, so it separates lanes
+ * that sit at the same distance from pace but differ in how soon the unused
+ * headroom lapses. It does NOT reorder lanes that share one reset and differ
+ * in utilization: deviation (utilization - elapsed) already ranks those
+ * roomiest-first, so the 2026-10-03 Muse 7/5/2 shape never reaches this
+ * comparator.
  *
  * Pure capacity math, not an admission gate: the 5h brake, the weekly-pace
  * rule, and `hardStopExcluded` all run upstream and unchanged. Windows at or
- * past full (utilization >= 1) contribute nothing — an exhausted window has no
- * headroom to spend. A lane with no computable window scores 0, exactly like
- * the `unknown` rank it already carries. Higher pulls first; ties fall
+ * past full (utilization >= 1) or already past their reset contribute nothing
+ * — an exhausted window has no headroom to spend and a stale observation has
+ * no hours to spend it in. A lane with no computable window scores 0, exactly
+ * like the `unknown` rank it already carries. Higher pulls first; ties fall
  * through to cost below.
  */
 export function expiryPull(verdict: LanePaceVerdict | null, nowMs: number): number {
@@ -325,10 +339,10 @@ export function expiryPull(verdict: LanePaceVerdict | null, nowMs: number): numb
       if (typeof window.utilization !== "number" || typeof window.resetsAt !== "string") continue;
       if (window.utilization >= 1) continue;
       const resetMs = Date.parse(window.resetsAt);
-      if (!Number.isFinite(resetMs)) continue;
       const hoursLeft = (resetMs - nowMs) / 3_600_000;
+      // Also rejects NaN from an unparseable `resetsAt`.
       if (!(hoursLeft > 0)) continue;
-      pull += ((1 - window.utilization) * 100) / hoursLeft;
+      pull += ((1 - window.utilization) * 100) / Math.max(EXPIRY_PULL_MIN_HOURS, hoursLeft);
     }
   }
   return pull;
@@ -428,10 +442,11 @@ export function orderCandidatesByPace(
   candidates: readonly Candidate[],
   models: readonly ModelEntry[],
   ledger: LaneLedger,
-  options?: { preferredElapsedThreshold?: number; nowMs?: number },
+  options?: { preferredElapsedThreshold?: number; nowMs?: number; expiryTiebreak?: boolean },
 ): Candidate[] {
   const elapsedThreshold = options?.preferredElapsedThreshold ?? PREFERRED_ELAPSED_THRESHOLD;
   const nowMs = options?.nowMs ?? Date.now();
+  const expiryTiebreak = options?.expiryTiebreak ?? true;
   const byTier = new Map<Candidate["tier"], Candidate[]>();
   const orderedTierKeys: Candidate["tier"][] = [];
   for (const candidate of candidates) {
@@ -461,13 +476,16 @@ export function orderCandidatesByPace(
       const deviationDelta = deviationOf(ledger, leftModel) - deviationOf(ledger, rightModel);
       if (deviationDelta !== 0) return deviationDelta;
 
-      // Use-before-expiry: same pace state AND same deviation (the
-      // common Muse case — lanes 7/5/2 all "behind" toward one shared
-      // reset) — the lane with more headroom-per-hour wins the group. Below
-      // cost on purpose: pace preference outranks price inside a tier group,
-      // and this tie-break only fires when state AND deviation already tied.
-      const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);
-      if (pullDelta !== 0) return pullDelta;
+      // Use-before-expiry: same pace state AND same deviation — the lane
+      // whose unused headroom lapses sooner (more headroom-per-hour) wins the
+      // group. Below cost on purpose: this only fires when state AND deviation
+      // already tied, and pace preference outranks price inside a tier group.
+      // Lanes sharing one reset never tie here unless they are equally
+      // utilized; deviation has already ordered them.
+      if (expiryTiebreak) {
+        const pullDelta = expiryPullOf(ledger, rightModel, nowMs) - expiryPullOf(ledger, leftModel, nowMs);
+        if (pullDelta !== 0) return pullDelta;
+      }
 
       if (left.expectedCostUsd !== right.expectedCostUsd) return left.expectedCostUsd - right.expectedCostUsd;
 
