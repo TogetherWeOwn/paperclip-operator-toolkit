@@ -1375,6 +1375,13 @@ jobs:
       - name: web_search lane passthrough probe suite
         run: python3 -m unittest -v test_websearch_lane_probe.py
 
+      # Quota-aware auth weight controller: contract canonicalization, weight
+      # planning and the apply/rollback path against an in-process fake
+      # management API. The credential never reaches argv, environ, logs or
+      # files (the canary tests read /proc and every output file).
+      - name: cliproxy quota controller suite
+        run: python3 -m unittest -v test_cliproxy_quota_controller.py
+
       # TOG-894 ask 2. opencode_shared_budget_probe.sh decides whether the paid
       # OpenCode budget is SHARED across lanes or throttled per lane. The two
       # have opposite control surfaces: under sharing, a per-lane enable/disable
