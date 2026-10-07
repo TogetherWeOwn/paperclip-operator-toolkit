@@ -1694,25 +1694,26 @@ export function createPlugin() {
         });
         if (v2Evidence) decision.aaEffortEvidence = v2Evidence;
 
-        // Whether the CURRENTLY PINNED model (not the newly-computed winner) sits
-        // on an unserviceable lane — this, not a routine pace-preference change,
-        // is the only thing allowed to force a repin through `pin:operator`.
-        const pinnedModelId = resolveConfiguredModelId(
-          described.descriptor.pinnedModelId,
-          config.models,
-        );
-        const pinnedModel = config.models.find((model) => model.id === pinnedModelId);
-        const isServiceabilityHardStop =
-          config.pacing.mode !== "off" &&
-          !!pinnedModel &&
-          (hardStopExcluded(laneLedger, pinnedModel) ||
-            deadVetoExcluded(laneLedger, pinnedModel, deadVetoScope));
-
         // Designated agents are exempt from router pinning: the exemption is
         // recorded in the decision trace so a skip is never silent. The
         // agent's own model governs; only a serviceability hard stop may
         // still repin the card.
         const agentExempt = isAgentExempt(described.assigneeAgentId, config);
+        // For an exempt unpinned card, the configured agent model is the
+        // effective model. Check it for a serviceability hard stop so the
+        // creation path can still move the card off a dead default lane.
+        // An existing pin remains authoritative unless its own lane is dead.
+        const hardStopModelId = resolveConfiguredModelId(
+          described.descriptor.pinnedModelId ??
+            (agentExempt ? described.descriptor.agentFloorModelId : null),
+          config.models,
+        );
+        const hardStopModel = config.models.find((model) => model.id === hardStopModelId);
+        const isServiceabilityHardStop =
+          config.pacing.mode !== "off" &&
+          !!hardStopModel &&
+          (hardStopExcluded(laneLedger, hardStopModel) ||
+            deadVetoExcluded(laneLedger, hardStopModel, deadVetoScope));
         if (agentExempt) {
           decision.trace.push(
             `exempt: agent ${described.assigneeAgentId} is exempt from router pinning; ` +

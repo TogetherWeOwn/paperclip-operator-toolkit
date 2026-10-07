@@ -221,6 +221,47 @@ describe("creation-time pin with an exempt assignee", () => {
     const afterNormal = (await harness.ctx.issues.get("normal-1", COMPANY)) as Issue;
     expect(pinnedModel(afterNormal)).toBe("claude-sonnet-5");
   });
+
+  it("hard-stops an unpinned exempt card when the agent default lane is exhausted", async () => {
+    const opus = MODELS.find((entry) => entry.id === "claude-opus-5")!;
+    const models = [
+      { ...opus, laneId: "lane-dead", contextWindow: 200_000 },
+      { ...opus, id: "claude-opus-5-alt", laneId: "lane-live", contextWindow: 200_000 },
+      ...MODELS.filter((entry) => entry.id !== "claude-opus-5"),
+    ];
+    const card = issue("exempt-dead-default", { assigneeAgentId: EXEMPT_AGENT });
+    const agents = [
+      agentRow(AGENT),
+      agentRow(EXEMPT_AGENT, { adapterConfig: { model: "claude-opus-5" } }),
+    ];
+    const harness = await boot(
+      exemptConfig({ models, pacing: { mode: "enforce" } }),
+      [card],
+      agents,
+    );
+    stubClassifier(harness, "T1");
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      {
+        "lane-dead": {
+          laneId: "lane-dead",
+          verdict: {
+            laneId: "lane-dead",
+            state: "exhausted",
+            serviceable: false,
+            serviceableAccountCount: 0,
+            accounts: [],
+            knownAccountCount: 1,
+            knownWeight: 1,
+          },
+        },
+      } as never,
+    );
+
+    await harness.emit("issue.created", { title: "A card" }, { entityId: card.id, companyId: COMPANY, entityType: "issue" });
+
+    expect(pinnedModel((await harness.ctx.issues.get(card.id, COMPANY)) as Issue)).toBe("claude-opus-5-alt");
+  });
 });
 
 describe("scheduled passes skip exempt cards", () => {
