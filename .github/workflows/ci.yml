@@ -1106,6 +1106,16 @@ jobs:
       - name: task liveness reconciler suite
         run: python3 -m unittest -v test_liveness_reconciler.py
 
+      # Admitted-PR closeout ledger: explicit registry (never a body parse),
+      # exact-SHA check/review evidence, drafts and releases as owned
+      # non-auto-merge work, bounded diagnostic-only proposals. Pure
+      # fixtures: no API, database, credential or timer.
+      - name: admitted-PR closeout ledger suite
+        run: python3 -m unittest -v test_pr_closeout_ledger.py
+
+      - name: admitted-PR closeout gates are load-bearing (mutation-gated)
+        run: ./verification/closeout-ledger-mutation-gate.sh
+
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
 
