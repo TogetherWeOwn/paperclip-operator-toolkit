@@ -1569,40 +1569,67 @@ jobs:
             "s/::error title=/note: /" \
             'emits a ::error annotation' || rc=1
 
-          # 3. An unobservable step list reports clean instead of refusing —
-          #    TOG-357's rule that a check which did not happen is not an answer.
-          dark_mutation "unobservable-reads-as-clean" ci_dark_steps.sh \
-            's/|| refuse "the job object carries no step list; nothing was measured"/|| true/' \
-            'REFUSES rather than reporting zero dark steps' || rc=1
-
-          # 4. Stop attributing the aborting step. "79 steps did not run" without
+          # 3. Stop attributing the aborting step. "78 steps did not run" without
           #    "because step 12 failed" sends the reader back to bisecting a log.
           dark_mutation "culprit-no-longer-attributed" ci_dark_steps.sh \
             's/^CULPRIT="\$(jq.*$/CULPRIT=""/' \
             'names the step that aborted the job' || rc=1
 
-          # 5. Cry wolf on clean runs. A warning on all 89-of-89 runs is one
+          # 4. Cry wolf on clean runs. A warning on every clean run is one
           #    every reviewer learns to scroll past, which is the same as absent.
           dark_mutation "warns-on-a-clean-run" ci_dark_steps.sh \
             's/^if \[\[ "\$DARK" -eq 0 \]\]; then/if [[ "$DARK" -lt 0 ]]; then/' \
             'raises no error annotation' || rc=1
 
-          # 6. Drop `if: always()` from the wiring. This silently re-blinds the
+          # 5. Drop `if: always()` from the wiring. This silently re-blinds the
           #    job: the reporter is then skipped by the very abort it describes,
           #    and prints only on the runs that did not need it. The suite pins
           #    the workflow file for this one reason.
           dark_mutation "if-always-dropped-from-wiring" .github/workflows/ci.yml \
             '/- name: Report steps that never ran/{n;/if: always()/d;}' \
-            'wired with if: always()' || rc=1
+            'wired with if: always\(\)' || rc=1
 
-            # 7. TOG-3427. Count only `"skipped"` as dark again. On a fail-fast
+            # 6. Count only `"skipped"` as dark again. On a fail-fast
             # abort the unreached steps still carry `conclusion: null` at
             # report time, so this reverts the tool to reading 0 dark and
             # printing "all N steps executed" over a 55-step abort — the exact
             # false green the abort-null fixture pins.
             dark_mutation "null-conclusions-not-counted-as-dark" ci_dark_steps.sh \
-            's/select(.conclusion != "success" and .conclusion != "failure")/select(.conclusion=="skipped")/' \
+            's/.conclusion == null and .status != "in_progress"/false/' \
             'an aborted run never prints the clean banner' || rc=1
+
+            # 7. A step still marked in_progress/null has started; treating it
+            # as dark raises a false error on the live view of a green job.
+            dark_mutation "in-progress-step-counted-as-dark" ci_dark_steps.sh \
+            's/ and .status != "in_progress"//' \
+            'an in-progress gate step is not reported as dark' || rc=1
+
+          # 8. Runner setup is not a workflow gate. If it remains in the gate
+          #    set, an otherwise gate-free job can look clean instead of refusing.
+          dark_mutation "runner-setup-counted-as-gate" ci_dark_steps.sh \
+            's/ and (.name != "Set up job" or .number != 1)//' \
+            'a job with only runner lifecycle steps REFUSES' || rc=1
+
+          # 9. A workflow gate can reuse the runner's display name; exclude only
+          #    the runner-generated first step, not a same-named workflow gate.
+          dark_mutation "same-name-workflow-gate-dropped" ci_dark_steps.sh \
+            's/(.name != "Set up job" or .number != 1)/.name != "Set up job"/' \
+            'a same-named workflow gate is retained' || rc=1
+
+          # 10. The runner's final bookkeeping step is not a workflow gate.
+          dark_mutation "runner-completion-counted-as-gate" ci_dark_steps.sh \
+            's/ and .name != "Complete job"//' \
+            'runner setup and completion are excluded from the gate count' || rc=1
+
+          # 11. A job with no gates cannot be certified as a clean run.
+          dark_mutation "empty-gate-set-reports-clean" ci_dark_steps.sh \
+            's/ || refuse "the gate set is empty; nothing was measured"/ || true/' \
+            'a job with only runner lifecycle steps REFUSES' || rc=1
+
+          # 12. A completed timeout is a failed run, not an unstarted gate.
+          dark_mutation "timed-out-step-counted-as-dark" ci_dark_steps.sh \
+            's/.conclusion == "skipped"/.conclusion == "skipped" or .conclusion == "timed_out"/' \
+            'a completed timeout is not counted as a never-run step' || rc=1
 
           exit $rc
 

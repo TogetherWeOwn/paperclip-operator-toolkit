@@ -138,48 +138,79 @@ jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
 
 # --- classify -----------------------------------------------------------------
 # Every count below is taken over the GATE set: registered steps minus the
-# exempted non-gates (this reporter's own step and the runner's `Post`
-# teardown steps, TOG-13080). TOTAL over all steps with DARK over the gate set
-# stops adding up — the outage fixture would print "78 of 93" beside a tally
-# covering 92 — and a live green job would print "all 6 steps executed" when
-# only 3 gates ran. The gate set is the set whose execution this tool
-# certifies; teardown is not a gate, so it is counted separately, not silently.
+# reporter and runner lifecycle steps (`Set up job` at step 1, `Post ...`
+# teardown, and `Complete job`).
+# TOTAL over all steps with DARK over the gate set stops adding up — the outage
+# fixture would print "78 of 93" beside a tally covering 90 — and a live green
+# job would print "all 6 steps executed" when only 3 gates ran. The gate set is
+# the set whose execution this tool certifies; runner lifecycle is not a gate,
+# so it is counted separately, not silently.
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
-GATE='select(.name != "Report steps that never ran" and (.name | startswith("Post ") | not))'
+GATE='select(.name != "Report steps that never ran" and (.name != "Set up job" or .number != 1) and .name != "Complete job" and (.name | startswith("Post ") | not))'
 jq '[.steps[] | '"$GATE"']' "$TMP/job.json" > "$TMP/gate.json"
 FULL="$(jq     '[.steps[]] | length'                              "$TMP/job.json")"
-TOTAL="$(jq    'length'                                          "$TMP/gate.json")"
-RAN="$(jq      '[.[] | select(.conclusion=="success")] | length' "$TMP/gate.json")"
-FAILED="$(jq   '[.[] | select(.conclusion=="failure")] | length' "$TMP/gate.json")"
-# Dark means "registered but never executed". A step that ran to a verdict has
-# conclusion `success` or `failure`; everything else — `skipped` on a finalised
-# job, `cancelled`, and above all `null` — is dark. The `null` case is the
-# load-bearing one (TOG-3427): this reporter runs INSIDE the job under
-# `if: always()`, so on a fail-fast abort the unreached steps still carry
-# `conclusion: null` at report time — the runner only rewrites them to
-# `"skipped"` when the job finalises. Counting only `"skipped"` therefore reads
-# 0 dark on exactly the runs this tool exists to describe, and prints the clean
-# banner over them. In a fail-fast job with no `if:` steps, `skipped` and `null`
-# both mean "never reached"; the distinction belongs to the reader.
-DARK="$(jq     '[.[] | select(.conclusion != "success" and .conclusion != "failure")] | length' "$TMP/gate.json")"
+TOTAL="$(jq 'length' "$TMP/gate.json")"
+[[ "$TOTAL" -gt 0 ]] || refuse "the gate set is empty; nothing was measured"
+RAN="$(jq '[.[] | select(.conclusion == "success")] | length' "$TMP/gate.json")"
+FAILED="$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | length' "$TMP/gate.json")"
+# Dark means "registered but never executed": a skipped step, or a null
+# conclusion on a step that has not started. A live in-progress step has
+# started and may only be awaiting its final API update. Completed timeouts and
+# other nonstandard conclusions are surfaced separately, not called dark.
+IN_PROGRESS="$(jq '[.[] | select(.status == "in_progress" and .conclusion == null)] | length' "$TMP/gate.json")"
+DARK_FILTER='select(.conclusion == "skipped" or (.conclusion == null and .status != "in_progress"))'
+DARK="$(jq '[.[] | '"$DARK_FILTER"'] | length' "$TMP/gate.json")"
+OTHER_FILTER='select(.conclusion != null and .conclusion != "success" and .conclusion != "failure" and .conclusion != "timed_out" and .conclusion != "startup_failure" and .conclusion != "skipped")'
+OTHER="$(jq '[.[] | '"$OTHER_FILTER"'] | length' "$TMP/gate.json")"
 EXEMPT="$((FULL - TOTAL))"
 
-CULPRIT="$(jq -r '[.[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/gate.json")"
-CULPRIT_NO="$(jq -r '[.[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/gate.json")"
+CULPRIT="$(jq -r '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .name // ""' "$TMP/gate.json")"
+CULPRIT_NO="$(jq -r '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .number // ""' "$TMP/gate.json")"
 
-jq -r '[.[] | select(.conclusion != "success" and .conclusion != "failure")][] | "  \(.number)\t\(.name)"' \
+jq -r '[.[] | '"$DARK_FILTER"'][] | "  \(.number)\t\(.name)"' \
    "$TMP/gate.json" > "$TMP/dark.txt"
+jq -r '[.[] | '"$OTHER_FILTER"'][] | "  \(.number)\t\(.name)\t\(.conclusion)"' \
+   "$TMP/gate.json" > "$TMP/other.txt"
 
 # --- report -------------------------------------------------------------------
 emit() { printf '%s\n' "$1"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; return 0; }
 
-if [[ "$DARK" -eq 0 ]]; then
-  emit "### ✅ ${JOB_NAME}: all ${TOTAL} steps executed"
+emit_other() {
+  [[ "$OTHER" -gt 0 ]] || return 0
   emit ""
-  emit "No gate step was skipped, so every gate in this job is load-bearing on this run."
+  emit '<details><summary>Steps with other conclusions</summary>'
+  emit ""
+  emit '```'
+  while IFS=$'\t' read -r num name conclusion; do
+    emit "$(printf '%-4s %s (%s)' "${num# }" "$name" "$conclusion")"
+  done < "$TMP/other.txt"
+  emit '```'
+  emit '</details>'
+}
+
+if [[ "$DARK" -eq 0 ]]; then
+  if [[ "$IN_PROGRESS" -gt 0 ]]; then
+    STEP_WORD="steps"; [[ "$IN_PROGRESS" -eq 1 ]] && STEP_WORD="step"
+    emit "### ⏳ ${JOB_NAME}: ${IN_PROGRESS} gate ${STEP_WORD} still in progress"
+    emit ""
+    emit "No gate step was identified as never started. Any in-progress gate step began but had not reached a verdict when this report ran."
+  elif [[ "$OTHER" -gt 0 ]]; then
+    OTHER_WORD="steps"; OTHER_VERB="have"
+    if [[ "$OTHER" -eq 1 ]]; then OTHER_WORD="step"; OTHER_VERB="has"; fi
+    emit "### ⚠️ ${JOB_NAME}: ${OTHER} gate ${OTHER_WORD} ${OTHER_VERB} nonstandard conclusions"
+    emit ""
+    emit "No gate step was identified as never started, but these outcomes are not counted as passed, failed, or not run."
+  else
+    emit "### ✅ ${JOB_NAME}: all ${TOTAL} steps executed"
+    emit ""
+    emit "No gate step was skipped, so every gate in this job is load-bearing on this run."
+  fi
+  emit ""
+  emit "Executed: ${RAN} passed, ${FAILED} failed. In progress: ${IN_PROGRESS}. Not run: ${DARK}. Other outcomes: ${OTHER}."
+  emit_other
   if [[ "$EXEMPT" -gt 0 ]]; then
     emit ""
-    emit "(${EXEMPT} non-gate steps excluded from this count: this reporter and runner teardown.)"
+    emit "(${EXEMPT} non-gate steps excluded from this count: reporter and runner lifecycle.)"
   fi
   exit 0
 fi
@@ -201,10 +232,11 @@ else
   emit "**${DARK}** steps were registered but never executed on this run."
 fi
 emit ""
-emit "Executed: ${RAN} passed, ${FAILED} failed. Not run: ${DARK}."
+emit "Executed: ${RAN} passed, ${FAILED} failed. In progress: ${IN_PROGRESS}. Not run: ${DARK}. Other outcomes: ${OTHER}."
+emit_other
 if [[ "$EXEMPT" -gt 0 ]]; then
   emit ""
-  emit "(${EXEMPT} non-gate steps excluded from this count: this reporter and runner teardown.)"
+  emit "(${EXEMPT} non-gate steps excluded from this count: reporter and runner lifecycle.)"
 fi
 emit ""
 emit '<details><summary>Steps that did not run</summary>'

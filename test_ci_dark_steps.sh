@@ -14,16 +14,15 @@
 # `actions/jobs/{id}` response for the two runs named in TOG-910:
 #
 #   job-100695318458-dark.json    pristine main e9dea118 — 13 success, 1 failure,
-#                                 79 skipped. The outage itself. Two of the 93
-#                                 are runner teardown (`Post ...`), which the
-#                                 gate set excludes, so the tool reports 78 dark
-#                                 of 91 gate steps with a 12/1/78 tally. One of the 79 is
-#                                 the runner's `Post Run actions/setup-node@v4`
-#                                 teardown, which TOG-13080 exempts from the dark
-#                                 set (teardown is not a gate), so the tool
-#                                 reports 78 dark here.
-#   job-100786202472-green.json   PR #198 d794f39c — 95 steps, 0 skipped. The
-#                                 same job once the expiry was re-issued.
+#                                 79 skipped across 93 steps. `Set up job`, two
+#                                 `Post ...` teardowns, and `Complete job` are
+#                                 runner lifecycle, not gates; one teardown was
+#                                 skipped and three lifecycle steps succeeded.
+#                                 The tool reports 78 dark of 89 gate steps with
+#                                 a 10/1/78 passed/failed/not-run tally.
+#   job-100786202472-green.json   PR #198 d794f39c — 95 steps, 0 skipped. Four
+#                                 runner lifecycle steps are excluded, leaving
+#                                 91 gate steps passed after the expiry was re-issued.
 #   job-105959891748-abort-null.json  run 35466576547, Offline suites, TOG-3427:
 #                                 80 success, 1 failure, 55 conclusions still
 #                                 `null` — the at-report-time view of a fail-fast
@@ -32,13 +31,18 @@
 #                                 which is exactly the state that hid the bug, so
 #                                 re-recording this fixture from the API would
 #                                 un-write the test. Counts match the card.
-#   job-live-green-reporter-inflight.json  TOG-13080: the at-report-time view of
-#                                 a GREEN job — 3 success, the reporter itself
-#                                 still in_progress (conclusion null), 2 `Post`
-#                                 teardown steps still queued. CONSTRUCTED: the
-#                                 finalised job object rewrites those nulls, so
-#                                 re-recording it from the API would un-write the
-#                                 test. Must read 0 dark with no ::error.
+#   job-live-green-reporter-inflight.json  The at-report-time view of
+#                                 a GREEN job — `Set up job`, 3 gates, the
+#                                 reporter in_progress, and 2 queued `Post`
+#                                 teardown steps. CONSTRUCTED: the finalised job
+#                                 object rewrites those nulls, so re-recording it
+#                                 from the API would un-write the test. Must read
+#                                 0 dark with no ::error.
+#   job-live-green-gate-inflight.json  Constructed live view: `Set up job`, 4
+#                                 gates concluded successfully, and one in_progress
+#                                 with a null conclusion when the reporter runs.
+#                                 Queued `Post ...` and `Complete job` steps are
+#                                 excluded.
 #
 # Re-record with:
 #   gh api repos/TogetherWeOwn/paperclip-ops-tooling/actions/jobs/<id> > <fixture>
@@ -59,6 +63,7 @@ DARK="$FIXTURES/job-100695318458-dark.json"
 GREEN="$FIXTURES/job-100786202472-green.json"
 ABORT_NULL="$FIXTURES/job-105959891748-abort-null.json"
 LIVE_GREEN="$FIXTURES/job-live-green-reporter-inflight.json"
+LIVE_GATE_INFLIGHT="$FIXTURES/job-live-green-gate-inflight.json"
 PASS=0; FAIL=0
 
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -78,7 +83,7 @@ command -v jq >/dev/null 2>&1 || { echo "test_ci_dark_steps: jq is required" >&2
 [[ -x "$TOOL" ]] || { echo "test_ci_dark_steps: $TOOL is not executable" >&2; exit 2; }
 # A missing fixture is a hard error, never a skip. A skipped test is a deleted
 # test that still prints a zero exit (TOG-339).
-for f in "$DARK" "$GREEN" "$ABORT_NULL" "$LIVE_GREEN"; do
+for f in "$DARK" "$GREEN" "$ABORT_NULL" "$LIVE_GREEN" "$LIVE_GATE_INFLIGHT"; do
   [[ -s "$f" ]] || { echo "test_ci_dark_steps: recorded fixture missing or empty: $f" >&2; exit 2; }
 done
 
@@ -93,11 +98,11 @@ OUT="$("$TOOL" report --job-json "$DARK" 2>&1)"; RC=$?
 assert $? "a dark run still exits 0" \
   "got exit $RC — the reporter must not replace the real failure's attribution"
 
-# 91 gate steps (93 registered minus 2 `Post` teardowns): 12 passed, 1 failed,
-# 78 dark. The tally must add up over the same set the banner counts.
-grep -q '78 of 91 steps never ran' <<< "$OUT"
+# 89 gate steps (93 registered minus `Set up job`, 2 `Post` teardowns, and
+# `Complete job`): 10 passed, 1 failed, 78 dark. The tally must match the banner.
+grep -q '78 of 89 steps never ran' <<< "$OUT"
 assert $? "the dark run names the count of steps that did not execute" \
-  "expected '78 of 91 steps never ran'"
+  "expected '78 of 89 steps never ran'"
 
 grep -q 'OmniRoute rehearsal package suite' <<< "$OUT"
 assert $? "the dark run names the step that aborted the job" \
@@ -116,16 +121,34 @@ grep -qi 'mutation-gated' <<< "$OUT"
 assert $? "the dark list names the mutation gates" \
   "no mutation-gated step is reported, so vacuity protection looks intact when it is not"
 
-# 12 + 1 + 78 = 91: the tally adds up over the gate set (one of the 13
-# recorded successes is an exempted `Post` teardown). If the arithmetic drifts,
-# the report is worse than nothing because it looks authoritative.
-grep -q 'Executed: 12 passed, 1 failed. Not run: 78.' <<< "$OUT"
+# 10 + 1 + 78 = 89: the tally adds up over the gate set. Three successful
+# runner lifecycle steps and one skipped Post teardown are excluded.
+grep -q 'Executed: 10 passed, 1 failed. In progress: 0. Not run: 78. Other outcomes: 0.' <<< "$OUT"
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
 
-grep -q '2 non-gate steps excluded' <<< "$OUT"
+grep -q '4 non-gate steps excluded' <<< "$OUT"
 assert $? "the dark report discloses the excluded non-gate steps" \
   "the exemption is silent, so the banner looks like it covers all 93 steps"
+
+# A step that timed out ran far enough to produce a failure, so it is not dark.
+jq '(.steps[] | select(.name == "OmniRoute rehearsal package suite") | .conclusion) = "timed_out"' \
+  "$DARK" > "$TMP/timeout.json"
+OUT_T="$("$TOOL" report --job-json "$TMP/timeout.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a timed-out gate run still exits 0" "got exit $RC"
+
+grep -q '78 of 89 steps never ran' <<< "$OUT_T"
+assert $? "a completed timeout is not counted as a never-run step" \
+  "the timeout was included in the dark count"
+
+grep -q 'aborted at step .*OmniRoute rehearsal package suite' <<< "$OUT_T"
+assert $? "a timed-out gate is attributed as the aborting step" \
+  "the timeout culprit is missing from the report"
+
+grep -q 'Executed: 10 passed, 1 failed. In progress: 0. Not run: 78. Other outcomes: 0.' <<< "$OUT_T"
+assert $? "a timeout is counted as failed, not dark" \
+  "the timeout is missing from the executed-step tally"
 
 # ---------------------------------------------------------------------------
 hdr "The fail-fast abort as the reporter sees it — null conclusions are dark (TOG-3427)"
@@ -155,7 +178,7 @@ grep -qi 'mutation-gated' <<< "$OUT_A"
 assert $? "the abort list names the mutation gates" \
   "no mutation-gated step is reported, so vacuity protection looks intact when it is not"
 
-grep -q 'Executed: 80 passed, 1 failed. Not run: 55.' <<< "$OUT_A"
+grep -q 'Executed: 80 passed, 1 failed. In progress: 0. Not run: 55. Other outcomes: 0.' <<< "$OUT_A"
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
 
@@ -181,21 +204,43 @@ assert $? "a fully-executed run raises no error annotation" \
 assert $? "a fully-executed run reports no un-run steps" \
   "a clean run is being described as dark"
 
-grep -q 'all 93 steps executed' <<< "$OUT_G"
+grep -q 'all 91 steps executed' <<< "$OUT_G"
 assert $? "a fully-executed run states the number of steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
 
-grep -q '2 non-gate steps excluded' <<< "$OUT_G"
+grep -q '4 non-gate steps excluded' <<< "$OUT_G"
 assert $? "a fully-executed run discloses the excluded non-gate steps" \
-  "the banner claims 93 while the job registered 95"
+  "the banner claims 91 while the job registered 95"
+
+# Other completed conclusions must be visible without being called dark or clean.
+jq '(.steps[] | select(.name == "Syntax check every script") | .conclusion) = "cancelled"' "$GREEN" > "$TMP/other-outcome.json"
+OUT_O="$("$TOOL" report --job-json "$TMP/other-outcome.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a completed nonstandard outcome still exits 0" "got exit $RC"
+
+! grep -qi 'never ran' <<< "$OUT_O"
+assert $? "a completed nonstandard outcome is not called never run" \
+  "the report treated a concluded step as dark"
+
+grep -q 'Other outcomes: 1.' <<< "$OUT_O"
+assert $? "a completed nonstandard outcome is tallied separately" \
+  "the report omitted the nonstandard conclusion"
+
+grep -q 'Syntax check every script (cancelled)' <<< "$OUT_O"
+assert $? "a completed nonstandard outcome is named" \
+  "the report did not identify the step with another conclusion"
+
+! grep -q 'all 91 steps executed' <<< "$OUT_O"
+assert $? "a nonstandard conclusion is not reported as fully executed" \
+  "the report claimed a clean execution despite an unclassified outcome"
 
 # ---------------------------------------------------------------------------
-hdr "The live view — the reporter exempts itself and teardown (TOG-13080)"
+hdr "The live view — runner lifecycle steps are not gates"
 
-# At report time the live job object always holds the reporter's OWN step
-# (in_progress, conclusion null) plus queued `Post` teardown steps. Before the
-# exemption every green job printed an ::error annotation about itself — the
-# cry-wolf failure this entire tool exists to prevent.
+# At report time the live job object holds `Set up job`, the reporter's OWN
+# step (in_progress, conclusion null), and queued `Post` teardown steps. Before
+# the exemption every green job printed an ::error annotation about itself —
+# the cry-wolf failure this entire tool exists to prevent.
 OUT_L="$("$TOOL" report --job-json "$LIVE_GREEN" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a live green run with the reporter in flight exits 0" "got exit $RC"
@@ -212,9 +257,62 @@ grep -q 'all 3 steps executed' <<< "$OUT_L"
 assert $? "a live green run with the reporter in flight states the number of gate steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
 
-grep -q '3 non-gate steps excluded' <<< "$OUT_L"
+grep -q '4 non-gate steps excluded' <<< "$OUT_L"
 assert $? "a live green run with the reporter in flight discloses the excluded non-gate steps" \
   "the banner claims 3 while the job registered 6"
+
+# ---------------------------------------------------------------------------
+hdr "A live gate step already in progress is not dark"
+
+OUT_I="$("$TOOL" report --job-json "$LIVE_GATE_INFLIGHT" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a live gate step in progress exits 0" "got exit $RC"
+
+! grep -q '::error' <<< "$OUT_I"
+assert $? "an in-progress gate step is not reported as dark" \
+  "a started gate step was treated as never run"
+
+! grep -qi 'never ran' <<< "$OUT_I"
+assert $? "an in-progress gate step is not listed as never run" \
+  "the report says a started gate step never ran"
+
+grep -q '1 gate step still in progress' <<< "$OUT_I"
+assert $? "the live view discloses the in-progress gate step" \
+  "the report does not distinguish a live step from a dark step"
+
+grep -q 'Executed: 4 passed, 0 failed. In progress: 1. Not run: 0. Other outcomes: 0.' <<< "$OUT_I"
+assert $? "the live view tally separates completed, in-progress, and dark steps" \
+  "the three gate states do not add up to the five-gate total"
+
+grep -q '5 non-gate steps excluded' <<< "$OUT_I"
+assert $? "runner setup and completion are excluded from the gate count" \
+  "the runner's Set up job or Complete job step was counted as a gate"
+
+! grep -q 'all 5 steps executed' <<< "$OUT_I"
+assert $? "an in-progress gate step is not claimed as fully executed" \
+  "the report claims a verdict before the live step has one"
+
+jq '.steps = (.steps[0:6] + [{"conclusion":null,"name":"Unstarted gate step","number":7,"status":"pending"}] + (.steps[6:] | map(.number += 1)))' \
+  "$LIVE_GATE_INFLIGHT" > "$TMP/live-inflight-with-dark.json"
+OUT_M="$("$TOOL" report --job-json "$TMP/live-inflight-with-dark.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a mixed live view still reports its dark gate" "got exit $RC"
+
+grep -q '1 of 6 steps never ran' <<< "$OUT_M"
+assert $? "the mixed live view counts only the unstarted gate as dark" \
+  "expected one dark gate among six gate steps"
+
+grep -q 'Unstarted gate step' <<< "$OUT_M"
+assert $? "the mixed live view lists the unstarted gate" \
+  "the actual dark step is missing from the report"
+
+! grep -q 'Finalize operator report' <<< "$OUT_M"
+assert $? "the mixed live view omits its in-progress gate from the dark list" \
+  "a started gate is listed as never run"
+
+grep -q 'Executed: 4 passed, 0 failed. In progress: 1. Not run: 1. Other outcomes: 0.' <<< "$OUT_M"
+assert $? "the mixed live view tally separates all gate states" \
+  "the tally does not account for four passed, one running, and one dark gate"
 
 # ---------------------------------------------------------------------------
 hdr "Refusal — a check that did not happen must never read as clean (TOG-357)"
@@ -226,6 +324,24 @@ assert $? "an empty step list REFUSES rather than reporting zero dark steps" \
   "got exit $RC — 'no steps skipped' out of no data is a false green"
 grep -q 'REFUSED' <<< "$OUT_E"
 assert $? "the refusal says so in words" "refusal is not labelled"
+
+jq -n '{name:"x",steps:[{conclusion:"success",name:"Set up job",number:1,status:"completed"},{conclusion:null,name:"Report steps that never ran",number:2,status:"in_progress"},{conclusion:null,name:"Post Run cleanup",number:3,status:"queued"},{conclusion:null,name:"Complete job",number:4,status:"queued"}]}' \
+  > "$TMP/no-gates.json"
+OUT_NG="$("$TOOL" report --job-json "$TMP/no-gates.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 3 ]]
+assert $? "a job with only runner lifecycle steps REFUSES" "got exit $RC"
+
+jq -n '{name:"x",steps:[{conclusion:"success",name:"Set up job",number:1,status:"completed"},{conclusion:"skipped",name:"Set up job",number:2,status:"completed"},{conclusion:null,name:"Report steps that never ran",number:3,status:"in_progress"},{conclusion:null,name:"Post Run cleanup",number:4,status:"queued"},{conclusion:null,name:"Complete job",number:5,status:"queued"}]}' \
+  > "$TMP/gate-named-like-setup.json"
+OUT_DUP="$("$TOOL" report --job-json "$TMP/gate-named-like-setup.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a same-named workflow gate is retained" "got exit $RC"
+grep -q '1 of 1 steps never ran' <<< "$OUT_DUP"
+assert $? "a same-named workflow gate is reported as dark" \
+  "the workflow step was masked by the runner setup step"
+grep -q 'Set up job' <<< "$OUT_DUP"
+assert $? "the same-named workflow gate appears in the dark list" \
+  "the workflow step is missing from the dark-step list"
 
 echo '{"name":"x"}' > "$TMP/nosteps.json"
 OUT_N="$("$TOOL" report --job-json "$TMP/nosteps.json" 2>&1)"; RC=$?

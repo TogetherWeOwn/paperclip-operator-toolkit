@@ -1,0 +1,17 @@
+{
+  "name": "Operator runbook gates",
+  "status": "in_progress",
+  "conclusion": null,
+  "steps": [
+    {"conclusion": "success", "name": "Set up job", "number": 1, "status": "completed"},
+    {"conclusion": "success", "name": "Checkout", "number": 2, "status": "completed"},
+    {"conclusion": "success", "name": "Run repository checks", "number": 3, "status": "completed"},
+    {"conclusion": "success", "name": "Verify policy gates", "number": 4, "status": "completed"},
+    {"conclusion": "success", "name": "Run mutation checks", "number": 5, "status": "completed"},
+    {"conclusion": null, "name": "Finalize operator report", "number": 6, "status": "in_progress"},
+    {"conclusion": null, "name": "Report steps that never ran", "number": 7, "status": "in_progress"},
+    {"conclusion": null, "name": "Post Run actions/checkout@v4", "number": 8, "status": "queued"},
+    {"conclusion": null, "name": "Post Run actions/setup-node@v4", "number": 9, "status": "queued"},
+    {"conclusion": null, "name": "Complete job", "number": 10, "status": "queued"}
+  ]
+}
