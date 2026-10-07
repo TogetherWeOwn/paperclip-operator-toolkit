@@ -3148,6 +3148,10 @@ jobs:
       - name: platform watchdog gate
         run: ./verification/platform-watchdog-gate.sh
 
+      # Standalone readers only: no detector, host, or deployment integration.
+      - name: watchdog section reader suite
+        run: python3 -m unittest -v test_watchdog_sections
+
       # Mutation gate: planted defects must kill, survivors fail the step.
       - name: lost-probe mutation gate
         run: python3 verification/process-lost-mutation-gate.py
