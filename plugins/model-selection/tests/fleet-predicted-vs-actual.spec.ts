@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPredictedVsActualReport, resetActualsForLedger } from "../src/fleet-predicted-vs-actual.js";
+import { buildPredictedVsActualReport, historyToResetActuals, historyToSnapshots, resetActualsForLedger } from "../src/fleet-predicted-vs-actual.js";
+import { appendFleetHistory, fleetLaneInputsForLedger, fleetProposalRecord, MAX_FLEET_HISTORY,
+  proposeShadowFleetAdmission, type FleetHistoryEntry } from "../src/fleet-admission-shadow.js";
 import { evaluateLanePace, normalizeLaneDocument } from "../src/lane-capacity/pace.js";
+
+function appendObservation(history: FleetHistoryEntry[], utilization: number, observedAt: string, resetAt = WINDOW_RESET) {
+  const observation = normalizeLaneDocument({ definition: { laneId: "alpha", healthFields: ["health"],
+    accountKeyFields: ["account_key"], weightFields: ["weight"], windows: [
+      { name: "weekly", role: "allowance", utilizationFields: ["weekly_u"], resetFields: ["weekly_reset"], defaultWindowSeconds: 604800 },
+    ] }, document: { observedAt, records: [{ account_key: "account", health: "healthy", weight: 1,
+      weekly_u: utilization, weekly_reset: resetAt }] } });
+  const verdict = evaluateLanePace({ observation, asOf: observedAt });
+  const ledger = { alpha: { laneId: "alpha", observation, verdict, fetchedAt: observedAt, error: null } };
+  const proposal = fleetProposalRecord(proposeShadowFleetAdmission({ lanes: fleetLaneInputsForLedger(ledger), asOf: observedAt }), null);
+  expect(proposal).not.toBeNull();
+  return appendFleetHistory(history, proposal, ledger);
+}
+
+function reportForHistory(history: FleetHistoryEntry[], asOf = WINDOW_RESET) {
+  return buildPredictedVsActualReport({ asOf, snapshots: historyToSnapshots(history),
+    actuals: historyToResetActuals(history), proposals: [], governorLevels: [] });
+}
 
 const WINDOW_START = "2026-09-29T00:00:00.000Z";
 const WINDOW_RESET = "2026-10-06T00:00:00.000Z";
@@ -36,6 +56,44 @@ describe("daily predicted-vs-actual report", () => {
     ]);
     expect(report.rows[0]!.projectionError).toBeCloseTo(-0.005, 5);
     expect(report.fleetLevels).toMatchObject({ proposalLevel: "normal", governorLevel: "normal", match: true });
+  });
+
+  it("compares a forecast frozen 24 hours before reset against a separate endpoint from real history", () => {
+    let history = appendObservation([], 0.8, MID_WEEK);
+    history = appendObservation(history, 0.805, "2026-10-05T12:00:00.000Z");
+    history = appendObservation(history, 0.81, NEAR_RESET);
+    const report = reportForHistory(history);
+    expect(report.rows[0]).toMatchObject({ projectedAsOf: MID_WEEK, actualAsOf: NEAR_RESET, actualUtilization: 0.81 });
+    expect(report.rows[0]!.projected).toBeCloseTo(0.8 / (4.5 / 7));
+    expect(report.rows[0]!.projectionError).toBeCloseTo(0.81 - 0.8 / (4.5 / 7));
+  });
+
+  it("does not dilute reset evidence by appending the same poll repeatedly", () => {
+    const nextReset = "2026-10-13T00:00:00.000Z";
+    let history = appendObservation([], 0.81, NEAR_RESET);
+    history = appendObservation(history, 0.01, "2026-10-06T00:10:00.000Z", nextReset);
+    for (let i = 0; i <= MAX_FLEET_HISTORY; i++) {
+      history = appendObservation(history, 0.01, "2026-10-06T00:10:00.000Z", nextReset);
+    }
+    expect(history).toHaveLength(2);
+    expect(reportForHistory(history, "2026-10-06T06:13:00.000Z").rows.find(row => row.resetAt === WINDOW_RESET))
+      .toMatchObject({ status: "reset-observed", actualUtilization: 0.81 });
+  });
+
+  it("retains forecast and reset anchors when more than 200 new observations arrive before reporting", () => {
+    let history = appendObservation([], 0.8, MID_WEEK);
+    history = appendObservation(history, 0.81, NEAR_RESET);
+    const original = history;
+    const unchanged = structuredClone(history);
+    for (let i = 1; i <= MAX_FLEET_HISTORY + 2; i++) {
+      history = appendObservation(history, 0.01, new Date(Date.parse(WINDOW_RESET) + (i + 10) * 60000).toISOString(),
+        "2026-10-13T00:00:00.000Z");
+    }
+    expect(history).toHaveLength(MAX_FLEET_HISTORY);
+    const row = reportForHistory(history, "2026-10-06T06:13:00.000Z").rows.find(row => row.resetAt === WINDOW_RESET);
+    expect(row).toMatchObject({ status: "reset-observed", projectedAsOf: MID_WEEK, actualAsOf: NEAR_RESET, actualUtilization: 0.81 });
+    expect(row!.projected).toBeCloseTo(0.8 / (4.5 / 7));
+    expect(original).toEqual(unchanged);
   });
 
   it("flags an actual outside the band and an aligned governor level mismatch", () => {
@@ -95,8 +153,46 @@ describe("daily predicted-vs-actual report", () => {
     });
     expect(report.rows.find(row => row.laneId === "alpha")).toMatchObject({ projected: 0.99,
       actualUtilization: null, projectionError: null, withinTargetBand: null });
-    expect(report.rows.find(row => row.laneId === "legacy")).toMatchObject({ status: "unknown-window", projectionError: null });
+    expect(report.rows.find(row => row.laneId === "legacy")).toMatchObject({ status: "unknown-window",
+      projected: 0.9, projectedAsOf: MID_WEEK, projectionError: null });
     expect(report.fleetLevels).toMatchObject({ proposalLevel: null, governorLevel: null, match: null });
+  });
+
+  it("does not expose future observations when legacy history has no reset identity", () => {
+    const report = buildPredictedVsActualReport({ ...reportInput(), snapshots: [{
+      laneId: "legacy", projected: 1.2, resetAt: null, asOf: "2026-10-07T00:00:00.000Z",
+    }], actuals: [] });
+    expect(report.rows[0]).toMatchObject({ status: "unknown-window", projected: null, projectedAsOf: null });
+  });
+
+  it.each(["missing-weekly", "monthly-governed", "missing-reset"])("never certifies a healthy sibling as the whole lane (%s)", scenario => {
+    const definition = { laneId: "alpha", healthFields: ["health"], accountKeyFields: ["account_key"],
+      weightFields: ["weight"], windows: [
+        { name: "weekly", role: "allowance" as const, utilizationFields: ["weekly_u"], resetFields: ["weekly_reset"], defaultWindowSeconds: 604800 },
+        { name: "monthly", role: "allowance" as const, utilizationFields: ["monthly_u"], resetFields: ["monthly_reset"], defaultWindowSeconds: 2592000 },
+        { name: "five-hour", role: "serviceability" as const, utilizationFields: ["five_u"], resetFields: ["five_reset"], defaultWindowSeconds: 18000 },
+      ] };
+    const observation = normalizeLaneDocument({ definition, document: { observedAt: NEAR_RESET, records: [
+      { account_key: "heavy", health: "healthy", weight: 100,
+        weekly_u: scenario === "missing-weekly" ? undefined : 0.2,
+        weekly_reset: scenario === "missing-reset" ? undefined : WINDOW_RESET,
+        monthly_u: scenario !== "missing-weekly" ? 0.99 : undefined,
+        monthly_reset: "2026-10-26T00:00:00.000Z", five_u: scenario === "missing-weekly" ? 1 : 0.1,
+        five_reset: "2026-10-06T03:00:00.000Z" },
+      { account_key: "light", health: "healthy", weight: 1, weekly_u: 0.99, weekly_reset: WINDOW_RESET,
+        five_u: 0.1, five_reset: "2026-10-06T03:00:00.000Z" },
+    ] } });
+    const verdict = evaluateLanePace({ observation, asOf: NEAR_RESET });
+    expect(verdict.serviceable).toBe(true);
+    if (scenario === "monthly-governed") expect(verdict.accounts[0]!.governingWindow).toBe("monthly");
+    const actuals = resetActualsForLedger({ alpha: { laneId: "alpha", observation, verdict, fetchedAt: NEAR_RESET, error: null } }, WINDOW_RESET);
+    const report = buildPredictedVsActualReport({ ...reportInput(), actuals });
+    if (scenario !== "monthly-governed") {
+      expect(report.rows[0]).toMatchObject({ status: "reset-reading-unavailable", actualUtilization: null, withinTargetBand: null });
+    } else {
+      expect(report.rows[0]!.actualUtilization).toBeCloseTo((100 * 0.2 + 0.99) / 101);
+      expect(report.rows[0]!.withinTargetBand).toBe(false);
+    }
   });
 
   it("reads weighted weekly utilization even when an account trips the five-hour backstop", () => {

@@ -1,7 +1,7 @@
 import type { LaneLedger } from "./engine/pacing.js";
 import { BURN_DOWN_TARGET_HIGH, BURN_DOWN_TARGET_LOW } from "./lane-capacity/burn-down.js";
 import type { FleetAdmissionLevel } from "./lane-capacity/fleet-admission.js";
-import { WEEK_SECONDS, weeklyLaneReadingsForLedger, type FleetHistoryEntry } from "./fleet-admission-shadow.js";
+import { FLEET_PROJECTION_LEAD_MS, WEEK_SECONDS, weeklyLaneReadingsForLedger, type FleetHistoryEntry } from "./fleet-admission-shadow.js";
 
 /** Source observations within one normal poll freshness budget of reset can validate the landing. */
 export const RESET_READING_MAX_AGE_MS = 15 * 60 * 1000;
@@ -59,6 +59,7 @@ function finite(value: unknown): value is number {
 function latestAtOrBefore<T extends { asOf: string | null }>(
   entries: readonly T[], atOrBeforeMs: number, notBeforeMs = Number.NEGATIVE_INFINITY,
 ): T | null {
+  if (!Number.isFinite(atOrBeforeMs) || Number.isNaN(notBeforeMs)) return null;
   let best: T | null = null;
   let bestMs = Number.NEGATIVE_INFINITY;
   for (const entry of entries) {
@@ -122,10 +123,13 @@ export function buildPredictedVsActualReport(input: {
     .map(({ laneId, resetAt }) => {
       const resetMs = Date.parse(resetAt ?? "");
       const startMs = resetMs - WEEK_SECONDS * 1000;
+      const cutoffMs = resetAt === null ? asOfMs : Math.min(resetMs, asOfMs);
+      const notBeforeMs = resetAt === null ? Number.NEGATIVE_INFINITY : startMs;
+      const forecastCutoffMs = resetAt === null ? asOfMs : Math.min(resetMs - FLEET_PROJECTION_LEAD_MS, asOfMs);
       const snapshot = latestAtOrBefore(input.snapshots.filter(s => s.laneId === laneId && s.resetAt === resetAt),
-        Math.min(resetMs, asOfMs), startMs);
+        forecastCutoffMs, notBeforeMs);
       const actual = latestAtOrBefore(input.actuals.filter(a => a.laneId === laneId && a.resetAt === resetAt),
-        Math.min(resetMs, asOfMs), startMs);
+        cutoffMs, notBeforeMs);
       const completed = Number.isFinite(resetMs) && Number.isFinite(asOfMs) && resetMs <= asOfMs;
       const resetObserved = completed && actual !== null && finite(actual.utilization) &&
         resetMs - Date.parse(actual.asOf ?? "") <= RESET_READING_MAX_AGE_MS;
@@ -152,7 +156,7 @@ export function buildPredictedVsActualReport(input: {
   const aligned = proposal !== null && governor !== null &&
     Math.abs(Date.parse(proposal.asOf) - Date.parse(governor.asOf)) <= RESET_READING_MAX_AGE_MS;
   const limitations = [
-    "Projections are linear spot readouts (utilization/elapsed), not forecasts; bursty consumption deviates from them.",
+    "Projections freeze the latest source reading at or before reset minus 24 hours; missing lead-time readings remain unknown. They are linear utilization/elapsed readouts, so bursty consumption deviates from them.",
     "Reset actuals use the last source observation at or before a completed weekly reset, within 15 minutes; older or missing readings are unknown, not a validated landing.",
   ];
   if (governorLevel === null || !aligned) {

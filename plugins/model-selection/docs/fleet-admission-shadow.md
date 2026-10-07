@@ -12,16 +12,18 @@ The previous known proposal level is persisted across advise cycles. An unknown 
 
 ## Reset-aligned daily table
 
-The shadow history stores each lane's weighted weekly utilization, linear projection, source observation time and weekly reset identity. Accounts with different weekly resets are separate report rows. A temporarily tripped five-hour account contributes its measured weekly utilization, not an artificial 100% weekly utilization.
+The shadow history stores each lane's weighted weekly utilization, linear projection, source observation time and weekly reset identity. Measurement includes every weekly allowance, even when a monthly allowance governs advice; the stricter weekly-governor requirement applies only to proposals. Accounts with different weekly resets are separate report rows. A temporarily tripped five-hour account contributes its measured weekly utilization, not an artificial 100% weekly utilization.
 
-The daily job reads this recorded history. It must not use the current ledger as the actual for an earlier or upcoming reset. Rows are keyed by lane and weekly reset:
+An account missing weekly utilization or weight makes its reset group unknown, rather than silently dropping its capacity and certifying the remaining accounts. An account with an unknown weekly reset cannot be assigned to a group, so all that observation's lane groups remain unknown. Every source observation must be at or before the report clock, including legacy projections without reset identity.
+
+The daily job reads this recorded history. It freezes the latest projection observed at or before reset minus 24 hours, separately from the last pre-reset actual. Later readings cannot replace the forecast and make its error zero by construction; a missing lead-time sample leaves the projection and error null. It must not use the current ledger as the actual for an earlier or upcoming reset. Rows are keyed by lane and weekly reset:
 
 - `pending-reset`: the weekly reset has not happened. The actual, error and target-band result are null.
 - `reset-observed`: the last source observation at or before a completed reset is within 15 minutes of that reset. The table compares that measured utilization with the projection from the same weekly window. This is a bounded pre-reset sample, not a claim of exact-at-reset measurement.
 - `reset-reading-unavailable`: the reset happened, but there is no endpoint reading inside that sampling budget. The actual, error and target-band result are null.
 - `unknown-window`: old history lacks reset identity. It cannot validate a landing.
 
-Re-reading an old ledger never updates its source observation time. Post-reset zero readings are not measurements of the previous window. History is bounded to 200 cycles; a missing or evicted endpoint remains unknown.
+Re-reading an old ledger never updates its source observation time or appends another identical poll. Post-reset zero readings are not measurements of the previous window. History is bounded to 200 changed-observation cycles. When trimming it, compact per-window forecast and endpoint receipts are carried into retained history with their original source clocks for eight days after reset. That covers a week of daily reports plus the next daily run, even after more than 200 fresh observations. This bounded retention is not a permanent audit archive; expired windows may disappear. Missing endpoint receipts remain unknown.
 
 ## Host governor comparison
 

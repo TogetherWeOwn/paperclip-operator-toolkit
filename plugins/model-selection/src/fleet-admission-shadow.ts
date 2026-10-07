@@ -64,6 +64,8 @@ function positive(value: unknown): number | null {
 }
 
 export const WEEK_SECONDS = 7 * 24 * 60 * 60;
+export const FLEET_PROJECTION_LEAD_MS = 24 * 60 * 60 * 1000;
+const FLEET_EVIDENCE_RETENTION_MS = WEEK_SECONDS * 1000 + FLEET_PROJECTION_LEAD_MS;
 
 /** Serviceability windows are a backstop, never a substitute for weekly allowance. */
 export function weeklyAllowanceWindow(account: PaceAccountVerdict): PaceWindowVerdict | null {
@@ -122,24 +124,37 @@ export function weeklyLaneReadingsForLedger(ledger: LaneLedger): FleetHistoryLan
     if (!verdict || verdict.serviceable === null || !verdict.observedAt) continue;
     const observedMs = Date.parse(verdict.observedAt);
     if (!Number.isFinite(observedMs)) continue;
-    const groups = new Map<string, { weight: number; utilized: number }>();
+    const groups = new Map<string, { weight: number; utilized: number; complete: boolean }>();
+    let unassignedWeeklyAccount = false;
     for (const account of verdict.accounts) {
-      const weekly = weeklyAllowanceWindow(account);
-      const weight = positive(weekly?.allowanceWeight ?? account.weight);
-      const resetAt = weekly?.resetsAt;
-      const utilization = weekly?.utilization;
-      if (!resetAt || weight === null || typeof utilization !== "number" || !Number.isFinite(utilization)) continue;
-      const resetMs = Date.parse(resetAt);
-      if (!Number.isFinite(resetMs) || observedMs > resetMs || observedMs <= resetMs - WEEK_SECONDS * 1000) continue;
-      const group = groups.get(resetAt) ?? { weight: 0, utilized: 0 };
-      group.weight += weight;
-      group.utilized += utilization * weight;
+      // Measurement covers every weekly allowance, even if a monthly allowance governs advice.
+      const weekly = (account.windows ?? []).find(window =>
+        window.role === "allowance" && window.windowSeconds === WEEK_SECONDS,
+      );
+      if (!weekly) continue;
+      const weight = positive(weekly.allowanceWeight ?? account.weight);
+      const resetAt = weekly.resetsAt;
+      const utilization = weekly.utilization;
+      const resetMs = Date.parse(resetAt ?? "");
+      if (!resetAt || !Number.isFinite(resetMs)) {
+        unassignedWeeklyAccount = true;
+        continue;
+      }
+      const group = groups.get(resetAt) ?? { weight: 0, utilized: 0, complete: true };
+      if (weight === null || typeof utilization !== "number" || !Number.isFinite(utilization) ||
+          observedMs > resetMs || observedMs <= resetMs - WEEK_SECONDS * 1000) {
+        group.complete = false;
+      } else {
+        group.weight += weight;
+        group.utilized += utilization * weight;
+      }
       groups.set(resetAt, group);
     }
     for (const [resetAt, group] of groups) {
-      const utilization = group.utilized / group.weight;
+      const utilization = group.complete && !unassignedWeeklyAccount && group.weight > 0
+        ? group.utilized / group.weight : null;
       const elapsed = 1 - (Date.parse(resetAt) - observedMs) / (WEEK_SECONDS * 1000);
-      readings.push({ laneId: verdict.laneId, projected: utilization / elapsed,
+      readings.push({ laneId: verdict.laneId, projected: utilization === null ? null : utilization / elapsed,
         utilization, resetAt, observedAt: verdict.observedAt });
     }
   }
@@ -227,22 +242,60 @@ export function storedFleetHistory(stored: unknown): FleetHistoryEntry[] {
   return Array.isArray(history) ? (history as FleetHistoryEntry[]) : [];
 }
 
-/** Append one known proposal to the rolling history, bounded and oldest-first. */
+function readingIdentity(lane: FleetHistoryLane): string {
+  return JSON.stringify([lane.laneId, lane.resetAt ?? null, lane.observedAt ?? null]);
+}
+
+/** Keep compact forecast and endpoint receipts for a week plus the next daily run. */
+function fleetWindowAnchors(history: readonly FleetHistoryEntry[], asOf: string): FleetHistoryLane[] {
+  const asOfMs = Date.parse(asOf);
+  if (!Number.isFinite(asOfMs)) return [];
+  const windows = new Map<string, { forecast?: FleetHistoryLane; endpoint?: FleetHistoryLane }>();
+  for (const entry of history) {
+    for (const lane of entry.lanes) {
+      const resetMs = Date.parse(lane.resetAt ?? "");
+      const observedMs = Date.parse(lane.observedAt ?? "");
+      if (!Number.isFinite(resetMs) || !Number.isFinite(observedMs) || observedMs > asOfMs ||
+          observedMs > resetMs || observedMs <= resetMs - WEEK_SECONDS * 1000 ||
+          resetMs < asOfMs - FLEET_EVIDENCE_RETENTION_MS) continue;
+      const key = JSON.stringify([lane.laneId, lane.resetAt]);
+      const window = windows.get(key) ?? {};
+      if (!window.endpoint || observedMs > Date.parse(window.endpoint.observedAt!)) window.endpoint = lane;
+      if (observedMs <= resetMs - FLEET_PROJECTION_LEAD_MS &&
+          (!window.forecast || observedMs > Date.parse(window.forecast.observedAt!))) window.forecast = lane;
+      windows.set(key, window);
+    }
+  }
+  return [...windows.values()].flatMap(window => [window.forecast, window.endpoint]
+    .filter((lane): lane is FleetHistoryLane => lane !== undefined));
+}
+
+/** Bounded proposal history, without repeated polls or silently evicted window receipts. */
 export function appendFleetHistory(
   history: FleetHistoryEntry[],
   proposal: FleetAdmissionShadowProposal | null | undefined,
   ledger?: LaneLedger,
 ): FleetHistoryEntry[] {
   if (!proposal || proposal.asOf === null) return history;
-  const next = [
+  const lanes = ledger ? weeklyLaneReadingsForLedger(ledger)
+    : proposal.lanes.map((lane) => ({ laneId: lane.laneId, projected: lane.projected }));
+  if (ledger && JSON.stringify(lanes.map(readingIdentity)) ===
+      JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;
+  const next: FleetHistoryEntry[] = [
     ...history,
     {
       asOf: proposal.asOf,
       level: proposal.level as Exclude<FleetAdmissionLevel, "unknown">,
       projected: proposal.projected,
-      lanes: ledger ? weeklyLaneReadingsForLedger(ledger)
-        : proposal.lanes.map((lane) => ({ laneId: lane.laneId, projected: lane.projected })),
+      lanes,
     },
   ];
-  return next.slice(-MAX_FLEET_HISTORY);
+  const retained = next.slice(-MAX_FLEET_HISTORY);
+  if (retained.length === next.length) return retained;
+  const present = new Set(retained.flatMap(entry => entry.lanes.map(readingIdentity)));
+  const carried = fleetWindowAnchors(next, proposal.asOf)
+    .filter(lane => !present.has(readingIdentity(lane)));
+  if (!carried.length) return retained;
+  // Each carried receipt keeps its own source clock, not this entry's proposal clock.
+  return [{ ...retained[0]!, lanes: [...retained[0]!.lanes, ...carried] }, ...retained.slice(1)];
 }

@@ -279,6 +279,9 @@ describe("worker", () => {
       observedAt: new Date(NOW).toISOString(),
     });
     expect((await stored()).governorLevels).toEqual(governorLevels);
+    const samePollHistory = (await stored()).fleetHistory;
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).fleetHistory).toEqual(samePollHistory);
     await h.ctx.state.set(ledgerKey, fleetLedger([0.62, 0.62]));
     await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
     expect((await stored()).report.fleetProposal).toMatchObject({ level: "hold", previousLevel: "hold" });
@@ -302,11 +305,14 @@ describe("worker", () => {
     }] } }));
     const resetAt = new Date(NOW).toISOString();
     const nearReset = new Date(NOW - 60_000).toISOString();
+    const forecastAt = new Date(NOW - 2 * 86_400_000).toISOString();
     const futureReset = new Date(NOW + 86_400_000).toISOString();
     const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
     await h.ctx.state.set(key, {
       report: { fleetProposal: { soonestResetAt: futureReset } },
-      fleetHistory: [{ asOf: nearReset, level: "normal", projected: 0.99, lanes: [
+      fleetHistory: [{ asOf: forecastAt, level: "normal", projected: 1.4, lanes: [
+        { laneId: "fixture-lane", projected: 1.4, utilization: 0.8, observedAt: forecastAt, resetAt },
+      ] }, { asOf: nearReset, level: "normal", projected: 0.99, lanes: [
         { laneId: "fixture-lane", projected: 0.99, utilization: 0.985, observedAt: nearReset, resetAt },
         { laneId: "other-lane", projected: 0.8, utilization: 0.7, observedAt: nearReset, resetAt: futureReset },
       ] }], governorLevels: [{ level: "normal", asOf: nearReset }],
@@ -322,7 +328,7 @@ describe("worker", () => {
     expect(artifact).not.toBeNull();
     expect(artifact.ranAt).toBe(resetAt);
     expect(artifact.report.rows.find(row => row.laneId === "fixture-lane")).toMatchObject({
-      resetAt, projected: 0.99, actualUtilization: 0.985, actualAsOf: nearReset, status: "reset-observed",
+      resetAt, projected: 1.4, projectedAsOf: forecastAt, actualUtilization: 0.985, actualAsOf: nearReset, status: "reset-observed",
     });
     expect(artifact.report.rows.find(row => row.laneId === "other-lane")).toMatchObject({
       resetAt: futureReset, status: "pending-reset", actualUtilization: null, projectionError: null,

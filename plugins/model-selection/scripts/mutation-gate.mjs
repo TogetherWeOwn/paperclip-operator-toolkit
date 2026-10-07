@@ -3893,6 +3893,48 @@ const mutants = [
     from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
     to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
   },
+  {
+    name: "fleet-shadow-forecast-lead-ignored",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "Math.min(resetMs - FLEET_PROJECTION_LEAD_MS, asOfMs)",
+    to: "Math.min(resetMs, asOfMs)",
+  },
+  {
+    name: "fleet-shadow-repeated-readings-appended",
+    file: "src/fleet-admission-shadow.ts",
+    from: "if (ledger && JSON.stringify(lanes.map(readingIdentity)) ===\n      JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;",
+    to: "if (false) return history;",
+  },
+  {
+    name: "fleet-shadow-reset-anchors-evicted",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const carried = fleetWindowAnchors(next, proposal.asOf)\n    .filter(lane => !present.has(readingIdentity(lane)));",
+    to: "const carried: FleetHistoryLane[] = [];",
+  },
+  {
+    name: "fleet-shadow-weekly-measurement-governor-only",
+    file: "src/fleet-admission-shadow.ts",
+    from: 'const weekly = (account.windows ?? []).find(window =>\n        window.role === "allowance" && window.windowSeconds === WEEK_SECONDS,\n      );',
+    to: "const weekly = weeklyAllowanceWindow(account);",
+  },
+  {
+    name: "fleet-shadow-partial-reset-coverage-ignored",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const utilization = group.complete && !unassignedWeeklyAccount && group.weight > 0",
+    to: "const utilization = !unassignedWeeklyAccount && group.weight > 0",
+  },
+  {
+    name: "fleet-shadow-unassigned-reset-coverage-ignored",
+    file: "src/fleet-admission-shadow.ts",
+    from: "const utilization = group.complete && !unassignedWeeklyAccount && group.weight > 0",
+    to: "const utilization = group.complete && group.weight > 0",
+  },
+  {
+    name: "fleet-shadow-report-future-readings-accepted",
+    file: "src/fleet-predicted-vs-actual.ts",
+    from: "if (!Number.isFinite(ms) || ms > atOrBeforeMs || ms < notBeforeMs) continue;",
+    to: "if (!Number.isFinite(ms) || ms < notBeforeMs) continue;",
+  },
   // Worker-level wiring must carry the state; helper-only tests cannot prove it.
   {
     name: "fleet-worker-drops-previous-level",
