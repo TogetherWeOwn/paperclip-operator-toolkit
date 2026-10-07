@@ -1,0 +1,39 @@
+{
+  "observedAt": "2026-10-04T12:00:00Z",
+  "lanes": [
+    {
+      "lane": "claude-lane-1",
+      "provider": "claude",
+      "weeklyUtilization": 0.30,
+      "weeklyResetUtc": "2026-10-08T00:00:00Z",
+      "fiveHourUtilization": 0.20,
+      "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+      "observationQuality": "live"
+    },
+    {
+      "lane": "claude-lane-2",
+      "provider": "claude",
+      "weeklyUtilization": 0.70,
+      "weeklyResetUtc": "2026-10-08T00:00:00Z",
+      "fiveHourUtilization": 0.50,
+      "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+      "observationQuality": "live"
+    },
+    {
+      "lane": "codex-lane-1",
+      "provider": "codex",
+      "weeklyUtilization": 0.20,
+      "weeklyResetUtc": "2026-10-08T00:00:00Z",
+      "observationQuality": "live"
+    },
+    {
+      "lane": "meta-lane-4",
+      "provider": "meta",
+      "weeklyUtilization": 0.90,
+      "weeklyResetUtc": "2026-10-08T00:00:00Z",
+      "fiveHourUtilization": 0.95,
+      "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+      "observationQuality": "cached"
+    }
+  ]
+}

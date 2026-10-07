@@ -1,0 +1,6 @@
+{
+  "events": [
+    {"ts": "2026-10-04T11:50:00Z", "lane": "claude-lane-2", "kind": "429"},
+    {"ts": "2026-10-04T10:00:00Z", "lane": "codex-lane-9", "kind": "exhaustion"}
+  ]
+}
