@@ -16,11 +16,15 @@ Usage (from the repo root)::
 Reads a detector snapshot (the same shape ``watchdog/detectors.py`` takes),
 evaluates every detector, and appends one decision record per detector row
 to the log file. Repeat polls on the same signature log ``skip`` with the
-same dedupe key instead of a second ``propose``.
+same dedupe key instead of a second ``propose``. Severity is part of the
+signature: a row first logged at ``info`` (a skip) that later escalates to
+``high`` is a new signature and is proposed once, instead of being swallowed
+by the earlier skip.
 
 Exit codes: 0 decided (propose and skip are both decisions), 2 usage or
-unreadable input. This harness never exits 1 for a failed apply, because it
-cannot apply.
+unreadable input (missing, non-UTF-8, malformed or too deeply nested
+snapshot or decision log). This harness never exits 1 for a failed apply,
+because it cannot apply.
 
 Decision record schema (one JSON object per line)::
 
@@ -88,12 +92,18 @@ def scope_of(record: dict) -> str:
 
 
 def dedupe_key(record: dict) -> str:
-    """First-seen identity of one detector row: detector + reason + scope."""
+    """First-seen identity of one detector row.
+
+    Detector + reason + severity + scope. Severity is in the key so an
+    ``info`` skip never uses up the identity its later ``high`` escalation
+    needs; measured values stay out so one signature keeps one key.
+    """
     material = json.dumps(
         {
             "detector": str(record.get("detector") or "unknown"),
             "reason": str(record.get("reason") or "unspecified"),
             "mutation": str(record.get("mutation") or "none"),
+            "severity": str(record.get("severity") or "none"),
             "scope": scope_of(record),
         },
         sort_keys=True,
@@ -119,7 +129,7 @@ def load_seen_keys(paths: list[str]) -> set[str]:
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError as exc:
+            except (json.JSONDecodeError, RecursionError) as exc:
                 raise ValueError(
                     f"corrupt decision log {path} line {lineno}: {exc}; "
                     f"refusing to lose dedupe state"
@@ -196,7 +206,9 @@ def run(snapshot_path: str, log_path: str,
     try:
         with open(snapshot_path, encoding="utf-8") as handle:
             snapshot = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, RecursionError) as exc:
+        # RecursionError is a deeply nested document: unreadable input, so
+        # exit 2 like the other refusals, not a traceback.
         raise ValueError(f"cannot read snapshot {snapshot_path}: {exc}") from exc
     if not isinstance(snapshot, dict):
         raise ValueError("snapshot must be a JSON object")

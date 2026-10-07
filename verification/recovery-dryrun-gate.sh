@@ -69,31 +69,66 @@ python3 watchdog/recovery_dryrun.py --snapshot "$SCRATCH/positive.json" \
   2>/dev/null \
   && fail "harness accepted --apply"
 
-# Load-bearing check: break dedupe in a throwaway copy and require the
-# owning suite to go red, with a green baseline first so the red is
-# attributable to the mutation and not to a broken staging copy.
+# Load-bearing checks: break one behavior at a time in a throwaway copy and
+# require the owning suite to go red, with a green baseline first so each red
+# is attributable to its mutation and not to a broken staging copy.
 STAGE="$(mktemp -d)"
 mkdir -p "$STAGE/watchdog"
-cp -p test_recovery_dryrun.py "$STAGE/"
-# The harness imports its sibling detectors module, so the staged tree needs
-# both or the green baseline dies on import.
-cp -p watchdog/recovery_dryrun.py watchdog/detectors.py "$STAGE/watchdog/"
 touch "$STAGE/watchdog/__init__.py"
+
+# Rebuild the staging tree from the real files. The harness imports its
+# sibling detectors module, so the staged tree needs both or the green
+# baseline dies on import.
+restage() {
+  cp -p test_recovery_dryrun.py "$STAGE/"
+  cp -p watchdog/recovery_dryrun.py watchdog/detectors.py "$STAGE/watchdog/"
+}
+
+restage
 (cd "$STAGE" && python3 -m unittest test_recovery_dryrun.py >/dev/null 2>&1) \
   || fail "unmutated staging copy is already red"
-STAGE_DIR="$STAGE" python3 - <<'PY'
+
+# mutant NAME OLD NEW: replace the one occurrence of OLD in the staged
+# harness with NEW; the suite must no longer pass.
+mutant() {
+  local name="$1" old="$2" new="$3" stage_out
+  restage
+  STAGE_DIR="$STAGE" OLD="$old" NEW="$new" python3 - <<'PY' \
+    || fail "mutation target for $name is missing or ambiguous"
 import os
 import pathlib
 path = pathlib.Path(os.environ["STAGE_DIR"]) / "watchdog" / "recovery_dryrun.py"
 source = path.read_text()
-old = "    if key in seen:"
+old = os.environ["OLD"]
 assert source.count(old) == 1, "mutation target must appear exactly once"
-path.write_text(source.replace(old, "    if False:  # MUTANT: dedupe disabled"))
+path.write_text(source.replace(old, os.environ["NEW"]))
 PY
-stage_out="$(cd "$STAGE" && python3 -m unittest test_recovery_dryrun.py 2>&1)"
-if grep -q "^OK" <<<"$stage_out"; then
-  fail "dedupe-disabled mutant still passes the suite"
-fi
-echo "PASS: dedupe-disabled mutant caught"
+  stage_out="$(cd "$STAGE" && python3 -m unittest test_recovery_dryrun.py 2>&1)"
+  if grep -q "^OK" <<<"$stage_out"; then
+    fail "$name mutant still passes the suite"
+  fi
+  echo "PASS: $name mutant caught"
+}
+
+mutant "dedupe-disabled" \
+  "    if key in seen:" \
+  "    if False:  # MUTANT: dedupe disabled"
+mutant "severity-out-of-key" \
+  '            "severity": str(record.get("severity") or "none"),
+' \
+  ""
+mutant "nested-snapshot-tracebacks" \
+  "    except (OSError, json.JSONDecodeError, RecursionError) as exc:
+        # RecursionError is a deeply nested document" \
+  "    except (OSError, json.JSONDecodeError) as exc:
+        # RecursionError is a deeply nested document"
+mutant "cli-exit-2-narrowed" \
+  "    except ValueError as exc:
+        print(" \
+  "    except OSError as exc:
+        print("
+mutant "nested-log-line-tracebacks" \
+  "            except (json.JSONDecodeError, RecursionError) as exc:" \
+  "            except json.JSONDecodeError as exc:"
 
 echo "GATE PASS: recovery dry-run harness"

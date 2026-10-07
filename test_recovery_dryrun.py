@@ -15,7 +15,11 @@
 #   * info diagnostics scored as proposals (a digest green that
 #     never delivered): benign/info rows skip, high rows propose;
 #   * volatile evidence in the dedupe key (ageMin moves every poll): one
-#     signature keeps one key while its measurements move.
+#     signature keeps one key while its measurements move;
+#   * an info skip that swallows the later high escalation of the same row:
+#     severity is part of the signature, so the escalation proposes once;
+#   * unreadable input that crashes with a traceback instead of exit 2
+#     (non-UTF-8 bytes, deeply nested JSON) in the snapshot or the log.
 #
 # Deterministic: no network, no credentials, no clock reads, no board.
 # Fixture rows are inline so the suite survives the live board changing.
@@ -31,7 +35,7 @@ import pathlib
 import socket
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from watchdog import recovery_dryrun as dry
@@ -194,6 +198,53 @@ class DedupeTest(unittest.TestCase):
             for row in decisions:
                 self.assertEqual(row["verdict"], "skip")
 
+    def test_key_separates_severity(self):
+        base = {"detector": "watchdog/x", "reason": "r", "mutation": "none",
+                "severity": "info"}
+        self.assertNotEqual(dedupe_key(base),
+                            dedupe_key(dict(base, severity="high")))
+        self.assertNotEqual(dedupe_key(base),
+                            dedupe_key({k: v for k, v in base.items()
+                                        if k != "severity"}))
+
+    def test_info_skip_does_not_swallow_later_high_escalation(self):
+        def snapshot_at(now):
+            return snap(now=now, pendingInteractions=[
+                {"interactionId": "int-1", "issueId": "iid-1",
+                 "identifier": "CARD-1", "kind": "ask_user_questions",
+                 "createdAt": "2026-10-03T13:15:00Z",
+                 "assigneeAgentId": "a1"}])
+
+        def pending_findings(decisions):
+            # Findings carry a severity; the paired proposal row does not and
+            # dedupes on its own key, so it is out of scope here.
+            return [d for d in decisions
+                    if d["detector"] == "watchdog/pending_interactions"
+                    and d["severity"] in ("info", "high")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = str(pathlib.Path(tmp) / "decisions.jsonl")
+            info_snap = write_snapshot(tmp, snapshot_at("2026-10-03T14:00:00Z"))
+            _, early = run(info_snap, log, [])
+            early_findings = pending_findings(early)
+            self.assertEqual({d["severity"] for d in early_findings}, {"info"})
+            self.assertEqual({d["verdict"] for d in early_findings}, {"skip"})
+
+            high_snap = write_snapshot(tmp, snapshot_at("2026-10-03T15:30:00Z"))
+            _, later = run(high_snap, log, [])
+            later_findings = pending_findings(later)
+            self.assertEqual({d["severity"] for d in later_findings}, {"high"})
+            self.assertTrue(later_findings)
+            for row in later_findings:
+                self.assertEqual(row["verdict"], "propose", row)
+                self.assertNotIn("duplicate", row["reason"].lower())
+
+            # The escalation proposes once: the next poll at high repeats it.
+            _, again = run(high_snap, log, [])
+            for row in pending_findings(again):
+                self.assertEqual(row["verdict"], "skip")
+                self.assertIn("duplicate", row["reason"].lower())
+
     def test_proposals_dedupe_by_issue(self):
         left = {"detector": "watchdog/churn", "type": "proposal",
                 "reason": "repeated stall re-wake", "mutation": "none",
@@ -336,6 +387,51 @@ class LoudFailureTest(unittest.TestCase):
             rc = dry.main(["--snapshot", str(pathlib.Path(tmp) / "nope.json"),
                            "--log", log])
             self.assertEqual(rc, 2)
+
+    def _assert_cli_refuses(self, argv):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = dry.main(argv)
+        self.assertEqual(rc, 2)
+        self.assertIn("recovery_dryrun:", err.getvalue())
+
+    def test_non_utf8_snapshot_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = pathlib.Path(tmp) / "snap.json"
+            snapshot.write_bytes(b'{"now": "\xff\xfe"}')
+            log = pathlib.Path(tmp) / "decisions.jsonl"
+            self._assert_cli_refuses(
+                ["--snapshot", str(snapshot), "--log", str(log)])
+            self.assertFalse(log.exists())
+
+    def test_deeply_nested_snapshot_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = pathlib.Path(tmp) / "snap.json"
+            snapshot.write_text("[" * 200000, encoding="utf-8")
+            log = pathlib.Path(tmp) / "decisions.jsonl"
+            self._assert_cli_refuses(
+                ["--snapshot", str(snapshot), "--log", str(log)])
+            self.assertFalse(log.exists())
+
+    def test_non_utf8_log_exits_2_and_is_not_modified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp, snap())
+            log = pathlib.Path(tmp) / "decisions.jsonl"
+            log.write_bytes(b'\xff\xfe not utf-8\n')
+            before = log.read_bytes()
+            self._assert_cli_refuses(
+                ["--snapshot", snapshot, "--log", str(log)])
+            self.assertEqual(log.read_bytes(), before)
+
+    def test_deeply_nested_log_line_exits_2_and_is_not_modified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = write_snapshot(tmp, snap())
+            log = pathlib.Path(tmp) / "decisions.jsonl"
+            log.write_text("[" * 200000 + "\n", encoding="utf-8")
+            before = log.read_bytes()
+            self._assert_cli_refuses(
+                ["--snapshot", snapshot, "--log", str(log)])
+            self.assertEqual(log.read_bytes(), before)
 
 
 if __name__ == "__main__":
