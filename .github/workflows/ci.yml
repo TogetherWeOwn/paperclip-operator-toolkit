@@ -3160,6 +3160,15 @@ jobs:
       - name: watchdog cli mutation gate
         run: python3 verification/platform-watchdog-cli-mutation-gate.py
 
+      # Recovery-writer dry-run harness: detector rows to propose/skip
+      # decisions with a stable dedupe key, no apply path. The gate runs the
+      # suite, a positive control, a repeat-poll control and a dedupe mutant.
+      - name: recovery dry-run harness suite
+        run: python3 -m unittest -v test_recovery_dryrun
+
+      - name: recovery dry-run harness gate
+        run: ./verification/recovery-dryrun-gate.sh
+
       # Public-fork provenance audit, hermetic self-test on synthetic
       # identities and fixtures; runs its own consistency suite inside.
       - name: fork provenance audit
