@@ -13,6 +13,7 @@ import { PIN_PROVENANCE_ENV_KEY, readPinProvenance, type PinProvenance } from ".
 import manifest from "../src/manifest.js";
 import type { ModelEntry } from "../src/engine/types.js";
 import { createPlugin } from "../src/worker.js";
+import { LANE_EVIDENCE_RUNS_SQL } from "../src/sql.js";
 import { MODELS, NO_ESCALATION, NOW, PROFILES } from "./fixtures.js";
 
 //  ( §5, §7 items 3-4): an agent-to-agent reassignment
@@ -81,6 +82,7 @@ interface Stubs {
   liveRuns?: unknown[];
   /** Issue ids the repin pass's candidate scan returns. */
   repinCandidates?: string[];
+  pacing?: Record<string, unknown>;
 }
 
 async function boot(
@@ -93,7 +95,7 @@ async function boot(
     models: roster(),
     classification: { enabled: true },
     selection: { enabled: true, mode: "enforce", defaultTier: "T3", fleetContextCeilingTokens: 200_000, ...selectionOverride },
-    pacing: { mode: "enforce" },
+    pacing: { mode: "enforce", ...stubs.pacing },
   };
   const harness = createTestHarness({ manifest, config });
   harness.seed({ issues, agents: agents as never, companies: [{ id: COMPANY, name: "Co" } as never] });
@@ -445,6 +447,107 @@ describe("exempt emergency pin recovery", () => {
     exemptRecovery: { pinnedModelId: fallback, returnModelId: inherited ? weak : normal, inherited },
   });
   const emergencyCard = (stamp: PinProvenance, overrides: Partial<Issue> = {}) => leaseCard(ISSUE, stamp, { assigneeAgentId: exempt, ...overrides });
+
+  it.each(["pacing-off", "dead-veto"])("holds recovery while the return model has a %s hard stop", async (stop) => {
+    const stamp = emergencyStamp();
+    const pacing = stop === "pacing-off" ? { mode: "off" } : {
+      lanes: ["lane-weak", "lane-normal"].map((laneId) => ({
+        laneId, statusUrl: "https://lane.example.com/status",
+        windows: [{ name: "daily", role: "serviceability", utilizationFields: ["utilization"] }],
+      })),
+    };
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), { pacing }, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      { "lane-weak": stop === "pacing-off"
+        ? { laneId: "lane-weak", verdict: { state: "exhausted", serviceable: false } }
+        : { laneId: "lane-weak", consecutiveNonSuccess: 5, verdict: null, unserviceableSince: null } },
+    );
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it.each(["evidence", "quarantine"])("does not recover onto a %s-stopped lane with pacing disabled", async (stop) => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), { pacing: { mode: "off" } }, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    if (stop === "evidence") {
+      const query = harness.ctx.db.query.bind(harness.ctx.db);
+      harness.ctx.db.query = (async (...args: Parameters<typeof query>) => args[0] === LANE_EVIDENCE_RUNS_SQL
+        ? [{ model: weak, succeeded: 0, failed: 30 }] : query(...args)) as typeof query;
+    } else {
+      await outage(harness, ["lane-weak"]);
+    }
+    await harness.runJob("repinPass");
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it("rechecks ownership after the awaited quarantine read", async () => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), {}, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    let issueReads = 0;
+    let changed = false;
+    const getIssue = harness.ctx.issues.get.bind(harness.ctx.issues);
+    harness.ctx.issues.get = (async (...args: Parameters<typeof getIssue>) => {
+      const issue = await getIssue(...args);
+      issueReads += 1;
+      return changed && issue ? { ...issue, assigneeAdapterOverrides: { adapterConfig: { model: normal } } } : issue;
+    }) as typeof getIssue;
+    const getState = harness.ctx.state.get.bind(harness.ctx.state);
+    harness.ctx.state.get = (async (...args: Parameters<typeof getState>) => {
+      const value = await getState(...args);
+      if (args[0].stateKey === PLUGIN_STATE_KEYS.laneOutage && issueReads >= 2) changed = true;
+      return value;
+    }) as typeof getState;
+    await harness.runJob("repinPass");
+    expect(changed).toBe(true);
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it("rechecks mid-pass quarantine even with pacing disabled", async () => {
+    const stamp = emergencyStamp();
+    const { harness, writes } = await boot([emergencyCard(stamp)], agents(), { pacing: { mode: "off" } }, selection);
+    await seedIndex(harness, { [ISSUE]: stamp });
+    let issueReads = 0;
+    let quarantined = false;
+    const getIssue = harness.ctx.issues.get.bind(harness.ctx.issues);
+    harness.ctx.issues.get = (async (...args: Parameters<typeof getIssue>) => {
+      issueReads += 1;
+      return getIssue(...args);
+    }) as typeof getIssue;
+    const getState = harness.ctx.state.get.bind(harness.ctx.state);
+    harness.ctx.state.get = (async (...args: Parameters<typeof getState>) => {
+      if (args[0].stateKey === PLUGIN_STATE_KEYS.laneOutage && issueReads >= 2) {
+        quarantined = true;
+        return { lanes: ["lane-weak"], models: [], until: new Date(NOW + 60_000).toISOString() };
+      }
+      return getState(...args);
+    }) as typeof getState;
+    await harness.runJob("repinPass");
+    expect(quarantined).toBe(true);
+    expect(writes).toEqual([]);
+    expect((await index(harness))[ISSUE]?.decisionId).toBe(stamp.decisionId);
+  });
+
+  it("does not inherit a stale emergency stamp after an explicit model change", async () => {
+    const { harness } = await boot([card(ISSUE, {
+      status: "in_progress", assigneeAgentId: exempt,
+      assigneeAdapterOverrides: { adapterConfig: { model: incumbent, env: stampEnv(emergencyStamp()) } },
+    })], agents(), { repinCandidates: [ISSUE] }, selection);
+    await harness.ctx.state.set(
+      { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+      { "lane-dead": { laneId: "lane-dead", verdict: { state: "exhausted", serviceable: false } } },
+    );
+    await harness.runJob("repinPass");
+    expect(readPinProvenance((await override(harness))?.adapterConfig?.env)).toMatchObject({
+      exemptRecovery: { pinnedModelId: normal, returnModelId: incumbent, inherited: false },
+    });
+  });
 
   it("holds and keeps the lease indexed until the designated return model recovers", async () => {
     const stamp = emergencyStamp();

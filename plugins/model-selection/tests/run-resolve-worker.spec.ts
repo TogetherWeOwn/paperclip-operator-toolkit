@@ -8,6 +8,7 @@ import { RUN_RESOLVE_ENV_KEYS, type ResolveRunModelParams, type ResolveRunModelR
 import { createPlugin } from "../src/worker.js";
 import { LANED_MODELS, MODELS, NO_ESCALATION, NOW, PROFILES, account, laneDoc } from "./fixtures.js";
 import { stoppedLane } from "./run-resolve-helpers.js";
+import { LANE_EVIDENCE_RUNS_SQL } from "../src/sql.js";
 
 const COMPANY = "co-1";
 const AGENT = "agent-1";
@@ -212,6 +213,33 @@ describe("onResolveRunModel on the worker ()", () => {
       expect(result.model).not.toBe("claude-haiku-4-5-20251001");
       expect(result.reason).toContain("exempt");
       expect((await harness.ctx.issues.get(ISSUE, COMPANY))?.assigneeAdapterOverrides).toBeNull();
+    });
+
+    it.each(["evidence", "quarantine"])("respects a known %s hard stop before keeping an exempt model", async (stop) => {
+      const { resolve, harness } = await boot(exemptConfig(), [exemptCard()]);
+      if (stop === "evidence") {
+        const query = harness.ctx.db.query.bind(harness.ctx.db);
+        harness.ctx.db.query = (async (...args: Parameters<typeof query>) => args[0] === LANE_EVIDENCE_RUNS_SQL
+          ? [{ model: "claude-haiku-4-5-20251001", succeeded: 0, failed: 30 }] : query(...args)) as typeof query;
+      } else {
+        await harness.ctx.state.set(
+          { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneOutage },
+          { lanes: ["lane-haiku"], models: [], until: new Date(NOW + 60_000).toISOString() },
+        );
+      }
+      const result = decide(await resolve(exemptParams()));
+      expect(result.model).not.toBe("claude-haiku-4-5-20251001");
+      expect(result.reason).toContain("exempt");
+    });
+
+    it("selects a healthy emergency alternative with pacing disabled", async () => {
+      const { resolve, harness } = await boot({ ...exemptConfig(), pacing: { mode: "off" } }, [exemptCard()]);
+      await harness.ctx.state.set(
+        { scopeKind: "company", scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.laneLedger },
+        { "lane-sonnet": stoppedLane("lane-sonnet") },
+      );
+      const result = decide(await resolve(exemptParams({ agentDefaultModel: "claude-sonnet-5" })));
+      expect(result.model).toBe("claude-opus-5");
     });
 
     it("defers rather than serving a known stopped fallback even with pacing disabled", async () => {

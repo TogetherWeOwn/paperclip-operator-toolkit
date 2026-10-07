@@ -3173,6 +3173,8 @@ export function createPlugin() {
             const lane = availability?.lanes.find((entry) => entry.laneId === model.laneId);
             return hardStopExcluded(snapshot.laneLedger, model, now) ||
               deadVetoExcluded(snapshot.laneLedger, model, { configuredLaneIds: config.pacing.lanes.map((entry) => entry.laneId), bypassAllDead: false }) ||
+              evidenceStateFor(snapshot.laneEvidence, model.laneId ?? null) === "proven-dead" ||
+              laneOutageExcluded(snapshot.laneOutageOverride, new Date(now).toISOString(), model) ||
               lane?.state === "unavailable" ||
               activeModelCooldown(lane?.modelCooldowns ?? [], model.id, now);
           };
@@ -3218,10 +3220,10 @@ export function createPlugin() {
           const peak = runPeakCache.peek(runIssueKey(companyId, issueId))?.value ?? null;
 
           const resolution = resolveRunDecision({
-            params: exemptHardStop ? { ...params, issueOverrideModel: null } : params,
+            params,
             issue,
             agent,
-            snapshot,
+            snapshot: exemptHardStop ? { ...snapshot, config: { ...config, models: config.models.filter((model) => !exemptModelStopped(model)) } } : snapshot,
             prior,
             classifiedTier,
             lastRunPeakTokens: peak,
@@ -5265,7 +5267,8 @@ export function createPlugin() {
         let exemptRecovery: PinProvenance["exemptRecovery"];
         if (advice?.isAgentExempt && advice.isServiceabilityHardStop) {
           const previous = readPinProvenance(advice.existingOverrideEnv);
-          const priorRecovery = previous?.agentId === agentId ? previous.exemptRecovery : undefined;
+          const priorRecovery = previous?.agentId === agentId && previous.exemptRecovery?.pinnedModelId === advice.pinnedModelId
+            ? previous.exemptRecovery : undefined;
           const returnModelId = priorRecovery?.returnModelId ?? advice.pinnedModelId ?? advice.agentFloorModelId;
           if (returnModelId) exemptRecovery = {
             pinnedModelId: model.id,
@@ -6494,6 +6497,11 @@ export function createPlugin() {
               );
               const returnModel = config.models.find((model) => model.id === returnModelId);
               if (!returnModel || !returnModel.enabled) continue;
+              if (hardStopExcluded(laneLedger, returnModel) ||
+                deadVetoExcluded(laneLedger, returnModel, { configuredLaneIds: config.pacing.lanes.map((lane) => lane.laneId), bypassAllDead: false }) ||
+                laneOutageExcluded(laneOutageOverride, nowIso, returnModel)) continue;
+              const evidence = await readLaneEvidence(companyId, config.models, Date.now());
+              if (evidenceStateFor(evidence, returnModel.laneId ?? null) === "proven-dead") continue;
               const availability = await readAvailability(companyId, Date.now());
               const lane = availability.lanes.find((candidate) => candidate.laneId === returnModel.laneId);
               if (lane?.state === "unavailable" || activeModelCooldown(lane?.modelCooldowns ?? [], returnModel.id, Date.now())) continue;
@@ -6505,6 +6513,7 @@ export function createPlugin() {
               }).tokens ?? undefined;
               if (!isUsableAndCapable(returnModel.id, returnModel.tier, requiredContextTokens, config, laneLedger, laneOutageOverride, modelScores, nowIso)) continue;
               if (!(await balanceWriteStillSafe(companyId, issueId, pinnedModelId, config.models))) continue;
+              if (writesAllowed && !(await writeStillSafeFromQuarantine(companyId, returnModel))) continue;
               const current = await describeIssue(companyId, issueId, {}, contextUsageCache);
               const currentStamp = current ? readPinProvenance(current.existingOverrideEnv) : null;
               if (!current || current.assigneeAgentId !== stamp.agentId || currentStamp?.decisionId !== stamp.decisionId ||
@@ -6514,7 +6523,6 @@ export function createPlugin() {
                 resolveConfiguredModelId(current.descriptor.pinnedModelId, config.models) !== pinnedModelId ||
                 (recovery.inherited && resolveConfiguredModelId(current.descriptor.agentFloorModelId, config.models) !== returnModel.id)) continue;
               if (writesAllowed) {
-                if (config.pacing.mode !== "off" && !(await writeStillSafeFromQuarantine(companyId, returnModel))) continue;
                 const patch = recovery.inherited ? { assigneeAdapterOverrides: null } : modelOverrideForContext({
                   model: returnModel,
                   agentEnvContextTokens: config.selection.agentEnvContextTokens,
