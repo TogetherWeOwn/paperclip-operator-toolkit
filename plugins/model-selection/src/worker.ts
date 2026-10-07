@@ -19,7 +19,7 @@ import {
 } from "./actuate/earnInWiring.js";
 import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
-import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
+import { isAgentExempt, resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
   AA_FETCH_TIMEOUT_MS,
   AA_FREE_FETCH_INTERVAL_MS,
@@ -1532,6 +1532,12 @@ export function createPlugin() {
         hasOperatorPin: boolean;
         isIdle: boolean;
         isServiceabilityHardStop: boolean;
+        /**
+         * True when the card's assignee is in `selection.exemptAgentIds`.
+         * An exempt card is treated as `pin:operator` from the first pin;
+         * only a serviceability hard stop may still repin it.
+         */
+        isAgentExempt: boolean;
         nowIso: string;
         config: ResolvedConfig;
         title: string;
@@ -1701,6 +1707,18 @@ export function createPlugin() {
           (hardStopExcluded(laneLedger, pinnedModel) ||
             deadVetoExcluded(laneLedger, pinnedModel, deadVetoScope));
 
+        // Designated agents are exempt from router pinning: the exemption is
+        // recorded in the decision trace so a skip is never silent. The
+        // agent's own model governs; only a serviceability hard stop may
+        // still repin the card.
+        const agentExempt = isAgentExempt(described.assigneeAgentId, config);
+        if (agentExempt) {
+          decision.trace.push(
+            `exempt: agent ${described.assigneeAgentId} is exempt from router pinning; ` +
+            `agent model governs${isServiceabilityHardStop ? "; serviceability hard stop applies" : ""}`,
+          );
+        }
+
         await ctx.metrics.write(`model_selection.decision.${decision.outcome}`, 1);
         //  (D1e), the operational half of the veto: count what it
         // takes out, so "which term is excluding right now" stays answerable
@@ -1804,6 +1822,7 @@ export function createPlugin() {
           hasOperatorPin: described.hasOperatorPin,
           isIdle: described.isIdle,
           isServiceabilityHardStop,
+          isAgentExempt: agentExempt,
           nowIso,
           config,
           title: described.title,
@@ -1898,6 +1917,24 @@ export function createPlugin() {
             result.decision,
             runCtx.agentId ?? null,
           );
+
+          // Designated agents are exempt from router pinning: an exempt card
+          // keeps the agent's own model. Only a serviceability hard stop may
+          // still write it, so an exempt agent never fails on a dead lane.
+          if (result.isAgentExempt && !result.isServiceabilityHardStop) {
+            const exemptPlan = {
+              write: false as const,
+              issueId: result.issueId,
+              modelId: null,
+              labelName: null,
+              reason: "agent exempt from router pinning; agent model governs",
+              envRepairOnly: false,
+            };
+            return {
+              content: `No write: ${exemptPlan.reason}`,
+              data: { decision: result.decision, plan: exemptPlan },
+            };
+          }
 
           // The repin exception is itself a pace CONSEQUENCE, gated the same as
           // every other pace consequence: only in `enforce`. In `off`/`shadow`
@@ -2722,6 +2759,28 @@ export function createPlugin() {
         const result = await advise(companyId, { issueId }, false, tier, isRepin);
         if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) {
           await maybeLogUnpinnableCard(companyId, issueId, identifier, result?.decision ?? null);
+          return null;
+        }
+        // Designated agents are exempt from router pinning: skip the
+        // creation-time pin (first pin and classifier re-pin) and leave the
+        // agent's own model in charge. A serviceability hard stop still
+        // repins, so an exempt agent never fails on a dead lane.
+        if (result.isAgentExempt && !result.isServiceabilityHardStop) {
+          ctx.logger.info("creation-time pin skipped: agent exempt", { companyId, issueId, source });
+          await ctx.activity.log({
+            companyId,
+            message: `Model Selection skipped the creation-time pin on ${identifier ?? issueId} (${source}): agent exempt from router pinning; agent model governs`,
+            entityType: "issue",
+            entityId: issueId,
+            metadata: {
+              modelId: result.decision.modelId,
+              tier: result.decision.effectiveTier,
+              source,
+              phase: isRepin ? "classified-repin" : "first-pin",
+              exempt: true,
+              trace: result.decision.trace,
+            },
+          });
           return null;
         }
         // `advise` re-described the card: trust its fresher status/pin
@@ -5734,6 +5793,18 @@ export function createPlugin() {
                   await maybeLogUnpinnableCard(company.id, issueId, identifier, result?.decision ?? null);
                   return "settled";
                 }
+                // Designated agents are exempt from router pinning: leave the
+                // agent's own model in charge. Only a serviceability hard stop
+                // may still write (unpinned rows have no pin, so this always
+                // skips here — the exception lives in the repin passes).
+                if (result.isAgentExempt && !result.isServiceabilityHardStop) {
+                  ctx.logger.info("label-only pass skipped: agent exempt", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                  });
+                  return "settled";
+                }
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 if (
                   result.decision.modelId === floorModelId &&
@@ -6034,7 +6105,11 @@ export function createPlugin() {
                 // before the usability check so a blocked card never spends
                 // the advise call either. Operator pins are already exempt
                 // above; the write shares REPIN_PASS_WRITE_LIMIT with repins.
+                // Designated agents are exempt too: an exempt card keeps its
+                // pin (usually none — the router never pinned it) even when
+                // blocked; only a hard-stop repin below may move it.
                 if (described.status === "blocked") {
+                  if (isAgentExempt(described.assigneeAgentId, config)) return "settled";
                   if (rowSliceSpent(rowStartedAt)) {
                     ctx.logger.warn("repin pass skipped slow row write: row exceeded its time slice", {
                       companyId: company.id,
@@ -6136,6 +6211,17 @@ export function createPlugin() {
                 // when the old pin's lane is dead.
                 const result = await advise(company.id, { issueId }, false, tier, true, contextUsageCache);
                 if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
+                // Designated agents are exempt from router pinning: leave the
+                // pin alone. A serviceability hard stop still repins, so an
+                // exempt agent never fails on a dead lane.
+                if (result.isAgentExempt && !result.isServiceabilityHardStop) {
+                  ctx.logger.info("repin pass skipped: agent exempt", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                  });
+                  return "settled";
+                }
                 if (result.decision.modelId === pinnedModelId) {
                   //  (b): an expired pin the fresh advise re-affirms is
                   // still alive — re-stamp it so the next pass does not pay
@@ -6347,6 +6433,12 @@ export function createPlugin() {
               described.hasOperatorPin ||
               !balanceOpenStatuses.has(described.status)
             ) {
+              dropped.set(issueId, entry.decisionId);
+              continue;
+            }
+            // Designated agents are exempt from router pinning: stop tracking
+            // the lease without writing — the release would move the pin.
+            if (isAgentExempt(described.assigneeAgentId, config)) {
               dropped.set(issueId, entry.decisionId);
               continue;
             }
@@ -6899,6 +6991,17 @@ export function createPlugin() {
                   if (!result || result.decision.outcome !== "selected" || !result.decision.modelId) return "settled";
                   if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
                   if (resolveConfiguredModelId(result.pinnedModelId, config.models) !== pinnedModelId) return "settled";
+                  // Designated agents are exempt from router pinning: leave
+                  // the pin alone. A serviceability hard stop still repins,
+                  // so an exempt agent never fails on a dead lane.
+                  if (result.isAgentExempt && !result.isServiceabilityHardStop) {
+                    ctx.logger.info("balance pass skipped: agent exempt", {
+                      companyId: company.id,
+                      issue: identifier,
+                      tier,
+                    });
+                    return "settled";
+                  }
                   // . A card whose pin is already correct but whose
                   // sub-call env is frozen on a dead lane must still be written.
                   // This is checked BEFORE the same-model short-circuit below,
@@ -7203,6 +7306,17 @@ export function createPlugin() {
                 }
                 if (!result.isIdle || !balanceOpenStatuses.has(result.status)) return "settled";
                 if (result.pinnedModelId !== null) return "settled";
+                // Designated agents are exempt from router pinning: an unpinned
+                // exempt card stays on the agent's own model (no hard stop can
+                // apply without a pin).
+                if (result.isAgentExempt) {
+                  ctx.logger.info("balance pass skipped unpinned card: agent exempt", {
+                    companyId: company.id,
+                    issue: identifier,
+                    tier,
+                  });
+                  return "settled";
+                }
                 const floorModelId = resolveConfiguredModelId(result.agentFloorModelId, config.models);
                 // : only elide onto the implicit NULL-override floor
                 // pin while that floor's own lane is serviceable right now —

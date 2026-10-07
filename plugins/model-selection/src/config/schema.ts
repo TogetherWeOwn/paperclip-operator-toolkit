@@ -78,6 +78,18 @@ export const SELECTION_CONFIG_SCHEMA = {
         agentEnvContextTokens: { type: "integer", minimum: 1, default: 1000000 },
         /** Fraction of a narrower model's context window where Claude Code should compact. */
         compactionRatio: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.75 },
+        /**
+         * Agents exempt from router pinning. An exempt assignee's card is
+         * treated as `pin:operator` from the first pin: the creation-time pin
+         * and the scheduled repins skip it, and the agent's own model governs.
+         * The one exception is the serviceability hard stop, which may still
+         * repin off a dead lane. UUID items; default empty (no exemptions).
+         */
+        exemptAgentIds: {
+          type: "array",
+          items: { type: "string", format: "uuid" },
+          default: [],
+        },
       },
       default: {},
     },

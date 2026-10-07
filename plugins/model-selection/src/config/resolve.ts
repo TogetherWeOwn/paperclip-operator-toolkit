@@ -99,6 +99,12 @@ export interface ResolvedConfig {
     /** : agent-level cap for the per-pin env stamp. Unset resolves to the fleet ceiling. */
     agentEnvContextTokens: number;
     compactionRatio: number;
+    /**
+     * Agents exempt from router pinning. An exempt assignee's card is treated
+     * as `pin:operator` from the first pin; only a serviceability hard stop
+     * may still repin it. Empty by default (no exemptions).
+     */
+    exemptAgentIds: readonly string[];
   };
   models: ModelEntry[];
   /**
@@ -263,6 +269,34 @@ function tier(value: unknown, fallback: Tier): Tier {
     : fallback;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Raw `selection.exemptAgentIds` items that survive resolution. Only strings
+ * survive here — including non-UUID strings — so `validateConfig` can reject
+ * them with a specific reason instead of resolution silently dropping them.
+ * Non-array values resolve to empty (no exemptions).
+ */
+function exemptAgentIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
+ * One shared helper for every pin site: true when the card's assignee is
+ * exempt from router pinning. An exempt card is treated as `pin:operator`
+ * from the first pin — the creation-time pin and the scheduled repins skip
+ * it — with one exception: a serviceability hard stop may still repin it, so
+ * callers must check that exception themselves before skipping.
+ */
+export function isAgentExempt(
+  assigneeAgentId: string | null | undefined,
+  config: Pick<ResolvedConfig, "selection">,
+): boolean {
+  if (!assigneeAgentId) return false;
+  return config.selection.exemptAgentIds.includes(assigneeAgentId);
+}
+
 /**
  * Defaults are chosen so that an unconfigured install is inert: advise mode,
  * conservative T1 default tier, hold on an untrusted profile. Nothing about
@@ -423,6 +457,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         num(selection.fleetContextCeilingTokens, 1_000_000),
       ),
       compactionRatio: num(selection.compactionRatio, 0.75),
+      exemptAgentIds: exemptAgentIds(selection.exemptAgentIds),
     },
     models,
     tierLabelIds,
@@ -666,6 +701,12 @@ export function validateConfig(config: ResolvedConfig): { errors: string[]; warn
   if (config.selection.contextRunLogRoot && !isAbsolute(config.selection.contextRunLogRoot)) {
     errors.push("selection.contextRunLogRoot must be an absolute path");
   }
+
+  config.selection.exemptAgentIds.forEach((agentId, index) => {
+    if (!UUID_RE.test(agentId)) {
+      errors.push(`selection.exemptAgentIds[${index}] must be a UUID (got ${JSON.stringify(agentId)})`);
+    }
+  });
 
   if (config.selection.enabled && config.models.length === 0) {
     warnings.push("selection is enabled but no models are configured; every decision will be no-eligible-model");
