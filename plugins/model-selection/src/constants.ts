@@ -45,6 +45,8 @@ export const TOOL_NAMES = {
   tierOutcomes: "model_selection_tier_outcomes",
   /** Read the last explicitly enabled account shadow snapshot; never actuates. */
   admissionShadowReport: "model_selection_admission_shadow_report",
+  /** Read the latest daily fleet predicted-vs-actual mismatch table. Read-only. */
+  fleetAdmissionDailyReport: "model_selection_fleet_admission_daily_report",
   /**  port of `lane_outage.json`: declare or clear a telemetry-invisible lane outage. */
   setLaneOutage: "model_selection_set_lane_outage",
   /**  port of `zai_pace_override()` / `zai_pace_override.json`. */
@@ -147,6 +149,8 @@ export const JOB_KEYS = {
   dispatchSweep: "dispatch-sweep",
   /** : warm the run-scoped decision's hot snapshot once a minute. */
   refreshRunResolve: "refreshRunResolveSnapshot",
+  /** Shadow-only daily fleet predicted-vs-actual mismatch table. Writes the artifact, never actuates. */
+  fleetAdmissionDaily: "fleetAdmissionDailyReport",
 } as const;
 
 /**
@@ -209,6 +213,12 @@ export const PLUGIN_STATE_KEYS = {
   shadowDiffs: "shadowDiffs",
   /** One bounded, caller-supplied account shadow snapshot, never a reservation ledger. */
   admissionShadowReport: "admissionShadowReport",
+  /**
+   * Per-company: the latest daily fleet predicted-vs-actual report
+   * (`{ranAt, report}`), so the read tool answers without re-reading the
+   * ledger. The artifact is the report — this job writes no admission state.
+   */
+  fleetAdmissionDaily: "fleetAdmissionDaily",
   /** Slice-4 bounded T1 earn-in dispatch bookkeeping. */
   earnInState: "earnInState",
   /**

@@ -18,6 +18,14 @@ import {
   resolveIsClaudeModel,
 } from "./actuate/earnInWiring.js";
 import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
+import {
+  appendFleetHistory, fleetLaneInputsForLedger, nextFleetPreviousLevel,
+  storedFleetHistory, storedFleetPreviousLevel,
+} from "./fleet-admission-shadow.js";
+import {
+  buildPredictedVsActualReport, historyToSnapshots, resetActualsForLedger,
+} from "./fleet-predicted-vs-actual.js";
+import type { FleetAdmissionLevel } from "./lane-capacity/fleet-admission.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
@@ -1763,6 +1771,15 @@ export function createPlugin() {
         // actuation; malformed observations/storage failures cannot veto a pick.
         if (config.accountAdmissionShadow.enabled && params.admissionShadow !== undefined) {
           try {
+            const shadowKey = {
+              scopeKind: "company" as const, scopeId: companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+            };
+            const previous = await ctx.state.get(shadowKey);
+            // Upgrade-only hysteresis: the carried level comes from the last
+            // stored proposal, so one unreadable cycle cannot reset the
+            // deadband. Inventory comes from the live ledger verdicts, so an
+            // added or cancelled account reflows with no config edit.
+            const fleetPreviousLevel = storedFleetPreviousLevel(previous);
             const report = reportDecisionAdmissionShadow(
               params.admissionShadow as DecisionAdmissionShadowInput,
               now,
@@ -1770,10 +1787,15 @@ export function createPlugin() {
                 modelId: candidate.modelId,
                 lane: config.models.find(model => model.id === candidate.modelId)?.laneId ?? null,
               })),
+              { lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: fleetPreviousLevel, asOf: nowIso },
             );
-            if (report) await ctx.state.set({
-              scopeKind: "company", scopeId: companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
-            }, { issueId, evaluatedAt: now, report });
+            if (report) await ctx.state.set(shadowKey, {
+              issueId,
+              evaluatedAt: now,
+              report,
+              fleetPreviousLevel: nextFleetPreviousLevel(fleetPreviousLevel, report.fleetProposal),
+              fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal),
+            });
           } catch {
             // Do not echo potentially sensitive caller input in logs.
             ctx.logger.warn("model-selection: account admission shadow failed; selection unchanged");
@@ -3520,6 +3542,69 @@ export function createPlugin() {
         }
       });
 
+      // --- daily fleet predicted-vs-actual report (shadow only) ------
+      //
+      // Read-only artifact: per-lane end-of-window projections snapshotted
+      // during the week (the rolling shadow history) against the current
+      // weekly utilization, plus the shadow proposal level against the host
+      // governor level. It writes the artifact and nothing else — no
+      // admission state, no selection input, no actuation. A company with no
+      // shadow history yet gets an honest empty table, not an error. The host
+      // governor snapshots live outside this plugin's state; until an
+      // ingestion records them on the stored shadow document the level
+      // compare reads governor-unknown rather than guessing.
+      ctx.jobs.register(JOB_KEYS.fleetAdmissionDaily, async () => {
+        const ranAt = new Date().toISOString();
+        for (const company of listKnownCompanies()) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.pacing.lanes.length === 0) continue;
+            const shadowStored = asRecord(await ctx.state.get({
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+            }));
+            const history = storedFleetHistory(shadowStored);
+            const ledger = await readLaneLedger(company.id);
+            const lastProposal = (shadowStored.report as
+              | { fleetProposal?: { soonestResetAt?: unknown } }
+              | undefined)?.fleetProposal;
+            const soonestReset = typeof lastProposal?.soonestResetAt === "string"
+              ? lastProposal.soonestResetAt
+              : null;
+            const windowReset = soonestReset ?? ranAt;
+            const windowStart = new Date(Date.parse(windowReset) - 7 * 24 * 60 * 60 * 1000).toISOString();
+            const inWindow = history.filter((entry) => entry.asOf >= windowStart && entry.asOf <= windowReset);
+            const report = buildPredictedVsActualReport({
+              windowStart,
+              windowReset,
+              asOf: ranAt,
+              snapshots: historyToSnapshots(inWindow),
+              actuals: resetActualsForLedger(ledger, ranAt),
+              proposals: history.map((entry) => ({ level: entry.level, asOf: entry.asOf })),
+              governorLevels: Array.isArray((shadowStored as Record<string, unknown>).governorLevels)
+                ? (shadowStored as Record<string, unknown>).governorLevels as Array<{ level: FleetAdmissionLevel; asOf: string }>
+                : [],
+            });
+            if (soonestReset === null) {
+              report.limitations.push(
+                "No shadow proposal reset on record: the window edges are inferred from the run time, not a lane reset.",
+              );
+            }
+            await ctx.state.set({
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,
+            }, { ranAt, report });
+          } catch (cause) {
+            ctx.logger.error("fleet predicted-vs-actual report failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
       // --- scheduled aa.ai Intelligence Index refresh -------------
       // Fetched once at instance scope (aa.ai data is not company-specific),
       // then diffed per company against that company's roster. A fetch/parse
@@ -4156,6 +4241,29 @@ export function createPlugin() {
           return {
             content: stored.report ? "Last caller-supplied account shadow snapshot; no host starts or reservations governed. Check evaluatedAt and observation freshness; this is not a live admission decision."
               : "No explicitly enabled account shadow snapshot has been recorded.",
+            data: stored.report ? stored : toolRejection("no-report-yet"),
+          };
+        },
+      );
+
+      // Read-only: the daily job writes the artifact, this tool reads it
+      // back. No-report-yet is an honest empty answer, never an error.
+      ctx.tools.register(
+        TOOL_NAMES.fleetAdmissionDailyReport,
+        {
+          displayName: "Fleet predicted-vs-actual report",
+          description: "Read the latest daily shadow fleet predicted-vs-actual mismatch table. Read-only; never actuates.",
+          parametersSchema: { type: "object", additionalProperties: false },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          if (!toolCtx?.companyId) return { content: "Company scope required.", data: toolRejection("missing-company-scope") };
+          const stored = asRecord(await ctx.state.get({
+            scopeKind: "company", scopeId: toolCtx.companyId, stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,
+          }));
+          return {
+            content: stored.report
+              ? "Latest shadow fleet predicted-vs-actual mismatch table. Check ranAt and the limitations; readings taken mid-window do not validate the landing."
+              : "No fleet predicted-vs-actual report has been recorded yet.",
             data: stored.report ? stored : toolRejection("no-report-yet"),
           };
         },

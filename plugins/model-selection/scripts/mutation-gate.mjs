@@ -3846,6 +3846,57 @@ const mutants = [
     from: "[\"diff\", \"--name-only\", \"-z\", \"--no-renames\", base, \"HEAD\", \"--\"]",
     to: "[\"diff\", \"--name-only\", \"-z\", base, \"HEAD\", \"--\"]",
   },
+  // Shadow fleet admission wiring: the proposal is advisory, so every one of
+  // these mutants still produces a plausible-looking report — the level just
+  // stops meaning what the deadband and the backstop say. Killed by the
+  // fleet-admission-shadow spec (real normalizer/evaluator verdicts through
+  // the shadow call).
+  {
+    // The carried level never reaches the proposal: upgrades apply at the
+    // raw boundary and the fleet flaps on noisy snapshots. Killed by the
+    // two-cycle hysteresis test (carried hold gates the 0.96-projection
+    // upgrade; without it the same snapshot boosts).
+    name: "fleet-shadow-drops-previous-level",
+    file: "src/fleet-admission-shadow.ts",
+    from: "    previousLevel: input.previousLevel ?? null,",
+    to: "    previousLevel: null,",
+  },
+  {
+    // The report mislabels which deadband applied: the level still carries,
+    // but the audit field claims no level did. Killed by the hysteresis
+    // test's previousLevel assertions on both the held and fresh proposals.
+    name: "fleet-shadow-report-drops-carried-level",
+    file: "src/admission-shadow.ts",
+    from: "const record = fleetProposalRecord(proposeShadowFleetAdmission(fleet), previousLevel);",
+    to: "const record = fleetProposalRecord(proposeShadowFleetAdmission(fleet), null);",
+  },
+  {
+    // An unreadable cycle resets the deadband instead of preserving it: one
+    // stale poll erases the carried level the next cycle needed. Killed by
+    // the unknown no-op test (stored normal survives a null proposal).
+    name: "fleet-shadow-unknown-resets-previous-level",
+    file: "src/fleet-admission-shadow.ts",
+    from: "  if (!proposal) return stored;",
+    to: "  return proposal?.level ?? null;",
+  },
+  {
+    // The backstop never reports that it capped the fleet: a majority
+    // five-hour trip still holds the level, but the report reads as a weekly
+    // decision. Killed by the majority-trip test (capped must be true).
+    name: "fleet-shadow-backstop-cap-unreported",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      capped: proposal.backstop.capped,",
+    to: "      capped: false,",
+  },
+  {
+    // The backstop names no lanes: the cap (if any) is unattributable and a
+    // minority trip is indistinguishable from none. Killed by the
+    // majority/minority trip tests (trippedLanes names the withheld lane).
+    name: "fleet-shadow-backstop-trips-unnamed",
+    file: "src/fleet-admission-shadow.ts",
+    from: "      trippedLanes: [...proposal.backstop.trippedLanes],",
+    to: "      trippedLanes: [],",
+  },
 ];
 
 // `--maxWorkers=2` is load-bearing, not tuning. At vitest's default worker

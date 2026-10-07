@@ -4,6 +4,10 @@ import {
   type EligibleBudgetBinding, type IncrementalHold,
 } from './admission-budget.js';
 import { adaptLaneQuotaSnapshot, type LaneObservationAdapterResult, type LaneQuotaSnapshot } from './admission-observation.js';
+import {
+  fleetProposalRecord, proposeShadowFleetAdmission,
+  type FleetAdmissionShadowProposal, type FleetShadowInput,
+} from './fleet-admission-shadow.js';
 
 export interface ShadowAccount {
   accountId: string;
@@ -59,6 +63,12 @@ export interface AdmissionShadowReport {
   }>;
   /** Unique pool/window evaluations; shared allowance appears once per sample. */
   evaluations: BudgetEvaluation[];
+  /**
+   * Shadow fleet admission proposal for this cycle, when the caller supplied
+   * lane verdicts and burn-downs and the fleet picture was computable.
+   * Absent on `unknown`: an unreadable fleet records nothing.
+   */
+  fleetProposal?: FleetAdmissionShadowProposal;
   limitations: string[];
   /** Present only when accounts/windows were derived from a lane quota snapshot. */
   observationAdapter?: Pick<LaneObservationAdapterResult, 'schema' | 'evidenceKind' | 'snapshotObservedAt' | 'maxAgeMs'
@@ -89,11 +99,20 @@ export interface LaneSnapshotAdmissionShadowInput {
   bindings?: DecisionAdmissionShadowInput['bindings'];
 }
 
-/** Intersects supplied bindings with the ALREADY computed landing-tier set. */
+/**
+ * Intersects supplied bindings with the ALREADY computed landing-tier set.
+ *
+ * The optional `fleet` input carries the already-evaluated lane verdicts and
+ * burn-downs plus the previous cycle's proposal level (upgrade-only
+ * hysteresis). The proposal is shadow-only: it is recorded on the report and
+ * never reaches selection or actuation. An unreadable fleet (`unknown`) or a
+ * proposal failure records nothing and changes nothing.
+ */
 export function reportDecisionAdmissionShadow(
   rawInput: DecisionAdmissionShadowInput | LaneSnapshotAdmissionShadowInput,
   now: number,
   eligibleModels: ReadonlyArray<{ modelId: string; lane: string | null }>,
+  fleet?: FleetShadowInput,
 ): AdmissionShadowReport | null {
   if (rawInput.enabled === false) return null;
   if (JSON.stringify(rawInput).length > 128 * 1024 || (rawInput.bindings?.length ?? 0) > 256) {
@@ -144,6 +163,15 @@ export function reportDecisionAdmissionShadow(
       eligibleBindings: bindings.map(entry => entry.binding) }],
   });
   if (report) {
+    if (fleet !== undefined) {
+      try {
+        const previousLevel = fleet.previousLevel ?? null;
+        const record = fleetProposalRecord(proposeShadowFleetAdmission(fleet), previousLevel);
+        if (record) report.fleetProposal = record;
+      } catch {
+        // Fail-neutral: a broken proposal input must not veto the shadow report.
+      }
+    }
     // No mapping is not proof of no demand, especially for a sticky incumbent
     // whose existing selector intentionally does not enumerate candidates.
     for (const account of report.accounts) {
