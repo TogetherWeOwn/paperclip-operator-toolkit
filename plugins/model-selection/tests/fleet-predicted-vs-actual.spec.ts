@@ -81,6 +81,26 @@ describe("daily predicted-vs-actual report", () => {
       .toMatchObject({ status: "reset-observed", actualUtilization: 0.81 });
   });
 
+  it("deduplicates unchanged readings after storage reorders lane object keys", () => {
+    const history = appendObservation([], 0.8, MID_WEEK);
+    const stored = structuredClone(history);
+    const lane = stored[0]!.lanes[0]!;
+    stored[0]!.lanes[0] = {
+      laneId: lane.laneId,
+      resetAt: lane.resetAt,
+      projected: lane.projected,
+      observedAt: lane.observedAt,
+      utilization: lane.utilization,
+    };
+    const freshLane = appendObservation([], 0.8, MID_WEEK)[0]!.lanes[0]!;
+    expect(JSON.stringify(freshLane)).not.toBe(JSON.stringify(stored[0]!.lanes[0]));
+
+    const repeated = appendObservation(stored, 0.8, MID_WEEK);
+
+    expect(repeated).toHaveLength(1);
+    expect(repeated).toEqual(stored);
+  });
+
   it("keeps a corrected same-clock receipt and refuses newly incomplete account coverage", () => {
     const complete = appendObservation([], 0.99, NEAR_RESET);
     const incomplete = appendObservation(complete, 0.99, NEAR_RESET, WINDOW_RESET, [{

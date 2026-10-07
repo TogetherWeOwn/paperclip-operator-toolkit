@@ -3902,8 +3902,8 @@ const mutants = [
   {
     name: "fleet-shadow-same-clock-corrections-discarded",
     file: "src/fleet-admission-shadow.ts",
-    from: "if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;",
-    to: "if (ledger && JSON.stringify(lanes.map(readingIdentity)) === JSON.stringify(history.at(-1)?.lanes.map(readingIdentity))) return history;",
+    from: "if (ledger && previousLanes &&\n      JSON.stringify(lanes.map(readingValueIdentity)) === JSON.stringify(previousLanes.map(readingValueIdentity))) return history;",
+    to: "if (ledger && previousLanes && JSON.stringify(lanes.map(readingIdentity)) === JSON.stringify(previousLanes.map(readingIdentity))) return history;",
   },
   {
     name: "fleet-shadow-same-clock-correction-loses-tie",
@@ -3920,7 +3920,7 @@ const mutants = [
   {
     name: "fleet-shadow-repeated-readings-appended",
     file: "src/fleet-admission-shadow.ts",
-    from: "if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;",
+    from: "if (ledger && previousLanes &&\n      JSON.stringify(lanes.map(readingValueIdentity)) === JSON.stringify(previousLanes.map(readingValueIdentity))) return history;",
     to: "if (false) return history;",
   },
   {

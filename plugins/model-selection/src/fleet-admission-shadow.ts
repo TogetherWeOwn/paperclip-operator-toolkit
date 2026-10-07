@@ -247,6 +247,11 @@ function readingIdentity(lane: FleetHistoryLane): string {
   return JSON.stringify([lane.laneId, lane.resetAt ?? null, lane.observedAt ?? null]);
 }
 
+function readingValueIdentity(lane: FleetHistoryLane): readonly unknown[] {
+  return [lane.laneId, lane.resetAt ?? null, lane.observedAt ?? null,
+    lane.utilization ?? null, lane.projected ?? null];
+}
+
 /** Keep compact forecast and endpoint receipts for a week plus the next daily run. */
 function fleetWindowAnchors(history: readonly FleetHistoryEntry[], asOf: string): FleetHistoryLane[] {
   const asOfMs = Date.parse(asOf);
@@ -280,7 +285,9 @@ export function appendFleetHistory(
   if (!proposal || proposal.asOf === null) return history;
   const lanes = ledger ? weeklyLaneReadingsForLedger(ledger)
     : proposal.lanes.map((lane) => ({ laneId: lane.laneId, projected: lane.projected }));
-  if (ledger && JSON.stringify(lanes) === JSON.stringify(history.at(-1)?.lanes)) return history;
+  const previousLanes = history.at(-1)?.lanes;
+  if (ledger && previousLanes &&
+      JSON.stringify(lanes.map(readingValueIdentity)) === JSON.stringify(previousLanes.map(readingValueIdentity))) return history;
   const next: FleetHistoryEntry[] = [
     ...history,
     {
