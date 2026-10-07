@@ -46,6 +46,23 @@ describe("selection.exemptAgentIds: config", () => {
     expect(resolved.selection.exemptAgentIds).toEqual([REVIEWER, "agent-b"]);
   });
 
+  it("lowercases entries at read, so an uppercase paste still exempts the agent", () => {
+    // REVIEWER is digits-only, so it cannot exercise case; this id has hex letters.
+    const lower = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const resolved = resolveConfig({ selection: { exemptAgentIds: [lower.toUpperCase()] } });
+    expect(resolved.selection.exemptAgentIds).toEqual([lower]);
+    expect(isExemptAgent(resolved.selection.exemptAgentIds, lower)).toBe(true);
+    const validated = validateConfig(resolveConfig({ models: MODELS, selection: { exemptAgentIds: [lower.toUpperCase()] } }));
+    expect(validated.errors).toEqual([]);
+    expect(validated.warnings.some((warning) => warning.includes("exemptAgentIds"))).toBe(false);
+  });
+
+  it("de-duplicates entries that differ only by case, keeping the first", () => {
+    const lower = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const resolved = resolveConfig({ selection: { exemptAgentIds: [lower.toUpperCase(), lower] } });
+    expect(resolved.selection.exemptAgentIds).toEqual([lower]);
+  });
+
   it("treats a non-array value as no exemption rather than throwing", () => {
     expect(resolveConfig({ selection: { exemptAgentIds: REVIEWER } }).selection.exemptAgentIds).toEqual([]);
   });

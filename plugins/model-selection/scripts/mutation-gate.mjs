@@ -3886,8 +3886,15 @@ const mutants = [
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: the configured list never reaches the router.
     name: "exempt-agent-resolver-drops-list",
     file: "src/config/resolve.ts",
-    from: "      exemptAgentIds: stringList(selection.exemptAgentIds),",
+    from: "      exemptAgentIds: lowercaseIds(stringList(selection.exemptAgentIds)),",
     to: "      exemptAgentIds: [],",
+  },
+  {
+    // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an uppercase paste passes validation yet exempts nobody.
+    name: "exempt-agent-resolver-skips-lowercase",
+    file: "src/config/resolve.ts",
+    from: "    const lower = id.toLowerCase();",
+    to: "    const lower = id;",
   },
   {
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: a padded id never matches the agent.

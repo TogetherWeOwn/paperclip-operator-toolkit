@@ -244,6 +244,21 @@ function stringList(value: unknown): string[] {
   return out;
 }
 
+/**
+ * Host agent ids are lowercase UUIDs. An operator-pasted uppercase id passes
+ * the UUID check (which ignores case) yet never matches, so the router would
+ * pin the agent it was meant to leave alone. Lowercasing at read keeps the
+ * match working; de-duplication is case-insensitive to match.
+ */
+function lowercaseIds(ids: string[]): string[] {
+  const out: string[] = [];
+  for (const id of ids) {
+    const lower = id.toLowerCase();
+    if (!out.includes(lower)) out.push(lower);
+  }
+  return out;
+}
+
 function nullableNum(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -444,7 +459,7 @@ export function resolveConfig(raw: Record<string, unknown> | null | undefined): 
         num(selection.fleetContextCeilingTokens, 1_000_000),
       ),
       compactionRatio: num(selection.compactionRatio, 0.75),
-      exemptAgentIds: stringList(selection.exemptAgentIds),
+      exemptAgentIds: lowercaseIds(stringList(selection.exemptAgentIds)),
     },
     models,
     tierLabelIds,
