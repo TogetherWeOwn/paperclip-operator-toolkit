@@ -3384,8 +3384,8 @@ jobs:
       # it is what would have caught the original hole. Every distinct suite
       # passes that baseline once before any of its mutants are scored.
       - name: Mutation gates — the suites must reject reintroduced defects
-        # Measured ~54 min on a green full run; 60 keeps a working margin
-        # without approaching the job bound, and a real overrun still fails loud.
+        # Keep the per-step cap below the 90-minute job timeout while leaving
+        # room for checkout/setup; a true overrun still fails loudly.
         timeout-minutes: 60
         run: |
           set -uo pipefail
