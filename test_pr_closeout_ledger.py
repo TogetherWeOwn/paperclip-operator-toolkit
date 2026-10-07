@@ -137,6 +137,15 @@ class MergeableIsNotGreen(unittest.TestCase):
         self.assertEqual(record["checkState"], "UNKNOWN")
         self.assertIn("gitleaks", record["blocker"])
 
+    def test_neutral_conclusion_counts_as_pass(self):
+        # GitHub treats neutral like skipped for required checks: both
+        # satisfy the branch rule, so the sweep must score GREEN, never RED.
+        snap = snapshot()
+        snap["checks"] = checks_at(HEAD_A, ("success", "neutral", "skipped"))
+        record = ledger.evaluate(entry(), snap, approve(), None, NOW)
+        self.assertEqual(record["checkState"], "GREEN")
+        self.assertNotEqual(record["disposition"], "NEEDS_FIX")
+
 
 class StaleProof(unittest.TestCase):
     def test_moved_head_voids_prior_verdict(self):
@@ -165,6 +174,22 @@ class StaleProof(unittest.TestCase):
         record = ledger.evaluate(entry(), snap, None, None, NOW)
         self.assertEqual(record["checkState"], "UNKNOWN")
         self.assertIn("full SHA", record["blocker"])
+
+    def test_sha_less_verdict_is_history_during_read_gap(self):
+        # A verdict with no SHA is history, never current proof: on a read
+        # gap (empty head) it must stay NONE, never route CHANGES_HANDBACK.
+        verdict, sha, _ = ledger.evaluate_review(
+            {"verdict": "CHANGES", "sha": ""}, "")
+        self.assertEqual(verdict, "NONE")
+        verdict_missing, _, _ = ledger.evaluate_review(
+            {"verdict": "CHANGES"}, "")
+        self.assertEqual(verdict_missing, "NONE")
+        gap = snapshot(head=None, apiError="HTTP 500: read failed")
+        gap["headSha"] = None
+        record = ledger.evaluate(
+            entry(), gap, {"verdict": "CHANGES", "sha": ""}, None, NOW)
+        self.assertEqual(record["verdict"], "NONE")
+        self.assertNotEqual(record["disposition"], "CHANGES_HANDBACK")
 
 
 class DraftAndRelease(unittest.TestCase):
@@ -1335,6 +1360,39 @@ class EndToEndOffline(unittest.TestCase):
                                          "admission": "admitted"}]}, out)
             with open(snapshot_path, "w", encoding="utf-8") as out:
                 json.dump({"snapshots": {}, "reviews": {}, "cards": {}}, out)
+            tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "pr_closeout_ledger.py")
+            proc = subprocess.run(
+                [sys.executable, tool,
+                 "--registry", registry_path, "--snapshot", snapshot_path,
+                 "--ledger-out", os.path.join(work, "ledger.json"),
+                 "--plan-out", os.path.join(work, "plan.json")],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 5)
+            self.assertIn("refusing to report a clean board", proc.stderr)
+        finally:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_cards_only_snapshot_refuses_through_main(self):
+        # Zero PR snapshots/reviews with only monitored cards is still an
+        # unmeasured board: it must refuse (exit 5), never exit 0 silent.
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        work = tempfile.mkdtemp()
+        try:
+            registry_path = os.path.join(work, "registry.json")
+            snapshot_path = os.path.join(work, "snapshot.json")
+            with open(registry_path, "w", encoding="utf-8") as out:
+                json.dump({"entries": [{"repo": "two-web-next", "pr": 291,
+                                         "admission": "admitted",
+                                         "authorCard": "CARD-12",
+                                         "successorCard": "CARD-12"}]}, out)
+            with open(snapshot_path, "w", encoding="utf-8") as out:
+                json.dump({"snapshots": {}, "reviews": {},
+                           "cards": {"CARD-12": card("CARD-12")}}, out)
             tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "pr_closeout_ledger.py")
             proc = subprocess.run(

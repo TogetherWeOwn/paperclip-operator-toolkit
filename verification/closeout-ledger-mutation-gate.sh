@@ -107,9 +107,17 @@ mutate short-sha-accepted-as-canonical \
   '    return isinstance(sha, str) and len(sha) >= 7' \
   test_truncated_sha_is_unknown
 mutate stale-verdict-reused-as-current \
-  '    if sha != head:' \
+  '    if not sha or sha != head:' \
   '    if False:' \
   test_moved_head_voids_prior_verdict
+mutate neutral-conclusion-read-as-failure \
+  'PASS_CONCLUSIONS = {"success", "skipped", "neutral"}' \
+  'PASS_CONCLUSIONS = {"success", "skipped"}' \
+  test_neutral_conclusion_counts_as_pass
+mutate sha-less-verdict-counts-as-current \
+  '    if not sha or sha != head:' \
+  '    if sha != head:' \
+  test_sha_less_verdict_is_history_during_read_gap
 mutate empty-required-list-read-as-green \
   '    if not required:' \
   '    if False:' \
@@ -470,9 +478,13 @@ mutate empty-registry-accepted \
   '    if False:' \
   test_empty_registry_refuses
 mutate empty-snapshot-accepted \
-  '        raise LedgerError("snapshot holds no snapshots, reviews or cards; refusing to report a clean board")' \
+  '        raise LedgerError("snapshot holds no PR snapshots or reviews; refusing to report a clean board")' \
   '        pass' \
   test_empty_snapshot_refuses_through_main
+mutate cards-only-snapshot-accepted \
+  '    if not snapshots and not reviews:' \
+  '    if not snapshots and not reviews and not cards:' \
+  test_cards_only_snapshot_refuses_through_main
 mutate registry-read-failure-ignored \
   '        raise LedgerError(f"registry unreadable: {error}") from error' \
   '        return []' \

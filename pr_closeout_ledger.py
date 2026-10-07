@@ -46,7 +46,7 @@ from typing import Any
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TERMINAL_DISPOSITIONS = {"MERGED", "PARKED", "SUPERSEDED", "EXCLUDED"}
 LIVE_RUN_STATUSES = {"queued", "running"}
-PASS_CONCLUSIONS = {"success", "skipped"}
+PASS_CONCLUSIONS = {"success", "skipped", "neutral"}
 FAIL_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required"}
 
 # Hours after lastProgressAt at which a stalled admitted record escalates.
@@ -254,7 +254,7 @@ def evaluate_review(
     sha = review.get("sha") if isinstance(review.get("sha"), str) else ""
     if verdict not in ("APPROVE", "CHANGES"):
         return "NONE", sha, "no actionable verdict recorded"
-    if sha != head:
+    if not sha or sha != head:
         return "NONE", sha, f"{verdict} verdict is at stale SHA, void at current head"
     return verdict, sha, f"{verdict} verdict at exact head"
 
@@ -1308,8 +1308,8 @@ def load_inputs(
             for name, row in extra_rows.items():
                 if isinstance(row, dict):
                     cards[str(name)] = row
-    if not snapshots and not reviews and not cards:
-        raise LedgerError("snapshot holds no snapshots, reviews or cards; refusing to report a clean board")
+    if not snapshots and not reviews:
+        raise LedgerError("snapshot holds no PR snapshots or reviews; refusing to report a clean board")
     prior_records: dict[str, dict[str, Any]] = {}
     if prior_path:
         prior_doc = load_doc(prior_path, "prior ledger")

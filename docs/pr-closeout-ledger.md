@@ -1,8 +1,7 @@
 # Admitted-PR closeout ledger
 
 `pr_closeout_ledger.py` is the automation slice of a Director-owned closeout
-loop. It persists
-one canonical record per explicitly admitted repo+PR and emits bounded,
+loop. It persists one canonical record per explicitly admitted repo+PR and emits bounded,
 diagnostic-only sweep proposals. It does not merge, close, reassign, or
 relabel anything: there is no `--apply` flag on purpose.
 
@@ -49,8 +48,8 @@ API errors read UNKNOWN, never green.
   steward) and carries the record's `nextCheckAt`, so the plan is the recheck
   schedule. The authorized Operator applies at most one action per admitted
   card per pass.
-- Exit 5: could not measure (unreadable/empty registry, empty snapshot).
-  Refuses to report a clean board.
+- Exit 5: could not measure (unreadable/empty registry, no PR snapshots or
+  reviews -- cards alone do not count). Refuses to report a clean board.
 
 Dispositions: `APPROVED_WAIT_CI` (owned, monitored; SHA change voids it),
 `NEEDS_REVIEW`, `NEEDS_FIX`, `UNKNOWN_CHECKS`, `CHANGES_HANDBACK` (findings +
