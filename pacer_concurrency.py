@@ -10,7 +10,7 @@
 # scale UP when the accounts serving that agent's lanes are behind weekly
 # pace with 5h headroom, DOWN when ahead or near cap, HOLD in between.
 #
-# WHAT THIS DOES NOT DO (deliberately, per the card's host dependency):
+# WHAT THIS DOES NOT DO (deliberately, per the host dependency):
 #   * No per-run admit/hold enforcement. The live host image lacks the
 #     run-model/admission hook, so admission stays an in-output ADVISORY
 #     (admit/hold + retryAfter per lane, shadow only) recorded alongside the
@@ -40,10 +40,17 @@
 #     agent's own baseline (scale-up without a cap only restores toward
 #     normal; raising normal is an operator edit to the caps file, not an
 #     inference). Caps above 32 are refused as insane, not clamped silently.
+#     An agent already ABOVE its ceiling never scales up: behind pace it
+#     steps down one toward the ceiling (still +-1), and the reason says so.
 #   * Dwell/cooldown: a computed move away from the last recorded target
 #     within --cooldown-min (default 30) is held at the last target with
 #     reason cooldown-hold. Both directions wait; flapping is the failure
 #     being prevented, and a faster down-ramp would just re-flap upward.
+#     --state is read-only here. Its shape is {"agents": {"<agentId>":
+#     {"target": N, "decidedAt": "<UTC Z>"}}}, keyed by the roster id (or the
+#     name when the roster row has no id). Every up/down record in the plan
+#     carries target and decidedAt so the applier (host timer or operator)
+#     can persist exactly the moves it applied; see docs/pacer-concurrency.md.
 #   * Frozen lanes (--frozen-lanes, the per-lane kill switch) force nochange
 #     for every agent they serve, in both modes. Unknown/stale lane data
 #     forces nochange/unknown, never a scaled guess (rule 4 of quota_brake).
@@ -211,21 +218,30 @@ def classify_lane(row, now):
     # Admission advisory (shadow): hold when any governing window is thin,
     # unknown, stale or invalid; admit only on all-known with margin.
     hold_reasons = list(unknowns)
-    retry_after = None
+    # A thin window holds until THAT window rolls: weekly days out, five-hour
+    # hours out. Several thin windows hold until the last of them rolls.
+    thin_resets = []
     weekly_head = weekly.get("headroom")
     if row.get("weeklyUtilization") is not None and weekly_head is not None \
             and weekly["state"] == "known" and weekly_head < ADMIT_WEEKLY_FLOOR:
         hold_reasons.append("weekly headroom %.2f under %.2f"
                            % (weekly_head, ADMIT_WEEKLY_FLOOR))
+        thin_resets.append(weekly["resetInS"])
     if row.get("fiveHourUtilization") is not None and fh_head is not None \
             and fh["state"] in ("known", "early") \
             and fh_head < FIVE_HOUR_DOWN_HEADROOM:
         hold_reasons.append("five-hour headroom %.2f under %.2f"
                            % (fh_head, FIVE_HOUR_DOWN_HEADROOM))
+        thin_resets.append(fh["resetInS"])
     if hold_reasons:
-        resets = [w["resetInS"] for w in windows.values()
-                  if isinstance(w.get("resetInS"), int)]
-        retry_after = min(resets) if resets else 300
+        if thin_resets:
+            retry_after = max(thin_resets)
+        else:
+            # Unknown/stale/invalid only: no window to wait for, so re-ask at
+            # the soonest reset seen, else after a short default.
+            resets = [w["resetInS"] for w in windows.values()
+                      if isinstance(w.get("resetInS"), int)]
+            retry_after = min(resets) if resets else 300
         admission = {"verdict": "hold", "reasons": hold_reasons,
                      "retryAfterS": retry_after}
     else:
@@ -308,11 +324,20 @@ def decide_agent(agent, lane_by_id, now, caps, state, frozen, cooldown_min,
     want = cur
     why = "ratio %.2f inside hysteresis [%.2f, %.2f]" % (ratio, UP_RATIO, DOWN_RATIO)
     if ratio <= UP_RATIO and (fh_head is None or fh_head >= FIVE_HOUR_UP_HEADROOM):
-        want = min(cur + 1, ceiling)
-        why = ("ratio %.2f behind pace with 5h headroom %s: scale up"
-               % (ratio, ("%.2f" % fh_head) if fh_head is not None else "n/a"))
-        if want == cur:
-            why += " (already at ceiling %d)" % ceiling
+        head_txt = ("%.2f" % fh_head) if fh_head is not None else "n/a"
+        if cur > ceiling:
+            # Above the ceiling there is no room to scale up. Walk back toward
+            # it one step at a time instead of jumping (the +-1 rule).
+            want = cur - 1
+            why = ("ratio %.2f behind pace with 5h headroom %s, but %d is "
+                   "above ceiling %d: step down toward the ceiling"
+                   % (ratio, head_txt, cur, ceiling))
+        else:
+            want = min(cur + 1, ceiling)
+            why = ("ratio %.2f behind pace with 5h headroom %s: scale up"
+                   % (ratio, head_txt))
+            if want == cur:
+                why += " (already at ceiling %d)" % ceiling
     elif ratio >= DOWN_RATIO or (fh_head is not None
                                  and fh_head < FIVE_HOUR_DOWN_HEADROOM):
         want = max(cur - 1, 1)
@@ -342,6 +367,9 @@ def decide_agent(agent, lane_by_id, now, caps, state, frozen, cooldown_min,
            "target": want, "from": cur, "measured": True,
            "critical": bool(agent.get("critical")),
            "paceRatio": round(ratio, 4)}
+    if action != "nochange":
+        # Persisted by the applier into --state so the cooldown can see it.
+        rec["decidedAt"] = fmt_ts(now)
     if fh_head is not None:
         rec["fiveHourHeadroom"] = round(fh_head, 4)
     if mode == "enforce" and action != "nochange":

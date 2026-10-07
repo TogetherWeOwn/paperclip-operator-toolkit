@@ -19,6 +19,9 @@
 #   re-moves the target. agent-cool's hold is the only case that sees it.
 # * §6 kills the ceiling/floor mutants: scale-up past the operator cap, or
 #   any target below 1, or a cap that silently clamps instead of refusing.
+# * §1/§5/§6 also pin the review fixes: a thin window retries at ITS reset,
+#   the --state shape is exactly what plan records emit, and an agent above
+#   its ceiling steps down by one instead of jumping under a scale-up reason.
 # * §8 kills the quiet-enforce mutant: enforce-mode output without --yes, or
 #   a shadow plan carrying patch intents. Directives must be asked for.
 # * §9 kills the cancel mutant: any cancel/kill/terminate/disable key in the
@@ -57,8 +60,9 @@ def plan_obj(*args):
     return json.loads(cp.stdout)
 
 
-def single_agent(lane_row, runs=2, baseline=4):
-    """Plan one agent on one lane row; return that agent's decision."""
+def single_plan(lane_row, runs=2, baseline=4, cap=None, state=None,
+                now=None, extra=()):
+    """Plan one agent on one lane row; return the whole plan."""
     agents = {"agents": [{
         "id": "e", "name": "edge-agent", "lanes": ["edge"],
         "maxConcurrentRuns": runs, "baseline": baseline, "status": "idle"}]}
@@ -70,7 +74,25 @@ def single_agent(lane_row, runs=2, baseline=4):
             json.dump(agents, f)
         with open(lp, "w") as f:
             json.dump(lanes, f)
-        return plan_obj("--lanes", lp, "--agents", ap)["agents"][0]
+        args = ["--lanes", lp, "--agents", ap]
+        if cap is not None:
+            cpath = os.path.join(d, "caps.json")
+            with open(cpath, "w") as f:
+                json.dump({"caps": {"edge-agent": cap}}, f)
+            args += ["--caps", cpath]
+        if state is not None:
+            spath = os.path.join(d, "state.json")
+            with open(spath, "w") as f:
+                json.dump(state, f)
+            args += ["--state", spath]
+        if now is not None:
+            args += ["--now", now]
+        return plan_obj(*args, *extra)
+
+
+def single_agent(lane_row, **kw):
+    """Plan one agent on one lane row; return that agent's decision."""
+    return single_plan(lane_row, **kw)["agents"][0]
 
 
 def agents_by_name(plan):
@@ -99,6 +121,40 @@ class ConcurrencyPlanTest(unittest.TestCase):
         stale = by_lane["meta-lane-4"]
         self.assertEqual(stale["admission"]["verdict"], "hold")
         self.assertGreater(stale["admission"]["retryAfterS"], 0)
+
+    def test_01_weekly_thin_hold_retries_at_the_weekly_reset(self):
+        # Weekly headroom 0.05 holds until the WEEKLY window rolls (3.5 days
+        # out), not at the five-hour reset 2.5 hours away. 0.15 headroom is
+        # over the floor and admits.
+        base = {"weeklyResetUtc": "2026-10-08T00:00:00Z",
+                "fiveHourUtilization": 0.2,
+                "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+                "observationQuality": "live"}
+        thin = single_plan(dict(base, weeklyUtilization=0.95))["lanes"][0]
+        self.assertEqual(thin["admission"]["verdict"], "hold")
+        self.assertIn("weekly headroom", thin["admission"]["reasons"][0])
+        self.assertEqual(thin["admission"]["retryAfterS"], 302400)
+        ok = single_plan(dict(base, weeklyUtilization=0.85))["lanes"][0]
+        self.assertEqual(ok["admission"]["verdict"], "admit")
+
+    def test_01_five_hour_thin_hold_retries_at_the_five_hour_reset(self):
+        base = {"weeklyUtilization": 0.30,
+                "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                "fiveHourUtilization": 0.90,
+                "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+                "observationQuality": "live"}
+        lane = single_plan(base)["lanes"][0]
+        self.assertEqual(lane["admission"]["verdict"], "hold")
+        self.assertEqual(lane["admission"]["retryAfterS"], 9000)
+
+    def test_01_both_windows_thin_waits_for_the_later_reset(self):
+        lane = single_plan({"weeklyUtilization": 0.95,
+                            "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                            "fiveHourUtilization": 0.90,
+                            "fiveHourResetUtc": "2026-10-04T14:30:00Z",
+                            "observationQuality": "live"})["lanes"][0]
+        self.assertEqual(len(lane["admission"]["reasons"]), 2)
+        self.assertEqual(lane["admission"]["retryAfterS"], 302400)
 
     # -- §2  worst wins, never the mean ------------------------------------
     def test_02_behind_pace_scales_up_one_step(self):
@@ -233,6 +289,55 @@ class ConcurrencyPlanTest(unittest.TestCase):
                       "--cooldown-min", "-1")
         self.assertEqual(cp.returncode, 2)
 
+    def test_05_cooldown_edge_is_exclusive(self):
+        # The last target was 3, so a computed move down to 2 revisits it.
+        # 29m59s into a 30m dwell holds; exactly 30m has served it and moves.
+        ahead = {"weeklyUtilization": 0.58,
+                 "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                 "observationQuality": "live"}
+        held = single_agent(ahead, runs=3, state={"agents": {"e": {
+            "target": 3, "decidedAt": "2026-10-04T11:30:01Z"}}})
+        self.assertEqual(held["action"], "nochange")
+        self.assertIn("cooldown-hold", held["reason"])
+        self.assertEqual(held["target"], 3)
+        moved = single_agent(ahead, runs=3, state={"agents": {"e": {
+            "target": 3, "decidedAt": "2026-10-04T11:30:00Z"}}})
+        self.assertEqual(moved["action"], "down")
+        self.assertEqual(moved["target"], 2)
+
+    def test_05_plan_records_feed_the_state_file_shape(self):
+        # The documented persistence recipe: for each up/down record the
+        # applier wrote, store {agents: {<agentId>: {target, decidedAt}}}.
+        # Following it verbatim must make the next run's cooldown bite.
+        behind = {"weeklyUtilization": 0.42,
+                  "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                  "observationQuality": "live"}
+        ahead = {"weeklyUtilization": 0.58,
+                 "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                 "observationQuality": "live"}
+        first = single_plan(behind, runs=2, baseline=4)["agents"][0]
+        self.assertEqual(first["action"], "up")
+        self.assertEqual(first["decidedAt"], NOW)
+        state = {"agents": {first["agentId"]: {
+            "target": first["target"], "decidedAt": first["decidedAt"]}}}
+        later = single_agent(ahead, runs=first["target"], baseline=4,
+                             state=state, now="2026-10-04T12:10:00Z")
+        self.assertEqual(later["action"], "nochange")
+        self.assertIn("cooldown-hold", later["reason"])
+        self.assertEqual(later["target"], 3)
+        past = single_agent(ahead, runs=first["target"], baseline=4,
+                            state=state, now="2026-10-04T12:31:00Z")
+        self.assertEqual(past["action"], "down")
+        self.assertEqual(past["decidedAt"], "2026-10-04T12:31:00Z")
+
+    def test_05_holds_and_skips_carry_no_decided_at(self):
+        plan = self.base()
+        for a in plan["agents"]:
+            if a["action"] in ("nochange", "skip"):
+                self.assertNotIn("decidedAt", a, a["name"])
+            else:
+                self.assertEqual(a["decidedAt"], NOW, a["name"])
+
     # -- §6  ceilings and floors --------------------------------------------
     def test_06_operator_cap_is_a_ceiling_not_a_hint(self):
         plan = self.base("--caps", os.path.join(FIX, "caps.json"))
@@ -252,6 +357,38 @@ class ConcurrencyPlanTest(unittest.TestCase):
             self.assertEqual(cp.returncode, 2)
         finally:
             os.unlink(cp_)
+
+    def test_06_above_baseline_ceiling_steps_down_by_one(self):
+        # 6 runs allowed, baseline 3, no cap, well behind pace. Scaling up is
+        # impossible; the old code jumped 6 -> 3 under a "scale up" reason.
+        # The rule is +-1 per decision, so it walks back one step and says so.
+        behind = {"weeklyUtilization": 0.20,
+                  "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                  "observationQuality": "live"}
+        a = single_agent(behind, runs=6, baseline=3)
+        self.assertEqual(a["action"], "down")
+        self.assertEqual((a["from"], a["target"]), (6, 5))
+        self.assertIn("above ceiling 3", a["reason"])
+        self.assertNotIn("scale up", a["reason"])
+
+    def test_06_above_operator_cap_steps_down_by_one(self):
+        behind = {"weeklyUtilization": 0.20,
+                  "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                  "observationQuality": "live"}
+        a = single_agent(behind, runs=6, baseline=6, cap=3,
+                         extra=("--mode", "enforce", "--yes"))
+        self.assertEqual((a["action"], a["from"], a["target"]),
+                         ("down", 6, 5))
+        self.assertEqual(a["patchIntent"]["runtimeConfig"]["heartbeat"]
+                         ["maxConcurrentRuns"], 5)
+
+    def test_06_at_the_ceiling_still_holds(self):
+        behind = {"weeklyUtilization": 0.20,
+                  "weeklyResetUtc": "2026-10-08T00:00:00Z",
+                  "observationQuality": "live"}
+        a = single_agent(behind, runs=3, baseline=3)
+        self.assertEqual(a["action"], "nochange")
+        self.assertIn("already at ceiling 3", a["reason"])
 
     def test_06_no_target_below_1(self):
         plan = self.base()
@@ -316,6 +453,13 @@ class ConcurrencyPlanTest(unittest.TestCase):
         self.assertEqual(plan["mode"], "rollback")
         restores = [r for r in plan["agents"] if r["action"] == "restore"]
         self.assertTrue(restores)
+
+    def test_08_rollback_without_yes_refuses_even_in_enforce(self):
+        cp = run_plan("--lanes", os.path.join(FIX, "lanes.json"),
+                      "--agents", os.path.join(FIX, "agents.json"),
+                      "--mode", "enforce", "--rollback")
+        self.assertEqual(cp.returncode, 2)
+        self.assertEqual(cp.stdout.strip(), "")
 
     # -- §9  no-cancellation vocabulary ----------------------------------------
     def test_09_schema_has_no_kill_keys(self):

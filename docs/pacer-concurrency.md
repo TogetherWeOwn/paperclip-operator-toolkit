@@ -29,12 +29,43 @@ overshooting quota costs delivery while undershooting costs only pace.
 1. **Operator overload caps** (`--caps` JSON): a hard ceiling per agent.
    Scale-up without a caps entry only restores toward the agent's own
    baseline; above-baseline is an operator edit to the caps file, never
-   an inference. Caps above 32 are refused, not clamped.
+   an inference. Caps above 32 are refused, not clamped. An agent that is
+   already above its ceiling never scales up: behind pace it steps down
+   one toward the ceiling (the reason text says so), so the +-1 rule
+   holds in every case.
 2. **Host fleet-quota-balancer**: model choice only. It keeps running
    unchanged while the reconciler owns concurrency. Once per-run
    admission is enforced from the fork release, the balancer's role
    reduces to tie-breaking between equally-admissible models, then
    retires — that retirement is its own change, not this one.
+
+## Cooldown state (`--state`)
+
+The reconciler never writes state; it only reads it. The file is JSON:
+
+```json
+{"agents": {"<agentId>": {"target": 3, "decidedAt": "2026-10-04T12:00:00Z"}}}
+```
+
+Keys are the roster `id` (the `name` when a roster row has no `id`). The
+applier (host timer or operator) owns persistence: after applying a plan,
+for every agent record with `action` `up` or `down` it stores that
+record's `agentId`, `target` and `decidedAt`, merged over the previous
+file. Holds and skips carry no `decidedAt` and are not stored. A computed
+move to a different target inside `--cooldown-min` (default 30) of the
+stored `decidedAt` is held at the stored target with reason
+`cooldown-hold`; a move exactly `--cooldown-min` old has served its dwell.
+Without a state file there is no cooldown, so a timer that skips
+persistence loses flap protection.
+
+## Admission advisory `retryAfterS`
+
+`lanes[].admission` is advisory and shadow-only. A `hold` caused by a thin
+window carries that window's reset: weekly headroom under 0.10 retries at
+the weekly reset, five-hour headroom under 0.15 at the five-hour reset,
+and when both are thin at the later of the two. A hold caused only by
+unknown, stale or invalid windows has no window to wait for and retries
+at the soonest reset seen (300 seconds when none is known).
 
 ## Shadow first, then enforce
 
@@ -49,7 +80,8 @@ overshooting quota costs delivery while undershooting costs only pace.
 3. **Enforce**: `--mode enforce --yes` emits per-move PATCH intents.
    The applier MUST read each agent's full `runtimeConfig` and write it
    back whole (quota_brake.sh rule 1: PATCH replaces, never merges),
-   and MUST take min(reconciler target, brake target) when both exist.
+   MUST take min(reconciler target, brake target) when both exist, and
+   persists each applied move into `--state` (see Cooldown state).
 4. **Kill switches**: `--frozen-lanes lane,...` pins named lanes to
    nochange in both modes (unknown names are refused, so a typo cannot
    silently freeze nothing). Rollback is
