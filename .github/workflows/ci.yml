@@ -1607,7 +1607,7 @@ jobs:
           # 8. Runner setup is not a workflow gate. If it remains in the gate
           #    set, an otherwise gate-free job can look clean instead of refusing.
           dark_mutation "runner-setup-counted-as-gate" ci_dark_steps.sh \
-            's/ and (.name != "Set up job" or .number != 1)//' \
+            's/(.name != "Set up job" or .number != 1) and //' \
             'a job with only runner lifecycle steps REFUSES' || rc=1
 
           # 9. A workflow gate can reuse the runner's display name; exclude only
@@ -1618,7 +1618,7 @@ jobs:
 
           # 10. The runner's final bookkeeping step is not a workflow gate.
           dark_mutation "runner-completion-counted-as-gate" ci_dark_steps.sh \
-            's/ and .name != "Complete job"//' \
+            's/\.number < \$reporter/(.number < \$reporter or .name == "Complete job")/' \
             'runner setup and completion are excluded from the gate count' || rc=1
 
           # 11. A job with no gates cannot be certified as a clean run.
@@ -1630,6 +1630,18 @@ jobs:
           dark_mutation "timed-out-step-counted-as-dark" ci_dark_steps.sh \
             's/.conclusion == "skipped"/.conclusion == "skipped" or .conclusion == "timed_out"/' \
             'a completed timeout is not counted as a never-run step' || rc=1
+
+          # 13. A workflow gate may start with `Post`; filtering lifecycle steps
+          #     by that name prefix falsely certifies it as executed.
+          dark_mutation "post-named-workflow-gate-dropped" ci_dark_steps.sh \
+            's/\.number < \$reporter/.number < $reporter and (.name | startswith("Post ") | not)/' \
+            'a Post-named workflow gate remains in the gate count' || rc=1
+
+          # 14. A gate may share the reporter label; use the last matching step,
+          #     which the workflow wiring contract pins as the real reporter.
+          dark_mutation "same-reporter-label-gate-dropped" ci_dark_steps.sh \
+            's/] | last \/\/ empty/] | first \/\/ empty/' \
+            'a same-named reporter label gate remains in the gate count' || rc=1
 
           exit $rc
 
@@ -3300,8 +3312,10 @@ jobs:
       # did not happen must never read as clean.
       #
       # Pinned by test_ci_dark_steps.sh, which asserts this wiring so a future
-      # edit cannot quietly drop the `if:` and re-blind the job. GITHUB_JOB_NAME
-      # carries this job's display name because the API lists jobs by display
+      # edit cannot quietly drop the `if:` and re-blind the job. Keep this as
+      # the last configured step: ci_dark_steps.sh uses its number as the
+      # boundary before runner-generated teardown. GITHUB_JOB_NAME carries this
+      # job's display name because the API lists jobs by display
       # name while GITHUB_JOB is the key — without it the tool falls back to
       # whichever parallel job is still running and annotates the wrong job.
       - name: Report steps that never ran
@@ -4127,8 +4141,10 @@ jobs:
       # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
       # abort skipped, never fail the build for it. This job is small, but it is
       # the one whose steps going dark caused TOG-1141 in the first place.
-      # GITHUB_JOB_NAME carries this job's display name: without it the tool
-      # falls back to whichever parallel job is still running.
+      # Keep the reporter last: the tool uses its step number to distinguish
+      # workflow gates from runner-generated teardown steps. GITHUB_JOB_NAME
+      # carries this job's display name: without it the tool falls back to
+      # whichever parallel job is still running.
       - name: Report steps that never ran
         if: always()
         env:

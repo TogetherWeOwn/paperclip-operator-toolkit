@@ -136,6 +136,44 @@ Related: we pin `adapterConfig.model` directly and never use
 first in the merge (`heartbeat.ts:3523-3525`) — the known ACP `effort` outage
 path.
 
+### Exempt agents: `selection.exemptAgentIds`
+
+Some agents must run on the model their own row names, whatever the router would
+choose: a reviewer that an owner decided runs on a specific model, for instance.
+List their agent ids in `selection.exemptAgentIds` (a string array, default
+empty) and the router makes **no first pin and no repin** for a card or run
+assigned to one of them; the agent's own model is used.
+
+This is the agent-level counterpart of the `pin:operator` label, and it exists
+because the label cannot do the job alone. The label is a per-card mark that
+lands after the card exists, so it protects a repin but not the first pin — the
+first pin is written within a second of creation, before anyone can label the
+card. The list is read at decision time, so it protects the first pin too.
+
+How it is enforced: `selectModel` returns `held-at-floor` for an exempt assignee,
+ahead of the sticky and operator-override branches (both can end in a pin).
+`held-at-floor` is the outcome every writer already reads as "write nothing", so
+the creation pin, `labelOnlyPass`, `repinPass`, `balancePass`, the lane-failure
+sweep, the `apply` tool and the run-scoped hook (`keep`) are all covered by that
+one gate. Two writers never ask the engine, so each has its own guard: the
+creation path (which also skips the classifier call it would otherwise spend on a
+card nothing will route) and `repinPass`'s clear-on-blocked write.
+
+What it deliberately does not do:
+
+- It does not clear a pin that already exists. A card pinned before its assignee
+  was exempted, or pinned for one agent and then reassigned to an exempt one,
+  keeps that pin until someone removes it; the router only stops adding or
+  changing pins.
+- It does not stop the env-only repair of an existing pin's secret bindings,
+  which changes no model.
+- An operator override for a specific card does not beat the exemption. Take the
+  agent off the list to route it again.
+
+An entry that is not a full agent UUID passes validation with a warning (it will
+exempt no agent unless it matches an id exactly); the failure it guards against is
+silent — the router pins the agent it was meant to leave alone.
+
 ### Effort travels with the model
 
 A roster row may carry an optional `effort`. When it does, the pin writes it in

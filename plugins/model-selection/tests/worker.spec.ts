@@ -4,13 +4,15 @@ import type { Issue } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../src/manifest.js";
-import { LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TIERS, TOOL_NAMES } from "../src/constants.js";
+import { JOB_KEYS, LOCAL_FOLDER_KEYS, PLUGIN_STATE_KEYS, TIERS, TOOL_NAMES } from "../src/constants.js";
 import { createPlugin } from "../src/worker.js";
 import { BENCHMARK_SPEC_VERSION, type BenchmarkRow } from "../src/engine/benchmark-prior.js";
 import { buildModelScore } from "../src/engine/scores.js";
 import type { ModelScore } from "../src/engine/types.js";
 import type { LaneLedger, LaneLedgerEntry } from "../src/engine/pacing.js";
-import type { LanePaceVerdict } from "../src/lane-capacity/pace.js";
+import { evaluateLanePace, normalizeLaneDocument, type LanePaceVerdict } from "../src/lane-capacity/pace.js";
+import { MAX_FLEET_HISTORY, type FleetHistoryEntry } from "../src/fleet-admission-shadow.js";
+import type { PredictedVsActualReport } from "../src/fleet-predicted-vs-actual.js";
 import { SHADOW_SCHEMA_VERSION } from "../src/shadow-emit.js";
 import { budgetWindowId, type BudgetWindowObservation } from "../src/admission-budget.js";
 import type {
@@ -159,6 +161,21 @@ function laneSnapshotShadow(): LaneSnapshotAdmissionShadowInput {
   };
 }
 
+function fleetLedger(utilizations: number[]): LaneLedger {
+  const observedAt = new Date(NOW).toISOString();
+  const resetAt = new Date(NOW + 2.5 * 86_400_000).toISOString();
+  const observation = normalizeLaneDocument({
+    definition: { laneId: "fixture-lane", healthFields: ["health"], accountKeyFields: ["account_key"],
+      weightFields: ["weight"], windows: [{ name: "weekly", role: "allowance",
+        utilizationFields: ["utilization"], resetFields: ["resets_at"], defaultWindowSeconds: 604800 }] },
+    document: { observedAt, records: utilizations.map((utilization, index) => ({
+      account_key: `account-${index}`, health: "healthy", weight: 1, utilization, resets_at: resetAt,
+    })) },
+  });
+  const verdict = evaluateLanePace({ observation, asOf: observedAt });
+  return { "fixture-lane": { laneId: "fixture-lane", observation, verdict, fetchedAt: observedAt, error: null } };
+}
+
 const runCtx = { companyId: COMPANY, agentId: "agent-1", runId: "run-1" };
 
 describe("worker", () => {
@@ -237,6 +254,92 @@ describe("worker", () => {
       }
     },
   );
+
+  it("carries fleet hysteresis, weekly observations and bounded history through real advise cycles", async () => {
+    const h = await boot(baseConfig({ accountAdmissionShadow: { enabled: true } }));
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+    const ledgerKey = { ...key, stateKey: PLUGIN_STATE_KEYS.laneLedger };
+    const stored = async () => await h.ctx.state.get(key) as {
+      report: AdmissionShadowReport; fleetPreviousLevel: string; fleetHistory: FleetHistoryEntry[];
+      governorLevels: unknown[];
+    };
+    const history = Array.from({ length: MAX_FLEET_HISTORY }, (_, index) => ({
+      asOf: new Date(NOW - (MAX_FLEET_HISTORY - index) * 1000).toISOString(),
+      level: "normal", projected: 0.99, lanes: [],
+    }));
+    const governorLevels = [{ level: "normal", asOf: new Date(NOW).toISOString() }];
+    await h.ctx.state.set(key, { fleetHistory: history, governorLevels });
+    await h.ctx.state.set(ledgerKey, fleetLedger([0.7]));
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).fleetPreviousLevel).toBe("hold");
+    expect((await stored()).fleetHistory).toHaveLength(MAX_FLEET_HISTORY);
+    expect((await stored()).fleetHistory[0]!.asOf).toBe(history[1]!.asOf);
+    expect((await stored()).fleetHistory.at(-1)!.lanes[0]).toMatchObject({
+      laneId: "fixture-lane", utilization: 0.7, resetAt: new Date(NOW + 2.5 * 86_400_000).toISOString(),
+      observedAt: new Date(NOW).toISOString(),
+    });
+    expect((await stored()).governorLevels).toEqual(governorLevels);
+    const samePollHistory = (await stored()).fleetHistory;
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).fleetHistory).toEqual(samePollHistory);
+    await h.ctx.state.set(ledgerKey, fleetLedger([0.62, 0.62]));
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).report.fleetProposal).toMatchObject({ level: "hold", previousLevel: "hold" });
+    expect((await stored()).report.fleetProposal!.inventory.knownAccountCount).toBe(2);
+    const beforeUnknown = await stored();
+    await h.ctx.state.set(ledgerKey, {});
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).report.fleetProposal).toBeUndefined();
+    expect((await stored()).fleetPreviousLevel).toBe("hold");
+    expect((await stored()).fleetHistory).toEqual(beforeUnknown.fleetHistory);
+    await h.ctx.state.set(ledgerKey, fleetLedger([0.3]));
+    await h.executeTool(TOOL_NAMES.advise, { issueId: ISSUE, admissionShadow: admissionSnapshot() }, runCtx);
+    expect((await stored()).report.fleetProposal!.inventory.knownAccountCount).toBe(1);
+  });
+
+  it("writes the daily reset-aligned fleet artifact and reads it without actuation or cross-company access", async () => {
+    const h = await boot(baseConfig({ accountAdmissionShadow: { enabled: true }, pacing: { mode: "off", lanes: [{
+      laneId: "fixture-lane", statusUrl: "https://status.example.com/fixture", windows: [{
+        name: "weekly", role: "allowance", utilizationFields: ["utilization"], defaultWindowSeconds: 604800,
+      }],
+    }] } }));
+    const resetAt = new Date(NOW).toISOString();
+    const nearReset = new Date(NOW - 60_000).toISOString();
+    const forecastAt = new Date(NOW - 2 * 86_400_000).toISOString();
+    const futureReset = new Date(NOW + 86_400_000).toISOString();
+    const key = { scopeKind: "company" as const, scopeId: COMPANY, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport };
+    await h.ctx.state.set(key, {
+      report: { fleetProposal: { soonestResetAt: futureReset } },
+      fleetHistory: [{ asOf: forecastAt, level: "normal", projected: 1.4, lanes: [
+        { laneId: "fixture-lane", projected: 1.4, utilization: 0.8, observedAt: forecastAt, resetAt },
+      ] }, { asOf: nearReset, level: "normal", projected: 0.99, lanes: [
+        { laneId: "fixture-lane", projected: 0.99, utilization: 0.985, observedAt: nearReset, resetAt },
+        { laneId: "other-lane", projected: 0.8, utilization: 0.7, observedAt: nearReset, resetAt: futureReset },
+      ] }], governorLevels: [{ level: "normal", asOf: nearReset }],
+    });
+    await h.ctx.state.set({ ...key, stateKey: PLUGIN_STATE_KEYS.laneLedger }, fleetLedger([0.2]));
+    expect((await h.executeTool(TOOL_NAMES.fleetAdmissionDailyReport, {}, runCtx) as { data: { ok: boolean } }).data.ok).toBe(false);
+    const update = vi.spyOn(h.ctx.issues, "update");
+    const get = vi.spyOn(h.ctx.issues, "get");
+    await h.runJob(JOB_KEYS.fleetAdmissionDaily);
+    const artifact = await h.ctx.state.get({ ...key, stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily }) as {
+      ranAt: string; report: PredictedVsActualReport;
+    };
+    expect(artifact).not.toBeNull();
+    expect(artifact.ranAt).toBe(resetAt);
+    expect(artifact.report.rows.find(row => row.laneId === "fixture-lane")).toMatchObject({
+      resetAt, projected: 1.4, projectedAsOf: forecastAt, actualUtilization: 0.985, actualAsOf: nearReset, status: "reset-observed",
+    });
+    expect(artifact.report.rows.find(row => row.laneId === "other-lane")).toMatchObject({
+      resetAt: futureReset, status: "pending-reset", actualUtilization: null, projectionError: null,
+    });
+    expect(artifact.report.fleetLevels).toMatchObject({ proposalLevel: "normal", governorLevel: "normal", match: true });
+    expect((await h.executeTool(TOOL_NAMES.fleetAdmissionDailyReport, {}, runCtx) as { data: unknown }).data).toEqual(artifact);
+    expect((await h.executeTool(TOOL_NAMES.fleetAdmissionDailyReport, {}, { ...runCtx, companyId: "other-company" }) as { data: unknown }).data).not.toEqual(artifact);
+    expect(update).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(h.activity).toEqual([]);
+  });
 
   it("isolates malformed account shadow and report storage failures from actual apply", async () => {
     const config = baseConfig({ selection: { enabled: true, mode: "enforce" },

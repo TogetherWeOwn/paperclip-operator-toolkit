@@ -18,6 +18,14 @@ import {
   resolveIsClaudeModel,
 } from "./actuate/earnInWiring.js";
 import { reportDecisionAdmissionShadow, type DecisionAdmissionShadowInput } from "./admission-shadow.js";
+import {
+  appendFleetHistory, fleetLaneInputsForLedger, nextFleetPreviousLevel,
+  storedFleetHistory, storedFleetPreviousLevel,
+} from "./fleet-admission-shadow.js";
+import {
+  buildPredictedVsActualReport, historyToSnapshots, historyToResetActuals,
+} from "./fleet-predicted-vs-actual.js";
+import type { FleetAdmissionLevel } from "./lane-capacity/fleet-admission.js";
 import { readRunContextEvidence, type ContextUsage } from "./context-evidence.js";
 import { resolveConfig, validateConfig, type ResolvedConfig } from "./config/resolve.js";
 import {
@@ -118,7 +126,7 @@ import { resolveConfiguredModelId } from "./engine/model-id.js";
 import { tierIndex } from "./engine/cost.js";
 import { classifyCostAttribution } from "./engine/cost-attribution.js";
 import { buildQualitySignals, buildVolumeProfiles, type RunRow } from "./engine/profiles.js";
-import { selectModel } from "./engine/select.js";
+import { isExemptAgent, selectModel } from "./engine/select.js";
 import { normalizeAvailability, type AvailabilitySnapshot } from "./engine/availability.js";
 import { resolveTier, tierFromLabels, tierOfModel, tierWithFallback } from "./engine/tier.js";
 import {
@@ -1332,6 +1340,8 @@ export function createPlugin() {
           labelNames,
           pinnedModelId,
           agentFloorModelId,
+          // The `selection.exemptAgentIds` gate in `selectModel` keys on it.
+          assigneeAgentId: typeof assigneeAgentId === "string" ? assigneeAgentId : null,
           // : adapter-compatibility gate (`devin/*` vs `claude_local`)
           // and the earn-in guard (priority + review/gate title) both read
           // these. Recorded from the issue/agent rows, never inferred.
@@ -1660,6 +1670,7 @@ export function createPlugin() {
             allowExplore,
             holdOnUnknownAvailability: config.selection.holdOnUnknownAvailability,
             wakeScopedFloor: config.wakeScopedFloor,
+            exemptAgentIds: config.selection.exemptAgentIds,
           },
           profiles,
           signals,
@@ -1763,6 +1774,15 @@ export function createPlugin() {
         // actuation; malformed observations/storage failures cannot veto a pick.
         if (config.accountAdmissionShadow.enabled && params.admissionShadow !== undefined) {
           try {
+            const shadowKey = {
+              scopeKind: "company" as const, scopeId: companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+            };
+            const previous = await ctx.state.get(shadowKey);
+            // Upgrade-only hysteresis: the carried level comes from the last
+            // stored proposal, so one unreadable cycle cannot reset the
+            // deadband. Inventory comes from the live ledger verdicts, so an
+            // added or cancelled account reflows with no config edit.
+            const fleetPreviousLevel = storedFleetPreviousLevel(previous);
             const report = reportDecisionAdmissionShadow(
               params.admissionShadow as DecisionAdmissionShadowInput,
               now,
@@ -1770,10 +1790,16 @@ export function createPlugin() {
                 modelId: candidate.modelId,
                 lane: config.models.find(model => model.id === candidate.modelId)?.laneId ?? null,
               })),
+              { lanes: fleetLaneInputsForLedger(laneLedger), previousLevel: fleetPreviousLevel, asOf: nowIso },
             );
-            if (report) await ctx.state.set({
-              scopeKind: "company", scopeId: companyId, stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
-            }, { issueId, evaluatedAt: now, report });
+            if (report) await ctx.state.set(shadowKey, {
+              issueId,
+              evaluatedAt: now,
+              report,
+              fleetPreviousLevel: nextFleetPreviousLevel(fleetPreviousLevel, report.fleetProposal),
+              fleetHistory: appendFleetHistory(storedFleetHistory(previous), report.fleetProposal, laneLedger),
+              governorLevels: asRecord(previous).governorLevels,
+            });
           } catch {
             // Do not echo potentially sensitive caller input in logs.
             ctx.logger.warn("model-selection: account admission shadow failed; selection unchanged");
@@ -2571,6 +2597,10 @@ export function createPlugin() {
         if (!balanceOpenStatuses.has(described.status)) return;
         if (described.hasOperatorPin) return;
         if (described.descriptor.pinnedModelId) return;
+        // An exempt agent is never routed: no first pin, and no classifier call
+        // spent on a decision nothing will act on. `selectModel` holds it at the
+        // floor on its own, so this is the cheap early exit, not the guard.
+        if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return;
 
         // : with run-scoped decisions live, the pin is retired but the
         // classification still runs and still writes the label — the hook reads
@@ -3520,6 +3550,47 @@ export function createPlugin() {
         }
       });
 
+      // --- daily fleet predicted-vs-actual report (shadow only) ------
+      //
+      // Compare recorded projections and source readings from each completed
+      // weekly window. Never substitute today's ledger or a future reset for
+      // an endpoint measurement. Missing history/governor ingestion remains
+      // explicit unknown. Only the report artifact is written; no actuation.
+      ctx.jobs.register(JOB_KEYS.fleetAdmissionDaily, async () => {
+        const ranAt = new Date().toISOString();
+        for (const company of listKnownCompanies()) {
+          try {
+            const config = await companyConfig(company.id);
+            if (config.pacing.lanes.length === 0) continue;
+            const shadowStored = asRecord(await ctx.state.get({
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.admissionShadowReport,
+            }));
+            const history = storedFleetHistory(shadowStored);
+            const report = buildPredictedVsActualReport({
+              asOf: ranAt,
+              snapshots: historyToSnapshots(history),
+              actuals: historyToResetActuals(history),
+              proposals: history.map((entry) => ({ level: entry.level, asOf: entry.asOf })),
+              governorLevels: Array.isArray((shadowStored as Record<string, unknown>).governorLevels)
+                ? (shadowStored as Record<string, unknown>).governorLevels as Array<{ level: FleetAdmissionLevel; asOf: string }>
+                : [],
+            });
+            await ctx.state.set({
+              scopeKind: "company" as const,
+              scopeId: company.id,
+              stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,
+            }, { ranAt, report });
+          } catch (cause) {
+            ctx.logger.error("fleet predicted-vs-actual report failed for a company", {
+              companyId: company.id,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+        }
+      });
+
       // --- scheduled aa.ai Intelligence Index refresh -------------
       // Fetched once at instance scope (aa.ai data is not company-specific),
       // then diffed per company against that company's roster. A fetch/parse
@@ -4156,6 +4227,29 @@ export function createPlugin() {
           return {
             content: stored.report ? "Last caller-supplied account shadow snapshot; no host starts or reservations governed. Check evaluatedAt and observation freshness; this is not a live admission decision."
               : "No explicitly enabled account shadow snapshot has been recorded.",
+            data: stored.report ? stored : toolRejection("no-report-yet"),
+          };
+        },
+      );
+
+      // Read-only: the daily job writes the artifact, this tool reads it
+      // back. No-report-yet is an honest empty answer, never an error.
+      ctx.tools.register(
+        TOOL_NAMES.fleetAdmissionDailyReport,
+        {
+          displayName: "Fleet predicted-vs-actual report",
+          description: "Read the latest daily shadow fleet predicted-vs-actual mismatch table. Read-only; never actuates.",
+          parametersSchema: { type: "object", additionalProperties: false },
+        },
+        async (_args, toolCtx): Promise<ToolResult> => {
+          if (!toolCtx?.companyId) return { content: "Company scope required.", data: toolRejection("missing-company-scope") };
+          const stored = asRecord(await ctx.state.get({
+            scopeKind: "company", scopeId: toolCtx.companyId, stateKey: PLUGIN_STATE_KEYS.fleetAdmissionDaily,
+          }));
+          return {
+            content: stored.report
+              ? "Latest shadow fleet predicted-vs-actual mismatch table. Check ranAt and the limitations; readings taken mid-window do not validate the landing."
+              : "No fleet predicted-vs-actual report has been recorded yet.",
             data: stored.report ? stored : toolRejection("no-report-yet"),
           };
         },
@@ -6026,6 +6120,10 @@ export function createPlugin() {
                 //  (#457, merged): preserve manual pins and active
                 // runs with the idle guard — a non-idle card is not repinnable.
                 if (described.hasOperatorPin || !described.isIdle) return "settled";
+                // An exempt agent's cards are not this pass's to touch: the
+                // clear-on-blocked write below never reaches `selectModel`, so
+                // the engine's own exemption cannot stop it.
+                if (isExemptAgent(config.selection.exemptAgentIds, described.assigneeAgentId)) return "settled";
                 const tier = tierWithFallback(described.descriptor, config.models, config.selection.defaultTier);
 
                 const pinnedModelId = resolveConfiguredModelId(described.descriptor.pinnedModelId, config.models);

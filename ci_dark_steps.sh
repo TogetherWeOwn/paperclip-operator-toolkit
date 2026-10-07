@@ -54,7 +54,7 @@ ME="$(basename "${BASH_SOURCE[0]}")"
 usage() {
   cat <<'USAGE'
   ./ci_dark_steps.sh report                 # annotate the running job (CI use)
-  ./ci_dark_steps.sh report --job-json FILE # report from a saved job object
+  ./ci_dark_steps.sh report --job-json FILE # report a saved job with this reporter step
   ./ci_dark_steps.sh help
 
 Reports the steps a job registered but never executed, because a fail-fast
@@ -96,8 +96,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --- obtain the job object ----------------------------------------------------
-# Either from a file (tests, and re-analysis of a past run) or from the API for
-# the job this script is running inside.
+# Either from a reporter-instrumented file (tests and re-analysis of a run with
+# this reporter) or from the API for the job this script is running inside.
 if [[ -n "$JOB_JSON" ]]; then
   [[ -s "$JOB_JSON" ]] || refuse "job json is missing or empty: $JOB_JSON"
   cp "$JOB_JSON" "$TMP/job.json"
@@ -137,17 +137,20 @@ jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
   || refuse "the job object carries no step list; nothing was measured"
 
 # --- classify -----------------------------------------------------------------
-# Every count below is taken over the GATE set: registered steps minus the
-# reporter and runner lifecycle steps (`Set up job` at step 1, `Post ...`
-# teardown, and `Complete job`).
-# TOTAL over all steps with DARK over the gate set stops adding up — the outage
-# fixture would print "78 of 93" beside a tally covering 90 — and a live green
-# job would print "all 6 steps executed" when only 3 gates ran. The gate set is
-# the set whose execution this tool certifies; runner lifecycle is not a gate,
-# so it is counted separately, not silently.
+# Every count below is taken over workflow gates: steps before the reporter,
+# minus runner setup (`Set up job` at step 1). The reporter is the last
+# configured workflow step in each instrumented job, so runner-generated
+# post-action and completion steps follow it. Use the position boundary rather
+# than a `Post ` name prefix: a workflow gate can legitimately start with that.
+# TOTAL and DARK must use the same set; otherwise the outage fixture reports a
+# dark count that cannot be reconciled with its executed-step tally.
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
-GATE='select(.name != "Report steps that never ran" and (.name != "Set up job" or .number != 1) and .name != "Complete job" and (.name | startswith("Post ") | not))'
-jq '[.steps[] | '"$GATE"']' "$TMP/job.json" > "$TMP/gate.json"
+REPORTER_NO="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .number] | last // empty' "$TMP/job.json")"
+[[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]] \
+  || refuse "the reporter step is missing; runner lifecycle boundary is unknown"
+jq --argjson reporter "$REPORTER_NO" \
+  '[.steps[] | select((.name != "Set up job" or .number != 1) and .number < $reporter)]' \
+  "$TMP/job.json" > "$TMP/gate.json"
 FULL="$(jq     '[.steps[]] | length'                              "$TMP/job.json")"
 TOTAL="$(jq 'length' "$TMP/gate.json")"
 [[ "$TOTAL" -gt 0 ]] || refuse "the gate set is empty; nothing was measured"

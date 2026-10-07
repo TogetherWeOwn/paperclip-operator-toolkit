@@ -10,27 +10,29 @@
 #
 # WHY THE FIXTURES ARE RECORDED, NOT WRITTEN. A hand-authored job object is one
 # that matches whatever the tool happens to read — it proves the tool agrees
-# with the test author, not with GitHub. Both fixtures are the verbatim
-# `actions/jobs/{id}` response for the two runs named in TOG-910:
+# with the test author, not with GitHub. The two historical snapshots below are
+# verbatim `actions/jobs/{id}` responses for the original outage and recovery runs. They
+# predate this reporter, so the suite adds a synthetic boundary before testing.
 #
 #   job-100695318458-dark.json    pristine main e9dea118 — 13 success, 1 failure,
-#                                 79 skipped across 93 steps. `Set up job`, two
-#                                 `Post ...` teardowns, and `Complete job` are
-#                                 runner lifecycle, not gates; one teardown was
+#                                 79 skipped across 93 source steps. The synthetic
+#                                 reporter boundary is inserted before `Post ...`
+#                                 teardown and `Complete job`; one teardown was
 #                                 skipped and three lifecycle steps succeeded.
-#                                 The tool reports 78 dark of 89 gate steps with
-#                                 a 10/1/78 passed/failed/not-run tally.
-#   job-100786202472-green.json   PR #198 d794f39c — 95 steps, 0 skipped. Four
-#                                 runner lifecycle steps are excluded, leaving
-#                                 91 gate steps passed after the expiry was re-issued.
+#                                 The tool reports 78 dark of 89 gates with a
+#                                 10/1/78 passed/failed/not-run tally.
+#   job-100786202472-green.json   PR #198 d794f39c — 95 source steps, 0 skipped.
+#                                 With the synthetic reporter boundary, the tool
+#                                 reports 91 gate steps passed after the expiry
+#                                 was re-issued.
 #   job-105959891748-abort-null.json  run 35466576547, Offline suites, TOG-3427:
 #                                 80 success, 1 failure, 55 conclusions still
 #                                 `null` — the at-report-time view of a fail-fast
 #                                 abort. CONSTRUCTED, not recorded: the finalised
 #                                 job object rewrites those nulls to "skipped",
-#                                 which is exactly the state that hid the bug, so
-#                                 re-recording this fixture from the API would
-#                                 un-write the test. Counts match the card.
+#                                 which is exactly the state that hid the bug. The
+#                                 suite adds the reporter marker at the end of this
+#                                 in-progress snapshot before running the tool.
 #   job-live-green-reporter-inflight.json  The at-report-time view of
 #                                 a GREEN job — `Set up job`, 3 gates, the
 #                                 reporter in_progress, and 2 queued `Post`
@@ -90,16 +92,38 @@ done
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# The archived outage/green snapshots predate this reporter step. Add a
+# synthetic marker at the known boundary before their runner post-actions;
+# the raw recorded fixtures stay unchanged. The live fixtures carry the real
+# reporter marker and exercise the current API shape directly.
+with_reporter_boundary() {
+  local src="$1" dst="$2"
+  jq '
+    .steps as $steps
+    | ([$steps | to_entries[] | select(.value.name | startswith("Post Run ")) | .key] | first // ($steps | length)) as $i
+    | (($steps[0:$i] | map(.number) | max) + 1) as $reporter_no
+    | .steps = ($steps[0:$i] + [{"conclusion":"success","name":"Report steps that never ran","number":$reporter_no,"status":"completed"}] + $steps[$i:])
+  ' "$src" > "$dst"
+}
+
+DARK_REPORTABLE="$TMP/dark-with-reporter.json"
+GREEN_REPORTABLE="$TMP/green-with-reporter.json"
+ABORT_NULL_REPORTABLE="$TMP/abort-null-with-reporter.json"
+with_reporter_boundary "$DARK" "$DARK_REPORTABLE"
+with_reporter_boundary "$GREEN" "$GREEN_REPORTABLE"
+with_reporter_boundary "$ABORT_NULL" "$ABORT_NULL_REPORTABLE"
+
 # ---------------------------------------------------------------------------
 hdr "The outage fixture — what a dark run must say"
 
-OUT="$("$TOOL" report --job-json "$DARK" 2>&1)"; RC=$?
+OUT="$("$TOOL" report --job-json "$DARK_REPORTABLE" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a dark run still exits 0" \
   "got exit $RC — the reporter must not replace the real failure's attribution"
 
-# 89 gate steps (93 registered minus `Set up job`, 2 `Post` teardowns, and
-# `Complete job`): 10 passed, 1 failed, 78 dark. The tally must match the banner.
+# 89 gate steps (the 93-step source plus a reporter marker, minus setup,
+# reporter, 2 `Post` teardowns, and `Complete job`): 10 passed, 1 failed,
+# 78 dark. The tally must match the banner.
 grep -q '78 of 89 steps never ran' <<< "$OUT"
 assert $? "the dark run names the count of steps that did not execute" \
   "expected '78 of 89 steps never ran'"
@@ -127,13 +151,13 @@ grep -q 'Executed: 10 passed, 1 failed. In progress: 0. Not run: 78. Other outco
 assert $? "the executed/not-run tally is reported exactly" \
   "tally line missing or wrong"
 
-grep -q '4 non-gate steps excluded' <<< "$OUT"
+grep -q '5 non-gate steps excluded' <<< "$OUT"
 assert $? "the dark report discloses the excluded non-gate steps" \
-  "the exemption is silent, so the banner looks like it covers all 93 steps"
+  "the exemption is silent, so the banner looks like it covers all 94 steps"
 
 # A step that timed out ran far enough to produce a failure, so it is not dark.
 jq '(.steps[] | select(.name == "OmniRoute rehearsal package suite") | .conclusion) = "timed_out"' \
-  "$DARK" > "$TMP/timeout.json"
+  "$DARK_REPORTABLE" > "$TMP/timeout.json"
 OUT_T="$("$TOOL" report --job-json "$TMP/timeout.json" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a timed-out gate run still exits 0" "got exit $RC"
@@ -153,7 +177,7 @@ assert $? "a timeout is counted as failed, not dark" \
 # ---------------------------------------------------------------------------
 hdr "The fail-fast abort as the reporter sees it — null conclusions are dark (TOG-3427)"
 
-OUT_A="$("$TOOL" report --job-json "$ABORT_NULL" 2>&1)"; RC=$?
+OUT_A="$("$TOOL" report --job-json "$ABORT_NULL_REPORTABLE" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "an aborted run still exits 0" \
   "got exit $RC — the reporter must not replace the real failure's attribution"
@@ -192,7 +216,7 @@ assert $? "an aborted run never prints the clean banner" \
 # ---------------------------------------------------------------------------
 hdr "The green fixture — silence is the feature"
 
-OUT_G="$("$TOOL" report --job-json "$GREEN" 2>&1)"; RC=$?
+OUT_G="$("$TOOL" report --job-json "$GREEN_REPORTABLE" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a fully-executed run exits 0" "got exit $RC"
 
@@ -208,12 +232,12 @@ grep -q 'all 91 steps executed' <<< "$OUT_G"
 assert $? "a fully-executed run states the number of steps it confirmed" \
   "the positive confirmation is missing, so 'no news' is ambiguous"
 
-grep -q '4 non-gate steps excluded' <<< "$OUT_G"
+grep -q '5 non-gate steps excluded' <<< "$OUT_G"
 assert $? "a fully-executed run discloses the excluded non-gate steps" \
-  "the banner claims 91 while the job registered 95"
+  "the banner claims 91 while the reportable job has 96 steps"
 
 # Other completed conclusions must be visible without being called dark or clean.
-jq '(.steps[] | select(.name == "Syntax check every script") | .conclusion) = "cancelled"' "$GREEN" > "$TMP/other-outcome.json"
+jq '(.steps[] | select(.name == "Syntax check every script") | .conclusion) = "cancelled"' "$GREEN_REPORTABLE" > "$TMP/other-outcome.json"
 OUT_O="$("$TOOL" report --job-json "$TMP/other-outcome.json" 2>&1)"; RC=$?
 [[ "$RC" -eq 0 ]]
 assert $? "a completed nonstandard outcome still exits 0" "got exit $RC"
@@ -260,6 +284,31 @@ assert $? "a live green run with the reporter in flight states the number of gat
 grep -q '4 non-gate steps excluded' <<< "$OUT_L"
 assert $? "a live green run with the reporter in flight discloses the excluded non-gate steps" \
   "the banner claims 3 while the job registered 6"
+
+# A workflow gate may use the same `Post ...` prefix as runner-generated
+# teardown steps. It is before the reporter boundary and must remain countable.
+jq '.steps = (.steps[0:4] + [{"conclusion":"skipped","name":"Post deploy verification","number":5,"status":"completed"}] + (.steps[4:] | map(.number += 1)))' \
+  "$LIVE_GREEN" > "$TMP/live-post-gate.json"
+OUT_P="$("$TOOL" report --job-json "$TMP/live-post-gate.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a gate named Post deploy verification still reports normally" "got exit $RC"
+grep -q '1 of 4 steps never ran' <<< "$OUT_P"
+assert $? "a Post-named workflow gate remains in the gate count" \
+  "the gate was filtered as runner teardown"
+grep -q 'Post deploy verification' <<< "$OUT_P"
+assert $? "a Post-named workflow gate appears in the dark-step list" \
+  "the skipped gate is missing from the report"
+
+# A gate can also share the reporter's display name. The last matching step is
+# the configured reporter; an earlier same-named gate remains inside its boundary.
+jq '.steps = (.steps[0:4] + [{"conclusion":"skipped","name":"Report steps that never ran","number":5,"status":"completed"}] + (.steps[4:] | map(.number += 1)))' \
+  "$LIVE_GREEN" > "$TMP/live-reporter-name-gate.json"
+OUT_R="$($TOOL report --job-json "$TMP/live-reporter-name-gate.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 0 ]]
+assert $? "a workflow gate sharing the reporter name still reports normally" "got exit $RC"
+grep -q '1 of 4 steps never ran' <<< "$OUT_R"
+assert $? "a same-named reporter label gate remains in the gate count" \
+  "the earlier gate was mistaken for the reporter boundary"
 
 # ---------------------------------------------------------------------------
 hdr "A live gate step already in progress is not dark"
@@ -342,6 +391,13 @@ assert $? "a same-named workflow gate is reported as dark" \
 grep -q 'Set up job' <<< "$OUT_DUP"
 assert $? "the same-named workflow gate appears in the dark list" \
   "the workflow step is missing from the dark-step list"
+
+jq -n '{name:"x",steps:[{conclusion:"success",name:"Set up job",number:1,status:"completed"},{conclusion:"skipped",name:"Post deploy verification",number:2,status:"completed"},{conclusion:null,name:"Post Run cleanup",number:3,status:"queued"},{conclusion:null,name:"Complete job",number:4,status:"queued"}]}' \
+  > "$TMP/no-reporter.json"
+OUT_NR="$("$TOOL" report --job-json "$TMP/no-reporter.json" 2>&1)"; RC=$?
+[[ "$RC" -eq 3 ]]
+assert $? "a saved job without this reporter refuses its unknown lifecycle boundary" \
+  "got exit $RC — the tool must not guess which Post-named steps are runner teardown"
 
 echo '{"name":"x"}' > "$TMP/nosteps.json"
 OUT_N="$("$TOOL" report --job-json "$TMP/nosteps.json" 2>&1)"; RC=$?
@@ -427,6 +483,15 @@ if [[ -s "$CI" ]]; then
     assert $? "the $rj reporter step names its job's display name" \
       "sets '$vv' but the job is named '$rn' — the key-vs-name match misses"
   done <<< "$WIRING"
+
+  AFTER_REPORTER="$(awk '
+    /^  [A-Za-z0-9_-]+:/ { job=$1; sub(/:$/, "", job); checking=0 }
+    /^      - name: Report steps that never ran$/ { reporter=job; checking=1; next }
+    checking && /^      - / { print reporter; checking=0 }
+  ' "$CI")"
+  [[ -z "$AFTER_REPORTER" ]]
+  assert $? "each reporter is the last configured workflow step" \
+    "a workflow step follows the reporter, so its position cannot mark runner teardown"
 else
   bad "ci.yml is readable for the wiring assertions"
 fi
