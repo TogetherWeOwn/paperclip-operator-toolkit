@@ -3231,6 +3231,9 @@ jobs:
       - name: event capture suites
         run: node --test gh-event-capture/test/*.test.mjs
 
+      - name: work supply shadow kernel suites
+        run: node --test plugins/work-supply/test/*.test.mjs
+
       - uses: actions/setup-node@v7
         with:
           node-version: '20'

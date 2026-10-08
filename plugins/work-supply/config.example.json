@@ -1,0 +1,18 @@
+{
+  "companyId": "example-company",
+  "mode": "shadow",
+  "pause": true,
+  "floor": 40,
+  "maxSnapshotAgeMs": 60000,
+  "cooldownMs": 21600000,
+  "maxLedgerEntries": 10000,
+  "projects": [],
+  "repositories": [],
+  "caps": {
+    "prSupply": { "perRun": 10, "perHour": 40 },
+    "backlogFloor": { "perRun": 10, "perHour": 40 },
+    "idleWake": { "perRun": 10, "perHour": 40 },
+    "reviewReconcile": { "perRun": 10, "perHour": 40 },
+    "intentSweep": { "perRun": 10, "perHour": 40 }
+  }
+}
