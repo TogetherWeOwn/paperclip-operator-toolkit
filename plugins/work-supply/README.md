@@ -32,11 +32,24 @@ callbacks are serialized so concurrent scheduled invocations cannot overwrite sh
 starve four jobs behind the kernel's busy fence. Different company queues start independently, so
 one stalled company does not prevent the others from running. Company scope is taken only from host-delivered
 `onConfigChanged` context; no company enumeration or caller-provided company identity is used.
-The worker reloads each company's config with `ctx.config.get(companyId)` for each firing.
+The worker reloads every company's config with `ctx.config.get(companyId)` for each firing, including
+companies with rejected notifications. The host persists before its best-effort notification, and
+concurrent saves can deliver notifications out of order. Stored config is authoritative: a validated
+stored read clears a rejection; a late valid notification alone cannot clear it. Invalid config remains
+a visible scope: `onHealth.details.configErrors` reports `invalid-config` and health degrades immediately.
+Other companies continue independently; subsequent successful firings replace earlier job errors.
 
-The ledger is stored in Paperclip's **plugin DB-backed state store**, with
-`scopeKind: "company"`, `namespace: "work-supply"`, `stateKey: "shadow-ledger-v1"`. One plugin worker
-owns this ledger. This is not a distributed CAS or a claim for core effects; do not run multiple
+Every notification changes a process-local version. Outstanding firings recheck it after reading
+config/pressure, around collection, before each write dispatch and before reporting success. A change
+cancels the firing with `invalid-config` or `config-changed`. An already-dispatched storage write may
+still commit; the job reports failure rather than claiming success or compensating that unknown write.
+This is not a transaction with config saves, nor detection of a notification that never arrived during
+a firing. The next firing reloads stored config even after a missed notification. Raw rejected config
+and upstream error text are never logged.
+
+The ledger is stored in Paperclip's **plugin DB-backed state store**, in company scope under the
+`work-supply` namespace. Its record name is `shadow-ledger-v1` (a storage identifier, not a credential).
+One plugin worker owns this ledger. This is not a distributed CAS or a claim for core effects; do not run multiple
 independent instances sharing it. An unavailable/failed write is a failed job, never success.
 `ctx.data` exposes the scoped `shadow-ledger` read, and `onHealth` returns bounded per-job status;
 job failures also throw and log allowlisted codes. Registry display of these diagnostics and real
