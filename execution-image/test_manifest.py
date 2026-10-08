@@ -119,6 +119,24 @@ class SourcePacketTests(unittest.TestCase):
                 m["files"]["Dockerfile"] = hashlib.sha256(f["Dockerfile"]).hexdigest()
                 self.refuse(m, f, "recipe drift")
 
+    def test_rebound_recipe_cannot_bypass_root_startup_initialization(self):
+        for user in [b"1000:1000", b"node"]:
+            with self.subTest(user=user):
+                m = copy.deepcopy(self.manifest)
+                f = dict(self.files)
+                f["Dockerfile"] += b"USER " + user + b"\n"
+                m["files"]["Dockerfile"] = hashlib.sha256(f["Dockerfile"]).hexdigest()
+                self.refuse(m, f, "recipe drift")
+
+    def test_rebound_recipe_cannot_check_compiler_as_root(self):
+        for replacement in [b"gosu 0:0 sh -eu -c", b"sh -eu -c"]:
+            with self.subTest(replacement=replacement):
+                m = copy.deepcopy(self.manifest)
+                f = dict(self.files)
+                f["Dockerfile"] = f["Dockerfile"].replace(b"gosu 1000:1000 sh -eu -c", replacement)
+                m["files"]["Dockerfile"] = hashlib.sha256(f["Dockerfile"]).hexdigest()
+                self.refuse(m, f, "recipe drift")
+
     def test_unpinned_or_injected_native_versions(self):
         for value in [None, "latest", "14.*", "14;curl", "14\nRUN evil", 14, "14 15"]:
             n = carrier.parse(self.files["native-packages.json"])
@@ -131,7 +149,8 @@ class SourcePacketTests(unittest.TestCase):
             self.refuse(m, f, "native.packages.gcc")
 
     def test_rebound_config_cannot_weaken_boundary(self):
-        for key, value in [("execution_user", "0:0"), ("wrapper", "direct_cargo"),
+        for key, value in [("execution_user", "0:0"), ("startup_user", "1000:1000"),
+                           ("wrapper", "direct_cargo"),
                            ("pool", "new_pool"), ("compiler_paths", ["/host/gcc"]),
                            ("runtime_policy", "writable_app"), ("adoption", "accepted")]:
             with self.subTest(key=key):
@@ -152,8 +171,9 @@ class SourcePacketTests(unittest.TestCase):
         recipe = self.files["Dockerfile"].decode()
         instructions = [line.split()[0] for line in recipe.splitlines()
                         if line and not line.startswith(("#", " "))]
-        self.assertEqual(instructions, ["FROM", "USER", "COPY", "RUN", "USER", "RUN"])
-        self.assertIn("USER 1000:1000\nRUN", recipe)
+        self.assertEqual(instructions, ["FROM", "USER", "COPY", "RUN", "RUN"])
+        self.assertEqual([line for line in recipe.splitlines() if line.startswith("USER ")], ["USER 0:0"])
+        self.assertIn("RUN gosu 1000:1000 sh -eu -c 'test \"$(id -u):$(id -g)\" = 1000:1000", recipe)
         self.assertIn("--no-install-recommends", recipe)
         self.assertIn("-o Dir::Etc::sourceparts=-", recipe)
         for name, version in carrier.parse(self.files["native-packages.json"])["packages"].items():

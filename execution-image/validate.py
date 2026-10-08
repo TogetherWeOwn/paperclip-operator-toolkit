@@ -16,6 +16,7 @@ PACKAGES = {"binutils", "gcc", "gcc-14", "libc6-dev", "pkg-config", "pkgconf"}
 RUNTIME = {
     "schema": "execution-image.runtime-contract.v1",
     "execution_user": "1000:1000",
+    "startup_user": "0:0_for_inherited_initialization_only",
     "entrypoint": "inherit_verified_standard_production",
     "command": "inherit_verified_standard_production",
     "rust_toolchain": "preserve_existing_package_owned_1.98.1",
@@ -94,12 +95,12 @@ def dockerfile(base, native):
             f"    && {checks} \\\n"
             "    && dpkg-query -W -f='${binary:Package}=${Version}\\n' > /usr/local/share/execution-image/installed-packages.txt \\\n"
             "    && rm -rf /var/lib/apt/lists/*\n"
-            "USER 1000:1000\n"
-            "RUN test \"$(id -u):$(id -g)\" = 1000:1000 \\\n"
+            "# Preserve root entrypoint initialization; drop privileges only for this build-time check.\n"
+            "RUN gosu 1000:1000 sh -eu -c 'test \"$(id -u):$(id -g)\" = 1000:1000 \\\n"
             "    && test -x /usr/bin/cc && test -x /usr/bin/gcc \\\n"
             "    && test -x /usr/bin/ld && test -x /usr/bin/ar && test -x /usr/bin/pkg-config \\\n"
             "    && test -r /usr/include/stdio.h \\\n"
-            "    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version\n")
+            "    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version'\n")
 
 
 def validate(manifest, files):

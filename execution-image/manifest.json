@@ -23,13 +23,13 @@
     "current_policy_acceptance": "UNESTABLISHED"
   },
   "files": {
-    "Dockerfile": "0888a9c05223c5d02938dc161b54d5839b86022f05e6670d6f24f96d429c56aa",
-    "README.md": "2abf80d7d341fce2b9bce50ff7170c4fd06e3d4ebd519ab9eeba8305697aef53",
+    "Dockerfile": "4ead497a6ccb03da3b9497a926ca7233181ed8e08ca8343f24997e0d5f4058b6",
+    "README.md": "23b26ad650764550ca0fc7254e2b6d9af7d4813b8b931563e9145910df2b5506",
     "native-packages.json": "fd91eef15291329f84493ba7c7c4a8f73bd2c151d1d6fcc6d413b44dde0f2e8a",
     "native.sources": "c84c10319b74e1f6ab16ca7c17a7ce7d290478fe14511df504af9f7b67674186",
-    "runtime-contract.json": "8e554b074c4da01c9a18717d535e50a928587313b32de7d881ff631b1ebf709a",
-    "test_manifest.py": "ab5271e9c39dae8734246fdebbb7b3bf9f88d23187453cc917f2740eb477034b",
-    "validate.py": "cdf9e3963f89ffd3bb8d51380e48cce2f2783b1b82f869ca415f97275a328cac"
+    "runtime-contract.json": "39d7616fe9d73202742aef4aa79c7a41bccf3539b7cbdc05feb7cb65daca6ed7",
+    "test_manifest.py": "004371ce26bd0c1cddd747639130baabec1ca77eabb94fcd972f9dd7be86df0e",
+    "validate.py": "012d4f779b2f3b495997e72c1394f308c48ac151405ab1a8510a95a1b64944cd"
   },
   "output": {
     "image_digest": null,

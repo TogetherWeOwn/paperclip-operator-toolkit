@@ -1,6 +1,7 @@
 {
   "schema": "execution-image.runtime-contract.v1",
   "execution_user": "1000:1000",
+  "startup_user": "0:0_for_inherited_initialization_only",
   "entrypoint": "inherit_verified_standard_production",
   "command": "inherit_verified_standard_production",
   "rust_toolchain": "preserve_existing_package_owned_1.98.1",

@@ -54,6 +54,21 @@ of an installed runtime toolchain**. This carrier neither installs Rust nor
 changes PATH, CC, linker selectors, model/env pins or the bounded Cargo wrapper.
 Verify the existing toolchain independently at future runtime acceptance.
 
+The pinned [production Dockerfile](https://github.com/paperclipai/paperclip/blob/e4b39da6f6304c18d40dff13a5c7d224b3bf50fd/Dockerfile#L224-L232)
+starts its inherited entrypoint as root. That
+[entrypoint](https://github.com/paperclipai/paperclip/blob/e4b39da6f6304c18d40dff13a5c7d224b3bf50fd/scripts/docker-entrypoint.sh#L4-L48)
+initializes volume ownership and applies the existing UID/GID mapping before
+`exec gosu node`. A final non-root Dockerfile `USER` would skip those steps:
+[`USER` governs runtime ENTRYPOINT/CMD as well as later RUN instructions](https://docs.docker.com/reference/dockerfile/#user).
+This derivative therefore retains `USER 0:0` for inherited initialization and
+uses the base's existing `gosu` only for the build-time compiler check. The
+runtime contract distinguishes startup root from the intended 1000:1000
+application/agent principal. No UID/GID env setting or privilege is added;
+current-configuration review must prove the inherited drop and actual execution
+identity before adoption, including compatibility of initialization with the
+protected existing mounts and read-only root policy. A build-time check is not
+that runtime proof.
+
 ## Source-only validation (safe now)
 
 From the toolkit root:
@@ -67,9 +82,10 @@ git diff --check
 The Linux validator is byte-bounded, duplicate-key/non-finite/unknown-field
 rejecting, and read-only. Non-regular files and symlinks are refused; nonblocking
 open and descriptor checks also refuse FIFO swaps without waiting for a writer. It binds source bytes and compares the recipe to a narrow permitted
-form: one fixed base, root only during image creation, signed pinned APT native
-additions, and final `USER 1000:1000`. No runtime command/entrypoint/env override is
-allowed. A successful result is `source_packet_consistent`, **never build-ready,
+form: one fixed base, signed pinned APT native additions, and a build-time
+compiler check under `gosu 1000:1000`. It preserves root entrypoint initialization
+and the inherited drop to the execution user; no final non-root `USER` bypasses
+that initialization. No runtime command/entrypoint/env override is allowed. A successful result is `source_packet_consistent`, **never build-ready,
 installed, trusted or accepted**. It cannot verify external signatures, contents
 of unavailable upstream objects, a live mount, capacity, processes or policy.
 Fixture mutations and CLI refusal tests prove those source checks can go red.

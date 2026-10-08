@@ -20,9 +20,9 @@ RUN test "$(dpkg --print-architecture)" = amd64 \
     && test "$(dpkg-query -W -f='${Version}' pkgconf)" = "1.8.1-4" \
     && dpkg-query -W -f='${binary:Package}=${Version}\n' > /usr/local/share/execution-image/installed-packages.txt \
     && rm -rf /var/lib/apt/lists/*
-USER 1000:1000
-RUN test "$(id -u):$(id -g)" = 1000:1000 \
+# Preserve root entrypoint initialization; drop privileges only for this build-time check.
+RUN gosu 1000:1000 sh -eu -c 'test "$(id -u):$(id -g)" = 1000:1000 \
     && test -x /usr/bin/cc && test -x /usr/bin/gcc \
     && test -x /usr/bin/ld && test -x /usr/bin/ar && test -x /usr/bin/pkg-config \
     && test -r /usr/include/stdio.h \
-    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version
+    && /usr/bin/gcc --version && /usr/bin/ld --version && /usr/bin/pkg-config --version'
