@@ -1,6 +1,6 @@
 {
   "name": "@togetherweown/paperclip-plugin-work-supply",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fail-closed native shadow scheduler for work-supply observations",
   "license": "MIT",
   "paperclipPlugin": { "manifest": "./src/manifest.mjs", "worker": "./src/worker.mjs" },

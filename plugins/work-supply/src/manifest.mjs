@@ -1,7 +1,7 @@
-import { JOBS } from './policy.mjs';
+import { JOBS, SCHEDULED_JOBS } from './policy.mjs';
 
 export const PLUGIN_ID = 'togetherweown.work-supply';
-export const PLUGIN_VERSION = '0.2.0';
+export const PLUGIN_VERSION = '0.3.0';
 const count = { type: 'integer', minimum: 0, maximum: 1000 };
 const cap = { type: 'object', additionalProperties: false, required: ['perRun', 'perHour'],
   properties: { perRun: count, perHour: count } };
@@ -11,10 +11,11 @@ const cap = { type: 'object', additionalProperties: false, required: ['perRun', 
 export const manifest = {
   id: PLUGIN_ID, apiVersion: 1, version: PLUGIN_VERSION,
   displayName: 'Work Supply (Shadow)', author: 'TogetherWeOwn', categories: ['automation'],
-  description: 'Fail-closed scheduled shadow decisions; no core effects or timer-retirement authority.',
-  capabilities: ['jobs.schedule', 'plugin.state.read', 'plugin.state.write'],
+  description: 'Native backlog and idle-wake shadow decisions; no core effects or timer-retirement authority.',
+  capabilities: ['jobs.schedule', 'plugin.state.read', 'plugin.state.write', 'issues.read',
+    'agents.read', 'issue.relations.read', 'issues.orchestration.read', 'issue.interactions.read'],
   entrypoints: { worker: './src/worker.mjs' },
-  jobs: JOBS.map(jobKey => ({ jobKey, displayName: jobKey,
+  jobs: SCHEDULED_JOBS.map(jobKey => ({ jobKey, displayName: jobKey,
     description: 'Observe only with complete native inputs and verified healthy host pressure.', schedule: '3-59/5 * * * *' })),
   instanceConfigSchema: {
     type: 'object', additionalProperties: false,

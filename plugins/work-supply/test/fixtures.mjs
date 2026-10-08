@@ -17,7 +17,7 @@ export function issue(id = 'issue-a', overrides = {}) {
     prState: 'none', pullRequestIds: [], ...overrides };
 }
 export function agent(id = 'agent-a', overrides = {}) {
-  return { id, companyId: 'company-a', status: 'idle', canWake: true, ...overrides };
+  return { id, companyId: 'company-a', status: 'idle', canWake: true, spareCapacity: 1, ...overrides };
 }
 export function pr(overrides = {}) {
   return { id: 'pr-a', companyId: 'company-a', repo: 'example/primary', state: 'open',

@@ -114,7 +114,7 @@ export class ShadowRunner {
       }
       validateLedger(ledger, companyId, now);
       lastValidLedger = structuredClone(ledger);
-      const snapshot = await dependency(() => this.collect(job, companyId));
+      const snapshot = await dependency(() => this.collect(job, companyId, config));
       now = await dependency(() => this.clock());
       if (!Number.isSafeInteger(now) || now < startedAt) throw new SupplyError('invalid-time');
       const actions = planJob(job, snapshot, config, now);

@@ -1,10 +1,6 @@
 # Work supply — native shadow package
 
-**Version 0.2.0 adds a loadable Paperclip API-v1 manifest, worker and five scheduled handlers to the
-shadow decision kernel. It is NOT parity-ready or a live replacement for host reconcilers.** The
-complete native read adapter is unavailable on the inspected SDK; the actual worker fails closed
-instead of manufacturing an empty census. Installing this package alone does not start meaningful
-shadowing. `mode: "live"` and `mode: "apply"` remain rejected. Keep host reconcilers authoritative.
+**Version 0.3.0 adds a native SDK reader for `backlogFloor` and `idleWake`, scheduled in shadow mode only. It is NOT parity-ready or a live replacement for host reconcilers.** The deployed-build source exposes issue-scoped run summaries but no status-transition history or agent-wide heartbeat-run reader; the collector uses conservative holds for those gaps. `prSupply` and `reviewReconcile` remain host-only, and `intentSweep` is not scheduled. `mode: "live"` and `mode: "apply"` remain rejected. Keep host reconcilers authoritative.
 
 The kernel separates deterministic decisions from collection and execution. Initial policies are
 derived from the requested behavior, **not verified parity with existing host scripts**. Native
@@ -15,8 +11,10 @@ There is no HTTP client, shell collector, credential access, agent tool or core 
 
 `package.json.paperclipPlugin` points to `src/manifest.mjs` and `src/worker.mjs`. Source modules are
 shipped directly; no build step is required. Node 24 and the host's compatible API-v1
-`@paperclipai/plugin-sdk` peer are required. The inspected SDK source identifies itself as 1.0.0;
-compatibility with a different deployed build must be verified, not inferred from a package name.
+`@paperclipai/plugin-sdk` peer are required. Read-client names below were verified from Paperclip
+source pinned to build `ad29901a3ae83c4825967be29212c99c1014eaa4`, not inferred from docs. The host's
+installed `node_modules` package was not directly inspected; the Operator must verify that the
+installed runtime matches this source before counting any shadow window.
 
 ```sh
 npm pack ./plugins/work-supply --pack-destination "$PAPERCLIP_RUN_SCRATCH_DIR"
@@ -27,9 +25,9 @@ checksum, SDK peer resolution and same-head review/CI before any Operator instal
 **new versioned immutable package path**. Do not reuse an existing package path, POST configuration,
 change tool policies or retire timers as a packaging shortcut.
 
-All five manifest jobs fire every five minutes at an off-minute start. Their company-specific
+The two native manifest jobs fire every five minutes at an off-minute start. Their company-specific
 callbacks are serialized so concurrent scheduled invocations cannot overwrite shadow state or
-starve four jobs behind the kernel's busy fence. Different company queues start independently, so
+starve one job behind the kernel's busy fence. Different company queues start independently, so
 one stalled company does not prevent the others from running. Company scope is taken only from host-delivered
 `onConfigChanged` context; no company enumeration or caller-provided company identity is used.
 The worker reloads every company's config with `ctx.config.get(companyId)` for each firing, including
@@ -55,10 +53,56 @@ independent instances sharing it. An unavailable/failed write is a failed job, n
 job failures also throw and log allowlisted codes. Registry display of these diagnostics and real
 host scheduling/storage remain unverified until deployment acceptance.
 
-`createSupplyPlugin({ collect, pressure, clock })` is an offline integration seam, exercised with
-fixtures in tests. The shipped `worker.mjs` supplies **no fake collector**: unpausing it produces
-`native-snapshot-source-unavailable`. Paused firings and missing-source failures do not count toward
-a 2–4-hour parity window. A reviewed supported native read adapter must land before that window.
+`createSupplyPlugin({ collect, pressure, clock })` remains an offline test seam. The shipped worker
+uses the native SDK reader for `backlogFloor` and `idleWake`; it never fabricates an empty census.
+The reader calls only `ctx.issues.list`, `ctx.agents.list`, `ctx.issues.relations.get`,
+`ctx.issues.summaries.getOrchestration`, and `ctx.issues.listInteractions`. Paused firings, missing
+read clients, failed reads, pressure holds, and host-only jobs do not count toward the 2–4-hour
+comparison window.
+
+## Native read contract and conservative differences
+
+The reader uses the pinned API-v1 source surface (not docs): `ctx.issues.list(input)`,
+`ctx.agents.list(input)`, `ctx.issues.relations.get(issueId, companyId)`,
+`ctx.issues.summaries.getOrchestration(input)`, and
+`ctx.issues.listInteractions(issueId, companyId)`. The manifest grants `issues.read`, `agents.read`,
+`issue.relations.read`, `issues.orchestration.read`, and `issue.interactions.read`. List calls are
+read in `limit`/`offset` pages and issue evidence is collected with a bounded worker pool.
+
+- `backlogFloor` defaults to 40. Project order comes from configured `rank`: place product projects
+  ahead of the designated lower-priority projects. Project names and IDs are supplied by host config,
+  not embedded in the package. It excludes titles beginning `Operator:`, text containing `parked until`, `probe` or
+  `canary`, and text containing both `Kofra` and `Laravel`/`Filament`; truncated descriptions are
+  excluded because those predicates cannot be checked completely. Comments are not read. Since the
+  SDK exposes no status-transition history, every backlog issue updated in the last 24 hours is
+  suppressed as a conservative superset of “promoted then bounced back” (this will create explainable
+  extra skips).
+- `idleWake` honors both `monitorNextCheckAt` and `executionPolicy.monitor.nextCheckAt`, direct
+  blocker edges (only `done` resolves a blocker; a `cancelled` blocker remains a hold until the edge
+  is removed), pending interactions/approvals, live runs, invocation blocks and matching open budget
+  incidents. Any run in the last 20 minutes suppresses a wake; three failed runs in the returned
+  issue history suppress it as well. The idle-waker host script is not present in this repository,
+  so the exact reset/window semantics for its three-failure counter still require Operator comparison.
+- There is no standalone heartbeat-run client. `getOrchestration` exposes issue-scoped runs, and the
+  pinned host query caps this list at 100; a 100-row result is treated as incomplete and suppresses
+  that issue. It does not provide the exact agent-wide running count used by the scheduler.
+- The `Agent` type has no typed spare-capacity field. The pinned heartbeat source computes
+  `maxConcurrentRuns - countRunningRunsForAgent` and clamps the limit to at least one. The collector
+  uses `status: "idle"` as positive evidence of at least one free slot (the host derives status from
+  its running-run count) and emits at most one wake per idle agent. It does not wake `running` agents,
+  even when they may have spare slots; this is intentionally conservative, not an exact capacity
+  reconstruction.
+- `prSupply` and `reviewReconcile` are not scheduled: the pinned `PluginContext` has no `connections`
+  or complete work-product/GitHub reader. `intentSweep` is also outside this slice. Native issue
+  snapshots therefore carry `prState: "unknown"` and no PR IDs; job validation does not treat these
+  two collectors as GitHub readers.
+
+Source references at build `ad29901a3ae83c4825967be29212c99c1014eaa4`:
+[SDK clients](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/plugins/sdk/src/types.ts),
+[issue fields](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/shared/src/types/issue.ts),
+[agent fields](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/shared/src/types/agent.ts), and
+[heartbeat capacity implementation](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/server/src/services/heartbeat.ts).
+These source files were inspected at the build SHA; the host’s installed `node_modules` was not.
 
 ## Host pressure guard
 
@@ -199,10 +243,10 @@ declarations"; SDK contracts: `packages/plugins/sdk/src/types.ts`.
 
 Verified SDK/runtime design constraints in the inspected source:
 
-1. All five `jobs[]` declarations and `ctx.jobs.register` handlers are packaged. Scheduled context
-   has no agent identity. The worker uses explicitly host-configured company scopes; listing
-   companies is not authorization. Verify real scheduled invocation/scope behavior on the exact
-   installed host build before counting a shadow window.
+1. Only `backlogFloor` and `idleWake` are declared and registered natively; the other three kernel
+   planners are not scheduled. Scheduled context has no agent identity. The worker uses explicitly
+   host-configured company scopes; listing companies is not authorization. Verify real scheduled
+   invocation/scope behavior on the exact installed host build before counting a shadow window.
 2. Use `manifest.database` migrations and the plugin SQL namespace for atomic unique claims.
    `ctx.state.set` is a blind JSON upsert, not CAS. A single conditional SQL statement can claim an
    intent; there is no transaction spanning that claim and native issue creation. Reconcile plugin

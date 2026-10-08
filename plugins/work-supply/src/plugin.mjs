@@ -1,4 +1,5 @@
-import { JOBS, ERROR_CODES, validateConfig } from './policy.mjs';
+import { JOBS, SCHEDULED_JOBS, ERROR_CODES, validateConfig } from './policy.mjs';
+import { collectNativeSnapshot, nativeReadClientsAvailable } from './collector.mjs';
 import { ShadowRunner } from './shadow.mjs';
 import { readPressure, pressureGate } from './pressure.mjs';
 import { manifest } from './manifest.mjs';
@@ -30,7 +31,8 @@ export function createSupplyPlugin({ collect, pressure = readPressure, clock = D
   const configVersions = new Map();
   const health = new Map();
   const tails = new Map();
-  const collectorAvailable = typeof collect === 'function';
+  const injectedCollector = typeof collect === 'function';
+  let collectorAvailable = injectedCollector;
   const healthKey = (companyId, job) => JSON.stringify([companyId, job]);
 
   async function run(companyId, job) {
@@ -76,9 +78,11 @@ export function createSupplyPlugin({ collect, pressure = readPressure, clock = D
               get: id => { checkConfig(); return ctx.state.get(ledgerKey(id)); },
               set: (id, ledger) => { checkConfig(); checkPressure(); return ctx.state.set(ledgerKey(id), ledger); },
             },
-            collect: async (key, id) => {
+            collect: async (key, id, runConfig) => {
               checkConfig(); checkPressure();
-              const snapshot = await collect(key, id);
+              const snapshot = injectedCollector
+                ? await collect(key, id, runConfig)
+                : await collectNativeSnapshot(ctx, key, id, runConfig, clock);
               checkConfig(); checkPressure();
               return snapshot;
             }, clock,
@@ -103,8 +107,8 @@ export function createSupplyPlugin({ collect, pressure = readPressure, clock = D
   }
 
   async function queuedRun(companyId, job) {
-    // Scheduled callbacks may overlap. Serialize all five jobs per company so
-    // a permanently identical schedule cannot starve four jobs behind one fence.
+    // Scheduled callbacks may overlap. Serialize both native jobs per company
+    // so one firing cannot overwrite shadow state while the other is running.
     const previous = tails.get(companyId) ?? Promise.resolve();
     const pending = previous.catch(() => {}).then(() => run(companyId, job));
     tails.set(companyId, pending);
@@ -116,7 +120,8 @@ export function createSupplyPlugin({ collect, pressure = readPressure, clock = D
     multiCompanyConfig: true,
     async setup(context) {
       ctx = context;
-      for (const jobKey of JOBS) ctx.jobs.register(jobKey, async job => {
+      collectorAvailable = injectedCollector || nativeReadClientsAvailable(context);
+      for (const jobKey of SCHEDULED_JOBS) ctx.jobs.register(jobKey, async job => {
         // Host-delivered company configs authorize scopes; no global company census.
         // Independent company queues start together; one stalled scope cannot
         // prevent the others from running. Rejections remain loud after settlement.
