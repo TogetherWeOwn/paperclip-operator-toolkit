@@ -35,6 +35,28 @@ class SecretScan(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture_exceptions([], {'version': 1, 'fingerprintSha256': ['not-a-hash']})
 
+    def test_historical_work_supply_storage_identifiers_are_exact_exceptions_only(self):
+        # These two generic-api-key matches are the same public ledger record name,
+        # not credentials. Source/docs no longer use credential-shaped assignment.
+        # Preserve history, and do not let a later commit/path/rule/line inherit this.
+        commit = '3593d46d6fd3ba145981538fc8bfed1a931baeb9'
+        registry = json.loads((ROOT / 'scripts/gitleaks-history-fixtures.json').read_text())
+        for path, line in (('plugins/work-supply/src/plugin.mjs', 8),
+                           ('plugins/work-supply/README.md', 38)):
+            fingerprint = f'{commit}:{path}:generic-api-key:{line}'
+            finding = {'Commit': commit, 'Fingerprint': fingerprint}
+            with self.subTest(path=path):
+                self.assertEqual(fixture_exceptions([finding], registry), [fingerprint])
+                for new_commit, new_path, rule, new_line in (
+                    ('b' * 40, path, 'generic-api-key', line),
+                    (commit, path + '.other', 'generic-api-key', line),
+                    (commit, path, 'github-pat', line),
+                    (commit, path, 'generic-api-key', line + 1),
+                ):
+                    changed = {'Commit': new_commit,
+                               'Fingerprint': f'{new_commit}:{new_path}:{rule}:{new_line}'}
+                    self.assertEqual(fixture_exceptions([changed], registry), [])
+
     def test_full_history_script_still_refuses_new_canary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
