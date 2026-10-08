@@ -4,9 +4,9 @@ export const NOW = 1_800_000_000_000;
 export function config(overrides = {}) {
   return { companyId: 'company-a', mode: 'shadow', pause: false, floor: 40,
     maxSnapshotAgeMs: 60_000, cooldownMs: 6 * 3_600_000, maxLedgerEntries: 10_000,
-    projects: [{ id: 'primary', rank: 0, admitted: true, assigneeAgentId: 'agent-a' },
-      { id: 'secondary', rank: 1, admitted: true, assigneeAgentId: 'agent-b' },
-      { id: 'legacy', rank: 2, admitted: false, assigneeAgentId: 'agent-a' }],
+    projects: [{ id: 'primary', name: 'Primary Product', rank: 0, admitted: true, assigneeAgentId: 'agent-a' },
+      { id: 'secondary', name: 'Secondary Product', rank: 1, admitted: true, assigneeAgentId: 'agent-b' },
+      { id: 'legacy', name: 'Legacy', rank: 2, admitted: false, assigneeAgentId: 'agent-a' }],
     repositories: [{ repo: 'example/primary', projectId: 'primary' }],
     caps: Object.fromEntries(JOBS.map(job => [job, { perRun: 10, perHour: 40 }])), ...overrides };
 }
@@ -17,7 +17,7 @@ export function issue(id = 'issue-a', overrides = {}) {
     prState: 'none', pullRequestIds: [], ...overrides };
 }
 export function agent(id = 'agent-a', overrides = {}) {
-  return { id, companyId: 'company-a', status: 'idle', canWake: true, ...overrides };
+  return { id, companyId: 'company-a', status: 'idle', canWake: true, spareCapacity: 1, ...overrides };
 }
 export function pr(overrides = {}) {
   return { id: 'pr-a', companyId: 'company-a', repo: 'example/primary', state: 'open',

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { manifest } from '../src/manifest.mjs';
 import { createSupplyPlugin, resolveConfig } from '../src/plugin.mjs';
-import { JOBS } from '../src/policy.mjs';
+import { MAX_CONFIG_PROJECTS, SCHEDULED_JOBS, SupplyError } from '../src/policy.mjs';
 import { NOW, config, issue, snapshot } from './fixtures.mjs';
 
 const rawConfig = patch => {
@@ -15,9 +15,10 @@ const healthy = () => ({ observedAt: new Date(NOW).toISOString(), scope: 'host',
 const job = key => ({ jobKey: key, runId: 'job-run', trigger: 'schedule', scheduledAt: new Date(NOW).toISOString() });
 
 async function harness(options = {}) {
+  const { readClients, ...pluginOptions } = options;
   const handlers = new Map(), data = new Map(), values = new Map(), configs = new Map(), logs = [];
   const calls = { reads: 0, writes: 0, configReads: [] };
-  const plugin = createSupplyPlugin({ clock: () => NOW, ...options });
+  const plugin = createSupplyPlugin({ clock: () => NOW, ...pluginOptions });
   const ctx = {
     jobs: { register: (key, fn) => handlers.set(key, fn) },
     data: { register: (key, fn) => data.set(key, fn) },
@@ -28,8 +29,8 @@ async function harness(options = {}) {
     },
     logger: { info: (...args) => logs.push(args), error: (...args) => logs.push(args) },
     // Any unintended core, network, secret or agent mutation is fatal in the tests.
-    issues: new Proxy({}, { get() { throw new Error('core mutation forbidden'); } }),
-    agents: new Proxy({}, { get() { throw new Error('agent mutation forbidden'); } }),
+    issues: readClients?.issues ?? new Proxy({}, { get() { throw new Error('core mutation forbidden'); } }),
+    agents: readClients?.agents ?? new Proxy({}, { get() { throw new Error('agent mutation forbidden'); } }),
     http: new Proxy({}, { get() { throw new Error('network forbidden'); } }),
     secrets: new Proxy({}, { get() { throw new Error('secret access forbidden'); } }),
   };
@@ -45,8 +46,12 @@ test('package declares real manifest and worker files with matching version', as
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.version, manifest.version);
   for (const path of Object.values(pkg.paperclipPlugin)) assert.ok(await readFile(new URL(`../${path}`, import.meta.url), 'utf8'));
-  assert.deepEqual(manifest.jobs.map(j => j.jobKey), JOBS);
-  assert.deepEqual(manifest.capabilities, ['jobs.schedule', 'plugin.state.read', 'plugin.state.write']);
+  assert.deepEqual(manifest.jobs.map(j => j.jobKey), SCHEDULED_JOBS);
+  assert.deepEqual(manifest.capabilities, ['jobs.schedule', 'plugin.state.read', 'plugin.state.write', 'issues.read',
+    'agents.read', 'issue.relations.read', 'issues.orchestration.read', 'issue.interactions.read']);
+  const projects = manifest.instanceConfigSchema.properties.projects;
+  assert.equal(projects.maxItems, MAX_CONFIG_PROJECTS);
+  assert.ok(projects.items.required.includes('name'));
 });
 test('config defaults paused and shadow, identity is exclusively host-derived', () => {
   assert.equal(resolveConfig('company-a', {}).pause, true);
@@ -59,7 +64,7 @@ test('config defaults paused and shadow, identity is exclusively host-derived', 
 });
 test('no company enumeration or ambient bootstrap scope', async () => {
   const h = await harness();
-  for (const key of JOBS) await h.handlers.get(key)(job(key));
+  for (const key of SCHEDULED_JOBS) await h.handlers.get(key)(job(key));
   assert.deepEqual(h.calls.configReads, []);
   assert.equal((await h.plugin.onHealth()).status, 'degraded');
   await assert.rejects(h.plugin.onConfigChanged({}, {}), /company-context-required/);
@@ -73,7 +78,7 @@ test('a persisted schema-valid invalid config is visible before scheduling and f
   assert.equal(health.status, 'degraded');
   assert.equal(health.details.configuredCompanies, 1);
   assert.deepEqual(health.details.configErrors, [{ companyId: 'company-bad', code: 'invalid-config' }]);
-  for (const key of JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
+  for (const key of SCHEDULED_JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
   assert.equal(h.calls.reads, 0); assert.equal(h.calls.writes, 0);
   assert.ok((await h.plugin.onHealth()).details.firings.every(f => f.code === 'invalid-config'));
   assert.ok(h.logs.some(([message, details]) => message === 'work-supply: config rejected'
@@ -114,7 +119,7 @@ for (const pause of [false, true]) {
     assert.ok(!JSON.stringify({ logs: h.logs, health: await h.plugin.onHealth() }).includes('sensitive-config-body'));
     h.ctx.config.get = get;
     await h.configure('company-a', {});
-    for (const key of JOBS) await h.handlers.get(key)(job(key));
+    for (const key of SCHEDULED_JOBS) await h.handlers.get(key)(job(key));
     const health = await h.plugin.onHealth();
     assert.equal(health.status, 'ok');
     assert.deepEqual(health.details.configErrors, []);
@@ -128,8 +133,8 @@ test('a delayed invalid notification cannot latch over newer valid persisted con
   await h.configure('company-a', {});
   await assert.rejects(h.plugin.onConfigChanged(invalid, { companyId: 'company-a' }), /invalid-config/);
   assert.equal((await h.plugin.onHealth()).status, 'degraded');
-  for (const key of JOBS) await h.handlers.get(key)(job(key));
-  assert.equal(h.calls.configReads.length, JOBS.length);
+  for (const key of SCHEDULED_JOBS) await h.handlers.get(key)(job(key));
+  assert.equal(h.calls.configReads.length, SCHEDULED_JOBS.length);
   assert.equal(h.calls.reads, 0); assert.equal(h.calls.writes, 0);
   const health = await h.plugin.onHealth();
   assert.equal(health.status, 'ok');
@@ -142,7 +147,7 @@ test('a delayed valid notification cannot clear a current config rejection', asy
   await assert.rejects(h.configure('company-a', { repositories: [{ repo: 'owner/repo', projectId: 'missing-project' }] }));
   await h.plugin.onConfigChanged({}, { companyId: 'company-a' });
   assert.deepEqual((await h.plugin.onHealth()).details.configErrors, [{ companyId: 'company-a', code: 'invalid-config' }]);
-  for (const key of JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
+  for (const key of SCHEDULED_JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
   assert.equal(h.calls.reads, 0); assert.equal(h.calls.writes, 0);
 });
 for (const boundary of ['pressure', 'ledger read', 'collection']) {
@@ -231,22 +236,69 @@ test('validation-only and invalid host context cannot enroll or poison a company
   assert.equal(health.details.configuredCompanies, 1);
   assert.deepEqual(health.details.configErrors, []);
 });
-test('all five paused jobs do no pressure, collection or ledger I/O', async () => {
+test('all scheduled native jobs pause before pressure, collection or ledger I/O', async () => {
   const h = await harness({ collect: () => { throw new Error('should not collect'); }, pressure: () => { throw new Error('should not read'); } });
   await h.configure('company-a', {});
-  for (const key of JOBS) await h.handlers.get(key)(job(key));
+  for (const key of SCHEDULED_JOBS) await h.handlers.get(key)(job(key));
   assert.equal(h.calls.reads, 0); assert.equal(h.calls.writes, 0);
   assert.ok((await h.plugin.onHealth()).details.firings.every(f => f.status === 'paused'));
 });
 test('actual default collector cannot manufacture a complete empty census', async () => {
   const h = await harness(); await h.configure('company-a', rawConfig());
-  for (const key of JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
+  for (const key of SCHEDULED_JOBS) await assert.rejects(h.handlers.get(key)(job(key)), /work-supply-job-failed/);
   assert.equal(h.calls.writes, 0);
   const health = await h.plugin.onHealth();
   assert.equal(health.status, 'degraded');
   assert.ok(health.details.firings.every(f => f.code === 'native-snapshot-source-unavailable'));
 });
-for (const key of JOBS) {
+
+test('collector SupplyError codes reach plugin health and logs', async () => {
+  const readClients = {
+    issues: {
+      list: async () => { throw new SupplyError('native-snapshot-incomplete'); },
+      relations: { get: async () => ({ blockedBy: [], blocks: [] }) },
+      listInteractions: async () => [],
+      summaries: { getOrchestration: async () => ({ runs: [], approvals: [], openBudgetIncidents: [], invocationBlocks: [] }) },
+    },
+    agents: { list: async () => [] },
+  };
+  const h = await harness({ readClients, pressure: () => healthy() });
+  await h.configure('company-a', rawConfig());
+
+  await assert.rejects(h.handlers.get('backlogFloor')(job('backlogFloor')), /work-supply-job-failed/);
+  assert.equal((await h.plugin.onHealth()).details.firings[0].code, 'native-snapshot-incomplete');
+  assert.ok(h.logs.some(([message, details]) => message === 'work-supply: shadow firing failed'
+    && details.code === 'native-snapshot-incomplete'));
+});
+
+test('default worker collects backlog from SDK read clients and registers no host-only jobs', async () => {
+  const readIssue = { id: 'native-issue', companyId: 'company-a', projectId: 'primary', title: 'Native issue',
+    description: null, status: 'backlog', priority: 'medium', createdAt: new Date(NOW - 3 * 86_400_000),
+    updatedAt: new Date(NOW - 2 * 86_400_000), assigneeAgentId: null, assigneeUserId: null,
+    activeRun: null, executionBlocker: null, activeRecoveryAction: null, unblockDescriptor: null,
+    executionState: null, executionPolicy: null, monitorNextCheckAt: null, liveDescendantCount: 0,
+    scheduledRetry: null, labels: [] };
+  const readAgent = { id: 'agent-a', companyId: 'company-a', status: 'idle', pauseReason: null,
+    pausedAt: null, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } };
+  const readClients = {
+    issues: {
+      list: async input => input.projectId === readIssue.projectId && input.status === readIssue.status ? [readIssue] : [],
+      relations: { get: async () => ({ blockedBy: [], blocks: [] }) },
+      listInteractions: async () => [],
+      summaries: { getOrchestration: async () => ({ runs: [], approvals: [], openBudgetIncidents: [], invocationBlocks: [] }) },
+    },
+    agents: { list: async () => [readAgent] },
+  };
+  const h = await harness({ readClients, pressure: () => healthy() });
+  await h.configure('company-a', rawConfig({ floor: 1 }));
+  await h.handlers.get('backlogFloor')(job('backlogFloor'));
+  const ledger = await h.data.get('shadow-ledger')({ companyId: 'company-a' });
+  assert.deepEqual(ledger.entries, []);
+  assert.deepEqual(ledger.observations, []);
+  assert.deepEqual([...h.handlers.keys()], SCHEDULED_JOBS);
+  assert.equal((await h.plugin.onHealth()).details.firings[0].status, 'shadow');
+});
+for (const key of SCHEDULED_JOBS) {
   test(`${key}: high host pressure suppresses all candidate kinds before collection`, async () => {
     let collected = 0;
     // A fresh sample above any threshold must suppress the whole planning path.
@@ -257,7 +309,7 @@ for (const key of JOBS) {
     assert.equal((await held.plugin.onHealth()).details.firings[0].status, 'pressure-held');
   });
 }
-for (const key of JOBS) {
+for (const key of SCHEDULED_JOBS) {
   test(`${key}: pressure expiring during collection does not write or consume observation budget`, async () => {
     let now = NOW, slow = true;
     const h = await harness({ clock: () => now, pressure: () => ({ ...healthy(), observedAt: new Date(now).toISOString() }),
@@ -313,7 +365,7 @@ test('scheduled proposals persist in company-scoped plugin DB state and survive 
 test('collector failure cannot impersonate healthy empty input', async () => {
   const h = await harness({ collect: () => { throw new Error('private-response'); }, pressure: () => healthy() });
   await h.configure('company-a', rawConfig());
-  await assert.rejects(h.handlers.get('prSupply')(job('prSupply')), /work-supply-job-failed/);
+  await assert.rejects(h.handlers.get('backlogFloor')(job('backlogFloor')), /work-supply-job-failed/);
   assert.ok(!JSON.stringify(h.logs).includes('private-response'));
   assert.equal((await h.plugin.onHealth()).details.firings[0].code, 'shadow-dependency-failed');
 });
@@ -336,25 +388,25 @@ test('a stalled company does not prevent another company from completing repeate
   const stalled = new Promise(resolve => { release = resolve; });
   const get = h.ctx.config.get;
   h.ctx.config.get = async id => { if (id === 'company-a') await stalled; return get(id); };
-  const pending = Array.from({ length: 2 }, () => JOBS.map(key => h.handlers.get(key)(job(key)))).flat();
+  const pending = Array.from({ length: 2 }, () => SCHEDULED_JOBS.map(key => h.handlers.get(key)(job(key)))).flat();
   try {
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(h.calls.configReads, Array(10).fill('company-b'));
+    assert.deepEqual(h.calls.configReads, Array(SCHEDULED_JOBS.length * 2).fill('company-b'));
     const firings = (await h.plugin.onHealth()).details.firings;
-    assert.equal(firings.length, 5);
+    assert.equal(firings.length, SCHEDULED_JOBS.length);
     assert.ok(firings.every(f => f.companyId === 'company-b' && f.status === 'paused'));
   } finally { release(); await Promise.all(pending); }
 });
-test('simultaneous schedules serialize all five jobs instead of starving behind busy', async () => {
+test('simultaneous native schedules serialize per company without starving', async () => {
   const collected = [];
   const h = await harness({ collect: async key => {
     collected.push(key); await new Promise(resolve => setImmediate(resolve)); return snapshot();
   }, pressure: () => healthy() });
   await h.configure('company-a', rawConfig());
-  await Promise.all(JOBS.map(key => h.handlers.get(key)(job(key))));
-  assert.deepEqual(collected, JOBS);
+  await Promise.all(SCHEDULED_JOBS.map(key => h.handlers.get(key)(job(key))));
+  assert.deepEqual(collected, SCHEDULED_JOBS);
   const ledger = await h.data.get('shadow-ledger')({ companyId: 'company-a' });
-  assert.deepEqual(Object.keys(ledger.health), JOBS);
+  assert.deepEqual(Object.keys(ledger.health), SCHEDULED_JOBS);
   assert.ok((await h.plugin.onHealth()).details.firings.every(f => f.status === 'shadow'));
 });
 test('unverified config cannot be overridden by an optimistic pressure reader', async () => {

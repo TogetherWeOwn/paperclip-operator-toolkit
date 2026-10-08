@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JOBS, planJob, nextPrAction } from '../src/policy.mjs';
+import { JOBS, MAX_CONFIG_PROJECTS, planJob, nextPrAction } from '../src/policy.mjs';
 import { NOW, config, issue, pr, snapshot, agent } from './fixtures.mjs';
 
 function plan(job, data, settings = config()) { return planJob(job, data, settings, NOW); }
@@ -18,6 +18,19 @@ test('configuration rejects missing limits, duplicate projects and non-admitted 
   assert.throws(() => plan('idleWake', snapshot(), config({ caps: {} })), { code: 'invalid-config' });
   assert.throws(() => plan('idleWake', snapshot(), config({ projects: [config().projects[0], config().projects[0]] })), { code: 'invalid-config' });
   assert.throws(() => plan('idleWake', snapshot(), config({ repositories: [{ repo: 'example/other', projectId: 'unknown' }] })), { code: 'invalid-config' });
+});
+
+test('configuration requires a nonblank project name and bounds the project map', () => {
+  const unnamed = { ...config().projects[0] };
+  delete unnamed.name;
+  assert.throws(() => plan('idleWake', snapshot(), config({ projects: [unnamed], repositories: [] })), { code: 'invalid-config' });
+
+  const blank = { ...config().projects[0], name: '   ' };
+  assert.throws(() => plan('idleWake', snapshot(), config({ projects: [blank], repositories: [] })), { code: 'invalid-config' });
+
+  const projects = Array.from({ length: MAX_CONFIG_PROJECTS + 1 }, (_, i) => ({ id: `project-${i}`,
+    name: `Project ${i}`, rank: i, admitted: true, assigneeAgentId: 'agent-a' }));
+  assert.throws(() => plan('idleWake', snapshot(), config({ projects, repositories: [] })), { code: 'invalid-config' });
 });
 
 for (const [name, change, code] of [
@@ -65,6 +78,14 @@ for (const [name, overrides] of [
     assert.deepEqual(plan('prSupply', snapshot({ issues: [owner(overrides)], prs: [pr()] })), []);
   });
 }
+
+test('unknown PR state cannot promote or wake native issues', () => {
+  const backlog = issue('backlog', { status: 'backlog', prState: 'unknown', pullRequestIds: null });
+  const inProgress = issue('in-progress', { status: 'in_progress', prState: 'unknown', pullRequestIds: null });
+
+  assert.deepEqual(plan('backlogFloor', snapshot({ issues: [backlog] })), []);
+  assert.deepEqual(plan('idleWake', snapshot({ issues: [inProgress] })), []);
+});
 
 test('unassigned backlog uses an explicit config map, never an unknown or paused agent', () => {
   const s = snapshot({ issues: [issue('unassigned', { assigneeAgentId: null })] });

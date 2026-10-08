@@ -1,7 +1,7 @@
-import { JOBS } from './policy.mjs';
+import { JOBS, MAX_CONFIG_PROJECTS, SCHEDULED_JOBS } from './policy.mjs';
 
 export const PLUGIN_ID = 'togetherweown.work-supply';
-export const PLUGIN_VERSION = '0.2.0';
+export const PLUGIN_VERSION = '0.3.0';
 const count = { type: 'integer', minimum: 0, maximum: 1000 };
 const cap = { type: 'object', additionalProperties: false, required: ['perRun', 'perHour'],
   properties: { perRun: count, perHour: count } };
@@ -11,10 +11,11 @@ const cap = { type: 'object', additionalProperties: false, required: ['perRun', 
 export const manifest = {
   id: PLUGIN_ID, apiVersion: 1, version: PLUGIN_VERSION,
   displayName: 'Work Supply (Shadow)', author: 'TogetherWeOwn', categories: ['automation'],
-  description: 'Fail-closed scheduled shadow decisions; no core effects or timer-retirement authority.',
-  capabilities: ['jobs.schedule', 'plugin.state.read', 'plugin.state.write'],
+  description: 'Native backlog and idle-wake shadow decisions; no core effects or timer-retirement authority.',
+  capabilities: ['jobs.schedule', 'plugin.state.read', 'plugin.state.write', 'issues.read',
+    'agents.read', 'issue.relations.read', 'issues.orchestration.read', 'issue.interactions.read'],
   entrypoints: { worker: './src/worker.mjs' },
-  jobs: JOBS.map(jobKey => ({ jobKey, displayName: jobKey,
+  jobs: SCHEDULED_JOBS.map(jobKey => ({ jobKey, displayName: jobKey,
     description: 'Observe only with complete native inputs and verified healthy host pressure.', schedule: '3-59/5 * * * *' })),
   instanceConfigSchema: {
     type: 'object', additionalProperties: false,
@@ -27,9 +28,10 @@ export const manifest = {
       maxSnapshotAgeMs: { type: 'integer', minimum: 1, default: 60000 },
       cooldownMs: { type: 'integer', minimum: 1, default: 21600000 },
       maxLedgerEntries: { type: 'integer', minimum: 1, default: 10000 },
-      projects: { type: 'array', default: [], items: { type: 'object', additionalProperties: false,
-        required: ['id', 'rank', 'admitted', 'assigneeAgentId'], properties: {
-          id: { type: 'string', minLength: 1, maxLength: 256 }, rank: { type: 'integer', minimum: 0 },
+      projects: { type: 'array', default: [], maxItems: MAX_CONFIG_PROJECTS, items: { type: 'object', additionalProperties: false,
+        required: ['id', 'name', 'rank', 'admitted', 'assigneeAgentId'], properties: {
+          id: { type: 'string', minLength: 1, maxLength: 256 },
+          name: { type: 'string', minLength: 1, maxLength: 256 }, rank: { type: 'integer', minimum: 0 },
           admitted: { type: 'boolean' }, assigneeAgentId: { type: ['string', 'null'], minLength: 1, maxLength: 256 },
         } } },
       repositories: { type: 'array', default: [], items: { type: 'object', additionalProperties: false,

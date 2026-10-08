@@ -1,12 +1,16 @@
 import { createHash } from 'node:crypto';
 
 export const JOBS = Object.freeze(['prSupply', 'backlogFloor', 'idleWake', 'reviewReconcile', 'intentSweep']);
+export const SCHEDULED_JOBS = Object.freeze(['backlogFloor', 'idleWake']);
+export const MAX_CONFIG_PROJECTS = 100;
 const HOUR = 3_600_000;
 const PRIORITY = { critical: 0, high: 1, medium: 2, low: 3 };
 const OPEN = new Set(['backlog', 'todo', 'in_progress', 'in_review']);
+const ELIGIBLE_PR_STATES = new Set(['none', 'open']);
 
 export const ERROR_CODES = Object.freeze(['invalid-config', 'shadow-only', 'invalid-time',
-  'invalid-snapshot', 'stale-snapshot', 'unknown-job', 'invalid-ledger', 'ledger-full', 'shadow-dependency-failed']);
+  'invalid-snapshot', 'stale-snapshot', 'unknown-job', 'invalid-ledger', 'ledger-full',
+  'native-read-client-unavailable', 'native-snapshot-incomplete', 'host-only-job', 'shadow-dependency-failed']);
 
 export class SupplyError extends Error {
   constructor(code) {
@@ -40,15 +44,17 @@ function timestamp(value) {
 export function validateConfig(config) {
   requireValue(record(config) && identifier(config.companyId), 'invalid-config');
   requireValue(typeof config.pause === 'boolean' && config.mode === 'shadow', 'shadow-only');
-  requireValue(Array.isArray(config.projects) && Array.isArray(config.repositories), 'invalid-config');
+  requireValue(Array.isArray(config.projects) && config.projects.length <= MAX_CONFIG_PROJECTS
+    && Array.isArray(config.repositories), 'invalid-config');
   requireValue(Number.isSafeInteger(config.floor) && config.floor >= 0 && config.floor <= 1000, 'invalid-config');
   for (const key of ['maxSnapshotAgeMs', 'cooldownMs', 'maxLedgerEntries']) {
     requireValue(Number.isSafeInteger(config[key]) && config[key] > 0, 'invalid-config');
   }
   const projects = new Set();
   for (const p of config.projects) {
-    requireValue(record(p) && identifier(p.id) && !projects.has(p.id) && Number.isSafeInteger(p.rank)
-      && p.rank >= 0 && typeof p.admitted === 'boolean', 'invalid-config');
+    requireValue(record(p) && identifier(p.id) && !projects.has(p.id) && identifier(p.name)
+      && p.name.trim().length > 0 && Number.isSafeInteger(p.rank) && p.rank >= 0
+      && typeof p.admitted === 'boolean', 'invalid-config');
     requireValue(p.assigneeAgentId === null || identifier(p.assigneeAgentId), 'invalid-config');
     projects.add(p.id);
   }
@@ -65,14 +71,22 @@ export function validateConfig(config) {
   }
 }
 
-// Collectors must normalize native evidence. Titles, comments and PR bodies are never policy inputs.
-export function validateSnapshot(snapshot, config, now) {
+// Native backlog and idle collection use title/description only for explicit exclusions;
+// comments and PR bodies are never policy inputs.
+export function validateSnapshot(snapshot, config, now, job) {
   requireValue(timestamp(now), 'invalid-time');
   requireValue(snapshot?.companyId === config.companyId && snapshot.complete === true);
   requireValue(timestamp(snapshot.capturedAt) && snapshot.capturedAt <= now
     && now - snapshot.capturedAt <= config.maxSnapshotAgeMs, 'stale-snapshot');
+  requireValue(Array.isArray(snapshot.issues) && Array.isArray(snapshot.agents));
+  const needsPrs = job === 'prSupply' || job === 'reviewReconcile';
+  const needsIntents = job === 'intentSweep';
+  if (needsPrs) requireValue(Array.isArray(snapshot.prs));
+  if (needsIntents) requireValue(Array.isArray(snapshot.intents));
+  if (snapshot.prs !== undefined) requireValue(Array.isArray(snapshot.prs));
+  if (snapshot.intents !== undefined) requireValue(Array.isArray(snapshot.intents));
   for (const collection of ['issues', 'agents', 'prs', 'intents']) {
-    requireValue(Array.isArray(snapshot[collection]));
+    if (snapshot[collection] === undefined) continue;
     const ids = new Set();
     for (const item of snapshot[collection]) {
       requireValue(record(item) && item.companyId === config.companyId && identifier(item.id) && !ids.has(item.id));
@@ -86,14 +100,20 @@ export function validateSnapshot(snapshot, config, now) {
     requireValue(timestamp(i.createdAt) && timestamp(i.updatedAt) && i.createdAt <= i.updatedAt && i.updatedAt <= now);
     requireValue(i.assigneeAgentId === null || identifier(i.assigneeAgentId));
     requireValue(i.assigneeUserId === null || identifier(i.assigneeUserId));
-    requireValue(['none', 'open', 'closed'].includes(i.prState) && Array.isArray(i.pullRequestIds)
-      && Array.from(i.pullRequestIds).every(identifier));
+    if (needsPrs) {
+      requireValue(['none', 'open', 'closed'].includes(i.prState) && Array.isArray(i.pullRequestIds)
+        && Array.from(i.pullRequestIds).every(identifier));
+    } else {
+      requireValue(['none', 'open', 'closed', 'unknown'].includes(i.prState));
+      requireValue(i.pullRequestIds === null || i.pullRequestIds === undefined
+        || (Array.isArray(i.pullRequestIds) && Array.from(i.pullRequestIds).every(identifier)));
+    }
   }
   for (const a of snapshot.agents) {
-    requireValue(['idle', 'running', 'paused', 'error', 'terminated'].includes(a.status)
-      && typeof a.canWake === 'boolean');
+    requireValue(['active', 'idle', 'running', 'paused', 'error', 'pending_approval', 'terminated'].includes(a.status)
+      && typeof a.canWake === 'boolean' && Number.isSafeInteger(a.spareCapacity) && a.spareCapacity >= 0);
   }
-  for (const pr of snapshot.prs) {
+  if (snapshot.prs !== undefined) for (const pr of snapshot.prs) {
     requireValue(typeof pr.repo === 'string' && identifier(pr.headSha)
       && ['open', 'closed', 'merged'].includes(pr.state) && typeof pr.draft === 'boolean');
     requireValue(timestamp(pr.createdAt) && pr.createdAt <= now);
@@ -103,7 +123,7 @@ export function validateSnapshot(snapshot, config, now) {
     requireValue(pr.reviewScore === null || (Number.isInteger(pr.reviewScore) && pr.reviewScore >= 0 && pr.reviewScore <= 5));
     requireValue(pr.mergeable === null || typeof pr.mergeable === 'boolean');
   }
-  for (const i of snapshot.intents) {
+  if (snapshot.intents !== undefined) for (const i of snapshot.intents) {
     requireValue(identifier(i.issueId) && ['pending', 'resolved'].includes(i.status));
   }
 }
@@ -115,7 +135,7 @@ function project(config, id) {
 function eligible(issue, config) {
   return Boolean(project(config, issue.projectId)) && OPEN.has(issue.status)
     && !issue.held && !issue.blocked && !issue.awaitingInput && !issue.liveRun
-    && issue.assigneeUserId === null && issue.runnable && issue.prState !== 'closed';
+    && issue.assigneeUserId === null && issue.runnable && ELIGIBLE_PR_STATES.has(issue.prState);
 }
 
 function ownerId(issue, config) {
@@ -231,7 +251,7 @@ export function planBacklogFloor(snapshot, config) {
 export function planIdleWake(snapshot, config) {
   const result = [];
   for (const agent of [...snapshot.agents].sort((a, b) => compare(a.id, b.id))) {
-    if (agent.status !== 'idle' || !agent.canWake) continue;
+    if (agent.status !== 'idle' || !agent.canWake || agent.spareCapacity < 1) continue;
     const candidates = snapshot.issues.filter(i => ['todo', 'in_progress'].includes(i.status)
       && i.assigneeAgentId === agent.id && eligible(i, config))
       .sort((a, b) => Number(b.status === 'in_progress') - Number(a.status === 'in_progress') || order(config)(a, b));
@@ -259,6 +279,6 @@ export function planJob(job, snapshot, config, now) {
   validateConfig(config);
   requireValue(JOBS.includes(job), 'unknown-job');
   if (config.pause) return [];
-  validateSnapshot(snapshot, config, now);
+  validateSnapshot(snapshot, config, now, job);
   return PLANNERS[job](snapshot, config, now);
 }
