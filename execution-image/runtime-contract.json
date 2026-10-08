@@ -1,0 +1,14 @@
+{
+  "schema": "execution-image.runtime-contract.v1",
+  "execution_user": "1000:1000",
+  "entrypoint": "inherit_verified_standard_production",
+  "command": "inherit_verified_standard_production",
+  "rust_toolchain": "preserve_existing_package_owned_1.98.1",
+  "compiler_paths": ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/ld", "/usr/bin/ar", "/usr/bin/pkg-config"],
+  "wrapper": "preserve_exact_source_pin_no_direct_cargo",
+  "pool": "preserve_existing_protected_finite_filesystem_no_new_pool",
+  "outputs": "preserve_target_scratch_external_outputs_leases_and_process_ownership",
+  "runtime_policy": "preserve_read_only_root_no_writable_app_no_privilege_or_network_expansion",
+  "adoption": "requires_current_configuration_specific_acceptance",
+  "rollback": "drain_then_restore_previous_verified_image_and_configuration_preserve_outputs"
+}
