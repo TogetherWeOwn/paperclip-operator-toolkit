@@ -68,7 +68,17 @@ USAGE
 }
 
 die()    { printf '%s: %s\n' "$ME" "$1" >&2; exit "${2:-2}"; }
-refuse() { printf '%s: REFUSED: %s\n' "$ME" "$1" >&2; exit 3; }
+refuse() {
+  printf '%s: REFUSED: %s\n' "$ME" "$1" >&2
+  printf '::error title=Dark-step report refused::The reporter could not safely classify the job step list; see the log for details.\n'
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      printf '### ⛔ Dark-step report refused\n\n'
+      printf '%s\n' "$1"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  exit 3
+}
 
 # --- argument parsing ---------------------------------------------------------
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -99,6 +109,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Either from a reporter-instrumented file (tests and re-analysis of a run with
 # this reporter) or from the API for the job this script is running inside.
 LIVE_API=0
+REPORTER_NAME="Report steps that never ran - ci_dark_steps reporter"
 fetch_api_job() {
   local -a timeout_args=()
   if [[ $# -gt 0 ]]; then
@@ -118,11 +129,6 @@ fetch_api_job() {
     jq --arg key "$GITHUB_JOB" --arg nm "${GITHUB_JOB_NAME:-}" \
        '[.jobs[] | select(.name == $key or .name == $nm)] | first // empty' \
        "$TMP/jobs.json" > "$TMP/job.json"
-    if [[ ! -s "$TMP/job.json" ]]; then
-      # Fall back to the only still-running job, which is this one.
-      jq '[.jobs[] | select(.status != "completed")] | first // empty' \
-         "$TMP/jobs.json" > "$TMP/job.json"
-    fi
   fi
   [[ -s "$TMP/job.json" ]] || refuse "could not identify job '${GITHUB_JOB:-?}' in run ${GITHUB_RUN_ID:-?}"
 }
@@ -137,7 +143,7 @@ if [[ -n "$JOB_JSON" ]]; then
   [[ -s "$JOB_JSON" ]] || refuse "job json is missing or empty: $JOB_JSON"
   cp "$JOB_JSON" "$TMP/job.json"
 else
-  : "${GITHUB_REPOSITORY:?}" 2>/dev/null || refuse "GITHUB_REPOSITORY is unset; not running in Actions"
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] || refuse "GITHUB_REPOSITORY is unset; not running in Actions"
   [[ -n "${GITHUB_RUN_ID:-}" ]]  || refuse "GITHUB_RUN_ID is unset"
   [[ -n "${GITHUB_JOB:-}" ]]     || refuse "GITHUB_JOB is unset"
   [[ -n "${GH_TOKEN:-}" ]]       || refuse "GH_TOKEN is unset; actions:read is required to list job steps"
@@ -160,23 +166,30 @@ validate_job
 # --- classify -----------------------------------------------------------------
 # Every count below is taken over workflow gates: steps before the reporter,
 # minus runner setup (`Set up job` at step 1). The reporter is the last
-# configured workflow step in each instrumented job, so runner-generated
-# post-action and completion steps follow it. Use the position boundary rather
-# than a `Post ` name prefix: a workflow gate can legitimately start with that.
+# configured workflow step, so only runner-generated teardown follows it. Live
+# data accepts one reserved marker with no recognized later gate. The caller
+# must place this marker last: API names alone cannot distinguish arbitrary named
+# post-actions from workflow gates. Use position, not a `Post ` prefix: a workflow
+# gate can legitimately start with that.
 # TOTAL and DARK must use the same set; otherwise the outage fixture reports a
 # dark count that cannot be reconciled with its executed-step tally.
 load_gate_set() {
-  REPORTER_NO="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .number] | last // empty' "$TMP/job.json")"
-  REPORTER_STATUS="$(jq -r '[.steps[] | select(.name == "Report steps that never ran") | .status] | last // empty' "$TMP/job.json")"
+  REPORTER_COUNT="$(jq --arg name "$REPORTER_NAME" '[.steps[] | select(.name == $name)] | length' "$TMP/job.json")"
+  REPORTER_NO="$(jq --arg name "$REPORTER_NAME" -r '[.steps[] | select(.name == $name) | .number] | last // empty' "$TMP/job.json")"
+  REPORTER_STATUS="$(jq --arg name "$REPORTER_NAME" -r '[.steps[] | select(.name == $name) | .status] | last // empty' "$TMP/job.json")"
+  REPORTER_GATE_AFTER=0
+  if [[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]]; then
+    REPORTER_GATE_AFTER="$(jq --argjson reporter "$REPORTER_NO" '[.steps[] | select(.number > $reporter) | select(.name != "Complete job" and ((.name // "") | startswith("Post Run ") | not))] | length' "$TMP/job.json")"
+  fi
   REPORTER_VALID=0
   if [[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]]; then
-    if [[ "$LIVE_API" -eq 0 || "$REPORTER_STATUS" == "in_progress" ]]; then
+    if [[ ( "$LIVE_API" -eq 0 || ( "$REPORTER_COUNT" -eq 1 && "$REPORTER_STATUS" == "in_progress" ) ) && "$REPORTER_GATE_AFTER" -eq 0 ]]; then
       REPORTER_VALID=1
     fi
   fi
   if [[ "$REPORTER_VALID" -ne 1 ]]; then
     [[ "$LIVE_API" -eq 1 ]] \
-      || refuse "the reporter step is missing; runner lifecycle boundary is unknown"
+      || refuse "the reporter step is missing or has later workflow gates; runner lifecycle boundary is unknown"
     : > "$TMP/gate.json"
     TOTAL=0
     return 0
@@ -226,14 +239,14 @@ if [[ "$LIVE_API" -eq 1 ]] && has_ambiguous_gate; then
     fi
     previous_signature="$signature"
   done
-  if [[ "$stable_repeats" -ge 2 ]]; then
+  if [[ "$settled" -eq 0 && "$stable_repeats" -ge 2 ]]; then
     [[ "$REPORTER_VALID" -eq 1 ]] \
       || refuse "reporter boundary did not settle within 15 seconds; refusing to guess which steps are gates"
     jq -e '
       . as $steps
       | ([$steps[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .number) as $abort
       | $abort != null
-        and ([$steps[] | select(.conclusion == null)] | all(.number > $abort and .status != "in_progress"))
+        and ([$steps[] | select(.conclusion == null)] | all(.number > $abort and (.status == "pending" or .status == "queued")))
     ' "$TMP/gate.json" >/dev/null \
       || refuse "stable null gate steps do not follow a confirmed abort; refusing to classify them as dark"
     settled=1
@@ -241,6 +254,11 @@ if [[ "$LIVE_API" -eq 1 ]] && has_ambiguous_gate; then
   [[ "$settled" -eq 1 ]] \
     || refuse "gate steps did not settle within 15 seconds; refusing to guess which null conclusions are dark"
 fi
+
+# A completed gate ran; an absent verdict cannot make it an unexecuted gate.
+jq -e '[.[] | select(.status == "completed" and .conclusion == null)] | length == 0' \
+  "$TMP/gate.json" >/dev/null \
+  || refuse "a completed gate has no conclusion; refusing to classify it as dark"
 
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
 FULL="$(jq '[.steps[]] | length' "$TMP/job.json")"
