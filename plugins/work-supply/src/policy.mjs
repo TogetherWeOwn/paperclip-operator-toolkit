@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 
 export const JOBS = Object.freeze(['prSupply', 'backlogFloor', 'idleWake', 'reviewReconcile', 'intentSweep']);
 export const SCHEDULED_JOBS = Object.freeze(['backlogFloor', 'idleWake']);
+export const MAX_CONFIG_PROJECTS = 100;
 const HOUR = 3_600_000;
 const PRIORITY = { critical: 0, high: 1, medium: 2, low: 3 };
 const OPEN = new Set(['backlog', 'todo', 'in_progress', 'in_review']);
+const ELIGIBLE_PR_STATES = new Set(['none', 'open']);
 
 export const ERROR_CODES = Object.freeze(['invalid-config', 'shadow-only', 'invalid-time',
   'invalid-snapshot', 'stale-snapshot', 'unknown-job', 'invalid-ledger', 'ledger-full',
@@ -42,15 +44,17 @@ function timestamp(value) {
 export function validateConfig(config) {
   requireValue(record(config) && identifier(config.companyId), 'invalid-config');
   requireValue(typeof config.pause === 'boolean' && config.mode === 'shadow', 'shadow-only');
-  requireValue(Array.isArray(config.projects) && Array.isArray(config.repositories), 'invalid-config');
+  requireValue(Array.isArray(config.projects) && config.projects.length <= MAX_CONFIG_PROJECTS
+    && Array.isArray(config.repositories), 'invalid-config');
   requireValue(Number.isSafeInteger(config.floor) && config.floor >= 0 && config.floor <= 1000, 'invalid-config');
   for (const key of ['maxSnapshotAgeMs', 'cooldownMs', 'maxLedgerEntries']) {
     requireValue(Number.isSafeInteger(config[key]) && config[key] > 0, 'invalid-config');
   }
   const projects = new Set();
   for (const p of config.projects) {
-    requireValue(record(p) && identifier(p.id) && !projects.has(p.id) && Number.isSafeInteger(p.rank)
-      && p.rank >= 0 && typeof p.admitted === 'boolean', 'invalid-config');
+    requireValue(record(p) && identifier(p.id) && !projects.has(p.id) && identifier(p.name)
+      && p.name.trim().length > 0 && Number.isSafeInteger(p.rank) && p.rank >= 0
+      && typeof p.admitted === 'boolean', 'invalid-config');
     requireValue(p.assigneeAgentId === null || identifier(p.assigneeAgentId), 'invalid-config');
     projects.add(p.id);
   }
@@ -106,7 +110,7 @@ export function validateSnapshot(snapshot, config, now, job) {
     }
   }
   for (const a of snapshot.agents) {
-    requireValue(['idle', 'running', 'paused', 'error', 'terminated'].includes(a.status)
+    requireValue(['active', 'idle', 'running', 'paused', 'error', 'pending_approval', 'terminated'].includes(a.status)
       && typeof a.canWake === 'boolean' && Number.isSafeInteger(a.spareCapacity) && a.spareCapacity >= 0);
   }
   if (snapshot.prs !== undefined) for (const pr of snapshot.prs) {
@@ -131,7 +135,7 @@ function project(config, id) {
 function eligible(issue, config) {
   return Boolean(project(config, issue.projectId)) && OPEN.has(issue.status)
     && !issue.held && !issue.blocked && !issue.awaitingInput && !issue.liveRun
-    && issue.assigneeUserId === null && issue.runnable && issue.prState !== 'closed';
+    && issue.assigneeUserId === null && issue.runnable && ELIGIBLE_PR_STATES.has(issue.prState);
 }
 
 function ownerId(issue, config) {

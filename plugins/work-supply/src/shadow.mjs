@@ -66,10 +66,11 @@ function validateLedger(ledger, companyId, now) {
   }
 }
 
-async function dependency(call) {
+async function dependency(call, preserveSupplyErrors = false) {
   try {
     return await call();
-  } catch {
+  } catch (error) {
+    if (preserveSupplyErrors && error instanceof SupplyError && ERROR_CODES.includes(error.code)) throw error;
     // Dependency-owned error classes and codes are not trusted kernel diagnostics.
     throw new SupplyError('shadow-dependency-failed');
   }
@@ -114,7 +115,7 @@ export class ShadowRunner {
       }
       validateLedger(ledger, companyId, now);
       lastValidLedger = structuredClone(ledger);
-      const snapshot = await dependency(() => this.collect(job, companyId, config));
+      const snapshot = await dependency(() => this.collect(job, companyId, config), true);
       now = await dependency(() => this.clock());
       if (!Number.isSafeInteger(now) || now < startedAt) throw new SupplyError('invalid-time');
       const actions = planJob(job, snapshot, config, now);

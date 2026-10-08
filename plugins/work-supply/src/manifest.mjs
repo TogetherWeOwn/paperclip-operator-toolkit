@@ -1,4 +1,4 @@
-import { JOBS, SCHEDULED_JOBS } from './policy.mjs';
+import { JOBS, MAX_CONFIG_PROJECTS, SCHEDULED_JOBS } from './policy.mjs';
 
 export const PLUGIN_ID = 'togetherweown.work-supply';
 export const PLUGIN_VERSION = '0.3.0';
@@ -28,9 +28,10 @@ export const manifest = {
       maxSnapshotAgeMs: { type: 'integer', minimum: 1, default: 60000 },
       cooldownMs: { type: 'integer', minimum: 1, default: 21600000 },
       maxLedgerEntries: { type: 'integer', minimum: 1, default: 10000 },
-      projects: { type: 'array', default: [], items: { type: 'object', additionalProperties: false,
-        required: ['id', 'rank', 'admitted', 'assigneeAgentId'], properties: {
-          id: { type: 'string', minLength: 1, maxLength: 256 }, rank: { type: 'integer', minimum: 0 },
+      projects: { type: 'array', default: [], maxItems: MAX_CONFIG_PROJECTS, items: { type: 'object', additionalProperties: false,
+        required: ['id', 'name', 'rank', 'admitted', 'assigneeAgentId'], properties: {
+          id: { type: 'string', minLength: 1, maxLength: 256 },
+          name: { type: 'string', minLength: 1, maxLength: 256 }, rank: { type: 'integer', minimum: 0 },
           admitted: { type: 'boolean' }, assigneeAgentId: { type: ['string', 'null'], minLength: 1, maxLength: 256 },
         } } },
       repositories: { type: 'array', default: [], items: { type: 'object', additionalProperties: false,

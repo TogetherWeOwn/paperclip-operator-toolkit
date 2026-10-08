@@ -1,20 +1,23 @@
 import { SCHEDULED_JOBS, SupplyError } from './policy.mjs';
 
 const PAGE_SIZE = 100;
-const MAX_PAGES = 10_000;
+const ISSUE_LIST_LIMIT = 1000;
+const MAX_NATIVE_ISSUES = 500;
+const MAX_NATIVE_AGENTS = 500;
+const MAX_PAGES = 100;
 const READ_CONCURRENCY = 8;
 const DAY = 24 * 60 * 60_000;
 const RECENT_RUN_WINDOW = 20 * 60_000;
 const RUN_HISTORY_LIMIT = 100;
 const ISSUE_STATUSES = {
-  backlogFloor: new Set(['backlog', 'todo']),
-  idleWake: new Set(['todo', 'in_progress']),
+  backlogFloor: ['backlog', 'todo'],
+  idleWake: ['todo', 'in_progress'],
 };
 const LIVE_RUNS = new Set(['queued', 'running', 'scheduled_retry']);
 const FAILED_RUNS = new Set(['failed', 'errored', 'error', 'timed_out', 'timeout']);
 const SETTLED_RUNS = new Set(['succeeded', 'interrupted', 'cancelled', 'canceled', 'expired', 'skipped']);
 const RESOLVED_BLOCKER_STATUSES = new Set(['done']);
-const AGENT_STATUSES = new Set(['idle', 'running', 'paused', 'error', 'terminated']);
+const AGENT_STATUSES = new Set(['active', 'paused', 'idle', 'running', 'error', 'pending_approval', 'terminated']);
 
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -22,6 +25,12 @@ function record(value) {
 
 function fail(code = 'native-snapshot-incomplete') {
   throw new SupplyError(code);
+}
+
+function assertSnapshotFresh(asOf, config, clock) {
+  const observedAt = clock();
+  if (!Number.isSafeInteger(observedAt) || observedAt < asOf) fail('invalid-time');
+  if (observedAt - asOf > config.maxSnapshotAgeMs) throw new SupplyError('stale-snapshot');
 }
 
 function timestamp(value) {
@@ -49,15 +58,44 @@ export function nativeReadClientsAvailable(ctx) {
   }
 }
 
-async function readAll(fetchPage, input) {
+async function readAll(fetchPage, input, assertFresh) {
   const rows = [];
   for (let page = 0; page < MAX_PAGES; page++) {
-    const batch = await fetchPage({ ...input, limit: PAGE_SIZE, offset: rows.length });
-    if (!Array.isArray(batch) || batch.length > PAGE_SIZE) fail();
+    assertFresh();
+    const remaining = MAX_NATIVE_AGENTS - rows.length;
+    const limit = Math.min(PAGE_SIZE, remaining + 1);
+    const batch = await fetchPage({ ...input, limit, offset: rows.length });
+    if (!Array.isArray(batch) || batch.length > limit || batch.length > remaining) fail();
     rows.push(...batch);
-    if (batch.length < PAGE_SIZE) return rows;
+    if (rows.length >= MAX_NATIVE_AGENTS) fail();
+    if (batch.length < limit) return rows;
   }
   fail();
+}
+
+async function readProjectIssues(ctx, project, companyId, job, remaining, assertFresh) {
+  const rows = [];
+  for (const status of ISSUE_STATUSES[job]) {
+    assertFresh();
+    const available = remaining - rows.length;
+    const limit = Math.min(ISSUE_LIST_LIMIT, available + 1);
+    const batch = await ctx.issues.list({ companyId, projectId: project.id, status,
+      limit, offset: 0 });
+    if (!Array.isArray(batch) || batch.length >= limit || rows.length + batch.length >= remaining
+        || batch.some(issue => !record(issue) || issue.status !== status)) fail();
+    rows.push(...batch);
+  }
+  return rows;
+}
+
+async function readAllProjectIssues(ctx, projects, companyId, job, assertFresh) {
+  const rows = [];
+  for (const project of projects) {
+    const group = await readProjectIssues(ctx, project, companyId, job,
+      MAX_NATIVE_ISSUES - rows.length, assertFresh);
+    rows.push(...group);
+  }
+  return rows;
 }
 
 async function mapLimit(values, fn) {
@@ -100,10 +138,9 @@ function normalizeAgent(agent, companyId) {
   return { id: agent.id, companyId, status: agent.status, canWake, spareCapacity };
 }
 
-function issueExclusion(issue) {
+function issueExclusion(issue, projectName) {
   const title = issue.title;
   const description = typeof issue.description === 'string' ? issue.description : '';
-  const projectName = typeof issue.project?.name === 'string' ? issue.project.name : '';
   const labels = Array.isArray(issue.labels)
     ? issue.labels.map(label => typeof label?.name === 'string' ? label.name : '').join(' ')
     : '';
@@ -193,22 +230,22 @@ function hasPendingApproval(approvals) {
     || !['approved', 'rejected', 'cancelled', 'canceled', 'expired'].includes(approval.status.toLowerCase()));
 }
 
-function normalizeIssue(issue, config, agents, job, asOf, evidence) {
+function normalizeIssue(issue, config, agents, job, asOf, observedAt, evidence) {
   if (!record(issue) || issue.companyId !== config.companyId || typeof issue.id !== 'string'
       || typeof issue.projectId !== 'string' || typeof issue.title !== 'string'
-      || !ISSUE_STATUSES[job].has(issue.status)) fail();
+      || !ISSUE_STATUSES[job].includes(issue.status)) fail();
   if (issue.assigneeAgentId !== null && issue.assigneeAgentId !== undefined && typeof issue.assigneeAgentId !== 'string') fail();
   if (issue.assigneeUserId !== null && issue.assigneeUserId !== undefined && typeof issue.assigneeUserId !== 'string') fail();
   const createdAt = requiredTimestamp(issue.createdAt);
   const updatedAt = requiredTimestamp(issue.updatedAt);
-  if (createdAt > updatedAt || updatedAt > asOf) fail();
+  if (createdAt > updatedAt || updatedAt > observedAt) fail();
   const priority = issue.priority;
   if (!['critical', 'high', 'medium', 'low'].includes(priority)) fail();
 
   const project = config.projects.find(item => item.id === issue.projectId && item.admitted);
   const ownerId = issue.assigneeAgentId ?? project?.assigneeAgentId ?? null;
   const owner = ownerId ? agents.get(ownerId) : null;
-  const excluded = issueExclusion(issue);
+  const excluded = issueExclusion(issue, project?.name ?? '');
   const recentBacklogUpdate = job === 'backlogFloor' && issue.status === 'backlog'
     && asOf - updatedAt < DAY;
   const deadline = monitorDeadline(issue);
@@ -261,13 +298,12 @@ export async function collectNativeSnapshot(ctx, job, companyId, config, clock =
   if (!Number.isSafeInteger(asOf) || asOf < 0) fail('invalid-time');
   try {
     const projects = config.projects.filter(project => project.admitted).sort((a, b) => a.rank - b.rank);
-    const [issuePages, rawAgents] = await Promise.all([
-      mapLimit(projects, project => readAll(input => ctx.issues.list(input), {
-        companyId, projectId: project.id,
-      })),
-      readAll(input => ctx.agents.list(input), { companyId }),
+    const assertFresh = () => assertSnapshotFresh(asOf, config, clock);
+    const [rawIssues, rawAgents] = await Promise.all([
+      readAllProjectIssues(ctx, projects, companyId, job, assertFresh),
+      readAll(input => ctx.agents.list(input), { companyId }, assertFresh),
     ]);
-    const allIssues = uniqueRows(issuePages.flat());
+    const allIssues = uniqueRows(rawIssues);
     const allAgents = uniqueRows(rawAgents);
     if (allAgents.some(agent => agent.companyId !== companyId)) fail();
     const agents = allAgents.map(agent => normalizeAgent(agent, companyId));
@@ -275,15 +311,17 @@ export async function collectNativeSnapshot(ctx, job, companyId, config, clock =
     const selected = allIssues.filter(issue => {
       if (!record(issue) || issue.companyId !== companyId) fail();
       if (!projects.some(project => project.id === issue.projectId)) fail();
-      return ISSUE_STATUSES[job].has(issue.status);
+      return ISSUE_STATUSES[job].includes(issue.status);
     });
-    const issues = await mapLimit(selected, async issue => {
-      const evidence = await readIssueEvidence(ctx, issue, companyId);
-      return normalizeIssue(issue, config, agentsById, job, asOf, evidence);
+    const evidence = await mapLimit(selected, issue => {
+      assertFresh();
+      return readIssueEvidence(ctx, issue, companyId);
     });
     const endedAt = clock();
     if (!Number.isSafeInteger(endedAt) || endedAt < asOf) fail('invalid-time');
     if (endedAt - asOf > config.maxSnapshotAgeMs) throw new SupplyError('stale-snapshot');
+    const issues = selected.map((issue, index) => normalizeIssue(issue, config, agentsById,
+      job, asOf, endedAt, evidence[index]));
     return { companyId, capturedAt: asOf, complete: true, issues, agents };
   } catch (error) {
     if (error instanceof SupplyError) throw error;

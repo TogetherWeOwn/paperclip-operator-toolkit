@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { manifest } from '../src/manifest.mjs';
 import { createSupplyPlugin, resolveConfig } from '../src/plugin.mjs';
-import { SCHEDULED_JOBS } from '../src/policy.mjs';
+import { MAX_CONFIG_PROJECTS, SCHEDULED_JOBS, SupplyError } from '../src/policy.mjs';
 import { NOW, config, issue, snapshot } from './fixtures.mjs';
 
 const rawConfig = patch => {
@@ -49,6 +49,9 @@ test('package declares real manifest and worker files with matching version', as
   assert.deepEqual(manifest.jobs.map(j => j.jobKey), SCHEDULED_JOBS);
   assert.deepEqual(manifest.capabilities, ['jobs.schedule', 'plugin.state.read', 'plugin.state.write', 'issues.read',
     'agents.read', 'issue.relations.read', 'issues.orchestration.read', 'issue.interactions.read']);
+  const projects = manifest.instanceConfigSchema.properties.projects;
+  assert.equal(projects.maxItems, MAX_CONFIG_PROJECTS);
+  assert.ok(projects.items.required.includes('name'));
 });
 test('config defaults paused and shadow, identity is exclusively host-derived', () => {
   assert.equal(resolveConfig('company-a', {}).pause, true);
@@ -249,6 +252,25 @@ test('actual default collector cannot manufacture a complete empty census', asyn
   assert.ok(health.details.firings.every(f => f.code === 'native-snapshot-source-unavailable'));
 });
 
+test('collector SupplyError codes reach plugin health and logs', async () => {
+  const readClients = {
+    issues: {
+      list: async () => { throw new SupplyError('native-snapshot-incomplete'); },
+      relations: { get: async () => ({ blockedBy: [], blocks: [] }) },
+      listInteractions: async () => [],
+      summaries: { getOrchestration: async () => ({ runs: [], approvals: [], openBudgetIncidents: [], invocationBlocks: [] }) },
+    },
+    agents: { list: async () => [] },
+  };
+  const h = await harness({ readClients, pressure: () => healthy() });
+  await h.configure('company-a', rawConfig());
+
+  await assert.rejects(h.handlers.get('backlogFloor')(job('backlogFloor')), /work-supply-job-failed/);
+  assert.equal((await h.plugin.onHealth()).details.firings[0].code, 'native-snapshot-incomplete');
+  assert.ok(h.logs.some(([message, details]) => message === 'work-supply: shadow firing failed'
+    && details.code === 'native-snapshot-incomplete'));
+});
+
 test('default worker collects backlog from SDK read clients and registers no host-only jobs', async () => {
   const readIssue = { id: 'native-issue', companyId: 'company-a', projectId: 'primary', title: 'Native issue',
     description: null, status: 'backlog', priority: 'medium', createdAt: new Date(NOW - 3 * 86_400_000),
@@ -260,7 +282,7 @@ test('default worker collects backlog from SDK read clients and registers no hos
     pausedAt: null, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } };
   const readClients = {
     issues: {
-      list: async input => input.projectId === readIssue.projectId ? [readIssue] : [],
+      list: async input => input.projectId === readIssue.projectId && input.status === readIssue.status ? [readIssue] : [],
       relations: { get: async () => ({ blockedBy: [], blocks: [] }) },
       listInteractions: async () => [],
       summaries: { getOrchestration: async () => ({ runs: [], approvals: [], openBudgetIncidents: [], invocationBlocks: [] }) },
@@ -271,7 +293,8 @@ test('default worker collects backlog from SDK read clients and registers no hos
   await h.configure('company-a', rawConfig({ floor: 1 }));
   await h.handlers.get('backlogFloor')(job('backlogFloor'));
   const ledger = await h.data.get('shadow-ledger')({ companyId: 'company-a' });
-  assert.equal(ledger.entries[0].action.issueId, 'native-issue');
+  assert.deepEqual(ledger.entries, []);
+  assert.deepEqual(ledger.observations, []);
   assert.deepEqual([...h.handlers.keys()], SCHEDULED_JOBS);
   assert.equal((await h.plugin.onHealth()).details.firings[0].status, 'shadow');
 });

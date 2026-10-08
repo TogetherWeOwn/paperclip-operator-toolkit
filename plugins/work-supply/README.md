@@ -66,8 +66,14 @@ The reader uses the pinned API-v1 source surface (not docs): `ctx.issues.list(in
 `ctx.agents.list(input)`, `ctx.issues.relations.get(issueId, companyId)`,
 `ctx.issues.summaries.getOrchestration(input)`, and
 `ctx.issues.listInteractions(issueId, companyId)`. The manifest grants `issues.read`, `agents.read`,
-`issue.relations.read`, `issues.orchestration.read`, and `issue.interactions.read`. List calls are
-read in `limit`/`offset` pages and issue evidence is collected with a bounded worker pool.
+`issue.relations.read`, `issues.orchestration.read`, and `issue.interactions.read`. Issue lists query
+only relevant statuses at offset zero; each query is bounded by the remaining company-wide issue
+budget plus one, with a 1,000-row SDK ceiling. The host applies the offset at both service and plugin
+layers, so a possibly truncated result fails closed rather than being paginated. At most 100 projects
+are configurable, and the collector fails closed at 500 issues or agents; successful snapshots
+therefore contain fewer than 500 of each. Agent lists use bounded 100-row `limit`/`offset` pages.
+Issue evidence is collected with a bounded worker pool, and snapshot freshness is rechecked before
+list pages, issue queries and each issue's evidence reads.
 
 - `backlogFloor` defaults to 40. Project order comes from configured `rank`: place product projects
   ahead of the designated lower-priority projects. Project names and IDs are supplied by host config,
@@ -86,22 +92,31 @@ read in `limit`/`offset` pages and issue evidence is collected with a bounded wo
 - There is no standalone heartbeat-run client. `getOrchestration` exposes issue-scoped runs, and the
   pinned host query caps this list at 100; a 100-row result is treated as incomplete and suppresses
   that issue. It does not provide the exact agent-wide running count used by the scheduler.
-- The `Agent` type has no typed spare-capacity field. The pinned heartbeat source computes
-  `maxConcurrentRuns - countRunningRunsForAgent` and clamps the limit to at least one. The collector
-  uses `status: "idle"` as positive evidence of at least one free slot (the host derives status from
-  its running-run count) and emits at most one wake per idle agent. It does not wake `running` agents,
-  even when they may have spare slots; this is intentionally conservative, not an exact capacity
-  reconstruction.
-- `prSupply` and `reviewReconcile` are not scheduled: the pinned `PluginContext` has no `connections`
-  or complete work-product/GitHub reader. `intentSweep` is also outside this slice. Native issue
-  snapshots therefore carry `prState: "unknown"` and no PR IDs; job validation does not treat these
-  two collectors as GitHub readers.
+- The host agent enum also includes `active` and `pending_approval`. Those states are preserved in the
+  snapshot with `canWake: false` and zero spare capacity, so either state is valid evidence but never
+  makes an agent eligible for a wake. The `Agent` type has no typed spare-capacity field. The pinned
+  heartbeat source computes `maxConcurrentRuns - countRunningRunsForAgent` and clamps the limit to at
+  least one. The collector uses `status: "idle"` as positive evidence of at least one free slot (the
+  host derives status from its running-run count) and emits at most one wake per idle agent. It does
+  not wake `running` agents, even when they may have spare slots; this is intentionally conservative,
+  not an exact capacity reconstruction.
+- The pinned issue list/get bridge returns issue rows without work products; the SDK exposes no
+  work-product or GitHub reader. Native snapshots therefore carry `prState: "unknown"` and no PR IDs.
+  The shared eligibility policy accepts only `none` or `open` PR state, rejecting both `closed` and
+  `unknown`; this prevents a closed-PR card from receiving a promotion or wake proposal. As a result,
+  native `backlogFloor` and `idleWake` currently emit no proposals and cannot establish decision parity
+  or support cutover. Keep the host scripts authoritative until an approved native association reader
+  is available. `prSupply` and `reviewReconcile` remain unscheduled, and `intentSweep` is outside this
+  slice.
 
-Source references at build `ad29901a3ae83c4825967be29212c99c1014eaa4`:
-[SDK clients](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/plugins/sdk/src/types.ts),
-[issue fields](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/shared/src/types/issue.ts),
-[agent fields](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/packages/shared/src/types/agent.ts), and
-[heartbeat capacity implementation](https://github.com/paperclipai/paperclip/blob/ad29901a3ae83c4825967be29212c99c1014eaa4/server/src/services/heartbeat.ts).
+Source references at build `ad29901a3ae83c4825967be29212c99c1014eaa4` in upstream repo
+`paperclipai/paperclip`:
+- SDK client signatures: `packages/plugins/sdk/src/types.ts`
+- issue and agent fields: `packages/shared/src/types/issue.ts`, `packages/shared/src/types/agent.ts`
+- agent status enum: `packages/shared/src/constants.ts`
+- issue query and host windowing: `server/src/services/issues.ts`, `server/src/services/plugin-host-services.ts`
+- heartbeat capacity implementation: `server/src/services/heartbeat.ts`
+
 These source files were inspected at the build SHA; the host’s installed `node_modules` was not.
 
 ## Host pressure guard
@@ -165,26 +180,32 @@ are safe nonnegative integer milliseconds, never human-readable date strings. Un
 must not be normalized into a false barrier or successful gate.
 
 Configuration starts from `config.example.json`: paused, shadow-only, no admitted projects or
-repositories. Project entries are `{ id, rank, admitted, assigneeAgentId }`; an assignee can be null.
-Repository entries are `{ repo: "owner/name", projectId }`. Each job has separate per-run and
-rolling-hour caps. Lower project rank wins. Project or assignee maps contain no company-specific
-values in code. The kernel does not decide routing, model placement, budgets or admission.
+repositories. Project entries are `{ id, name, rank, admitted, assigneeAgentId }`; the nonblank name
+is required for configured project-name exclusions, and the map is limited to 100 entries. An
+assignee can be null. Repository entries are `{ repo: "owner/name", projectId }`. Each job has
+separate per-run and rolling-hour caps. Lower project rank wins. Project or assignee maps contain no
+company-specific values in code. The kernel does not decide routing, model placement, budgets or
+admission.
 
 A snapshot has:
 
-- `companyId`, `capturedAt`, `complete: true` and arrays `issues`, `agents`, `prs`, `intents`.
-  All pages and applicable repositories must have been read successfully. A truncated list,
-  denied source, missing collection, foreign company, duplicate identity or stale/future timestamp
-  fails closed. Empty complete arrays are valid; a source failure is not an empty array.
+- `companyId`, `capturedAt`, `complete: true`, and `issues`/`agents` arrays. `prs` is required for
+  `prSupply` and `reviewReconcile`; `intents` is required for `intentSweep`; other jobs may omit them.
+  All applicable reads must complete successfully. A truncated list, denied source, missing required
+  collection, foreign company, duplicate identity or stale/future timestamp fails closed. Empty
+  complete arrays are valid; a source failure is not an empty array.
 - Issues: `id`, `companyId`, `projectId`, `status`, `priority`, `createdAt`, `updatedAt`, nullable
   `assigneeAgentId` and `assigneeUserId`, explicit booleans `held`, `blocked`, `awaitingInput`,
-  `liveRun`, `runnable`, `prState: "none" | "open" | "closed"`, and `pullRequestIds`.
+  `liveRun`, `runnable`, `prState: "none" | "open" | "closed" | "unknown"`, and
+  `pullRequestIds?: string[] | null`. `unknown`/`null` PR evidence is accepted only for jobs that do
+  not require PR data; `prSupply` and `reviewReconcile` require a known PR state and an ID array.
   Collectors must include native tree holds, blockers, interactions/review waits, queued/running
   invocations and quota/admission barriers in these fields. `runnable` is positive native evidence,
   not merely the absence of a visible error.
-- Agents: `id`, `companyId`, `status: "idle" | "running" | "paused" | "error" | "terminated"`,
-  and `canWake`, derived from native budget/admission/hold evidence. Running agents can own supplied
-  todo cards but cannot receive an `idleWake` suggestion.
+- Agents: `id`, `companyId`, `status: "active" | "idle" | "running" | "paused" | "error" |
+  "pending_approval" | "terminated"`, boolean `canWake`, and nonnegative safe integer `spareCapacity`.
+  `active` and `pending_approval` are valid host states but not wakeable. Running agents can own
+  supplied todo cards but cannot receive an `idleWake` suggestion.
 - PRs: `id`, `companyId`, `repo`, `state: "open" | "closed" | "merged"`, `createdAt`, `headSha`,
   `draft`, `ciState: "success" | "failure" | "pending" | "unknown"`,
   `reviewState: "missing" | "error" | "pending" | "changes_requested" | "approved"`, nullable
