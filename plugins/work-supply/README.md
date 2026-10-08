@@ -1,14 +1,72 @@
-# Work supply — shadow decision kernel
+# Work supply — native shadow package
 
-**This is the first, offline-only slice, not an installable Paperclip plugin.** It has no worker,
-manifest, scheduler registration, network client, credential access or core mutation method. It
-cannot replace a host reconciler. `mode: "live"` is rejected, even when passed by a caller that
-intends to apply the returned actions. Keep existing reconcilers authoritative.
+**Version 0.2.0 adds a loadable Paperclip API-v1 manifest, worker and five scheduled handlers to the
+shadow decision kernel. It is NOT parity-ready or a live replacement for host reconcilers.** The
+complete native read adapter is unavailable on the inspected SDK; the actual worker fails closed
+instead of manufacturing an empty census. Installing this package alone does not start meaningful
+shadowing. `mode: "live"` and `mode: "apply"` remain rejected. Keep host reconcilers authoritative.
 
-The kernel separates deterministic decisions from collection and execution so a future native
-plugin can compare intended actions without duplicating live writes. Initial policies are derived
-from the requested work-supply behavior, **not verified parity with existing host scripts**.
-Source parity, the native integration, independent review and rollout are separate gates.
+The kernel separates deterministic decisions from collection and execution. Initial policies are
+derived from the requested behavior, **not verified parity with existing host scripts**. Native
+collection, governed effects, source parity, independent review and rollout remain separate gates.
+There is no HTTP client, shell collector, credential access, agent tool or core mutation method.
+
+## Package and native scheduling
+
+`package.json.paperclipPlugin` points to `src/manifest.mjs` and `src/worker.mjs`. Source modules are
+shipped directly; no build step is required. Node 24 and the host's compatible API-v1
+`@paperclipai/plugin-sdk` peer are required. The inspected SDK source identifies itself as 1.0.0;
+compatibility with a different deployed build must be verified, not inferred from a package name.
+
+```sh
+npm pack ./plugins/work-supply --pack-destination "$PAPERCLIP_RUN_SCRATCH_DIR"
+```
+
+This creates a candidate package, not an installation receipt. Verify the tarball's paths,
+checksum, SDK peer resolution and same-head review/CI before any Operator installation into a
+**new versioned immutable package path**. Do not reuse an existing package path, POST configuration,
+change tool policies or retire timers as a packaging shortcut.
+
+All five manifest jobs fire every five minutes at an off-minute start. Their company-specific
+callbacks are serialized so concurrent scheduled invocations cannot overwrite shadow state or
+starve four jobs behind the kernel's busy fence. Different company queues start independently, so
+one stalled company does not prevent the others from running. Company scope is taken only from host-delivered
+`onConfigChanged` context; no company enumeration or caller-provided company identity is used.
+The worker reloads each company's config with `ctx.config.get(companyId)` for each firing.
+
+The ledger is stored in Paperclip's **plugin DB-backed state store**, with
+`scopeKind: "company"`, `namespace: "work-supply"`, `stateKey: "shadow-ledger-v1"`. One plugin worker
+owns this ledger. This is not a distributed CAS or a claim for core effects; do not run multiple
+independent instances sharing it. An unavailable/failed write is a failed job, never success.
+`ctx.data` exposes the scoped `shadow-ledger` read, and `onHealth` returns bounded per-job status;
+job failures also throw and log allowlisted codes. Registry display of these diagnostics and real
+host scheduling/storage remain unverified until deployment acceptance.
+
+`createSupplyPlugin({ collect, pressure, clock })` is an offline integration seam, exercised with
+fixtures in tests. The shipped `worker.mjs` supplies **no fake collector**: unpausing it produces
+`native-snapshot-source-unavailable`. Paused firings and missing-source failures do not count toward
+a 2–4-hour parity window. A reviewed supported native read adapter must land before that window.
+
+## Host pressure guard
+
+Every unpaused firing with an available collector reads fixed PSI paths under `/proc/pressure`
+and filesystem statistics for `/` and `/home` before collecting or proposing any action:
+
+- CPU `some avg10` > 30%, IO `some avg10` > 30%, or memory `full avg10` > 5%: suppress all proposals.
+- Root used >= 93% or home used >= 95%: suppress all proposals. Filesystem usage follows `df`'s
+  reserved-block-aware, rounded-up percentage; safe integer/BigInt arithmetic avoids overflow.
+- Missing/malformed/out-of-range/stale/future metrics, a read failure or unverified mount provenance
+  fail closed. Freshness is at most 60 seconds. CPU/memory limit equality is permitted; disk
+  equality is held. The same sample is revalidated before/after snapshot collection and immediately
+  before each state write; a slow dependency cannot consume observation budget using expired pressure.
+
+`hostPressureScopeVerified` defaults false. The Operator must prove that these paths describe the
+**actual host**, not a container-only filesystem, before setting it true through the sanctioned
+configuration path. Reading files successfully does not establish that scope. Pressure-held
+firings record zero observations without consuming the ledger/cooldown; they are not agreement
+samples. PSI semantics: https://docs.kernel.org/accounting/psi.html. Filesystem API:
+https://nodejs.org/api/fs.html#class-fsstatfs. Exact parity with an unavailable host helper is
+unverified; the thresholds above implement the specified contract.
 
 ## Run
 
@@ -119,7 +177,7 @@ observations only. Live actions require a unique plugin-DB claim, payload bindin
 in-flight/unknown state before mutation and reconciliation after an ambiguous outcome. A timeout
 must never become permission to retry an unknown effect.
 
-## Native integration requirements — still unimplemented
+## Native integration gates — remaining before parity and cutover
 
 Official Paperclip source: https://github.com/paperclipai/paperclip
 
@@ -128,9 +186,10 @@ declarations"; SDK contracts: `packages/plugins/sdk/src/types.ts`.
 
 Verified SDK/runtime design constraints in the inspected source:
 
-1. Declare all five `jobs[]` and register each handler through `ctx.jobs.register`. Scheduled context
-   has no agent identity. Restrict proactive company access to explicitly configured company scopes;
-   listing companies is not authorization.
+1. All five `jobs[]` declarations and `ctx.jobs.register` handlers are packaged. Scheduled context
+   has no agent identity. The worker uses explicitly host-configured company scopes; listing
+   companies is not authorization. Verify real scheduled invocation/scope behavior on the exact
+   installed host build before counting a shadow window.
 2. Use `manifest.database` migrations and the plugin SQL namespace for atomic unique claims.
    `ctx.state.set` is a blind JSON upsert, not CAS. A single conditional SQL statement can claim an
    intent; there is no transaction spanning that claim and native issue creation. Reconcile plugin

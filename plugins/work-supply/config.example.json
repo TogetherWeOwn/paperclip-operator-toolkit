@@ -1,7 +1,7 @@
 {
-  "companyId": "example-company",
   "mode": "shadow",
   "pause": true,
+  "hostPressureScopeVerified": false,
   "floor": 40,
   "maxSnapshotAgeMs": 60000,
   "cooldownMs": 21600000,
