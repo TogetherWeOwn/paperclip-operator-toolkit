@@ -1507,6 +1507,8 @@ jobs:
       - name: Prove the dark-step reporter still detects a silenced report
         run: |
           set -uo pipefail
+          # Mutants must not publish fabricated reports to this step's summary.
+          unset GITHUB_STEP_SUMMARY
           rc=0
           # dark_mutation <label> <file> <sed-expr> <named test that must go red>
           dark_mutation() {
@@ -1569,40 +1571,190 @@ jobs:
             "s/::error title=/note: /" \
             'emits a ::error annotation' || rc=1
 
-          # 3. An unobservable step list reports clean instead of refusing —
-          #    TOG-357's rule that a check which did not happen is not an answer.
-          dark_mutation "unobservable-reads-as-clean" ci_dark_steps.sh \
-            's/|| refuse "the job object carries no step list; nothing was measured"/|| true/' \
-            'REFUSES rather than reporting zero dark steps' || rc=1
-
-          # 4. Stop attributing the aborting step. "79 steps did not run" without
+          # 3. Stop attributing the aborting step. "78 steps did not run" without
           #    "because step 12 failed" sends the reader back to bisecting a log.
           dark_mutation "culprit-no-longer-attributed" ci_dark_steps.sh \
             's/^CULPRIT="\$(jq.*$/CULPRIT=""/' \
             'names the step that aborted the job' || rc=1
 
-          # 5. Cry wolf on clean runs. A warning on all 89-of-89 runs is one
+          # 4. Cry wolf on clean runs. A warning on every clean run is one
           #    every reviewer learns to scroll past, which is the same as absent.
           dark_mutation "warns-on-a-clean-run" ci_dark_steps.sh \
             's/^if \[\[ "\$DARK" -eq 0 \]\]; then/if [[ "$DARK" -lt 0 ]]; then/' \
             'raises no error annotation' || rc=1
 
-          # 6. Drop `if: always()` from the wiring. This silently re-blinds the
+          # 5. Drop `if: always()` from the wiring. This silently re-blinds the
           #    job: the reporter is then skipped by the very abort it describes,
           #    and prints only on the runs that did not need it. The suite pins
           #    the workflow file for this one reason.
           dark_mutation "if-always-dropped-from-wiring" .github/workflows/ci.yml \
-            '/- name: Report steps that never ran/{n;/if: always()/d;}' \
-            'wired with if: always()' || rc=1
+            '/- name: Report steps that never ran - ci_dark_steps reporter/{n;/if: always()/d;}' \
+            'wired with if: always\(\)' || rc=1
 
-            # 7. TOG-3427. Count only `"skipped"` as dark again. On a fail-fast
+            # 6. Count only `"skipped"` as dark again. On a fail-fast
             # abort the unreached steps still carry `conclusion: null` at
             # report time, so this reverts the tool to reading 0 dark and
             # printing "all N steps executed" over a 55-step abort — the exact
             # false green the abort-null fixture pins.
             dark_mutation "null-conclusions-not-counted-as-dark" ci_dark_steps.sh \
-            's/select(.conclusion != "success" and .conclusion != "failure")/select(.conclusion=="skipped")/' \
+            's/.conclusion == null and .status != "in_progress"/false/' \
             'an aborted run never prints the clean banner' || rc=1
+
+            # 7. A step still marked in_progress/null has started; treating it
+            # as dark raises a false error on the live view of a green job.
+            dark_mutation "in-progress-step-counted-as-dark" ci_dark_steps.sh \
+            's/ and .status != "in_progress"//' \
+            'an in-progress gate step is not reported as dark' || rc=1
+
+          # 8. Runner setup is not a workflow gate. If it remains in the gate
+          #    set, an otherwise gate-free job can look clean instead of refusing.
+          dark_mutation "runner-setup-counted-as-gate" ci_dark_steps.sh \
+            's/(.name != "Set up job" or .number != 1) and //' \
+            'a job with only runner lifecycle steps REFUSES' || rc=1
+
+          # 9. A workflow gate can reuse the runner's display name; exclude only
+          #    the runner-generated first step, not a same-named workflow gate.
+          dark_mutation "same-name-workflow-gate-dropped" ci_dark_steps.sh \
+            's/(.name != "Set up job" or .number != 1)/.name != "Set up job"/' \
+            'a same-named workflow gate is retained' || rc=1
+
+          # 10. The runner's final bookkeeping step is not a workflow gate.
+          dark_mutation "runner-completion-counted-as-gate" ci_dark_steps.sh \
+            's/\.number < \$reporter/(.number < \$reporter or .name == "Complete job")/' \
+            'runner setup and completion are excluded from the gate count' || rc=1
+
+          # 11. A job with no gates cannot be certified as a clean run.
+          dark_mutation "empty-gate-set-reports-clean" ci_dark_steps.sh \
+            's/ || refuse "the gate set is empty; nothing was measured"/ || true/' \
+            'a job with only runner lifecycle steps REFUSES' || rc=1
+
+          # 12. A completed timeout is a failed run, not an unstarted gate.
+          dark_mutation "timed-out-step-counted-as-dark" ci_dark_steps.sh \
+            's/.conclusion == "skipped"/.conclusion == "skipped" or .conclusion == "timed_out"/' \
+            'a completed timeout is not counted as a never-run step' || rc=1
+
+          # 13. A workflow gate may start with `Post`; filtering lifecycle steps
+          #     by that name prefix falsely certifies it as executed.
+          dark_mutation "post-named-workflow-gate-dropped" ci_dark_steps.sh \
+            's/\.number < \$reporter/.number < $reporter and (.name | startswith("Post ") | not)/' \
+            'a Post-named workflow gate remains in the gate count' || rc=1
+
+          # 14. A gate may share the reporter label; use the last matching step,
+          #     which the workflow wiring contract pins as the real reporter.
+          dark_mutation "same-reporter-label-gate-dropped" ci_dark_steps.sh \
+            's/] | last \/\/ empty/] | first \/\/ empty/' \
+            'a same-named reporter marker gate remains in the gate count' || rc=1
+
+          # 15. A just-completed gate can still read pending/null from the API.
+          #     Removing the live refresh must make the lag fixture raise ::error.
+          dark_mutation "api-lagging-view-classified-dark" ci_dark_steps.sh \
+            's/if \[\[.*has_ambiguous_gate; then/if false; then/' \
+            'lagging pending/null API view is retried before dark classification' || rc=1
+
+          # 16. A preceding gate can remain in_progress in a stale API snapshot.
+          dark_mutation "live-in-progress-gate-not-refreshed" ci_dark_steps.sh \
+            's/select(.conclusion == null)/select(.conclusion == null and .status != "in_progress")/' \
+            'the live in-progress gate settles after one refresh' || rc=1
+
+          # 17. Stable nulls without an observed abort must not become a false error.
+          dark_mutation "stable-stale-green-reported-dark" ci_dark_steps.sh \
+            's/|| refuse "stable null gate steps do not follow a confirmed abort; refusing to classify them as dark"/|| true/' \
+            'a stable stale-green API view is refused rather than called dark' || rc=1
+
+          # 18. An invalid reporter boundary must keep the live view unsettled.
+          dark_mutation "stale-reporter-boundary-not-refreshed" ci_dark_steps.sh \
+            's/if \[\[ "\$LIVE_API" -eq 1 && "\$REPORTER_VALID" -ne 1 \]\]; then/if false; then/' \
+            'the refreshed reporter boundary includes every workflow gate' || rc=1
+
+          # 19. A same-named completed gate cannot stand in for the live reporter.
+          dark_mutation "stale-same-name-reporter-accepted" ci_dark_steps.sh \
+            's/if \[\[ ( "\$LIVE_API" -eq 0 || ( "\$REPORTER_COUNT" -eq 1 && "\$REPORTER_STATUS" == "in_progress" ) ) && "\$REPORTER_GATE_AFTER" -eq 0 \]\]; then/if true; then/' \
+            'the refreshed reporter boundary includes every workflow gate' || rc=1
+
+          # 20. Keep the second reporter under if: always(), independently pinned.
+          dark_mutation "runbook-reporter-if-always-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran - ci_dark_steps reporter/{n;/if: always()/d;} }' \
+            'the runbook-gates reporter step is wired with if: always\(\)' || rc=1
+
+          # 21. The second reporter also needs its own Actions token mapping.
+          dark_mutation "runbook-reporter-token-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran - ci_dark_steps reporter/{n;n;n;/GH_TOKEN:/d;} }' \
+            'the runbook-gates reporter step receives the Actions token' || rc=1
+
+          # 22. The second reporter must keep invoking the script.
+          dark_mutation "runbook-reporter-command-dropped" .github/workflows/ci.yml \
+            '/^  runbook-gates:/,/^  [A-Za-z0-9_-]*:/ { /- name: Report steps that never ran - ci_dark_steps reporter/{n;n;n;n;n;s#ci_dark_steps.sh report#true#;} }' \
+            'the runbook-gates reporter step invokes ci_dark_steps.sh' || rc=1
+
+          # 23. Listing job steps must stay within the read-only Actions grant.
+          dark_mutation "actions-read-permission-dropped" .github/workflows/ci.yml \
+            's/^  actions: read$/  actions: write/' \
+            'the workflow grants actions: read for the live reporter' || rc=1
+
+          # 24. Silence both rejection paths to exercise false-dark completed/null data.
+          dark_mutation "completed-null-gate-called-dark" ci_dark_steps.sh \
+            's/\.status == "pending" or \.status == "queued"/.status != "in_progress"/; s/\.status == "completed" and \.conclusion == null/.status == "never-completed" and .conclusion == null/' \
+            'a completed/null gate after an abort is refused' || rc=1
+
+          # 25. A refusal must reach the Actions annotation surface despite `|| true`.
+          dark_mutation "refusal-annotation-hidden" ci_dark_steps.sh \
+            's/::error title=Dark-step report refused::/note: /' \
+            'a refused report emits a visible error annotation' || rc=1
+
+          # 26. Keep the reporter marker distinct from ordinary workflow gate names.
+          dark_mutation "reserved-reporter-marker-lost" ci_dark_steps.sh \
+            's/REPORTER_NAME="Report steps that never ran - ci_dark_steps reporter"/REPORTER_NAME="Report steps that never ran"/' \
+            'a workflow gate sharing the reserved reporter name still reports normally' || rc=1
+
+          # 27. Multiple reserved markers are ambiguous even if the last is in progress.
+          dark_mutation "duplicate-reporter-marker-accepted" ci_dark_steps.sh \
+            's/"\$REPORTER_COUNT" -eq 1 && //' \
+            'a duplicate reporter marker forces one live refresh' || rc=1
+
+          # 28. The live reporter marker must still be running in this API view.
+          dark_mutation "completed-reporter-marker-trusted" ci_dark_steps.sh \
+            's/"\$REPORTER_STATUS" == "in_progress"/true/' \
+            'a completed reporter marker forces one live refresh' || rc=1
+
+          # 29. A workflow gate after the marker proves it is not the reporter boundary.
+          dark_mutation "post-marker-gate-accepted-as-reporter" ci_dark_steps.sh \
+            's/ && "\$REPORTER_GATE_AFTER" -eq 0//' \
+            'the refreshed reporter boundary includes every workflow gate' || rc=1
+
+          # 30. The reserved workflow marker must match the script's live boundary.
+          dark_mutation "workflow-reporter-marker-renamed" .github/workflows/ci.yml \
+            's/^      - name: Report steps that never ran - ci_dark_steps reporter$/      - name: Report steps that never ran/' \
+            'the reporter step is present in ci.yml at step indentation' || rc=1
+
+          # 31. A green view can settle on the final refresh after stable nulls.
+          dark_mutation "late-settling-green-refused-as-abort" ci_dark_steps.sh \
+            's/"\$settled" -eq 0 && //' \
+            'a green API view settling on the final refresh exits normally' || rc=1
+
+          # 32. Fixture subprocesses must not inherit the real Actions summary.
+          dark_mutation "fixture-summary-isolation-lost" test_ci_dark_steps.sh \
+            '/^export GITHUB_STEP_SUMMARY=/d' \
+            "fixture reports write to the suite's scratch summary" || rc=1
+
+          # 33. A lagging job list must not substitute another running job.
+          dark_mutation "unidentified-job-falls-back-to-parallel-job" ci_dark_steps.sh \
+            's/select(\.name == \$key or \.name == \$nm)/select(.status != "completed")/' \
+            'a missing current job refuses rather than selecting a parallel job' || rc=1
+
+          # 34. Missing Actions context must reach the visible refusal handler.
+          dark_mutation "missing-repository-fatal-expansion" ci_dark_steps.sh \
+            's/\[\[ -n "${GITHUB_REPOSITORY:-}" \]\]/: "${GITHUB_REPOSITORY:?}"/' \
+            'a missing repository uses the documented refusal exit' || rc=1
+
+          # 35. Saved data cannot waive an observable gate after the reporter.
+          dark_mutation "saved-post-reporter-gate-hidden" ci_dark_steps.sh \
+            's/ && "\$REPORTER_GATE_AFTER" -eq 0/ \&\& ( "$LIVE_API" -eq 0 || "$REPORTER_GATE_AFTER" -eq 0 )/' \
+            'a saved job with a gate after its reporter refuses' || rc=1
+
+          # 36. Completed/null is inconsistent, not evidence of nonexecution.
+          dark_mutation "saved-completed-null-gate-called-dark" ci_dark_steps.sh \
+            's/\.status == "completed" and \.conclusion == null/.status == "never-completed" and .conclusion == null/' \
+            'a completed saved gate without a conclusion refuses' || rc=1
 
           exit $rc
 
@@ -3281,11 +3433,17 @@ jobs:
       # did not happen must never read as clean.
       #
       # Pinned by test_ci_dark_steps.sh, which asserts this wiring so a future
-      # edit cannot quietly drop the `if:` and re-blind the job.
-      - name: Report steps that never ran
+      # edit cannot quietly drop the `if:` and re-blind the job. Keep this as
+      # the last configured step: ci_dark_steps.sh uses its number as the
+      # boundary before runner-generated teardown. GITHUB_JOB_NAME carries this
+      # job's display name because the API lists jobs by display
+      # name while GITHUB_JOB is the key — without it the tool falls back to
+      # whichever parallel job is still running and annotates the wrong job.
+      - name: Report steps that never ran - ci_dark_steps reporter
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_JOB_NAME: Offline suites
         run: ./ci_dark_steps.sh report || true
 
   # Upgrade rehearsal offline suite (paperclip-upgrade/). A separate required
@@ -4125,10 +4283,15 @@ jobs:
       # TOG-910. Same contract as `offline-suites`: name the steps a fail-fast
       # abort skipped, never fail the build for it. This job is small, but it is
       # the one whose steps going dark caused TOG-1141 in the first place.
-      - name: Report steps that never ran
+      # Keep the reporter last: the tool uses its step number to distinguish
+      # workflow gates from runner-generated teardown steps. GITHUB_JOB_NAME
+      # carries this job's display name: without it the tool falls back to
+      # whichever parallel job is still running.
+      - name: Report steps that never ran - ci_dark_steps reporter
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_JOB_NAME: Operator runbook gates
         run: ./ci_dark_steps.sh report || true
 
   # ---------------------------------------------------------------------------

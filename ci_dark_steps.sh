@@ -45,8 +45,8 @@ set -uo pipefail
 # check that did not happen must never read as a clean answer (TOG-357).
 #
 # Reads: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_JOB,
-#        GITHUB_STEP_SUMMARY, GH_TOKEN (needs actions:read).
-# Requires curl and jq. No credential ever reaches argv (TOG-200).
+#        GITHUB_JOB_NAME, GITHUB_STEP_SUMMARY, GH_TOKEN (needs actions:read).
+# Requires curl and jq; live API retries also require sleep. Credentials stay in a header file.
 # ===========================================================================
 
 ME="$(basename "${BASH_SOURCE[0]}")"
@@ -54,7 +54,7 @@ ME="$(basename "${BASH_SOURCE[0]}")"
 usage() {
   cat <<'USAGE'
   ./ci_dark_steps.sh report                 # annotate the running job (CI use)
-  ./ci_dark_steps.sh report --job-json FILE # report from a saved job object
+  ./ci_dark_steps.sh report --job-json FILE # report a saved job with this reporter step
   ./ci_dark_steps.sh help
 
 Reports the steps a job registered but never executed, because a fail-fast
@@ -68,7 +68,17 @@ USAGE
 }
 
 die()    { printf '%s: %s\n' "$ME" "$1" >&2; exit "${2:-2}"; }
-refuse() { printf '%s: REFUSED: %s\n' "$ME" "$1" >&2; exit 3; }
+refuse() {
+  printf '%s: REFUSED: %s\n' "$ME" "$1" >&2
+  printf '::error title=Dark-step report refused::The reporter could not safely classify the job step list; see the log for details.\n'
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      printf '### ⛔ Dark-step report refused\n\n'
+      printf '%s\n' "$1"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  exit 3
+}
 
 # --- argument parsing ---------------------------------------------------------
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -96,17 +106,49 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --- obtain the job object ----------------------------------------------------
-# Either from a file (tests, and re-analysis of a past run) or from the API for
-# the job this script is running inside.
+# Either from a reporter-instrumented file (tests and re-analysis of a run with
+# this reporter) or from the API for the job this script is running inside.
+LIVE_API=0
+REPORTER_NAME="Report steps that never ran - ci_dark_steps reporter"
+fetch_api_job() {
+  local -a timeout_args=()
+  if [[ $# -gt 0 ]]; then
+    timeout_args=(--connect-timeout "$1" --max-time "$1")
+  fi
+  CODE="$(curl "${timeout_args[@]}" -sS -o "$TMP/jobs.json" -w '%{http_code}' -H @"$HDR" "$URL" 2>"$TMP/curl.err")"
+  [[ "$CODE" == "200" ]] || refuse "listing jobs returned HTTP $CODE (actions:read missing?)"
+
+  if [[ -n "${API_JOB_ID:-}" ]]; then
+    jq --arg id "$API_JOB_ID" \
+       '[.jobs[] | select((.id | tostring) == $id)] | first // empty' \
+       "$TMP/jobs.json" > "$TMP/job.json"
+  else
+    # Match by the workflow KEY where the API exposes it, else by display name.
+    # `GITHUB_JOB` is the key (`offline-suites`); `.name` is the display name
+    # ("Offline suites"), so try both rather than assuming they match.
+    jq --arg key "$GITHUB_JOB" --arg nm "${GITHUB_JOB_NAME:-}" \
+       '[.jobs[] | select(.name == $key or .name == $nm)] | first // empty' \
+       "$TMP/jobs.json" > "$TMP/job.json"
+  fi
+  [[ -s "$TMP/job.json" ]] || refuse "could not identify job '${GITHUB_JOB:-?}' in run ${GITHUB_RUN_ID:-?}"
+}
+
+validate_job() {
+  jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
+     "$TMP/job.json" >/dev/null 2>&1 \
+    || refuse "the job object carries no step list; nothing was measured"
+}
+
 if [[ -n "$JOB_JSON" ]]; then
   [[ -s "$JOB_JSON" ]] || refuse "job json is missing or empty: $JOB_JSON"
   cp "$JOB_JSON" "$TMP/job.json"
 else
-  : "${GITHUB_REPOSITORY:?}" 2>/dev/null || refuse "GITHUB_REPOSITORY is unset; not running in Actions"
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] || refuse "GITHUB_REPOSITORY is unset; not running in Actions"
   [[ -n "${GITHUB_RUN_ID:-}" ]]  || refuse "GITHUB_RUN_ID is unset"
   [[ -n "${GITHUB_JOB:-}" ]]     || refuse "GITHUB_JOB is unset"
   [[ -n "${GH_TOKEN:-}" ]]       || refuse "GH_TOKEN is unset; actions:read is required to list job steps"
 
+  LIVE_API=1
   ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
   # The token goes in a header FILE, never in argv — /proc/*/cmdline is
   # world-readable and this host is shared (TOG-200).
@@ -115,57 +157,172 @@ else
   printf 'Accept: application/vnd.github+json\n' >> "$HDR"
 
   URL="$API/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$ATTEMPT/jobs?per_page=100"
-  CODE="$(curl -sS -o "$TMP/jobs.json" -w '%{http_code}' -H @"$HDR" "$URL" 2>"$TMP/curl.err")"
-  [[ "$CODE" == "200" ]] || refuse "listing jobs returned HTTP $CODE (actions:read missing?)"
-
-  # Match the job by its workflow KEY where the API exposes it, else by name.
-  # `GITHUB_JOB` is the key (`offline-suites`); `.name` is the display name
-  # ("Offline suites"), so try both rather than assuming they match.
-  jq --arg key "$GITHUB_JOB" --arg nm "${GITHUB_JOB_NAME:-}" \
-     '[.jobs[] | select(.name == $key or .name == $nm)] | first // empty' \
-     "$TMP/jobs.json" > "$TMP/job.json"
-  if [[ ! -s "$TMP/job.json" ]]; then
-    # Fall back to the only still-running job, which is this one.
-    jq '[.jobs[] | select(.status != "completed")] | first // empty' \
-       "$TMP/jobs.json" > "$TMP/job.json"
-  fi
-  [[ -s "$TMP/job.json" ]] || refuse "could not identify job '$GITHUB_JOB' in run $GITHUB_RUN_ID"
+  fetch_api_job 5
+  API_JOB_ID="$(jq -r '.id // empty' "$TMP/job.json")"
 fi
 
-jq -e 'has("steps") and (.steps | type == "array") and (.steps | length > 0)' \
-   "$TMP/job.json" >/dev/null 2>&1 \
-  || refuse "the job object carries no step list; nothing was measured"
+validate_job
 
 # --- classify -----------------------------------------------------------------
+# Every count below is taken over workflow gates: steps before the reporter,
+# minus runner setup (`Set up job` at step 1). The reporter is the last
+# configured workflow step, so only runner-generated teardown follows it. Live
+# data accepts one reserved marker with no recognized later gate. The caller
+# must place this marker last: API names alone cannot distinguish arbitrary named
+# post-actions from workflow gates. Use position, not a `Post ` prefix: a workflow
+# gate can legitimately start with that.
+# TOTAL and DARK must use the same set; otherwise the outage fixture reports a
+# dark count that cannot be reconciled with its executed-step tally.
+load_gate_set() {
+  REPORTER_COUNT="$(jq --arg name "$REPORTER_NAME" '[.steps[] | select(.name == $name)] | length' "$TMP/job.json")"
+  REPORTER_NO="$(jq --arg name "$REPORTER_NAME" -r '[.steps[] | select(.name == $name) | .number] | last // empty' "$TMP/job.json")"
+  REPORTER_STATUS="$(jq --arg name "$REPORTER_NAME" -r '[.steps[] | select(.name == $name) | .status] | last // empty' "$TMP/job.json")"
+  REPORTER_GATE_AFTER=0
+  if [[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]]; then
+    REPORTER_GATE_AFTER="$(jq --argjson reporter "$REPORTER_NO" '[.steps[] | select(.number > $reporter) | select(.name != "Complete job" and ((.name // "") | startswith("Post Run ") | not))] | length' "$TMP/job.json")"
+  fi
+  REPORTER_VALID=0
+  if [[ "$REPORTER_NO" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ ( "$LIVE_API" -eq 0 || ( "$REPORTER_COUNT" -eq 1 && "$REPORTER_STATUS" == "in_progress" ) ) && "$REPORTER_GATE_AFTER" -eq 0 ]]; then
+      REPORTER_VALID=1
+    fi
+  fi
+  if [[ "$REPORTER_VALID" -ne 1 ]]; then
+    [[ "$LIVE_API" -eq 1 ]] \
+      || refuse "the reporter step is missing or has later workflow gates; runner lifecycle boundary is unknown"
+    : > "$TMP/gate.json"
+    TOTAL=0
+    return 0
+  fi
+  jq --argjson reporter "$REPORTER_NO" \
+    '[.steps[] | select((.name != "Set up job" or .number != 1) and .number < $reporter)]' \
+    "$TMP/job.json" > "$TMP/gate.json"
+  TOTAL="$(jq 'length' "$TMP/gate.json")"
+  [[ "$TOTAL" -gt 0 ]] || refuse "the gate set is empty; nothing was measured"
+}
+
+has_ambiguous_gate() {
+  if [[ "$LIVE_API" -eq 1 && "$REPORTER_VALID" -ne 1 ]]; then
+    return 0
+  fi
+  jq -e '[.[] | select(.conclusion == null)] | length > 0' \
+    "$TMP/gate.json" >/dev/null
+}
+
+load_gate_set
+if [[ "$LIVE_API" -eq 1 ]] && has_ambiguous_gate; then
+  command -v sleep >/dev/null 2>&1 || refuse "sleep is required to settle live step data"
+  # A null conclusion can mean an unreached fail-fast gate or a just-run gate
+  # whose API update has not landed yet. The reporter runs after every gate, so
+  # even an in_progress gate status may be stale. Re-read the live view five
+  # times. Only stable nulls after a confirmed failed gate are safe to call dark;
+  # otherwise refuse rather than emit a false error on a green job. Five
+  # 1-second sleeps and 2-second request limits bound refreshes to 15 seconds.
+  previous_signature="$(jq -c '[.steps[] | [.number, .name, .status, .conclusion]]' "$TMP/job.json")"
+  stable_repeats=0
+  settled=0
+  for ((poll=1; poll<=5; poll++)); do
+    sleep 1
+    fetch_api_job 2
+    validate_job
+    load_gate_set
+    if ! has_ambiguous_gate; then
+      settled=1
+      break
+    fi
+
+    signature="$(jq -c '[.steps[] | [.number, .name, .status, .conclusion]]' "$TMP/job.json")"
+    if [[ "$signature" == "$previous_signature" ]]; then
+      stable_repeats=$((stable_repeats + 1))
+    else
+      stable_repeats=0
+    fi
+    previous_signature="$signature"
+  done
+  if [[ "$settled" -eq 0 && "$stable_repeats" -ge 2 ]]; then
+    [[ "$REPORTER_VALID" -eq 1 ]] \
+      || refuse "reporter boundary did not settle within 15 seconds; refusing to guess which steps are gates"
+    jq -e '
+      . as $steps
+      | ([$steps[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .number) as $abort
+      | $abort != null
+        and ([$steps[] | select(.conclusion == null)] | all(.number > $abort and (.status == "pending" or .status == "queued")))
+    ' "$TMP/gate.json" >/dev/null \
+      || refuse "stable null gate steps do not follow a confirmed abort; refusing to classify them as dark"
+    settled=1
+  fi
+  [[ "$settled" -eq 1 ]] \
+    || refuse "gate steps did not settle within 15 seconds; refusing to guess which null conclusions are dark"
+fi
+
+# A completed gate ran; an absent verdict cannot make it an unexecuted gate.
+jq -e '[.[] | select(.status == "completed" and .conclusion == null)] | length == 0' \
+  "$TMP/gate.json" >/dev/null \
+  || refuse "a completed gate has no conclusion; refusing to classify it as dark"
+
 JOB_NAME="$(jq -r '.name // "?"' "$TMP/job.json")"
-TOTAL="$(jq   '[.steps[]] | length'                                   "$TMP/job.json")"
-RAN="$(jq     '[.steps[] | select(.conclusion=="success")] | length'  "$TMP/job.json")"
-FAILED="$(jq  '[.steps[] | select(.conclusion=="failure")] | length'  "$TMP/job.json")"
-# Dark means "registered but never executed". A step that ran to a verdict has
-# conclusion `success` or `failure`; everything else — `skipped` on a finalised
-# job, `cancelled`, and above all `null` — is dark. The `null` case is the
-# load-bearing one (TOG-3427): this reporter runs INSIDE the job under
-# `if: always()`, so on a fail-fast abort the unreached steps still carry
-# `conclusion: null` at report time — the runner only rewrites them to
-# `"skipped"` when the job finalises. Counting only `"skipped"` therefore reads
-# 0 dark on exactly the runs this tool exists to describe, and prints the clean
-# banner over them. In a fail-fast job with no `if:` steps, `skipped` and `null`
-# both mean "never reached"; the distinction belongs to the reader.
-DARK="$(jq    '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")] | length' "$TMP/job.json")"
+FULL="$(jq '[.steps[]] | length' "$TMP/job.json")"
+RAN="$(jq '[.[] | select(.conclusion == "success")] | length' "$TMP/gate.json")"
+FAILED="$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | length' "$TMP/gate.json")"
+# Dark means "registered but never executed": a skipped step, or a null
+# conclusion on a step that has not started. A live in-progress step has
+# started and may only be awaiting its final API update. Completed timeouts and
+# other nonstandard conclusions are surfaced separately, not called dark.
+IN_PROGRESS="$(jq '[.[] | select(.status == "in_progress" and .conclusion == null)] | length' "$TMP/gate.json")"
+DARK_FILTER='select(.conclusion == "skipped" or (.conclusion == null and .status != "in_progress"))'
+DARK="$(jq '[.[] | '"$DARK_FILTER"'] | length' "$TMP/gate.json")"
+OTHER_FILTER='select(.conclusion != null and .conclusion != "success" and .conclusion != "failure" and .conclusion != "timed_out" and .conclusion != "startup_failure" and .conclusion != "skipped")'
+OTHER="$(jq '[.[] | '"$OTHER_FILTER"'] | length' "$TMP/gate.json")"
+EXEMPT="$((FULL - TOTAL))"
 
-CULPRIT="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .name // ""' "$TMP/job.json")"
-CULPRIT_NO="$(jq -r '[.steps[] | select(.conclusion=="failure")] | first | .number // ""' "$TMP/job.json")"
+CULPRIT="$(jq -r '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .name // ""' "$TMP/gate.json")"
+CULPRIT_NO="$(jq -r '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | first | .number // ""' "$TMP/gate.json")"
 
-jq -r '[.steps[] | select(.conclusion != "success" and .conclusion != "failure")][] | "  \(.number)\t\(.name)"' \
-   "$TMP/job.json" > "$TMP/dark.txt"
+jq -r '[.[] | '"$DARK_FILTER"'][] | "  \(.number)\t\(.name)"' \
+   "$TMP/gate.json" > "$TMP/dark.txt"
+jq -r '[.[] | '"$OTHER_FILTER"'][] | "  \(.number)\t\(.name)\t\(.conclusion)"' \
+   "$TMP/gate.json" > "$TMP/other.txt"
 
 # --- report -------------------------------------------------------------------
 emit() { printf '%s\n' "$1"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; return 0; }
 
-if [[ "$DARK" -eq 0 ]]; then
-  emit "### ✅ ${JOB_NAME}: all ${TOTAL} steps executed"
+emit_other() {
+  [[ "$OTHER" -gt 0 ]] || return 0
   emit ""
-  emit "No step was skipped, so every gate in this job is load-bearing on this run."
+  emit '<details><summary>Steps with other conclusions</summary>'
+  emit ""
+  emit '```'
+  while IFS=$'\t' read -r num name conclusion; do
+    emit "$(printf '%-4s %s (%s)' "${num# }" "$name" "$conclusion")"
+  done < "$TMP/other.txt"
+  emit '```'
+  emit '</details>'
+}
+
+if [[ "$DARK" -eq 0 ]]; then
+  if [[ "$IN_PROGRESS" -gt 0 ]]; then
+    STEP_WORD="steps"; [[ "$IN_PROGRESS" -eq 1 ]] && STEP_WORD="step"
+    emit "### ⏳ ${JOB_NAME}: ${IN_PROGRESS} gate ${STEP_WORD} still in progress"
+    emit ""
+    emit "No gate step was identified as never started. Any in-progress gate step began but had not reached a verdict when this report ran."
+  elif [[ "$OTHER" -gt 0 ]]; then
+    OTHER_WORD="steps"; OTHER_VERB="have"
+    if [[ "$OTHER" -eq 1 ]]; then OTHER_WORD="step"; OTHER_VERB="has"; fi
+    emit "### ⚠️ ${JOB_NAME}: ${OTHER} gate ${OTHER_WORD} ${OTHER_VERB} nonstandard conclusions"
+    emit ""
+    emit "No gate step was identified as never started, but these outcomes are not counted as passed, failed, or not run."
+  else
+    emit "### ✅ ${JOB_NAME}: all ${TOTAL} steps executed"
+    emit ""
+    emit "No gate step was skipped, so every gate in this job is load-bearing on this run."
+  fi
+  emit ""
+  emit "Executed: ${RAN} passed, ${FAILED} failed. In progress: ${IN_PROGRESS}. Not run: ${DARK}. Other outcomes: ${OTHER}."
+  emit_other
+  if [[ "$EXEMPT" -gt 0 ]]; then
+    emit ""
+    emit "(${EXEMPT} non-gate steps excluded from this count: reporter and runner lifecycle.)"
+  fi
   exit 0
 fi
 
@@ -186,7 +343,12 @@ else
   emit "**${DARK}** steps were registered but never executed on this run."
 fi
 emit ""
-emit "Executed: ${RAN} passed, ${FAILED} failed. Not run: ${DARK}."
+emit "Executed: ${RAN} passed, ${FAILED} failed. In progress: ${IN_PROGRESS}. Not run: ${DARK}. Other outcomes: ${OTHER}."
+emit_other
+if [[ "$EXEMPT" -gt 0 ]]; then
+  emit ""
+  emit "(${EXEMPT} non-gate steps excluded from this count: reporter and runner lifecycle.)"
+fi
 emit ""
 emit '<details><summary>Steps that did not run</summary>'
 emit ""
