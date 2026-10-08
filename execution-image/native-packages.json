@@ -1,0 +1,16 @@
+{
+  "schema": "execution-image.native-packages.v1",
+  "architecture": "amd64",
+  "distribution": "trixie",
+  "snapshot": "20261007T000000Z",
+  "index_url": "https://snapshot.debian.org/archive/debian/20261007T000000Z/dists/trixie/main/binary-amd64/Packages.xz",
+  "packages": {
+    "binutils": "2.44-3",
+    "gcc": "4:14.2.0-1",
+    "gcc-14": "14.2.0-19",
+    "libc6-dev": "2.41-12+deb13u4",
+    "pkg-config": "1.8.1-4",
+    "pkgconf": "1.8.1-4"
+  },
+  "evidence": "read_only_snapshot_index_not_an_installed_package_receipt"
+}
