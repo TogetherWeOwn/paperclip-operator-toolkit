@@ -19,6 +19,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 function issue(overrides: Partial<Issue> = {}): Issue {
@@ -49,6 +50,10 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
 
 async function boot(config: Record<string, unknown>, seedIssue = issue()) {
   const harness = createTestHarness({ manifest, config });
+  // The SDK harness otherwise forwards refresh tools to the real network.
+  harness.ctx.http.fetch = vi.fn(async () => {
+    throw new Error("offline");
+  });
   harness.seed({ issues: [seedIssue] });
   const plugin = createPlugin();
   const setup = plugin.definition.setup;
@@ -82,6 +87,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 describe(": every tool result carries a plain-object data", () => {
   it("registers exactly the TOOL_NAMES registry (this test covers every tool by construction)", async () => {
+    const liveFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("unexpected live fetch");
+    });
     const harness = await boot(baseConfig());
     for (const name of Object.values(TOOL_NAMES)) {
       await expect(
@@ -91,6 +99,7 @@ describe(": every tool result carries a plain-object data", () => {
         `tool ${name} is registered`,
       ).resolves.toBeDefined();
     }
+    expect(liveFetch).not.toHaveBeenCalled();
   });
 
   it("advise: success and not-found paths both carry plain-object data", async () => {

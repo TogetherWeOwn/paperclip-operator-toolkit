@@ -1,0 +1,46 @@
+{
+  "schema": "execution-image.source-packet.v1",
+  "state": "unbuilt_recipe",
+  "carrier_repository": "TogetherWeOwn/paperclip-operator-toolkit",
+  "carrier_base_revision": "5610702179ca2168730aa306f6af2db076c5ca41",
+  "base": {
+    "image_ref": "ghcr.io/paperclipai/paperclip@sha256:95cc19e5fdd7804b9fd8699fbe33a7202ae6a26e2b42dc5e6fdf4785f213deed",
+    "source_repository": "paperclipai/paperclip",
+    "source_ref": "refs/heads/master",
+    "source_revision": "e4b39da6f6304c18d40dff13a5c7d224b3bf50fd",
+    "signer_workflow": "paperclipai/paperclip/.github/workflows/docker.yml@refs/heads/master",
+    "producer_run_url": "https://github.com/paperclipai/paperclip/actions/runs/37717359076",
+    "attestation_url": "https://github.com/paperclipai/paperclip/attestations/53785733",
+    "independent_signature_verification": "UNESTABLISHED"
+  },
+  "wrapper": {
+    "repository": "TogetherWeOwn/two-bot-next",
+    "source_revision": "dfc1433fab43e41b51f9710e0fb3a1d01943d573",
+    "path": "scripts/cargo_cache.py",
+    "sha256": "d5072c3cabe819a28f6f598b3315f5536869fe3ca58f5a9405fe86b364c3036d",
+    "toolchain_version": "1.98.1",
+    "toolchain_file_sha256": "c72ca9d920511e456e5eb5af1083911bbd06d9c74723ec1624430585cc3c5733",
+    "current_policy_acceptance": "UNESTABLISHED"
+  },
+  "files": {
+    "Dockerfile": "4ead497a6ccb03da3b9497a926ca7233181ed8e08ca8343f24997e0d5f4058b6",
+    "README.md": "23b26ad650764550ca0fc7254e2b6d9af7d4813b8b931563e9145910df2b5506",
+    "native-packages.json": "fd91eef15291329f84493ba7c7c4a8f73bd2c151d1d6fcc6d413b44dde0f2e8a",
+    "native.sources": "c84c10319b74e1f6ab16ca7c17a7ce7d290478fe14511df504af9f7b67674186",
+    "runtime-contract.json": "39d7616fe9d73202742aef4aa79c7a41bccf3539b7cbdc05feb7cb65daca6ed7",
+    "test_manifest.py": "004371ce26bd0c1cddd747639130baabec1ca77eabb94fcd972f9dd7be86df0e",
+    "validate.py": "012d4f779b2f3b495997e72c1394f308c48ac151405ab1a8510a95a1b64944cd"
+  },
+  "output": {
+    "image_digest": null,
+    "exact_runtime_receipt": null,
+    "dependency_inventory": null,
+    "configuration_receipt": null
+  },
+  "authorization": {
+    "image_creation": false,
+    "runtime_change": false,
+    "host_action": false,
+    "hold_clearance": false
+  }
+}
