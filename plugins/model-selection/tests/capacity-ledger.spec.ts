@@ -363,6 +363,271 @@ describe('capacity-ledger lifecycle: charged outcomes', () => {
     expect(db2.writes).toHaveLength(0);
   });
 
+  describe('cancelBeforeStart refusals and residue', () => {
+    function withWindows(mutate: (windows: Record<string, Record<string, unknown>>) => void) {
+      const { fp, row } = heldRow();
+      const windows = JSON.parse(row.windows as string);
+      mutate(windows);
+      return { fp, row: { ...row, windows: JSON.stringify(windows) } };
+    }
+
+    async function cancelRefused(row: ReturnType<typeof heldRow>['row'], fp: string) {
+      const db = new ScriptedDb([[row]], []);
+      const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart('attempt-1', fp, EPOCH);
+      expect(db.writes).toHaveLength(0);
+      expect(db.queries).toHaveLength(1);
+      return res;
+    }
+
+    // One window; each amount is a held attempt. Reserved is the left-to-right sum reserve writes.
+    function singleWindowHolds(amounts: number[]) {
+      const fps: Record<string, string> = {};
+      const entries: Record<string, unknown> = {};
+      let reserved = 0;
+      amounts.forEach((amount, i) => {
+        const key = `hold-${i}`;
+        const journaled: LedgerAttempt = {
+          ...attempt(key),
+          debits: [{ windowId: WEEKLY, unit: 'allowance', amount, readReserved: 0 }],
+        };
+        fps[key] = fingerprintAttempt(journaled);
+        entries[key] = {
+          fingerprint: fps[key], outcome: 'held', reservation_version: 1,
+          debits: { [WEEKLY]: { unit: 'allowance', amount, remaining: amount } },
+          duration_ms: 100, reconciliation_ids: [],
+        };
+        reserved += amount;
+      });
+      const windows = {
+        [WEEKLY]: { unit: 'allowance', quota: 100, consumed: 0, reserved, safety_headroom: 0, reset_at: 10000 },
+      };
+      const row = rowJson({
+        version: amounts.length, slotsHeld: amounts.length, slotMax: amounts.length,
+        windows: JSON.stringify(windows), attempts: JSON.stringify(entries),
+      });
+      return { row, fps, keys: Object.keys(entries) };
+    }
+
+    // Cancels in order, feeding each write back as the next read; stops at the first refusal.
+    async function cancelInOrder(start: Record<string, unknown>, fps: Record<string, string>, order: string[]) {
+      let row = start;
+      const persisted: number[] = [];
+      for (const key of order) {
+        const db = new ScriptedDb([[row]], [{ rowCount: 1 }]);
+        const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart(key, fps[key]!, EPOCH);
+        if (!res.cancelled) return { res, persisted };
+        const write = db.writes[0]!;
+        persisted.push(JSON.parse(write.params[6] as string)[WEEKLY].reserved);
+        row = { ...row, windows: write.params[6] as string, attempts: write.params[7] as string };
+      }
+      return { res: { cancelled: true, reasons: [] as string[] }, persisted };
+    }
+
+    function mulberry32(seed: number) {
+      let s = seed >>> 0;
+      return () => {
+        s = (s + 0x6d2b79f5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function shuffled<T>(items: T[], rand: () => number): T[] {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [out[i], out[j]] = [out[j]!, out[i]!];
+      }
+      return out;
+    }
+
+    it('refuses with reservation-window-missing when any journaled window is absent', async () => {
+      const noFiveHour = withWindows(w => { delete w[FIVE_HOUR]; });
+      expect(await cancelRefused(noFiveHour.row, noFiveHour.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-window-missing'] });
+      const noWeekly = withWindows(w => { delete w[WEEKLY]; });
+      expect(await cancelRefused(noWeekly.row, noWeekly.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-window-missing'] });
+    });
+
+    it('commit and reconcile refuse the same absent window without writing', async () => {
+      const { fp, row } = withWindows(w => { delete w[FIVE_HOUR]; });
+      const dbCommit = new ScriptedDb([[row]], []);
+      expect(await new CapacityLedger(dbCommit, NS, TENANT, DOMAIN).commit('attempt-1', fp, EPOCH, NOW))
+        .toEqual({ committed: false, reasons: ['cannot-start-expired-reservation'] });
+      expect(dbCommit.writes).toHaveLength(0);
+
+      // Reconcile only applies to a started attempt, so seed one over the same missing window.
+      const started = JSON.parse(row.attempts as string);
+      started['attempt-1'].outcome = 'committed';
+      const dbRec = new ScriptedDb([[{ ...row, attempts: JSON.stringify(started) }]], []);
+      expect(await new CapacityLedger(dbRec, NS, TENANT, DOMAIN)
+        .reconcile('attempt-1', fp, EPOCH, FIVE_HOUR, 'rec-1', 5, 15, 'src-1', 1, true))
+        .toEqual({ reconciled: false, fullyReconciled: false, reasons: ['reservation-window-or-unit-mismatch'] });
+      expect(dbRec.writes).toHaveLength(0);
+    });
+
+    it('refuses a release that would drive a reserved counter below zero, on either window', async () => {
+      const under = withWindows(w => { w[WEEKLY]!.reserved = 4; });
+      expect(await cancelRefused(under.row, under.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-release-exceeds-reserved'] });
+      const underLast = withWindows(w => { w[FIVE_HOUR]!.reserved = 4; });
+      expect(await cancelRefused(underLast.row, underLast.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-release-exceeds-reserved'] });
+    });
+
+    it('refuses an exactly representable whole-unit over-release at large magnitude', async () => {
+      const { fp, row } = heldRow();
+      const windows = JSON.parse(row.windows as string);
+      windows[WEEKLY].reserved = 1e9;
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['attempt-1'].debits[WEEKLY].amount = 1e9 + 1;
+      attempts['attempt-1'].debits[WEEKLY].remaining = 1e9 + 1;
+      const damaged = { ...row, windows: JSON.stringify(windows), attempts: JSON.stringify(attempts) };
+      expect(await cancelRefused(damaged, fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-release-exceeds-reserved'] });
+    });
+
+    it('refuses a whole-unit over-release when the window quota is large', async () => {
+      const { fp, row } = heldRow();
+      const windows = JSON.parse(row.windows as string);
+      windows[WEEKLY].quota = 1e12;
+      windows[WEEKLY].reserved = 1e9;
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['attempt-1'].debits[WEEKLY].amount = 1e9 + 1;
+      attempts['attempt-1'].debits[WEEKLY].remaining = 1e9 + 1;
+      const damaged = { ...row, windows: JSON.stringify(windows), attempts: JSON.stringify(attempts) };
+      expect(await cancelRefused(damaged, fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-release-exceeds-reserved'] });
+    });
+
+    it('refuses a tiny over-release against a zero counter', async () => {
+      const { fp, row } = heldRow();
+      const windows = JSON.parse(row.windows as string);
+      windows[WEEKLY].reserved = 0;
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['attempt-1'].debits[WEEKLY].amount = 1e-10;
+      attempts['attempt-1'].debits[WEEKLY].remaining = 1e-10;
+      const damaged = { ...row, windows: JSON.stringify(windows), attempts: JSON.stringify(attempts) };
+      expect(await cancelRefused(damaged, fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-release-exceeds-reserved'] });
+    });
+
+    it('reports a missing window ahead of an over-release on another window', async () => {
+      const both = withWindows(w => { w[WEEKLY]!.reserved = 0; delete w[FIVE_HOUR]; });
+      expect(await cancelRefused(both.row, both.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-window-missing'] });
+    });
+
+    it('a held attempt without a debit journal does not block an unrelated cancel', async () => {
+      const { fp, row } = heldRow();
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['legacy'] = { fingerprint: 'legacy-fp', outcome: 'held', reservation_version: 1, duration_ms: 100, reconciliation_ids: [], slot_released: false };
+      const db = new ScriptedDb([[{ ...row, attempts: JSON.stringify(attempts) }]], [{ rowCount: 1 }]);
+      const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart('attempt-1', fp, EPOCH);
+      expect(res).toEqual({ cancelled: true, reasons: [] });
+      expect(db.writes).toHaveLength(1);
+    });
+
+    it('refuses non-finite release arithmetic instead of persisting a null counter', async () => {
+      const bad = withWindows(w => { w[WEEKLY]!.reserved = 'NaN'; });
+      expect(await cancelRefused(bad.row, bad.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-window-malformed'] });
+    });
+
+    it('refuses a non-finite window quota rather than accepting a negative release', async () => {
+      const bad = withWindows(w => { w[WEEKLY]!.quota = 'NaN'; w[WEEKLY]!.reserved = 4; });
+      expect(await cancelRefused(bad.row, bad.fp))
+        .toEqual({ cancelled: false, reasons: ['reservation-window-malformed'] });
+    });
+
+    it('releases fractional float residue as zero and never persists a negative reserved', async () => {
+      // 0.3 held on the window, but the journal released 0.1 + 0.2 = 0.30000000000000004.
+      const { fp, row } = heldRow();
+      const windows = JSON.parse(row.windows as string);
+      windows[WEEKLY].reserved = 0.3;
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['attempt-1'].debits[WEEKLY].remaining = 0.1 + 0.2;
+      const db = new ScriptedDb([[{ ...row, windows: JSON.stringify(windows), attempts: JSON.stringify(attempts) }]], [{ rowCount: 1 }]);
+      const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart('attempt-1', fp, EPOCH);
+      expect(res).toEqual({ cancelled: true, reasons: [] });
+      const patched = JSON.parse(db.writes[0]!.params[6] as string);
+      expect(patched[WEEKLY].reserved).toBe(0);
+      expect(Object.is(patched[WEEKLY].reserved, -0)).toBe(false);
+      expect(patched[FIVE_HOUR].reserved).toBe(0);
+    });
+
+    it('a window whose reset_at has passed but whose row still exists releases as before', async () => {
+      // cancelBeforeStart takes no clock: a past reset_at is not a refusal reason.
+      const { fp, row } = withWindows(w => { w[WEEKLY]!.reset_at = 1; w[FIVE_HOUR]!.reset_at = 1; });
+      const db = new ScriptedDb([[row]], [{ rowCount: 1 }]);
+      const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart('attempt-1', fp, EPOCH);
+      expect(res).toEqual({ cancelled: true, reasons: [] });
+      const patched = JSON.parse(db.writes[0]!.params[6] as string);
+      expect(patched[WEEKLY]).toMatchObject({ reserved: 0, reset_at: 1 });
+      expect(patched[FIVE_HOUR]).toMatchObject({ reserved: 0, reset_at: 1 });
+    });
+
+    it('six FIFO holds on one window cancel one by one and end at reserved 0', async () => {
+      // The counter peaks at 37.1; the last cancel's residue is set by that peak, not the last hold.
+      const { row, fps, keys } = singleWindowHolds([8.17, 9.77, 0.16, 6.15, 9.41, 3.44]);
+      const out = await cancelInOrder(row, fps, keys);
+      expect(out.res).toEqual({ cancelled: true, reasons: [] });
+      expect(out.persisted.every(v => v >= 0)).toBe(true);
+      expect(out.persisted.at(-1)).toBe(0);
+    });
+
+    it('keeps a sub-tolerance residue on the window while another hold is still live', async () => {
+      const { row, fps } = singleWindowHolds([1e-14, 5]);
+      const out = await cancelInOrder(row, fps, ['hold-1', 'hold-0']);
+      expect(out.res).toEqual({ cancelled: true, reasons: [] });
+      expect(out.persisted[0]).toBeGreaterThan(0);
+      expect(out.persisted.at(-1)).toBe(0);
+    });
+
+    it('a lone hold cancels after 100000 reserve and release updates at concurrency 16', async () => {
+      // Seed 10 leaves the counter 8.6e-13 below the lone hold, which a 16-epsilon allowance would refuse.
+      const rand = mulberry32(10);
+      let reserved = 0;
+      const live: number[] = [];
+      const release = (i: number) => { reserved -= live.splice(i, 1)[0]!; };
+      for (let op = 0; op < 100_000; op++) {
+        if (live.length < 16 && (live.length === 0 || rand() < 0.5)) {
+          const amount = 0.01 + rand() * 9.99;
+          if (reserved + amount <= 100) { live.push(amount); reserved += amount; continue; }
+        }
+        if (live.length > 0) release(Math.floor(rand() * live.length));
+      }
+      while (live.length > 1) release(Math.floor(rand() * live.length));
+      const { row, fps, keys } = singleWindowHolds([live[0]!]);
+      const windows = JSON.parse(row.windows as string);
+      windows[WEEKLY].reserved = reserved;
+      const out = await cancelInOrder({ ...row, windows: JSON.stringify(windows) }, fps, keys);
+      expect(out.res).toEqual({ cancelled: true, reasons: [] });
+      expect(out.persisted).toEqual([0]);
+    });
+
+    it('seeded FIFO, LIFO and shuffled cancels of fully held sets all end at reserved 0', async () => {
+      for (let seed = 1; seed <= 200; seed++) {
+        const rand = mulberry32(seed);
+        const count = 1 + Math.floor(rand() * 16);
+        const raw = Array.from({ length: count }, () =>
+          seed % 2 === 0 ? Math.round((0.01 + rand() * 9.99) * 100) / 100 : 0.01 + rand() * 9.99);
+        const total = raw.reduce((sum, a) => sum + a, 0);
+        const amounts = total > 95 ? raw.map(a => (a * 95) / total) : raw;
+        const { row, fps, keys } = singleWindowHolds(amounts);
+        for (const order of [keys, [...keys].reverse(), shuffled(keys, rand)]) {
+          const out = await cancelInOrder(row, fps, order);
+          expect(out.res, `seed ${seed}`).toEqual({ cancelled: true, reasons: [] });
+          expect(out.persisted.every(v => v >= 0), `seed ${seed}`).toBe(true);
+          expect(out.persisted.at(-1), `seed ${seed}`).toBe(0);
+        }
+      }
+    });
+  });
+
   it('finish frees the slot once, journals the release, and keeps the held debit charged', async () => {
     const { fp } = heldRow();
     const committed = rowJson({ version: 2, slotsHeld: 1, attempts: JSON.stringify({ 'attempt-1': {
