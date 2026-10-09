@@ -158,24 +158,41 @@ ci_json() {
 gh_api() { curl -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null || echo 000; }
 
 # failing_checks <owner/repo> <body-file> -> prints sorted, lowercased
-# failing check-run names, one per line, and saves the raw check-runs body to
-# <body-file> for the caller to mine head_sha from. The body goes through a
-# file, not a sentinel line, because check-run names are attacker-influenced
-# strings and any sentinel (HEAD_SHA=, ---, ...) is a name someone can type.
-# Lowercased here because the contract keys on the lowercased set ("Broker
-# suite" and "broker suite" are one signature, not two incidents). Empty
-# output with exit 0 means "check runs read, none failing" — a fail verdict
+# failing check-run names, one per line. Every check-runs page is read until
+# the rows seen match total_count; a short read returns 1 with nothing printed,
+# so the caller keys on the reader reason instead of a partial check set. The
+# first page is saved to <body-file> for the caller to mine head_sha from. The
+# body goes through a file, not a sentinel line, because check-run names are
+# attacker-influenced strings and any sentinel (HEAD_SHA=, ---, ...) is a name
+# someone can type. Lowercased because the contract keys on the lowercased set
+# ("Broker suite" and "broker suite" are one signature, not two incidents).
+# Empty output with exit 0 means "check runs read, none failing": a fail verdict
 # sourced elsewhere (commit statuses) falls back to the reader reason as key.
 failing_checks() {
-  local slug="$1" body_file="$2" code
-  code="$(gh_api "/repos/$slug/commits/main/check-runs?per_page=100")"
-  [[ "$code" == "200" ]] || return 1
-  cp "$GH_BODY" "$body_file" 2>/dev/null || return 1
-  jq -r '[.check_runs[]?
-      | select(.status=="completed")
-      | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure"))
-      | (.name // "" | tostring | ascii_downcase)]
-      | sort | .[]' "$body_file" 2>/dev/null
+  local slug="$1" body_file="$2" code page=1 total=0 seen=0 page_n tmp
+  tmp="$(mktemp)" || return 1
+  while true; do
+    code="$(gh_api "/repos/$slug/commits/main/check-runs?per_page=100&page=$page")"
+    [[ "$code" == "200" ]] || { rm -f "$tmp"; return 1; }
+    if [[ "$page" -eq 1 ]]; then
+      total="$(jq -r '.total_count // (.check_runs | length) // 0' "$GH_BODY" 2>/dev/null)"
+      [[ "$total" =~ ^[0-9]+$ ]] || total=0
+      cp "$GH_BODY" "$body_file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
+    page_n="$(jq -r '.check_runs | length' "$GH_BODY" 2>/dev/null)"
+    [[ "$page_n" =~ ^[0-9]+$ ]] || page_n=0
+    seen=$((seen + page_n))
+    jq -c '[.check_runs[]?
+        | select(.status=="completed")
+        | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure"))
+        | (.name // "" | tostring | ascii_downcase)]' "$GH_BODY" >> "$tmp" 2>/dev/null
+    if [[ "$seen" -ge "$total" || "$page_n" -eq 0 ]]; then break; fi
+    page=$((page + 1))
+    if [[ "$page" -gt 100 ]]; then rm -f "$tmp"; return 1; fi
+  done
+  if [[ "$seen" -lt "$total" ]]; then rm -f "$tmp"; return 1; fi
+  jq -rs 'add // [] | sort | .[]' "$tmp" 2>/dev/null
+  rm -f "$tmp"
   return 0
 }
 

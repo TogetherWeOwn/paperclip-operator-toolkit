@@ -2607,6 +2607,13 @@ jobs:
           ci_mutation "check-run-id-trusted" \
             's/^is_check_run_id() {/is_check_run_id() { return 0;/' \
             'a check-run id that is not a number is never put in a request path' || rc=1
+          # 9. Let a workflow-run red count as an observed failure beside a
+          #    truncated read. The workflow run is the same outage seen from
+          #    another endpoint, so the non-start reads as `non-started` while
+          #    unread check-run pages may hold a real red.
+          ci_mutation "truncated-nonstart-outranked-by-workflow-red" \
+            's/( -z "\$RUNS_FAIL" || -n "\$CHECKS_NONSTART" )/-z "$RUNS_FAIL"/' \
+            'a truncated read beside a non-start and a workflow red -> unknown, not non-started' || rc=1
           exit $rc
 
       # Same discipline for the drift detector (TOG-212). Its whole value is

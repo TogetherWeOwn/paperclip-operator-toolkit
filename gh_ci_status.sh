@@ -419,12 +419,14 @@ fi
 
 if [[ "$CHECKS_STATE" == "no-such-ref" && "$STATUS_STATE" == "no-such-ref" ]]; then
   VERDICT="unknown"; REASON="no-such-ref"; EXIT=3
-elif [[ "$TRUNCATED" -eq 1 && -z "$FAILED" && -z "$EXT_FAILED" && -z "$CHECKS_FAIL" ]]; then
+elif [[ "$TRUNCATED" -eq 1 && -z "$CHECKS_FAIL" && -z "$EXT_FAILED" && ( -z "$RUNS_FAIL" || -n "$CHECKS_NONSTART" ) ]]; then
   # A short read is truncation, not evidence: a failure may sit on an unread
   # page. Fail still wins above (an observed red is decisive), but a short
   # read with no observed failure is `unknown` — never `pass`, never
   # `non-started`, never `pending` — because each of those claims the unread
-  # rows contain nothing worse than what was seen.
+  # rows contain nothing worse than what was seen. A workflow-run red beside a
+  # non-start is the same outage seen from another endpoint, so it is not an
+  # observed failure here.
   VERDICT="unknown"; REASON="truncated: only $TRUNC_DETAIL read; a failure may sit on an unread page. This is NOT a pass."; EXIT=3
 elif [[ -n "$CHECKS_NONSTART" && -z "$CHECKS_FAIL" && -z "$EXT_FAILED" ]]; then
   VERDICT="non-started"

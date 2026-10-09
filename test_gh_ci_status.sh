@@ -246,6 +246,19 @@ const CASES = {
   'sha-paged-short': { checks: [{ total_count: 200, check_runs: pageOf100 }],
                        statuses: 403,
                        runs: { total_count: 0, workflow_runs: [] } },
+
+  // A truncated read holding a non-start, beside a red workflow run. The unread
+  // pages may hold a real red, and the workflow red is the same outage seen from
+  // another endpoint, so neither `non-started` nor `fail` is licensed: unknown.
+  'sha-paged-short-nonstart': { checks: [{ total_count: 200, check_runs: [realNonstart.check_runs[0]].concat(pageOf100.slice(0, 99)) }],
+                                statuses: 403,
+                                runs: { total_count: 1, workflow_runs: [completed('CI', 'failure')] } },
+
+  // The same truncation with no non-start: an observed workflow red is still a
+  // red, so it stays `fail` rather than softening to unknown.
+  'sha-paged-short-red-run': { checks: [{ total_count: 200, check_runs: pageOf100 }],
+                               statuses: 403,
+                               runs: { total_count: 1, workflow_runs: [completed('CI', 'failure')] } },
 }
 
 // check-run id -> annotations body, or a bare status code. Ids present in the
@@ -422,6 +435,11 @@ expect sha-paged-green pass 0 "101 successes across two pages -> pass"
 # never arrive. The unread rows may hold a red, so this is unknown (exit 3) —
 # never pass, never pending, never non-started.
 expect sha-paged-short unknown 3 "a truncated check-runs read -> unknown, not pass"
+
+# A non-start beside a truncated read: the workflow red does not license
+# non-started, and the unread pages may hold a real red. Unknown.
+expect sha-paged-short-nonstart unknown 3 "a truncated read beside a non-start and a workflow red -> unknown, not non-started"
+expect sha-paged-short-red-run fail 1 "a workflow red beside a truncated read with no non-start -> fail"
 
 run sha-paged-fail
 printf '%s' "$OUT" | jq -e '.signalsObserved == 101 and .checkRunsRead == 101 and .checkRunsTruncated == false' >/dev/null 2>&1

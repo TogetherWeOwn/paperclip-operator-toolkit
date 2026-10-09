@@ -90,6 +90,8 @@ done
 #   o/never-ran                 4x completed/failure with the billing-limit
 #                               annotation at failure level (genuine non-start)
 #   o/evil-name                 a failing run literally named "HEAD_SHA=x"
+#   o/red-paged                 101 check runs, the failure on page 2
+#   o/red-paged-short           200 advertised, 100 served, a failure on page 1
 cat > "$WORK/stub-api.js" <<'STUB'
 const http = require('http')
 
@@ -115,6 +117,7 @@ const neverRanRuns = [completed(890001, 'broker suite', 'failure', SHA_A), compl
 const annBilling = [{ annotation_level: 'failure', message: 'The job was not started because the account hit its spending limit.' }]
 
 const failPunct = [completed(880001, 'lint_b', 'failure', SHA_A), completed(880002, 'Lint.c', 'failure', SHA_A), completed(880003, 'lint-a', 'failure', SHA_A), completed(880004, 'lint a', 'failure', SHA_A), completed(880005, 'unit', 'success', SHA_A)]
+const pagedFirst = Array.from({ length: 100 }, (_, i) => completed(900100 + i, 'job-' + (i + 1), 'success', SHA_A))
 const CASES = {
   'o/red-punct':   { checks: { total_count: 5, check_runs: failPunct }, statuses: 403, runs: 403 },
   'o/red-same-a':  { checks: { total_count: 3, check_runs: fail2A }, statuses: 403, runs: 403 },
@@ -131,6 +134,11 @@ const CASES = {
   'o/pending':     { checks: { total_count: 2, check_runs: [completed('broker suite', 'success', SHA_A), running('Offline suites', SHA_A)] }, statuses: 403, runs: 403 },
   'o/never-ran':   { checks: { total_count: 3, check_runs: neverRanRuns }, statuses: 403, runs: 403 },
   'o/evil-name':   { checks: { total_count: 2, check_runs: evilRuns }, statuses: 403, runs: 403 },
+  'o/red-paged':   { checks: [{ total_count: 101, check_runs: pagedFirst },
+                              { total_count: 101, check_runs: [completed(909999, 'late-failure', 'failure', SHA_A)] }],
+                     statuses: 403, runs: { total_count: 0, workflow_runs: [] } },
+  'o/red-paged-short': { checks: [{ total_count: 200, check_runs: [completed(909001, 'early-failure', 'failure', SHA_A)].concat(pagedFirst.slice(0, 99)) }],
+                         statuses: 403, runs: { total_count: 0, workflow_runs: [] } },
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +278,15 @@ const srv = http.createServer((req, res) => {
   if (m) {
     const spec = CASES[m[1]]
     if (!spec) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    // A paged list is served as an array: element 0 is page 1, which is what a
+    // request without page= gets.
+    if (Array.isArray(spec.checks)) {
+      const pm = (url.match(/[?&]page=(\d+)/) || [])[1]
+      const body = spec.checks[pm ? parseInt(pm, 10) - 1 : 0]
+      if (body === undefined) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+      res.statusCode = 200
+      return res.end(JSON.stringify(body))
+    }
     return send(spec.checks)
   }
   m = url.match(/\/repos\/([^/]+\/[^/]+)\/commits\/([^/]+)\/status/)
@@ -428,6 +445,23 @@ printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "reason"' >/dev/null 2>&1 
 printf '%s' "$OUT" | jq -e '(.redMains[0].signature | length) == 8' >/dev/null 2>&1 \
   && ok "reason-keyed signature is still 8 hex chars" \
   || bad "reason-keyed signature is still 8 hex chars" "$OUT"
+
+hdr "A failure past page 1 keys on the check set, not the reason"
+snapshot o/red-paged
+[[ "$RC" -eq 1 ]] && ok "paged red exits 1" || bad "paged red exits 1" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "checks"' >/dev/null 2>&1 \
+  && ok "paged red records sigSource:checks" \
+  || bad "paged red records sigSource:checks" "$OUT"
+printf '%s' "$OUT" | jq -e '.redMains[0].failingJobs == "late-failure"' >/dev/null 2>&1 \
+  && ok "paged red names the page-2 failure" \
+  || bad "paged red names the page-2 failure" "$OUT"
+
+hdr "A short check-run read keys on the reason, never on a partial set"
+snapshot o/red-paged-short
+[[ "$RC" -eq 1 ]] && ok "short-read red exits 1" || bad "short-read red exits 1" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "reason"' >/dev/null 2>&1 \
+  && ok "short-read red keys on the reason, not the rows it could read" \
+  || bad "short-read red keys on the reason, not the rows it could read" "$OUT"
 
 hdr "Attacker-influenced names cannot break the key (sentinel job name)"
 snapshot o/evil-name
