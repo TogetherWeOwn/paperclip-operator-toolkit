@@ -51,6 +51,95 @@ for sample in "${samples[@]}"; do
   expect "content sample $i is flagged" 1 bash "$scan" --no-git "$d"
 done
 
+private_root="/paper""clip/"
+public_paths=(
+  'https://github.com/paperclipai/paperclip/actions'
+  'paperclipai/paperclip/.github/x.yml'
+  '  --signer-workflow paperclipai/paperclip/.github/x.yml'
+  'req.url === https://api.github.com/repos/paperclipai/paperclip/x'
+  'https://api.github.com/repos/paperclipai/paperclip/private-vulnerability-reporting'
+  'https://example.com/paperclipai/paperclip/x'
+  'https://github.com/someone/paperclip/x'
+  'HTTPS://EXAMPLE.COM/PAPERCLIPAI/PAPERCLIP/X'
+  'see paperclipai/paperclip/.github/workflows/ci.yml'
+  'uses: paperclipai/paperclip/.github/a.yml@main # pinned'
+  'cd /tmp && curl https://github.com/paperclipai/paperclip/actions'
+)
+private_paths=(
+  "DIR=${private_root}x"
+  "x=\"${private_root}x\""
+  "${private_root^^}x"
+  "/var/log${private_root}x"
+  "/home/node${private_root}x"
+  "~${private_root}x"
+  "\$HOME${private_root}x"
+  "\${VAR:-${private_root}x}"
+  "\${VAR:-${private_root}.github/x}"
+  "file://${private_root}x"
+  "ssh://host${private_root}x"
+  "host:${private_root}x"
+  "/paperclipai${private_root}x"
+  "xgithub.com/paperclipai${private_root}x"
+  "\$HOME/paperclipai${private_root}x"
+  '~/repos/paperclipai/paper''clip/x'
+  'x/repos/paperclipai/paper''clip/x'
+  '/paperclipai/paper''clip/.github/x'
+  'paperclipai/paper''clip/x'
+  'paperclipai/paper''clip/x/paper''clip/y'
+  'paperclipai/paperclip/.github/x /paper''clip/y'
+  'https://github.com/paperclipai/paperclip/x /paper''clip/y'
+  'https://github.com/paperclipai/paperclip/x/paper''clip/y'
+  'https://example.com/paper''clip/x'
+  'https://example.com/x /paper''clip/y'
+  'git@github.com:paperclipai/paper''clip/x'
+  'repo:paperclipai/paper''clip/x'
+  "https://github.com/paperclipai/paperclip/x $tracker-1234"
+  "https://example.com/paperclipai/paperclip/x/$tracker-9"
+  'https://example.com/x/192.''168.0.9'
+  '/Users/op/My Projects/paper''clip/.github/x'
+  '~/My Projects/paper''clip/.github/x'
+  '$HOME/My Projects/paper''clip/.github/x'
+  '${HOME}/My Projects/paper''clip/.github/x'
+  'DIR=/repos/op/paper''clip/instances/x'
+  'host:/repos/op/paper''clip/instances/x'
+  'cp /x /repos/op/paper''clip/instances/x'
+  'workdir: /repos/op/paper''clip/instances/x'
+  'cp /repos/op/paper''clip/instances/x'
+  '`/Users/op/My Projects/paper''clip/.github/x`'
+  '{/Users/op/My Projects/paper''clip/.github/x}'
+  '`https://a.example/`/Users/op/My Projects/paper''clip/.github/x'
+  'file:///Users/op/My Projects/paper''clip/.github/x'
+  'vscode://file/Users/op/My Projects/paper''clip/.github/x'
+  'ssh://host/srv/My Projects/paper''clip/.github/x'
+  'file:///Users/op/My%20Projects/paper''clip/.github/x'
+  'https://github.com/paperclipai/paperclip/x %paperclipai/paper''clip/.github/x'
+  'uses: paperclipai/paper''clip/.github/a.yml@main # paperclipai/paper''clip/.github/b.yml'
+  '-I/Users/op/My Projects/paper''clip/.github/include'
+  'x_ssh://h/srv/My Projects/paper''clip/.github/x'
+  'x_https://h/srv/My Projects/paper''clip/.github/x'
+  '2file:///Users/op/My Projects/paper''clip/.github/x'
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa://h/Users/op/My Projects/paper''clip/.github/x'
+  '--dir=op/paper''clip/.github/x'
+  'https://100.100.1.2/op/paper''clip/x'
+  'https://localhost/op/paper''clip/x'
+  'https://example.com/z,/Users/op/My Projects/paper''clip/.github/x'
+  'https://github.com/paperclipai/paperclip/actions and paperclipai/paper''clip/.github/x.yml'
+  'see https://x.y/z and paperclipai/paper''clip/.github/x.yml'
+  'https://localhost/Users/op/My Projects/paper''clip/.github/x'
+  'https://h.example/Users/op/My Projects/paper''clip/.github/x'
+  'host:/Users/op/My Projects/paper''clip/.github/x'
+)
+i=0
+for sample in "${public_paths[@]}"; do
+  i=$((i+1)); d="$tmp/public$i"; mkdir -p "$d"; printf '%s\n' "$sample" >"$d/f.txt"
+  expect "public namespace or URL sample $i passes" 0 bash "$scan" --no-git "$d"
+done
+i=0
+for sample in "${private_paths[@]}"; do
+  i=$((i+1)); d="$tmp/private$i"; mkdir -p "$d"; printf '%s\n' "$sample" >"$d/f.txt"
+  expect "path-root or mixed sample $i is flagged" 1 bash "$scan" --no-git "$d"
+done
+
 mkdir -p "$tmp/name" "$tmp/lock" "$tmp/link" "$tmp/unreadable"
 printf 'ok\n' >"$tmp/name/${tracker,,}2438-evidence.mjs"
 printf '{"reference":"%s-12"}\n' "$other" >"$tmp/lock/package-lock.json"
@@ -77,14 +166,57 @@ printf '{"reference":"%s-12"}\n' "$other" >"$tmp/repo/plugins/package-lock.json"
 git -C "$tmp/repo" add plugins/package-lock.json
 expect 'tracked lockfile is scanned' 1 env -C "$tmp/repo" bash "$scan" plugins
 
-mkdir "$tmp/bin"
-real_git="$(command -v git)"
-cat >"$tmp/bin/git" <<'STUB'
-#!/usr/bin/env bash
-if [ "${1:-}" = 'ls-files' ]; then exit 128; fi
-exec "$REAL_GIT" "$@"
-STUB
-chmod +x "$tmp/bin/git"
-expect 'Git enumeration failure refuses' 2 env -C "$tmp/repo" PATH="$tmp/bin:$PATH" REAL_GIT="$real_git" bash "$scan" plugins
+mkdir -p "$tmp/whole/plugins" "$tmp/whole/docs" "$tmp/bare" "$tmp/leak/plugins" "$tmp/leak/docs"
+git -C "$tmp/whole" init -q; git -C "$tmp/bare" init -q; git -C "$tmp/leak" init -q
+printf 'plain prose\n' >"$tmp/whole/plugins/a.md"
+printf 'plain prose\n' >"$tmp/whole/docs/b.md"
+git -C "$tmp/whole" add -A
+expect 'default root passes a clean whole tree' 0 env -C "$tmp/whole" bash "$scan"
+expect 'default root refuses an empty tracked tree' 2 env -C "$tmp/bare" bash "$scan"
+expect 'default root outside a repository refuses' 2 env -C "$tmp/outside" bash "$scan"
+printf 'plain prose\n' >"$tmp/leak/plugins/a.md"
+printf 'DIR=%s\n' "${private_root}x" >"$tmp/leak/docs/b.md"
+git -C "$tmp/leak" add -A
+expect 'default root fails a violation outside plugins' 1 env -C "$tmp/leak" bash "$scan"
+expect 'default root from a subdirectory covers the whole tree' 1 env -C "$tmp/leak/plugins" bash "$scan"
+expect 'explicit dot covers the whole tree' 1 env -C "$tmp/leak" bash "$scan" .
+
+# Each population slice gets its own violation, so narrowing the enumeration to
+# drop dot directories or root-level files turns exactly one control green.
+for slice in dot root; do
+  mkdir -p "$tmp/$slice/plugins" "$tmp/$slice/.github"
+  git -C "$tmp/$slice" init -q
+  printf 'plain prose\n' >"$tmp/$slice/plugins/a.md"
+done
+printf 'DIR=%s\n' "${private_root}x" >"$tmp/dot/.github/w.yml"
+printf 'DIR=%s\n' "${private_root}x" >"$tmp/root/README.md"
+git -C "$tmp/dot" add -A; git -C "$tmp/root" add -A
+expect 'default root fails a violation in a dot directory' 1 env -C "$tmp/dot" bash "$scan"
+expect 'default root fails a violation in a root-level file' 1 env -C "$tmp/root" bash "$scan"
+
+# A corrupt index makes ls-files fail without shadowing git on PATH.
+printf 'not an index\n' >"$tmp/corrupt-index"
+expect 'Git enumeration failure refuses' 2 env -C "$tmp/repo" GIT_INDEX_FILE="$tmp/corrupt-index" bash "$scan" plugins
+
+# A failing ls-files that already printed paths must not leave a clean-looking partial measurement.
+expect 'Git failure after partial output refuses' 2 python3 - "$here/disclosure-scan.py" "$tmp/repo" <<'PY'
+import importlib.util, os, subprocess, sys
+
+spec = importlib.util.spec_from_file_location("scan", sys.argv[1])
+scan = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scan)
+real = subprocess.run
+
+
+def run(cmd, **kwargs):
+    if cmd[:2] == ["git", "ls-files"]:
+        return subprocess.CompletedProcess(cmd, 1, stdout=b"plugins/a.md\0", stderr=b"")
+    return real(cmd, **kwargs)
+
+
+subprocess.run = run
+os.chdir(sys.argv[2])
+sys.exit(scan.main(["plugins"]))
+PY
 
 exit "$rc"

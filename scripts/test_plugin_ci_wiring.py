@@ -42,6 +42,11 @@ class PluginWiring(unittest.TestCase):
                 self.assertNotIn("outputs.heavy", block)
                 self.assertIn("runs-on: ubuntu-latest", block)
 
+    def test_disclosure_scan_covers_the_complete_tracked_tree(self):
+        block = job(self.text, "disclosure-scan")
+        self.assertIn("run: bash scripts/disclosure-scan.sh .\n", block)
+        self.assertNotIn("disclosure-scan.sh plugins", block)
+
     def test_secret_scan_keeps_pinned_scanner_controls_and_full_history(self):
         block = job(self.text, "secret-scan")
         self.assertIn("fetch-depth: 0", block)

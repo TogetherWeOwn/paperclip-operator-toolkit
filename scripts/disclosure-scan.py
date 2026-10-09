@@ -13,9 +13,32 @@ CONTENT = re.compile(
     r"\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b|"
     r"\b172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}\b|"
     r"\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b|"
-    r"/paper" r"clip/|secure" r"-drop|operator" r"-handoff",
+    r"secure" r"-drop|operator" r"-handoff",
     re.IGNORECASE,
 )
+# Namespace spans skip only the root rule; CONTENT still judges every line.
+# A web URL span (host/owner/paperclip on a dotted, non-numeric host) is always
+# a namespace. A bare owner/repo span is one only at a token start and only when
+# no slash precedes it on the line: a file path can hold spaces, so any earlier
+# slash, in a path or a URL, makes the span ambiguous and the root rule judges it.
+NAMESPACE = re.compile(
+    r"(?P<url>https?://(?![\d.:]*/)(?=[^/]*\.)[^\s/'\"`<>()\[\]{}$;&|,?#]+"
+    r"/(?:repos/)?\w[\w-]*/paperclip(?=/))"
+    r"|(?P<owner>(?<![^\s\"'`(\[{])\w[\w-]*/paperclip(?=/\.github/))",
+    re.IGNORECASE,
+)
+ROOT = re.compile(r"/paper" r"clip/", re.IGNORECASE)
+
+
+def outside_namespaces(text):
+    first_slash = text.find("/")
+
+    def blank(match):
+        if match.group("url") or first_slash >= match.start():
+            return " "
+        return match.group(0)
+
+    return NAMESPACE.sub(blank, text)
 
 
 class Unmeasured(Exception):
@@ -46,7 +69,7 @@ def readable(path, directory=False):
 def tracked(roots):
     repo = Path(os.fsdecode(git("rev-parse", "--show-toplevel")).strip())
     files = set()
-    for root in roots:
+    for root in roots or [repo]:
         path = Path(root)
         # Resolve the path only after checking the input is not a symlink.
         mode = path.lstat().st_mode
@@ -87,7 +110,7 @@ def main(args):
         else:
             if any(arg.startswith("--") for arg in args):
                 raise Unmeasured("unknown option")
-            base, files = tracked(args or ["plugins"])
+            base, files = tracked(args)
         findings = 0
         for path in files:
             readable(path)
@@ -98,7 +121,8 @@ def main(args):
             # Lockfiles and binary files are not exemptions: their metadata can
             # disclose private registry URLs or embedded tracker references too.
             for line_number, line in enumerate(path.read_bytes().splitlines(), 1):
-                if CONTENT.search(line.decode("utf-8", errors="replace")):
+                text = line.decode("utf-8", errors="replace")
+                if CONTENT.search(text) or ROOT.search(outside_namespaces(text)):
                     # Do not echo content: a line can carry unrelated secrets.
                     print(f"{name}:{line_number}: disclosure pattern")
                     findings += 1

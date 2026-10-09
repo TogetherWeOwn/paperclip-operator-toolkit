@@ -1,8 +1,9 @@
 # Public disclosure checks
 
-Run `bash scripts/disclosure-scan.sh plugins` from a repository checkout.
-Explicit roots may include tracked files as well as directories. Run
-`bash scripts/disclosure-scan.sh --no-git DIR` for one plain directory.
+Run `bash scripts/disclosure-scan.sh` from a repository checkout; it measures
+the whole tracked tree, as CI does. Explicit roots may include tracked files as
+well as directories. Run `bash scripts/disclosure-scan.sh --no-git DIR` for one
+plain directory.
 
 - Exit **0** means a nonempty inventory was read and no disclosure pattern matched.
 - Exit **1** means disclosure findings; output names files and lines, not their contents.
