@@ -99,6 +99,7 @@ cat > "$TMP/stub-api.js" <<'STUB'
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
 const FIXTURES = process.argv[2]
 const fx = (n) => JSON.parse(fs.readFileSync(path.join(FIXTURES, n), 'utf8'))
@@ -129,6 +130,10 @@ const realRedFailure = realRed.check_runs.find(r => r.conclusion === 'failure')
 
 const completed = (name, conclusion) => ({ name, status: 'completed', conclusion })
 const running   = (name) => ({ name, status: 'in_progress', conclusion: null })
+
+// A full first page of successes: the old single-page reader saw exactly this
+// and reported pass, with the failure sitting unread on page 2.
+const pageOf100 = Array.from({ length: 100 }, (_, i) => completed('job-' + (i + 1), 'success'))
 
 // ref -> { checks, statuses, runs }; each is a status code or a body.
 const CASES = {
@@ -219,7 +224,86 @@ const CASES = {
   'sha-nonstart-extred': { checks: realNonstart,
                            statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
                            runs: 403 },
+
+  // ---- pagination: a failure past page 1 must not read as pass -------------
+  // Page 1 is a full 100-success page whose total_count advertises one more
+  // row; the failure sits on page 2. The old single-page reader saw only
+  // page 1 and reported pass with 101 signals observed. Served as arrays so
+  // the stub answers `?page=1` and `?page=2` separately (see the handler).
+  'sha-paged-fail': { checks: [{ total_count: 101, check_runs: pageOf100 },
+                               { total_count: 101, check_runs: [completed('late-failure', 'failure')] }],
+                      statuses: 403,
+                      runs: { total_count: 0, workflow_runs: [] } },
+
+  // Both pages green: the paginating reader must still reach pass.
+  'sha-paged-green': { checks: [{ total_count: 101, check_runs: pageOf100 },
+                                { total_count: 101, check_runs: [completed('last-job', 'success')] }],
+                       statuses: 403,
+                       runs: { total_count: 0, workflow_runs: [] } },
+
+  // total_count advertises rows the stub never serves: a short read the
+  // reader cannot complete. Served as a one-element array so page 2 is a
+  // 404 — the unread rows may hold a red, so this is unknown, never pass.
+  'sha-paged-short': { checks: [{ total_count: 200, check_runs: pageOf100 }],
+                       statuses: 403,
+                       runs: { total_count: 0, workflow_runs: [] } },
+
+  // A truncated read holding a non-start, beside a red workflow run. The unread
+  // pages may hold a real red, and the workflow red is the same outage seen from
+  // another endpoint, so neither `non-started` nor `fail` is licensed: unknown.
+  'sha-paged-short-nonstart': { checks: [{ total_count: 200, check_runs: [realNonstart.check_runs[0]].concat(pageOf100.slice(0, 99)) }],
+                                statuses: 403,
+                                runs: { total_count: 1, workflow_runs: [completed('CI', 'failure')] } },
+
+  // The same truncation with no non-start: an observed workflow red is still a
+  // red, so it stays `fail` rather than softening to unknown.
+  'sha-paged-short-red-run': { checks: [{ total_count: 200, check_runs: pageOf100 }],
+                               statuses: 403,
+                               runs: { total_count: 1, workflow_runs: [completed('CI', 'failure')] } },
+  // A workflow startup failure beside green check runs, read by branch name.
+  // GitHub answers zero workflow runs for a branch name in head_sha, so the
+  // reader has to resolve the ref to a commit before it asks for runs.
+  'sha-branch-startup': { checks: { total_count: 2, check_runs: [completed('Offline suites', 'success'), completed('broker suite', 'success')] },
+                          statuses: 403,
+                          runs: { total_count: 1, workflow_runs: [completed('CI', 'startup_failure')] } },
+
+  // A check-runs body that is not JSON. Its total is unknown, so the read
+  // cannot be shown complete, and the green status must not carry it to pass.
+  'sha-garbage-checks': { checks: 'RAW:<html>captive portal</html>',
+                          statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                          runs: 403 },
+
+  // A commit-status body that is not JSON, beside green check runs.
+  'sha-garbage-status': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                          statuses: 'RAW:not json',
+                          runs: 403 },
+
+  // A server error on check runs is a read that did not happen, not a pass.
+  'sha-5xx-checks': { checks: 503,
+                      statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                      runs: 403 },
+  // A 200 body with no check_runs list. Its rows are unknown, so it is not an
+  // empty read, and the green status must not carry it to pass.
+  'sha-keyless-checks': { checks: { message: 'no list here' },
+                          statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                          runs: 403 },
+
+  // A failed combined state whose statuses list is missing still reports the failure.
+  'sha-keyless-status': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                          statuses: { state: 'failure' },
+                          runs: 403 },
+
+  // The combined status says 40 contexts exist and the list holds 30: a short read.
+  'sha-status-truncated': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                            statuses: { state: 'success', total_count: 40,
+                                        statuses: Array.from({ length: 30 }, (_, i) => ({ context: 'ctx-' + i, state: 'success' })) },
+                            runs: 403 },
 }
+
+// A ref resolves to a 40-hex commit id, as a real SHA does. The stub's id is the
+// SHA-1 of the case name, and REFS maps it back to the case.
+const shaOf = (name) => crypto.createHash('sha1').update(name).digest('hex')
+const REFS = new Map(Object.keys(CASES).map((n) => [shaOf(n), n]))
 
 // check-run id -> annotations body, or a bare status code. Ids present in the
 // recorded check-runs bodies resolve to their recorded annotation file.
@@ -238,6 +322,21 @@ const annotationFor = (id) => {
 
 const srv = http.createServer((req, res) => {
   const url = req.url
+  res.setHeader('Content-Type', 'application/json')
+
+  // GET /repos/{o}/{r}/commits/{ref}: the resolution the reader makes first.
+  // A ref the case table marks missing answers 422, as GitHub does for an
+  // unknown commit; any other known ref resolves to its 40-hex id.
+  const resolve = url.match(/\/repos\/[^/]+\/[^/]+\/commits\/([^/?]+)(?:\?|$)/)
+  if (resolve) {
+    const name = REFS.get(resolve[1]) || resolve[1]
+    const spec = CASES[name]
+    if (!spec) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    if (spec.checks === 422) { res.statusCode = 422; return res.end(JSON.stringify({ message: 'No commit found' })) }
+    res.statusCode = 200
+    return res.end(JSON.stringify({ sha: shaOf(name) }))
+  }
+
   let ref = null, source = null, annId = null
   let m = url.match(/\/commits\/([^/]+)\/check-runs/)
   if (m) { ref = m[1]; source = 'checks' }
@@ -248,20 +347,38 @@ const srv = http.createServer((req, res) => {
   m = url.match(/\/check-runs\/([^/]+)\/annotations/)
   if (m) { annId = m[1]; source = 'annotations' }
 
-  res.setHeader('Content-Type', 'application/json')
-
   const send = (val) => {
     if (val === 403) { res.statusCode = 403; return res.end(JSON.stringify({ message: 'Resource not accessible by integration' })) }
     if (val === 422) { res.statusCode = 422; return res.end(JSON.stringify({ message: `No commit found for SHA: ${ref}` })) }
     if (val === 404 || val === undefined || val === null) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    if (typeof val === 'number') { res.statusCode = val; return res.end(JSON.stringify({ message: 'upstream error' })) }
+    if (typeof val === 'string' && val.startsWith('RAW:')) { res.statusCode = 200; return res.end(val.slice(4)) }
     res.statusCode = 200
     res.end(JSON.stringify(val))
   }
+
+  // Paged list bodies are served as arrays: element 0 is page 1, element 1 is
+  // page 2. A reader that never sends `page=` gets element 0 — which is what
+  // made the pre-fix reader report pass on sha-paged-fail.
+  const sendPaged = (val) => {
+    if (!Array.isArray(val)) return send(val)
+    const pm = (url.match(/[?&]page=(\d+)/) || [])[1]
+    const page = pm ? parseInt(pm, 10) : 1
+    const body = val[page - 1]
+    if (body === undefined) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    res.statusCode = 200
+    res.end(JSON.stringify(body))
+  }
+
+  // GitHub answers no workflow runs for a branch name in head_sha: only a commit id matches.
+  if (source === 'runs' && !/^[0-9a-f]{40}$/.test(ref)) return send({ total_count: 0, workflow_runs: [] })
+  if (ref !== null) ref = REFS.get(ref) || ref
 
   if (source === 'annotations') return send(annotationFor(annId))
 
   const spec = CASES[ref]
   if (!spec || !source) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+  if (source === 'checks' || source === 'runs') return sendPaged(spec[source])
   send(spec[source])
 })
 srv.listen(0, '127.0.0.1', () => process.stdout.write(String(srv.address().port) + '\n'))
@@ -367,6 +484,49 @@ expect sha-startup fail 1 "startup_failure visible only via workflow runs -> fai
 expect sha-extstatus fail 1 "failing external commit status -> fail"
 expect sha-extgreen  pass 0 "passing external commit status -> pass"
 
+hdr "Pagination — a failure past page 1 must not read as pass"
+
+# THE regression case for this change: 100 successes on page 1, the failure
+# on page 2. The single-page reader reported pass (exit 0); the fix reads
+# both pages and reports fail (exit 1).
+expect sha-paged-fail fail 1 "a failure on page 2 of 101 check runs -> fail, not pass"
+
+# The control: both pages green is still a pass.
+expect sha-paged-green pass 0 "101 successes across two pages -> pass"
+
+# A short read the reader cannot complete: total_count advertises rows that
+# never arrive. The unread rows may hold a red, so this is unknown (exit 3) —
+# never pass, never pending, never non-started.
+expect sha-paged-short unknown 3 "a truncated check-runs read -> unknown, not pass"
+
+# A non-start beside a truncated read: the workflow red does not license
+# non-started, and the unread pages may hold a real red. Unknown.
+expect sha-paged-short-nonstart unknown 3 "a truncated read beside a non-start and a workflow red -> unknown, not non-started"
+expect sha-paged-short-red-run fail 1 "a workflow red beside a truncated read with no non-start -> fail"
+
+# A ref is resolved to its commit before the runs query. Read by branch name,
+# the runs endpoint answers nothing, and the startup failure would read as green.
+expect sha-branch-startup fail 1 "a workflow startup failure beside green check runs, read by branch name -> fail, not pass"
+
+# A body that is not a list of check runs or statuses is an unread source, not
+# an empty one, and a server error is a read that did not happen.
+expect sha-garbage-checks unknown 3 "a check-runs body that is not JSON -> unknown, not pass"
+expect sha-garbage-status unknown 3 "a commit-status body that is not JSON -> unknown, not pass"
+expect sha-5xx-checks unknown 3 "a server error on check runs -> unknown, not pass"
+expect sha-keyless-checks unknown 3 "a check-runs body with no check_runs list -> unknown, not pass"
+expect sha-keyless-status fail 1 "a failed commit-status state with no statuses list -> fail, not pass"
+expect sha-status-truncated unknown 3 "a commit-status list shorter than its total -> unknown, not pass"
+
+run sha-paged-fail
+printf '%s' "$OUT" | jq -e '.signalsObserved == 101 and .checkRunsRead == 101 and .checkRunsTruncated == false' >/dev/null 2>&1
+assert $? "the paged failure reports the rows actually read, not the first page" \
+  "signalsObserved is not 101 read rows — the count still comes from a single page"
+
+run sha-paged-short
+printf '%s' "$OUT" | jq -e '.truncated == true and .checkRunsTruncated == true' >/dev/null 2>&1
+assert $? "a truncated read is flagged structurally, not only in prose" \
+  "a caller would have to regex the reason string to learn the read was short"
+
 hdr "TOG-381 — a job that never ran is not a red build"
 
 # THE headline assertion for TOG-381, replayed from the real outage. Every field
@@ -465,7 +625,10 @@ assert $? "a genuine red reports an empty nonStarted list" \
 LEAK=""
 for r in sha-denied sha-empty sha-green sha-red sha-running sha-skipped sha-missing \
          sha-startup sha-extstatus sha-extgreen sha-partial sha-real-green sha-real-red \
-         sha-fast-real-fail sha-ann-denied sha-ann-warnonly sha-ann-warnlevel sha-mixed sha-bad-id; do
+         sha-fast-real-fail sha-ann-denied sha-ann-warnonly sha-ann-warnlevel sha-mixed sha-bad-id \
+         sha-paged-fail sha-paged-green sha-paged-short sha-paged-short-nonstart sha-paged-short-red-run \
+         sha-branch-startup sha-garbage-checks sha-garbage-status sha-5xx-checks \
+         sha-keyless-checks sha-keyless-status sha-status-truncated; do
   run "$r"
   [[ "$RC" -eq 5 ]] && { LEAK="$r"; break; }
 done

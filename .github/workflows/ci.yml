@@ -2607,6 +2607,68 @@ jobs:
           ci_mutation "check-run-id-trusted" \
             's/^is_check_run_id() {/is_check_run_id() { return 0;/' \
             'a check-run id that is not a number is never put in a request path' || rc=1
+          # 9. Let a workflow-run red count as an observed failure beside a
+          #    truncated read. The workflow run is the same outage seen from
+          #    another endpoint, so the non-start reads as `non-started` while
+          #    unread check-run pages may hold a real red.
+          ci_mutation "truncated-nonstart-outranked-by-workflow-red" \
+            's/( -z "\$RUNS_FAIL" || -n "\$CHECKS_NONSTART" )/-z "$RUNS_FAIL"/' \
+            'a truncated read beside a non-start and a workflow red -> unknown, not non-started' || rc=1
+          # 10. Query workflow runs by the branch name. GitHub answers zero runs
+          #     for a branch name in head_sha, so a startup failure beside green
+          #     check runs reads as pass.
+          ci_mutation "runs-queried-by-branch-name" \
+            's/head_sha=\$RESOLVED&/head_sha=$REF\&/' \
+            'a workflow startup failure beside green check runs, read by branch name -> fail, not pass' || rc=1
+          exit $rc
+
+      # The red-main poller reads its failing checks from a separate call. That
+      # read must use the commit the verdict was read from, or a push between the
+      # two reads files the incident under the wrong signature. A mutant that
+      # reads the branch name must turn the poller suite red on its named test.
+      - name: Prove the red-main poller still reads failing checks at the resolved commit
+        run: |
+          set -uo pipefail
+          rc=0
+          poll_mutation() {
+            local label="$1" expr="$2" expect="$3"
+            local mut; mut="$(mktemp -d)"
+            cp red_main_poll.sh test_red_main_poll.sh gh_ci_status.sh "$mut/"
+            local base
+            base="$(cd "$mut" && ./test_red_main_poll.sh 2>&1)"
+            if [ $? -ne 0 ]; then
+              echo "::error::$label: the UNMUTATED copy already fails — this gate proves nothing"
+              printf '%s\n' "$base" | grep -a 'FAIL' | head -20; rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "ok +$expect" <<< "$base"; then
+              echo "::error::$label: no passing test matching /$expect/ in the baseline — the assertion this mutation pins has been renamed or deleted"
+              rm -rf "$mut"; return 1
+            fi
+            sed -i "$expr" "$mut/red_main_poll.sh"
+            if ! bash -n "$mut/red_main_poll.sh"; then
+              echo "::error::$label: the mutation broke the parse; it would fail for the wrong reason"
+              rm -rf "$mut"; return 1
+            fi
+            if cmp -s red_main_poll.sh "$mut/red_main_poll.sh"; then
+              echo "::error::$label: the sed changed nothing — the code moved and this gate is blind"
+              rm -rf "$mut"; return 1
+            fi
+            local out status
+            out="$(cd "$mut" && ./test_red_main_poll.sh 2>&1)"; status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$label: the poller suite PASSED against the mutation"
+              rm -rf "$mut"; return 1
+            fi
+            if ! grep -aqE "FAIL +$expect" <<< "$out"; then
+              echo "::error::$label: the suite went red, but no test matching /$expect/ failed — it is failing for an unrelated reason"
+              grep -a 'FAIL' <<< "$out" | head -20
+              rm -rf "$mut"; return 1
+            fi
+            rm -rf "$mut"; echo "  ok  $label"
+          }
+          poll_mutation "failing-checks-read-by-branch-name" \
+            's|/commits/\$sha/check-runs|/commits/main/check-runs|' \
+            'paged red records sigSource:checks' || rc=1
           exit $rc
 
       # Same discipline for the drift detector (TOG-212). Its whole value is

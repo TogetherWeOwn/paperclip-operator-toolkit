@@ -116,7 +116,8 @@ set -uo pipefail
 #   0  pass     at least one CI signal was observed, and all of them succeeded
 #   1  fail     a signal was observed and it failed
 #   2  pending  a signal was observed and it has not concluded
-#   3  unknown  CI could NOT be observed: denied, no signal, or no such ref
+#   3  unknown  CI could NOT be observed: denied, no signal, no such ref, or a
+#               read that was short or unreadable
 #   4  usage    bad arguments / missing token
 #   5  non-started  every observed failure is a job GitHub never ran. Not a
 #                red build: there is nothing in the diff to fix, and no gate in
@@ -195,31 +196,72 @@ BODY="$(mktemp)"
 # Fetch one endpoint. Echoes the HTTP status; leaves the body in $BODY.
 api() { curl -sS -o "$BODY" -w '%{http_code}' -H "@$HDRS" "$API$1" 2>/dev/null || echo 000; }
 
+# Resolve the ref to a commit once, so every page and every source reads the same
+# commit. A branch name moves between page requests, and GitHub answers zero
+# workflow runs when a branch name is passed as head_sha.
+RESOLVED=""
+if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+  RESOLVED="$REF"
+elif [[ "$(api "/repos/$SLUG/commits/$REF")" == "200" ]]; then
+  RESOLVED="$(jq -r '.sha // ""' "$BODY" 2>/dev/null)"
+  [[ "$RESOLVED" =~ ^[0-9a-f]{40}$ ]] || RESOLVED=""
+fi
+READ_REF="${RESOLVED:-$REF}"
+
 # --- source 1: check runs (GitHub Actions and any Checks-API app) -------------
 # Needs `checks:read`. This is the source our own CI populates.
+# Paged: the endpoint returns at most 100 rows per page, and total_count is
+# the authority on how many exist. A single-page read of a 101-run head
+# reports pass while a failure sits unread on page 2, so every page is read
+# until the rows seen match total_count. A short read is truncation, not
+# evidence, and forces `unknown` below — never `pass`.
 CHECKS_STATE="unreadable"; CHECKS_N=0; CHECKS_FAIL=""; CHECKS_PENDING=""
 CHECKS_NONSTART=""; NONSTART_PROBE="not-needed"
-code="$(api "/repos/$SLUG/commits/$REF/check-runs?per_page=100")"
-case "$code" in
-  200)
-    CHECKS_STATE="read"
-    CHECKS_N="$(jq -r '.total_count // (.check_runs|length) // 0' "$BODY")"
-    CHECKS_PENDING="$(jq -r '[.check_runs[]? | select(.status!="completed") | .name] | join(", ")' "$BODY")"
-    # Failures are carried as id/duration/name triples rather than just names,
-    # because the id is what the annotations probe below needs.
-    FAILED_RUNS="$(jq -r '
-      .check_runs[]?
-      | select(.status=="completed")
-      | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure"))
-      | ( if (.started_at != null and .completed_at != null)
-          then ((.completed_at|fromdateiso8601) - (.started_at|fromdateiso8601))
-          else 0 end ) as $d
-      | "\(.id)\t\($d)\t\(.name)"' "$BODY" 2>/dev/null)"
-    ;;
-  403) CHECKS_STATE="denied";;
-  404|422) CHECKS_STATE="no-such-ref";;
-  *) CHECKS_STATE="error-$code";;
-esac
+CHECKS_TOTAL=0; CHECKS_READ=0; CHECKS_TRUNCATED=0; FAILED_RUNS=""
+_checks_page=1
+while true; do
+  code="$(api "/repos/$SLUG/commits/$READ_REF/check-runs?per_page=100&page=$_checks_page")"
+  case "$code" in
+    200)
+      if [[ "$_checks_page" -eq 1 ]]; then
+        CHECKS_TOTAL="$(jq -r 'if (.check_runs | type) == "array" then (.total_count // (.check_runs | length)) else empty end' "$BODY" 2>/dev/null)"
+        if [[ ! "$CHECKS_TOTAL" =~ ^[0-9]+$ ]]; then CHECKS_STATE="error-body"; CHECKS_TRUNCATED=1; break; fi
+        CHECKS_STATE="read"
+      fi
+      _page_n="$(jq -r 'if (.check_runs | type) == "array" then (.check_runs | length) else empty end' "$BODY" 2>/dev/null)"
+      [[ "$_page_n" =~ ^[0-9]+$ ]] || _page_n=0
+      CHECKS_READ=$((CHECKS_READ + _page_n))
+      _page_pending="$(jq -r '[.check_runs[]? | select(.status!="completed") | .name] | join(", ")' "$BODY" 2>/dev/null)"
+      if [[ -n "$_page_pending" ]]; then
+        if [[ -n "$CHECKS_PENDING" ]]; then CHECKS_PENDING="$CHECKS_PENDING, $_page_pending"; else CHECKS_PENDING="$_page_pending"; fi
+      fi
+      # Failures are carried as id/duration/name triples rather than just names,
+      # because the id is what the annotations probe below needs.
+      _page_failed="$(jq -r '
+        .check_runs[]?
+        | select(.status=="completed")
+        | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure"))
+        | ( if (.started_at != null and .completed_at != null)
+            then ((.completed_at|fromdateiso8601) - (.started_at|fromdateiso8601))
+            else 0 end ) as $d
+        | "\(.id)\t\($d)\t\(.name)"' "$BODY" 2>/dev/null)"
+      if [[ -n "$_page_failed" ]]; then
+        if [[ -n "$FAILED_RUNS" ]]; then FAILED_RUNS="$FAILED_RUNS"$'\n'"$_page_failed"; else FAILED_RUNS="$_page_failed"; fi
+      fi
+      if [[ "$CHECKS_READ" -ge "$CHECKS_TOTAL" ]]; then break; fi
+      if [[ "$_page_n" -eq 0 ]]; then break; fi
+      _checks_page=$((_checks_page + 1))
+      if [[ "$_checks_page" -gt 100 ]]; then CHECKS_TRUNCATED=1; break; fi
+      ;;
+    403) if [[ "$_checks_page" -eq 1 ]]; then CHECKS_STATE="denied"; else CHECKS_TRUNCATED=1; fi; break;;
+    404|422) if [[ "$_checks_page" -eq 1 ]]; then CHECKS_STATE="no-such-ref"; else CHECKS_TRUNCATED=1; fi; break;;
+    *) CHECKS_TRUNCATED=1; if [[ "$_checks_page" -eq 1 ]]; then CHECKS_STATE="error-$code"; fi; break;;
+  esac
+done
+if [[ "$CHECKS_STATE" == "read" ]]; then
+  CHECKS_N="$CHECKS_READ"
+  if [[ "$CHECKS_READ" -lt "$CHECKS_TOTAL" ]]; then CHECKS_TRUNCATED=1; fi
+fi
 
 # --- source 1b: is a failure actually a job that GitHub never ran? (TOG-381) --
 # Only reached when source 1 saw a failure. Needs `checks:read` — the same
@@ -274,17 +316,23 @@ fi
 # granting checks does not grant this. Measured: 403 even on a token holding
 # actions:read + checks:read. A repo whose CI posts commit statuses rather than
 # check runs is invisible to source 1 entirely, so it is asked about separately.
-STATUS_STATE="unreadable"; STATUS_STATE_VAL=""; STATUS_N=0
-code="$(api "/repos/$SLUG/commits/$REF/status")"
+STATUS_STATE="unreadable"; STATUS_STATE_VAL=""; STATUS_N=0; STATUS_TOTAL=0; STATUS_TRUNCATED=0
+code="$(api "/repos/$SLUG/commits/$READ_REF/status?per_page=100")"
 case "$code" in
   200)
-    STATUS_STATE="read"
-    STATUS_N="$(jq -r '.statuses | length' "$BODY")"
-    STATUS_STATE_VAL="$(jq -r '.state // ""' "$BODY")"
+    STATUS_STATE_VAL="$(jq -r '.state // ""' "$BODY" 2>/dev/null)"
+    STATUS_N="$(jq -r 'if (.statuses | type) == "array" then (.statuses | length) else empty end' "$BODY" 2>/dev/null)"
+    STATUS_TOTAL="$(jq -r '.total_count // empty' "$BODY" 2>/dev/null)"
+    if [[ "$STATUS_N" =~ ^[0-9]+$ ]]; then
+      STATUS_STATE="read"
+      if [[ "$STATUS_TOTAL" =~ ^[0-9]+$ && "$STATUS_TOTAL" -gt "$STATUS_N" ]]; then STATUS_TRUNCATED=1; fi
+    else
+      STATUS_STATE="error-body"; STATUS_N=0; STATUS_TRUNCATED=1
+    fi
     ;;
   403) STATUS_STATE="denied";;
   404|422) STATUS_STATE="no-such-ref";;
-  *) STATUS_STATE="error-$code";;
+  *) STATUS_STATE="error-$code"; STATUS_TRUNCATED=1;;
 esac
 
 # --- source 3: workflow runs (corroboration) ----------------------------------
@@ -294,23 +342,52 @@ esac
 # from "the workflow file is broken", and the broken case is the one that
 # matters.
 RUNS_STATE="unreadable"; RUNS_N=0; RUNS_FAIL=""; RUNS_PENDING=""
-code="$(api "/repos/$SLUG/actions/runs?head_sha=$REF&per_page=100")"
-case "$code" in
-  200)
-    RUNS_STATE="read"
-    RUNS_N="$(jq -r '.total_count // 0' "$BODY")"
-    RUNS_FAIL="$(jq -r '[.workflow_runs[]? | select(.status=="completed") | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure")) | .name] | join(", ")' "$BODY")"
-    RUNS_PENDING="$(jq -r '[.workflow_runs[]? | select(.status!="completed") | .name] | join(", ")' "$BODY")"
-    ;;
-  403) RUNS_STATE="denied";;
-  404|422) RUNS_STATE="no-such-ref";;
-  *) RUNS_STATE="error-$code";;
-esac
+RUNS_TOTAL=0; RUNS_READ=0; RUNS_TRUNCATED=0
+[[ -n "$RESOLVED" ]] || { RUNS_STATE="unresolved"; RUNS_TRUNCATED=1; }
+_runs_page=1
+while [[ -n "$RESOLVED" ]]; do
+  code="$(api "/repos/$SLUG/actions/runs?head_sha=$RESOLVED&per_page=100&page=$_runs_page")"
+  case "$code" in
+    200)
+      if [[ "$_runs_page" -eq 1 ]]; then
+        RUNS_TOTAL="$(jq -r 'if (.workflow_runs | type) == "array" then (.total_count // (.workflow_runs | length)) else empty end' "$BODY" 2>/dev/null)"
+        if [[ ! "$RUNS_TOTAL" =~ ^[0-9]+$ ]]; then RUNS_STATE="error-body"; RUNS_TRUNCATED=1; break; fi
+        RUNS_STATE="read"
+      fi
+      _rpage_n="$(jq -r 'if (.workflow_runs | type) == "array" then (.workflow_runs | length) else empty end' "$BODY" 2>/dev/null)"
+      [[ "$_rpage_n" =~ ^[0-9]+$ ]] || _rpage_n=0
+      RUNS_READ=$((RUNS_READ + _rpage_n))
+      _rpage_fail="$(jq -r '[.workflow_runs[]? | select(.status=="completed") | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure")) | .name] | join(", ")' "$BODY" 2>/dev/null)"
+      if [[ -n "$_rpage_fail" ]]; then
+        if [[ -n "$RUNS_FAIL" ]]; then RUNS_FAIL="$RUNS_FAIL, $_rpage_fail"; else RUNS_FAIL="$_rpage_fail"; fi
+      fi
+      _rpage_pending="$(jq -r '[.workflow_runs[]? | select(.status!="completed") | .name] | join(", ")' "$BODY" 2>/dev/null)"
+      if [[ -n "$_rpage_pending" ]]; then
+        if [[ -n "$RUNS_PENDING" ]]; then RUNS_PENDING="$RUNS_PENDING, $_rpage_pending"; else RUNS_PENDING="$_rpage_pending"; fi
+      fi
+      if [[ "$RUNS_READ" -ge "$RUNS_TOTAL" ]]; then break; fi
+      if [[ "$_rpage_n" -eq 0 ]]; then break; fi
+      _runs_page=$((_runs_page + 1))
+      if [[ "$_runs_page" -gt 100 ]]; then RUNS_TRUNCATED=1; break; fi
+      ;;
+    403) if [[ "$_runs_page" -eq 1 ]]; then RUNS_STATE="denied"; else RUNS_TRUNCATED=1; fi; break;;
+    404|422) if [[ "$_runs_page" -eq 1 ]]; then RUNS_STATE="no-such-ref"; else RUNS_TRUNCATED=1; fi; break;;
+    *) RUNS_TRUNCATED=1; if [[ "$_runs_page" -eq 1 ]]; then RUNS_STATE="error-$code"; fi; break;;
+  esac
+done
+if [[ "$RUNS_STATE" == "read" ]]; then
+  RUNS_N="$RUNS_READ"
+  if [[ "$RUNS_READ" -lt "$RUNS_TOTAL" ]]; then RUNS_TRUNCATED=1; fi
+fi
 
 # --- verdict ------------------------------------------------------------------
 # Order matters, and the ordering IS the fail-closed property:
 #
 #   fail        beats everything. One observed failure is decisive.
+#   truncated beats everything except an observed fail. A short read (rows
+#           seen < total_count) with no observed failure is `unknown`: the
+#           unread pages may hold a red, so neither `pass`, `pending`, nor
+#           `non-started` may be claimed.
 #   non-started beats fail ONLY when nothing else failed. A genuine red
 #           alongside a non-start is still a genuine red — there is code to fix
 #           — so `fail` wins and the non-starts are named in the JSON instead.
@@ -332,10 +409,10 @@ SIGNALS=$((CHECKS_N + STATUS_N + RUNS_N))
 FAILED="$(printf '%s' "${CHECKS_FAIL}${CHECKS_FAIL:+, }${RUNS_FAIL}" | sed 's/, $//')"
 PENDING="$(printf '%s' "${CHECKS_PENDING}${CHECKS_PENDING:+, }${RUNS_PENDING}" | sed 's/, $//')"
 
-# The combined commit status has its own vocabulary and is authoritative for
-# source 2 when it has any statuses at all.
+# The combined commit status has its own vocabulary, and its state is what
+# source 2 reports. A pending state with no statuses is not a pending job.
 case "$STATUS_STATE_VAL" in
-  failure|error) [[ "$STATUS_N" -gt 0 ]] && FAILED="${FAILED:+$FAILED, }commit-status:$STATUS_STATE_VAL";;
+  failure|error) FAILED="${FAILED:+$FAILED, }commit-status:$STATUS_STATE_VAL";;
   pending)       [[ "$STATUS_N" -gt 0 ]] && PENDING="${PENDING:+$PENDING, }commit-status:pending";;
 esac
 
@@ -348,11 +425,37 @@ esac
 # GitHub Actions block, so a red there really is a red.
 EXT_FAILED=""
 case "$STATUS_STATE_VAL" in
-  failure|error) [[ "$STATUS_N" -gt 0 ]] && EXT_FAILED="commit-status:$STATUS_STATE_VAL";;
+  failure|error) EXT_FAILED="commit-status:$STATUS_STATE_VAL";;
 esac
+
+TRUNCATED=0
+[[ "$CHECKS_TRUNCATED" -eq 1 || "$RUNS_TRUNCATED" -eq 1 || "$STATUS_TRUNCATED" -eq 1 ]] && TRUNCATED=1
+TRUNC_DETAIL=""
+if [[ "$CHECKS_TRUNCATED" -eq 1 ]]; then
+  if [[ "$CHECKS_STATE" == "read" ]]; then TRUNC_DETAIL="check runs $CHECKS_READ of $CHECKS_TOTAL"
+  else TRUNC_DETAIL="check runs unreadable: $CHECKS_STATE"; fi
+fi
+if [[ "$RUNS_TRUNCATED" -eq 1 ]]; then
+  [[ -n "$TRUNC_DETAIL" ]] && TRUNC_DETAIL="$TRUNC_DETAIL; "
+  if [[ "$RUNS_STATE" == "read" ]]; then TRUNC_DETAIL="${TRUNC_DETAIL}workflow runs $RUNS_READ of $RUNS_TOTAL"
+  else TRUNC_DETAIL="${TRUNC_DETAIL}workflow runs unreadable: $RUNS_STATE"; fi
+fi
+if [[ "$STATUS_TRUNCATED" -eq 1 ]]; then
+  [[ -n "$TRUNC_DETAIL" ]] && TRUNC_DETAIL="$TRUNC_DETAIL; "
+  TRUNC_DETAIL="${TRUNC_DETAIL}commit statuses unreadable: $STATUS_STATE"
+fi
 
 if [[ "$CHECKS_STATE" == "no-such-ref" && "$STATUS_STATE" == "no-such-ref" ]]; then
   VERDICT="unknown"; REASON="no-such-ref"; EXIT=3
+elif [[ "$TRUNCATED" -eq 1 && -z "$CHECKS_FAIL" && -z "$EXT_FAILED" && ( -z "$RUNS_FAIL" || -n "$CHECKS_NONSTART" ) ]]; then
+  # A short or unreadable read is incomplete, not evidence: a failure may sit on
+  # an unread page or in a source that could not be read. Fail still wins above
+  # (an observed red is decisive), but an incomplete read with no observed
+  # failure is `unknown` — never `pass`, never `non-started`, never `pending` —
+  # because each of those claims the unread rows contain nothing worse than what
+  # was seen. A workflow-run red beside a non-start is the same outage seen from
+  # another endpoint, so it is not an observed failure here.
+  VERDICT="unknown"; REASON="incomplete: $TRUNC_DETAIL. A failure may sit on an unread page or in an unreadable source. This is NOT a pass."; EXIT=3
 elif [[ -n "$CHECKS_NONSTART" && -z "$CHECKS_FAIL" && -z "$EXT_FAILED" ]]; then
   VERDICT="non-started"
   REASON="not started: $CHECKS_NONSTART — GitHub reported these jobs as completed/failure but they never ran (account-level block: failed payment or spending limit). This is NOT a red build: there is nothing in the diff to fix, and every CI-enforced gate on this repo is currently unenforced."
@@ -378,11 +481,18 @@ jq -n \
   --arg checks "$CHECKS_STATE" --arg statuses "$STATUS_STATE" --arg runs "$RUNS_STATE" \
   --arg nonstart "$CHECKS_NONSTART" --arg probe "$NONSTART_PROBE" \
   --argjson signals "$SIGNALS" --argjson exit "$EXIT" \
+  --argjson checksTotal "${CHECKS_TOTAL:-0}" --argjson checksRead "${CHECKS_READ:-0}" \
+  --argjson checksTruncated "${CHECKS_TRUNCATED:-0}" \
+  --argjson runsTotal "${RUNS_TOTAL:-0}" --argjson runsRead "${RUNS_READ:-0}" \
+  --argjson runsTruncated "${RUNS_TRUNCATED:-0}" --argjson truncated "$TRUNCATED" \
   '{repo:$repo, ref:$ref, verdict:$verdict, reason:$reason,
     sources:{checkRuns:$checks, commitStatuses:$statuses, workflowRuns:$runs},
     nonStarted: ($nonstart | if . == "" then [] else split(", ") end),
     nonStartedProbe: $probe,
-    signalsObserved:$signals, exitCode:$exit}'
+    signalsObserved:$signals, exitCode:$exit,
+    checkRunsTotal:$checksTotal, checkRunsRead:$checksRead, checkRunsTruncated:($checksTruncated==1),
+    workflowRunsTotal:$runsTotal, workflowRunsRead:$runsRead, workflowRunsTruncated:($runsTruncated==1),
+    truncated:($truncated==1)}'
 
 if [[ "$QUIET" -eq 0 ]]; then
   case "$VERDICT" in

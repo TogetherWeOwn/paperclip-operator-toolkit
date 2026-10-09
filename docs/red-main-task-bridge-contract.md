@@ -153,7 +153,7 @@ posts nothing) and their 403 lines now name this fix.
 2. Mint exactly one bridge key with the body above; record the key id, never
    the value, in one 0600 env file with `RED_MAIN_ROLLUP_PARENT_ID` set.
 3. Seeded checks before enabling: the offline suites
-   (`./test_red_main_poll.sh`, expect `92 passed, 0 failed`;
+   (`./test_red_main_poll.sh`, expect `97 passed, 0 failed`;
    `./test_post_rollup_comment.sh`, expect `40 passed, 0 failed`), a live
    `snapshot`/`propose` against the parent thread with the runless key
    (reads `200`, zero company-wide calls, no draft for an already-mirrored
