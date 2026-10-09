@@ -178,11 +178,25 @@ def check_bytes(raw):
     return verdict(None)
 
 
-def _sha256_file(path):
+def _open_regular(path):
+    # O_NONBLOCK: open() on a FIFO with no writer would block before the type check.
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _sha256_file(path, deadline):
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with _open_regular(path) as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
+            if time.monotonic() >= deadline:
+                raise Refusal("timeout")
     return digest.hexdigest()
 
 
@@ -212,18 +226,18 @@ def capture(argv, expected_sha256, timeout_s=CAPTURE_TIMEOUT_S):
         raise Refusal("argv")
     if not 0 < timeout_s <= CAPTURE_TIMEOUT_S:
         raise Refusal("timeout")
+    deadline = time.monotonic() + timeout_s
     executable = argv[0]
     if not os.path.isabs(executable) or not os.path.isfile(executable):
         raise Refusal("executable_path")
     if not os.access(executable, os.R_OK | os.X_OK):
         raise Refusal("executable_path")
     try:
-        digest = _sha256_file(executable)
+        digest = _sha256_file(executable, deadline)
     except OSError:
         raise Refusal("executable_path") from None
     if digest != expected_sha256:
         raise Refusal("executable_sha256")
-    deadline = time.monotonic() + timeout_s
     try:
         proc = subprocess.Popen(
             argv,
@@ -248,7 +262,7 @@ def capture(argv, expected_sha256, timeout_s=CAPTURE_TIMEOUT_S):
             # An unreaped leader keeps its pid, so the group id cannot be reused.
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
         proc.wait()
         proc.stdout.close()
@@ -258,11 +272,7 @@ def capture(argv, expected_sha256, timeout_s=CAPTURE_TIMEOUT_S):
 
 
 def _read_regular(path):
-    # O_NONBLOCK: open() on a FIFO with no writer would block before the type check.
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "not a regular file")
+    with _open_regular(path) as handle:
         return handle.read(MAX_BYTES + 1)
 
 

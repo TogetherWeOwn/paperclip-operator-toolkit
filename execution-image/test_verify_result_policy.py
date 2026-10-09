@@ -48,8 +48,10 @@ elif mode == "nonce":
     sys.stdout.write(os.urandom(16).hex())
 elif mode == "sleep":
     time.sleep(30)
+elif mode == "short-sleep":
+    time.sleep(2)
 elif mode == "spawn":
-    subprocess.Popen([sys.executable, "-c", "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(4); open(sys.argv[2], 'w').close()", args[0], args[1]])
+    subprocess.Popen([sys.executable, "-c", "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(float(sys.argv[3])); open(sys.argv[2], 'w').close()", args[0], args[1], args[2]])
     time.sleep(30)
 """
 
@@ -257,7 +259,7 @@ class ManifestBindingTests(unittest.TestCase):
 class CaptureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.python_sha256 = vrp._sha256_file(sys.executable)
+        cls.python_sha256 = vrp._sha256_file(sys.executable, float("inf"))
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -322,9 +324,9 @@ class CaptureTests(unittest.TestCase):
     def test_timeout_kills_same_group_descendant_holding_stdout(self):
         started = os.path.join(self.tmp, "started")
         late = os.path.join(self.tmp, "late")
-        self._assert_capture_refused(self._argv("spawn", started, late), self.python_sha256, "timeout", timeout_s=2)
+        self._assert_capture_refused(self._argv("spawn", started, late, "6"), self.python_sha256, "timeout", timeout_s=3)
         self.assertTrue(os.path.exists(started))
-        time.sleep(3)
+        time.sleep(5)
         self.assertFalse(os.path.exists(late))
 
     def test_unreadable_executable_is_refused(self):
@@ -341,12 +343,22 @@ class CaptureTests(unittest.TestCase):
     def test_wrong_hash_is_refused(self):
         self._assert_capture_refused(self._argv("echo"), "0" * 64, "executable_sha256")
 
-    def test_unspawnable_executable_is_refused(self):
-        path = os.path.join(self.tmp, "not-a-program")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("not a program\n")
-        os.chmod(path, 0o755)
-        self._assert_capture_refused([path], vrp._sha256_file(path), "spawn")
+    def test_spawn_failure_is_refused(self):
+        with mock.patch.object(vrp.subprocess, "Popen", side_effect=OSError(8, "Exec format error")):
+            self._assert_capture_refused(self._argv("echo"), self.python_sha256, "spawn")
+
+    def test_fifo_at_executable_path_is_refused_without_blocking(self):
+        path = os.path.join(self.tmp, "fifo-as-program")
+        os.mkfifo(path, 0o700)
+        with mock.patch.object(vrp.os.path, "isfile", return_value=True):
+            self._assert_capture_refused([path], self.python_sha256, "executable_path")
+
+    def test_hashing_past_the_deadline_is_refused(self):
+        self._assert_capture_refused(self._argv("echo"), self.python_sha256, "timeout", timeout_s=1e-6)
+
+    def test_refused_kill_still_reports_the_timeout(self):
+        with mock.patch.object(vrp.os, "killpg", side_effect=PermissionError(1, "denied")):
+            self._assert_capture_refused(self._argv("short-sleep"), self.python_sha256, "timeout", timeout_s=1)
 
     def test_malformed_argv_is_refused(self):
         for argv in ("python3 -B stub.py", [], [1, 2]):

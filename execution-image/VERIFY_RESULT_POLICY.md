@@ -7,6 +7,8 @@ Status: source-only Stage-B policy check. The checker reads the JSON printed by 
 - `verify_result_policy.py`: checker CLI (`main`), bounded parser, and `capture()`, a bounded helper that runs one caller-pinned executable and returns its stdout. It writes no files. The CLI does not call `capture()`, and CI calls it only from the unit tests; an authorized caller supplies argv and the expected executable SHA-256.
 - `test_verify_result_policy.py`: offline unit tests, including a binding test against `manifest.json` `base`. The `offline-suites` job runs them in the `execution-image source-only carrier suite` step when change detection sets `heavy=true`. A `.github/**` change always does, including on a draft PR. Any other change that is not docs-only does on a ready PR; a draft that touches no workflow, dependency or disclosure boundary waits for `ready_for_review`.
 
+**Scope.** This unit's three files (`verify_result_policy.py`, `test_verify_result_policy.py` and this document) are not listed in `manifest.json` or `validate.py`, and this change does not alter the accepted carrier bytes. Their identity is the commit plus the SHA-256 values recorded in the pull request. They become carrier files only in a later reviewed change.
+
 ## Use
 
 ```sh
@@ -58,7 +60,9 @@ Parse refusals, raised before any rule: `input_too_large` (over 4 MiB), `invalid
 
 Depth and node counts are checked after parsing, so peak memory scales with the 4 MiB input and Python object overhead. Where `sys.get_int_max_str_digits` exists (Python 3.11 and later, and some 3.7 to 3.10 patch releases), the default limit of 4300 digits refuses longer integer literals as `invalid_json`. The limit can be lifted at runtime (`sys.set_int_max_str_digits(0)` or `PYTHONINTMAXSTRDIGITS=0`). With it lifted, or on a build without it, the 4 MiB input cap is the only bound. One measurement: a 4,000,000-digit literal parsed in 2.46 s on Python 3.13.5 with the limit lifted.
 
-Capture refusals (`capture()` only): `argv` (not a non-empty list of strings, or an argument after argv[0] that cannot be encoded for exec, such as one with NUL or an unpaired surrogate), `executable_path` (argv[0] not absolute, not a regular file, not readable and executable, or with NUL or an unpaired surrogate), `executable_sha256`, `spawn`, `output_limit` (over 4 MiB of stdout), `timeout` (must be greater than 0 and at most 120 s; the default is 120 s; NaN and out-of-range values are refused before spawn; a non-number raises `TypeError`), `exit_status` (non-zero).
+Capture refusals (`capture()` only): `argv` (not a non-empty list of strings, or an argument after argv[0] that cannot be encoded for exec, such as one with NUL or an unpaired surrogate), `executable_path` (argv[0] not absolute, not a regular file, not readable and executable, not a regular file when opened without blocking, or with NUL or an unpaired surrogate), `executable_sha256`, `spawn`, `output_limit` (over 4 MiB of stdout), `timeout` (must be greater than 0 and at most 120 s; the default is 120 s; NaN and out-of-range values are refused before spawn; a non-number raises `TypeError`; the deadline starts before the executable check and covers hashing, which is checked after each 1 MiB read), `exit_status` (non-zero).
+
+**Predicate body.** The checker reads only the statement's `predicateType`. It does not read the predicate body, including any build definition or resolved source. The source commit comes from the certificate's `sourceRepositoryDigest`. The README's manual instruction to inspect the signed predicate is not performed by this checker.
 
 ## Capture contract
 
@@ -102,7 +106,9 @@ The gh test fixture `pkg/cmd/attestation/verification/extensions_test.go:18` use
 | Hash-to-exec window in `capture()` | Open residual. | Hash and execute through the same descriptor. |
 | Environment inherited by the capture child | Full environment passed through, including credential variables. No allowlist. | Decision by the authorizing owner on an allowlist, then an authorized run that uses it. |
 | Same-group descendant that closes stdout and outlives a reaped leader | Not killed, whether the leader exited 0 or not. The timeout and output-cap paths kill the group while the leader is unreaped. | Run the caller inside a cgroup or container that is torn down on exit. |
-| `proc.wait()` after SIGKILL | No time limit. A leader in uninterruptible sleep keeps the call open. | A bounded wait driven by the caller's supervisor, or a container teardown. |
+| `proc.wait()` after SIGKILL or a refused kill | No time limit. A leader in uninterruptible sleep, or one the caller cannot signal, keeps the call open. A refused kill still raises the original refusal. | A bounded wait driven by the caller's supervisor, or a container teardown. |
+| Filesystem call that never returns before spawn (hung mount, stalled read) | Not interrupted in-process. The deadline is checked between 1 MiB reads, not inside a read. | A supervisor bound on the process, or a container teardown. |
+| Predicate body beyond `predicateType` | Not read. The source commit comes from the certificate, and the README's manual predicate inspection is not performed by the checker. | An authorized reviewer decides whether a predicate-level check is needed, after a real output confirms its field spelling. |
 | Stage-A exit status for a saved file | The CLI cannot observe the verifier's exit status. A `satisfied` CLI verdict covers only the saved bytes. `capture()` refuses a non-zero exit itself (tested). | The authorized run records exit 0 for the same saved bytes. |
 | Freshness of a saved file | The checker has no reference time and no pinned freshness window. `capture()` cannot return output from an earlier invocation (tested). | The authorizing owner pins a window, and the procedure that writes the file binds it to one run. |
 | Signature, Fulcio chain, Rekor inclusion, artifact bytes | Not verified by this unit. | Authorized verifier run with separate security acceptance. |
