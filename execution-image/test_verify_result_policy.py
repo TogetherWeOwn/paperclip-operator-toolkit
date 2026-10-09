@@ -59,6 +59,8 @@ elif mode == "spawn":
 
 NEGATIVE_CASES = [
     ("media_type", [0, "verificationResult", "mediaType"], "application/json"),
+    ("media_type", [0, "verificationResult", "mediaType"], "application/vnd.dev.sigstore.bundle.v0.3+json"),
+    ("media_type", [0, "verificationResult", "mediaType"], "application/vnd.dev.sigstore.verificationresult+json;version=0.2"),
     ("media_type", [0, "verificationResult", "mediaType"], DELETE),
     ("result_shape", [0, "verificationResult"], DELETE),
     ("result_shape", [0], "not-an-object"),
@@ -114,7 +116,7 @@ def _valid_doc():
         {
             "attestation": {"bundle": {}},
             "verificationResult": {
-                "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
                 "signature": {
                     "certificate": {
                         "issuer": vrp.EXPECTED["issuer"],

@@ -21,7 +21,7 @@ CAPTURE_REAP_S = 5
 
 # Mirrors execution-image/manifest.json base.*; test_verify_result_policy.py cross-checks each value.
 EXPECTED = {
-    "media_type_prefix": "application/vnd.dev.sigstore.bundle.",
+    "media_type": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
     "statement_type": "https://in-toto.io/Statement/v1",
     "predicate_type": "https://slsa.dev/provenance/v1",
     "subject_name": "ghcr.io/paperclipai/paperclip",
@@ -122,7 +122,7 @@ def _check_policy(doc):
     if not isinstance(doc, list) or len(doc) != 1:
         raise Refusal("result_count")
     result = _field(doc[0], "verificationResult", dict, "result_shape")
-    if not _field(result, "mediaType", str, "media_type").startswith(EXPECTED["media_type_prefix"]):
+    if _field(result, "mediaType", str, "media_type") != EXPECTED["media_type"]:
         raise Refusal("media_type")
     statement = _field(result, "statement", dict, "statement_shape")
     if statement.get("_type") != EXPECTED["statement_type"]:
