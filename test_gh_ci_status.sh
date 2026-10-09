@@ -130,6 +130,10 @@ const realRedFailure = realRed.check_runs.find(r => r.conclusion === 'failure')
 const completed = (name, conclusion) => ({ name, status: 'completed', conclusion })
 const running   = (name) => ({ name, status: 'in_progress', conclusion: null })
 
+// A full first page of successes: the old single-page reader saw exactly this
+// and reported pass, with the failure sitting unread on page 2.
+const pageOf100 = Array.from({ length: 100 }, (_, i) => completed('job-' + (i + 1), 'success'))
+
 // ref -> { checks, statuses, runs }; each is a status code or a body.
 const CASES = {
   // Every source denied: the broker's current default profile.
@@ -219,6 +223,29 @@ const CASES = {
   'sha-nonstart-extred': { checks: realNonstart,
                            statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
                            runs: 403 },
+
+  // ---- pagination: a failure past page 1 must not read as pass -------------
+  // Page 1 is a full 100-success page whose total_count advertises one more
+  // row; the failure sits on page 2. The old single-page reader saw only
+  // page 1 and reported pass with 101 signals observed. Served as arrays so
+  // the stub answers `?page=1` and `?page=2` separately (see the handler).
+  'sha-paged-fail': { checks: [{ total_count: 101, check_runs: pageOf100 },
+                               { total_count: 101, check_runs: [completed('late-failure', 'failure')] }],
+                      statuses: 403,
+                      runs: { total_count: 0, workflow_runs: [] } },
+
+  // Both pages green: the paginating reader must still reach pass.
+  'sha-paged-green': { checks: [{ total_count: 101, check_runs: pageOf100 },
+                                { total_count: 101, check_runs: [completed('last-job', 'success')] }],
+                       statuses: 403,
+                       runs: { total_count: 0, workflow_runs: [] } },
+
+  // total_count advertises rows the stub never serves: a short read the
+  // reader cannot complete. Served as a one-element array so page 2 is a
+  // 404 — the unread rows may hold a red, so this is unknown, never pass.
+  'sha-paged-short': { checks: [{ total_count: 200, check_runs: pageOf100 }],
+                       statuses: 403,
+                       runs: { total_count: 0, workflow_runs: [] } },
 }
 
 // check-run id -> annotations body, or a bare status code. Ids present in the
@@ -258,10 +285,24 @@ const srv = http.createServer((req, res) => {
     res.end(JSON.stringify(val))
   }
 
+  // Paged list bodies are served as arrays: element 0 is page 1, element 1 is
+  // page 2. A reader that never sends `page=` gets element 0 — which is what
+  // made the pre-fix reader report pass on sha-paged-fail.
+  const sendPaged = (val) => {
+    if (!Array.isArray(val)) return send(val)
+    const pm = (url.match(/[?&]page=(\d+)/) || [])[1]
+    const page = pm ? parseInt(pm, 10) : 1
+    const body = val[page - 1]
+    if (body === undefined) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    res.statusCode = 200
+    res.end(JSON.stringify(body))
+  }
+
   if (source === 'annotations') return send(annotationFor(annId))
 
   const spec = CASES[ref]
   if (!spec || !source) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+  if (source === 'checks' || source === 'runs') return sendPaged(spec[source])
   send(spec[source])
 })
 srv.listen(0, '127.0.0.1', () => process.stdout.write(String(srv.address().port) + '\n'))
@@ -366,6 +407,31 @@ expect sha-startup fail 1 "startup_failure visible only via workflow runs -> fai
 # check runs forever, so a checks-only gate reads it as green permanently.
 expect sha-extstatus fail 1 "failing external commit status -> fail"
 expect sha-extgreen  pass 0 "passing external commit status -> pass"
+
+hdr "Pagination — a failure past page 1 must not read as pass"
+
+# THE regression case for this change: 100 successes on page 1, the failure
+# on page 2. The single-page reader reported pass (exit 0); the fix reads
+# both pages and reports fail (exit 1).
+expect sha-paged-fail fail 1 "a failure on page 2 of 101 check runs -> fail, not pass"
+
+# The control: both pages green is still a pass.
+expect sha-paged-green pass 0 "101 successes across two pages -> pass"
+
+# A short read the reader cannot complete: total_count advertises rows that
+# never arrive. The unread rows may hold a red, so this is unknown (exit 3) —
+# never pass, never pending, never non-started.
+expect sha-paged-short unknown 3 "a truncated check-runs read -> unknown, not pass"
+
+run sha-paged-fail
+printf '%s' "$OUT" | jq -e '.signalsObserved == 101 and .checkRunsRead == 101 and .checkRunsTruncated == false' >/dev/null 2>&1
+assert $? "the paged failure reports the rows actually read, not the first page" \
+  "signalsObserved is not 101 read rows — the count still comes from a single page"
+
+run sha-paged-short
+printf '%s' "$OUT" | jq -e '.truncated == true and .checkRunsTruncated == true' >/dev/null 2>&1
+assert $? "a truncated read is flagged structurally, not only in prose" \
+  "a caller would have to regex the reason string to learn the read was short"
 
 hdr "TOG-381 — a job that never ran is not a red build"
 
