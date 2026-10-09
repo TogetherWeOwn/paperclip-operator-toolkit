@@ -64,6 +64,8 @@ public_paths=(
   'see paperclipai/paperclip/.github/workflows/ci.yml'
   'uses: paperclipai/paperclip/.github/a.yml@main # pinned'
   'cd /tmp && curl https://github.com/paperclipai/paperclip/actions'
+  'https://example.com:8443/someone/paperclip/x'
+  'r"https://github\.com/paperclipai/paperclip/actions/runs/[0-9]+"'
 )
 private_paths=(
   "DIR=${private_root}x"
@@ -122,6 +124,8 @@ private_paths=(
   '--dir=op/paper''clip/.github/x'
   'https://100.100.1.2/op/paper''clip/x'
   'https://localhost/op/paper''clip/x'
+  'https://a.b@100.100.1.2/op/paper''clip/x'
+  'https://100.100.1.2:8443/op/paper''clip/x'
   'https://example.com/z,/Users/op/My Projects/paper''clip/.github/x'
   'https://github.com/paperclipai/paperclip/actions and paperclipai/paper''clip/.github/x.yml'
   'see https://x.y/z and paperclipai/paper''clip/.github/x.yml'

@@ -17,12 +17,13 @@ CONTENT = re.compile(
     re.IGNORECASE,
 )
 # Namespace spans skip only the root rule; CONTENT still judges every line.
-# A web URL span (host/owner/paperclip on a dotted, non-numeric host) is always
-# a namespace. A bare owner/repo span is one only at a token start and only when
-# no slash precedes it on the line: a file path can hold spaces, so any earlier
-# slash, in a path or a URL, makes the span ambiguous and the root rule judges it.
+# A web URL span (host/owner/paperclip) is always a namespace when the host is a
+# dotted DNS name: no userinfo, not an IP address; a regex-escaped dot counts. A
+# bare owner/repo span is one only at a token start and only when no slash
+# precedes it on the line: a file path can hold spaces, so any earlier slash, in
+# a path or a URL, makes the span ambiguous and the root rule judges it.
 NAMESPACE = re.compile(
-    r"(?P<url>https?://(?![\d.:]*/)(?=[^/]*\.)[^\s/'\"`<>()\[\]{}$;&|,?#]+"
+    r"(?P<url>https?://(?![\d.\\]+(?::\d+)?/)[a-z0-9-]+(?:\\?\.[a-z0-9-]+)+(?::\d+)?"
     r"/(?:repos/)?\w[\w-]*/paperclip(?=/))"
     r"|(?P<owner>(?<![^\s\"'`(\[{])\w[\w-]*/paperclip(?=/\.github/))",
     re.IGNORECASE,
