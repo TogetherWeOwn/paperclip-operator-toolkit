@@ -100,14 +100,16 @@ set -uo pipefail
 #   sibling_guard.sh <ISSUE-KEY|issue-uuid> [--phase=start|prepush] [--repo O/R]
 #                    [--quiet] [--json]
 #
-#   TOG-345 style keys are resolved to an issue id through the company issue
-#   list. A uuid is used as-is and needs no company scope.
+#   A key is resolved by GET /api/issues/<key>, which answers for any issue
+#   however old. The company issue list (the 500 newest) is only the fallback.
+#   A uuid is used as-is and needs no lookup.
 #
 # ENVIRONMENT
 #   PAPERCLIP_API_URL, PAPERCLIP_API_KEY, PAPERCLIP_AGENT_ID, PAPERCLIP_RUN_ID
 #                       control-plane detector; absent -> that detector is
 #                       could-not-run, i.e. exit 3, never exit 0.
-#   PAPERCLIP_COMPANY_ID   needed only to resolve a TOG-nnn key to an id.
+#   PAPERCLIP_COMPANY_ID   needed only when GET /api/issues/<key> is not 200 and
+#                       the company issue list has to be tried.
 #   GH_TOKEN            open-PR query. Absent -> the PR half is could-not-run.
 #                       Branch-and-ancestor still run off the local clone.
 #   GH_API_URL          default https://api.github.com (test seam).
@@ -132,7 +134,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '99,115p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '99,117p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
@@ -177,7 +179,7 @@ trap 'rm -rf "$TMPD"' EXIT
 # DETECTOR 1 — control plane (leading: sees a sibling that has written nothing)
 # ===========================================================================
 detect_control_plane() {
-  local base key url code body hdrs
+  local base key url code direct body hdrs
   base="${PAPERCLIP_API_URL:-}"
   [[ -n "$base" ]] || { blind_on "control-plane: PAPERCLIP_API_URL is unset"; return; }
   key="${PAPERCLIP_API_KEY:-}"
@@ -192,20 +194,31 @@ detect_control_plane() {
 
   local issue_id="$ISSUE_ARG"
   if [[ ! "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
-    # A TOG-nnn key. Resolve through the company issue list.
-    [[ -n "${PAPERCLIP_COMPANY_ID:-}" ]] || { blind_on "control-plane: \"$ISSUE_ARG\" is a key, and PAPERCLIP_COMPANY_ID is unset so it cannot be resolved to an id"; return; }
-    body="$TMPD/issues.json"
-    code="$(curl -sS -m 30 -o "$body" -w '%{http_code}' -H "@$hdrs" "$base/api/companies/$PAPERCLIP_COMPANY_ID/issues" 2>/dev/null || echo 000)"
-    [[ "$code" == "200" ]] || { blind_on "control-plane: issue list returned HTTP $code, cannot resolve $ISSUE_ARG"; return; }
-    issue_id="$(node -e '
-      const fs = require("fs")
-      const a0 = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-      const a = Array.isArray(a0) ? a0 : (a0.issues || [])
-      const want = process.argv[2].toLowerCase()
-      const m = a.find(i => String(i.identifier || "").toLowerCase() === want)
-      process.stdout.write(m ? String(m.id) : "")
-    ' "$body" "$ISSUE_ARG" 2>/dev/null)"
-    [[ -n "$issue_id" ]] || { blind_on "control-plane: no issue in this company has identifier $ISSUE_ARG"; return; }
+    # The company list holds only the 500 newest issues, so a key is asked of
+    # GET /api/issues/<key> first. The list is the fallback, not the source.
+    body="$TMPD/issue.json"
+    direct="$(curl -sS -m 30 -o "$body" -w '%{http_code}' -H "@$hdrs" "$base/api/issues/$ISSUE_ARG" 2>/dev/null || echo 000)"
+    if [[ "$direct" == "200" ]]; then
+      issue_id="$(node -e '
+        const fs = require("fs")
+        const i = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+        if (String(i.identifier || "").toLowerCase() === process.argv[2].toLowerCase()) process.stdout.write(String(i.id || ""))
+      ' "$body" "$ISSUE_ARG" 2>/dev/null)"
+    else
+      [[ -n "${PAPERCLIP_COMPANY_ID:-}" ]] || { blind_on "control-plane: GET /api/issues/$ISSUE_ARG returned HTTP $direct and PAPERCLIP_COMPANY_ID is unset, so the issue list cannot be tried"; return; }
+      body="$TMPD/issues.json"
+      code="$(curl -sS -m 30 -o "$body" -w '%{http_code}' -H "@$hdrs" "$base/api/companies/$PAPERCLIP_COMPANY_ID/issues" 2>/dev/null || echo 000)"
+      [[ "$code" == "200" ]] || { blind_on "control-plane: GET /api/issues/$ISSUE_ARG returned HTTP $direct and the issue list returned HTTP $code, cannot resolve $ISSUE_ARG"; return; }
+      issue_id="$(node -e '
+        const fs = require("fs")
+        const a0 = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+        const a = Array.isArray(a0) ? a0 : (a0.issues || [])
+        const want = process.argv[2].toLowerCase()
+        const m = a.find(i => String(i.identifier || "").toLowerCase() === want)
+        process.stdout.write(m ? String(m.id) : "")
+      ' "$body" "$ISSUE_ARG" 2>/dev/null)"
+    fi
+    [[ -n "$issue_id" ]] || { blind_on "control-plane: $ISSUE_ARG did not resolve to an issue id (GET /api/issues/$ISSUE_ARG returned HTTP $direct)"; return; }
   fi
 
   body="$TMPD/runs.json"

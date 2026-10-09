@@ -112,6 +112,11 @@ const ISSUES = Object.keys(RUNS).map((id, i) => ({
   id, identifier: 'TOG-90' + i, title: 'stub issue ' + id,
 })).concat([{ id: 'case-500', identifier: 'TOG-950' }, { id: 'case-badjson', identifier: 'TOG-951' }])
 
+// Older than the 500-row company list, so the list never returns them. Only
+// GET /api/issues/<key> resolves these.
+const OLD_ISSUES = [{ id: 'case-old', identifier: 'OPS-7' }]
+const OLD_RUNS   = { 'case-old': [myOwnRow] }
+
 const PULLS = {
   none:   [],
   hit:    [{ number: 77, title: 'Do the thing (TOG-900)', body: '', head: { ref: 'feature-x' } }],
@@ -130,11 +135,17 @@ const srv = http.createServer((req, res) => {
 
   let m
   if ((m = url.match(/^\/api\/companies\/[^/]+\/issues$/))) return send(200, ISSUES)
+  // Listed keys 404 here on purpose: they must reach the list fallback, which
+  // stays under test. Only the old tail is served by key.
+  if ((m = url.match(/^\/api\/issues\/([^/]+)$/))) {
+    const hit = OLD_ISSUES.find(i => i.identifier === m[1])
+    return hit ? send(200, hit) : send(404, { error: 'no such issue' })
+  }
   if ((m = url.match(/^\/api\/issues\/([^/]+)\/runs$/))) {
     const id = m[1]
     if (id === 'case-500') return send(500, { error: 'boom' })
     if (id === 'case-badjson') return send(200, '<html>not json</html>')
-    if (RUNS[id]) return send(200, RUNS[id])
+    if (RUNS[id] || OLD_RUNS[id]) return send(200, RUNS[id] || OLD_RUNS[id])
     return send(404, { error: 'no such issue' })
   }
   if ((m = url.match(/^\/repos\/[^/]+\/([^/]+)\/pulls$/))) {
@@ -472,6 +483,21 @@ assert "$(grep -q 'pgrep\|/proc/' "$CODE_ONLY" && echo 1 || echo 0)" \
 assert "$(grep -nE 'curl[^|]*(\$GH_TOKEN|\$token|\$PAPERCLIP_API_KEY|\$key)' "$TOOL" >/dev/null && echo 1 || echo 0)" \
   "no credential is passed to curl on the command line" \
   "$(grep -nE 'curl[^|]*(\$GH_TOKEN|\$token|\$PAPERCLIP_API_KEY|\$key)' "$TOOL" || true)"
+
+# ===========================================================================
+hdr "11. An old key resolves through its own endpoint, not the 500-row list."
+# The company list returns the 500 newest issues, so an older key is found only
+# by GET /api/issues/<key>. A key that neither lookup finds stays blind.
+
+run_guard "$CLEAN" OPS-7 --repo=stub/none
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "an old key outside the company list resolves and is read, exits 0" "rc=$RC out=$OUT"
+assert "$(grep -q "read case-old run list" <<< "$OUT" && echo 0 || echo 1)" \
+  "the old key resolves to the issue it names" "$OUT"
+
+run_guard "$CLEAN" OPS-404 --repo=stub/none
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "a key that 404s by key and is absent from the list stays blind, exits 3" "rc=$RC out=$OUT"
 
 # ===========================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
