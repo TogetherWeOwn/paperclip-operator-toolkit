@@ -147,17 +147,29 @@ printf 'Authorization: Bearer %s\nAccept: application/vnd.github+json\nX-GitHub-
 
 valid_repo() { [[ "$1" == */* && "$1" != *..* && "$1" != *" "* ]]; }
 
-# ci_json <owner/repo> -> prints gh_ci_status.sh JSON on stdout.
+# resolve_main <owner/repo> -> the commit SHA main points at, on stdout; returns
+# 1 when it cannot be resolved. Resolved once per repo so the reader and the
+# failing-check read describe the same commit: a push between them would split
+# the verdict from the names it is keyed on.
+resolve_main() {
+  local sha
+  [[ "$(gh_api "/repos/$1/commits/main")" == "200" ]] || return 1
+  sha="$(jq -r '.sha // ""' "$GH_BODY" 2>/dev/null)"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s' "$sha"
+}
+
+# ci_json <owner/repo> <commit-sha> -> prints gh_ci_status.sh JSON on stdout.
 # Returns the reader's exit code (0 pass, 1 fail, 2 pending, 3 unknown,
 # 5 non-started). A reader failure is the repo's verdict, not the poll's.
 ci_json() {
-  "$CI_STATUS_BIN" --quiet "$1" main 2>/dev/null
+  "$CI_STATUS_BIN" --quiet "$1" "$2" 2>/dev/null
 }
 
 # gh_api <path> -> HTTP status; body in $GH_BODY.
 gh_api() { curl -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null || echo 000; }
 
-# failing_checks <owner/repo> <body-file> -> prints sorted, lowercased
+# failing_checks <owner/repo> <commit-sha> <body-file> -> prints sorted, lowercased
 # failing check-run names, one per line. Every check-runs page is read until
 # the rows seen match total_count; a short read returns 1 with nothing printed,
 # so the caller keys on the reader reason instead of a partial check set. The
@@ -169,14 +181,14 @@ gh_api() { curl -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/d
 # Empty output with exit 0 means "check runs read, none failing": a fail verdict
 # sourced elsewhere (commit statuses) falls back to the reader reason as key.
 failing_checks() {
-  local slug="$1" body_file="$2" code page=1 total=0 seen=0 page_n tmp
+  local slug="$1" sha="$2" body_file="$3" code page=1 total=0 seen=0 page_n tmp
   tmp="$(mktemp)" || return 1
   while true; do
-    code="$(gh_api "/repos/$slug/commits/main/check-runs?per_page=100&page=$page")"
+    code="$(gh_api "/repos/$slug/commits/$sha/check-runs?per_page=100&page=$page")"
     [[ "$code" == "200" ]] || { rm -f "$tmp"; return 1; }
     if [[ "$page" -eq 1 ]]; then
-      total="$(jq -r '.total_count // (.check_runs | length) // 0' "$GH_BODY" 2>/dev/null)"
-      [[ "$total" =~ ^[0-9]+$ ]] || total=0
+      total="$(jq -r '.total_count // (.check_runs | length) // empty' "$GH_BODY" 2>/dev/null)"
+      [[ "$total" =~ ^[0-9]+$ ]] || { rm -f "$tmp"; return 1; }
       cp "$GH_BODY" "$body_file" 2>/dev/null || { rm -f "$tmp"; return 1; }
     fi
     page_n="$(jq -r '.check_runs | length' "$GH_BODY" 2>/dev/null)"
@@ -353,8 +365,9 @@ title_for() { printf '[%s] Red main: %s' "$1" "$2"; }
 # another repo's red (rule 4 cuts both ways: partial coverage is reported,
 # not discarded).
 poll_one() {
-  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body
-  out="$(ci_json "$slug")"; rc=$?
+  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body main_sha
+  main_sha="$(resolve_main "$slug")" || { printf 'UNKNOWN %s @ main: could not resolve main to a commit\n' "$slug"; return 0; }
+  out="$(ci_json "$slug" "$main_sha")"; rc=$?
   verdict="$(jq -r '.verdict // ""' <<<"$out" 2>/dev/null)"
   reason="$(jq -r '.reason // ""' <<<"$out" 2>/dev/null)"
   case "$rc:$verdict" in
@@ -365,7 +378,7 @@ poll_one() {
       # a red confined to non-required checks is S3, but required-ness is
       # not observable here, so triage alone downgrades on that evidence.
       checks_body="$(mktemp)"
-      if names="$(failing_checks "$slug" "$checks_body")"; then
+      if names="$(failing_checks "$slug" "$main_sha" "$checks_body")"; then
         head="$(jq -r '[.check_runs[]? | .head_sha // ""] | map(select(length > 0)) | first // ""' "$checks_body" 2>/dev/null)"
       else
         names=""

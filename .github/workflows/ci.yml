@@ -2614,6 +2614,12 @@ jobs:
           ci_mutation "truncated-nonstart-outranked-by-workflow-red" \
             's/( -z "\$RUNS_FAIL" || -n "\$CHECKS_NONSTART" )/-z "$RUNS_FAIL"/' \
             'a truncated read beside a non-start and a workflow red -> unknown, not non-started' || rc=1
+          # 10. Query workflow runs by the branch name. GitHub answers zero runs
+          #     for a branch name in head_sha, so a startup failure beside green
+          #     check runs reads as pass.
+          ci_mutation "runs-queried-by-branch-name" \
+            's/head_sha=\$RESOLVED&/head_sha=$REF\&/' \
+            'a workflow startup failure beside green check runs, read by branch name -> fail, not pass' || rc=1
           exit $rc
 
       # Same discipline for the drift detector (TOG-212). Its whole value is

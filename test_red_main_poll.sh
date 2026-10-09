@@ -105,6 +105,7 @@ const running = (id, name, sha) => ({ name, status: 'in_progress', conclusion: n
 
 const SHA_A = 'aaa00000000000000000000000000000000000001'
 const SHA_B = 'bbb00000000000000000000000000000000000002'
+const SHA_MAIN = 'a'.repeat(40)
 
 const fail2A = [completed(810001, 'broker suite', 'failure', SHA_A), completed(810002, 'Offline suites', 'failure', SHA_A), completed(810003, 'lint', 'success', SHA_A)]
 const fail2B = [completed(820001, 'broker suite', 'failure', SHA_B), completed(820002, 'Offline suites', 'failure', SHA_B), completed(820003, 'lint', 'success', SHA_B)]
@@ -273,6 +274,12 @@ const srv = http.createServer((req, res) => {
     if (val === 422) { res.statusCode = 422; return res.end(JSON.stringify({ message: 'No commit found' })) }
     res.statusCode = 200
     res.end(JSON.stringify(val))
+  }
+  // GET /repos/{o}/{r}/commits/main: the commit the poller resolves once per repo.
+  const resolve = url.match(/\/repos\/([^/]+\/[^/]+)\/commits\/([^/?]+)(?:\?|$)/)
+  if (resolve) {
+    if (!CASES[resolve[1]]) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    return send({ sha: SHA_MAIN })
   }
   let m = url.match(/\/repos\/([^/]+\/[^/]+)\/commits\/([^/]+)\/check-runs/)
   if (m) {

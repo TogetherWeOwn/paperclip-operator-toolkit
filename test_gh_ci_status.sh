@@ -99,6 +99,7 @@ cat > "$TMP/stub-api.js" <<'STUB'
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
 const FIXTURES = process.argv[2]
 const fx = (n) => JSON.parse(fs.readFileSync(path.join(FIXTURES, n), 'utf8'))
@@ -259,7 +260,34 @@ const CASES = {
   'sha-paged-short-red-run': { checks: [{ total_count: 200, check_runs: pageOf100 }],
                                statuses: 403,
                                runs: { total_count: 1, workflow_runs: [completed('CI', 'failure')] } },
+  // A workflow startup failure beside green check runs, read by branch name.
+  // GitHub answers zero workflow runs for a branch name in head_sha, so the
+  // reader has to resolve the ref to a commit before it asks for runs.
+  'sha-branch-startup': { checks: { total_count: 2, check_runs: [completed('Offline suites', 'success'), completed('broker suite', 'success')] },
+                          statuses: 403,
+                          runs: { total_count: 1, workflow_runs: [completed('CI', 'startup_failure')] } },
+
+  // A check-runs body that is not JSON. Its total is unknown, so the read
+  // cannot be shown complete, and the green status must not carry it to pass.
+  'sha-garbage-checks': { checks: 'RAW:<html>captive portal</html>',
+                          statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                          runs: 403 },
+
+  // A commit-status body that is not JSON, beside green check runs.
+  'sha-garbage-status': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                          statuses: 'RAW:not json',
+                          runs: 403 },
+
+  // A server error on check runs is a read that did not happen, not a pass.
+  'sha-5xx-checks': { checks: 503,
+                      statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                      runs: 403 },
 }
+
+// A ref resolves to a 40-hex commit id, as a real SHA does. The stub's id is the
+// SHA-1 of the case name, and REFS maps it back to the case.
+const shaOf = (name) => crypto.createHash('sha1').update(name).digest('hex')
+const REFS = new Map(Object.keys(CASES).map((n) => [shaOf(n), n]))
 
 // check-run id -> annotations body, or a bare status code. Ids present in the
 // recorded check-runs bodies resolve to their recorded annotation file.
@@ -278,6 +306,21 @@ const annotationFor = (id) => {
 
 const srv = http.createServer((req, res) => {
   const url = req.url
+  res.setHeader('Content-Type', 'application/json')
+
+  // GET /repos/{o}/{r}/commits/{ref}: the resolution the reader makes first.
+  // A ref the case table marks missing answers 422, as GitHub does for an
+  // unknown commit; any other known ref resolves to its 40-hex id.
+  const resolve = url.match(/\/repos\/[^/]+\/[^/]+\/commits\/([^/?]+)(?:\?|$)/)
+  if (resolve) {
+    const name = REFS.get(resolve[1]) || resolve[1]
+    const spec = CASES[name]
+    if (!spec) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    if (spec.checks === 422) { res.statusCode = 422; return res.end(JSON.stringify({ message: 'No commit found' })) }
+    res.statusCode = 200
+    return res.end(JSON.stringify({ sha: shaOf(name) }))
+  }
+
   let ref = null, source = null, annId = null
   let m = url.match(/\/commits\/([^/]+)\/check-runs/)
   if (m) { ref = m[1]; source = 'checks' }
@@ -288,12 +331,12 @@ const srv = http.createServer((req, res) => {
   m = url.match(/\/check-runs\/([^/]+)\/annotations/)
   if (m) { annId = m[1]; source = 'annotations' }
 
-  res.setHeader('Content-Type', 'application/json')
-
   const send = (val) => {
     if (val === 403) { res.statusCode = 403; return res.end(JSON.stringify({ message: 'Resource not accessible by integration' })) }
     if (val === 422) { res.statusCode = 422; return res.end(JSON.stringify({ message: `No commit found for SHA: ${ref}` })) }
     if (val === 404 || val === undefined || val === null) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    if (typeof val === 'number') { res.statusCode = val; return res.end(JSON.stringify({ message: 'upstream error' })) }
+    if (typeof val === 'string' && val.startsWith('RAW:')) { res.statusCode = 200; return res.end(val.slice(4)) }
     res.statusCode = 200
     res.end(JSON.stringify(val))
   }
@@ -310,6 +353,10 @@ const srv = http.createServer((req, res) => {
     res.statusCode = 200
     res.end(JSON.stringify(body))
   }
+
+  // GitHub answers no workflow runs for a branch name in head_sha: only a commit id matches.
+  if (source === 'runs' && !/^[0-9a-f]{40}$/.test(ref)) return send({ total_count: 0, workflow_runs: [] })
+  if (ref !== null) ref = REFS.get(ref) || ref
 
   if (source === 'annotations') return send(annotationFor(annId))
 
@@ -441,6 +488,16 @@ expect sha-paged-short unknown 3 "a truncated check-runs read -> unknown, not pa
 expect sha-paged-short-nonstart unknown 3 "a truncated read beside a non-start and a workflow red -> unknown, not non-started"
 expect sha-paged-short-red-run fail 1 "a workflow red beside a truncated read with no non-start -> fail"
 
+# A ref is resolved to its commit before the runs query. Read by branch name,
+# the runs endpoint answers nothing, and the startup failure would read as green.
+expect sha-branch-startup fail 1 "a workflow startup failure beside green check runs, read by branch name -> fail, not pass"
+
+# A body that is not a list of check runs or statuses is an unread source, not
+# an empty one, and a server error is a read that did not happen.
+expect sha-garbage-checks unknown 3 "a check-runs body that is not JSON -> unknown, not pass"
+expect sha-garbage-status unknown 3 "a commit-status body that is not JSON -> unknown, not pass"
+expect sha-5xx-checks unknown 3 "a server error on check runs -> unknown, not pass"
+
 run sha-paged-fail
 printf '%s' "$OUT" | jq -e '.signalsObserved == 101 and .checkRunsRead == 101 and .checkRunsTruncated == false' >/dev/null 2>&1
 assert $? "the paged failure reports the rows actually read, not the first page" \
@@ -549,7 +606,9 @@ assert $? "a genuine red reports an empty nonStarted list" \
 LEAK=""
 for r in sha-denied sha-empty sha-green sha-red sha-running sha-skipped sha-missing \
          sha-startup sha-extstatus sha-extgreen sha-partial sha-real-green sha-real-red \
-         sha-fast-real-fail sha-ann-denied sha-ann-warnonly sha-ann-warnlevel sha-mixed sha-bad-id; do
+         sha-fast-real-fail sha-ann-denied sha-ann-warnonly sha-ann-warnlevel sha-mixed sha-bad-id \
+         sha-paged-fail sha-paged-green sha-paged-short sha-paged-short-nonstart sha-paged-short-red-run \
+         sha-branch-startup sha-garbage-checks sha-garbage-status sha-5xx-checks; do
   run "$r"
   [[ "$RC" -eq 5 ]] && { LEAK="$r"; break; }
 done
