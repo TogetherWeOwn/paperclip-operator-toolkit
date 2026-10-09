@@ -116,6 +116,8 @@ const ISSUES = Object.keys(RUNS).map((id, i) => ({
 // GET /api/issues/<key> resolves these.
 const OLD_ISSUES = [{ id: 'case-old', identifier: 'OPS-7' }]
 const OLD_RUNS   = { 'case-old': [myOwnRow] }
+// A 200 that names a different issue must not resolve the key that was asked for.
+const MISMATCHED = { 'OPS-8': { id: 'case-old', identifier: 'OPS-9' } }
 
 const PULLS = {
   none:   [],
@@ -138,6 +140,7 @@ const srv = http.createServer((req, res) => {
   // Listed keys 404 here on purpose: they must reach the list fallback, which
   // stays under test. Only the old tail is served by key.
   if ((m = url.match(/^\/api\/issues\/([^/]+)$/))) {
+    if (MISMATCHED[m[1]]) return send(200, MISMATCHED[m[1]])
     const hit = OLD_ISSUES.find(i => i.identifier === m[1])
     return hit ? send(200, hit) : send(404, { error: 'no such issue' })
   }
@@ -194,12 +197,12 @@ cat > "$GIT_CONFIG_GLOBAL" <<'GC'
 GC
 
 ORIGIN="$TMP/origin.git"
-git init --quiet --bare "$ORIGIN"
+git init --quiet --bare -b main "$ORIGIN"
 SEED="$TMP/seed"
-git init --quiet "$SEED" && (
+git init --quiet -b main "$SEED" && (
   cd "$SEED"
   echo one > file.txt
-  git add file.txt && git commit --quiet -m "seed"
+  git add file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -m "seed"
   git remote add origin "$ORIGIN" && git push --quiet -u origin main
 )
 
@@ -211,15 +214,32 @@ mkclone() { git clone --quiet "$ORIGIN" "$1"; }
 OUT=""; RC=0
 run_guard() {
   local cwd="$1" issue="$2"; shift 2
-  OUT="$( cd "$cwd" && \
-    PAPERCLIP_API_URL="$BASE" \
-    PAPERCLIP_API_KEY="${OVERRIDE_KEY-stub-key}" \
-    PAPERCLIP_COMPANY_ID="${OVERRIDE_CO-stub-co}" \
-    PAPERCLIP_AGENT_ID="${OVERRIDE_AGENT-agent-me}" \
-    PAPERCLIP_RUN_ID="${OVERRIDE_RUN-run-me}" \
-    GH_API_URL="$BASE" \
-    GH_TOKEN="${OVERRIDE_GH_TOKEN-stub-gh-token}" \
-    "$TOOL" "$issue" "$@" 2>&1 )"
+  # OVERRIDE_GH_TOKEN="" must survive the broker shim: the shim re-mints a real
+  # GH_TOKEN from PAPERCLIP_GITHUB_BROKER_TOKEN even when GH_TOKEN was cleared,
+  # so the "no credential" case never goes blind. Clearing both broker vars
+  # makes the shim report capability_missing and leave GH_TOKEN empty, which
+  # then makes `git credential fill` fail — the fixture for that case.
+  if [[ "${OVERRIDE_GH_TOKEN-sentinel}" == "" ]]; then
+    OUT="$( cd "$cwd" && \
+      PAPERCLIP_API_URL="$BASE" \
+      PAPERCLIP_API_KEY="${OVERRIDE_KEY-stub-key}" \
+      PAPERCLIP_COMPANY_ID="${OVERRIDE_CO-stub-co}" \
+      PAPERCLIP_AGENT_ID="${OVERRIDE_AGENT-agent-me}" \
+      PAPERCLIP_RUN_ID="${OVERRIDE_RUN-run-me}" \
+      GH_API_URL="$BASE" \
+      PAPERCLIP_GITHUB_BROKER_TOKEN="" PAPERCLIP_GITHUB_BROKER_URL="" GH_TOKEN="" \
+      "$TOOL" "$issue" "$@" 2>&1 )"
+  else
+    OUT="$( cd "$cwd" && \
+      PAPERCLIP_API_URL="$BASE" \
+      PAPERCLIP_API_KEY="${OVERRIDE_KEY-stub-key}" \
+      PAPERCLIP_COMPANY_ID="${OVERRIDE_CO-stub-co}" \
+      PAPERCLIP_AGENT_ID="${OVERRIDE_AGENT-agent-me}" \
+      PAPERCLIP_RUN_ID="${OVERRIDE_RUN-run-me}" \
+      GH_API_URL="$BASE" \
+      GH_TOKEN="${OVERRIDE_GH_TOKEN-stub-gh-token}" \
+      "$TOOL" "$issue" "$@" 2>&1 )"
+  fi
   RC=$?
   return 0
 }
@@ -276,7 +296,7 @@ run_guard "$CLEAN" TOG-900 --repo=stub/bad
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "an unparseable pull request list exits 3, not 0" "rc=$RC out=$OUT"
 
-NOREMOTE="$TMP/noremote"; git init --quiet "$NOREMOTE" && (cd "$NOREMOTE" && echo x > a && git add a && git commit --quiet -m x)
+NOREMOTE="$TMP/noremote"; git init --quiet -b main "$NOREMOTE" && (cd "$NOREMOTE" && echo x > a && git add a && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -m x)
 run_guard "$NOREMOTE" TOG-900 --repo=stub/none
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "a clone with no origin exits 3, not 0" "rc=$RC out=$OUT"
@@ -339,7 +359,7 @@ hdr "5. Local refs — the only signal for finished-but-unpushed work."
 
 AHEAD="$TMP/ahead"; mkclone "$AHEAD"
 (cd "$AHEAD" && git checkout --quiet -b tog-900-sibling && echo two >> file.txt \
-   && git commit --quiet -am "sibling work" && git checkout --quiet main)
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "sibling work" && git checkout --quiet main)
 run_guard "$AHEAD" TOG-900 --repo=stub/none
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "a local branch naming the issue and ahead of origin/main exits 1" "rc=$RC out=$OUT"
@@ -357,7 +377,7 @@ assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
 
 # Standing on your own branch must not detect yourself.
 SELF="$TMP/self"; mkclone "$SELF"
-(cd "$SELF" && git checkout --quiet -b tog-901-work && echo mine >> file.txt && git commit --quiet -am "my work")
+(cd "$SELF" && git checkout --quiet -b tog-901-work && echo mine >> file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "my work")
 run_guard "$SELF" TOG-901 --repo=stub/none
 assert "$(grep -qv "tog-901-work is" <<< "$OUT" && grep -q "run-sib" <<< "$OUT" && echo 0 || echo 1)" \
   "the branch the caller is standing on is not reported as a sibling branch" "$OUT"
@@ -367,7 +387,7 @@ hdr "6. Remote — a pushed branch, and an open PR."
 
 PUSHED="$TMP/pushed"; mkclone "$PUSHED"
 (cd "$PUSHED" && git checkout --quiet -b tog-901-pushed && echo p >> file.txt \
-   && git commit --quiet -am push && git push --quiet -u origin tog-901-pushed \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am push && git push --quiet -u origin tog-901-pushed \
    && git checkout --quiet main && git branch -D tog-901-pushed >/dev/null 2>&1)
 FRESH="$TMP/fresh"; mkclone "$FRESH"
 run_guard "$FRESH" TOG-901 --repo=stub/none
@@ -416,7 +436,7 @@ assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at start, a HEAD sitting on origin/main is not already-landed" "rc=$RC out=$OUT"
 
 WORK="$TMP/work"; mkclone "$WORK"
-(cd "$WORK" && git checkout --quiet -b tog-901-work && echo w >> file.txt && git commit --quiet -am w)
+(cd "$WORK" && git checkout --quiet -b tog-901-work && echo w >> file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am w)
 run_guard "$WORK" TOG-900 --repo=stub/none --phase=prepush
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at prepush, unlanded work on a fresh branch is clear" "rc=$RC out=$OUT"
@@ -498,6 +518,10 @@ assert "$(grep -q "read case-old run list" <<< "$OUT" && echo 0 || echo 1)" \
 run_guard "$CLEAN" OPS-404 --repo=stub/none
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "a key that 404s by key and is absent from the list stays blind, exits 3" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" OPS-8 --repo=stub/none
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "a 200 that names a different issue does not resolve the key, exits 3" "rc=$RC out=$OUT"
 
 # ===========================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
