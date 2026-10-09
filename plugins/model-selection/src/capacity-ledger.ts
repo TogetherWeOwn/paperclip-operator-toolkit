@@ -98,6 +98,8 @@ export interface ReserveResult {
 
 const MAX_DEBITS_PER_RESERVE = 16;
 const MAX_KEY_LEN = 256;
+// Release residue allowance in EPSILON x magnitude, sized above simulated 10^5-operation churn.
+const RELEASE_RESIDUE_EPSILONS = 1024;
 
 const NAMESPACE_RE = /^[a-z][a-z0-9_]{0,62}$/;
 const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -700,6 +702,7 @@ export class CapacityLedger {
     return { committed: false, reasons: ['cannot-start-expired-reservation'] };
   }
 
+  /** Refuses with zero writes when a held debit cannot be released coherently. */
   async cancelBeforeStart(
     idempotencyKey: string,
     fingerprint: string,
@@ -712,9 +715,27 @@ export class CapacityLedger {
     if (!entry || entry.fingerprint !== fingerprint) return { cancelled: false, reasons: ['unknown-attempt'] };
     if (entry.outcome === 'cancelled-before-start') return { cancelled: true, reasons: [] };
     if (entry.outcome !== 'held') return { cancelled: false, reasons: ['cannot-refund-started-attempt'] };
+    const debits = Object.entries(entry.debits);
+    if (debits.some(([wid]) => !row.windows[wid])) {
+      return { cancelled: false, reasons: ['reservation-window-missing'] };
+    }
     const nextWindows = structuredClone(row.windows);
-    for (const [wid, debit] of Object.entries(entry.debits)) {
-      nextWindows[wid]!.reserved -= debit.remaining;
+    for (const [wid, debit] of debits) {
+      const w = nextWindows[wid]!;
+      const released = w.reserved - debit.remaining;
+      if (
+        !Number.isFinite(w.reserved) || !Number.isFinite(debit.remaining) ||
+        !Number.isFinite(w.quota) || !Number.isFinite(released)
+      ) {
+        return { cancelled: false, reasons: ['reservation-window-malformed'] };
+      }
+      const tolerance = RELEASE_RESIDUE_EPSILONS * Number.EPSILON
+        * Math.max(Math.abs(w.reserved), Math.abs(debit.remaining), w.quota);
+      if (released < -tolerance) return { cancelled: false, reasons: ['reservation-release-exceeds-reserved'] };
+      const otherLive = Object.entries(row.attempts).some(([key, other]) =>
+        key !== idempotencyKey && (other.outcome === 'held' || other.outcome === 'committed')
+        && (other.debits[wid]?.remaining ?? 0) > 0);
+      w.reserved = released <= tolerance ? (otherLive ? Math.max(0, released) : 0) : released;
     }
     const nextAttempts = structuredClone(row.attempts);
     nextAttempts[idempotencyKey]!.outcome = 'cancelled-before-start';
