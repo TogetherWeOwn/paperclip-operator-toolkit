@@ -17,7 +17,6 @@ MAX_BYTES = 4 * 1024 * 1024
 MAX_DEPTH = 64
 MAX_NODES = 100_000
 CAPTURE_TIMEOUT_S = 120
-CAPTURE_TIMEOUT_MAX_S = 3600
 
 # Mirrors execution-image/manifest.json base.*; test_verify_result_policy.py cross-checks each value.
 EXPECTED = {
@@ -211,7 +210,7 @@ def _read_bounded(stream, deadline):
 def capture(argv, expected_sha256, timeout_s=CAPTURE_TIMEOUT_S):
     if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
         raise Refusal("argv")
-    if not 0 < timeout_s <= CAPTURE_TIMEOUT_MAX_S:
+    if not 0 < timeout_s <= CAPTURE_TIMEOUT_S:
         raise Refusal("timeout")
     executable = argv[0]
     if not os.path.isabs(executable) or not os.path.isfile(executable):

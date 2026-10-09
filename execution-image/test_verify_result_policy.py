@@ -25,7 +25,7 @@ SUBJECT_ENTRY = {
     "digest": {"sha256": vrp.EXPECTED["subject_sha256"]},
 }
 STUB = """
-import json, subprocess, sys, time
+import json, os, subprocess, sys, time
 mode, args = sys.argv[1], sys.argv[2:]
 if mode == "echo":
     sys.stdout.write(json.dumps(args))
@@ -38,6 +38,14 @@ elif mode == "stderr":
     sys.stdout.write("ok\\n")
 elif mode == "fail":
     sys.exit(3)
+elif mode == "emit-fail":
+    sys.stdout.write(args[0])
+    sys.exit(1)
+elif mode == "auth-fail":
+    sys.stderr.write("HTTP 401: Bad credentials\\n")
+    sys.exit(4)
+elif mode == "nonce":
+    sys.stdout.write(os.urandom(16).hex())
 elif mode == "sleep":
     time.sleep(30)
 elif mode == "spawn":
@@ -166,9 +174,24 @@ class PolicyTests(unittest.TestCase):
 
     def test_result_count_refuses_empty_multiple_and_object(self):
         result = _valid_doc()[0]
-        for label, doc in (("empty", []), ("two", [result, result]), ("object", result)):
+        for label, doc in (
+            ("empty", []),
+            ("two", [result, result]),
+            ("object", result),
+            ("error body", {"message": "Bad credentials"}),
+        ):
             with self.subTest(label=label):
                 self._assert_refused(doc, "result_count")
+
+    def test_identity_fields_spliced_across_results_are_refused(self):
+        bad_subject = _mutate(_valid_doc(), SUBJ + ["name"], "ghcr.io/paperclipai/paperclip-fork")
+        bad_signer = _mutate(
+            _valid_doc(), CERT + ["subjectAlternativeName"], REPO_URL + "/.github/workflows/other.yml@refs/heads/master"
+        )
+        self._assert_refused(bad_subject, "subject_name")
+        self._assert_refused(bad_signer, "signer_identity")
+        self._assert_refused(bad_subject + bad_signer, "result_count")
+        self._assert_refused(bad_signer + bad_subject, "result_count")
 
     def test_depth_beyond_limit_is_refused(self):
         nested = []
@@ -203,6 +226,8 @@ class PolicyTests(unittest.TestCase):
             ("invalid_encoding", b'[{"x": "\xff"}]'),
             ("input_too_large", b" " * (vrp.MAX_BYTES + 1)),
             ("too_deep", b"[" * 5000 + b"]" * 5000),
+            ("invalid_json", b"401 Unauthorized"),
+            ("invalid_json", b"<html>502 Bad Gateway</html>"),
         ]
         for code, raw in cases:
             with self.subTest(code=code, raw=raw[:24]):
@@ -275,10 +300,24 @@ class CaptureTests(unittest.TestCase):
     def test_nonzero_exit_is_refused(self):
         self._assert_capture_refused(self._argv("fail"), self.python_sha256, "exit_status")
 
+    def test_nonzero_exit_with_valid_output_is_refused(self):
+        self._assert_capture_refused(self._argv("emit-fail", json.dumps(_valid_doc())), self.python_sha256, "exit_status")
+
+    def test_authentication_failure_is_refused(self):
+        self._assert_capture_refused(self._argv("auth-fail"), self.python_sha256, "exit_status")
+
+    def test_each_capture_is_fresh(self):
+        first = vrp.capture(self._argv("nonce"), self.python_sha256)
+        self.assertNotEqual(first, vrp.capture(self._argv("nonce"), self.python_sha256))
+
     def test_timeout_is_refused(self):
         started = time.monotonic()
         self._assert_capture_refused(self._argv("sleep"), self.python_sha256, "timeout", timeout_s=1)
         self.assertLess(time.monotonic() - started, 30)
+
+    def test_timeout_at_cap_is_accepted(self):
+        out = vrp.capture(self._argv("echo", "x"), self.python_sha256, timeout_s=vrp.CAPTURE_TIMEOUT_S)
+        self.assertEqual(json.loads(out), ["x"])
 
     def test_timeout_kills_same_group_descendant_holding_stdout(self):
         started = os.path.join(self.tmp, "started")
@@ -328,7 +367,7 @@ class CaptureTests(unittest.TestCase):
         self._assert_capture_refused([sys.executable + "\0"], self.python_sha256, "executable_path")
 
     def test_out_of_range_timeout_is_refused_before_spawn(self):
-        for bad in (0, -1, float("nan"), float("inf"), 1e300, vrp.CAPTURE_TIMEOUT_MAX_S + 1):
+        for bad in (0, -1, float("nan"), float("inf"), 1e300, vrp.CAPTURE_TIMEOUT_S + 1):
             with self.subTest(timeout_s=bad):
                 with mock.patch.object(vrp.subprocess, "Popen", side_effect=AssertionError("spawned")):
                     self._assert_capture_refused(self._argv("echo"), self.python_sha256, "timeout", timeout_s=bad)
