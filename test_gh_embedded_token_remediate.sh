@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Regression suite for gh_embedded_token_remediate.py — TOG-3202/TOG-3209.
+# Regression suite for gh_embedded_token_remediate.py.
 #
 # WHAT THIS PROTECTS. The sweep's old repair, `git remote set-url`, deletes OUR
 # COPY of an embedded credential and leaves the credential itself live at
-# GitHub for up to an hour — measured on TOG-3202, where a scrubbed token still
+# GitHub for up to an hour — measured during an earlier incident, where a scrubbed token still
 # authenticated ~5 min after the sweep reported it remediated. This tool does
 # the half nothing else does: revoke, then scrub. The ways THAT can be wrong,
 # in descending order of how badly it hurts:

@@ -170,7 +170,7 @@ PY
 # The python above exits non-zero with the real cause on stderr, but under
 # `mapfile < <(...)` that status is lost and only the line COUNT survives. A
 # count is a symptom; reporting it as the failure is how a stale host render
-# got read as "the suite is green" on TOG-714. Point the reader at stderr.
+# got read as "the suite is green" in an earlier run. Point the reader at stderr.
 [ "${#generated_values[@]}" -eq 2 ] || fail 'generated evidence did not yield two ExecStart values — see the SystemExit reason printed above for the actual cause (commonly: the carrier was edited, so the host render is stale)'
 server_exec=${generated_values[0]}
 run_exec=${generated_values[1]}
@@ -196,7 +196,7 @@ grep -Eq -- '(^|[[:space:]])--user 61111:61112([[:space:]]|$)' <<<"$run_exec" ||
 grep -Fq -- '-v /run/paperclip-runs/run-a:/run/paperclip-run:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated run-root bind'
 grep -Fq -- '-v /run/paperclip-runs/run-a/workspace:/workspace:rw,Z' <<<"$run_exec" || fail 'run ExecStart lacks generated workspace bind'
 
-# TOG-1141. Everything below this line measures kernel behaviour inside an
+# Everything below this line measures kernel behaviour inside an
 # unprivileged user namespace: a read-only bind mount, then a uid/gid map. If
 # userns is unavailable, `unshare` exits 1 with "write failed
 # /proc/self/uid_map: Operation not permitted" -- which is byte-for-byte
@@ -204,7 +204,7 @@ grep -Fq -- '-v /run/paperclip-runs/run-a/workspace:/workspace:rw,Z' <<<"$run_ex
 # genuinely being broken. It was read that way for the whole of this window.
 #
 # So refuse instead, exit 3: a comparison that did not happen must not read as
-# an answer (TOG-357). Checked here, after the pure-bytes assertions above, so
+# an answer. Checked here, after the pure-bytes assertions above, so
 # a host without userns still gets the carrier verdict it CAN give.
 if ! unshare -Urnm true 2>/dev/null; then
   printf 'REFUSE: unprivileged user namespaces are unavailable here (unshare -Urnm failed).\n' >&2

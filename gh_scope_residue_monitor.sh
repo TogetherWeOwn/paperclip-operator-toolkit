@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# gh_scope_residue_monitor.sh — one complete cycle of the TOG-398 monitor.
+# gh_scope_residue_monitor.sh — one complete cycle of the monitor.
 # ---------------------------------------------------------------------------
 # gh_scope_residue.sh is a standing detector, but a detector nobody schedules
 # is still discovered by the agent whose checkout is already broken. Paperclip

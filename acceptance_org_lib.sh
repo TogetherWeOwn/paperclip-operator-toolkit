@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared fixture machinery for the TOG-199 acceptance suites.
+# Shared fixture machinery for the acceptance suites.
 #
 # Both acceptance suites need the same three things: a snapshot of the REAL org
 # in the TSV the queue reads, a stub provisioner whose ceiling is EXTRACTED from
@@ -62,7 +62,7 @@ build_stub() {
     echo 'set -uo pipefail'
     sed -n "/^CEILING_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"
     # EXTRACTED, never copied — same rule as the ceiling above. The risk
-    # classifier added in TOG-388 reads this catalog to decide whether an ask is
+    # classifier added later reads this catalog to decide whether an ask is
     # risky, and a stub holding its own copy would keep answering against
     # yesterday's permission keys.
     sed -n "/^TEMPLATES_JSON='{/,/^}'\$/p" "$HERE/org_provisioner.sh"

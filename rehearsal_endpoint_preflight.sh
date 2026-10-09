@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# One-shot TOG-554 cache rehearsal gate. This wrapper exists so the operator and
+# One-shot cache rehearsal gate. This wrapper exists so the operator and
 # Director of Engineering do not have to improvise the endpoint, retry policy,
 # or model. The underlying gate already keeps credentials in a 0600 header file
 # and never retries an authorization failure.
