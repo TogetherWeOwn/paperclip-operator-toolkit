@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
 import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -152,6 +154,24 @@ def _mutate(doc, path, value):
 
 def _encode(doc):
     return json.dumps(doc).encode("utf-8")
+
+
+class ProbeHung(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _fails_instead_of_hanging(seconds):
+    def interrupt(_signum, _frame):
+        raise ProbeHung(f"no return within {seconds} s")
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 class PolicyTests(unittest.TestCase):
@@ -350,15 +370,52 @@ class CaptureTests(unittest.TestCase):
     def test_fifo_at_executable_path_is_refused_without_blocking(self):
         path = os.path.join(self.tmp, "fifo-as-program")
         os.mkfifo(path, 0o700)
-        with mock.patch.object(vrp.os.path, "isfile", return_value=True):
+        with mock.patch.object(vrp.os.path, "isfile", return_value=True), _fails_instead_of_hanging(10):
             self._assert_capture_refused([path], self.python_sha256, "executable_path")
 
     def test_hashing_past_the_deadline_is_refused(self):
         self._assert_capture_refused(self._argv("echo"), self.python_sha256, "timeout", timeout_s=1e-6)
 
-    def test_refused_kill_still_reports_the_timeout(self):
+    def test_executable_check_counts_against_the_deadline(self):
+        clock = [1000.0]
+
+        def slow_isfile(_path):
+            clock[0] += 10
+            return True
+
+        with mock.patch.object(vrp.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+            vrp.os.path, "isfile", side_effect=slow_isfile
+        ), mock.patch.object(vrp.subprocess, "Popen", side_effect=AssertionError("spawned")):
+            self._assert_capture_refused(self._argv("echo"), self.python_sha256, "timeout", timeout_s=5)
+
+    def test_refused_kill_is_reported_as_kill_refused(self):
         with mock.patch.object(vrp.os, "killpg", side_effect=PermissionError(1, "denied")):
-            self._assert_capture_refused(self._argv("short-sleep"), self.python_sha256, "timeout", timeout_s=1)
+            self._assert_capture_refused(self._argv("short-sleep"), self.python_sha256, "kill_refused", timeout_s=1)
+
+    def test_leader_that_survives_the_reap_bound_is_refused(self):
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def record(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        def reap():
+            for proc in spawned:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+
+        self.addCleanup(reap)
+        with mock.patch.object(vrp, "CAPTURE_REAP_S", 0.2), mock.patch.object(
+            vrp.subprocess, "Popen", side_effect=record
+        ), mock.patch.object(vrp.os, "killpg", side_effect=PermissionError(1, "denied")):
+            started = time.monotonic()
+            self._assert_capture_refused(self._argv("sleep"), self.python_sha256, "kill_refused", timeout_s=1)
+            self.assertLess(time.monotonic() - started, 10)
 
     def test_malformed_argv_is_refused(self):
         for argv in ("python3 -B stub.py", [], [1, 2]):

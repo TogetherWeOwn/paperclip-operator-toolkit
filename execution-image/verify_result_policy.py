@@ -17,6 +17,7 @@ MAX_BYTES = 4 * 1024 * 1024
 MAX_DEPTH = 64
 MAX_NODES = 100_000
 CAPTURE_TIMEOUT_S = 120
+CAPTURE_REAP_S = 5
 
 # Mirrors execution-image/manifest.json base.*; test_verify_result_policy.py cross-checks each value.
 EXPECTED = {
@@ -258,14 +259,22 @@ def capture(argv, expected_sha256, timeout_s=CAPTURE_TIMEOUT_S):
         except subprocess.TimeoutExpired:
             raise Refusal("timeout") from None
     finally:
+        proc.stdout.close()
         if proc.returncode is None:
             # An unreaped leader keeps its pid, so the group id cannot be reused.
+            signal_refused = False
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError:
                 pass
-        proc.wait()
-        proc.stdout.close()
+            except PermissionError:
+                signal_refused = True
+            try:
+                proc.wait(timeout=CAPTURE_REAP_S)
+            except subprocess.TimeoutExpired:
+                raise Refusal("kill_refused") from None
+            if signal_refused:
+                raise Refusal("kill_refused")
     if status != 0:
         raise Refusal("exit_status")
     return output
