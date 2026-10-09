@@ -5067,9 +5067,9 @@ jobs:
       - name: Verify the plugin builds
         run: npm run build
 
-  # The plugin tree is published; it carries no internal tracker IDs, hostnames,
-  # private addresses or host-local paths. The self-test proves each pattern can
-  # actually fail the scan before the real tree is judged. Always on, like
+  # Scans every tracked file for internal tracker IDs, the internal domain,
+  # private addresses and host-local paths. The self-test proves each pattern
+  # can actually fail the scan before the real tree is judged. Always on, like
   # `secret-scan`: no `needs`, no `if`, and `ci-ok` requires `success`.
   disclosure-scan:
     name: disclosure scan
@@ -5086,8 +5086,8 @@ jobs:
       - name: Plugin CI wiring self-test
         run: python3 scripts/test_plugin_ci_wiring.py
 
-      - name: Disclosure scan over plugins/
-        run: bash scripts/disclosure-scan.sh plugins
+      - name: Disclosure scan over the full tracked tree
+        run: bash scripts/disclosure-scan.sh .
 
   # Secret scan over the full history. Pinned binary, checksum-verified, no
   # third-party action: the org-licensed action is not needed for a public repo.
