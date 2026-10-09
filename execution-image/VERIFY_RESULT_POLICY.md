@@ -4,8 +4,8 @@ Status: source-only. The checker reads the JSON printed by `gh attestation verif
 
 ## Files
 
-- `verify_result_policy.py`: checker CLI (`main`), bounded parser, and `capture()`, a bounded helper that runs one caller-pinned executable and returns its stdout. It writes no files. Neither CI nor the CLI calls `capture()`; an operator-authorized caller supplies argv and the expected executable SHA-256.
-- `test_verify_result_policy.py`: offline unit tests, including a binding test against `manifest.json` `base`. The `offline-suites` job runs them in the `execution-image source-only carrier suite` step whenever change detection sets `heavy=true`: any `.github/**` change or any non-doc change. A docs-only change skips that step.
+- `verify_result_policy.py`: checker CLI (`main`), bounded parser, and `capture()`, a bounded helper that runs one caller-pinned executable and returns its stdout. It writes no files. The CLI does not call `capture()`, and CI calls it only from the unit tests; an operator-authorized caller supplies argv and the expected executable SHA-256.
+- `test_verify_result_policy.py`: offline unit tests, including a binding test against `manifest.json` `base`. The `offline-suites` job runs them in the `execution-image source-only carrier suite` step when change detection sets `heavy=true`. A `.github/**` change always does, including on a draft PR. Any other change that is not docs-only does on a ready PR; a draft that touches no workflow, dependency or disclosure boundary waits for `ready_for_review`.
 
 ## Use
 
@@ -56,16 +56,17 @@ Each rule refuses with the code in the first column. Checks run in this order an
 
 Parse refusals, raised before any rule: `input_too_large` (over 4 MiB), `invalid_encoding` (not UTF-8), `invalid_json`, `duplicate_key`, `non_finite_number` (NaN, Infinity, or a number literal that overflows to infinity such as `1e999`), `too_deep` (over 64 levels), `too_many_nodes` (over 100,000 nodes).
 
-Depth and node counts are checked after parsing, so peak memory scales with the 4 MiB input and Python object overhead. On Python builds with the integer-string conversion limit (3.11 and later), integer literals over 4300 digits are refused as `invalid_json`. Other builds accept them, so their conversion time is bounded only by the input cap.
+Depth and node counts are checked after parsing, so peak memory scales with the 4 MiB input and Python object overhead. Where `sys.get_int_max_str_digits` exists (Python 3.11 and later, and some 3.7 to 3.10 patch releases), the default limit of 4300 digits refuses longer integer literals as `invalid_json`. The limit can be lifted at runtime (`sys.set_int_max_str_digits(0)` or `PYTHONINTMAXSTRDIGITS=0`). With it lifted, or on a build without it, the 4 MiB input cap is the only bound. One measurement: a 4,000,000-digit literal parsed in 2.46 s on Python 3.13.5 with the limit lifted.
 
-Capture refusals (`capture()` only): `argv`, `executable_path`, `executable_sha256`, `spawn`, `output_limit` (over 4 MiB of stdout), `timeout` (120 s default), `exit_status` (non-zero).
+Capture refusals (`capture()` only): `argv` (not a non-empty list of strings, or an argument after argv[0] that cannot be encoded for exec, such as one with NUL or an unpaired surrogate), `executable_path` (argv[0] not absolute, not a regular file, not readable and executable, or with NUL or an unpaired surrogate), `executable_sha256`, `spawn`, `output_limit` (over 4 MiB of stdout), `timeout` (must be greater than 0 and at most 3600 s; the default is 120 s; NaN and out-of-range values are refused before spawn; a non-number raises `TypeError`), `exit_status` (non-zero).
 
 ## Capture contract
 
-- POSIX only. argv is a list of strings. argv[0] is an absolute, readable, executable regular file whose SHA-256 matches the caller's pin.
+- POSIX only. argv is a list of strings. argv[0] is an absolute, readable, executable regular file whose SHA-256 matches the caller's pin. The pin covers those bytes only. Not pinned: the interpreter a script names in its shebang, the dynamic loader, shared libraries, PATH lookups made by the child, and inherited `LD_*` variables.
 - `shell=False`; stdin and stderr go to DEVNULL; PATH and the environment are not changed; stdout is capped at 4 MiB; one attempt, no retry, no daemon.
-- The child starts in a new session. Any path that leaves the leader unreaped (timeout, output cap, or an error) sends SIGKILL to the whole process group before the helper returns.
-- The child inherits the full environment, including any credential variables the caller holds. Passing an allowlist is an operator decision; this unit does not choose one.
+- The child starts in a new session. While the leader is unreaped, the helper sends SIGKILL to its whole process group on timeout, output cap, or error. Once the leader is reaped, the group is not signalled, so a same-group descendant that closes stdout and outlives its leader is not killed.
+- After SIGKILL, the helper waits for the leader with no time limit. A leader in uninterruptible sleep (state D) keeps `capture()` from returning.
+- The child inherits the full environment, including any credential variables the caller holds. Passing an allowlist is an operator decision; this unit does not choose one. Inherited `PATH` and `LD_*` values also decide what the child loads; neither is pinned.
 - Residual: the hash is checked before exec, so a file replaced between the check and the exec is not caught. This is not closed here. A future option is to hash and execute through the same descriptor (`/dev/fd/N` with `pass_fds`).
 
 ## Upstream pins
@@ -98,7 +99,8 @@ The gh test fixture `tests/gh-pkg_cmd_attestation_verification_extensions_test.g
 | gh binary SHA-256 | Not pinned. The caller supplies it. No binary was acquired. | Operator provides the approved binary hash. |
 | Hash-to-exec window in `capture()` | Open residual. | Hash and execute through the same descriptor. |
 | Environment inherited by the capture child | Full environment passed through, including credential variables. No allowlist. | Operator decision on an allowlist, then an authorized run that uses it. |
-| Descendants that outlive a successful exit | Not killed. Timeout, output-cap and error paths kill the group. | Run the caller inside a cgroup or container that is torn down on exit. |
+| Same-group descendant that closes stdout and outlives a reaped leader | Not killed, whether the leader exited 0 or not. The timeout and output-cap paths kill the group while the leader is unreaped. | Run the caller inside a cgroup or container that is torn down on exit. |
+| `proc.wait()` after SIGKILL | No time limit. A leader in uninterruptible sleep keeps the call open. | A bounded wait driven by the caller's supervisor, or a container teardown. |
 | Signature, Fulcio chain, Rekor inclusion, artifact bytes | Not verified by this unit. | Authorized verifier run with separate security acceptance. |
 | Authenticity and HOLD | Not established. Not cleared. | Security acceptance of the bound artifact. |
 

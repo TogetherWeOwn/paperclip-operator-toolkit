@@ -41,7 +41,7 @@ elif mode == "fail":
 elif mode == "sleep":
     time.sleep(30)
 elif mode == "spawn":
-    subprocess.Popen([sys.executable, "-c", "import sys, time; time.sleep(2); open(sys.argv[1], 'w').close()", args[0]])
+    subprocess.Popen([sys.executable, "-c", "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(4); open(sys.argv[2], 'w').close()", args[0], args[1]])
     time.sleep(30)
 """
 
@@ -52,6 +52,7 @@ NEGATIVE_CASES = [
     ("result_shape", [0], "not-an-object"),
     ("statement_shape", [0, "verificationResult", "statement"], DELETE),
     ("statement_type", STMT + ["_type"], "https://in-toto.io/Statement/v0.1"),
+    ("statement_type", STMT + ["_type"], DELETE),
     ("predicate_type", STMT + ["predicateType"], "https://slsa.dev/provenance/v0.2"),
     ("predicate_type", STMT + ["predicateType"], DELETE),
     ("subject_shape", STMT + ["subject"], DELETE),
@@ -63,15 +64,21 @@ NEGATIVE_CASES = [
     ("subject_name", SUBJ + ["name"], DELETE),
     ("subject_shape", SUBJ + ["digest"], DELETE),
     ("subject_digest", SUBJ + ["digest", "sha256"], "0" * 64),
+    ("subject_digest", SUBJ + ["digest", "sha256"], DELETE),
     ("certificate_shape", [0, "verificationResult", "signature"], DELETE),
     ("certificate_shape", CERT, DELETE),
     ("issuer", CERT + ["issuer"], "https://example.invalid"),
     ("issuer", CERT + ["issuer"], DELETE),
     ("signer_identity", CERT + ["subjectAlternativeName"], REPO_URL + "/.github/workflows/docker.yml@refs/heads/feature"),
+    ("signer_identity", CERT + ["subjectAlternativeName"], DELETE),
     ("build_signer", CERT + ["buildSignerURI"], REPO_URL + "/.github/workflows/other.yml@refs/heads/master"),
+    ("build_signer", CERT + ["buildSignerURI"], DELETE),
     ("source_uri", CERT + ["sourceRepositoryURI"], REPO_URL + "-fork"),
+    ("source_uri", CERT + ["sourceRepositoryURI"], DELETE),
     ("source_ref", CERT + ["sourceRepositoryRef"], "refs/heads/feature"),
+    ("source_ref", CERT + ["sourceRepositoryRef"], DELETE),
     ("source_digest", CERT + ["sourceRepositoryDigest"], "f" * 40),
+    ("source_digest", CERT + ["sourceRepositoryDigest"], DELETE),
     ("run_invocation", CERT + ["runInvocationURI"], DELETE),
     ("run_invocation", CERT + ["runInvocationURI"], RUN_URL + "/attempts/0"),
     ("run_invocation", CERT + ["runInvocationURI"], RUN_URL + "/attempts/1234567890"),
@@ -86,6 +93,7 @@ NEGATIVE_CASES = [
     ("timestamps", [0, "verificationResult", "verifiedTimestamps", 0, "uri"], DELETE),
     ("timestamps", [0, "verificationResult", "verifiedTimestamps", 0, "timestamp"], 1700000000),
     ("timestamps", [0, "verificationResult", "verifiedTimestamps", 0, "type"], ""),
+    ("timestamps", [0, "verificationResult", "verifiedTimestamps", 0, "type"], DELETE),
 ]
 
 
@@ -272,11 +280,13 @@ class CaptureTests(unittest.TestCase):
         self._assert_capture_refused(self._argv("sleep"), self.python_sha256, "timeout", timeout_s=1)
         self.assertLess(time.monotonic() - started, 30)
 
-    def test_timeout_kills_descendants_that_hold_stdout(self):
-        sentinel = os.path.join(self.tmp, "late")
-        self._assert_capture_refused(self._argv("spawn", sentinel), self.python_sha256, "timeout", timeout_s=0.5)
+    def test_timeout_kills_same_group_descendant_holding_stdout(self):
+        started = os.path.join(self.tmp, "started")
+        late = os.path.join(self.tmp, "late")
+        self._assert_capture_refused(self._argv("spawn", started, late), self.python_sha256, "timeout", timeout_s=2)
+        self.assertTrue(os.path.exists(started))
         time.sleep(3)
-        self.assertFalse(os.path.exists(sentinel))
+        self.assertFalse(os.path.exists(late))
 
     def test_unreadable_executable_is_refused(self):
         with mock.patch.object(vrp, "_sha256_file", side_effect=PermissionError(13, "denied")):
@@ -308,6 +318,39 @@ class CaptureTests(unittest.TestCase):
         before = dict(os.environ)
         vrp.capture(self._argv("echo", "x"), self.python_sha256)
         self.assertEqual(dict(os.environ), before)
+
+    def test_unencodable_argument_is_refused(self):
+        for bad in ("a\0b", "\ud800"):
+            with self.subTest(arg=bad):
+                self._assert_capture_refused(self._argv("echo", bad), self.python_sha256, "argv")
+
+    def test_nul_in_executable_path_is_refused(self):
+        self._assert_capture_refused([sys.executable + "\0"], self.python_sha256, "executable_path")
+
+    def test_out_of_range_timeout_is_refused_before_spawn(self):
+        for bad in (0, -1, float("nan"), float("inf"), 1e300, vrp.CAPTURE_TIMEOUT_MAX_S + 1):
+            with self.subTest(timeout_s=bad):
+                with mock.patch.object(vrp.subprocess, "Popen", side_effect=AssertionError("spawned")):
+                    self._assert_capture_refused(self._argv("echo"), self.python_sha256, "timeout", timeout_s=bad)
+
+
+class IntegerLimitTests(unittest.TestCase):
+    def setUp(self):
+        if not hasattr(sys, "get_int_max_str_digits"):
+            self.skipTest("interpreter has no integer string conversion limit")
+        self.addCleanup(sys.set_int_max_str_digits, sys.get_int_max_str_digits())
+
+    def _raw(self, digits):
+        return b'[{"n": ' + b"9" * digits + b", " + _encode(_valid_doc())[2:]
+
+    def test_4300_digit_limit_refuses_one_digit_past_it(self):
+        sys.set_int_max_str_digits(4300)
+        self.assertEqual(vrp.check_bytes(self._raw(4301))["refusal_code"], "invalid_json")
+        self.assertIsNone(vrp.check_bytes(self._raw(4300))["refusal_code"])
+
+    def test_lifted_limit_parses_the_same_literal(self):
+        sys.set_int_max_str_digits(0)
+        self.assertIsNone(vrp.check_bytes(self._raw(4301))["refusal_code"])
 
 
 class CliTests(unittest.TestCase):
