@@ -521,6 +521,16 @@ describe('capacity-ledger lifecycle: charged outcomes', () => {
         .toEqual({ cancelled: false, reasons: ['reservation-window-missing'] });
     });
 
+    it('a held attempt without a debit journal does not block an unrelated cancel', async () => {
+      const { fp, row } = heldRow();
+      const attempts = JSON.parse(row.attempts as string);
+      attempts['legacy'] = { fingerprint: 'legacy-fp', outcome: 'held', reservation_version: 1, duration_ms: 100, reconciliation_ids: [], slot_released: false };
+      const db = new ScriptedDb([[{ ...row, attempts: JSON.stringify(attempts) }]], [{ rowCount: 1 }]);
+      const res = await new CapacityLedger(db, NS, TENANT, DOMAIN).cancelBeforeStart('attempt-1', fp, EPOCH);
+      expect(res).toEqual({ cancelled: true, reasons: [] });
+      expect(db.writes).toHaveLength(1);
+    });
+
     it('refuses non-finite release arithmetic instead of persisting a null counter', async () => {
       const bad = withWindows(w => { w[WEEKLY]!.reserved = 'NaN'; });
       expect(await cancelRefused(bad.row, bad.fp))

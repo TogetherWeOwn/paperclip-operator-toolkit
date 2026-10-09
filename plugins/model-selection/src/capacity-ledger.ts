@@ -734,7 +734,7 @@ export class CapacityLedger {
       if (released < -tolerance) return { cancelled: false, reasons: ['reservation-release-exceeds-reserved'] };
       const otherLive = Object.entries(row.attempts).some(([key, other]) =>
         key !== idempotencyKey && (other.outcome === 'held' || other.outcome === 'committed')
-        && (other.debits[wid]?.remaining ?? 0) > 0);
+        && (other.debits?.[wid]?.remaining ?? 0) > 0);
       w.reserved = released <= tolerance ? (otherLive ? Math.max(0, released) : 0) : released;
     }
     const nextAttempts = structuredClone(row.attempts);
