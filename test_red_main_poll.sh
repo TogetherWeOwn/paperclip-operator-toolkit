@@ -285,6 +285,9 @@ const srv = http.createServer((req, res) => {
   if (m) {
     const spec = CASES[m[1]]
     if (!spec) { res.statusCode = 404; return res.end(JSON.stringify({ message: 'Not Found' })) }
+    // Reads go to the resolved commit. A read by branch name sees nothing here,
+    // so a failing-check read that drifts off the resolved commit loses its failures.
+    if (!url.includes('/commits/' + SHA_MAIN + '/')) return send({ total_count: 0, check_runs: [] })
     // A paged list is served as an array: element 0 is page 1, which is what a
     // request without page= gets.
     if (Array.isArray(spec.checks)) {

@@ -282,6 +282,22 @@ const CASES = {
   'sha-5xx-checks': { checks: 503,
                       statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
                       runs: 403 },
+  // A 200 body with no check_runs list. Its rows are unknown, so it is not an
+  // empty read, and the green status must not carry it to pass.
+  'sha-keyless-checks': { checks: { message: 'no list here' },
+                          statuses: { state: 'success', statuses: [{ context: 'buildkite', state: 'success' }] },
+                          runs: 403 },
+
+  // A failed combined state whose statuses list is missing still reports the failure.
+  'sha-keyless-status': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                          statuses: { state: 'failure' },
+                          runs: 403 },
+
+  // The combined status says 40 contexts exist and the list holds 30: a short read.
+  'sha-status-truncated': { checks: { total_count: 1, check_runs: [completed('Offline suites', 'success')] },
+                            statuses: { state: 'success', total_count: 40,
+                                        statuses: Array.from({ length: 30 }, (_, i) => ({ context: 'ctx-' + i, state: 'success' })) },
+                            runs: 403 },
 }
 
 // A ref resolves to a 40-hex commit id, as a real SHA does. The stub's id is the
@@ -497,6 +513,9 @@ expect sha-branch-startup fail 1 "a workflow startup failure beside green check 
 expect sha-garbage-checks unknown 3 "a check-runs body that is not JSON -> unknown, not pass"
 expect sha-garbage-status unknown 3 "a commit-status body that is not JSON -> unknown, not pass"
 expect sha-5xx-checks unknown 3 "a server error on check runs -> unknown, not pass"
+expect sha-keyless-checks unknown 3 "a check-runs body with no check_runs list -> unknown, not pass"
+expect sha-keyless-status fail 1 "a failed commit-status state with no statuses list -> fail, not pass"
+expect sha-status-truncated unknown 3 "a commit-status list shorter than its total -> unknown, not pass"
 
 run sha-paged-fail
 printf '%s' "$OUT" | jq -e '.signalsObserved == 101 and .checkRunsRead == 101 and .checkRunsTruncated == false' >/dev/null 2>&1
@@ -608,7 +627,8 @@ for r in sha-denied sha-empty sha-green sha-red sha-running sha-skipped sha-miss
          sha-startup sha-extstatus sha-extgreen sha-partial sha-real-green sha-real-red \
          sha-fast-real-fail sha-ann-denied sha-ann-warnonly sha-ann-warnlevel sha-mixed sha-bad-id \
          sha-paged-fail sha-paged-green sha-paged-short sha-paged-short-nonstart sha-paged-short-red-run \
-         sha-branch-startup sha-garbage-checks sha-garbage-status sha-5xx-checks; do
+         sha-branch-startup sha-garbage-checks sha-garbage-status sha-5xx-checks \
+         sha-keyless-checks sha-keyless-status sha-status-truncated; do
   run "$r"
   [[ "$RC" -eq 5 ]] && { LEAK="$r"; break; }
 done

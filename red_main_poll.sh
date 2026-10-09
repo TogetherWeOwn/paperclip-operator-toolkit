@@ -187,12 +187,12 @@ failing_checks() {
     code="$(gh_api "/repos/$slug/commits/$sha/check-runs?per_page=100&page=$page")"
     [[ "$code" == "200" ]] || { rm -f "$tmp"; return 1; }
     if [[ "$page" -eq 1 ]]; then
-      total="$(jq -r '.total_count // (.check_runs | length) // empty' "$GH_BODY" 2>/dev/null)"
+      total="$(jq -r 'if (.check_runs | type) == "array" then (.total_count // (.check_runs | length)) else empty end' "$GH_BODY" 2>/dev/null)"
       [[ "$total" =~ ^[0-9]+$ ]] || { rm -f "$tmp"; return 1; }
       cp "$GH_BODY" "$body_file" 2>/dev/null || { rm -f "$tmp"; return 1; }
     fi
-    page_n="$(jq -r '.check_runs | length' "$GH_BODY" 2>/dev/null)"
-    [[ "$page_n" =~ ^[0-9]+$ ]] || page_n=0
+    page_n="$(jq -r 'if (.check_runs | type) == "array" then (.check_runs | length) else empty end' "$GH_BODY" 2>/dev/null)"
+    [[ "$page_n" =~ ^[0-9]+$ ]] || { rm -f "$tmp"; return 1; }
     seen=$((seen + page_n))
     jq -c '[.check_runs[]?
         | select(.status=="completed")

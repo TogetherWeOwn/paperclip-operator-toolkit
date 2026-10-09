@@ -224,11 +224,11 @@ while true; do
   case "$code" in
     200)
       if [[ "$_checks_page" -eq 1 ]]; then
-        CHECKS_TOTAL="$(jq -r '.total_count // (.check_runs|length) // empty' "$BODY" 2>/dev/null)"
+        CHECKS_TOTAL="$(jq -r 'if (.check_runs | type) == "array" then (.total_count // (.check_runs | length)) else empty end' "$BODY" 2>/dev/null)"
         if [[ ! "$CHECKS_TOTAL" =~ ^[0-9]+$ ]]; then CHECKS_STATE="error-body"; CHECKS_TRUNCATED=1; break; fi
         CHECKS_STATE="read"
       fi
-      _page_n="$(jq -r '.check_runs | length' "$BODY" 2>/dev/null)"
+      _page_n="$(jq -r 'if (.check_runs | type) == "array" then (.check_runs | length) else empty end' "$BODY" 2>/dev/null)"
       [[ "$_page_n" =~ ^[0-9]+$ ]] || _page_n=0
       CHECKS_READ=$((CHECKS_READ + _page_n))
       _page_pending="$(jq -r '[.check_runs[]? | select(.status!="completed") | .name] | join(", ")' "$BODY" 2>/dev/null)"
@@ -316,15 +316,18 @@ fi
 # granting checks does not grant this. Measured: 403 even on a token holding
 # actions:read + checks:read. A repo whose CI posts commit statuses rather than
 # check runs is invisible to source 1 entirely, so it is asked about separately.
-STATUS_STATE="unreadable"; STATUS_STATE_VAL=""; STATUS_N=0; STATUS_TRUNCATED=0
-code="$(api "/repos/$SLUG/commits/$READ_REF/status")"
+STATUS_STATE="unreadable"; STATUS_STATE_VAL=""; STATUS_N=0; STATUS_TOTAL=0; STATUS_TRUNCATED=0
+code="$(api "/repos/$SLUG/commits/$READ_REF/status?per_page=100")"
 case "$code" in
   200)
-    STATUS_N="$(jq -r '.statuses | length' "$BODY" 2>/dev/null)"
-    if [[ ! "$STATUS_N" =~ ^[0-9]+$ ]]; then STATUS_STATE="error-body"; STATUS_N=0; STATUS_TRUNCATED=1
-    else
+    STATUS_STATE_VAL="$(jq -r '.state // ""' "$BODY" 2>/dev/null)"
+    STATUS_N="$(jq -r 'if (.statuses | type) == "array" then (.statuses | length) else empty end' "$BODY" 2>/dev/null)"
+    STATUS_TOTAL="$(jq -r '.total_count // empty' "$BODY" 2>/dev/null)"
+    if [[ "$STATUS_N" =~ ^[0-9]+$ ]]; then
       STATUS_STATE="read"
-      STATUS_STATE_VAL="$(jq -r '.state // ""' "$BODY")"
+      if [[ "$STATUS_TOTAL" =~ ^[0-9]+$ && "$STATUS_TOTAL" -gt "$STATUS_N" ]]; then STATUS_TRUNCATED=1; fi
+    else
+      STATUS_STATE="error-body"; STATUS_N=0; STATUS_TRUNCATED=1
     fi
     ;;
   403) STATUS_STATE="denied";;
@@ -340,18 +343,18 @@ esac
 # matters.
 RUNS_STATE="unreadable"; RUNS_N=0; RUNS_FAIL=""; RUNS_PENDING=""
 RUNS_TOTAL=0; RUNS_READ=0; RUNS_TRUNCATED=0
-[[ -n "$RESOLVED" ]] || RUNS_TRUNCATED=1
+[[ -n "$RESOLVED" ]] || { RUNS_STATE="unresolved"; RUNS_TRUNCATED=1; }
 _runs_page=1
 while [[ -n "$RESOLVED" ]]; do
   code="$(api "/repos/$SLUG/actions/runs?head_sha=$RESOLVED&per_page=100&page=$_runs_page")"
   case "$code" in
     200)
       if [[ "$_runs_page" -eq 1 ]]; then
-        RUNS_TOTAL="$(jq -r '.total_count // (.workflow_runs|length) // empty' "$BODY" 2>/dev/null)"
+        RUNS_TOTAL="$(jq -r 'if (.workflow_runs | type) == "array" then (.total_count // (.workflow_runs | length)) else empty end' "$BODY" 2>/dev/null)"
         if [[ ! "$RUNS_TOTAL" =~ ^[0-9]+$ ]]; then RUNS_STATE="error-body"; RUNS_TRUNCATED=1; break; fi
         RUNS_STATE="read"
       fi
-      _rpage_n="$(jq -r '.workflow_runs | length' "$BODY" 2>/dev/null)"
+      _rpage_n="$(jq -r 'if (.workflow_runs | type) == "array" then (.workflow_runs | length) else empty end' "$BODY" 2>/dev/null)"
       [[ "$_rpage_n" =~ ^[0-9]+$ ]] || _rpage_n=0
       RUNS_READ=$((RUNS_READ + _rpage_n))
       _rpage_fail="$(jq -r '[.workflow_runs[]? | select(.status=="completed") | select((.conclusion // "") | IN("failure","timed_out","cancelled","action_required","startup_failure")) | .name] | join(", ")' "$BODY" 2>/dev/null)"
@@ -406,10 +409,10 @@ SIGNALS=$((CHECKS_N + STATUS_N + RUNS_N))
 FAILED="$(printf '%s' "${CHECKS_FAIL}${CHECKS_FAIL:+, }${RUNS_FAIL}" | sed 's/, $//')"
 PENDING="$(printf '%s' "${CHECKS_PENDING}${CHECKS_PENDING:+, }${RUNS_PENDING}" | sed 's/, $//')"
 
-# The combined commit status has its own vocabulary and is authoritative for
-# source 2 when it has any statuses at all.
+# The combined commit status has its own vocabulary, and its state is what
+# source 2 reports. A pending state with no statuses is not a pending job.
 case "$STATUS_STATE_VAL" in
-  failure|error) [[ "$STATUS_N" -gt 0 ]] && FAILED="${FAILED:+$FAILED, }commit-status:$STATUS_STATE_VAL";;
+  failure|error) FAILED="${FAILED:+$FAILED, }commit-status:$STATUS_STATE_VAL";;
   pending)       [[ "$STATUS_N" -gt 0 ]] && PENDING="${PENDING:+$PENDING, }commit-status:pending";;
 esac
 
@@ -422,7 +425,7 @@ esac
 # GitHub Actions block, so a red there really is a red.
 EXT_FAILED=""
 case "$STATUS_STATE_VAL" in
-  failure|error) [[ "$STATUS_N" -gt 0 ]] && EXT_FAILED="commit-status:$STATUS_STATE_VAL";;
+  failure|error) EXT_FAILED="commit-status:$STATUS_STATE_VAL";;
 esac
 
 TRUNCATED=0
