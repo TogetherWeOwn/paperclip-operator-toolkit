@@ -19,7 +19,7 @@ MAX_NODES = 100_000
 CAPTURE_TIMEOUT_S = 120
 CAPTURE_REAP_S = 5
 
-# Mirrors execution-image/manifest.json base.*; test_verify_result_policy.py cross-checks each value.
+# Mirrors manifest.json base.* where the manifest records a value; test_expected_values_match_manifest_base checks those.
 EXPECTED = {
     "media_type": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
     "statement_type": "https://in-toto.io/Statement/v1",
