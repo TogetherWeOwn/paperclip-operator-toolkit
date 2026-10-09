@@ -3330,6 +3330,7 @@ jobs:
         run: |
           python3 -B execution-image/test_manifest.py
           python3 -B execution-image/validate.py execution-image/manifest.json
+          python3 -B execution-image/test_verify_result_policy.py
 
       # GARM offline checkers, each on its synthetic fixture. The
       # build-manifest checker cross-checks a pinned runner env, so the step
