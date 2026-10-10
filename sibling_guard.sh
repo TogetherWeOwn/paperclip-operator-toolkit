@@ -96,10 +96,10 @@ set -uo pipefail
 #                     if HEAD is already reachable from origin/main, your work
 #                     is already landed and the push is a duplicate. Adds the
 #                     same-head ownership check: an open PR sitting on HEAD
-#                     whose body carries `Refs:` for a DIFFERENT card refuses
-#                     the push and names that card (two cards, one branch,
-#                     both pushed). Your own `Refs:`, or no `Refs:` line at
-#                     all, stays clear.
+#                     whose `Refs:` line names only OTHER cards refuses the
+#                     push and names that card (two cards, one branch, both
+#                     pushed). A `Refs:` line naming this card — even among
+#                     others — or no `Refs:` line at all, stays clear.
 #
 # USAGE
 #   sibling_guard.sh <ISSUE-KEY|issue-uuid> [--phase=start|prepush] [--repo O/R]
@@ -392,8 +392,12 @@ detect_remote() {
           // merely mentions a foreign card.
           if (p.head && p.head.ref === mine) {
             const claimed = []
-            for (const line of String(p.body || "").matchAll(/refs\s*:[^\n]*/gi)) {
-              for (const k of line[0].matchAll(/[A-Za-z]+-\d+/g)) claimed.push(k[0])
+            // Attribution is a Refs LINE, not a Refs mention: the match is
+            // anchored to the start of a line so "see Refs: TOG-1 for detail"
+            // mid-sentence does not count. Tokens are card-key-shaped
+            // (>=2 letters, word boundaries) so "TOG-1x" is not "TOG-1".
+            for (const line of String(p.body || "").matchAll(/^[ \t]*refs[ \t]*:[^\n]*/gim)) {
+              for (const k of line[0].matchAll(/\b[A-Za-z]{2,}-\d+\b/g)) claimed.push(k[0])
             }
             process.stdout.write(["SAMEHEAD", p.number, p.head.ref, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
             continue
@@ -418,12 +422,21 @@ detect_remote() {
         # about to be pushed but whose body carries `Refs:` for a DIFFERENT
         # card read as clear. At prepush the branch is known (it is HEAD), so
         # same-head PRs are attributed through their `Refs:` line, and a
-        # foreign claimant refuses the push by name. Start phase keeps the old
-        # skip: nothing is being pushed yet, and your own just-opened PR must
-        # not alarm you.
+        # Refs line naming only OTHER cards refuses the push by name. A Refs
+        # line that names our own key — even alongside others, and even
+        # alongside key-shaped non-cards like a parenthetical SHA-256 — is
+        # our own PR. Start phase keeps the old skip: nothing is being
+        # pushed yet, and your own just-opened PR must not alarm you.
         if [[ "$PHASE" == "prepush" ]]; then
           local mykey="$KEY_LC"
-          if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
+          # The caller's own-key lookup below runs ONLY when there is a
+          # same-head PR to attribute: with nothing to attribute, a
+          # transient API error must not turn the push indeterminate.
+          local samehead_rows
+          samehead_rows="$(grep '^SAMEHEAD' <<< "$hits" || true)"
+          if [[ -z "$samehead_rows" ]]; then
+            mykey=""
+          elif [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
             # Invoked by uuid: the caller's own card key is not the argument,
             # so it is read off GET /api/issues/<uuid> — the same endpoint the
             # control-plane detector resolves keys through. Unresolvable means
@@ -461,20 +474,24 @@ detect_remote() {
                 note "remote: open PR #$s_num (head $s_head) is on the branch you are about to push and names no card — treating it as your own"
                 continue
               fi
-              local claimant foreign=""
+              local claimant mine_present="" foreign=""
               local -a claimants=()
               IFS=',' read -ra claimants <<< "$s_claims"
               for claimant in "${claimants[@]}"; do
-                [[ "$(printf '%s' "$claimant" | tr '[:upper:]' '[:lower:]')" != "$mykey" ]] && { foreign="$claimant"; break; }
+                if [[ "$(printf '%s' "$claimant" | tr '[:upper:]' '[:lower:]')" == "$mykey" ]]; then
+                  mine_present=1
+                elif [[ -z "$foreign" ]]; then
+                  foreign="$claimant"
+                fi
               done
-              if [[ -z "$foreign" ]]; then
-                note "remote: open PR #$s_num (head $s_head) is on the branch you are about to push and claims this card — your own PR, as expected before a push"
+              if [[ -n "$mine_present" ]]; then
+                note "remote: open PR #$s_num (head $s_head) is on the branch you are about to push and its Refs line claims this card — your own PR, as expected before a push"
               else
                 local where=""
                 grep -qx -- "$s_head" <<< "$wt_branches" && where=" Local worktree match: branch $s_head checked out in this clone — read it before pushing anything."
                 find_it "remote: open PR #$s_num (head $s_head) is on the branch you are about to push but its body claims another open card $foreign (Refs: $s_claims). Do not push here; that card owns this PR branch.$where"
               fi
-            done <<< "$hits"
+            done <<< "$samehead_rows"
           fi
         fi
       fi

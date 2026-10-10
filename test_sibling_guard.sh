@@ -119,6 +119,18 @@ const OLD_RUNS   = { 'case-old': [myOwnRow] }
 // A 200 that names a different issue must not resolve the key that was asked for.
 const MISMATCHED = { 'OPS-8': { id: 'case-old', identifier: 'OPS-9' } }
 
+// Uuid-shaped stub ids: the same-head ownership check reads the caller's own
+// key off GET /api/issues/<uuid>, so these exercise the 200, the 404 and the
+// unparseable body. Each has a clear run list, so the verdict below isolates
+// the ownership lookup instead of the control-plane detector.
+const UUID_OK = '11111111-2222-3333-4444-555555555555'
+const UUID_404 = '22222222-3333-4444-5555-666666666666'
+const UUID_BADJSON = '33333333-4444-5555-6666-777777777777'
+OLD_ISSUES.push({ id: UUID_OK, identifier: 'TOG-900' })
+OLD_RUNS[UUID_OK] = [myOwnRow]
+OLD_RUNS[UUID_404] = [myOwnRow]
+OLD_RUNS[UUID_BADJSON] = [myOwnRow]
+
 const PULLS = {
   none:   [],
   hit:    [{ number: 77, title: 'Do the thing (TOG-900)', body: '', head: { ref: 'feature-x' } }],
@@ -133,6 +145,14 @@ const PULLS = {
   foreign: [{ number: 881, title: 'shared branch work', body: 'Refs: TOG-907', head: { ref: 'CURRENT' } }],
   self:    [{ number: 882, title: 'mine (TOG-900)', body: 'Refs: TOG-900', head: { ref: 'CURRENT' } }],
   unclaimed: [{ number: 883, title: 'no refs line', body: 'just a description', head: { ref: 'CURRENT' } }],
+  // A Refs line naming our own key among others is still ours (multi-key
+  // Refs lines are common); a key-shaped parenthetical (SHA-256) is not a
+  // card. A Refs line naming only other cards still refuses, and a Refs
+  // mention that does not start a line is not attribution at all.
+  multiref: [{ number: 884, title: 'shared branch work', body: 'Refs: TOG-900, TOG-907', head: { ref: 'CURRENT' } }],
+  shaparens: [{ number: 885, title: 'shared branch work', body: 'Refs: TOG-900 (pins SHA-256 digests)', head: { ref: 'CURRENT' } }],
+  multiforeign: [{ number: 886, title: 'shared branch work', body: 'Refs: TOG-907, TOG-908', head: { ref: 'CURRENT' } }],
+  midline: [{ number: 887, title: 'shared branch work', body: 'Related work (see Refs: TOG-907 for detail)', head: { ref: 'CURRENT' } }],
   denied: 403,
   bad:    'not json at all',
 }
@@ -150,7 +170,8 @@ const srv = http.createServer((req, res) => {
   // stays under test. Only the old tail is served by key.
   if ((m = url.match(/^\/api\/issues\/([^/]+)$/))) {
     if (MISMATCHED[m[1]]) return send(200, MISMATCHED[m[1]])
-    const hit = OLD_ISSUES.find(i => i.identifier === m[1])
+    if (m[1] === UUID_BADJSON) return send(200, '<html>not json</html>')
+    const hit = OLD_ISSUES.find(i => i.identifier === m[1] || i.id === m[1])
     return hit ? send(200, hit) : send(404, { error: 'no such issue' })
   }
   if ((m = url.match(/^\/api\/issues\/([^/]+)\/runs$/))) {
@@ -281,7 +302,10 @@ OVERRIDE_AGENT="" run_guard "$CLEAN" TOG-900 --repo=stub/none
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "a missing PAPERCLIP_AGENT_ID exits 3, not 0" "rc=$RC out=$OUT"
 
-OVERRIDE_CO="" run_guard "$CLEAN" TOG-900 --repo=stub/none
+# TOG-999: direct GET 404s and the stub list never names it, so with no
+# company id there is no fallback. (TOG-900 would resolve: the uuid fixtures
+# in 6c give it a direct issue record.)
+OVERRIDE_CO="" run_guard "$CLEAN" TOG-999 --repo=stub/none
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "an unresolvable issue key exits 3, not 0" "rc=$RC out=$OUT"
 
@@ -461,6 +485,65 @@ assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
 run_guard "$MYPR" TOG-900 --repo=stub/unclaimed --phase=prepush
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at prepush, a same-head PR naming no card stays clear" "rc=$RC out=$OUT"
+
+# A Refs line that names our own key among others is still ours: multi-key
+# Refs lines are common, and a parenthetical digest token (SHA-256) is
+# key-shaped without being a card. Either one refusing our own push is the
+# false-positive class that gets the guard skipped.
+run_guard "$MYPR" TOG-900 --repo=stub/multiref --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head Refs line naming this card among others is your own, exits 0" "rc=$RC out=$OUT"
+
+run_guard "$MYPR" TOG-900 --repo=stub/shaparens --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head Refs line with a key-shaped parenthetical stays clear, exits 0" "rc=$RC out=$OUT"
+
+# ...but a Refs line naming only other cards still refuses, naming the first.
+run_guard "$MYPR" TOG-900 --repo=stub/multiforeign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head Refs line naming only other cards exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the first foreign claimant is named in the report" "$OUT"
+
+# Attribution is a Refs line, not a Refs mention: a mid-sentence pointer at a
+# foreign card does not hand that card the branch.
+run_guard "$MYPR" TOG-900 --repo=stub/midline --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a Refs mention that does not start a line is not attribution, exits 0" "rc=$RC out=$OUT"
+
+# ===========================================================================
+hdr "6c. Same-head ownership when invoked by uuid."
+# Invoked by uuid, the caller's own key is read off GET /api/issues/<uuid> —
+# and only when a same-head PR is actually in play. Each uuid below has a
+# clear run list, so the verdict isolates the ownership lookup. With no
+# same-head PR there is nothing to attribute, and even a 404ing lookup must
+# stay clear rather than indeterminate.
+
+run_guard "$MYPR" 11111111-2222-3333-4444-555555555555 --repo=stub/foreign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid, a same-head PR claimed by another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid lookup resolves our key and names the sibling card" "$OUT"
+
+run_guard "$MYPR" 11111111-2222-3333-4444-555555555555 --repo=stub/self --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid, a same-head PR claiming this card is your own, exits 0" "rc=$RC out=$OUT"
+
+run_guard "$MYPR" 22222222-3333-4444-5555-666666666666 --repo=stub/none --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid with no same-head PR, an unresolvable lookup stays clear, exits 0" "rc=$RC out=$OUT"
+
+run_guard "$MYPR" 22222222-3333-4444-5555-666666666666 --repo=stub/foreign --phase=prepush
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid, a 404ing lookup with a same-head PR exits 3, not 0" "rc=$RC out=$OUT"
+assert "$(grep -q "prepush ownership check" <<< "$OUT" && echo 0 || echo 1)" \
+  "the unattributable lookup is named in the report" "$OUT"
+
+run_guard "$MYPR" 33333333-4444-5555-6666-777777777777 --repo=stub/self --phase=prepush
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid, an unparseable lookup body exits 3, not 0" "rc=$RC out=$OUT"
+assert "$(grep -q "could not read our own card key" <<< "$OUT" && echo 0 || echo 1)" \
+  "the unreadable lookup body is named in the report" "$OUT"
 
 # ===========================================================================
 hdr "7. The pre-push phase, and the already-landed test."
