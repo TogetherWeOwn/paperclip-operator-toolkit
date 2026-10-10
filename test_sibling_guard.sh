@@ -124,6 +124,15 @@ const PULLS = {
   hit:    [{ number: 77, title: 'Do the thing (TOG-900)', body: '', head: { ref: 'feature-x' } }],
   head:   [{ number: 78, title: 'unrelated title', body: '', head: { ref: 'tog-900-sibling' } }],
   mine:   [{ number: 79, title: 'mine (TOG-900)', body: '', head: { ref: 'CURRENT' } }],
+  // Same-head fixtures. The body Refs line is the attribution source:
+  // `foreign` is claimed by a different card, `self` by this one,
+  // `unclaimed` names no card. Titles carry no card key on purpose, so the
+  // refusal below can only come from the Refs line, never a substring.
+  // STUB_CURRENT_BRANCH is spliced into CURRENT below, so the caller head
+  // sits on each of these branches in turn.
+  foreign: [{ number: 881, title: 'shared branch work', body: 'Refs: TOG-907', head: { ref: 'CURRENT' } }],
+  self:    [{ number: 882, title: 'mine (TOG-900)', body: 'Refs: TOG-900', head: { ref: 'CURRENT' } }],
+  unclaimed: [{ number: 883, title: 'no refs line', body: 'just a description', head: { ref: 'CURRENT' } }],
   denied: 403,
   bad:    'not json at all',
 }
@@ -414,6 +423,44 @@ MYPR="$TMP/mypr"; mkclone "$MYPR"
 run_guard "$MYPR" TOG-900 --repo=stub/mine
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "an open PR on the caller's own head branch is not a sibling" "rc=$RC out=$OUT"
+
+# ===========================================================================
+hdr "6b. Same-head ownership at prepush (two cards, one branch)."
+# Two cards, one branch, both pushed. The old PR scan skipped the
+# caller's own head branch, so a same-head PR claimed by a DIFFERENT card
+# read as clear. Attribution is the body `Refs:` line ONLY, so a mention
+# elsewhere in the body does not count; your own Refs, or no Refs at all,
+# stays clear.
+
+# Start phase keeps the old skip: nothing is being pushed yet.
+run_guard "$MYPR" TOG-900 --repo=stub/foreign
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at start, a same-head PR claimed by another card is not yet a refusal" "rc=$RC out=$OUT"
+
+# The prepush half runs on MYPR itself: it stands on tog-900-work, which the
+# stub splices into CURRENT, so each fixture PR sits on the caller's own head
+# — the same-head shape. One commit first, or the already-landed test fires
+# and every assertion below is satisfied by the wrong finding. (The stub
+# server is a separate process: its STUB_CURRENT_BRANCH is fixed at spawn, so
+# the fixture branch must be the spawn-time value, not a re-export.)
+(cd "$MYPR" && echo pushme >> file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "my push")
+run_guard "$MYPR" TOG-900 --repo=stub/foreign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head PR claimed by another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the sibling card owning the PR branch is named in the report" "$OUT"
+assert "$(grep -q "#881" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-head PR number is named in the report" "$OUT"
+assert "$(grep -q "owns this PR branch" <<< "$OUT" && echo 0 || echo 1)" \
+  "the refusal names the ownership, not the already-landed test" "$OUT"
+
+run_guard "$MYPR" TOG-900 --repo=stub/self --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head PR claiming this card is your own, exits 0" "rc=$RC out=$OUT"
+
+run_guard "$MYPR" TOG-900 --repo=stub/unclaimed --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-head PR naming no card stays clear" "rc=$RC out=$OUT"
 
 # ===========================================================================
 hdr "7. The pre-push phase, and the already-landed test."

@@ -94,7 +94,12 @@ set -uo pipefail
 #   --phase=prepush   immediately before `git push`, every time, including the
 #                     push you make after a CI cycle. Adds the ancestor test:
 #                     if HEAD is already reachable from origin/main, your work
-#                     is already landed and the push is a duplicate.
+#                     is already landed and the push is a duplicate. Adds the
+#                     same-head ownership check: an open PR sitting on HEAD
+#                     whose body carries `Refs:` for a DIFFERENT card refuses
+#                     the push and names that card (two cards, one branch,
+#                     both pushed). Your own `Refs:`, or no `Refs:` line at
+#                     all, stays clear.
 #
 # USAGE
 #   sibling_guard.sh <ISSUE-KEY|issue-uuid> [--phase=start|prepush] [--repo O/R]
@@ -134,7 +139,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '99,117p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '93,122p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
@@ -380,8 +385,20 @@ detect_remote() {
         const mine = process.argv[3]
         for (const p of prs) {
           const hay = [p.title || "", (p.head && p.head.ref) || "", p.body || ""].join(" ").toLowerCase()
+          // A PR sitting on the calling run own head branch is NOT skipped:
+          // at prepush it is the ownership evidence for the check below.
+          // Attribution is card keys on a Refs line ONLY — a bare substring
+          // would keep the false-positive class where a "Related" line
+          // merely mentions a foreign card.
+          if (p.head && p.head.ref === mine) {
+            const claimed = []
+            for (const line of String(p.body || "").matchAll(/refs\s*:[^\n]*/gi)) {
+              for (const k of line[0].matchAll(/[A-Za-z]+-\d+/g)) claimed.push(k[0])
+            }
+            process.stdout.write(["SAMEHEAD", p.number, p.head.ref, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
+            continue
+          }
           if (!hay.includes(key)) continue
-          if (p.head && p.head.ref === mine) continue
           process.stdout.write([p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90)].join("\t") + "\n")
         }
       ' "$body" "$KEY_LC" "$current_branch" 2>/dev/null)"
@@ -391,9 +408,75 @@ detect_remote() {
         note "remote: queried open pull requests on $slug"
         local num ref title
         while IFS=$'\t' read -r num ref title; do
+          [[ "$num" == "SAMEHEAD" ]] && continue
           [[ -n "${num:-}" ]] || continue
           find_it "remote: open PR #$num (head $ref) already covers this issue — \"$title\". Diff yours against it before pushing; do not open a second."
         done <<< "$hits"
+        # -- same-head ownership: does another card own this PR branch? -------
+        # Two cards, one branch, both pushed: the guard keyed on the caller
+        # own card key, so a PR whose head is the branch
+        # about to be pushed but whose body carries `Refs:` for a DIFFERENT
+        # card read as clear. At prepush the branch is known (it is HEAD), so
+        # same-head PRs are attributed through their `Refs:` line, and a
+        # foreign claimant refuses the push by name. Start phase keeps the old
+        # skip: nothing is being pushed yet, and your own just-opened PR must
+        # not alarm you.
+        if [[ "$PHASE" == "prepush" ]]; then
+          local mykey="$KEY_LC"
+          if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
+            # Invoked by uuid: the caller's own card key is not the argument,
+            # so it is read off GET /api/issues/<uuid> — the same endpoint the
+            # control-plane detector resolves keys through. Unresolvable means
+            # unattributable, which fails closed, never clear.
+            if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+              blind_on "remote: prepush ownership check cannot learn our own card key for $ISSUE_ARG with no control-plane credential, so a same-head PR cannot be attributed"
+              mykey=""
+            else
+              local obase ohdrs obody ocode
+              obase="${PAPERCLIP_API_URL%/}"; obase="${obase%/api}"
+              ohdrs="$TMPD/ownhdrs"; : > "$ohdrs"; chmod 600 "$ohdrs"
+              printf 'Authorization: Bearer %s\n' "$PAPERCLIP_API_KEY" > "$ohdrs"
+              obody="$TMPD/own.json"
+              ocode="$(curl -sS -m 30 -o "$obody" -w '%{http_code}' -H "@$ohdrs" "$obase/api/issues/$ISSUE_ARG" 2>/dev/null || echo 000)"
+              if [[ "$ocode" == "200" ]]; then
+                mykey="$(node -e 'try { const i = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(i.identifier || "").toLowerCase()) } catch (e) { process.exit(9) }' "$obody" 2>/dev/null)"
+                if [[ $? -ne 0 || -z "$mykey" ]]; then
+                  blind_on "remote: prepush ownership check could not read our own card key off /api/issues/$ISSUE_ARG (HTTP $ocode)"
+                  mykey=""
+                fi
+              else
+                blind_on "remote: prepush ownership check GET /api/issues/$ISSUE_ARG returned HTTP $ocode, so a same-head PR cannot be attributed"
+                mykey=""
+              fi
+            fi
+          fi
+          if [[ -n "$mykey" ]]; then
+            local wt_branches
+            wt_branches="$(git worktree list --porcelain 2>/dev/null | awk '/^branch /{sub("refs/heads/","",$2); print $2}')"
+            local tag s_num s_head s_title s_claims
+            while IFS=$'\t' read -r tag s_num s_head s_title s_claims; do
+              [[ "${tag:-}" == "SAMEHEAD" ]] || continue
+              [[ -n "${s_num:-}" ]] || continue
+              if [[ -z "${s_claims:-}" ]]; then
+                note "remote: open PR #$s_num (head $s_head) is on the branch you are about to push and names no card — treating it as your own"
+                continue
+              fi
+              local claimant foreign=""
+              local -a claimants=()
+              IFS=',' read -ra claimants <<< "$s_claims"
+              for claimant in "${claimants[@]}"; do
+                [[ "$(printf '%s' "$claimant" | tr '[:upper:]' '[:lower:]')" != "$mykey" ]] && { foreign="$claimant"; break; }
+              done
+              if [[ -z "$foreign" ]]; then
+                note "remote: open PR #$s_num (head $s_head) is on the branch you are about to push and claims this card — your own PR, as expected before a push"
+              else
+                local where=""
+                grep -qx -- "$s_head" <<< "$wt_branches" && where=" Local worktree match: branch $s_head checked out in this clone — read it before pushing anything."
+                find_it "remote: open PR #$s_num (head $s_head) is on the branch you are about to push but its body claims another open card $foreign (Refs: $s_claims). Do not push here; that card owns this PR branch.$where"
+              fi
+            done <<< "$hits"
+          fi
+        fi
       fi
     fi
   fi
