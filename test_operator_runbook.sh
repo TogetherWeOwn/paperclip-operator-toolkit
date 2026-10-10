@@ -939,5 +939,115 @@ if [[ -f "$REAL" ]]; then
     || bad "a shipped runbook pins a commit that does not carry its own SUMS hashes ($ok_n of $sel_n OK), rc=$rc" "$out"
 fi
 
+# ---------------------------------------------------------------------------
+section "11. pointers — an informational section that is not an ask"
+# A pointer is not a capability request, not a decision, and not a misroute:
+# it carries no blast radius and no `check` coupling. It renders as an
+# unnumbered section that leaves line numbers, counts and ordering untouched,
+# and `check`/`check-handoff` behave as if it were not there.
+PCLS="$TMP/ptr_cls.json"
+jq '.pointers = [
+  {"id":"timer-flow","title":"Timer flow hands to the hourly routine",
+   "body":"Measures things every 15 min.\n\nSee [the rules](docs/rules.md) for exit codes."},
+  {"title":"A pointer with no id","body":"Body renders verbatim."}
+]' "$CLS" > "$PCLS"
+
+pdoc="$("$TOOL" render --classification "$PCLS" </dev/null 2>&1)"; rc=$?
+(( rc == 0 )) && ok "render exits 0 with a pointers section present" \
+              || bad "render failed with pointers ($rc)" "$pdoc"
+grep -q 'Timer flow hands to the hourly routine' <<<"$pdoc" \
+  && ok "pointer title renders" || bad "pointer title missing"
+grep -q 'Measures things every 15 min.' <<<"$pdoc" \
+  && ok "pointer body renders" || bad "pointer body missing"
+grep -q 'docs/rules.md' <<<"$pdoc" \
+  && ok "markdown in the body is carried verbatim, not stripped" \
+  || bad "markdown link target lost from the body"
+
+# Unnumbered by construction: still exactly the four numbered lines, same order.
+pnums="$(grep -cE '^### [0-9]+\.' <<<"$pdoc")"
+[[ "$pnums" == "4" ]] && ok "pointers add no numbered lines (still 4)" \
+                     || bad "expected 4 numbered lines, got $pnums"
+porder="$(grep -oE '^### [0-9]+\. TOG-[A-Z]' <<<"$pdoc" | grep -oE 'TOG-[A-Z]' | tr '\n' ' ')"
+[[ "$porder" == "TOG-B TOG-C TOG-M TOG-A " ]] \
+  && ok "runbook line ordering is undisturbed by pointers" \
+  || bad "wrong order with pointers: '$porder'"
+grep -q '^### A pointer with no id$' <<<"$pdoc" \
+  && ok "a pointer without an id renders a clean heading (no empty parens)" \
+  || bad "id-less pointer heading wrong" "$(grep '^### A pointer' <<<"$pdoc")"
+
+# Counts untouched: the summary table still reports the ask sections only.
+for want in '| Runbook lines (capability requests) | 4 |' \
+            '| Genuine decisions, correctly reserved | 1 |' \
+            '| Misrouted — an agent can answer these | 1 |' \
+            '| Retired since the last revision (recorded, not deleted) | 0 |'; do
+  grep -qF "$want" <<<"$pdoc" && ok "count unchanged: $want" || bad "count moved: $want"
+done
+
+# Placement: after the numbered lines, before the decisions section.
+rl_at="$(grep -n '^## Runbook lines' <<<"$pdoc" | cut -d: -f1)"
+pt_at="$(grep -n '^## Pointers' <<<"$pdoc" | cut -d: -f1)"
+dc_at="$(grep -n '^## Not runbook lines — genuine decisions' <<<"$pdoc" | cut -d: -f1)"
+[[ -n "$rl_at" && -n "$pt_at" && -n "$dc_at" && "$rl_at" -lt "$pt_at" && "$pt_at" -lt "$dc_at" ]] \
+  && ok "pointers section sits between runbook lines and decisions" \
+  || bad "pointers section misplaced (runbook=$rl_at pointers=$pt_at decisions=$dc_at)"
+
+# `check` ignores the key: aligned input still passes with identical counts.
+out="$("$TOOL" check --classification "$PCLS" < "$ALIGNED" 2>&1)"; rc=$?
+(( rc == 0 )) && ok "check exits 0 on aligned input with pointers present" \
+              || bad "check should ignore pointers, got $rc" "$out"
+grep -q 'pending board_only: 5' <<<"$out" \
+  && ok "check counts are unchanged by pointers" \
+  || bad "check counts moved with pointers present" "$out"
+out="$("$TOOL" check --classification "$PCLS" < "$UNCL" 2>&1)"; rc=$?
+(( rc == 3 )) && grep -q 'UNCLASSIFIED' <<<"$out" \
+  && ok "check still reports a genuinely unclassified ask with pointers present" \
+  || bad "check lost the UNCLASSIFIED branch once pointers exist (rc=$rc)" "$out"
+
+# A pointer id is not a classification: an interaction carrying one is
+# UNCLASSIFIED, not excused. (Pointers neither require nor forbid board state.)
+PTR_UNCL="$TMP/ptr_uncl.json"; mk_input "$PTR_UNCL" TOG-A TOG-B TOG-C TOG-D TOG-E timer-flow
+out="$("$TOOL" check --classification "$PCLS" < "$PTR_UNCL" 2>&1)"; rc=$?
+(( rc == 3 )) && grep -q 'UNCLASSIFIED' <<<"$out" && grep -q 'timer-flow' <<<"$out" \
+  && ok "a pending interaction named like a pointer is UNCLASSIFIED, not excused" \
+  || bad "a pointer id must not satisfy check (rc=$rc)" "$out"
+
+# `check-handoff` ignores the key too: registration is unchanged either way.
+P_HCLS="$TMP/hcls_ptr.json"
+jq '.pointers = [{"id":"timer-flow","title":"Timer flow","body":"Measures things."}]' "$HCLS" > "$P_HCLS"
+out="$("$TOOL" check-handoff --classification "$P_HCLS" --handoff "$HDIR_OK" 2>&1)"; rc=$?
+(( rc == 0 )) && ok "check-handoff passes a registered tree with pointers present" \
+              || bad "check-handoff should ignore pointers, got $rc" "$out"
+
+# Pure function of the classification file: same file in, same file out.
+"$TOOL" render --classification "$PCLS" </dev/null >"$TMP/ptr_once.md" 2>/dev/null
+"$TOOL" render --classification "$PCLS" </dev/null >"$TMP/ptr_twice.md" 2>/dev/null
+cmp -s "$TMP/ptr_once.md" "$TMP/ptr_twice.md" \
+  && ok "two renders of one classification file are byte-identical" \
+  || bad "render is not deterministic"
+"$TOOL" render --classification "$PCLS" <"$ALIGNED" >"$TMP/ptr_stdin.md" 2>/dev/null
+cmp -s "$TMP/ptr_once.md" "$TMP/ptr_stdin.md" \
+  && ok "render reads nothing but the classification file (stdin ignored)" \
+  || bad "render consumed stdin — it is no longer a pure function of the file"
+
+# Absent or empty: the section vanishes and the document matches the keyless
+# render byte for byte, so old classifications need no migration.
+jq 'del(.pointers)' "$PCLS" > "$TMP/ptr_nokey.json"
+"$TOOL" render --classification "$TMP/ptr_nokey.json" </dev/null >"$TMP/ptr_nokey.md" 2>/dev/null
+grep -q '^## Pointers' "$TMP/ptr_nokey.md" \
+  && bad "a classification without pointers must not render the section" \
+  || ok "no pointers key: the section is omitted, not rendered empty"
+jq '.pointers = []' "$PCLS" > "$TMP/ptr_empty.json"
+"$TOOL" render --classification "$TMP/ptr_empty.json" </dev/null >"$TMP/ptr_empty.md" 2>/dev/null
+cmp -s "$TMP/ptr_nokey.md" "$TMP/ptr_empty.md" \
+  && ok "absent and empty pointers render byte-identically (no migration needed)" \
+  || bad "empty pointers array changed the document"
+
+# A half-filled row (no title) renders nothing, not an empty heading.
+jq '.pointers += [{"id":"half","body":"no title"}]' "$PCLS" > "$TMP/ptr_half.json"
+half_doc="$("$TOOL" render --classification "$TMP/ptr_half.json" </dev/null 2>&1)"
+grep -q 'half' <<<"$half_doc" \
+  && bad "a title-less pointer leaked into the document" "$half_doc" \
+  || ok "a title-less pointer entry is dropped silently"
+
 printf '\n== totals\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
