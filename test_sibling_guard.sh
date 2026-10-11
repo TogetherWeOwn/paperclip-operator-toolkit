@@ -615,6 +615,16 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
   "the start-phase uuid lookup resolves our key and names the sibling card" "$OUT"
 
+run_guard "$SHAHEAD" 11111111-2222-3333-4444-555555555555 --repo=stub/shaown
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a same-commit PR whose body names this card refuses as a duplicate PR" "rc=$RC out=$OUT"
+assert "$(grep -q "#892" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid duplicate-PR refusal names the PR number" "$OUT"
+
+run_guard "$SHAHEAD" 11111111-2222-3333-4444-555555555555 --repo=stub/shaown --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush by uuid, a same-commit PR whose body names this card refuses as a duplicate PR" "rc=$RC out=$OUT"
+
 run_guard "$SHAHEAD" 22222222-3333-4444-5555-666666666666 --repo=stub/shaforeign
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "at start by uuid, a 404ing lookup with a same-commit PR exits 3, not 0" "rc=$RC out=$OUT"
