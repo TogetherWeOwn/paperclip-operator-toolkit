@@ -153,6 +153,16 @@ const PULLS = {
   shaparens: [{ number: 885, title: 'shared branch work', body: 'Refs: TOG-900 (pins SHA-256 digests)', head: { ref: 'CURRENT' } }],
   multiforeign: [{ number: 886, title: 'shared branch work', body: 'Refs: TOG-907, TOG-908', head: { ref: 'CURRENT' } }],
   midline: [{ number: 887, title: 'shared branch work', body: 'Related work (see Refs: TOG-907 for detail)', head: { ref: 'CURRENT' } }],
+  // Same-commit fixtures (TOG-20982): the PR sits on a DIFFERENT branch name
+  // but carries the caller exact commit. Titles carry no card key on purpose,
+  // so the verdict below can only come from the Refs line, never a substring.
+  // sha 'SAMESHA' is replaced per request with the caller head under test
+  // (read off STUB_SHA_FILE, written by the fixture before each run);
+  // 'DISTINCT' is forty zeros and never equals a real commit.
+  shaforeign: [{ number: 891, title: 'sibling head work', body: 'Refs: TOG-907', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  shaown: [{ number: 892, title: 'my renamed branch', body: 'Refs: TOG-900', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  shanone: [{ number: 893, title: 'unclaimed head work', body: 'just a description', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  shadistinct: [{ number: 894, title: 'other work', body: 'Refs: TOG-907', head: { ref: 'tog-907-sibling-branch', sha: 'DISTINCT' } }],
   denied: 403,
   bad:    'not json at all',
 }
@@ -187,15 +197,22 @@ const srv = http.createServer((req, res) => {
     if (v === 403) return send(403, { message: 'Resource not accessible' })
     if (typeof v === 'string') return send(200, v)
     const branch = process.env.STUB_CURRENT_BRANCH || ''
-    return send(200, v.map(p => p.head.ref === 'CURRENT'
-      ? Object.assign({}, p, { head: { ref: branch } }) : p))
+    let sameSha = ''
+    try { sameSha = require('fs').readFileSync(process.env.STUB_SHA_FILE || '', 'utf8').trim() } catch (e) { sameSha = '' }
+    return send(200, v.map(p => {
+      let head = p.head
+      if (head && head.ref === 'CURRENT') head = Object.assign({}, head, { ref: branch })
+      if (head && head.sha === 'SAMESHA') head = Object.assign({}, head, { sha: sameSha })
+      if (head && head.sha === 'DISTINCT') head = Object.assign({}, head, { sha: '0000000000000000000000000000000000000000' })
+      return (head === p.head) ? p : Object.assign({}, p, { head })
+    }))
   }
   return send(404, { error: 'API route not found' })
 })
 srv.listen(0, '127.0.0.1', () => console.log(srv.address().port))
 STUB
 
-STUB_CURRENT_BRANCH="tog-900-work" node "$TMP/stub.js" > "$TMP/port.txt" 2>"$TMP/stub.err" &
+STUB_CURRENT_BRANCH="tog-900-work" STUB_SHA_FILE="$TMP/sha.txt" node "$TMP/stub.js" > "$TMP/port.txt" 2>"$TMP/stub.err" &
 STUB_PID=$!
 for _ in $(seq 1 50); do [[ -s "$TMP/port.txt" ]] && break; sleep 0.1; done
 PORT="$(tr -d '\n' < "$TMP/port.txt")"
@@ -544,6 +561,107 @@ assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "at prepush by uuid, an unparseable lookup body exits 3, not 0" "rc=$RC out=$OUT"
 assert "$(grep -q "could not read our own card key" <<< "$OUT" && echo 0 || echo 1)" \
   "the unreadable lookup body is named in the report" "$OUT"
+
+# ===========================================================================
+hdr "6d. Same commit, different branch name (PR #825 / TOG-19375)."
+# A second card fast-forwarded onto the owned head: branch names differ so
+# every branch-name match reads clear, but the commit is identical. The PR
+# fixtures below sit on tog-907-sibling-branch while the caller stands on
+# ahead-work with one local commit; the caller head SHA is handed to the
+# stub through $TMP/sha.txt before each run. Attribution is the Refs line
+# ONLY: a foreign claimant refuses in BOTH phases, our own Refs or no Refs
+# stays clear, as does a distinct head — and a HEAD with no local commits
+# skips the comparison instead of firing on the base.
+
+SHAHEAD="$TMP/shahead"; mkclone "$SHAHEAD"
+(cd "$SHAHEAD" && git checkout --quiet -b ahead-work && echo shared >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "shared head" \
+   && git rev-parse HEAD > "$TMP/sha.txt")
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shaforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start, a same-commit PR on another branch claimed by another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the sibling card claiming the same-commit PR is named in the report" "$OUT"
+assert "$(grep -q "#891" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-commit PR number is named in the report" "$OUT"
+assert "$(grep -q "tog-907-sibling-branch" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-commit PR branch is named in the report" "$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shaforeign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-commit PR on another branch claimed by another card exits 1" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shaown
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a same-commit PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shaown --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-commit PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shanone
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a same-commit PR naming no card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shadistinct
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a distinct-head PR claimed by another card stays clear" "rc=$RC out=$OUT"
+
+# Invoked by uuid, the start-phase lookup resolves our key the same way.
+run_guard "$SHAHEAD" 11111111-2222-3333-4444-555555555555 --repo=stub/shaforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a same-commit PR claimed by another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the start-phase uuid lookup resolves our key and names the sibling card" "$OUT"
+
+run_guard "$SHAHEAD" 22222222-3333-4444-5555-666666666666 --repo=stub/shaforeign
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with a same-commit PR exits 3, not 0" "rc=$RC out=$OUT"
+assert "$(grep -q "same-commit ownership check" <<< "$OUT" && echo 0 || echo 1)" \
+  "the unattributable same-commit lookup is named in the report" "$OUT"
+
+# Vacuous: a HEAD with no local commits shares the base with every empty
+# foreign PR. Refusing there would fire on every fresh start.
+VACUOUS="$TMP/vacuous"; mkclone "$VACUOUS"
+(cd "$VACUOUS" && git rev-parse HEAD > "$TMP/sha.txt")
+run_guard "$VACUOUS" TOG-900 --repo=stub/shaforeign
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a HEAD with no local commits does not refuse a same-commit PR" "rc=$RC out=$OUT"
+assert "$(grep -q "no local commits" <<< "$OUT" && echo 0 || echo 1)" \
+  "the vacuous comparison is named instead of silently skipped" "$OUT"
+
+# ===========================================================================
+hdr "6e. Same HEAD checked out in another worktree."
+# The local half of the TOG-19375 shape: two checkouts, one commit, different
+# branch names. A linked worktree on another branch at this HEAD refuses in
+# both phases; a detached checkout at this HEAD is reported, not refused.
+
+SHAWT="$TMP/shawt"; mkclone "$SHAWT"
+(cd "$SHAWT" && git checkout --quiet -b wt-work && echo wt >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "wt head" \
+   && git worktree add --quiet -b wt-other-branch "$TMP/wt-other" HEAD)
+run_guard "$SHAWT" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start, another worktree on this HEAD under another branch exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "wt-other-branch" <<< "$OUT" && echo 0 || echo 1)" \
+  "the sibling worktree branch is named in the report" "$OUT"
+assert "$(grep -q "wt-other" <<< "$OUT" && echo 0 || echo 1)" \
+  "the sibling worktree path is named in the report" "$OUT"
+
+run_guard "$SHAWT" TOG-900 --repo=stub/none --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, another worktree on this HEAD under another branch exits 1" "rc=$RC out=$OUT"
+
+SHADET="$TMP/shadet"; mkclone "$SHADET"
+(cd "$SHADET" && git checkout --quiet -b det-work && echo det >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "det head" \
+   && git worktree add --quiet --detach "$TMP/wt-det" HEAD)
+run_guard "$SHADET" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a detached worktree on this HEAD is reported, not refused" "rc=$RC out=$OUT"
+assert "$(grep -q "detached worktree" <<< "$OUT" && echo 0 || echo 1)" \
+  "the detached checkout is named in the report" "$OUT"
 
 # ===========================================================================
 hdr "7. The pre-push phase, and the already-landed test."

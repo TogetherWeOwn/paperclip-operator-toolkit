@@ -28,7 +28,7 @@ set -uo pipefail
 # paragraph above again.
 #
 # ---------------------------------------------------------------------------
-# THREE DETECTORS, BECAUSE NO ONE OF THEM SEES THE WHOLE PICTURE
+# DETECTORS, BECAUSE NO ONE OF THEM SEES THE WHOLE PICTURE
 #
 #   control-plane   GET /api/issues/{id}/runs. The LEADING signal: it reports a
 #                   sibling that has written nothing at all — no commit, no
@@ -43,6 +43,11 @@ set -uo pipefail
 #                   ancestor of origin/main. LAGGING — it sees a sibling only
 #                   after they push — but it is the only one that survives the
 #                   clone being different from the sibling's.
+#   same-head (SHA) Both phases resolve HEAD and compare the commit itself:
+#                   open PRs on different branch names carrying this exact
+#                   commit (attributed by their Refs line), and other worktrees
+#                   checked out at this commit. This is the PR #825 / TOG-19375
+#                   shape, where branch-name matching reads clear.
 #
 # WHY THE CHECKOUT CLAIM IS NOT ONE OF THEM. The harness hands each run a
 # checkout claim, and `PATCH /api/issues/{id}` 409s naming the holder when
@@ -99,7 +104,17 @@ set -uo pipefail
 #                     whose `Refs:` line names only OTHER cards refuses the
 #                     push and names that card (two cards, one branch, both
 #                     pushed). A `Refs:` line naming this card — even among
-#                     others — or no `Refs:` line at all, stays clear.
+#                     others — or no `Refs:` line at all, stays clear. Both
+#                     phases also compare the current head SHA: an open PR on
+#                     a DIFFERENT branch name carrying the SAME commit, whose
+#                     `Refs:` line names only other cards, is the PR #825 /
+#                     TOG-19375 shape (a second card fast-forwarded onto an
+#                     owned head) and refuses with the card, PR and branch
+#                     named. Own `Refs:`, no `Refs:`, and distinct heads stay
+#                     clear, as do unclaimed PRs. When HEAD carries no local
+#                     commits the SHA comparison is vacuous and skipped by
+#                     note. An owner's pushed head is covered through its PR;
+#                     an unpushed one through the control-plane run list.
 #
 # USAGE
 #   sibling_guard.sh <ISSUE-KEY|issue-uuid> [--phase=start|prepush] [--repo O/R]
@@ -139,7 +154,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '93,122p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '93,132p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
@@ -332,6 +347,12 @@ detect_remote() {
   # -- pushed branches naming the issue -------------------------------------
   local current_sha current_branch
   current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  # The head SHA for the same-commit comparison below (both phases). An
+  # unresolvable HEAD cannot be compared, so that step is blind, never clear.
+  current_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  if [[ -z "$current_sha" ]]; then
+    blind_on "remote: HEAD does not resolve to a commit, so the same-head SHA comparison could not run"
+  fi
   local rb
   while read -r rb; do
     [[ -n "$rb" ]] || continue
@@ -383,6 +404,18 @@ detect_remote() {
         if (!Array.isArray(prs)) process.exit(9)
         const key = process.argv[2]
         const mine = process.argv[3]
+        const headSha = (process.argv[4] || "").toLowerCase()
+        const refsClaims = (text) => {
+          const claimed = []
+          // Attribution is a Refs LINE, not a Refs mention: the match is
+          // anchored to the start of a line so "see Refs: TOG-1 for detail"
+          // mid-sentence does not count. Tokens are card-key-shaped
+          // (>=2 letters, word boundaries) so "TOG-1x" is not "TOG-1".
+          for (const line of String(text || "").matchAll(/^[ \t]*refs[ \t]*:[^\n]*/gim)) {
+            for (const k of line[0].matchAll(/\b[A-Za-z]{2,}-\d+\b/g)) claimed.push(k[0])
+          }
+          return claimed
+        }
         for (const p of prs) {
           const hay = [p.title || "", (p.head && p.head.ref) || "", p.body || ""].join(" ").toLowerCase()
           // A PR sitting on the calling run own head branch is NOT skipped:
@@ -391,28 +424,31 @@ detect_remote() {
           // would keep the false-positive class where a "Related" line
           // merely mentions a foreign card.
           if (p.head && p.head.ref === mine) {
-            const claimed = []
-            // Attribution is a Refs LINE, not a Refs mention: the match is
-            // anchored to the start of a line so "see Refs: TOG-1 for detail"
-            // mid-sentence does not count. Tokens are card-key-shaped
-            // (>=2 letters, word boundaries) so "TOG-1x" is not "TOG-1".
-            for (const line of String(p.body || "").matchAll(/^[ \t]*refs[ \t]*:[^\n]*/gim)) {
-              for (const k of line[0].matchAll(/\b[A-Za-z]{2,}-\d+\b/g)) claimed.push(k[0])
-            }
+            const claimed = refsClaims(p.body)
             process.stdout.write(["SAMEHEAD", p.number, p.head.ref, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
+            continue
+          }
+          // Same commit, different branch name: the PR #825 / TOG-19375
+          // shape, where a second card fast-forwarded onto an owned head.
+          // Emitted for attribution below in BOTH phases; a missing sha
+          // (old fixtures) simply never matches.
+          const sha = String((p.head && p.head.sha) || "").toLowerCase()
+          if (headSha && sha && sha === headSha) {
+            const claimed = refsClaims(p.body)
+            process.stdout.write(["SAMESHA", p.number, (p.head && p.head.ref) || "?", sha, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
             continue
           }
           if (!hay.includes(key)) continue
           process.stdout.write([p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90)].join("\t") + "\n")
         }
-      ' "$body" "$KEY_LC" "$current_branch" 2>/dev/null)"
+      ' "$body" "$KEY_LC" "$current_branch" "$current_sha" 2>/dev/null)"
       if [[ $? -ne 0 ]]; then
         blind_on "remote: the pull request list did not parse as JSON"
       else
         note "remote: queried open pull requests on $slug"
         local num ref title
         while IFS=$'\t' read -r num ref title; do
-          [[ "$num" == "SAMEHEAD" ]] && continue
+          [[ "$num" == "SAMEHEAD" || "$num" == "SAMESHA" ]] && continue
           [[ -n "${num:-}" ]] || continue
           find_it "remote: open PR #$num (head $ref) already covers this issue — \"$title\". Diff yours against it before pushing; do not open a second."
         done <<< "$hits"
@@ -494,6 +530,89 @@ detect_remote() {
             done <<< "$samehead_rows"
           fi
         fi
+        # -- same commit, different branch: the PR #825 / TOG-19375 shape -----
+        # A second card fast-forwarded onto an owned head: branch names differ
+        # so the key scan above stays silent, but the commit is identical. This
+        # runs in BOTH phases — at start the sibling may already have pushed.
+        # Attribution is the same anchored Refs line: a line naming only other
+        # cards refuses with the card, PR number and branch named; our own key
+        # or no Refs stays clear, as do unclaimed PRs and distinct heads. When
+        # HEAD carries no local commits there is no head to collide, so
+        # same-commit rows are noted and skipped: a fresh start must not fire
+        # on every empty foreign PR sitting on the base.
+        samesha_rows="$(grep '^SAMESHA' <<< "$hits" || true)"
+        if [[ -n "$samesha_rows" && -n "$current_sha" ]]; then
+          sha_base=""; sha_ahead="?"
+          if git rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1; then
+            sha_base="refs/remotes/origin/main"
+          elif git rev-parse --verify -q refs/heads/main >/dev/null 2>&1; then
+            sha_base="refs/heads/main"
+          else
+            blind_on "remote: neither origin/main nor main exists, so the same-commit comparison cannot tell local commits from the base"
+          fi
+          if [[ -n "$sha_base" ]]; then
+            sha_ahead="$(git rev-list --count "$sha_base..HEAD" 2>/dev/null || echo "?")"
+          fi
+          if [[ -z "$sha_base" ]]; then
+            : # blind above; nothing to evaluate
+          elif [[ "$sha_ahead" == "0" ]]; then
+            note "remote: HEAD carries no local commits beyond $(basename "$sha_base"), so $(grep -c . <<< "$samesha_rows") same-commit PR(s) sharing the base are not evaluated"
+          else
+            sha_mykey="$KEY_LC"
+            if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
+              # Invoked by uuid: read our own key off GET /api/issues/<uuid>,
+              # but only with a same-commit PR in play — with nothing to
+              # attribute, a transient API error must not go indeterminate.
+              if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+                blind_on "remote: same-commit ownership check cannot learn our own card key for $ISSUE_ARG with no control-plane credential, so a same-commit PR cannot be attributed"
+                sha_mykey=""
+              else
+                sha_obase="${PAPERCLIP_API_URL%/}"; sha_obase="${sha_obase%/api}"
+                sha_ohdrs="$TMPD/shaownhdrs"; : > "$sha_ohdrs"; chmod 600 "$sha_ohdrs"
+                printf 'Authorization: Bearer %s\n' "$PAPERCLIP_API_KEY" > "$sha_ohdrs"
+                sha_obody="$TMPD/shaown.json"
+                sha_ocode="$(curl -sS -m 30 -o "$sha_obody" -w '%{http_code}' -H "@$sha_ohdrs" "$sha_obase/api/issues/$ISSUE_ARG" 2>/dev/null || echo 000)"
+                if [[ "$sha_ocode" == "200" ]]; then
+                  sha_mykey="$(node -e 'try { const i = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(i.identifier || "").toLowerCase()) } catch (e) { process.exit(9) }' "$sha_obody" 2>/dev/null)"
+                  if [[ $? -ne 0 || -z "$sha_mykey" ]]; then
+                    blind_on "remote: same-commit ownership check could not read our own card key off /api/issues/$ISSUE_ARG (HTTP $sha_ocode)"
+                    sha_mykey=""
+                  fi
+                else
+                  blind_on "remote: same-commit ownership check GET /api/issues/$ISSUE_ARG returned HTTP $sha_ocode, so a same-commit PR cannot be attributed"
+                  sha_mykey=""
+                fi
+              fi
+            fi
+            if [[ -n "$sha_mykey" ]]; then
+              sha_tag=""; sha_num=""; sha_ref=""; sha_sha=""; sha_title=""; sha_claims=""
+              while IFS=$'\t' read -r sha_tag sha_num sha_ref sha_sha sha_title sha_claims; do
+                [[ "${sha_tag:-}" == "SAMESHA" ]] || continue
+                [[ -n "${sha_num:-}" ]] || continue
+                sha_short="${sha_sha:0:12}"
+                if [[ -z "${sha_claims:-}" ]]; then
+                  note "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD and names no card — treating it as unclaimed, stays clear"
+                  continue
+                fi
+                sha_mine="" ; sha_foreign=""
+                sha_claimant=""
+                IFS=',' read -ra sha_parts <<< "$sha_claims"
+                for sha_claimant in "${sha_parts[@]}"; do
+                  if [[ "$(printf '%s' "$sha_claimant" | tr '[:upper:]' '[:lower:]')" == "$sha_mykey" ]]; then
+                    sha_mine=1
+                  elif [[ -z "$sha_foreign" ]]; then
+                    sha_foreign="$sha_claimant"
+                  fi
+                done
+                if [[ -n "$sha_mine" ]]; then
+                  note "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD and its Refs line claims this card — your own head under another branch name"
+                else
+                  find_it "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD but its body claims another open card $sha_foreign (Refs: $sha_claims). A second card is on this head — do not implement or push here until you have read that PR."
+                fi
+              done <<< "$samesha_rows"
+            fi
+          fi
+        fi
       fi
     fi
   fi
@@ -520,9 +639,72 @@ detect_remote() {
 }
 
 # ===========================================================================
+# DETECTOR 2b — same HEAD checked out in another worktree (both phases)
+# ===========================================================================
+# PR #825 / TOG-19375: a second card fast-forwarded its own branch onto the
+# owned head. Same commit, different branch names — invisible to every
+# branch-name match above. `git worktree list --porcelain` reports each
+# worktree's HEAD, so another checkout sitting on this exact commit is named
+# here with its path and branch. Skipped by note when HEAD carries no local
+# commits: every main-checkout worktree trivially shares the base commit, and
+# refusing on that would fire on every fresh start.
+detect_same_head_worktrees() {
+  git rev-parse --git-dir >/dev/null 2>&1 || { blind_on "same-head worktrees: not inside a git repository"; return; }
+  local me_sha me_top me_branch wt_base wt_ahead
+  me_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  [[ -n "$me_sha" ]] || { blind_on "same-head worktrees: HEAD does not resolve to a commit"; return; }
+  me_top="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+  [[ -n "$me_top" ]] || { blind_on "same-head worktrees: the current worktree path does not resolve"; return; }
+  me_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  [[ "$me_branch" == "HEAD" ]] && me_branch=""
+  if git rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1; then
+    wt_base="refs/remotes/origin/main"
+  elif git rev-parse --verify -q refs/heads/main >/dev/null 2>&1; then
+    wt_base="refs/heads/main"
+  else
+    blind_on "same-head worktrees: neither origin/main nor main exists, so local commits cannot be told from the base"
+    return
+  fi
+  wt_ahead="$(git rev-list --count "$wt_base..HEAD" 2>/dev/null || echo "?")"
+  if [[ "$wt_ahead" == "0" ]]; then
+    note "same-head worktrees: HEAD carries no local commits beyond $(basename "$wt_base"), so no head collision is evaluated"
+    return
+  fi
+  local wt_list
+  wt_list="$(git worktree list --porcelain 2>/dev/null || echo "")"
+  [[ -n "$wt_list" ]] || { blind_on "same-head worktrees: git worktree list failed"; return; }
+  local wpath wsha wbranch seen=0
+  wpath=""; wsha=""; wbranch=""
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      if [[ -n "$wpath" && "$wsha" == "$me_sha" && "$wpath" != "$me_top" ]]; then
+        seen=1
+        if [[ -n "$wbranch" && "$wbranch" != "$me_branch" ]]; then
+          find_it "same-head worktrees: worktree $wpath (branch $wbranch) sits on the same HEAD ($(git rev-parse --short HEAD)) under a different branch name. A second checkout is on this commit — read it before writing or pushing."
+        elif [[ -z "$wbranch" ]]; then
+          note "same-head worktrees: detached worktree $wpath sits on the same HEAD ($(git rev-parse --short HEAD)) — visible, not a refusal."
+        else
+          note "same-head worktrees: worktree $wpath shares this branch and HEAD, as expected."
+        fi
+      fi
+      wpath=""; wsha=""; wbranch=""
+      continue
+    fi
+    case "$line" in
+      worktree\ *) wpath="${line#worktree }" ;;
+      HEAD\ *) wsha="${line#HEAD }" ;;
+      branch\ *) wbranch="${line#branch refs/heads/}" ;;
+      detached) wbranch="" ;;
+    esac
+  done <<< "$wt_list"$'\n'
+  [[ "$seen" -eq 1 ]] || note "same-head worktrees: no other worktree shares HEAD ($(git rev-parse --short HEAD))"
+}
+
+# ===========================================================================
 detect_control_plane
 detect_local_refs
 detect_remote
+detect_same_head_worktrees
 
 # --- report ------------------------------------------------------------------
 if [[ "$JSON" -eq 1 ]]; then
@@ -572,6 +754,6 @@ if [[ "${#FINDINGS[@]}" -gt 0 ]]; then VERDICT="sibling"; CODE=1; fi
 case "$VERDICT" in
   sibling)       say "VERDICT: sibling  (exit 1) — do not implement or push until you have read the evidence above.";;
   indeterminate) say "VERDICT: indeterminate  (exit 3) — this is NOT a pass. ${#BLIND[@]} detector(s) could not run.";;
-  clear)         say "VERDICT: clear  (exit 0) — all three detectors ran and none found a sibling.";;
+  clear)         say "VERDICT: clear  (exit 0) — every detector ran and none found a sibling.";;
 esac
 exit "$CODE"
