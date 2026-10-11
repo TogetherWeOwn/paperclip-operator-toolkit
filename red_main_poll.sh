@@ -193,8 +193,11 @@ gh_api() {
 
 # failing_checks <owner/repo> <commit-sha> <body-file> -> prints sorted, lowercased
 # failing check-run names, one per line. Every check-runs page is read until
-# the rows seen match total_count; a short read returns 1 with nothing printed,
-# so the caller reports UNKNOWN instead of keying on a partial check set. The
+# the rows seen match total_count. Exit 0 prints the check set; exit 2 means
+# the first page answered 403/404 (persistent permission boundary: the caller
+# keeps the reader reason as key); exit 1 with nothing printed means any other
+# unreadable read, so the caller reports UNKNOWN instead of keying on a
+# partial check set. The
 # first page is saved to <body-file> for the caller to mine head_sha from. The
 # body goes through a file, not a sentinel line, because check-run names are
 # attacker-influenced strings and any sentinel (HEAD_SHA=, ---, ...) is a name
@@ -207,7 +210,16 @@ failing_checks() {
   tmp="$(mktemp)" || return 1
   while true; do
     code="$(gh_api "/repos/$slug/commits/$sha/check-runs?per_page=100&page=$page")"
-    [[ "$code" == "200" ]] || { rm -f "$tmp"; return 1; }
+    if [[ "$code" != "200" ]]; then
+      rm -f "$tmp"
+      # A page-1 403/404 repeats on every tick for a token without
+      # checks:read, so it is not a transient short read: exit 2 tells the
+      # caller to keep the stable reader reason as key. Transport failures
+      # (000), short totals, bad bodies and later-page denials stay exit 1
+      # (UNKNOWN).
+      if [[ "$page" -eq 1 && ( "$code" == "403" || "$code" == "404" ) ]]; then return 2; fi
+      return 1
+    fi
     if [[ "$page" -eq 1 ]]; then
       total="$(jq -r 'if (.check_runs | type) == "array" then (.total_count // (.check_runs | length)) else empty end' "$GH_BODY" 2>/dev/null)"
       [[ "$total" =~ ^[0-9]+$ ]] || { rm -f "$tmp"; return 1; }
@@ -388,7 +400,7 @@ title_for() { printf '[%s] Red main: %s' "$1" "$2"; }
 # another repo's red (rule 4 cuts both ways: partial coverage is reported,
 # not discarded).
 poll_one() {
-  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body main_sha
+  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body main_sha fc_rc=0
   main_sha="$(resolve_main "$slug")" || { printf 'UNKNOWN %s @ main: could not resolve main to a commit\n' "$slug"; return 0; }
   out="$(ci_json "$slug" "$main_sha")"; rc=$?
   verdict="$(jq -r '.verdict // ""' <<<"$out" 2>/dev/null)"
@@ -404,9 +416,18 @@ poll_one() {
       if names="$(failing_checks "$slug" "$main_sha" "$checks_body")"; then
         head="$(jq -r '[.check_runs[]? | .head_sha // ""] | map(select(length > 0)) | first // ""' "$checks_body" 2>/dev/null)"
       else
+        fc_rc=$?
         rm -f "$checks_body"
-        printf 'UNKNOWN %s @ main: check-runs could not be read\n' "$slug"
-        return 0
+        if [[ "$fc_rc" -eq 2 ]]; then
+          # Check runs denied on page 1 (token without checks:read): a red
+          # the reader saw in commit statuses still files under the stable
+          # reason key, as before the timeout bounds.
+          names=""
+          head=""
+        else
+          printf 'UNKNOWN %s @ main: check-runs could not be read\n' "$slug"
+          return 0
+        fi
       fi
       rm -f "$checks_body"
       key="$(sed '/^[[:space:]]*$/d' <<<"$names" | paste -sd '\n' -)"

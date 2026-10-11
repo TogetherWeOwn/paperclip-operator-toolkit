@@ -134,6 +134,9 @@ const CASES = {
   'o/red-status-only': { checks: { total_count: 0, check_runs: [] },
                          statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
                          runs: { total_count: 0, workflow_runs: [] } },
+  'o/red-status-checks-denied': { checks: 403,
+                         statuses: { state: 'failure', statuses: [{ context: 'buildkite', state: 'failure' }] },
+                         runs: 403 },
   'o/green':       { checks: { total_count: 2, check_runs: greenRuns }, statuses: 403, runs: 403 },
   'o/denied':      { checks: 403, statuses: 403, runs: 403 },
   'o/empty':       { checks: { total_count: 0, check_runs: [] }, statuses: { state: 'pending', statuses: [] }, runs: { total_count: 0, workflow_runs: [] } },
@@ -461,6 +464,16 @@ printf '%s' "$OUT" | jq -e '(.redMains[0].signature | length) == 8' >/dev/null 2
   && ok "reason-keyed signature is still 8 hex chars" \
   || bad "reason-keyed signature is still 8 hex chars" "$OUT"
 
+hdr "A denied check-runs read keeps the reader reason, never hides the red"
+snapshot o/red-status-checks-denied
+[[ "$RC" -eq 1 ]] && ok "status red with denied check runs exits 1" || bad "status red with denied check runs exits 1" "got $RC"
+printf '%s' "$OUT" | jq -e '.redMains[0].sigSource == "reason"' >/dev/null 2>&1 \
+  && ok "denied check runs record sigSource:reason" \
+  || bad "denied check runs record sigSource:reason" "$OUT"
+printf '%s' "$OUT" | jq -e '(.redMains[0].failingJobs | length) > 0' >/dev/null 2>&1 \
+  && ok "denied check runs key on the reader reason, not the empty set" \
+  || bad "denied check runs key on the reader reason, not the empty set" "$OUT"
+
 hdr "A failure past page 1 keys on the check set, not the reason"
 snapshot o/red-paged
 [[ "$RC" -eq 1 ]] && ok "paged red exits 1" || bad "paged red exits 1" "got $RC"
@@ -774,6 +787,22 @@ OUT="$(timeout 8s env GH_CI_STATUS_BIN="$WORK/sleeping-ci-reader.sh" \
 RC=$?; elapsed=$((SECONDS - start)); ERR="$(cat "$WORK/err.txt")"
 [[ "$RC" -eq 3 ]] && ok "a hung CI reader exits 3 (unmeasurable), never a clean pass" || bad "a hung CI reader exits 3 (unmeasurable), never a clean pass" "rc=$RC out=$OUT err=$ERR"
 [[ "$elapsed" -le 6 ]] && ok "the reader run is cut off within a few seconds" || bad "the reader run is cut off within a few seconds" "elapsed=${elapsed}s"
+
+hdr "A hung board read is bounded, never silent"
+if start_hang_server; then
+  start=$SECONDS
+  OUT="$(timeout 10s env -u INCIDENT_SOURCE_CMD -u PAPERCLIP_COMPANY_ID PAPERCLIP_API_URL="$HANG_URL" RED_MAIN_ROLLUP_PARENT_ID=parent-known RED_MAIN_API_KEY=canary-board-key-001 RED_MAIN_POLL_CURL_CONNECT_TIMEOUT=1 RED_MAIN_POLL_CURL_MAX_TIME=1 "$TOOL" snapshot o/green 2>"$WORK/err.txt")"
+  RC=$?; elapsed=$((SECONDS - start)); ERR="$(cat "$WORK/err.txt")"
+  [[ "$RC" -eq 3 ]] && ok "hung board read exits 3 (unmeasurable), never a clean pass" || bad "hung board read exits 3 (unmeasurable), never a clean pass" "rc=$RC out=$OUT err=$ERR"
+  [[ -z "$OUT" ]] && ok "hung board read prints no fragment" || bad "hung board read prints no fragment" "$OUT"
+  [[ -s "$WORK/hang-accepted" ]] && ok "the loopback server accepted the board connection" || bad "the loopback server accepted the board connection"
+  [[ "$elapsed" -le 6 ]] && ok "the hung board read is bounded to a few seconds" || bad "the hung board read is bounded to a few seconds" "elapsed=${elapsed}s"
+  [[ "$OUT$ERR" != *canary-board-key-001* ]] \
+    && ok "the board key stays out of output" || bad "the board key stays out of output"
+else
+  bad "the board loopback hang server starts" "$(cat "$WORK/hang-server.err")"
+fi
+stop_hang_server
 
 # Host-wrapper and operator-packet sections intentionally absent: they
 # need the host wrapper and install packet, which live outside this slice.
