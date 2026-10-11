@@ -110,8 +110,9 @@ set -uo pipefail
 #                     `Refs:` line names only other cards, is the PR #825 /
 #                     TOG-19375 shape (a second card fast-forwarded onto an
 #                     owned head) and refuses with the card, PR and branch
-#                     named. Own `Refs:`, no `Refs:`, and distinct heads stay
-#                     clear, as do unclaimed PRs. When HEAD carries no local
+#                     named. Own `Refs:` on another branch refuses as a duplicate
+#                     PR; no `Refs:` and distinct heads stay clear. When HEAD carries
+#                     no local
 #                     commits the SHA comparison is vacuous and skipped by
 #                     note. An owner's pushed head is covered through its PR;
 #                     an unpushed one through the control-plane run list.
@@ -154,7 +155,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '98,137p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '98,138p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
@@ -535,7 +536,8 @@ detect_remote() {
         # runs in BOTH phases — at start the sibling may already have pushed.
         # Attribution is the same anchored Refs line: a line naming only other
         # cards refuses with the card, PR number and branch named; our own key
-        # or no Refs stays clear, as do unclaimed PRs and distinct heads. When
+        # refuses as a duplicate PR via the key scan, while no Refs stays clear,
+        # as do unclaimed PRs and distinct heads. When
         # HEAD carries no local commits there is no head to collide, so
         # same-commit rows are noted and skipped: a fresh start must not fire
         # on every empty foreign PR sitting on the base.
@@ -603,9 +605,9 @@ detect_remote() {
                     sha_foreign="$sha_claimant"
                   fi
                 done
-                if [[ -n "$sha_mine" ]]; then
-                  note "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD and its Refs line claims this card — your own head under another branch name"
-                else
+                # Own key: the key scan above already refused this PR as a
+                # duplicate, so no second note is reported here.
+                if [[ -z "$sha_mine" ]]; then
                   find_it "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD but its body claims another open card $sha_foreign (Refs: $sha_claims). A second card is on this head — do not implement or push here until you have read that PR."
                 fi
               done <<< "$samesha_rows"

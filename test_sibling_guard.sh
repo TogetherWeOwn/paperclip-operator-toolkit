@@ -569,9 +569,9 @@ hdr "6d. Same commit, different branch name (PR #825 / TOG-19375)."
 # fixtures below sit on tog-907-sibling-branch while the caller stands on
 # ahead-work with one local commit; the caller head SHA is handed to the
 # stub through $TMP/sha.txt before each run. Attribution is the Refs line
-# ONLY: a foreign claimant refuses in BOTH phases, our own Refs or no Refs
-# stays clear, as does a distinct head — and a HEAD with no local commits
-# skips the comparison instead of firing on the base.
+# ONLY: a foreign claimant refuses in BOTH phases; our own Refs refuses as a
+# duplicate PR, while no Refs stays clear, as does a distinct head — and a HEAD
+# with no local commits skips the comparison instead of firing on the base.
 
 SHAHEAD="$TMP/shahead"; mkclone "$SHAHEAD"
 (cd "$SHAHEAD" && git checkout --quiet -b ahead-work && echo shared >> file.txt \
