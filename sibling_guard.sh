@@ -154,7 +154,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '93,132p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '98,137p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
@@ -436,7 +436,6 @@ detect_remote() {
           if (headSha && sha && sha === headSha) {
             const claimed = refsClaims(p.body)
             process.stdout.write(["SAMESHA", p.number, (p.head && p.head.ref) || "?", sha, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
-            continue
           }
           if (!hay.includes(key)) continue
           process.stdout.write([p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90)].join("\t") + "\n")

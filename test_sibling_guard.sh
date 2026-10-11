@@ -593,12 +593,12 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "at prepush, a same-commit PR on another branch claimed by another card exits 1" "rc=$RC out=$OUT"
 
 run_guard "$SHAHEAD" TOG-900 --repo=stub/shaown
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a same-commit PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a same-commit PR whose body names this card refuses as a duplicate PR" "rc=$RC out=$OUT"
 
 run_guard "$SHAHEAD" TOG-900 --repo=stub/shaown --phase=prepush
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "at prepush, a same-commit PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-commit PR whose body names this card refuses as a duplicate PR" "rc=$RC out=$OUT"
 
 run_guard "$SHAHEAD" TOG-900 --repo=stub/shanone
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
@@ -720,6 +720,14 @@ assert "$([[ "$RC" -eq 2 ]] && echo 0 || echo 1)" \
 OUT="$("$TOOL" 'TOG-900;rm -rf /' 2>&1)"; RC=$?
 assert "$([[ "$RC" -eq 2 ]] && echo 0 || echo 1)" \
   "an issue argument that is not a bare key or uuid is refused" "rc=$RC out=$OUT"
+
+OUT="$("$TOOL" --help 2>&1)"; RC=$?
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "--help exits 0" "rc=$RC out=$OUT"
+assert "$(grep -q -- "--phase=start" <<< "$OUT" && echo 0 || echo 1)" \
+  "--help documents the start phase" "$OUT"
+assert "$(grep -q "SIBLING_GUARD_NO_FETCH" <<< "$OUT" && echo 0 || echo 1)" \
+  "--help documents the fetch-skip switch" "$OUT"
 
 run_guard "$CLEAN" TOG-901 --repo=stub/none --json
 assert "$(node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.exit(j.verdict==="sibling"&&j.exitCode===1&&j.findings.length>0?0:1)})' <<< "$OUT" && echo 0 || echo 1)" \
