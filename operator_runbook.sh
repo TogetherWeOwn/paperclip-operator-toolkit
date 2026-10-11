@@ -186,6 +186,8 @@ cmd_check() {
   [[ -f "$CLASSIFICATION" ]] || die "classification file not found: $CLASSIFICATION"
   jq -e 'type=="object"' >/dev/null 2>&1 <"$CLASSIFICATION" || die "classification file is not a JSON object"
 
+  # `pointers` (informational sections, not asks) is intentionally absent here:
+  # a pointer neither requires nor forbids board state, so `check` ignores it.
   local classified; classified="$(jq -r '(.items|keys[]),(.decisions|keys[]),(.misrouted|keys[])' "$CLASSIFICATION" | sort -u)"
   local pending;    pending="$(pending_board_only "$input")"
 
@@ -287,6 +289,8 @@ cmd_check_handoff() {
   # the same fail-open `check` was fixed for. Say it measured nothing.
   [[ -d "$HANDOFF" ]] || die "handoff directory not found: $HANDOFF (refusing to report an unread directory as clean)"
 
+  # `pointers` is intentionally absent here too: an informational section is not
+  # a classification, so it can neither register an artifact nor strand one.
   local classified; classified="$(jq -r '(.items|keys[]),(.decisions|keys[]),(.misrouted|keys[]),((.closed//{})|keys[])' "$CLASSIFICATION" | sort -u)"
 
   # Identifiers that have a runbook artifact sitting in the handoff directory.
@@ -415,6 +419,10 @@ cmd_render() {
     # the state that must not disappear quietly. So closure is recorded with the
     # measurement that closed it, and never re-numbered into the live list.
     | ((.closed // {}) | to_entries | sort_by(.key)) as $closed
+    # Informational pointers. NOT asks, NOT decisions: no blast radius, no
+    # `check` coupling, no numbering, no count. Entries without a title render
+    # nothing, so a half-filled row cannot emit an empty heading.
+    | ((.pointers // []) | map(select((.title // "") != ""))) as $pointers
     # The lines whose standing interaction has been WITHDRAWN. Numbered here,
     # from the same sorted array the body is rendered from, so the reference
     # cannot drift from the line it points at the way a hand-written list does.
@@ -457,6 +465,20 @@ cmd_render() {
     + "## Runbook lines\n\n"
     + ([ $items | to_entries[] | line_block(.value.key; .value.value; .key + 1) ] | join("\n"))
     + "\n---\n\n"
+    # A pointer section is unnumbered and uncounted by construction: it sits
+    # outside the numbered list and the summary table, so existing line numbers,
+    # counts and ordering cannot shift under it. Absent or empty, it renders
+    # nothing and the document is byte-identical to before.
+    + (if ($pointers|length) > 0
+       then "## Pointers — where to look next\n\n"
+          + "These are informational only: not asks, not decisions. They need no\n"
+          + "triage, require no board state, and forbid nothing.\n\n"
+          + ([ $pointers[]
+                | "### \(.title)"
+                + (if (.id // "") != "" then " (\(.id))" else "" end)
+                + "\n\n\(.body // "")\n" ] | join("\n"))
+          + "\n---\n\n"
+       else "" end)
     + "## Not runbook lines — genuine decisions\n\n"
     + "These name a reserved matter and stay in the decision queue. They are listed\n"
     + "here only so the queue can be reconciled against one document.\n\n"
