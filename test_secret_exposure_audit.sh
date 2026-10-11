@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression suite for secret_exposure_audit.sh  (TOG-392).
+# Regression suite for secret_exposure_audit.sh.
 #
 # Runs fully offline. It never reads the real master key, the real DATABASE_URL,
 # or any live secret: every case launches the audit under a FABRICATED
@@ -10,7 +10,7 @@
 # standing lesson on faking the credential env rather than dropping it.)
 #
 # The two failures this suite is built to catch, both in the fail-open
-# direction -- the direction that would wrongly authorise closing TOG-392:
+# direction -- the direction that would wrongly authorise closing the finding:
 #
 #   * a set-but-EMPTY projection counting as "present", which would report a
 #     contained environment as still exposed (false alarm) OR, worse in the
@@ -73,7 +73,7 @@ grep -q "VERDICT: CONTAINED" <<<"$OUT" && ok "case2 says CONTAINED" || bad "case
 # --- Case 3: set-but-empty must NOT count as present ------------------------
 # The classic fail-open: an empty projection is not a usable credential. If this
 # counts as present the audit can never reach CONTAINED and the containment
-# signal TOG-392 depends on is dead.
+# signal the check depends on is dead.
 run_audit 0 "set-but-empty high channels -> CONTAINED" \
   PAPERCLIP_SECRETS_MASTER_KEY_FILE="$WORK/does-not-exist" \
   DATABASE_URL="" \

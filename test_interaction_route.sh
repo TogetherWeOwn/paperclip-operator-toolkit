@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# test_interaction_route.sh — suite for interaction_route.sh (TOG-389)
+# test_interaction_route.sh — suite for interaction_route.sh
 # ===========================================================================
 # Needs nothing: no API key, no VPS, no database. Every case is a literal JSON
 # fixture or a flag combination, so this runs in CI and in an agent container.
@@ -167,7 +167,7 @@ mk '[{"identifier":"UNASSIGNED","issueStatus":"blocked","kind":"ask_user_questio
       "addresseeAgentId":null,"hasToolAction":false}]' unassigned
 assert_reason UNASSIGNED "ok" "$WORK/unassigned.json"
 
-# MEASURED (TOG-395, probe D, 2026-08-25): unassigned + an addressee is the ONE
+# MEASURED (probe D, 2026-08-25): unassigned + an addressee is the ONE
 # configuration that hands a question to a named agent with no platform change,
 # and the checker used to call it inert. :2792 returns early on an unassigned
 # issue, so the assignee gate never fires and :2971 becomes the operative
@@ -304,7 +304,7 @@ assert_shape "agent-routable advice nests the flag" \
   "$("$TOOL" route --answer-type choice \
        --addressee "$A_PEER" --issue-assignee "$A_PEER" --self "$A_SELF" 2>&1)"
 
-# Mutation: restore the pre-TOG-239 bare form and assert BAD_SHAPE fires. A
+# Mutation: restore the pre-change bare form and assert BAD_SHAPE fires. A
 # shape assertion that stays green against the shape it forbids asserts nothing.
 MUT2="$WORK/mutant-shape.sh"
 cp "$TOOL" "$MUT2"; chmod +x "$MUT2"

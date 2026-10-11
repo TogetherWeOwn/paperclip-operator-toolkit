@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ===========================================================================
 # interaction_envelope_lint.sh — refuse an envelope the server will silently
-#                                edit behind your back (TOG-396)
+#                                edit behind your back
 # ===========================================================================
 # `interaction_route.sh` decides WHERE an ask belongs. This decides whether the
 # JSON you are about to POST says what you think it says. They are different
@@ -37,7 +37,7 @@
 # Enum membership is checked; key membership is not. Every wrong-value class is
 # caught and every wrong-key class is not.
 #
-# THE "INCONSISTENCY" IN THE TOG-396 REPORT IS NOT ONE — see the doc. The
+# THE "INCONSISTENCY" IN THE EARLIER REPORT IS NOT ONE — see the doc. The
 # answers payload is not strict either; its loud 400 comes from `optionIds`
 # being REQUIRED, not from unknown-key rejection. That matters because it kills
 # the cheap fix: there is no strict sibling schema to copy. Client-side is the
@@ -252,7 +252,7 @@ cmd_lint() {
   esac
 
   # ---- 5. payload.supersedeOnUserComment — warning, not an error. ----------
-  # Out of TOG-396's stated scope (it is a payload field, not an envelope key)
+  # Out of the earlier report's stated scope (it is a payload field, not an envelope key)
   # but it is the same failure class and it is the measured largest single
   # cause of dead interactions, so silence here would be its own trap.
   local has_supersede

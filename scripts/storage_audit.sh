@@ -1,5 +1,5 @@
 #!/bin/bash
-# TOG-782 Deliverable 1: re-runnable storage consumer map with growth rates.
+# Deliverable 1: re-runnable storage consumer map with growth rates.
 #
 # Re-cut 2026-09-02 -- the original 2026-08-31 run of this script was never
 # committed (only reported done in an issue comment) and its output was lost
