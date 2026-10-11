@@ -118,6 +118,12 @@
 #                          mode vs "company-list" otherwise.
 #   GH_CI_STATUS_BIN       optional path to gh_ci_status.sh (default: same
 #                          directory as this script).
+#   RED_MAIN_POLL_CURL_CONNECT_TIMEOUT  positive whole seconds; default 10.
+#   RED_MAIN_POLL_CURL_MAX_TIME         positive whole seconds; default 30.
+#                          Bounds connection setup and each complete curl call.
+#   RED_MAIN_POLL_READER_TIMEOUT        positive whole seconds; default 120.
+#                          Bounds one whole gh_ci_status.sh run (it makes its own
+#                          curl calls); a timeout reads as UNKNOWN, exit 3.
 # ===========================================================================
 set -uo pipefail
 
@@ -131,6 +137,14 @@ command -v sha1sum >/dev/null 2>&1 || { echo "red_main_poll: sha1sum is required
 [[ -x "$CI_STATUS_BIN" ]] || { echo "red_main_poll: CI reader missing at $CI_STATUS_BIN" >&2; exit 2; }
 
 die() { echo "red_main_poll: $*" >&2; exit 2; }
+
+CURL_CONNECT_TIMEOUT="${RED_MAIN_POLL_CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${RED_MAIN_POLL_CURL_MAX_TIME:-30}"
+READER_TIMEOUT="${RED_MAIN_POLL_READER_TIMEOUT:-120}"
+for timeout in "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$READER_TIMEOUT"; do
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || die "curl and reader timeouts must be positive whole seconds"
+done
+command -v timeout >/dev/null 2>&1 || die "timeout is required"
 
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN is not set; refusing to poll anonymously (an anonymous read of a private repo is a 404, which is not green)"
 
@@ -163,16 +177,24 @@ resolve_main() {
 # Returns the reader's exit code (0 pass, 1 fail, 2 pending, 3 unknown,
 # 5 non-started). A reader failure is the repo's verdict, not the poll's.
 ci_json() {
-  "$CI_STATUS_BIN" --quiet "$1" "$2" 2>/dev/null
+  timeout --kill-after=5 "$READER_TIMEOUT" "$CI_STATUS_BIN" --quiet "$1" "$2" 2>/dev/null
 }
 
 # gh_api <path> -> HTTP status; body in $GH_BODY.
-gh_api() { curl -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null || echo 000; }
+gh_api() {
+  local status
+  if status="$(curl --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+      -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null)"; then
+    printf '%s' "$status"
+  else
+    printf '000'
+  fi
+}
 
 # failing_checks <owner/repo> <commit-sha> <body-file> -> prints sorted, lowercased
 # failing check-run names, one per line. Every check-runs page is read until
 # the rows seen match total_count; a short read returns 1 with nothing printed,
-# so the caller keys on the reader reason instead of a partial check set. The
+# so the caller reports UNKNOWN instead of keying on a partial check set. The
 # first page is saved to <body-file> for the caller to mine head_sha from. The
 # body goes through a file, not a sentinel line, because check-run names are
 # attacker-influenced strings and any sentinel (HEAD_SHA=, ---, ...) is a name
@@ -246,7 +268,8 @@ BOARD_READ_MODE="unknown"
 # parses as "no issues".
 board_api_get() {
   local path="$1" key="$2"
-  curl -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+  curl --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+    -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
     "${PAPERCLIP_API_URL%/}${path}" 2>/dev/null
 }
 
@@ -381,8 +404,9 @@ poll_one() {
       if names="$(failing_checks "$slug" "$main_sha" "$checks_body")"; then
         head="$(jq -r '[.check_runs[]? | .head_sha // ""] | map(select(length > 0)) | first // ""' "$checks_body" 2>/dev/null)"
       else
-        names=""
-        head=""
+        rm -f "$checks_body"
+        printf 'UNKNOWN %s @ main: check-runs could not be read\n' "$slug"
+        return 0
       fi
       rm -f "$checks_body"
       key="$(sed '/^[[:space:]]*$/d' <<<"$names" | paste -sd '\n' -)"
