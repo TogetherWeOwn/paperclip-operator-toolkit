@@ -118,6 +118,12 @@
 #                          mode vs "company-list" otherwise.
 #   GH_CI_STATUS_BIN       optional path to gh_ci_status.sh (default: same
 #                          directory as this script).
+#   RED_MAIN_POLL_CURL_CONNECT_TIMEOUT  positive whole seconds; default 10.
+#   RED_MAIN_POLL_CURL_MAX_TIME         positive whole seconds; default 30.
+#                          Bounds connection setup and each complete curl call.
+#   RED_MAIN_POLL_READER_TIMEOUT        positive whole seconds; default 120.
+#                          Bounds one whole gh_ci_status.sh run (it makes its own
+#                          curl calls); a timeout reads as UNKNOWN, exit 3.
 # ===========================================================================
 set -uo pipefail
 
@@ -131,6 +137,14 @@ command -v sha1sum >/dev/null 2>&1 || { echo "red_main_poll: sha1sum is required
 [[ -x "$CI_STATUS_BIN" ]] || { echo "red_main_poll: CI reader missing at $CI_STATUS_BIN" >&2; exit 2; }
 
 die() { echo "red_main_poll: $*" >&2; exit 2; }
+
+CURL_CONNECT_TIMEOUT="${RED_MAIN_POLL_CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${RED_MAIN_POLL_CURL_MAX_TIME:-30}"
+READER_TIMEOUT="${RED_MAIN_POLL_READER_TIMEOUT:-120}"
+for timeout in "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$READER_TIMEOUT"; do
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || die "curl and reader timeouts must be positive whole seconds"
+done
+command -v timeout >/dev/null 2>&1 || die "timeout is required"
 
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN is not set; refusing to poll anonymously (an anonymous read of a private repo is a 404, which is not green)"
 
@@ -163,16 +177,27 @@ resolve_main() {
 # Returns the reader's exit code (0 pass, 1 fail, 2 pending, 3 unknown,
 # 5 non-started). A reader failure is the repo's verdict, not the poll's.
 ci_json() {
-  "$CI_STATUS_BIN" --quiet "$1" "$2" 2>/dev/null
+  timeout --kill-after=5 "$READER_TIMEOUT" "$CI_STATUS_BIN" --quiet "$1" "$2" 2>/dev/null
 }
 
 # gh_api <path> -> HTTP status; body in $GH_BODY.
-gh_api() { curl -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null || echo 000; }
+gh_api() {
+  local status
+  if status="$(curl --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+      -sS -o "$GH_BODY" -w '%{http_code}' -H "@$GH_HDRS" "$API$1" 2>/dev/null)"; then
+    printf '%s' "$status"
+  else
+    printf '000'
+  fi
+}
 
 # failing_checks <owner/repo> <commit-sha> <body-file> -> prints sorted, lowercased
 # failing check-run names, one per line. Every check-runs page is read until
-# the rows seen match total_count; a short read returns 1 with nothing printed,
-# so the caller keys on the reader reason instead of a partial check set. The
+# the rows seen match total_count. Exit 0 prints the check set; exit 2 means
+# the first page answered 403/404 (persistent permission boundary: the caller
+# keeps the reader reason as key); exit 1 with nothing printed means any other
+# unreadable read, so the caller reports UNKNOWN instead of keying on a
+# partial check set. The
 # first page is saved to <body-file> for the caller to mine head_sha from. The
 # body goes through a file, not a sentinel line, because check-run names are
 # attacker-influenced strings and any sentinel (HEAD_SHA=, ---, ...) is a name
@@ -185,7 +210,16 @@ failing_checks() {
   tmp="$(mktemp)" || return 1
   while true; do
     code="$(gh_api "/repos/$slug/commits/$sha/check-runs?per_page=100&page=$page")"
-    [[ "$code" == "200" ]] || { rm -f "$tmp"; return 1; }
+    if [[ "$code" != "200" ]]; then
+      rm -f "$tmp"
+      # A page-1 403/404 repeats on every tick for a token without
+      # checks:read, so it is not a transient short read: exit 2 tells the
+      # caller to keep the stable reader reason as key. Transport failures
+      # (000), short totals, bad bodies and later-page denials stay exit 1
+      # (UNKNOWN).
+      if [[ "$page" -eq 1 && ( "$code" == "403" || "$code" == "404" ) ]]; then return 2; fi
+      return 1
+    fi
     if [[ "$page" -eq 1 ]]; then
       total="$(jq -r 'if (.check_runs | type) == "array" then (.total_count // (.check_runs | length)) else empty end' "$GH_BODY" 2>/dev/null)"
       [[ "$total" =~ ^[0-9]+$ ]] || { rm -f "$tmp"; return 1; }
@@ -246,7 +280,8 @@ BOARD_READ_MODE="unknown"
 # parses as "no issues".
 board_api_get() {
   local path="$1" key="$2"
-  curl -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
+  curl --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+    -sS -w $'\n%{http_code}' --config <(printf 'header = "Authorization: Bearer %s"\n' "$key") \
     "${PAPERCLIP_API_URL%/}${path}" 2>/dev/null
 }
 
@@ -365,7 +400,7 @@ title_for() { printf '[%s] Red main: %s' "$1" "$2"; }
 # another repo's red (rule 4 cuts both ways: partial coverage is reported,
 # not discarded).
 poll_one() {
-  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body main_sha
+  local slug="$1" titles_file="$2" out rc=0 verdict reason names head key sig sig_source tag sev tracked checks_body main_sha fc_rc=0
   main_sha="$(resolve_main "$slug")" || { printf 'UNKNOWN %s @ main: could not resolve main to a commit\n' "$slug"; return 0; }
   out="$(ci_json "$slug" "$main_sha")"; rc=$?
   verdict="$(jq -r '.verdict // ""' <<<"$out" 2>/dev/null)"
@@ -381,8 +416,18 @@ poll_one() {
       if names="$(failing_checks "$slug" "$main_sha" "$checks_body")"; then
         head="$(jq -r '[.check_runs[]? | .head_sha // ""] | map(select(length > 0)) | first // ""' "$checks_body" 2>/dev/null)"
       else
-        names=""
-        head=""
+        fc_rc=$?
+        rm -f "$checks_body"
+        if [[ "$fc_rc" -eq 2 ]]; then
+          # Check runs denied on page 1 (token without checks:read): a red
+          # the reader saw in commit statuses still files under the stable
+          # reason key, as before the timeout bounds.
+          names=""
+          head=""
+        else
+          printf 'UNKNOWN %s @ main: check-runs could not be read\n' "$slug"
+          return 0
+        fi
       fi
       rm -f "$checks_body"
       key="$(sed '/^[[:space:]]*$/d' <<<"$names" | paste -sd '\n' -)"
