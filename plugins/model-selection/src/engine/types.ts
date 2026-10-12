@@ -486,6 +486,15 @@ export interface SelectionDecision {
   /** Set when we deliberately declined to move off the agent floor. */
   heldReason: string | null;
   /**
+   * Set only on an exempt-agent hold (`selection.exemptAgentIds`) whose own
+   * configured model is known unserviceable right now (active cooldown, lane
+   * hard stop, outage, or a published unavailable lane). The decision stays
+   * `held-at-floor` and writes nothing; the run-scoped hook reads this to defer
+   * the run instead of starting it on a model that will refuse it. Never names
+   * a replacement: an exempt agent is not repinned.
+   */
+  exemptUnserviceable?: { modelId: string; reason: string };
+  /**
    * . True only in `pacing.mode: enforce`, and only when pace
    * ordering or the slot throttle actually changed the outcome versus a
    * pace-less selection. False in `off`/`shadow` (and in `enforce` when

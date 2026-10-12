@@ -584,6 +584,23 @@ export function hardStopExcluded(ledger: LaneLedger, model: ModelEntry, nowMs = 
 }
 
 /**
+ * Affirmative-only pace refusal for an exempt agent's own model. Unlike
+ * `hardStopExcluded` — which is deliberately fail-closed for routing (a lane
+ * with somewhere else to go) — this reads ONLY the current verdict's
+ * `serviceable === false`. An indeterminate verdict ("the lane may be at 2%
+ * or at 100%") and a stale `unserviceableSince` with no current reading are
+ * not refusals: there is no other lane for an exempt agent, so deferring on
+ * them would stop every run on a pacing-config typo or a poller outage that
+ * follows one exhausted reading. Cooldowns need no branch here — `laneRead`
+ * already reports them as `unavailable` via `modelCooldownExcluded`.
+ */
+export function exemptPaceUnserviceable(ledger: LaneLedger, model: ModelEntry): boolean {
+  const laneId = model.laneId ?? null;
+  if (!laneId) return false;
+  return ledger[laneId]?.verdict?.serviceable === false;
+}
+
+/**
  *  (D1e). How many consecutive non-success polls dead-veto a lane.
  * Held equal to `EVIDENCE_ZERO_SUCCESS_SAMPLES` (lane-evidence.ts) on purpose:
  * the same evidence weight that condemns a lane on run outcomes condemns one
