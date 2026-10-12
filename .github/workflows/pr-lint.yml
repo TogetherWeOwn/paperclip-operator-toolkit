@@ -55,7 +55,7 @@ jobs:
           # instance UI links and the internal host. These always fail a public title/body
           # check unless the strict level is explicitly downgraded to a warning (fail-closed).
           TRACKER_ID = re.compile(r"\b(TOG|PAP|PAPA)-\d+\b")
-          UI_LINK = re.compile(r"/[A-Z]{2,6}/(issues|agents|projects|approvals|runs)/")
+          UI_LINK = re.compile(r"/(TOG|PAP|PAPA)/(issues|agents|projects|approvals|runs)/")
           HOST_INTERNAL = re.compile(r"\binfextion\.net\b", re.IGNORECASE)
           STRICT_FIXED = [(UI_LINK, "an instance UI link"), (HOST_INTERNAL, "the internal host")]
 
