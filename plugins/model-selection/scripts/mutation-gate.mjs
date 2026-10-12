@@ -3888,6 +3888,27 @@ const mutants = [
     to: "return !!exemptAgentIds && exemptAgentIds.includes(agentId as string);",
   },
   {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: the run-scoped hook keeps (starts the run) when an exempt agent's own model is unserviceable.
+    name: "exempt-agent-unserviceable-defer-removed",
+    file: "src/engine/run-resolve.ts",
+    from: "    if (decision.exemptUnserviceable) {",
+    to: "    if (false && decision.exemptUnserviceable) {",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: a published unavailable lane or cooldown no longer defers an exempt agent.
+    name: "exempt-agent-availability-read-dropped",
+    file: "src/engine/select.ts",
+    from: "        ownRead.state === \"unavailable\";\n      if (stopped) {",
+    to: "        false;\n      if (stopped) {",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: a pace-engine hard stop no longer defers an exempt agent.
+    name: "exempt-agent-hard-stop-read-dropped",
+    file: "src/engine/select.ts",
+    from: "(paceActive && (hardStopExcluded(ledger, ownModel, now) || ",
+    to: "(paceActive && (false || ",
+  },
+  {
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt agent's new card is still classified.
     name: "exempt-agent-creation-guard-removed",
     file: "src/worker.ts",

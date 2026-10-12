@@ -170,6 +170,17 @@ What it deliberately does not do:
 - An operator override for a specific card does not beat the exemption. Take the
   agent off the list to route it again.
 
+An exempt agent whose own configured model is known unserviceable right now
+(an active cooldown, a pace-engine hard stop, an outage override, or a lane the
+published availability document calls unavailable) does not start the run into a
+refusal: the run-scoped hook answers `defer` with the existing
+`runResolve.deferRetryMs`. It never names or switches to another model. An
+unknown or unpublished lane state is not a cooldown and still answers `keep`, and
+a live issue override stays authoritative. The host retries a deferred run a
+bounded number of times (12) at `deferRetryMs` apart (at most 60 s each), then
+surfaces the issue instead of starting it, so a cooldown longer than that window
+ends in a surfaced card, not a resumed run.
+
 An entry that is not a full agent UUID passes validation with a warning (it will
 exempt no agent unless it matches an id exactly); the failure it guards against is
 silent — the router pins the agent it was meant to leave alone.

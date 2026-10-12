@@ -584,6 +584,24 @@ export function selectModel(input: SelectInput): SelectionDecision {
   if (isExemptAgent(config.exemptAgentIds, descriptor.assigneeAgentId)) {
     const reason = "assignee is on selection.exemptAgentIds: the router makes no pin and the agent's own model is used";
     trace.push(reason);
+    // Still no pin and no switch. Only report whether the agent's own model can
+    // serve right now, on the same serviceability predicates the floor check
+    // uses (cooldown, hard stop, outage, published availability) and not the
+    // pace preferences (avoid, withdrawn), which rank models, not refuse them.
+    // UNKNOWN is not dead: a blind instrument defers nothing.
+    const ownModelId = resolveConfiguredModelId(descriptor.agentFloorModelId ?? null, config.models);
+    const ownModel = ownModelId ? config.models.find((model) => model.id === ownModelId) : undefined;
+    if (ownModel) {
+      const ownRead = laneRead(ownModel);
+      const stopped =
+        (paceActive && (hardStopExcluded(ledger, ownModel, now) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||
+        ownRead.state === "unavailable";
+      if (stopped) {
+        const why = ownRead.state === "unavailable" ? ownRead.reason : `lane ${ownModel.laneId ?? "(none)"} is not serviceable`;
+        trace.push(`exempt agent's own model ${ownModel.id} is not serviceable: ${why}; the run is deferred, never repinned`);
+        return { ...base, outcome: "held-at-floor", heldReason: reason, exemptUnserviceable: { modelId: ownModel.id, reason: why } };
+      }
+    }
     return { ...base, outcome: "held-at-floor", heldReason: reason };
   }
 
