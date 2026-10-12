@@ -3905,8 +3905,22 @@ const mutants = [
     // Killed by: tests/exempt-defer.spec.ts; the mutant is: a pace-engine hard stop no longer defers an exempt agent.
     name: "exempt-agent-hard-stop-read-dropped",
     file: "src/engine/select.ts",
-    from: "(paceActive && (hardStopExcluded(ledger, ownModel, now) || ",
+    from: "(paceActive && (exemptPaceUnserviceable(ledger, ownModel) || ",
     to: "(paceActive && (false || ",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: an active lane-outage override no longer defers an exempt agent.
+    name: "exempt-agent-outage-read-dropped",
+    file: "src/engine/select.ts",
+    from: "exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel)",
+    to: "exemptPaceUnserviceable(ledger, ownModel) || false",
+  },
+  {
+    // Killed by: tests/exempt-defer.spec.ts; the mutant is: the pace gate fires even when the operator disabled all pace involvement.
+    name: "exempt-agent-pace-gate-fires-when-pacing-off",
+    file: "src/engine/select.ts",
+    from: "        (paceActive && (exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||",
+    to: "        (true && (exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||",
   },
   {
     // Killed by: tests/exempt-agent-ids.spec.ts; the mutant is: an exempt agent's new card is still classified.

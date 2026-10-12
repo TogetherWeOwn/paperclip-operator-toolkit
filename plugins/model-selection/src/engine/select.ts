@@ -33,6 +33,7 @@ import {
   allLanesDeadVetoed,
   avoidThresholdFor,
   deadVetoExcluded,
+  exemptPaceUnserviceable,
   hardStopExcluded,
   modelCooldownExcluded,
   laneAvoidExcluded,
@@ -593,8 +594,13 @@ export function selectModel(input: SelectInput): SelectionDecision {
     const ownModel = ownModelId ? config.models.find((model) => model.id === ownModelId) : undefined;
     if (ownModel) {
       const ownRead = laneRead(ownModel);
+      // Affirmative refusal only: the current pace verdict (`serviceable ===
+      // false`), an active outage override, or a published unavailable lane /
+      // cooldown via `laneRead`. Indeterminate verdicts and a stale
+      // `unserviceableSince` with no current reading keep — a blind instrument
+      // defers nothing, because there is no other lane for an exempt agent.
       const stopped =
-        (paceActive && (hardStopExcluded(ledger, ownModel, now) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||
+        (paceActive && (exemptPaceUnserviceable(ledger, ownModel) || laneOutageExcluded(config.laneOutageOverride ?? null, nowIso, ownModel))) ||
         ownRead.state === "unavailable";
       if (stopped) {
         const why = ownRead.state === "unavailable" ? ownRead.reason : `lane ${ownModel.laneId ?? "(none)"} is not serviceable`;

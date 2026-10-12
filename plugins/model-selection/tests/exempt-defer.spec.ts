@@ -8,6 +8,7 @@ import {
   type RunResolveSnapshot,
 } from "../src/engine/run-resolve.js";
 import { LANED_MODELS, NOW, NO_ESCALATION, PROFILES, account, laneDoc } from "./fixtures.js";
+import type { LaneOutageOverride } from "../src/engine/pacing.js";
 import { stoppedLane, type LaneLedger } from "./run-resolve-helpers.js";
 
 /**
@@ -45,13 +46,14 @@ function fleet(zaiOverrides: Record<string, unknown> = {}) {
 
 function input(
   agentId: string,
-  options: { availabilityRaw?: unknown; ledger?: LaneLedger; exempt?: readonly string[]; defaultModel?: string; issueOverrideModel?: string | null } = {},
+  options: { availabilityRaw?: unknown; ledger?: LaneLedger; exempt?: readonly string[]; defaultModel?: string; issueOverrideModel?: string | null; pacingMode?: string; laneOutageOverride?: LaneOutageOverride | null } = {},
 ): RunResolveInput {
   const snapshot: RunResolveSnapshot = {
     config: resolveConfig({
       selection: { enabled: true, mode: "enforce", holdOnUntrustedProfile: true, exemptAgentIds: options.exempt ?? [REVIEWER] },
       models: LANED_MODELS as unknown as Record<string, unknown>[],
       runResolve: { enabled: true },
+      ...(options.pacingMode ? { pacing: { mode: options.pacingMode } } : {}),
     }),
     profiles: PROFILES,
     signals: NO_ESCALATION,
@@ -59,7 +61,7 @@ function input(
     operatorOverrides: {},
     cardLedger: {},
     modelScores: {},
-    laneOutageOverride: null,
+    laneOutageOverride: options.laneOutageOverride ?? null,
     zaiPaceOverride: null,
     pinsWeightByLane: {},
     availabilityRaw: options.availabilityRaw ?? null,
@@ -105,6 +107,53 @@ describe("exempt agent whose configured model is unserviceable: run-scoped hook"
 
   it("defers on a pace-engine hard stop for the model's lane", () => {
     const resolution = resolveRunDecision(input(REVIEWER, { ledger: { zai: stoppedLane("zai") } }));
+    expect(resolution.kind).toBe("defer");
+  });
+
+  it.each(["indeterminate-account-weight", "invalid-configured-governing-window"] as const)(
+    "keeps on an indeterminate pace verdict (%s): a blind instrument defers nothing",
+    (reason) => {
+      const ledger: LaneLedger = {
+        zai: {
+          ...stoppedLane("zai"),
+          verdict: { serviceable: null, state: "unknown", reason } as unknown as LaneLedger["zai"]["verdict"],
+        },
+      };
+      expect(resolveRunDecision(input(REVIEWER, { ledger })).kind).toBe("keep");
+    },
+  );
+
+  it("keeps when the ledger holds only a stale unserviceableSince with no current reading", () => {
+    const ledger: LaneLedger = {
+      zai: {
+        ...stoppedLane("zai"),
+        verdict: null,
+        unserviceableSince: at(-5 * MINUTE),
+        unserviceableReason: "serviceability-window-exhausted",
+        error: "poll failed",
+      },
+    };
+    expect(resolveRunDecision(input(REVIEWER, { ledger })).kind).toBe("keep");
+  });
+
+  it("defers on an active lane-outage override for the model's lane", () => {
+    const laneOutageOverride: LaneOutageOverride = { lanes: ["zai"], models: [], until: at(10 * MINUTE) };
+    const resolution = resolveRunDecision(input(REVIEWER, { laneOutageOverride }));
+    expect(resolution.kind).toBe("defer");
+  });
+
+  it("keeps once the lane-outage override has expired", () => {
+    const laneOutageOverride: LaneOutageOverride = { lanes: ["zai"], models: [], until: at(-MINUTE) };
+    expect(resolveRunDecision(input(REVIEWER, { laneOutageOverride })).kind).toBe("keep");
+  });
+
+  it("keeps when pacing is off even with a pace-engine hard stop: the pace gate is inert", () => {
+    const resolution = resolveRunDecision(input(REVIEWER, { ledger: { zai: stoppedLane("zai") }, pacingMode: "off" }));
+    expect(resolution.kind).toBe("keep");
+  });
+
+  it("still defers on a published cooldown when pacing is off: availability reads ignore the mode", () => {
+    const resolution = resolveRunDecision(input(REVIEWER, { availabilityRaw: cooling(), pacingMode: "off" }));
     expect(resolution.kind).toBe("defer");
   });
 
