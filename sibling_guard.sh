@@ -418,7 +418,6 @@ detect_remote() {
           return claimed
         }
         for (const p of prs) {
-          const hay = [p.title || "", (p.head && p.head.ref) || "", p.body || ""].join(" ").toLowerCase()
           // A PR sitting on the calling run own head branch is NOT skipped:
           // at prepush it is the ownership evidence for the check below.
           // Attribution is card keys on a Refs line ONLY — a bare substring
@@ -438,7 +437,17 @@ detect_remote() {
             const claimed = refsClaims(p.body)
             process.stdout.write(["SAMESHA", p.number, (p.head && p.head.ref) || "?", sha, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
           }
-          if (!hay.includes(key)) continue
+          // Non-samehead duplicate attribution (TOG-23152): a title or head
+          // branch substring still refuses, but a BODY mention does not —
+          // only a Refs LINE naming this card claims it. A bare body
+          // substring kept the false-positive class where a "Related" line
+          // merely references the ratchet (PR #888 vs its suite PRs).
+          // File overlap is deliberately not consulted: it costs a files
+          // API call per open PR.
+          const titleBranchHay = [p.title || "", (p.head && p.head.ref) || ""].join(" ").toLowerCase()
+          const claimed = refsClaims(p.body)
+          const claimsOwn = claimed.some(k => k.toLowerCase() === key)
+          if (!titleBranchHay.includes(key) && !claimsOwn) continue
           process.stdout.write([p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90)].join("\t") + "\n")
         }
       ' "$body" "$KEY_LC" "$current_branch" "$current_sha" 2>/dev/null)"

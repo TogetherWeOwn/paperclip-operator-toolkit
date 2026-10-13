@@ -163,6 +163,11 @@ const PULLS = {
   shaown: [{ number: 892, title: 'my renamed branch', body: 'Refs: TOG-900', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
   shanone: [{ number: 893, title: 'unclaimed head work', body: 'just a description', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
   shadistinct: [{ number: 894, title: 'other work', body: 'Refs: TOG-907', head: { ref: 'tog-907-sibling-branch', sha: 'DISTINCT' } }],
+  // TOG-23152: non-samehead body attribution. Titles/branches carry no key
+  // on purpose, so the verdict can only come from the body Refs line.
+  bodymention: [{ number: 895, title: 'wire suite foo', body: 'Related: TOG-900 procedure reference, see ratchet', head: { ref: 'suite-foo-branch' } }],
+  bodymidrefs: [{ number: 897, title: 'wire suite bar', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'suite-bar-branch' } }],
+  bodyrefs: [{ number: 896, title: 'wire suite foo', body: 'Refs: TOG-900', head: { ref: 'suite-foo-branch' } }],
   denied: 403,
   bad:    'not json at all',
 }
@@ -464,6 +469,27 @@ MYPR="$TMP/mypr"; mkclone "$MYPR"
 run_guard "$MYPR" TOG-900 --repo=stub/mine
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "an open PR on the caller's own head branch is not a sibling" "rc=$RC out=$OUT"
+
+# ===========================================================================
+hdr "6a. Non-samehead body mentions are not duplicates (TOG-23152)."
+# PR #888 / TOG-22068: six sibling-suite PRs mention the ratchet card in
+# their bodies (Related/procedure reference) without claiming it. A bare
+# body substring must not refuse; only a Refs LINE naming this card does.
+# Title/branch substring matches keep refusing (duplicate protection).
+
+run_guard "$CLEAN" TOG-900 --repo=stub/bodymention
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a non-samehead PR whose body merely mentions the key stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/bodymidrefs
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a non-samehead mid-sentence Refs mention stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/bodyrefs
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a non-samehead PR whose Refs line names this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#896" <<< "$OUT" && echo 0 || echo 1)" \
+  "the Refs-claimed duplicate PR number is named in the report" "$OUT"
 
 # ===========================================================================
 hdr "6b. Same-head ownership at prepush (two cards, one branch)."
