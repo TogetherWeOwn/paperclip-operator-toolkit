@@ -163,6 +163,12 @@ const PULLS = {
   shaown: [{ number: 892, title: 'my renamed branch', body: 'Refs: TOG-900', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
   shanone: [{ number: 893, title: 'unclaimed head work', body: 'just a description', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
   shadistinct: [{ number: 894, title: 'other work', body: 'Refs: TOG-907', head: { ref: 'tog-907-sibling-branch', sha: 'DISTINCT' } }],
+  // Same-commit with the key in the title or branch but no anchored Refs line:
+  // unclaimed same-commit rows stay in the generic path so the title/branch
+  // match still refuses as on base (identical commit plus the key in the title
+  // is the strongest duplicate evidence).
+  shatitle: [{ number: 898, title: 'Do the thing (TOG-900)', body: 'just a description', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  shabranch: [{ number: 899, title: 'other work', body: 'just a description', head: { ref: 'tog-900-feature', sha: 'SAMESHA' } }],
   // TOG-23152: non-samehead body attribution. Titles/branches carry no key
   // on purpose, so the verdict can only come from the body Refs line.
   bodymention: [{ number: 895, title: 'wire suite foo', body: 'Related: TOG-900 procedure reference, see ratchet', head: { ref: 'suite-foo-branch' } }],
@@ -182,6 +188,10 @@ const PULLS = {
   crossexact: [{ number: 917, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-9000', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossmidrelevant: [{ number: 918, title: 'Do the thing (TOG-900)', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossunrelated: [{ number: 919, title: 'other work', body: 'Refs: TOG-907', head: { ref: 'unrelated-branch', sha: 'DISTINCT' } }],
+  // No anchored claim and no key-like token in title or branch: provably
+  // irrelevant, so a uuid caller skips the key lookup and stays clear even
+  // when the lookup would fail.
+  crossnoclaimsunrelated: [{ number: 921, title: 'other work', body: 'just a description', head: { ref: 'unrelated-branch', sha: 'DISTINCT' } }],
   crossown901: [{ number: 920, title: 'Do the thing (TOG-901)', body: 'Refs: TOG-901', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   denied: 403,
   bad:    'not json at all',
@@ -500,14 +510,15 @@ run_guard "$CLEAN" TOG-900 --repo=stub/bodymidrefs
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a non-samehead mid-sentence Refs mention stays clear" "rc=$RC out=$OUT"
 
-# Authorized Test Author update: an own Refs claim on a foreign
-# branch name is the caller own PR, not a duplicate — the old refusal above
-# is the live false positive. Own claims note and clear; see 6a1.
+# An own Refs claim on a foreign branch with a distinct head refuses as a
+# duplicate PR: two runs of one agent share the key (TOG-253/TOG-258), so the
+# Refs line alone cannot prove the PR is the caller own (review on PR #79).
+# Same-commit own already refuses; distinct-head own is no safer. See 6a1.
 run_guard "$CLEAN" TOG-900 --repo=stub/bodyrefs
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a non-samehead PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
-assert "$(grep -q "VERDICT: clear" <<< "$OUT" && echo 0 || echo 1)" \
-  "the own-Refs PR verdict is reported as clear" "$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a non-samehead PR whose Refs line names this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#896" <<< "$OUT" && echo 0 || echo 1)" \
+  "the Refs-claimed duplicate PR number is named in the report" "$OUT"
 
 # ===========================================================================
 hdr "6a1. Cross-branch Refs ownership on foreign branch names."
@@ -518,11 +529,12 @@ hdr "6a1. Cross-branch Refs ownership on foreign branch names."
 # runs when head == current branch. Every fixture below sits on a DIFFERENT
 # branch name with a DISTINCT head commit (forty zeros), so same-head and
 # same-SHA rules cannot fire — the verdict can only come from generic Refs
-# attribution. Own Refs (alone, mixed or lowercase) notes and clears;
+# attribution. Own Refs (alone, mixed or lowercase) refuses as a duplicate PR
+# on another branch — two runs share the key, so Refs alone cannot prove own;
 # foreign-only Refs on a relevant candidate refuses naming owner and PR;
 # unrelated foreign claims stay clear; unresolvable own keys go indeterminate.
 
-# Prepush own-clear cases run on a WORK-like fixture: a fresh branch plus one
+# Prepush own-duplicate cases run on a WORK-like fixture: a fresh branch plus one
 # commit, so HEAD is not yet on origin/main and the already-landed test does
 # not fire. CLEAN at prepush always exits 1 via already-landed; see 6b ("One
 # commit first, or the already-landed test fires") and the WORK fixture in 7.
@@ -530,32 +542,44 @@ CROSSWORK="$TMP/crosswork"; mkclone "$CROSSWORK"
 (cd "$CROSSWORK" && git checkout --quiet -b tog-901-work && echo w >> file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am w)
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossown
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a relevant PR on a foreign branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#911" <<< "$OUT" && echo 0 || echo 1)" \
+  "the own-PR duplicate names the PR number" "$OUT"
+assert "$(grep -qi "your own PR" <<< "$OUT" && echo 0 || echo 1)" \
+  "the own-PR duplicate says it is your own PR" "$OUT"
 
 run_guard "$CROSSWORK" TOG-900 --repo=stub/crossown --phase=prepush
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "at prepush, a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a relevant PR on a foreign branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#911" <<< "$OUT" && echo 0 || echo 1)" \
+  "the prepush own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossmixed
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a relevant PR on a foreign branch whose Refs line names this card among others exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#912" <<< "$OUT" && echo 0 || echo 1)" \
+  "the mixed own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CROSSWORK" TOG-900 --repo=stub/crossmixed --phase=prepush
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "at prepush, a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a relevant PR on a foreign branch whose Refs line names this card among others exits 1" "rc=$RC out=$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchown
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a branch-relevant PR on a foreign branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#914" <<< "$OUT" && echo 0 || echo 1)" \
+  "the branch-relevant own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CROSSWORK" TOG-900 --repo=stub/crossbranchown --phase=prepush
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "at prepush, a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a branch-relevant PR on a foreign branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crosslower
-assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "a relevant PR whose Refs line names this card in lowercase stays clear" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a relevant PR whose Refs line names this card in lowercase exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#916" <<< "$OUT" && echo 0 || echo 1)" \
+  "the lowercase own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossforeign
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
@@ -586,17 +610,32 @@ assert "$(grep -q "TOG-9000" <<< "$OUT" && echo 0 || echo 1)" \
 run_guard "$CLEAN" TOG-900 --repo=stub/crossmidrelevant
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "a relevant PR with only a mid-sentence Refs mention and no anchored line exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "already covers this issue" <<< "$OUT" && echo 0 || echo 1)" \
+  "the no-Refs refusal uses the title message" "$OUT"
+assert "$(grep -q "Do the thing" <<< "$OUT" && echo 0 || echo 1)" \
+  "the no-Refs refusal names the PR title" "$OUT"
+assert "$(grep -q "00000000" <<< "$OUT" && echo 1 || echo 0)" \
+  "the no-Refs refusal never prints a head SHA as an open card" "rc=$RC out=$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossunrelated
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "an unrelated PR naming only another card stays clear" "rc=$RC out=$OUT"
 
-# Invoked by uuid, the caller own key is resolved off GET /api/issues/<uuid>
-# only when a relevant generic candidate is in play. Unresolvable or
-# unreadable lookups fail closed, never clear.
-run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/crossown
+run_guard "$CLEAN" TOG-900 --repo=stub/crossnoclaimsunrelated
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
-  "at start by uuid, a relevant PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+  "an unrelated PR with no anchored claim stays clear" "rc=$RC out=$OUT"
+
+# Invoked by uuid, the caller own key is resolved off GET /api/issues/<uuid>
+# only when a possibly-relevant generic candidate is in play: an anchored Refs
+# claim, or a card-key token in the title or head branch. A PR with no claim
+# and no key-like token is provably irrelevant, so the lookup is skipped and a
+# transient API error cannot turn an irrelevant start indeterminate.
+# Unresolvable or unreadable lookups with a candidate fail closed, never clear.
+run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/crossown
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a relevant PR whose Refs line names this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#911" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/crossforeign
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
@@ -612,16 +651,28 @@ run_guard "$CLEAN" 33333333-4444-5555-6666-777777777777 --repo=stub/crossown
 assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
   "at start by uuid, an unparseable lookup with a relevant PR exits 3, not 0" "rc=$RC out=$OUT"
 
-# An own-PR note never masks a live sibling or a blind detector.
+run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/crossunrelated
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with an unrelated PR carrying a claim exits 3, not 0" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/crossnoclaimsunrelated
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with no claim and no key-like token stays clear" "rc=$RC out=$OUT"
+
+# An own-PR refusal never masks a live sibling or a blind detector.
 run_guard "$CLEAN" TOG-901 --repo=stub/crossown901
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
-  "an own-PR note does not mask a live sibling finding" "rc=$RC out=$OUT"
+  "an own-PR refusal does not mask a live sibling finding" "rc=$RC out=$OUT"
 assert "$(grep -q "run-sib" <<< "$OUT" && echo 0 || echo 1)" \
-  "the live sibling is still named alongside the own-PR note" "$OUT"
+  "the live sibling is still named alongside the own-PR refusal" "$OUT"
+assert "$(grep -q "#920" <<< "$OUT" && echo 0 || echo 1)" \
+  "the own-PR duplicate is still named alongside the live sibling" "$OUT"
 
 OVERRIDE_KEY="" run_guard "$CLEAN" TOG-900 --repo=stub/crossown
-assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
-  "an own-PR note does not mask a blind detector" "rc=$RC out=$OUT"
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an own-PR refusal with a blind detector exits 1, finding outranks blindness" "rc=$RC out=$OUT"
+assert "$(grep -q "PAPERCLIP_API_KEY is unset" <<< "$OUT" && echo 0 || echo 1)" \
+  "the blind detector is still reported alongside the own-PR refusal" "$OUT"
 
 # ===========================================================================
 hdr "6b. Same-head ownership at prepush (two cards, one branch)."
@@ -761,6 +812,22 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 run_guard "$SHAHEAD" TOG-900 --repo=stub/shanone
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a same-commit PR naming no card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shatitle
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a same-commit PR with the key in the title and no Refs line exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "already covers this issue" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-commit title match uses the title message" "$OUT"
+assert "$(grep -q "#898" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-commit title-match PR number is named" "$OUT"
+assert "$(grep -q "00000000" <<< "$OUT" && echo 1 || echo 0)" \
+  "the same-commit title match never prints a head SHA as an open card" "rc=$RC out=$OUT"
+
+run_guard "$SHAHEAD" TOG-900 --repo=stub/shabranch --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a same-commit PR with the key in the branch and no Refs line exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#899" <<< "$OUT" && echo 0 || echo 1)" \
+  "the same-commit branch-match PR number is named" "$OUT"
 
 run_guard "$SHAHEAD" TOG-900 --repo=stub/shadistinct
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \

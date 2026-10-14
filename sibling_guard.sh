@@ -454,7 +454,11 @@ detect_remote() {
           // costs a files API call per open PR.
           const gclaimed = refsClaims(p.body)
           const gsha = String((p.head && p.head.sha) || "")
-          process.stdout.write(["GENERIC", p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90), gclaimed.join(","), gsha].join("\t") + "\n")
+          // GENERIC rows join with \x1f (not tab): claims is a middle field
+          // and empty for every PR with no anchored Refs line, and bash
+          // IFS-tab read merges adjacent tabs, shifting the head SHA into
+          // claims. \x1f never appears in branch names, titles, keys or SHAs.
+          process.stdout.write(["GENERIC", p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90), gclaimed.join(","), gsha].join("\x1f") + "\n")
         }
       ' "$body" "$KEY_LC" "$current_branch" "$current_sha" 2>/dev/null)"
       if [[ $? -ne 0 ]]; then
@@ -463,20 +467,57 @@ detect_remote() {
         note "remote: queried open pull requests on $slug"
         # -- cross-branch generic ownership (TOG-23879) -----------------------
         # A relevant PR on a foreign branch whose Refs line names our own key
-        # is our own PR: note, not finding. Foreign-only Refs on a relevant
-        # candidate refuses naming owner and PR. Relevant with no anchored
-        # line keeps the old refusal (title/branch substring). Unrelated
-        # foreign-only stays clear. Same-commit rows are skipped here:
-        # SAMESHA owns them (own same-commit refuses as duplicate there).
+        # refuses as a duplicate PR on another branch: two runs of one agent
+        # share the key (TOG-253/TOG-258), so Refs alone cannot prove own, and
+        # same-commit own already refuses — a distinct-head own claim is no
+        # safer. Foreign-only Refs on a relevant candidate refuses naming
+        # owner and PR. Relevant with no anchored line keeps the old refusal
+        # (title/branch substring). Unrelated foreign-only stays clear.
+        # Claimed same-commit rows are skipped here: SAMESHA owns them.
+        # Unclaimed same-commit rows stay here so a title/branch match still
+        # refuses as on base.
         local generic_rows
         generic_rows="$(grep '^GENERIC' <<< "$hits" || true)"
         if [[ -n "$generic_rows" ]]; then
           local generic_mykey="$KEY_LC"
+          local cur_sha_lc
+          cur_sha_lc="$(printf '%s' "${current_sha:-}" | tr '[:upper:]' '[:lower:]')"
+          local generic_candidate=""
+          if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
+            # Uuid callers cannot test title/branch relevance without the key,
+            # so pre-scan for a row that could refuse: any anchored Refs claim
+            # (own claims refuse as duplicate, so claims alone can refuse) or
+            # a card-key token in the title or head branch. Only a PR with no
+            # claim and no key-like token is provably irrelevant; anything
+            # else fails closed when the lookup fails, as on base for relevant
+            # rows.
+            while IFS=$'\x1f' read -r c_tag c_num c_ref c_title c_claims c_sha; do
+              [[ "${c_tag:-}" == "GENERIC" ]] || continue
+              [[ -n "${c_num:-}" ]] || continue
+              if [[ -n "$cur_sha_lc" && -n "${c_sha:-}" && -n "${c_claims:-}" ]]; then
+                if [[ "$(printf '%s' "$c_sha" | tr '[:upper:]' '[:lower:]')" == "$cur_sha_lc" ]]; then
+                  continue
+                fi
+              fi
+              if [[ -n "${c_claims:-}" ]]; then
+                generic_candidate=1
+                break
+              fi
+              if grep -qiE '[a-z]{2,}-[0-9]+' <<< "${c_title:-} ${c_ref:-}" 2>/dev/null; then
+                generic_candidate=1
+                break
+              fi
+            done <<< "$generic_rows"
+          fi
           if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
             # Invoked by uuid: resolve own key off GET /api/issues/<uuid>,
-            # but only with a generic candidate in play — with nothing to
-            # attribute, a transient API error must not go indeterminate.
-            if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+            # but only with a possibly-relevant candidate in play — with
+            # nothing that could refuse, a transient API error must not go
+            # indeterminate. No candidate skips the lookup and stays with the
+            # raw uuid key, which never matches: clear, as on base.
+            if [[ -z "$generic_candidate" ]]; then
+              : # no possibly-relevant row: skip the lookup, stay clear
+            elif [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
               blind_on "remote: cross-branch ownership check cannot learn our own card key for $ISSUE_ARG with no control-plane credential, so a generic PR cannot be attributed"
               generic_mykey=""
             else
@@ -500,14 +541,15 @@ detect_remote() {
           fi
           if [[ -n "$generic_mykey" ]]; then
             local g_tag g_num g_ref g_title g_claims g_sha
-            local cur_sha_lc
-            cur_sha_lc="$(printf '%s' "${current_sha:-}" | tr '[:upper:]' '[:lower:]')"
-            while IFS=$'\t' read -r g_tag g_num g_ref g_title g_claims g_sha; do
+            while IFS=$'\x1f' read -r g_tag g_num g_ref g_title g_claims g_sha; do
               [[ "${g_tag:-}" == "GENERIC" ]] || continue
               [[ -n "${g_num:-}" ]] || continue
-              # Same-commit is SAMESHA territory: skip here to avoid double
-              # reporting; SAMESHA refuses own same-commit as duplicate.
-              if [[ -n "$cur_sha_lc" && -n "${g_sha:-}" ]]; then
+              # Claimed same-commit rows are SAMESHA territory: skip here to
+              # avoid double reporting; SAMESHA refuses claimed same-commit
+              # (own as duplicate, foreign as second-card-on-head). Unclaimed
+              # same-commit rows stay here so a title/branch match still
+              # refuses as on base.
+              if [[ -n "$cur_sha_lc" && -n "${g_sha:-}" && -n "${g_claims:-}" ]]; then
                 if [[ "$(printf '%s' "$g_sha" | tr '[:upper:]' '[:lower:]')" == "$cur_sha_lc" ]]; then
                   continue
                 fi
@@ -533,7 +575,7 @@ detect_remote() {
                 continue
               fi
               if [[ -n "$mine_present" ]]; then
-                note "remote: open PR #$g_num (head $g_ref) claims this card on its Refs line (Refs: $g_claims) — your own PR, not a sibling"
+                find_it "remote: open PR #$g_num (head $g_ref) already covers this issue (Refs: $g_claims) — your own PR on another branch, do not open a second."
                 continue
               fi
               if [[ -n "$foreign" ]]; then
