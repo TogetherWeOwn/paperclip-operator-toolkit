@@ -161,7 +161,7 @@ while [[ $# -gt 0 ]]; do
     --repo)    REPO_SLUG="${2:-}"; shift 2;;
     --quiet|-q) QUIET=1; shift;;
     --json)    JSON=1; shift;;
-    -h|--help) sed -n '98,138p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '98,144p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     --) shift; POSITIONAL+=("$@"); break;;
     -*) die "unknown flag $1";;
     # Flags are accepted on either side of the issue key. `TOG-345 --phase=prepush`
