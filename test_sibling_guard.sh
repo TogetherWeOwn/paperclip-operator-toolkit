@@ -168,6 +168,21 @@ const PULLS = {
   bodymention: [{ number: 895, title: 'wire suite foo', body: 'Related: TOG-900 procedure reference, see ratchet', head: { ref: 'suite-foo-branch' } }],
   bodymidrefs: [{ number: 897, title: 'wire suite bar', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'suite-bar-branch' } }],
   bodyrefs: [{ number: 896, title: 'wire suite foo', body: 'Refs: TOG-900', head: { ref: 'suite-foo-branch' } }],
+  // Cross-branch generic Refs ownership. Every fixture sits on a
+  // DIFFERENT branch name with a DISTINCT head commit (forty zeros, never a
+  // real commit), so same-head and same-SHA rules cannot fire — the verdict
+  // can only come from generic Refs attribution. Titles/branches that carry
+  // TOG-900 are relevant candidates; the Refs line attributes ownership.
+  crossown: [{ number: 911, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-900', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossmixed: [{ number: 912, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-900, TOG-907', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossforeign: [{ number: 913, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-907', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossbranchown: [{ number: 914, title: 'unrelated title', body: 'Refs: TOG-900', head: { ref: 'tog-900-feature', sha: 'DISTINCT' } }],
+  crossbranchforeign: [{ number: 915, title: 'unrelated title', body: 'Refs: TOG-907', head: { ref: 'tog-900-feature', sha: 'DISTINCT' } }],
+  crosslower: [{ number: 916, title: 'Do the thing (TOG-900)', body: 'refs: tog-900', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossexact: [{ number: 917, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-9000', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossmidrelevant: [{ number: 918, title: 'Do the thing (TOG-900)', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
+  crossunrelated: [{ number: 919, title: 'other work', body: 'Refs: TOG-907', head: { ref: 'unrelated-branch', sha: 'DISTINCT' } }],
+  crossown901: [{ number: 920, title: 'Do the thing (TOG-901)', body: 'Refs: TOG-901', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   denied: 403,
   bad:    'not json at all',
 }
@@ -485,11 +500,121 @@ run_guard "$CLEAN" TOG-900 --repo=stub/bodymidrefs
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a non-samehead mid-sentence Refs mention stays clear" "rc=$RC out=$OUT"
 
+# Authorized Test Author update: an own Refs claim on a foreign
+# branch name is the caller own PR, not a duplicate — the old refusal above
+# is the live false positive. Own claims note and clear; see 6a1.
 run_guard "$CLEAN" TOG-900 --repo=stub/bodyrefs
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a non-samehead PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+assert "$(grep -q "VERDICT: clear" <<< "$OUT" && echo 0 || echo 1)" \
+  "the own-Refs PR verdict is reported as clear" "$OUT"
+
+# ===========================================================================
+hdr "6a1. Cross-branch Refs ownership on foreign branch names."
+# The live false positive: execution branch `tog-900-work` vs PR head
+# `quality/meta-only-assets` (body `Refs: TOG-900`) read as sibling exit 1
+# with all detectors running. The generic open-PR path matches on title and
+# head substrings with no ownership attribution; the SAMEHEAD Refs logic only
+# runs when head == current branch. Every fixture below sits on a DIFFERENT
+# branch name with a DISTINCT head commit (forty zeros), so same-head and
+# same-SHA rules cannot fire — the verdict can only come from generic Refs
+# attribution. Own Refs (alone, mixed or lowercase) notes and clears;
+# foreign-only Refs on a relevant candidate refuses naming owner and PR;
+# unrelated foreign claims stay clear; unresolvable own keys go indeterminate.
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossown
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossown --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossmixed
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossmixed --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchown
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchown --phase=prepush
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at prepush, a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crosslower
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a relevant PR whose Refs line names this card in lowercase stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossforeign
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
-  "a non-samehead PR whose Refs line names this card exits 1" "rc=$RC out=$OUT"
-assert "$(grep -q "#896" <<< "$OUT" && echo 0 || echo 1)" \
-  "the Refs-claimed duplicate PR number is named in the report" "$OUT"
+  "a relevant PR on a foreign branch whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the foreign claimant owning the cross-branch PR is named in the report" "$OUT"
+assert "$(grep -q "#913" <<< "$OUT" && echo 0 || echo 1)" \
+  "the cross-branch foreign PR number is named in the report" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossforeign --phase=prepush
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at prepush, a relevant PR on a foreign branch whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the prepush foreign claimant owning the cross-branch PR is named in the report" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a branch-relevant PR on a foreign branch whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the branch-relevant foreign claimant is named in the report" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossexact
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a relevant PR whose Refs line names only a longer key exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-9000" <<< "$OUT" && echo 0 || echo 1)" \
+  "the longer foreign key is named without matching this card" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossmidrelevant
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a relevant PR with only a mid-sentence Refs mention and no anchored line exits 1" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/crossunrelated
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "an unrelated PR naming only another card stays clear" "rc=$RC out=$OUT"
+
+# Invoked by uuid, the caller own key is resolved off GET /api/issues/<uuid>
+# only when a relevant generic candidate is in play. Unresolvable or
+# unreadable lookups fail closed, never clear.
+run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/crossown
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a relevant PR whose Refs line names this card stays clear" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/crossforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a relevant PR whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid cross-branch lookup resolves our key and names the sibling card" "$OUT"
+
+run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/crossforeign
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with a relevant PR exits 3, not 0" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" 33333333-4444-5555-6666-777777777777 --repo=stub/crossown
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, an unparseable lookup with a relevant PR exits 3, not 0" "rc=$RC out=$OUT"
+
+# An own-PR note never masks a live sibling or a blind detector.
+run_guard "$CLEAN" TOG-901 --repo=stub/crossown901
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an own-PR note does not mask a live sibling finding" "rc=$RC out=$OUT"
+assert "$(grep -q "run-sib" <<< "$OUT" && echo 0 || echo 1)" \
+  "the live sibling is still named alongside the own-PR note" "$OUT"
+
+OVERRIDE_KEY="" run_guard "$CLEAN" TOG-900 --repo=stub/crossown
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "an own-PR note does not mask a blind detector" "rc=$RC out=$OUT"
 
 # ===========================================================================
 hdr "6b. Same-head ownership at prepush (two cards, one branch)."
