@@ -114,10 +114,10 @@ set -uo pipefail
 #                     refuses as a duplicate PR; no `Refs:` and distinct heads
 #                     stay clear. A relevant open PR on a foreign branch with a
 #                     DISTINCT head whose `Refs:` line names our own key (alone,
-#                     mixed or lowercase) is our own PR: noted clear in both
-#                     phases; foreign-only `Refs:` on a relevant candidate
-#                     refuses naming owner and PR; unrelated foreign-only stays
-#                     clear. When HEAD
+#                     mixed or lowercase) refuses as a duplicate PR on another
+#                     branch in both phases; foreign-only `Refs:` on a relevant
+#                     candidate refuses naming owner and PR; unrelated
+#                     foreign-only stays clear. When HEAD
 #                     carries no local commits the SHA comparison is vacuous
 #                     and skipped by note. An owner's pushed head is covered
 #                     through its PR; an unpushed one through the control-plane
@@ -473,15 +473,31 @@ detect_remote() {
         # safer. Foreign-only Refs on a relevant candidate refuses naming
         # owner and PR. Relevant with no anchored line keeps the old refusal
         # (title/branch substring). Unrelated foreign-only stays clear.
-        # Claimed same-commit rows are skipped here: SAMESHA owns them.
-        # Unclaimed same-commit rows stay here so a title/branch match still
-        # refuses as on base.
+        # Claimed same-commit rows are skipped here only when SAMESHA will
+        # evaluate them (HEAD ahead of main): SAMESHA owns them then.
+        # When HEAD carries no local commits SAMESHA notes and skips them,
+        # so they stay here and refuse as on base. Unclaimed same-commit
+        # rows always stay here so a title/branch match still refuses.
         local generic_rows
         generic_rows="$(grep '^GENERIC' <<< "$hits" || true)"
         if [[ -n "$generic_rows" ]]; then
           local generic_mykey="$KEY_LC"
           local cur_sha_lc
           cur_sha_lc="$(printf '%s' "${current_sha:-}" | tr '[:upper:]' '[:lower:]')"
+          # SAMESHA skips same-commit rows when HEAD is not ahead of main,
+          # so gate the claimed same-commit skip on a non-zero ahead count.
+          local generic_base="" generic_ahead="?" samesha_will_eval=""
+          if git rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1; then
+            generic_base="refs/remotes/origin/main"
+          elif git rev-parse --verify -q refs/heads/main >/dev/null 2>&1; then
+            generic_base="refs/heads/main"
+          fi
+          if [[ -n "$generic_base" ]]; then
+            generic_ahead="$(git rev-list --count "$generic_base..HEAD" 2>/dev/null || echo "?")"
+          fi
+          if [[ "$generic_ahead" =~ ^[1-9][0-9]*$ ]]; then
+            samesha_will_eval=1
+          fi
           local generic_candidate=""
           if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
             # Uuid callers cannot test title/branch relevance without the key,
@@ -494,7 +510,7 @@ detect_remote() {
             while IFS=$'\x1f' read -r c_tag c_num c_ref c_title c_claims c_sha; do
               [[ "${c_tag:-}" == "GENERIC" ]] || continue
               [[ -n "${c_num:-}" ]] || continue
-              if [[ -n "$cur_sha_lc" && -n "${c_sha:-}" && -n "${c_claims:-}" ]]; then
+              if [[ -n "$samesha_will_eval" && -n "$cur_sha_lc" && -n "${c_sha:-}" && -n "${c_claims:-}" ]]; then
                 if [[ "$(printf '%s' "$c_sha" | tr '[:upper:]' '[:lower:]')" == "$cur_sha_lc" ]]; then
                   continue
                 fi
@@ -544,12 +560,13 @@ detect_remote() {
             while IFS=$'\x1f' read -r g_tag g_num g_ref g_title g_claims g_sha; do
               [[ "${g_tag:-}" == "GENERIC" ]] || continue
               [[ -n "${g_num:-}" ]] || continue
-              # Claimed same-commit rows are SAMESHA territory: skip here to
-              # avoid double reporting; SAMESHA refuses claimed same-commit
-              # (own as duplicate, foreign as second-card-on-head). Unclaimed
-              # same-commit rows stay here so a title/branch match still
-              # refuses as on base.
-              if [[ -n "$cur_sha_lc" && -n "${g_sha:-}" && -n "${g_claims:-}" ]]; then
+              # Claimed same-commit rows are SAMESHA territory only when it
+              # will evaluate them: skip here to avoid double reporting;
+              # SAMESHA refuses claimed same-commit (own as duplicate,
+              # foreign as second-card-on-head). On a vacuous HEAD they stay
+              # here and refuse as on base. Unclaimed same-commit rows always
+              # stay here so a title/branch match still refuses as on base.
+              if [[ -n "$samesha_will_eval" && -n "$cur_sha_lc" && -n "${g_sha:-}" && -n "${g_claims:-}" ]]; then
                 if [[ "$(printf '%s' "$g_sha" | tr '[:upper:]' '[:lower:]')" == "$cur_sha_lc" ]]; then
                   continue
                 fi
@@ -741,8 +758,9 @@ detect_remote() {
                   fi
                 done
                 # Own key on the SAME commit: a duplicate PR in both modes.
-                # Generic skips same-commit rows, so this block owns the
-                # refusal; distinct-commit own rows are noted clear there.
+                # Generic skips claimed same-commit rows only when HEAD is
+                # ahead of main (so this block will evaluate them); generic
+                # refuses distinct-commit own rows as duplicate PRs there.
                 if [[ -n "$sha_mine" ]]; then
                   find_it "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD and already covers this issue (Refs: $sha_claims). Diff yours against it before pushing; do not open a second."
                 elif [[ -z "$sha_mine" ]]; then

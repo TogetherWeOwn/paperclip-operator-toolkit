@@ -192,6 +192,19 @@ const PULLS = {
   // irrelevant, so a uuid caller skips the key lookup and stays clear even
   // when the lookup would fail.
   crossnoclaimsunrelated: [{ number: 921, title: 'other work', body: 'just a description', head: { ref: 'unrelated-branch', sha: 'DISTINCT' } }],
+  // Relevant title or branch with no anchored Refs line: the uuid pre-scan
+  // must still treat the row as a candidate, so a working lookup refuses and
+  // a failing lookup goes indeterminate (never clear).
+  uuidreltitle: [{ number: 922, title: 'Do the thing (TOG-900)', body: 'just a description', head: { ref: 'quality/x', sha: 'DISTINCT' } }],
+  uuidrelbranch: [{ number: 923, title: 'other work', body: 'just a description', head: { ref: 'tog-900-feature', sha: 'DISTINCT' } }],
+  // Unclaimed same-commit row with a relevant title: stays in the generic
+  // path, so a uuid caller with a failing lookup still goes indeterminate.
+  uuidrelsha: [{ number: 924, title: 'Do the thing (TOG-900)', body: 'just a description', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  // Vacuous-HEAD fixtures: claimed same-commit rows with a relevant title.
+  // On a HEAD with no local commits SAMESHA skips them, so the generic path
+  // must refuse as on base instead of dropping the refusal.
+  shavacown: [{ number: 925, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-900', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
+  shavacforeign: [{ number: 926, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-907', head: { ref: 'tog-907-sibling-branch', sha: 'SAMESHA' } }],
   crossown901: [{ number: 920, title: 'Do the thing (TOG-901)', body: 'Refs: TOG-901', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   denied: 403,
   bad:    'not json at all',
@@ -522,9 +535,10 @@ assert "$(grep -q "#896" <<< "$OUT" && echo 0 || echo 1)" \
 
 # ===========================================================================
 hdr "6a1. Cross-branch Refs ownership on foreign branch names."
-# The live false positive: execution branch `tog-900-work` vs PR head
-# `quality/meta-only-assets` (body `Refs: TOG-900`) read as sibling exit 1
-# with all detectors running. The generic open-PR path matches on title and
+# Execution branch `tog-900-work` vs PR head `quality/meta-only-assets`
+# (body `Refs: TOG-900`): a relevant PR on a foreign branch whose Refs line
+# names our own card refuses as a duplicate PR on another branch, exit 1,
+# in both phases. The generic open-PR path matches on title and
 # head substrings with no ownership attribution; the SAMEHEAD Refs logic only
 # runs when head == current branch. Every fixture below sits on a DIFFERENT
 # branch name with a DISTINCT head commit (forty zeros), so same-head and
@@ -658,6 +672,29 @@ assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
 run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/crossnoclaimsunrelated
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at start by uuid, a 404ing lookup with no claim and no key-like token stays clear" "rc=$RC out=$OUT"
+
+# A relevant title or branch with no anchored Refs line is still a candidate:
+# the uuid pre-scan title/branch branch must fire (review on PR #79). A broken
+# pre-scan fails open here, so these pin the fail-closed paths.
+run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/uuidreltitle
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a relevant title with no Refs line exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#922" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid title-relevant PR number is named in the report" "$OUT"
+
+run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/uuidreltitle
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with a relevant title and no Refs line exits 3, not 0" "rc=$RC out=$OUT"
+
+run_guard "$CLEAN" 11111111-2222-3333-4444-555555555555 --repo=stub/uuidrelbranch
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a relevant branch with no Refs line exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#923" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid branch-relevant PR number is named in the report" "$OUT"
+
+run_guard "$CLEAN" 22222222-3333-4444-5555-666666666666 --repo=stub/uuidrelbranch
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with a relevant branch and no Refs line exits 3, not 0" "rc=$RC out=$OUT"
 
 # An own-PR refusal never masks a live sibling or a blind detector.
 run_guard "$CLEAN" TOG-901 --repo=stub/crossown901
@@ -856,6 +893,18 @@ assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "same-commit ownership check" <<< "$OUT" && echo 0 || echo 1)" \
   "the unattributable same-commit lookup is named in the report" "$OUT"
 
+# An unclaimed same-commit row with a relevant title stays in the generic
+# path, so the uuid pre-scan must treat it as a candidate (review on PR #79).
+run_guard "$SHAHEAD" 11111111-2222-3333-4444-555555555555 --repo=stub/uuidrelsha
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, an unclaimed same-commit PR with a relevant title exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#924" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid same-commit title-match PR number is named" "$OUT"
+
+run_guard "$SHAHEAD" 22222222-3333-4444-5555-666666666666 --repo=stub/uuidrelsha
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a 404ing lookup with an unclaimed same-commit relevant PR exits 3, not 0" "rc=$RC out=$OUT"
+
 # Vacuous: a HEAD with no local commits shares the base with every empty
 # foreign PR. Refusing there would fire on every fresh start.
 VACUOUS="$TMP/vacuous"; mkclone "$VACUOUS"
@@ -865,6 +914,21 @@ assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a HEAD with no local commits does not refuse a same-commit PR" "rc=$RC out=$OUT"
 assert "$(grep -q "no local commits" <<< "$OUT" && echo 0 || echo 1)" \
   "the vacuous comparison is named instead of silently skipped" "$OUT"
+
+# A claimed same-commit row with a relevant title still refuses on a vacuous
+# HEAD: SAMESHA skips it, so the generic path owns the refusal as on base
+# (review on PR #79). Gating the generic skip on ahead-of-main restores it.
+run_guard "$VACUOUS" TOG-900 --repo=stub/shavacown
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a vacuous HEAD still refuses a title-relevant claimed same-commit PR naming this card" "rc=$RC out=$OUT"
+assert "$(grep -q "#925" <<< "$OUT" && echo 0 || echo 1)" \
+  "the vacuous own-claim PR number is named in the report" "$OUT"
+
+run_guard "$VACUOUS" TOG-900 --repo=stub/shavacforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a vacuous HEAD still refuses a title-relevant claimed same-commit PR naming another card" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the vacuous foreign claimant is named in the report" "$OUT"
 
 # ===========================================================================
 hdr "6e. Same HEAD checked out in another worktree."
