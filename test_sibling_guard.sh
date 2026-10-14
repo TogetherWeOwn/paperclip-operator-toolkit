@@ -522,11 +522,18 @@ hdr "6a1. Cross-branch Refs ownership on foreign branch names."
 # foreign-only Refs on a relevant candidate refuses naming owner and PR;
 # unrelated foreign claims stay clear; unresolvable own keys go indeterminate.
 
+# Prepush own-clear cases run on a WORK-like fixture: a fresh branch plus one
+# commit, so HEAD is not yet on origin/main and the already-landed test does
+# not fire. CLEAN at prepush always exits 1 via already-landed; see 6b ("One
+# commit first, or the already-landed test fires") and the WORK fixture in 7.
+CROSSWORK="$TMP/crosswork"; mkclone "$CROSSWORK"
+(cd "$CROSSWORK" && git checkout --quiet -b tog-901-work && echo w >> file.txt && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am w)
+
 run_guard "$CLEAN" TOG-900 --repo=stub/crossown
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
 
-run_guard "$CLEAN" TOG-900 --repo=stub/crossown --phase=prepush
+run_guard "$CROSSWORK" TOG-900 --repo=stub/crossown --phase=prepush
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at prepush, a relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
 
@@ -534,7 +541,7 @@ run_guard "$CLEAN" TOG-900 --repo=stub/crossmixed
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
 
-run_guard "$CLEAN" TOG-900 --repo=stub/crossmixed --phase=prepush
+run_guard "$CROSSWORK" TOG-900 --repo=stub/crossmixed --phase=prepush
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at prepush, a relevant PR on a foreign branch whose Refs line names this card among others stays clear" "rc=$RC out=$OUT"
 
@@ -542,7 +549,7 @@ run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchown
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
 
-run_guard "$CLEAN" TOG-900 --repo=stub/crossbranchown --phase=prepush
+run_guard "$CROSSWORK" TOG-900 --repo=stub/crossbranchown --phase=prepush
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "at prepush, a branch-relevant PR on a foreign branch whose Refs line names only this card stays clear" "rc=$RC out=$OUT"
 
