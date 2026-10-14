@@ -930,6 +930,28 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
   "the vacuous foreign claimant is named in the report" "$OUT"
 
+# The uuid pre-scan must keep the same vacuous-HEAD candidate as key mode:
+# skipping it would skip the lookup and clear the PR (review on PR #79).
+run_guard "$VACUOUS" 11111111-2222-3333-4444-555555555555 --repo=stub/shavacown
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a vacuous HEAD still refuses a title-relevant own-claim same-commit PR" "rc=$RC out=$OUT"
+assert "$(grep -q "#925" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid vacuous own-claim PR number is named in the report" "$OUT"
+
+run_guard "$VACUOUS" 22222222-3333-4444-5555-666666666666 --repo=stub/shavacown
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a vacuous HEAD with a 404ing lookup and a relevant own-claim same-commit PR exits 3, not 0" "rc=$RC out=$OUT"
+
+run_guard "$VACUOUS" 11111111-2222-3333-4444-555555555555 --repo=stub/shavacforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a vacuous HEAD still refuses a title-relevant foreign-claim same-commit PR" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uuid vacuous foreign claimant is named in the report" "$OUT"
+
+run_guard "$VACUOUS" 22222222-3333-4444-5555-666666666666 --repo=stub/shavacforeign
+assert "$([[ "$RC" -eq 3 ]] && echo 0 || echo 1)" \
+  "at start by uuid, a vacuous HEAD with a 404ing lookup and a relevant foreign-claim same-commit PR exits 3, not 0" "rc=$RC out=$OUT"
+
 # ===========================================================================
 hdr "6e. Same HEAD checked out in another worktree."
 # The local half of the TOG-19375 shape: two checkouts, one commit, different
