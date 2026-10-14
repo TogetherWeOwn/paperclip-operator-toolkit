@@ -110,8 +110,14 @@ set -uo pipefail
 #                     `Refs:` line names only other cards, is the PR #825 /
 #                     TOG-19375 shape (a second card fast-forwarded onto an
 #                     owned head) and refuses with the card, PR and branch
-#                     named. Own `Refs:` on another branch refuses as a duplicate
-#                     PR; no `Refs:` and distinct heads stay clear. When HEAD
+#                     named. Own `Refs:` on the SAME commit on another branch
+#                     refuses as a duplicate PR; no `Refs:` and distinct heads
+#                     stay clear. A relevant open PR on a foreign branch with a
+#                     DISTINCT head whose `Refs:` line names our own key (alone,
+#                     mixed or lowercase) is our own PR: noted clear in both
+#                     phases; foreign-only `Refs:` on a relevant candidate
+#                     refuses naming owner and PR; unrelated foreign-only stays
+#                     clear. When HEAD
 #                     carries no local commits the SHA comparison is vacuous
 #                     and skipped by note. An owner's pushed head is covered
 #                     through its PR; an unpushed one through the control-plane
@@ -437,30 +443,107 @@ detect_remote() {
             const claimed = refsClaims(p.body)
             process.stdout.write(["SAMESHA", p.number, (p.head && p.head.ref) || "?", sha, (p.title || "").slice(0, 90), claimed.join(",")].join("\t") + "\n")
           }
-          // Non-samehead duplicate attribution (TOG-23152): a title or head
-          // branch substring still refuses, but a BODY mention does not —
-          // only a Refs LINE naming this card claims it. A bare body
-          // substring kept the false-positive class where a "Related" line
-          // merely references the ratchet (PR #888 vs its suite PRs).
-          // File overlap is deliberately not consulted: it costs a files
-          // API call per open PR.
-          const titleBranchHay = [p.title || "", (p.head && p.head.ref) || ""].join(" ").toLowerCase()
-          const claimed = refsClaims(p.body)
-          const claimsOwn = claimed.some(k => k.toLowerCase() === key)
-          if (!titleBranchHay.includes(key) && !claimsOwn) continue
-          process.stdout.write([p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90)].join("\t") + "\n")
+          // Cross-branch generic Refs ownership (TOG-23879): emit every
+          // non-samehead PR with its anchored Refs claims and head SHA.
+          // Bash attributes own vs foreign and enforces title/branch
+          // relevance in BOTH phases; uuid callers resolve their own key
+          // there. Same-commit rows are skipped in bash (SAMESHA owns them).
+          // A title or head branch substring still makes a candidate, but a
+          // BODY mention does not — only a Refs LINE naming the key claims
+          // it (TOG-23152). File overlap is deliberately not consulted: it
+          // costs a files API call per open PR.
+          const gclaimed = refsClaims(p.body)
+          const gsha = String((p.head && p.head.sha) || "")
+          process.stdout.write(["GENERIC", p.number, (p.head && p.head.ref) || "?", (p.title || "").slice(0, 90), gclaimed.join(","), gsha].join("\t") + "\n")
         }
       ' "$body" "$KEY_LC" "$current_branch" "$current_sha" 2>/dev/null)"
       if [[ $? -ne 0 ]]; then
         blind_on "remote: the pull request list did not parse as JSON"
       else
         note "remote: queried open pull requests on $slug"
-        local num ref title
-        while IFS=$'\t' read -r num ref title; do
-          [[ "$num" == "SAMEHEAD" || "$num" == "SAMESHA" ]] && continue
-          [[ -n "${num:-}" ]] || continue
-          find_it "remote: open PR #$num (head $ref) already covers this issue — \"$title\". Diff yours against it before pushing; do not open a second."
-        done <<< "$hits"
+        # -- cross-branch generic ownership (TOG-23879) -----------------------
+        # A relevant PR on a foreign branch whose Refs line names our own key
+        # is our own PR: note, not finding. Foreign-only Refs on a relevant
+        # candidate refuses naming owner and PR. Relevant with no anchored
+        # line keeps the old refusal (title/branch substring). Unrelated
+        # foreign-only stays clear. Same-commit rows are skipped here:
+        # SAMESHA owns them (own same-commit refuses as duplicate there).
+        local generic_rows
+        generic_rows="$(grep '^GENERIC' <<< "$hits" || true)"
+        if [[ -n "$generic_rows" ]]; then
+          local generic_mykey="$KEY_LC"
+          if [[ "$ISSUE_ARG" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}- ]]; then
+            # Invoked by uuid: resolve own key off GET /api/issues/<uuid>,
+            # but only with a generic candidate in play — with nothing to
+            # attribute, a transient API error must not go indeterminate.
+            if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" ]]; then
+              blind_on "remote: cross-branch ownership check cannot learn our own card key for $ISSUE_ARG with no control-plane credential, so a generic PR cannot be attributed"
+              generic_mykey=""
+            else
+              local gbase ghdr gbody gcode
+              gbase="${PAPERCLIP_API_URL%/}"; gbase="${gbase%/api}"
+              ghdr="$TMPD/gownhdrs"; : > "$ghdr"; chmod 600 "$ghdr"
+              printf 'Authorization: Bearer %s\n' "$PAPERCLIP_API_KEY" > "$ghdr"
+              gbody="$TMPD/gown.json"
+              gcode="$(curl -sS -m 30 -o "$gbody" -w '%{http_code}' -H "@$ghdr" "$gbase/api/issues/$ISSUE_ARG" 2>/dev/null || echo 000)"
+              if [[ "$gcode" == "200" ]]; then
+                generic_mykey="$(node -e 'try { const i = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(i.identifier || "").toLowerCase()) } catch (e) { process.exit(9) }' "$gbody" 2>/dev/null)"
+                if [[ $? -ne 0 || -z "$generic_mykey" ]]; then
+                  blind_on "remote: cross-branch ownership check could not read our own card key off /api/issues/$ISSUE_ARG (HTTP $gcode)"
+                  generic_mykey=""
+                fi
+              else
+                blind_on "remote: cross-branch ownership check GET /api/issues/$ISSUE_ARG returned HTTP $gcode, so a generic PR cannot be attributed"
+                generic_mykey=""
+              fi
+            fi
+          fi
+          if [[ -n "$generic_mykey" ]]; then
+            local g_tag g_num g_ref g_title g_claims g_sha
+            local cur_sha_lc
+            cur_sha_lc="$(printf '%s' "${current_sha:-}" | tr '[:upper:]' '[:lower:]')"
+            while IFS=$'\t' read -r g_tag g_num g_ref g_title g_claims g_sha; do
+              [[ "${g_tag:-}" == "GENERIC" ]] || continue
+              [[ -n "${g_num:-}" ]] || continue
+              # Same-commit is SAMESHA territory: skip here to avoid double
+              # reporting; SAMESHA refuses own same-commit as duplicate.
+              if [[ -n "$cur_sha_lc" && -n "${g_sha:-}" ]]; then
+                if [[ "$(printf '%s' "$g_sha" | tr '[:upper:]' '[:lower:]')" == "$cur_sha_lc" ]]; then
+                  continue
+                fi
+              fi
+              local hay
+              hay="$(printf '%s %s' "$g_title" "$g_ref" | tr '[:upper:]' '[:lower:]')"
+              local mine_present="" foreign=""
+              local -a parts=()
+              if [[ -n "${g_claims:-}" ]]; then
+                IFS=',' read -ra parts <<< "$g_claims"
+              fi
+              local pc
+              for pc in ${parts[@]+"${parts[@]}"}; do
+                if [[ "$(printf '%s' "$pc" | tr '[:upper:]' '[:lower:]')" == "$generic_mykey" ]]; then
+                  mine_present=1
+                elif [[ -z "$foreign" ]]; then
+                  foreign="$pc"
+                fi
+              done
+              # Relevance: title/branch substring OR own Refs claim. Unrelated
+              # foreign-only (no substring, no own claim) stays clear.
+              if [[ "$hay" != *"$generic_mykey"* && -z "$mine_present" ]]; then
+                continue
+              fi
+              if [[ -n "$mine_present" ]]; then
+                note "remote: open PR #$g_num (head $g_ref) claims this card on its Refs line (Refs: $g_claims) — your own PR, not a sibling"
+                continue
+              fi
+              if [[ -n "$foreign" ]]; then
+                find_it "remote: open PR #$g_num (head $g_ref) already covers this issue but its body claims another open card $foreign (Refs: $g_claims). Diff yours against it before pushing; do not open a second."
+              else
+                find_it "remote: open PR #$g_num (head $g_ref) already covers this issue — \"$g_title\". Diff yours against it before pushing; do not open a second."
+              fi
+            done <<< "$generic_rows"
+          fi
+        fi
         # -- same-head ownership: does another card own this PR branch? -------
         # Two cards, one branch, both pushed: the guard keyed on the caller
         # own card key, so a PR whose head is the branch
@@ -545,8 +628,8 @@ detect_remote() {
         # runs in BOTH phases — at start the sibling may already have pushed.
         # Attribution is the same anchored Refs line: a line naming only other
         # cards refuses with the card, PR number and branch named; our own key
-        # refuses as a duplicate PR — via the key scan in key mode, via this
-        # block in uuid mode — while no Refs stays clear,
+        # on the SAME commit refuses as a duplicate PR in this block in both
+        # modes (generic skips same-commit rows) — while no Refs stays clear,
         # as do unclaimed PRs and distinct heads. When
         # HEAD carries no local commits there is no head to collide, so
         # same-commit rows are noted and skipped: a fresh start must not fire
@@ -615,12 +698,10 @@ detect_remote() {
                     sha_foreign="$sha_claimant"
                   fi
                 done
-                # Own key: in key mode the key scan above already refused
-                # this PR as a duplicate, so nothing more is reported here.
-                # In uuid mode the key scan matches the raw uuid argument and
-                # cannot see a `Refs: <key>` body, so this block reports the
-                # duplicate itself — the only case the key scan could miss.
-                if [[ -n "$sha_mine" && "$KEY_LC" != "$sha_mykey" ]]; then
+                # Own key on the SAME commit: a duplicate PR in both modes.
+                # Generic skips same-commit rows, so this block owns the
+                # refusal; distinct-commit own rows are noted clear there.
+                if [[ -n "$sha_mine" ]]; then
                   find_it "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD and already covers this issue (Refs: $sha_claims). Diff yours against it before pushing; do not open a second."
                 elif [[ -z "$sha_mine" ]]; then
                   find_it "remote: open PR #$sha_num (head $sha_ref) carries the same commit $sha_short as HEAD but its body claims another open card $sha_foreign (Refs: $sha_claims). A second card is on this head — do not implement or push here until you have read that PR."
