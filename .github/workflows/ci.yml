@@ -3427,6 +3427,8 @@ jobs:
             echo "::error::storage_auto_reclaim accepted a write-intent flag" >&2
             exit 1
           fi
+          cd ..
+          python3 -m unittest test_isolated_build_profile test_isolated_idle_ttl test_isolated_profile_matrix
 
       # GARM orphan/stale instance reaper audit on synthetic pool fixtures.
       # The audit is read-only by construction (pool-show reads only, no
@@ -5147,6 +5149,9 @@ jobs:
 
       - name: Plugin CI wiring self-test
         run: python3 scripts/test_plugin_ci_wiring.py
+
+      - name: Repo placement classifier self-test
+        run: python3 scripts/test_repo_placement.py
 
       - name: Disclosure scan over plugins/
         run: bash scripts/disclosure-scan.sh plugins
