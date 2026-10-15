@@ -1,0 +1,15 @@
+# Caller template -- copy this ONE file into a consumer repo as
+# .github/workflows/config-deploy.yml. It is the only per-repo file.
+# The rules live in the reusable workflow; never copy them per repo.
+# Pin the SHA to the reviewed config-deploy release, then bump centrally.
+name: config-deploy
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  config-deploy:
+    uses: TogetherWeOwn/paperclip-ops-tooling/.github/workflows/config-deploy.yml@636bc30f461ad4ec3d7e1185181244be0982d7fb
+    with:
+      mode: error

@@ -1132,6 +1132,12 @@ jobs:
       - name: review_dedup placement gate
         run: ./test_review_dedup_placement.sh
 
+      - name: shared config/deploy checks suite
+        run: python3 -m unittest -v test_config_deploy_check.py
+
+      - name: config/deploy placement gate
+        run: ./test_config_deploy_placement.sh
+
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
 

@@ -1,0 +1,39 @@
+name: config-deploy
+
+# Shared deterministic config/deploy checks — defined ONCE here.
+# Org home: TogetherWeOwn/.github. Every repo consumes this file via a tiny
+# caller (see the caller template staged alongside this file) so new repos inherit the checks
+# with zero per-repo rule copies:
+#
+#   uses: TogetherWeOwn/paperclip-ops-tooling/.github/workflows/config-deploy.yml@<sha>
+#
+# The checker (.github/scripts/config_deploy_check.py) is stdlib-only, runs
+# offline in under a minute, and fails closed (exit 2 = nothing measured).
+# It becomes a required check org-wide only when the Operator applies the
+# org ruleset in the org ruleset template staged alongside this file; until then it is advisory.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn prints findings without failing; error fails the job"
+        type: string
+        required: false
+        default: error
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  config-deploy:
+    name: config-deploy
+    runs-on: [self-hosted, two-ephemeral]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run shared config/deploy checks
+        run: python3 .github/scripts/config_deploy_check.py --root . --mode "${{ inputs.mode || 'error' }}"
