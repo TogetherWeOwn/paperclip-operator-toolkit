@@ -114,6 +114,34 @@ mutate curl-api-get-maxtime-dropped '"-m", "90", "-w"' '"-w"' test_curl_calls_ca
 mutate sql-timeout-value-raised 'timeout=SQL_TIMEOUT' 'timeout=999999' test_docker_calls_carry_timeouts
 mutate guard-timeout-value-lowered 'timeout=30' 'timeout=1' test_docker_calls_carry_timeouts
 
+mutate fork-head-repo-hardcoded 'head_repo = (d["head"].get("repo") or {}).get("full_name")' 'head_repo = f"TogetherWeOwn/{repo}"' test_fork_pr_branch_card_is_not_nudged_end_to_end
+mutate fork-head-repo-wrong-key '.get("full_name")' '.get("name")' test_same_repo_branch_card_is_nudged_end_to_end
+mutate live-sql-scheduled-retry-dropped "h.status in ('queued','running','scheduled_retry')" "h.status in ('queued','running')" test_live_work_sql_predicate_is_pinned
+mutate live-sql-taskid-dropped "h.context_snapshot->>'taskId'" "h.context_snapshot->>'issueId'" test_live_work_sql_predicate_is_pinned
+mutate live-sql-issueid-dropped "h.context_snapshot->>'issueId'," "h.context_snapshot->>'taskId'," test_live_work_sql_predicate_is_pinned
+mutate blocked-open-edge-flipped 'if status == "blocked" and has_edge == "f":' 'if status == "blocked":' test_blocked_with_open_edge_keeps_blocked_status
+mutate parked-unblock-descriptor-dropped ' or issue.get("unblockDescriptor")' '' test_blocked_parked_via_unblock_descriptor_is_not_nudged
+mutate parked-marker-search-dropped ' or PARK_MARKER.search(issue.get("description") or "")' '' test_blocked_parked_via_parked_until_line_is_not_nudged
+mutate parked-do-not-mutate-dropped 'parked until|do not mutate' 'parked until' test_blocked_parked_via_do_not_mutate_line_is_not_nudged
+mutate pr-detail-skip-dropped 'if not isinstance(d, dict) or "_err" in d or "head" not in d:' 'if False:' test_pr_detail_404_skips_that_pr_and_nudges_others
+mutate no-refs-board-query 'if not refs: continue' 'if False: continue' test_pr_without_tracker_id_issues_no_board_query
+mutate gh-incomplete-read-crashes 'except (OSError, http.client.HTTPException, ValueError) as e:' 'except (OSError, ValueError) as e:' test_incomplete_read_on_listing_is_a_counted_fault
+mutate skipped-patch-cooldown-recorded 'if isinstance(r, dict) and r.get("_err") == "skipped":' 'if False:' test_skipped_patch_records_no_cooldown
+mutate state-heal-dropped '        atomic_write_state(STATE, state)
+    return 1 if RUN["faults"] else 0' '        pass
+    return 1 if RUN["faults"] else 0' test_torn_state_heals_on_quiet_run
+mutate nonobject-state-crashes 'if not isinstance(state, dict):' 'if False:' test_nonobject_state_is_a_fault_not_a_crash
+mutate api-get-curl-breaker-dropped '        if r.returncode in (7, 28): RUN["api_down"] = True
+        fault(f"board api failed: curl exit {r.returncode}: GET {path}")' '        fault(f"board api failed: curl exit {r.returncode}: GET {path}")' test_api_get_curl_hang_sets_breaker
+mutate api-get-timeout-breaker-dropped 'RUN["api_down"] = True; fault(f"board api timed out after {API_TIMEOUT}s: GET {path}")' 'fault(f"board api timed out after {API_TIMEOUT}s: GET {path}")' test_api_get_timeout_sets_breaker
+mutate api-get-oserror-breaker-dropped 'RUN["api_down"] = True; fault(f"board api could not run: {type(e).__name__}: GET {path}")' 'fault(f"board api could not run: {type(e).__name__}: GET {path}")' test_api_get_oserror_sets_breaker
+mutate api-timeout-breaker-dropped 'RUN["api_down"] = True; fault(f"board api timed out after {API_TIMEOUT}s: {method} {path}")' 'fault(f"board api timed out after {API_TIMEOUT}s: {method} {path}")' test_api_timeout_and_oserror_set_breaker
+mutate api-oserror-breaker-dropped 'RUN["api_down"] = True; fault(f"board api could not run: {type(e).__name__}: {method} {path}")' 'fault(f"board api could not run: {type(e).__name__}: {method} {path}")' test_api_timeout_and_oserror_set_breaker
+mutate sql-oserror-breaker-dropped 'RUN["sql_down"] = True; fault(f"sql could not run: {type(e).__name__}")' 'fault(f"sql could not run: {type(e).__name__}")' test_sql_oserror_sets_breaker
+mutate sql-breaker-not-honoured 'if RUN["sql_down"]: log("sql skipped: docker did not answer earlier in this run"); return None' 'if False: log("sql skipped: docker did not answer earlier in this run"); return None' test_sql_breaker_skips_next_call
+mutate api-breaker-not-honoured 'if RUN.get("api_down"): log(f"board api skipped: board did not answer earlier in this run: {method} {path}"); return {"_err": "skipped"}' 'if False: log(f"board api skipped: board did not answer earlier in this run: {method} {path}"); return {"_err": "skipped"}' test_api_breaker_skips_next_call
+mutate api-get-breaker-not-honoured 'if RUN.get("api_down"): log(f"board api skipped: board did not answer earlier in this run: GET {path}"); return None' 'if False: log(f"board api skipped: board did not answer earlier in this run: GET {path}"); return None' test_api_get_breaker_skips_next_call
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re

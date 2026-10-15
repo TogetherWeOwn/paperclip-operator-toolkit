@@ -12,6 +12,7 @@ whose agent name contains the field separator.
 Stdlib only, offline; reuses the acceptance harness by import.
 """
 
+import http.client
 import json
 import os
 import subprocess
@@ -352,7 +353,7 @@ class Coverage(base.SweepCase):
     def test_owner_branch_name_boundary(self):
         card = self._card([], workspace_repo=f"https://github.com/{base.ORG_REPO}")
         owner, _why = self._choose([card], branch=base.REF + "9-fix")
-        self.assertIsNone(owner, "TOG-1239 must not name the TOG-123 card")
+        self.assertIsNone(owner, base.REF + "9 must not name the " + base.REF + " card")
         owner, _why = self._choose([card], branch=base.REF + "-fix")
         self.assertIsNotNone(owner)
 
@@ -493,6 +494,208 @@ class Coverage(base.SweepCase):
         for argv, kwargs in calls:
             self.assertEqual(kwargs.get("timeout"), sweep.API_TIMEOUT)
             self.assertEqual(argv[argv.index("-m") + 1], "90")
+
+    # --- Round 3 finding 1: fork/branch wiring into choose_owner, end to end ---
+
+    def _route_branch_pr(self, head_repo_name):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        detail = base.pull_detail()
+        detail["body"] = ""
+        detail["head"]["repo"] = {"full_name": head_repo_name}
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {
+            f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": "ws-1", "projectId": None},
+            f"issues/{base.IID}/work-products": [],
+            "execution-workspaces/ws-1": {"id": "ws-1", "repoUrl": f"https://github.com/{base.ORG_REPO}"},
+        }
+
+    def test_fork_pr_branch_card_is_not_nudged_end_to_end(self):
+        self._route_branch_pr("attacker/example-repo")
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [],
+                         "a fork PR whose branch names a card must never steer a board write")
+
+    def test_same_repo_branch_card_is_nudged_end_to_end(self):
+        self._route_branch_pr(base.ORG_REPO)
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.proc.board_writes()), 1)
+
+    # --- Round 3 finding 2: live-work SQL predicate text ---
+
+    def test_live_work_sql_predicate_is_pinned(self):
+        captured = []
+        def run(argv, **kwargs):
+            captured.append(argv[argv.index("-c") + 1])
+            return subprocess.CompletedProcess(argv, 0, "f", "")
+        with mock.patch("subprocess.run", run):
+            self.assertFalse(sweep.issue_has_live_work(base.IID))
+        self.assertEqual(len(captured), 1)
+        query = captured[0]
+        for fragment in ("'queued'", "'running'", "'scheduled_retry'",
+                         "h.context_snapshot->>'issueId'", "h.context_snapshot->>'taskId'",
+                         base.IID):
+            self.assertIn(fragment, query)
+
+    # --- Round 3 finding 3: blocked->todo guards ---
+
+    def _route_blocked(self, has_edge="f", **issue_over):
+        self.route_one_green_pr()
+        self.proc.docker = lambda q: "f" if "heartbeat_runs" in q else (
+            f"{base.IID}|{base.REF}|blocked|Some Agent|{has_edge}")
+        if issue_over:
+            issue = dict(self.proc.curl_get[f"issues/{base.IID}"])
+            issue.update(issue_over)
+            self.proc.curl_get[f"issues/{base.IID}"] = issue
+
+    def test_blocked_with_open_edge_keeps_blocked_status(self):
+        self._route_blocked(has_edge="t")
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        body = json.loads(captured[0])
+        self.assertIn("comment", body)
+        self.assertNotIn("status", body,
+                         "a card waiting on an open blocker must not be flipped to todo")
+
+    def test_blocked_parked_via_unblock_descriptor_is_not_nudged(self):
+        self._route_blocked(unblockDescriptor="waiting on an external reply")
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_blocked_parked_via_parked_until_line_is_not_nudged(self):
+        self._route_blocked(description="Notes\nParked until the owner replies\n")
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_blocked_parked_via_do_not_mutate_line_is_not_nudged(self):
+        self._route_blocked(description="Do not mutate this card while parked\n")
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+
+    # --- Round 3 finding 4: run-continuity and state-heal guards ---
+
+    def test_pr_detail_404_skips_that_pr_and_nudges_others(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open",
+                       [base.pull_list(7)[0], base.pull_list(8)[0]])
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", http_error(404))
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/8", base.pull_detail())
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+                              f"issues/{base.IID}/work-products": [self._product(8)]}
+        self.assertEqual(self.run_main(), 0)
+        self.assertIn("PR detail unavailable", self.log_text())
+        self.assertEqual(len(self.proc.board_writes()), 1)
+
+    def test_pr_without_tracker_id_issues_no_board_query(self):
+        self.route_org()
+        item = {"number": 7, "draft": False, "title": "chore: bump dependency",
+                "head": {"ref": "dependabot/pip/requests-2"}}
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", [item])
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7",
+                       {"mergeable_state": "clean", "title": "chore: bump dependency", "body": "",
+                        "head": {"sha": base.SHA, "ref": "dependabot/pip/requests-2",
+                                 "repo": {"full_name": base.ORG_REPO}}})
+        self.proc.docker = self.docker_rows
+        self.assertEqual(self.run_main(), 0)
+        board_queries = [argv for argv, _ in self.proc.calls
+                         if argv[0] == "docker" and "from issues" in argv[argv.index("-c") + 1]]
+        self.assertEqual(board_queries, [], "a PR with no tracker id must issue no board query")
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_incomplete_read_on_listing_is_a_counted_fault(self):
+        self.net.route("orgs/", http.client.IncompleteRead(b"partial", 10))
+        self.assertEqual(self.run_main(), 1)
+        self.assertTrue(sweep.RUN["faults"], "a truncated listing body must be a counted fault")
+
+    def test_skipped_patch_records_no_cooldown(self):
+        self.route_one_green_pr()
+        with mock.patch.object(sweep, "api", return_value={"_err": "skipped"}):
+            self.assertEqual(self.run_main(), 0)
+        state = {}
+        if os.path.exists(sweep.STATE):
+            with open(sweep.STATE) as f:
+                state = json.load(f)
+        self.assertEqual(state, {}, "a PATCH skipped by the board breaker records no cooldown")
+
+    def test_torn_state_heals_on_quiet_run(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", [])
+        with open(sweep.STATE, "w") as f:
+            f.write("{torn")
+        self.assertEqual(self.run_main(), 1, "the torn state is a counted fault on the first run")
+        self.assertEqual(self.run_main(), 0, "the final state save must heal the torn file")
+
+    def test_nonobject_state_is_a_fault_not_a_crash(self):
+        with open(sweep.STATE, "w") as f:
+            f.write("[]")
+        self.assertEqual(sweep.load_state(), {})
+        self.assertEqual(len(sweep.RUN["faults"]), 1)
+
+    # --- Round 3 finding 5: sql/board breakers are set and honoured ---
+
+    def test_api_get_curl_hang_sets_breaker(self):
+        for code in (7, 28):
+            with self.subTest(code=code):
+                sweep.reset_run()
+                with mock.patch("subprocess.run", curl_proc("", returncode=code)):
+                    self.assertIsNone(sweep.api_get("issues/x"))
+                self.assertTrue(sweep.RUN["api_down"])
+
+    def test_api_get_timeout_sets_breaker(self):
+        def boom(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, sweep.API_TIMEOUT)
+        with mock.patch("subprocess.run", boom):
+            self.assertIsNone(sweep.api_get("issues/x"))
+        self.assertTrue(sweep.RUN["api_down"])
+
+    def test_api_get_oserror_sets_breaker(self):
+        def boom(argv, **kwargs):
+            raise OSError("curl missing")
+        with mock.patch("subprocess.run", boom):
+            self.assertIsNone(sweep.api_get("issues/x"))
+        self.assertTrue(sweep.RUN["api_down"])
+
+    def test_api_timeout_and_oserror_set_breaker(self):
+        def timeout(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, sweep.API_TIMEOUT)
+        with mock.patch("subprocess.run", timeout):
+            self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"_err": "timeout"})
+        self.assertTrue(sweep.RUN["api_down"])
+        sweep.reset_run()
+        def oserror(argv, **kwargs):
+            raise OSError("curl missing")
+        with mock.patch("subprocess.run", oserror):
+            self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"_err": "unavailable"})
+        self.assertTrue(sweep.RUN["api_down"])
+
+    def test_sql_oserror_sets_breaker(self):
+        def boom(argv, **kwargs):
+            raise OSError("docker missing")
+        with mock.patch("subprocess.run", boom):
+            self.assertIsNone(sweep.sql("select 1"))
+        self.assertTrue(sweep.RUN["sql_down"])
+
+    def test_sql_breaker_skips_next_call(self):
+        sweep.RUN["sql_down"] = True
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(sweep.sql("select 1"))
+        run.assert_not_called()
+
+    def test_api_breaker_skips_next_call(self):
+        sweep.RUN["api_down"] = True
+        with mock.patch("subprocess.run") as run:
+            self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"_err": "skipped"})
+        run.assert_not_called()
+
+    def test_api_get_breaker_skips_next_call(self):
+        sweep.RUN["api_down"] = True
+        with mock.patch("subprocess.run") as run:
+            self.assertIsNone(sweep.api_get("issues/x"))
+        run.assert_not_called()
 
     def test_draft_and_release_please_are_skipped(self):
         self.route_org()
