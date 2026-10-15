@@ -133,9 +133,15 @@ annotations.
   `poetry.lock`, `pdm.lock`, `uv.lock`, `Pipfile.lock`,
   `requirements.txt` and `requirements-*.txt`. A `pyproject.toml` with
   no dependency table (`[project]`, `[tool.poetry]`, `[tool.pdm]`,
-  `[tool.uv]`) is tool config, not a manifest; a library crate
-  (`src/lib.rs` without `src/main.rs`) never reports. A manifest
-  containing `lockfile: none` or listed in `ignore_manifests` opts out.
+  `[tool.uv]`) is tool config, not a manifest; a library crate (a
+  `lib.rs` in the changed manifest's own directory with no `main.rs`,
+  no `src/bin/` file, and no `[[bin]]` target) never reports. A
+  manifest containing `lockfile: none` (case-insensitive; for
+  `package.json` use the JSON-valid `"//": "lockfile: none"`) or
+  listed in `ignore_manifests` (gate `with:`, required-wrapper `with:`,
+  or the `BLOCKER_LOCKFILE_IGNORE` repo variable) opts out. The
+  binary `bun.lockb` is never opened as text and `requirements*.txt`
+  is never emptiness-checked.
 
 ## Rollout: adopt, activate, warn 24h, then required
 

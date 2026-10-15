@@ -8,6 +8,18 @@
 name: Blocker lockfile required wrapper
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+      ignore_manifests:
+        description: "comma- or space-separated manifest basenames to exempt"
+        required: false
+        default: ""
+        type: string
   pull_request:
   merge_group:
 
@@ -18,7 +30,12 @@ jobs:
   lockfile:
     name: lockfile
     uses: TogetherWeOwn/.github/.github/workflows/blocker-lockfile-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
+    # On `pull_request` / `merge_group` the `workflow_call` inputs are
+    # empty, so a repo exempts manifests with the
+    # `BLOCKER_LOCKFILE_IGNORE` repo variable (comma- or space-separated
+    # basenames); an explicit caller `with:` still wins when present.
     with:
-      mode: warn
+      mode: ${{ inputs.mode || 'warn' }}
+      ignore_manifests: ${{ inputs.ignore_manifests || vars.BLOCKER_LOCKFILE_IGNORE || '' }}
     permissions:
       contents: read

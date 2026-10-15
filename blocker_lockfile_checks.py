@@ -10,13 +10,19 @@ even when the manifest changes without it, and matching is by basename
 (any lockfile anywhere satisfies any manifest). Recognised lockfiles:
 npm (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
 `npm-shrinkwrap.json`, `bun.lock`, `bun.lockb`), Cargo (`Cargo.lock`;
-a library crate hint — `src/lib.rs` present with no `src/main.rs` —
+a library crate hint — `src/lib.rs` present with no binary evidence —
 never reports), Python (`poetry.lock`, `pdm.lock`, `uv.lock`,
 `Pipfile.lock`, `requirements.txt` and `requirements-*.txt`; a
 `pyproject.toml` carrying only tool config is not a manifest — see
 `manifest_contents`), Go (`go.sum`), Ruby (`Gemfile.lock`).
-A manifest containing `lockfile: none` opts out. Stale-lockfile and
+A manifest containing `lockfile: none` opts out (for `package.json`
+use the JSON-valid form `"//": "lockfile: none"`). Stale-lockfile and
 monorepo directory-scoped detection are follow-ups.
+
+Parseability (`check_lockfile_parseable` / `is_parseable_lockfile`)
+covers text lockfiles only: the binary `bun.lockb` is never opened as
+text and `requirements*.txt` files are never emptiness-checked (an
+empty requirements file is a legitimate empty constraint set).
 
 Stdlib only, pure functions, no network/clock/filesystem.
 """
@@ -84,20 +90,74 @@ def is_lockfile(path):
     return bool(_REQUIREMENTS_TXT_RE.match(name))
 
 
-def _is_library_crate_hint(changed_files, present_files):
-    """True when the tree looks like a library crate that never commits
-    a lockfile: `src/lib.rs` present with no `src/main.rs` (Cargo itself
-    recommends against committing `Cargo.lock` for libraries)."""
+def is_parseable_lockfile(path):
+    """True when the path should be fed to `check_lockfile_parseable`.
+
+    Text lockfiles only: the binary `bun.lockb` is never opened as
+    UTF-8 text (it would raise `UnicodeDecodeError`, a `ValueError`
+    the gate must not mistake for a missing file), and
+    `requirements*.txt` files are never emptiness-checked (an empty
+    requirements file is a legitimate empty constraint set). Every
+    other recognised lockfile basename parses as text.
+    """
+    name = _basename(path)
+    if _REQUIREMENTS_TXT_RE.match(name):
+        return False
+    if name == "bun.lockb":
+        return False
+    if any(name in locks for locks in MANIFEST_TO_LOCK.values()):
+        return True
+    return False
+
+
+def _manifest_scope_dir(manifest_path):
+    """Directory owning a manifest, normalised without leading slash.
+
+    `Cargo.toml` -> `""` (repo root, whole tree); `crates/a/Cargo.toml`
+    -> `"crates/a"`. Used to scope the library-crate hint to the crate
+    that owns the changed manifest instead of the whole repo.
+    """
+    normed = _norm_path(manifest_path).lstrip("/")
+    if "/" not in normed:
+        return ""
+    return normed.rsplit("/", 1)[0]
+
+
+def _is_library_crate_hint(
+    changed_files, present_files, manifest_path=None, manifest_text=None,
+):
+    """True when the crate owning the manifest looks like a library crate
+    that never commits a lockfile (Cargo itself recommends against
+    committing `Cargo.lock` for libraries).
+
+    Library evidence: a `lib.rs` in the manifest's scope. Binary
+    evidence (any one waives the exemption): a `main.rs` anywhere in
+    scope, a `src/bin/*.rs` file in scope (`src/bin/tool.rs`,
+    `crates/cli/src/bin/cli.rs`, `src/bin/tool/main.rs`), or a
+    `[[bin]]` target in the manifest text. Scoping matters in
+    workspaces: a `lib.rs` under `crates/a/` never exempts a binary
+    crate under `crates/cli/`.
+    """
     paths = [
         _norm_path(p).lstrip("/")
         for p in list(changed_files) + list(present_files)
     ]
+    if manifest_path is not None:
+        scope = _manifest_scope_dir(manifest_path)
+        if scope:
+            prefix = scope + "/"
+            paths = [p for p in paths if p == scope or p.startswith(prefix)]
     has_lib = any(
         p == "lib.rs" or p.endswith("/lib.rs") for p in paths
     )
     has_bin = any(
         p == "main.rs" or p.endswith("/main.rs") for p in paths
     )
+    if not has_bin:
+        has_bin = any("/src/bin/" in "/" + p for p in paths)
+    if not has_bin and isinstance(manifest_text, str):
+        if "[[bin]]" in manifest_text:
+            has_bin = True
     return has_lib and not has_bin
 
 
@@ -113,14 +173,16 @@ def check_lockfile_present(
     (presence, not freshness).
 
     `manifest_contents` (optional path -> text) enables two opt-outs:
-    a manifest containing `lockfile: none` never reports, and a
-    `pyproject.toml` without a dependency table (`[project]`,
-    `[tool.poetry]`, `[tool.pdm]`, `[tool.uv]`) is tool config, not a
-    manifest. Without contents the check fails closed (every
-    `pyproject.toml` counts). `ignore_manifests` lists basenames a repo
-    opts out of. `requirements-*.txt` satisfies `pyproject.toml`, and a
-    library-crate hint (`src/lib.rs` without `src/main.rs`) satisfies
-    `Cargo.toml`.
+    a manifest containing `lockfile: none` (case-insensitive; for
+    `package.json` use the JSON-valid form `"//": "lockfile: none"`)
+    never reports, and a `pyproject.toml` without a dependency table
+    (`[project]`, `[tool.poetry]`, `[tool.pdm]`, `[tool.uv]`) is tool
+    config, not a manifest. Without contents the check fails closed
+    (every `pyproject.toml` counts). `ignore_manifests` lists basenames
+    a repo opts out of. `requirements-*.txt` satisfies `pyproject.toml`,
+    and a library-crate hint (a `lib.rs` in the changed manifest's own
+    directory with no binary evidence: no `main.rs`, no `src/bin/`
+    file, no `[[bin]]` target) satisfies `Cargo.toml`.
     """
     have = {_basename(p) for p in list(changed_files) + list(present_files)}
     ignored = {_basename(p) for p in (ignore_manifests or ())}
@@ -145,7 +207,8 @@ def check_lockfile_present(
             if not _PYPROJECT_MANIFEST_RE.search(text):
                 continue
         if name == "Cargo.toml" and _is_library_crate_hint(
-            changed_files, present_files
+            changed_files, present_files, path,
+            text if isinstance(text, str) else None,
         ):
             continue
         accepted = MANIFEST_TO_LOCK[name]
@@ -166,9 +229,14 @@ def check_lockfile_parseable(lock_contents):
     """One finding per empty file, per package-lock.json with neither
     "packages" nor "dependencies", per pnpm-lock.yaml without
     "lockfileVersion", and per Cargo.lock without "[[package]]".
-    Other non-empty lockfiles pass."""
+    Other non-empty lockfiles pass. Paths that are not parseable
+    lockfiles (`bun.lockb`, `requirements*.txt`) are skipped: the
+    former is binary, the latter is legitimately empty as a constraint
+    set (see `is_parseable_lockfile`)."""
     findings = []
     for path, text in lock_contents.items():
+        if not is_parseable_lockfile(path):
+            continue
         name = _basename(path)
         if not (text or "").strip():
             findings.append("%s: lockfile is empty" % path)

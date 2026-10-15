@@ -116,13 +116,19 @@ the tree, and empty/corrupt lockfiles (content-free `package-lock.json`,
 version-less `pnpm-lock.yaml`, package-less `Cargo.lock`). Accepted
 lockfiles include `bun.lock`/`bun.lockb` (npm), `Pipfile.lock` and
 `requirements*.txt` (Python); a `pyproject.toml` with no dependency
-table is tool config, not a manifest (contents-aware), and a library
-crate (`src/lib.rs` without `src/main.rs`) never reports; `lockfile:
-none` or `ignore_manifests` opts a manifest out. Presence, not
-freshness: an already-vendored lockfile satisfies the gate even when the
-manifest changes without it, and matching is by basename (any lockfile
-anywhere satisfies any manifest). Stale-lockfile and directory-scoped
-detection are follow-ups.
+table (`[project]`, `[tool.poetry]`, `[tool.pdm]`, `[tool.uv]`) is tool
+config, not a manifest (contents-aware), and a library crate (a
+`lib.rs` in the changed manifest's own directory with no binary
+evidence: no `main.rs`, no `src/bin/` file, no `[[bin]]` target) never
+reports; `lockfile: none` (case-insensitive; for `package.json` use the
+JSON-valid form `"//": "lockfile: none"`) or `ignore_manifests` (gate
+input, required-wrapper input, or the `BLOCKER_LOCKFILE_IGNORE` repo
+variable) opts a manifest out. Parseability covers text lockfiles only:
+the binary `bun.lockb` is never opened as text and `requirements*.txt`
+is never emptiness-checked. Presence, not freshness: an already-vendored
+lockfile satisfies the gate even when the manifest changes without it,
+and matching is by basename (any lockfile anywhere satisfies any
+manifest). Stale-lockfile and directory-scoped detection are follow-ups.
 
 ## Rollout
 
@@ -139,7 +145,8 @@ test_blocker_classes47_round5_regression
 test_blocker_classes47_review_acceptance
 test_blocker_classes47_round6_regression
 test_blocker_classes47_round7_regression
-test_blocker_classes47_round8_regression`
+test_blocker_classes47_round8_regression
+test_blocker_classes47_round9_regression`
 plus YAML/JSON parse. The blind review-acceptance module exercises the
 actual migration heredoc, missing-schema API skip and required-wrapper
 mapping, not comments containing their names. Every `*-gate.yml` runs

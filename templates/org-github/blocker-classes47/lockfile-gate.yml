@@ -26,6 +26,11 @@ on:
         required: false
         default: "warn"
         type: string
+      ignore_manifests:
+        description: "comma- or space-separated manifest basenames to exempt (e.g. 'package.json'); repos may also set the BLOCKER_LOCKFILE_IGNORE repo variable"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +58,7 @@ jobs:
       - name: Run lockfile checks on the PR diff
         env:
           GATE_MODE: ${{ inputs.mode }}
+          GATE_IGNORE_MANIFESTS: ${{ inputs.ignore_manifests }}
           GATE_EVENT: ${{ github.event_name }}
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GATE_BEFORE: ${{ github.event.before }}
@@ -74,14 +80,22 @@ jobs:
           printf '%s\n' "$changed" > /tmp/blocker-changed.txt
           git ls-files > /tmp/blocker-present.txt
           # -I: ignore cwd so a PR-root module can never shadow stdlib.
+          # Binary lockfiles (`bun.lockb`) are never opened as UTF-8 text
+          # and `requirements*.txt` never reaches the emptiness check (see
+          # `is_parseable_lockfile`). Manifest contents are read so the
+          # `lockfile: none` marker, tool-only `pyproject.toml`, and the
+          # library-crate hint work in the delivered workflow — not just
+          # in library unit tests.
           GATE_CHANGED=/tmp/blocker-changed.txt GATE_PRESENT=/tmp/blocker-present.txt GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import os
+          import re
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
           from blocker_lockfile_checks import (
               check_lockfile_parseable,
               check_lockfile_present,
-              is_lockfile,
+              is_manifest,
+              is_parseable_lockfile,
           )
           import os as _os
           changed = [
@@ -94,16 +108,31 @@ jobs:
               for line in open(os.environ["GATE_PRESENT"], encoding="utf-8")
               if line.strip()
           ]
-          lock_contents = {}
+          manifest_contents = {}
           for path in changed:
-              if not is_lockfile(path):
+              if not is_manifest(path):
                   continue
               try:
-                  with open(path, encoding="utf-8") as f:
-                      lock_contents[path] = f.read()
-              except OSError:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      manifest_contents[path] = f.read()
+              except (OSError, UnicodeDecodeError, ValueError):
                   pass
-          findings = check_lockfile_present(changed, present) + check_lockfile_parseable(lock_contents)
+          raw_ignore = os.environ.get("GATE_IGNORE_MANIFESTS", "") or ""
+          ignore_manifests = tuple(
+              piece for piece in re.split(r"[,\s]+", raw_ignore) if piece
+          )
+          lock_contents = {}
+          for path in changed:
+              if not is_parseable_lockfile(path):
+                  continue
+              try:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      lock_contents[path] = f.read()
+              except (OSError, UnicodeDecodeError, ValueError):
+                  pass
+          findings = check_lockfile_present(
+              changed, present, manifest_contents, ignore_manifests
+          ) + check_lockfile_parseable(lock_contents)
           if findings:
               print("::warning::blocker-lockfile findings:")
               for finding in findings:
