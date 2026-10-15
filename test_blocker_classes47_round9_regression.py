@@ -244,7 +244,7 @@ class LockfileGateWiringTest(unittest.TestCase):
         env = dict(
             self.env, GATE_CHANGED=str(changed), GATE_PRESENT=str(present),
             GATE_LOGIC=str(HERE), GATE_MODE="enforce",
-            GATE_IGNORE_MANIFESTS=ignore,
+            GATE_IGNORE_MANIFESTS=ignore, GATE_BASE=base,
         )
         return subprocess.run(
             [sys.executable, "-I", "-"],
@@ -284,9 +284,11 @@ class LockfileGateWiringTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_gate_lockfile_none_marker_passes(self):
+        # Marker honoured only from the base revision (merged opt-out):
+        # base carries the marker, PR keeps it while changing deps.
         proc = self.lockfile_gate(
-            {},
             {"package.json": '{"name": "x", "//": "lockfile: none"}\n'},
+            {"package.json": '{"name": "x", "dependencies": {"left-pad": "1.0.0"}, "//": "lockfile: none"}\n'},
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 

@@ -27,7 +27,7 @@ on:
         default: "warn"
         type: string
       ignore_manifests:
-        description: "comma- or space-separated manifest basenames to exempt (e.g. 'package.json'); repos may also set the BLOCKER_LOCKFILE_IGNORE repo variable"
+        description: "comma- or space-separated manifest basenames to exempt (e.g. 'package.json, Cargo.toml'); repos may also set the BLOCKER_LOCKFILE_IGNORE repo variable (read by this gate with an explicit with: winning when present)"
         required: false
         default: ""
         type: string
@@ -58,7 +58,7 @@ jobs:
       - name: Run lockfile checks on the PR diff
         env:
           GATE_MODE: ${{ inputs.mode }}
-          GATE_IGNORE_MANIFESTS: ${{ inputs.ignore_manifests }}
+          GATE_IGNORE_MANIFESTS: ${{ inputs.ignore_manifests || vars.BLOCKER_LOCKFILE_IGNORE || '' }}
           GATE_EVENT: ${{ github.event_name }}
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GATE_BEFORE: ${{ github.event.before }}
@@ -82,13 +82,18 @@ jobs:
           # -I: ignore cwd so a PR-root module can never shadow stdlib.
           # Binary lockfiles (`bun.lockb`) are never opened as UTF-8 text
           # and `requirements*.txt` never reaches the emptiness check (see
-          # `is_parseable_lockfile`). Manifest contents are read so the
-          # `lockfile: none` marker, tool-only `pyproject.toml`, and the
-          # library-crate hint work in the delivered workflow — not just
-          # in library unit tests.
-          GATE_CHANGED=/tmp/blocker-changed.txt GATE_PRESENT=/tmp/blocker-present.txt GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          # `is_parseable_lockfile`). Manifest contents are read from the
+          # PR checkout so tool-only `pyproject.toml`, the library-crate
+          # hint, and the stdlib-only `go.mod` exemption work in the
+          # delivered workflow — not just in library unit tests. The
+          # `lockfile: none` marker is read from the BASE commit instead
+          # (`git show "$base:$path"`): an opt-out must be merged first,
+          # so a PR that adds the marker in the same diff still fails in
+          # enforce mode (same shape as the PR-added wrangler bypass).
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_PRESENT=/tmp/blocker-present.txt GATE_BASE="$base" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import os
           import re
+          import subprocess
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
           from blocker_lockfile_checks import (
@@ -117,6 +122,18 @@ jobs:
                       manifest_contents[path] = f.read()
               except (OSError, UnicodeDecodeError, ValueError):
                   pass
+          marker_contents = {}
+          base = os.environ.get("GATE_BASE", "")
+          if base:
+              for path in changed:
+                  if not is_manifest(path):
+                      continue
+                  read = subprocess.run(
+                      ["git", "show", "%s:%s" % (base, path)],
+                      capture_output=True, text=True,
+                  )
+                  if read.returncode == 0:
+                      marker_contents[path] = read.stdout
           raw_ignore = os.environ.get("GATE_IGNORE_MANIFESTS", "") or ""
           ignore_manifests = tuple(
               piece for piece in re.split(r"[,\s]+", raw_ignore) if piece
@@ -131,7 +148,8 @@ jobs:
               except (OSError, UnicodeDecodeError, ValueError):
                   pass
           findings = check_lockfile_present(
-              changed, present, manifest_contents, ignore_manifests
+              changed, present, manifest_contents, ignore_manifests,
+              marker_contents,
           ) + check_lockfile_parseable(lock_contents)
           if findings:
               print("::warning::blocker-lockfile findings:")

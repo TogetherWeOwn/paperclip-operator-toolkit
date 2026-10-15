@@ -131,15 +131,21 @@ annotations.
   `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `npm-shrinkwrap.json`, `bun.lock`, `bun.lockb`; Python accepts
   `poetry.lock`, `pdm.lock`, `uv.lock`, `Pipfile.lock`,
-  `requirements.txt` and `requirements-*.txt`. A `pyproject.toml` with
+  `requirements.txt` and `requirements-*.txt`; Go accepts `go.sum`
+  (a `go.mod` with no `require` directive is stdlib-only — `go mod
+  tidy` leaves no `go.sum` — and never reports). A `pyproject.toml` with
   no dependency table (`[project]`, `[tool.poetry]`, `[tool.pdm]`,
   `[tool.uv]`) is tool config, not a manifest; a library crate (a
   `lib.rs` in the changed manifest's own directory with no `main.rs`,
   no `src/bin/` file, and no `[[bin]]` target) never reports. A
-  manifest containing `lockfile: none` (case-insensitive; for
+  manifest opted out via `lockfile: none` (case-insensitive; for
   `package.json` use the JSON-valid `"//": "lockfile: none"`) or
   listed in `ignore_manifests` (gate `with:`, required-wrapper `with:`,
-  or the `BLOCKER_LOCKFILE_IGNORE` repo variable) opts out. The
+  or the `BLOCKER_LOCKFILE_IGNORE` repo variable — read by both the
+  gate and the wrapper, so the direct caller and the wrapper agree)
+  never reports. The `lockfile: none` marker is honoured only from the
+  base revision: the opt-out must be merged first, so a PR that adds
+  the marker in the same diff still fails in enforce mode. The
   binary `bun.lockb` is never opened as text and `requirements*.txt`
   is never emptiness-checked.
 

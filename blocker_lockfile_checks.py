@@ -14,9 +14,13 @@ a library crate hint — `src/lib.rs` present with no binary evidence —
 never reports), Python (`poetry.lock`, `pdm.lock`, `uv.lock`,
 `Pipfile.lock`, `requirements.txt` and `requirements-*.txt`; a
 `pyproject.toml` carrying only tool config is not a manifest — see
-`manifest_contents`), Go (`go.sum`), Ruby (`Gemfile.lock`).
+`manifest_contents`), Go (`go.sum`, except a `go.mod` with no `require`
+directive — stdlib-only, no `go.sum` exists after `go mod tidy`),
+Ruby (`Gemfile.lock`).
 A manifest containing `lockfile: none` opts out (for `package.json`
-use the JSON-valid form `"//": "lockfile: none"`). Stale-lockfile and
+use the JSON-valid form `"//": "lockfile: none"`); the delivered gate
+honours the marker only from the base revision (an opt-out must be
+merged first — a PR cannot waive itself). Stale-lockfile and
 monorepo directory-scoped detection are follow-ups.
 
 Parseability (`check_lockfile_parseable` / `is_parseable_lockfile`)
@@ -63,6 +67,13 @@ _REQUIREMENTS_TXT_RE = re.compile(r"^requirements.*\.txt$", re.IGNORECASE)
 _PYPROJECT_MANIFEST_RE = re.compile(
     r"(?m)^\s*\[(?:project|tool\.poetry|tool\.pdm|tool\.uv)\b"
 )
+
+# A `go.mod` with no `require` directive has no dependencies, so `go mod
+# tidy` leaves no `go.sum` (verified with go 1.27.1 on a stdlib-only
+# module). Such a file never reports — but only when the caller passes
+# `manifest_contents` with the `go.mod` text; without contents the check
+# fails closed and still demands `go.sum`.
+_GO_REQUIRE_RE = re.compile(r"(?m)^\s*require\b")
 
 
 def _basename(path):
@@ -161,9 +172,22 @@ def _is_library_crate_hint(
     return has_lib and not has_bin
 
 
+def _lookup_contents(contents, path, name):
+    """Return the text for a manifest path, accepting basename keys."""
+    if not isinstance(contents, dict):
+        return None
+    text = contents.get(path)
+    if text is None and contents:
+        for key, value in contents.items():
+            if _basename(key) == name:
+                text = value
+                break
+    return text
+
+
 def check_lockfile_present(
     changed_files, present_files, manifest_contents=None,
-    ignore_manifests=(),
+    ignore_manifests=(), marker_contents=None,
 ):
     """One finding per changed manifest whose accepted lockfile is in
     neither changed_files nor present_files (basename comparison).
@@ -172,21 +196,30 @@ def check_lockfile_present(
     satisfies the check even when the manifest changes without it
     (presence, not freshness).
 
-    `manifest_contents` (optional path -> text) enables two opt-outs:
-    a manifest containing `lockfile: none` (case-insensitive; for
-    `package.json` use the JSON-valid form `"//": "lockfile: none"`)
-    never reports, and a `pyproject.toml` without a dependency table
+    `manifest_contents` (optional path -> text) enables content-aware
+    exemptions: a `pyproject.toml` without a dependency table
     (`[project]`, `[tool.poetry]`, `[tool.pdm]`, `[tool.uv]`) is tool
-    config, not a manifest. Without contents the check fails closed
-    (every `pyproject.toml` counts). `ignore_manifests` lists basenames
+    config, not a manifest; a `go.mod` with no `require` directive is
+    stdlib-only (no `go.sum` exists after `go mod tidy`). Without
+    contents both checks fail closed. `ignore_manifests` lists basenames
     a repo opts out of. `requirements-*.txt` satisfies `pyproject.toml`,
     and a library-crate hint (a `lib.rs` in the changed manifest's own
     directory with no binary evidence: no `main.rs`, no `src/bin/`
     file, no `[[bin]]` target) satisfies `Cargo.toml`.
+
+    `marker_contents` (optional path -> text) is the opt-out source for
+    the `lockfile: none` marker (case-insensitive; for `package.json`
+    use the JSON-valid form `"//": "lockfile: none"`). When provided
+    (even as an empty dict) only it is consulted: the delivered gate
+    passes base-revision contents here so an opt-out must be merged
+    first and a PR cannot waive itself. When omitted (`None`) the
+    marker falls back to `manifest_contents` for backward compatibility
+    with library callers and unit tests.
     """
     have = {_basename(p) for p in list(changed_files) + list(present_files)}
     ignored = {_basename(p) for p in (ignore_manifests or ())}
     contents = manifest_contents or {}
+    markers = marker_contents if marker_contents is not None else contents
     findings = []
     for path in changed_files:
         name = _basename(path)
@@ -194,17 +227,15 @@ def check_lockfile_present(
             continue
         if name in ignored:
             continue
-        text = contents.get(path) if isinstance(contents, dict) else None
-        if text is None and contents:
-            # Contents keyed by basename still opt out.
-            for key, value in contents.items():
-                if _basename(key) == name:
-                    text = value
-                    break
-        if isinstance(text, str) and "lockfile: none" in text.lower():
+        text = _lookup_contents(contents, path, name)
+        marker_text = _lookup_contents(markers, path, name)
+        if isinstance(marker_text, str) and "lockfile: none" in marker_text.lower():
             continue
         if name == "pyproject.toml" and contents is not None and text is not None:
             if not _PYPROJECT_MANIFEST_RE.search(text):
+                continue
+        if name == "go.mod" and contents is not None and text is not None:
+            if not _GO_REQUIRE_RE.search(text):
                 continue
         if name == "Cargo.toml" and _is_library_crate_hint(
             changed_files, present_files, path,
