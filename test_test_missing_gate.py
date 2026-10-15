@@ -69,6 +69,20 @@ class IsTestPathTest(unittest.TestCase):
         for path in ("src/foo.spec.js", "src/bar.spec.ts"):
             self.assertTrue(CHECK.is_test_path(path), path)
 
+    def test_bare_test_spec_suffix_is_test(self):
+        for path in ("release.test", "app.spec", "src/release.test",
+                     "src/app.spec"):
+            self.assertTrue(CHECK.is_test_path(path), path)
+
+    def test_uppercase_test_spec_suffix_is_test(self):
+        for path in ("src/Foo.TEST.ts", "src/Foo.SPEC.JS", "RELEASE.TEST",
+                     "APP.SPEC", "src/a.Test.mjs", "src/b.Spec.ts"):
+            self.assertTrue(CHECK.is_test_path(path), path)
+
+    def test_uppercase_bare_suffix_is_test(self):
+        for path in ("RELEASE.TEST", "APP.SPEC"):
+            self.assertTrue(CHECK.is_test_path(path), path)
+
     def test_plain_src_is_not_test(self):
         self.assertFalse(CHECK.is_test_path("warn_first_inventory.py"))
 
@@ -329,6 +343,110 @@ class EmbeddedGateScriptTest(unittest.TestCase):
     def test_docs_only_passes(self):
         self.assertEqual(
             self._run_gate("pull_request", "enforcing", ["README.md"]), 0)
+
+    def test_embedded_dot_spec_colocated_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/foo.ts", "src/foo.spec.js"]), 0)
+
+    def test_embedded_dot_spec_only_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/foo.spec.js"]), 0)
+
+    def test_embedded_uppercase_dot_test_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/a.py", "src/FOO.TEST.TS"]), 0)
+
+    def test_embedded_uppercase_dot_spec_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/a.py", "src/FOO.SPEC.JS"]), 0)
+
+    def test_embedded_bare_test_suffix_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/a.py", "release.test"]), 0)
+
+    def test_embedded_bare_spec_suffix_passes(self):
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing",
+                           ["src/a.py", "app.spec"]), 0)
+
+    def test_embedded_filtered_src_only_still_fails(self):
+        # The detect job filters deleted/renamed paths out with
+        # --diff-filter=AM before the script runs: a src edit whose only
+        # accompanying test was deleted arrives here as src-only.
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing", ["src/a.py"]), 1)
+
+    def test_embedded_filtered_empty_passes(self):
+        # A deleted src file or a pure rename arrives here as an empty
+        # list once the detect job excludes it: no present src change.
+        self.assertEqual(
+            self._run_gate("pull_request", "enforcing", []), 0)
+
+
+class WorkflowWiringTest(unittest.TestCase):
+    """Pin the workflow env/output wiring the behavioural matrix cannot see.
+
+    The matrix sets GATE_* directly, so a mis-wired YAML value (empty
+    GATE_CHANGED, hard-wired warn mode, blank labels/output, wrong base
+    SHA, missing fetch-depth) turns enforcing into a silent no-op with
+    no failing test. These pins assert the exact wiring lines plus the
+    --diff-filter=AM that keeps deleted/renamed paths out of the gate.
+    """
+
+    STAGED_GATE = EmbeddedGateScriptTest.STAGED_GATE
+
+    @classmethod
+    def _text(cls):
+        with open(cls.STAGED_GATE) as handle:
+            return handle.read()
+
+    def test_detect_output_wiring(self):
+        text = self._text()
+        self.assertIn("changed: ${{ steps.diff.outputs.changed }}", text)
+
+    def test_gate_changed_wiring(self):
+        text = self._text()
+        self.assertIn(
+            "GATE_CHANGED: ${{ needs.detect.outputs.changed }}", text)
+
+    def test_gate_labels_wiring(self):
+        text = self._text()
+        self.assertIn(
+            "GATE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}",
+            text)
+
+    def test_gate_mode_wiring_in_check_job(self):
+        text = self._text()
+        self.assertGreaterEqual(
+            text.count("GATE_MODE: ${{ inputs.mode }}"), 2,
+            "check and aggregator jobs must both wire GATE_MODE from inputs.mode")
+
+    def test_pr_base_sha_wiring(self):
+        text = self._text()
+        self.assertIn(
+            "GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}", text)
+
+    def test_fetch_depth_zero_in_both_checkouts(self):
+        text = self._text()
+        self.assertGreaterEqual(
+            text.count("fetch-depth: 0"), 2,
+            "both checkouts need full history so the base SHA is fetchable")
+
+    def test_diff_excludes_deleted_and_renames(self):
+        import re
+        text = self._text()
+        self.assertIn("--diff-filter=AM", text)
+        diff_lines = [line for line in text.splitlines()
+                      if "git diff --name-only" in line]
+        self.assertTrue(diff_lines, "no git diff --name-only line found")
+        for line in diff_lines:
+            self.assertIn("--diff-filter=AM", line,
+                          "unfiltered diff line: %s" % line.strip())
 
 
 if __name__ == "__main__":

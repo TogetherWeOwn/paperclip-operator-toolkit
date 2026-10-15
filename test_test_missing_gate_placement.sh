@@ -259,6 +259,34 @@ PY
   assert $? "the gate wires GATE_EVENT from github.event_name in detect and check jobs" \
     "a mis-wired GATE_EVENT silently changes merge_group/push handling with no failing test"
 
+  grep -qF 'GATE_CHANGED: ${{ needs.detect.outputs.changed }}' "$STAGE/test-missing-gate.yml"
+  assert $? "the check job wires GATE_CHANGED from the detect outputs" \
+    "an empty GATE_CHANGED sees no files, so enforcing never fails with no failing test"
+
+  grep -qF "GATE_LABELS: \${{ join(github.event.pull_request.labels.*.name, ',') }}" "$STAGE/test-missing-gate.yml"
+  assert $? "the check job wires GATE_LABELS from the pull-request labels" \
+    "a blank GATE_LABELS breaks the tests-exempt waiver with no failing test"
+
+  [[ "$(grep -c 'GATE_MODE: ${{ inputs.mode }}' "$STAGE/test-missing-gate.yml")" -ge 2 ]]
+  assert $? "the check and aggregator jobs wire GATE_MODE from inputs.mode" \
+    "a hard-wired GATE_MODE warn keeps enforcing green with no failing test"
+
+  grep -qF 'changed: ${{ steps.diff.outputs.changed }}' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect job exposes the diff via steps.diff.outputs.changed" \
+    "a blanked detect output starves the gate with no failing test"
+
+  grep -qF 'GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect job diffs the pull-request base SHA" \
+    "a GATE_PR_BASE pointed at head.sha diffs to an empty set with no failing test"
+
+  [[ "$(grep -c 'fetch-depth: 0' "$STAGE/test-missing-gate.yml")" -ge 2 ]]
+  assert $? "both checkouts fetch full history (fetch-depth 0)" \
+    "a shallow checkout cannot fetch the base SHA, so the diff is empty with no failing test"
+
+  grep -qF -- '--diff-filter=AM' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect diff excludes deleted and renamed paths (--diff-filter=AM)" \
+    "a deleted test would otherwise satisfy the test-evidence check while deleted src and pure renames false-fail"
+
   grep -q 'merge_group.base_sha' "$STAGE/test-missing-gate.yml"
   assert $? "the detect job diffs the merge_group base_sha in queue runs" \
     "dropping the merge_group base diffs other queued PRs files with no failing test"

@@ -70,11 +70,16 @@ jobs:
           # In a merge_group run there is no pull_request context; diff
           # against the merge group's base instead of HEAD~1, which would
           # span other queued PRs' files.
+          # Deleted and renamed paths are not present-file changes: a deleted
+          # test must not satisfy the test-evidence check, a deleted src
+          # needs no test, and a pure rename carries no content change.
+          # --diff-filter=AM keeps only Added/Modified paths so all three
+          # cases resolve without a false pass or false fail.
           GATE_BASE="${GATE_PR_BASE:-${GATE_MERGE_BASE:-}}"
           if [ -n "${GATE_BASE}" ]; then
-            git diff --name-only "${GATE_BASE}" HEAD > changed.txt
+            git diff --name-only --diff-filter=AM "${GATE_BASE}" HEAD > changed.txt
           else
-            git diff --name-only HEAD~1 HEAD > changed.txt || true
+            git diff --name-only --diff-filter=AM HEAD~1 HEAD > changed.txt || true
           fi
           {
             echo "changed<<EOF"

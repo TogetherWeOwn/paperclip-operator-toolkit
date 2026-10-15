@@ -28,10 +28,12 @@ jobs:
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # Only Added/Modified paths count: deleted and renamed paths are
+          # not present-file changes (see test-missing-gate.yml).
           if [ -n "${GATE_PR_BASE:-}" ]; then
-            git diff --name-only "${GATE_PR_BASE}" HEAD > changed.txt
+            git diff --name-only --diff-filter=AM "${GATE_PR_BASE}" HEAD > changed.txt
           else
-            git diff --name-only HEAD~1 HEAD > changed.txt || true
+            git diff --name-only --diff-filter=AM HEAD~1 HEAD > changed.txt || true
           fi
           relevant=$(python3 - <<'PY'
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
@@ -39,8 +41,13 @@ jobs:
           def is_test(p):
               parts = p.replace("\\", "/").split("/")
               name = parts[-1]
+              lower_name = name.lower()
               stem = name.rsplit(".", 1)[0] if "." in name else name
               if name.startswith("test_") or stem.endswith("_test"):
+                  return True
+              if ".test." in lower_name or ".spec." in lower_name:
+                  return True
+              if lower_name.endswith(".test") or lower_name.endswith(".spec"):
                   return True
               return any(d in test_dirs for d in parts[:-1])
           def is_src(p):
