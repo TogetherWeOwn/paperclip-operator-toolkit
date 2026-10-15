@@ -71,6 +71,49 @@ mutate pipe-name-crashes 'head, has_edge = row.rsplit("|", 1)
 mutate malformed-row-silent 'fault(f"board row malformed for {repo}#{p['"'"'number'"'"']}: {_plain(row[:80])}")' 'log(f"board row malformed for {repo}#{p['"'"'number'"'"']}: {_plain(row[:80])}")' test_malformed_board_row_is_a_fault_not_a_crash
 mutate draft-release-skipped-dropped 'if p["head"]["ref"].startswith("release-please") or p.get("draft"): continue' 'if False: continue' test_draft_and_release_please_are_skipped
 
+mutate live-deferral-dropped 'if issue_has_live_work(iid, on_error=live_work_fault):' 'if False:' test_live_run_defers_nudge
+mutate live-guard-t-dropped "return out == 't'" 'return False' test_live_work_guard_returns_live_only_on_t
+mutate live-guard-uuid-dropped 'if not issue_id or not _UUID.fullmatch(str(issue_id)):' 'if False:' test_live_work_guard_rejects_invalid_issue_id
+mutate sql-down-break-dropped 'if RUN["sql_down"]:
+                log("  remaining nudges deferred: live-work lookup unavailable"); break' 'if RUN["sql_down"]:
+                log("  remaining nudges deferred: live-work lookup unavailable")' test_sql_down_break_stops_remaining_nudges
+mutate owner-fork-check-dropped 'if not same_repo_branch:' 'if False:' test_owner_fork_branch_card_is_rejected
+mutate owner-registered-check-dropped 'elif repo in _registered_repos(card):' 'elif True:' test_owner_unregistered_branch_card_is_rejected
+mutate owner-single-rule-dropped 'if len(trusted) == 1:' 'if trusted:' test_owner_two_trusted_cards_are_ambiguous
+mutate owner-facts-check-dropped 'if unknown:' 'if False:' test_owner_facts_unavailable_is_refused
+mutate owner-stale-filter-dropped 'if product.get("status") in _STALE_STATUSES:' 'if False:' test_owner_untrusted_products_are_rejected
+mutate owner-mismatch-filter-dropped 'if external_key and url_key and external_key != url_key:' 'if False:' test_owner_untrusted_products_are_rejected
+mutate owner-provider-filter-dropped 'if product.get("type") != "pull_request" or product.get("provider") != "github":' 'if False:' test_owner_untrusted_products_are_rejected
+mutate owner-branch-boundary-dropped 'pattern = r"(?<![0-9A-Za-z])%s(?![0-9])" % re.escape(identifier)' 'pattern = r"%s" % re.escape(identifier)' test_owner_branch_name_boundary
+mutate board-company-filter-changed "where i.company_id='{C}'" "where i.company_id='x'" test_board_query_filters_are_pinned
+mutate board-status-filter-changed "i.status not in ('done','cancelled')" "i.status not in ('done')" test_board_query_filters_are_pinned
+mutate board-assignee-filter-dropped 'and i.assignee_agent_id is not null' '' test_board_query_filters_are_pinned
+mutate board-blocks-filter-changed "ir.type='blocks' and b.status not in ('done','cancelled')" "ir.type='blocks'" test_board_query_filters_are_pinned
+mutate red-timed-out-dropped '("failure", "timed_out", "startup_failure")' '("failure", "startup_failure")' test_red_timed_out_check_is_a_red_nudge
+mutate red-kind-disabled 'if failing: kind = "red"' 'if False: kind = "red"' test_red_timed_out_check_is_a_red_nudge
+mutate dirty-behind-dropped 'behind = cmp.get("behind_by", "?") if isinstance(cmp, dict) else "?"' 'behind = "?"' test_dirty_pr_reports_compare_behind_count
+mutate sanitize-ref-dropped 'ref=_plain(d["head"]["ref"])' 'ref=d["head"]["ref"]' test_comment_sanitizes_pr_controlled_text
+mutate sanitize-failing-dropped '", ".join(_plain(name) for name in failing[:8])' '", ".join(failing[:8])' test_comment_sanitizes_pr_controlled_text
+mutate mint-timeout-dropped ', timeout=MINT_TIMEOUT' '' test_mint_call_carries_a_timeout
+mutate sql-timeout-dropped ', timeout=SQL_TIMEOUT' '' test_docker_calls_carry_timeouts
+mutate guard-timeout-dropped ', timeout=30' '' test_docker_calls_carry_timeouts
+mutate curl-api-timeout-dropped '"-d", json.dumps(body)], capture_output=True, text=True, timeout=API_TIMEOUT' '"-d", json.dumps(body)], capture_output=True, text=True' test_curl_calls_carry_timeouts
+mutate curl-api-get-timeout-dropped 'f"http://127.0.0.1:3100/api/{path}"], capture_output=True, text=True, timeout=API_TIMEOUT' 'f"http://127.0.0.1:3100/api/{path}"], capture_output=True, text=True' test_curl_calls_carry_timeouts
+
+mutate owner-archived-filter-dropped '_STALE_STATUSES = frozenset({"merged", "closed", "archived"})' '_STALE_STATUSES = frozenset({"merged", "closed"})' test_owner_untrusted_products_are_rejected
+mutate owner-malformed-external-dropped 'if external_id is not None and external_key is None:' 'if False:' test_owner_untrusted_products_are_rejected
+mutate owner-project-fallback-dropped 'else card["project_repos"]' 'else []' test_owner_project_repo_fallback_is_trusted
+mutate owner-head-repo-none-crashes '(pr["head_repo"] or "").lower()' 'pr["head_repo"].lower()' test_owner_missing_head_repo_does_not_crash
+mutate board-edge-direction-flipped 'where ir.related_issue_id=i.id' 'where ir.issue_id=i.id' test_board_query_filters_are_pinned
+mutate red-startup-failure-dropped '("failure", "timed_out", "startup_failure")' '("failure", "timed_out")' test_red_startup_failure_check_is_a_red_nudge
+mutate red-blocked-state-dropped 'elif ms in ("unstable", "blocked"):' 'elif ms in ("unstable",):' test_blocked_state_pr_with_failing_check_is_red
+mutate red-kind-always-on 'if failing: kind = "red"' 'if True: kind = "red"' test_unstable_all_green_checks_are_not_nudged
+mutate red-nameless-check-crashes ' and c.get("name")})' '})' test_red_nameless_failing_check_does_not_crash
+mutate curl-api-maxtime-dropped '"-m", "90", "-X", method' '"-X", method' test_curl_calls_carry_timeouts
+mutate curl-api-get-maxtime-dropped '"-m", "90", "-w"' '"-w"' test_curl_calls_carry_timeouts
+mutate sql-timeout-value-raised 'timeout=SQL_TIMEOUT' 'timeout=999999' test_docker_calls_carry_timeouts
+mutate guard-timeout-value-lowered 'timeout=30' 'timeout=1' test_docker_calls_carry_timeouts
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re

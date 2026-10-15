@@ -248,6 +248,252 @@ class Coverage(base.SweepCase):
         self.assertIn("FAULT", self.log_text())
         self.assertEqual(self.proc.board_writes(), [])
 
+    # --- Finding 1 (round 2): live-run deferral and owner-trust gates ---
+
+    def test_live_run_defers_nudge(self):
+        self.route_one_green_pr()
+        self.proc.docker = lambda q: "t" if "heartbeat_runs" in q else f"{base.IID}|{base.REF}|todo|Some Agent|f"
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+        self.assertIn("deferred:", self.log_text())
+
+    def test_live_work_guard_returns_live_only_on_t(self):
+        for out, expected in (("t", True), ("f", False)):
+            with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(["docker"], 0, out, "")):
+                self.assertIs(sweep.issue_has_live_work(base.IID), expected)
+
+    def test_live_work_guard_rejects_invalid_issue_id(self):
+        proc = subprocess.CompletedProcess(["docker"], 0, "f", "")
+        with mock.patch("subprocess.run", return_value=proc):
+            self.assertTrue(sweep.issue_has_live_work("not-a-uuid"),
+                            "an invalid id must fail closed, never read as no live work")
+            self.assertTrue(sweep.issue_has_live_work(""))
+
+    def test_sql_down_break_stops_remaining_nudges(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open",
+                       [base.pull_list(7)[0], base.pull_list(8)[0]])
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", base.pull_detail())
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/8", base.pull_detail())
+        guard_calls = []
+        def docker(q):
+            if "heartbeat_runs" in q:
+                guard_calls.append(q)
+                return subprocess.CompletedProcess(["docker"], 1, "", "boom")
+            return f"{base.IID}|{base.REF}|todo|Some Agent|f"
+        self.proc.docker = docker
+        products = [{"type": "pull_request", "provider": "github", "status": "active",
+                     "externalId": f"{base.ORG_REPO}#{n}", "url": None} for n in (7, 8)]
+        self.proc.curl_get = {f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+                              f"issues/{base.IID}/work-products": products}
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(self.proc.board_writes(), [])
+        self.assertIn("remaining nudges deferred", self.log_text())
+        self.assertEqual(len(guard_calls), 1, "the sql_down break must stop guard calls for later nudges")
+
+    @staticmethod
+    def _card(products, workspace_repo=None, project_repos=None, identifier=None, iid=None):
+        return {"iid": iid or base.IID, "identifier": identifier or base.REF, "status": "todo",
+                "agent": "Some Agent", "has_edge": "f", "products": products,
+                "workspace_repo": workspace_repo, "project_repos": project_repos or []}
+
+    @staticmethod
+    def _product(number=7, **over):
+        product = {"type": "pull_request", "provider": "github", "status": "active",
+                   "externalId": f"{base.ORG_REPO}#{number}", "url": None}
+        product.update(over)
+        return product
+
+    def _choose(self, cards, branch=None, head_repo=None):
+        pr = {"repo": base.ORG_REPO, "number": 7, "branch": branch or (base.REF + "-fix"),
+              "head_repo": base.ORG_REPO if head_repo is None else head_repo}
+        return sweep.choose_owner(pr, cards)
+
+    def test_owner_fork_branch_card_is_rejected(self):
+        card = self._card([], workspace_repo=f"https://github.com/{base.ORG_REPO}")
+        owner, why = self._choose([card], head_repo="someone/example-repo")
+        self.assertIsNone(owner)
+        self.assertIn("another repo", why)
+
+    def test_owner_unregistered_branch_card_is_rejected(self):
+        card = self._card([], workspace_repo="https://github.com/TogetherWeOwn/other-repo")
+        owner, why = self._choose([card])
+        self.assertIsNone(owner)
+        self.assertIn("not registered", why)
+
+    def test_owner_two_trusted_cards_are_ambiguous(self):
+        iid2 = "22222222-3333-4444-5555-666666666666"
+        cards = [self._card([self._product()]),
+                 self._card([self._product()], identifier="TO" + "G-124", iid=iid2)]
+        owner, why = self._choose(cards)
+        self.assertIsNone(owner)
+        self.assertIn("ambiguous", why)
+
+    def test_owner_facts_unavailable_is_refused(self):
+        owner, why = self._choose([self._card(None)])
+        self.assertIsNone(owner)
+        self.assertIn("facts unavailable", why)
+
+    def test_owner_untrusted_products_are_rejected(self):
+        cases = [
+            self._product(status="merged"),
+            self._product(status="closed"),
+            self._product(status="archived"),
+            self._product(url=f"https://github.com/{base.ORG_REPO}/pull/8"),
+            self._product(externalId="bogus!!", url=f"https://github.com/{base.ORG_REPO}/pull/7"),
+            self._product(provider="gitlab"),
+            self._product(type="issue"),
+        ]
+        for product in cases:
+            with self.subTest(product=product):
+                owner, _why = self._choose([self._card([product])])
+                self.assertIsNone(owner)
+
+    def test_owner_branch_name_boundary(self):
+        card = self._card([], workspace_repo=f"https://github.com/{base.ORG_REPO}")
+        owner, _why = self._choose([card], branch=base.REF + "9-fix")
+        self.assertIsNone(owner, "TOG-1239 must not name the TOG-123 card")
+        owner, _why = self._choose([card], branch=base.REF + "-fix")
+        self.assertIsNotNone(owner)
+
+    def test_board_query_filters_are_pinned(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        queries = [argv[argv.index("-c") + 1] for argv, _ in self.proc.calls
+                   if argv[0] == "docker" and "from issues" in argv[argv.index("-c") + 1]]
+        self.assertEqual(len(queries), 1)
+        query = queries[0]
+        for fragment in (f"i.company_id='{sweep.C}'", "i.status not in ('done','cancelled')",
+                         "i.assignee_agent_id is not null", "ir.type='blocks'",
+                         "join issues b on b.id=ir.issue_id", "where ir.related_issue_id=i.id",
+                         "b.status not in ('done','cancelled')"):
+            self.assertIn(fragment, query)
+
+    def _route_pr(self, detail, check_runs=None):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        if check_runs is not None:
+            self.net.route(f"repos/TogetherWeOwn/{base.REPO}/commits/{base.SHA}/check-runs",
+                           {"check_runs": check_runs})
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/compare/main...{base.SHA}", {"behind_by": 3})
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+                              f"issues/{base.IID}/work-products": [self._product()]}
+
+    def test_red_timed_out_check_is_a_red_nudge(self):
+        self._route_pr(base.pull_detail("unstable"),
+                       check_runs=[{"name": "ci-slow", "conclusion": "timed_out"}])
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        comment = json.loads(captured[0])["comment"]
+        self.assertIn("failing CI", comment)
+        self.assertIn("ci-slow", comment)
+
+    def test_owner_project_repo_fallback_is_trusted(self):
+        card = self._card([], workspace_repo=None,
+                          project_repos=[f"https://github.com/{base.ORG_REPO}"])
+        owner, _why = self._choose([card])
+        self.assertIsNotNone(owner)
+
+    def test_owner_missing_head_repo_does_not_crash(self):
+        pr = {"repo": base.ORG_REPO, "number": 7, "branch": base.REF + "-fix", "head_repo": None}
+        owner, _why = sweep.choose_owner(pr, [self._card([self._product()])])
+        self.assertIsNotNone(owner)
+
+    def test_red_startup_failure_check_is_a_red_nudge(self):
+        self._route_pr(base.pull_detail("unstable"),
+                       check_runs=[{"name": "ci-boot", "conclusion": "startup_failure"}])
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("ci-boot", json.loads(captured[0])["comment"])
+
+    def test_blocked_state_pr_with_failing_check_is_red(self):
+        self._route_pr(base.pull_detail("blocked"),
+                       check_runs=[{"name": "ci", "conclusion": "failure"}])
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("failing CI", json.loads(captured[0])["comment"])
+
+    def test_unstable_all_green_checks_are_not_nudged(self):
+        self._route_pr(base.pull_detail("unstable"),
+                       check_runs=[{"name": "ci", "conclusion": "success"}])
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_red_nameless_failing_check_does_not_crash(self):
+        self._route_pr(base.pull_detail("unstable"),
+                       check_runs=[{"conclusion": "failure"},
+                                   {"name": "ci", "conclusion": "failure"}])
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("ci", json.loads(captured[0])["comment"])
+
+    def test_dirty_pr_reports_compare_behind_count(self):
+        self._route_pr(base.pull_detail("dirty"))
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("3 commits behind", json.loads(captured[0])["comment"])
+
+    # --- Finding 2: PR-controlled text is sanitized in the comment ---
+
+    def test_comment_sanitizes_pr_controlled_text(self):
+        detail = base.pull_detail("unstable")
+        detail["head"]["ref"] = "bad`ref\n@evil"
+        self._route_pr(detail, check_runs=[{"name": "evil check\n@evil`x", "conclusion": "failure"}])
+        captured, run = self._patch_capture({"id": base.IID})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(captured), 1)
+        comment = json.loads(captured[0])["comment"]
+        self.assertNotIn("bad`ref", comment)
+        self.assertNotIn("@evil", comment)
+        self.assertNotIn("evil check", comment)
+        self.assertIn("bad_ref__evil", comment)
+        self.assertIn("evil_check__evil_x", comment)
+
+    # --- Finding 3: every subprocess call carries a timeout ---
+
+    def _calls_of(self, program):
+        return [(argv, kwargs) for argv, kwargs in self.proc.calls if argv[0] == program]
+
+    def test_mint_call_carries_a_timeout(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        calls = self._calls_of("bash")
+        self.assertTrue(calls)
+        for _argv, kwargs in calls:
+            self.assertEqual(kwargs.get("timeout"), sweep.MINT_TIMEOUT)
+
+    def test_docker_calls_carry_timeouts(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        calls = self._calls_of("docker")
+        self.assertGreaterEqual(len(calls), 2, "board sql and the live-work guard both shell to docker")
+        for argv, kwargs in calls:
+            query = argv[argv.index("-c") + 1]
+            expected = 30 if "heartbeat_runs" in query else sweep.SQL_TIMEOUT
+            self.assertEqual(kwargs.get("timeout"), expected, query[:60])
+
+    def test_curl_calls_carry_timeouts(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        calls = self._calls_of("curl")
+        self.assertGreaterEqual(len(calls), 2, "board api_get facts and the api PATCH both shell to curl")
+        for argv, kwargs in calls:
+            self.assertEqual(kwargs.get("timeout"), sweep.API_TIMEOUT)
+            self.assertEqual(argv[argv.index("-m") + 1], "90")
+
     def test_draft_and_release_please_are_skipped(self):
         self.route_org()
         draft = dict(base.pull_list(7)[0]); draft["draft"] = True

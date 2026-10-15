@@ -409,7 +409,7 @@ def _run(argv):
                 if not isinstance(runs, dict) or "_err" in runs:
                     log(f"skip {repo}#{p['number']}: check-runs unavailable {runs if not isinstance(runs, dict) else runs['_err']}"); continue
                 runs = runs.get("check_runs", [])
-                failing = sorted({c["name"] for c in runs if c.get("conclusion") in ("failure", "timed_out", "startup_failure")})
+                failing = sorted({c["name"] for c in runs if c.get("conclusion") in ("failure", "timed_out", "startup_failure") and c.get("name")})
                 if failing: kind = "red"
             if not kind: continue
             key = f"{repo}#{p['number']}@{sha[:10]}:{kind}"
