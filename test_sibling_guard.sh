@@ -188,6 +188,13 @@ const PULLS = {
   // secondary token of another card's branch, the title carries no key, and
   // the Refs line names only the foreign card — not relevant, stays clear.
   crosscardpr: [{ number: 927, title: 'bump pin', body: 'Refs: TOG-907', head: { ref: 'tog-907-bump-pin-so-tog-900-reruns-green', sha: 'DISTINCT' } }],
+  // Namespaced / segment open-PR heads whose primary key is ours: titles carry
+  // no key, so relevance can only come from the branch segment rule at the
+  // generic open-PR call site (not title, not same-head, not same-SHA).
+  nsprprefix: [{ number: 928, title: 'widget', body: 'just a description', head: { ref: 'ops/tog-900-widget', sha: 'DISTINCT' } }],
+  nsprseg: [{ number: 929, title: 'widget', body: 'just a description', head: { ref: 'tog-900/widget', sha: 'DISTINCT' } }],
+  nsprforeign: [{ number: 930, title: 'widget', body: 'Refs: TOG-907', head: { ref: 'ops/tog-900-widget', sha: 'DISTINCT' } }],
+  nsprown: [{ number: 931, title: 'widget', body: 'Refs: TOG-900', head: { ref: 'ops/tog-900-widget', sha: 'DISTINCT' } }],
   crosslower: [{ number: 916, title: 'Do the thing (TOG-900)', body: 'refs: tog-900', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossexact: [{ number: 917, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-9000', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossmidrelevant: [{ number: 918, title: 'Do the thing (TOG-900)', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
@@ -543,6 +550,27 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "tog-900/widget" <<< "$OUT" && echo 0 || echo 1)" \
   "the segment local branch is named in the report" "$OUT"
 
+# The `_` and `.` separators promised by the helper comment are owned too:
+# `<key>_x` and `<key>.1-x` must refuse, not silently clear if the trailing
+# separator class is tightened.
+UNDSEP="$TMP/undsep"; mkclone "$UNDSEP"
+(cd "$UNDSEP" && git checkout --quiet -b tog-900_widget && echo ns >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "underscore work" && git checkout --quiet main)
+run_guard "$UNDSEP" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card followed by an underscore separator and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900_widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the underscore-separated local branch is named in the report" "$OUT"
+
+DOTSEP="$TMP/dotsep"; mkclone "$DOTSEP"
+(cd "$DOTSEP" && git checkout --quiet -b tog-900.1-widget && echo ns >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "dot work" && git checkout --quiet main)
+run_guard "$DOTSEP" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card followed by a dot separator and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900.1-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the dot-separated local branch is named in the report" "$OUT"
+
 # ===========================================================================
 hdr "5b. Remote branch-name attribution ignores cross-card substrings."
 # Same primary-prefix rule through the remote detector, isolated: each fresh
@@ -775,6 +803,35 @@ assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
 run_guard "$CLEAN" TOG-900 --repo=stub/crosscardpr
 assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
   "an open PR on another card's branch naming this key only secondarily stays clear" "rc=$RC out=$OUT"
+
+# Namespaced / segment open-PR heads are relevant at this call site too: the
+# key starting a whole path segment (`ops/<key>-...`) or as its own segment
+# (`<key>/...`) is primary ownership, with or without an anchored Refs line.
+run_guard "$CLEAN" TOG-900 --repo=stub/nsprprefix
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an open PR on a namespaced branch with this card as segment prefix exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#928" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced open-PR duplicate names the PR number" "$OUT"
+assert "$(grep -q "ops/tog-900-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced open-PR duplicate names the full head ref" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/nsprseg
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an open PR on a branch with this card as its own path segment exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#929" <<< "$OUT" && echo 0 || echo 1)" \
+  "the segment open-PR duplicate names the PR number" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/nsprforeign
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an open PR on a namespaced branch whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced foreign claimant is named in the report" "$OUT"
+
+run_guard "$CLEAN" TOG-900 --repo=stub/nsprown
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an open PR on a namespaced branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#931" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced own-PR duplicate names the PR number" "$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossexact
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
