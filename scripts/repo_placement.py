@@ -20,8 +20,9 @@ Usage:
   repo_placement.py --fail-on-public < paths.txt
 
 Exit codes: 0 no public paths in the input, 1 public paths remain (or a
-plain listing was requested), 2 unmeasured (no input). A listing without
---fail-on-public always exits 0 when input was measured.
+plain listing was requested), 2 unmeasured (no input, or a quoted line
+that cannot be decoded). A listing without --fail-on-public always exits
+0 when input was measured, 2 when any line is unmeasured.
 """
 from __future__ import annotations
 
@@ -119,6 +120,21 @@ def _decode_git_path(line: str) -> str | None:
         elif nxt == "n":
             raw.append(0x0A)
             i += 2
+        elif nxt == "a":
+            raw.append(0x07)
+            i += 2
+        elif nxt == "b":
+            raw.append(0x08)
+            i += 2
+        elif nxt == "v":
+            raw.append(0x0B)
+            i += 2
+        elif nxt == "f":
+            raw.append(0x0C)
+            i += 2
+        elif nxt == "r":
+            raw.append(0x0D)
+            i += 2
         elif nxt in "01234567":
             digits = nxt
             j = i + 2
@@ -212,21 +228,32 @@ def main(argv=None, stdin_text=None) -> int:
         return 2
     text = sys.stdin.read() if stdin_text is None else stdin_text
     # Accept NUL-delimited input (`git ls-files -z`) as well as newlines.
-    text = text.replace("\0", "\n")
-    paths = [line.strip() for line in text.splitlines() if line.strip()]
+    # With -z the only record separator is NUL: a name may itself contain
+    # a newline, CR, VT, FF or unicode line breaks, so split on NUL only.
+    if "\0" in text:
+        paths = [r.strip() for r in text.split("\0") if r.strip()]
+    else:
+        paths = [line.strip() for line in text.splitlines() if line.strip()]
     if not paths:
         print("repo placement: UNMEASURED - no paths", file=sys.stderr)
         return 2
     counts: dict[str, int] = {}
     public_remaining = 0
+    unmeasured = 0
     for path in paths:
         verdict, rule = classify(path)
         counts[verdict] = counts.get(verdict, 0) + 1
-        if verdict.startswith("PUBLIC"):
+        if rule == "undecodable-quoted-path":
+            unmeasured += 1
+        elif verdict.startswith("PUBLIC"):
             public_remaining += 1
         print(f"{path}\t{verdict}\t{rule}")
     summary = ", ".join(f"{k}={counts[k]}" for k in sorted(counts))
     print(f"repo placement: {len(paths)} paths ({summary})", file=sys.stderr)
+    if unmeasured:
+        print(f"repo placement: UNMEASURED - "
+              f"{unmeasured} undecodable paths", file=sys.stderr)
+        return 2
     if fail_on_public and public_remaining:
         print(f"repo placement: FAIL ({public_remaining} public paths remain)",
               file=sys.stderr)

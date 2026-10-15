@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from repo_placement import _strip_backup, classify, main  # noqa: E402
+from repo_placement import _decode_git_path, _strip_backup, classify, main  # noqa: E402
 
 TRACKER = "TO" + "G" + "-1234"
 
@@ -117,16 +117,82 @@ class Classify(unittest.TestCase):
                      '"caf\\303\\251.key"',
                      '"keys/caf\\303\\251.env"'):
             with self.subTest(path=path):
-                self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+                verdict, rule = classify(path)
+                self.assertEqual(verdict, "PRIVATE-DATA", path)
+                # Must come from the real rule, not the fail-closed path:
+                # a broken decoder returns undecodable-quoted-path here.
+                self.assertEqual(rule, "secret-or-env-material", path)
+        self.assertEqual(_decode_git_path('"caf\\303\\251.pem"'), "café.pem")
+        # A non-UTF-8 octal byte decodes via surrogateescape and still
+        # matches the suffix rule (not the undecodable path).
+        verdict, rule = classify('"lat\\351.pem"')
+        self.assertEqual(verdict, "PRIVATE-DATA")
+        self.assertEqual(rule, "secret-or-env-material")
         # NUL-delimited (`git ls-files -z`) input classifies the same.
         self.assertEqual(main(["--fail-on-public"],
                               stdin_text='"caf\\303\\251.pem"\nquota_brake.sh\n'), 1)
         self.assertEqual(main(["--fail-on-public"],
                               stdin_text='"caf\\303\\251.pem"\0keys/app.pem\n'), 0)
 
+    def test_git_quoted_decoded_public_paths_stay_public(self):
+        # These decode to non-private names: a broken decoder that fails
+        # closed (None -> PRIVATE-DATA) flips them to private.
+        for path in ('"caf\\303\\251.txt"',
+                     '"a\\tb.txt"',
+                     '"a\\nb.txt"',
+                     '"a\\\\b.txt"',
+                     '"a\\"b.txt"'):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
+        self.assertEqual(_decode_git_path('"caf\\303\\251.txt"'),
+                         "café.txt")
+        self.assertEqual(_decode_git_path('"a\\tb.txt"'), "a\tb.txt")
+        # A decoded private tree stays private for its own reason.
+        verdict, rule = classify('"ops/caf\\303\\251.txt"')
+        self.assertEqual(verdict, "PRIVATE-DATA")
+        self.assertEqual(rule, "internal-notes-tree")
+
+    def test_git_quoted_control_escapes_decode(self):
+        # git also emits \a \b \v \f \r: all must decode, not fail closed.
+        for path in ('"bell\\ax.pem"',
+                     '"bs\\bx.pem"',
+                     '"vt\\vx.pem"',
+                     '"ff\\fx.pem"',
+                     '"cr\\rx.pem"'):
+            with self.subTest(path=path):
+                verdict, rule = classify(path)
+                self.assertEqual(verdict, "PRIVATE-DATA", path)
+                self.assertEqual(rule, "secret-or-env-material", path)
+        self.assertEqual(classify('"cr\\rx.txt"')[0], "PUBLIC-ABLE")
+
+    def test_nul_delimited_input_splits_on_nul_only(self):
+        # Real `git ls-files -z` output: NUL is the only separator.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a.pem\0b.pem\0"), 0)
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a.pem\0pub.txt\0"), 1)
+        # Unquoted UTF-8 name via -z stays private.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="café.pem\0"), 0)
+        # A newline inside a private name is not a record separator.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="new\nline.pem\0"), 0)
+
     def test_undecodable_quoted_paths_fail_closed(self):
         # A quoted line that cannot be decoded is never movable.
-        self.assertEqual(classify('"caf\\999.pem"')[0], "PRIVATE-DATA")
+        verdict, rule = classify('"caf\\999.pem"')
+        self.assertEqual(verdict, "PRIVATE-DATA")
+        self.assertEqual(rule, "undecodable-quoted-path")
+        # Trailing backslash and unknown escapes are also undecodable.
+        for path in ('"trailing\\"',
+                     '"a\\qb.txt"'):
+            with self.subTest(path=path):
+                verdict, rule = classify(path)
+                self.assertEqual(verdict, "PRIVATE-DATA", path)
+                self.assertEqual(rule, "undecodable-quoted-path", path)
+        # An undecodable-only listing is unmeasured (exit 2), never done.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text='"caf\\999.pem"\n'), 2)
 
     def test_synthetic_fixtures_are_not_private_config(self):
         # These paths match a pin/allowlist sheet rule and stay public
