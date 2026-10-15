@@ -1135,6 +1135,20 @@ jobs:
       - name: test-missing gate placement suite
         run: bash test_test_missing_gate_placement.sh
 
+      # Review trigger and same-head idempotency guard. The trigger decision
+      # (review_trigger.decide) and the step glue are pure stdlib with a
+      # faked GitHub API; the dedup guard, the one-retry reconciler and the
+      # orphan sweeper are offline with stubbed subprocesses. No API,
+      # database, credential or timer.
+      - name: review trigger decision suite
+        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger.py'
+
+      - name: review trigger step suite
+        run: python3 -m unittest discover -s .github/scripts -p 'test_review_trigger_step.py'
+
+      - name: same-head review idempotency suites
+        run: (cd ops/productivity && python3 -B -m unittest -v test_review_error_rerequest test_orphan_prs)
+
       # Same-head review idempotency guard: never request a covered head,
       # one retry max on errors, unknown states fail closed toward suppress.
       # Pure fixtures: no API, database, credential or timer.
