@@ -29,43 +29,58 @@ def _contains_any(text, markers):
 
 
 # Command-token match for `run:` shell text (fail closed on real
-# migrations, silent on prose): `migrate` must appear as a whole shell
-# word (optionally `db:migrate` or `migrate:<task>`), never inside a
-# longer identifier (`staging_migrate_db`, `unmigrated`, `migrated`).
-# Phrases `alembic upgrade` / `migrations apply` match whole. `cargo
-# test`, `selftest`, `echo`, and `git` lines never count: they run tests,
-# print prose, or inspect history against throwaway databases.
+# migrations, silent on prose): `migrate` must appear as a path/word
+# segment (bounded by non-alphanumerics, so `migrate-prod`,
+# `migrate_prod`, `db-migrate`, `./run_migrate.sh` flag), never inside a
+# longer alphanumeric word (`staging_migrate_db` is saved by the
+# `cargo test` segment rule, `unmigrated`/`migrated`/`--grep=migrate`
+# never match: the former two have alphanumeric glue, the latter is a
+# `git` segment). Phrases `alembic upgrade` / `migrations apply` match
+# whole. Chained shell lines are split on `&&`/`||`/`;`/`|` and each
+# segment is judged alone: only a segment that starts with `echo`/`git`
+# or carries `cargo test`/`selftest` is benign, so
+# `git pull && npm run migrate` and `echo go && npm run db:migrate`
+# still flag while bare `echo`/`git`/`cargo test` prose stays clean.
 _MIGRATE_TOKEN_RE = re.compile(
-    r"(?<![\w:-])(?:db\s*:\s*)?migrate(?::[\w-]+)?(?![\w:-])"
-    r"|(?<![\w:-])alembic\s+upgrade(?![\w:-])"
-    r"|(?<![\w:-])migrations\s+apply(?![\w:-])",
+    r"(?<![A-Za-z0-9])alembic\s+upgrade(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])migrations\s+apply(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])migrate(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|]")
 
 
 def _run_text_runs_migrations(run_text):
     """True when shell `run:` text invokes a migration command.
 
-    Line-based: comment (`#`), `echo`, and `git` lines are skipped;
-    any line carrying `cargo test` or `selftest` is a test/ephemeral-DB
-    invocation, never a deploy migration. Every other line is tested
-    with `_MIGRATE_TOKEN_RE`, so `staging_migrate_db`, `unmigrated`,
-    `migrated`, and `--grep=migrate` never flag while `db:migrate`,
+    Segment-based: each line is split on `&&`/`||`/`;`/`|` and every
+    segment is judged alone. A segment starting with `#`/`echo`/`git`,
+    or carrying `cargo test`/`selftest`, is a test/prose/inspection
+    invocation, never a deploy migration. Every other segment is tested
+    with `_MIGRATE_TOKEN_RE` (path/word segments, so `migrate-prod`,
+    `db-migrate`, `migrate_db`, `./run_migrate.sh` flag), so
+    `staging_migrate_db` via `cargo test`, `unmigrated`, `migrated`,
+    and `--grep=migrate` (a `git` segment) never flag while `db:migrate`,
     `migrate`, `alembic upgrade`, and `migrations apply` still do.
     """
     for raw_line in (run_text or "").splitlines() or [run_text or ""]:
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        low = stripped.lower()
-        if "cargo test" in low or "selftest" in low:
-            continue
-        if re.match(r"echo\b", low):
-            continue
-        if re.match(r"git\b", low):
-            continue
-        if _MIGRATE_TOKEN_RE.search(stripped):
-            return True
+        for segment in _SEGMENT_SPLIT_RE.split(stripped):
+            seg = segment.strip()
+            if not seg or seg.startswith("#"):
+                continue
+            low = seg.lower()
+            if "cargo test" in low or "selftest" in low:
+                continue
+            if re.match(r"echo\b", low):
+                continue
+            if re.match(r"git\b", low):
+                continue
+            if _MIGRATE_TOKEN_RE.search(seg):
+                return True
     return False
 
 
@@ -156,10 +171,12 @@ def _with_text_runs_migrations(with_text):
 def step_runs_migrations(step):
     """True when the step runs migrations (case-insensitive).
 
-    Consults the step's `run:` shell text as command tokens (whole-word
-    `migrate`/`db:migrate`, `alembic upgrade`, `migrations apply`;
-    `cargo test`/`selftest`/`echo`/`git` lines and `migrated`/`unmigrated`
-    prose never count), its `uses:` action reference (markers plus the
+    Consults the step's `run:` shell text as command tokens (path/word
+    segments: `migrate`, `migrate-prod`, `db-migrate`, `migrate_db`,
+    `alembic upgrade`, `migrations apply`; chained `&&`/`||`/`;`/`|`
+    segments are judged alone so `echo`/`git`/`cargo test`/`selftest`
+    segments never hide a migrating sibling, and `migrated`/`unmigrated`
+    prose never counts), its `uses:` action reference (markers plus the
     `migrat` stem, so `run-migrations` composites count, gate refs
     excluded), and its command-carrying `with:` inputs only
     (`command`/`args`/`run`/`script`/`preCommands`/`postCommands`/

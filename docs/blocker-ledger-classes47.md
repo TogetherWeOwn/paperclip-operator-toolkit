@@ -39,8 +39,11 @@ destructive-DDL. There is no per-file CONCURRENTLY skip:
 `-- no-transaction` (sqlx: this file does NOT run in a transaction)
 still requires CONCURRENTLY. The same-file `CREATE INDEX` exemption is
 strict: full qualified name (a qualified side never matches an
-unqualified side), never `TEMP`, never `IF NOT EXISTS`, never inside
-string literals or `DO`/function bodies. The
+unqualified side), never `TEMP`, never inside string literals or
+`DO`/function bodies, never a statement-opening `EXECUTE` (a column
+named `executed_at` never skips); the idempotent
+`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS` pair counts
+as proof. The
 gate takes `dialect: auto|postgres|sqlite|postgres-transactional`
 (default `auto`): explicit `postgres`/`sqlite`/`postgres-transactional`
 always wins and any other value (including
@@ -77,10 +80,12 @@ follow-up, never a failure (the base-commit read is recorded before the
 
 ## Concurrency (`blocker_concurrency_checks.py`)
 
-Flags workflow files that run migrations (whole command tokens:
-`migrate`/`db:migrate`, `alembic upgrade`, `migrations apply`, including
-`npx wrangler d1 migrations apply`; `cargo test`/`selftest`/`echo`/`git`
-lines and `staging_migrate_db`/`unmigrated`/`migrated` prose never count)
+Flags workflow files that run migrations (path/word segments: `migrate`,
+`migrate-prod`, `db-migrate`, `migrate_db`, `alembic upgrade`,
+`migrations apply`, including `npx wrangler d1 migrations apply`;
+chained `&&`/`||`/`;`/`|` segments are judged alone so `git pull &&
+npm run migrate` flags, while `cargo test`/`selftest`/`echo`/`git`
+segments and `unmigrated`/`migrated` prose never count)
 without
 a serialising `concurrency:` group: a top-level `concurrency:` (column 0)
 or a `concurrency:` block directly under EACH job key whose steps run
@@ -108,7 +113,12 @@ migrate-and-seed passes.
 Flags changed manifests (`package.json`, `Cargo.toml`, `pyproject.toml`,
 `go.mod`, `Gemfile`) with no accepted lockfile basename in the change or
 the tree, and empty/corrupt lockfiles (content-free `package-lock.json`,
-version-less `pnpm-lock.yaml`, package-less `Cargo.lock`). Presence, not
+version-less `pnpm-lock.yaml`, package-less `Cargo.lock`). Accepted
+lockfiles include `bun.lock`/`bun.lockb` (npm), `Pipfile.lock` and
+`requirements*.txt` (Python); a `pyproject.toml` with no dependency
+table is tool config, not a manifest (contents-aware), and a library
+crate (`src/lib.rs` without `src/main.rs`) never reports; `lockfile:
+none` or `ignore_manifests` opts a manifest out. Presence, not
 freshness: an already-vendored lockfile satisfies the gate even when the
 manifest changes without it, and matching is by basename (any lockfile
 anywhere satisfies any manifest). Stale-lockfile and directory-scoped
@@ -128,7 +138,8 @@ test_blocker_classes47_round4_regression
 test_blocker_classes47_round5_regression
 test_blocker_classes47_review_acceptance
 test_blocker_classes47_round6_regression
-test_blocker_classes47_round7_regression`
+test_blocker_classes47_round7_regression
+test_blocker_classes47_round8_regression`
 plus YAML/JSON parse. The blind review-acceptance module exercises the
 actual migration heredoc, missing-schema API skip and required-wrapper
 mapping, not comments containing their names. Every `*-gate.yml` runs

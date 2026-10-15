@@ -299,25 +299,26 @@ def _created_tables(up):
     counts), dollar-quoted `DO`/function bodies removed, then scanned per
     `;`-separated statement. Skipped as proof: `TEMP`/`TEMPORARY` tables
     (a temp object is never the persistent table the index builds on),
-    `CREATE TABLE IF NOT EXISTS` (the guard itself says the table may
-    already exist), and any creation inside a `DO`/function/`EXECUTE`
-    fragment (dollar-quote remnants, `DO ` prefix, or `EXECUTE` keyword).
+    and any creation inside a `DO`/function/`EXECUTE` fragment
+    (dollar-quote remnants, a `DO ` line prefix, or a statement-opening
+    `EXECUTE` keyword). A top-level `CREATE TABLE IF NOT EXISTS` counts
+    as proof: the idempotent `IF NOT EXISTS` pair is the dominant shape
+    in forward-only repos, and excluding it flags roughly half of a real
+    corpus. A column named `executed_at`/`execute_at` never skips the
+    statement: only a statement-opening `EXECUTE` counts.
     """
     no_comments = _strip_sql_comments(up)
     no_literals = _strip_single_quoted_literals(no_comments)
     top_level = _strip_dollar_quoted_blocks(no_literals)
     created = set()
     for stmt in _statements(top_level):
-        lowered = stmt.lower()
-        if "execute" in lowered:
+        if re.search(r"(?m)^\s*execute\b", stmt, re.IGNORECASE):
             continue
         if re.search(r"(?m)^\s*do\b", stmt, re.IGNORECASE):
             continue
         for m in _CREATE_TABLE_RE.finditer(stmt):
             whole = m.group(0)
             if re.search(r"\btemp(orary)?\b", whole, re.IGNORECASE):
-                continue
-            if re.search(r"\bif\s+not\s+exists\b", whole, re.IGNORECASE):
                 continue
             table = _normalize_table(m.group(1))
             if table:
@@ -369,8 +370,10 @@ def check_migration_safety(contents, dialect="postgres"):
     exactly where CONCURRENTLY works, so it still requires it. A
     `CREATE INDEX` on a table created at top level in the same up-section
     never reports (a brand-new persistent table has no concurrent writers
-    to block); the match is strict (full qualified name, no TEMP, no
-    `IF NOT EXISTS`, never inside literals or DO/function bodies).
+    to block, including the idempotent `CREATE TABLE IF NOT EXISTS` +
+    `CREATE INDEX IF NOT EXISTS` pair); the match is strict (full
+    qualified name, no TEMP, never inside literals or DO/function
+    bodies, never a statement-opening `EXECUTE`).
     """
     if dialect not in DIALECTS:
         raise ValueError("unknown dialect: %r" % (dialect,))

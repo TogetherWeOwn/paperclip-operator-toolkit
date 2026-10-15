@@ -104,9 +104,11 @@ annotations.
   an explicit caller `with:` still wins when present.
 - Migration per-file carve-outs (plain `postgres` only): a `CREATE INDEX`
   on a table created at top level in the same up-section never reports
-  (brand-new persistent table, no concurrent writers) — the match is
-  strict (full qualified name, never `TEMP`, never `IF NOT EXISTS`,
-  never inside string literals or `DO`/function bodies); a file
+  (brand-new persistent table, no concurrent writers, including the
+  idempotent `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`
+  pair) — the match is strict (full qualified name, never `TEMP`,
+  never inside string literals or `DO`/function bodies, never a
+  statement-opening `EXECUTE`); a file
   carrying `-- forward-only` (or `forward-only: acknowledged`) skips the
   down-path check for that file. There is deliberately no per-file
   CONCURRENTLY skip: `-- no-transaction` (sqlx: this file does NOT run
@@ -119,10 +121,21 @@ annotations.
   command-carrying `with:` inputs (`command`/`args`/`run`/`script`/
   `preCommands`/`postCommands`/`entrypoint`) are scanned — `ref`/`name`/
   cache-`key` values mentioning `migrate` do not make a job migrating.
-  Step `run:` text matches whole command tokens only (`migrate`,
-  `db:migrate`, `alembic upgrade`, `migrations apply`): `cargo test`,
-  `selftest`, `echo`, and `git` lines never count, and
-  `staging_migrate_db` / `unmigrated` / `migrated` prose never flags.
+  Step `run:` text matches path/word segments only (`migrate`,
+  `migrate-prod`, `db-migrate`, `migrate_db`, `alembic upgrade`,
+  `migrations apply`): chained `&&`/`||`/`;`/`|` segments are judged
+  alone, so `git pull && npm run migrate` flags, while `cargo test`,
+  `selftest`, `echo`, and `git` segments and `unmigrated` / `migrated`
+  prose never flag.
+- Lockfile recognised sets (presence, not freshness): npm accepts
+  `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+  `npm-shrinkwrap.json`, `bun.lock`, `bun.lockb`; Python accepts
+  `poetry.lock`, `pdm.lock`, `uv.lock`, `Pipfile.lock`,
+  `requirements.txt` and `requirements-*.txt`. A `pyproject.toml` with
+  no dependency table (`[project]`, `[tool.poetry]`, `[tool.pdm]`,
+  `[tool.uv]`) is tool config, not a manifest; a library crate
+  (`src/lib.rs` without `src/main.rs`) never reports. A manifest
+  containing `lockfile: none` or listed in `ignore_manifests` opts out.
 
 ## Rollout: adopt, activate, warn 24h, then required
 

@@ -8,8 +8,9 @@ untouched; this file pins the new behaviour separately.
 - `-- no-transaction` never skips CONCURRENTLY (sqlx semantics): a marked
   file with a plain index flags, including a marker in the DOWN half.
 - Same-file CREATE INDEX exemption is strict: schema-qualified mismatch,
-  TEMP, string-literal prose, `IF NOT EXISTS`, and DO-guard creations
-  all flag; plain and qualified same-table creations stay exempt.
+  TEMP, string-literal prose, and DO-guard creations all flag; plain,
+  qualified, and `IF NOT EXISTS` same-table creations stay exempt
+  (round-8: the idempotent pair is the dominant forward-only shape).
 - `postgres-transactional` gate wiring is harness-pinned: the delivered
   migration-gate heredoc exits 0 for a plain index / missing DOWN under
   the transactional pin and 1 for ALTER TYPE without USING.
@@ -108,11 +109,25 @@ class SameFileExemptionStrictnessTest(unittest.TestCase):
             "CREATE INDEX i ON events(id);\n"
         )
 
-    def test_if_not_exists_does_not_prove_new_table(self):
-        self.assert_flags(
-            "CREATE TABLE IF NOT EXISTS events(id int);\n"
-            "CREATE INDEX i ON events(id);\n"
-        )
+    def test_if_not_exists_counts_as_new_table(self):
+        # Round-8 correction: the idempotent IF NOT EXISTS pair is the
+        # dominant forward-only shape; excluding it flagged ~half of a
+        # real corpus, so it counts as proof (TEMP/literals/DO still do
+        # not). Updated per the 4/5 review on head b8a11e1.
+        self.assertEqual(MIG.check_migration_safety({
+            "m/1.sql": (
+                "CREATE TABLE IF NOT EXISTS events(id int);\n"
+                "CREATE INDEX i ON events(id);\n"
+            ),
+        }), [])
+
+    def test_if_not_exists_idempotent_pair_stays_exempt(self):
+        self.assertEqual(MIG.check_migration_safety({
+            "m/1.sql": (
+                "CREATE TABLE IF NOT EXISTS events(id int);\n"
+                "CREATE INDEX IF NOT EXISTS i ON events(id);\n"
+            ),
+        }), [])
 
     def test_do_guard_creation_does_not_exempt(self):
         self.assert_flags(

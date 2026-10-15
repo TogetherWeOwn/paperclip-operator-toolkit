@@ -1131,7 +1131,7 @@ jobs:
       - name: blocker-ledger classes 4-7 suites
         env:
           PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
-        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression test_blocker_classes47_review_acceptance test_blocker_classes47_round6_regression test_blocker_classes47_round7_regression
+        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression test_blocker_classes47_review_acceptance test_blocker_classes47_round6_regression test_blocker_classes47_round7_regression test_blocker_classes47_round8_regression
 
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh

@@ -192,12 +192,13 @@ class SameTableAndTransactionalTest(unittest.TestCase):
     def test_gate_accepts_transactional_dialect(self):
         text = (STAGE / "migration-gate.yml").read_text()
         self.assertIn("postgres-transactional", text)
-        # The gate's `case` allow-list must accept the new value: the
-        # input description already mentions it, so a bare `assertIn`
-        # survives dropping it from the case statement.
+        # Pin the exact `case` allow-list line, not the error message on
+        # the next line (which carries the same literal): dropping the
+        # value from the case statement must turn this red. The shell
+        # validator itself is executed in the round-8 harness.
         self.assertRegex(
             text,
-            r"auto\|postgres\|sqlite\|postgres-transactional",
+            r"(?m)^\s*auto\|postgres\|sqlite\|postgres-transactional\)\s*;;",
         )
 
 
