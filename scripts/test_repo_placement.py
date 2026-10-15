@@ -27,12 +27,26 @@ class Classify(unittest.TestCase):
     def test_suffixless_secret_and_credential_files_are_private_data(self):
         for path in ("id_rsa", "keys/id_ed25519", "keys/id_ecdsa",
                      "keys/id_dsa", ".netrc", ".npmrc", ".pypirc",
+                     ".git-credentials", ".pgpass", ".htpasswd", ".my.cnf",
+                     ".docker/config.json",
                      "credentials.json", "config/credentials",
                      "secrets.yaml", "secret.txt", "kubeconfig",
                      "config/kubeconfig", ".kube/config",
                      "clusters/kubeconfig-prod.yaml", "my-kubeconfig",
-                     "prod.tfvars", "backup.gpg",
+                     "prod.tfvars", "prod.tfvars.json",
+                     "AuthKey_X.p8", "key.ppk", "key.pk8",
+                     "backup.gpg",
                      "token.age", "vault.kdbx", "app.jks", "app.keystore"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+
+    def test_backup_copies_of_secrets_stay_private_data(self):
+        for path in ("id_rsa.bak", "id_rsa.old", "id_rsa~",
+                     "keys/id_ed25519.bak",
+                     "credentials.json.bak", "credentials.bak",
+                     "secrets.yaml.orig", "secret.txt~",
+                     ".env.bak", "prod.tfvars.json.bak",
+                     "token.age.orig", "AuthKey_X.p8.bak"):
             with self.subTest(path=path):
                 self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
 
@@ -42,9 +56,13 @@ class Classify(unittest.TestCase):
     def test_secret_named_code_files_are_not_private_data(self):
         # Only a full secret/credentials stem is material; code that merely
         # handles secrets (or an English word starting with "secret") is
-        # generic code and stays public-able.
+        # generic code and stays public-able. The same holds for kubeconfig:
+        # a parser, helper or guide is code/docs, not cluster material.
         for path in ("src/secrets_manager.py", "src/credentials_provider.js",
-                     "api/secrets.py", "secretary.py", "config/secretary.json"):
+                     "api/secrets.py", "secretary.py", "config/secretary.json",
+                     "kubeconfig.py", "src/kubeconfig_loader.py",
+                     "test_kubeconfig.py", "scripts/kubeconfig.sh",
+                     "kubeconfig_test.go", "docs/kubeconfig-guide.md"):
             with self.subTest(path=path):
                 self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
 
