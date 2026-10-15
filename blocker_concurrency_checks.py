@@ -28,6 +28,47 @@ def _contains_any(text, markers):
     return any(marker.lower() in lowered for marker in markers)
 
 
+# Command-token match for `run:` shell text (fail closed on real
+# migrations, silent on prose): `migrate` must appear as a whole shell
+# word (optionally `db:migrate` or `migrate:<task>`), never inside a
+# longer identifier (`staging_migrate_db`, `unmigrated`, `migrated`).
+# Phrases `alembic upgrade` / `migrations apply` match whole. `cargo
+# test`, `selftest`, `echo`, and `git` lines never count: they run tests,
+# print prose, or inspect history against throwaway databases.
+_MIGRATE_TOKEN_RE = re.compile(
+    r"(?<![\w:-])(?:db\s*:\s*)?migrate(?::[\w-]+)?(?![\w:-])"
+    r"|(?<![\w:-])alembic\s+upgrade(?![\w:-])"
+    r"|(?<![\w:-])migrations\s+apply(?![\w:-])",
+    re.IGNORECASE,
+)
+
+
+def _run_text_runs_migrations(run_text):
+    """True when shell `run:` text invokes a migration command.
+
+    Line-based: comment (`#`), `echo`, and `git` lines are skipped;
+    any line carrying `cargo test` or `selftest` is a test/ephemeral-DB
+    invocation, never a deploy migration. Every other line is tested
+    with `_MIGRATE_TOKEN_RE`, so `staging_migrate_db`, `unmigrated`,
+    `migrated`, and `--grep=migrate` never flag while `db:migrate`,
+    `migrate`, `alembic upgrade`, and `migrations apply` still do.
+    """
+    for raw_line in (run_text or "").splitlines() or [run_text or ""]:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        low = stripped.lower()
+        if "cargo test" in low or "selftest" in low:
+            continue
+        if re.match(r"echo\b", low):
+            continue
+        if re.match(r"git\b", low):
+            continue
+        if _MIGRATE_TOKEN_RE.search(stripped):
+            return True
+    return False
+
+
 def _is_gate_uses(value):
     """True for the blocker-ledger gate's own reusable-workflow refs.
 
@@ -115,15 +156,18 @@ def _with_text_runs_migrations(with_text):
 def step_runs_migrations(step):
     """True when the step runs migrations (case-insensitive).
 
-    Consults the step's `run:` shell text, its `uses:` action reference
-    (markers plus the `migrat` stem, so `run-migrations` composites
-    count, gate refs excluded), and its command-carrying `with:` inputs
-    only (`command`/`args`/`run`/`script`/`preCommands`/`postCommands`/
+    Consults the step's `run:` shell text as command tokens (whole-word
+    `migrate`/`db:migrate`, `alembic upgrade`, `migrations apply`;
+    `cargo test`/`selftest`/`echo`/`git` lines and `migrated`/`unmigrated`
+    prose never count), its `uses:` action reference (markers plus the
+    `migrat` stem, so `run-migrations` composites count, gate refs
+    excluded), and its command-carrying `with:` inputs only
+    (`command`/`args`/`run`/`script`/`preCommands`/`postCommands`/
     `entrypoint`) — never `needs:`, names, `ref`/`name`/`key` inputs, or
     comments.
     """
     step = step or {}
-    if _contains_any(step.get("run", ""), MIGRATION_RUN_MARKERS):
+    if _run_text_runs_migrations(step.get("run", "")):
         return True
     if _uses_text_runs_migrations(step.get("uses", "")):
         return True

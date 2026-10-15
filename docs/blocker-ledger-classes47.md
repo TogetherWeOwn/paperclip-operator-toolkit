@@ -32,9 +32,18 @@ Down-section statements are not findings. Ack waives destructive-DDL only
 after explicit human review.
 Dialect: `postgres` enforces CONCURRENTLY/USING; `sqlite` (Cloudflare D1)
 skips CONCURRENTLY/USING and the down check because SQLite rejects that
-syntax (plain `CREATE INDEX` passes, destructive-DDL still reports). The
-gate takes `dialect: auto|postgres|sqlite` (default `auto`): explicit
-`postgres`/`sqlite` always wins and any other value (including
+syntax (plain `CREATE INDEX` passes, destructive-DDL still reports);
+`postgres-transactional` (forward-only single-transaction Postgres
+runner) skips CONCURRENTLY and the down check but keeps USING and
+destructive-DDL. There is no per-file CONCURRENTLY skip:
+`-- no-transaction` (sqlx: this file does NOT run in a transaction)
+still requires CONCURRENTLY. The same-file `CREATE INDEX` exemption is
+strict: full qualified name (a qualified side never matches an
+unqualified side), never `TEMP`, never `IF NOT EXISTS`, never inside
+string literals or `DO`/function bodies. The
+gate takes `dialect: auto|postgres|sqlite|postgres-transactional`
+(default `auto`): explicit `postgres`/`sqlite`/`postgres-transactional`
+always wins and any other value (including
 `Postgres`) is rejected instead of falling back to auto; `auto` selects
 sqlite only when a wrangler config read from the BASE commit (never the
 PR checkout, so a PR-added `wrangler.toml` cannot flip the result)
@@ -68,8 +77,11 @@ follow-up, never a failure (the base-commit read is recorded before the
 
 ## Concurrency (`blocker_concurrency_checks.py`)
 
-Flags workflow files that run migrations (`migrate`, `alembic upgrade`,
-`migrations apply`, including `npx wrangler d1 migrations apply`) without
+Flags workflow files that run migrations (whole command tokens:
+`migrate`/`db:migrate`, `alembic upgrade`, `migrations apply`, including
+`npx wrangler d1 migrations apply`; `cargo test`/`selftest`/`echo`/`git`
+lines and `staging_migrate_db`/`unmigrated`/`migrated` prose never count)
+without
 a serialising `concurrency:` group: a top-level `concurrency:` (column 0)
 or a `concurrency:` block directly under EACH job key whose steps run
 migrations (direct-child indent derived from the block, so 2-space and
@@ -114,7 +126,9 @@ test_blocker_classes47_round2_regression
 test_blocker_classes47_round3_regression
 test_blocker_classes47_round4_regression
 test_blocker_classes47_round5_regression
-test_blocker_classes47_review_acceptance`
+test_blocker_classes47_review_acceptance
+test_blocker_classes47_round6_regression
+test_blocker_classes47_round7_regression`
 plus YAML/JSON parse. The blind review-acceptance module exercises the
 actual migration heredoc, missing-schema API skip and required-wrapper
 mapping, not comments containing their names. Every `*-gate.yml` runs

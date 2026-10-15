@@ -126,10 +126,26 @@ class SameTableAndTransactionalTest(unittest.TestCase):
         self.assertTrue(findings)
         self.assertIn("CONCURRENTLY", findings[0])
 
-    def test_no_transaction_marker_skips_concurrently(self):
-        self.assertEqual(MIG.check_migration_safety({
+    def test_no_transaction_marker_does_not_skip_concurrently(self):
+        # `-- no-transaction` is the sqlx marker for a file that does NOT
+        # run in a transaction: CONCURRENTLY works there, so the gate
+        # still requires it (transactional runners pin the
+        # `postgres-transactional` dialect instead).
+        findings = MIG.check_migration_safety({
             "m/1.sql": "CREATE INDEX i ON t(x);\n-- no-transaction\n",
-        }), [])
+        })
+        self.assertTrue(findings)
+        self.assertIn("CONCURRENTLY", findings[0])
+
+    def test_no_transaction_marker_in_down_half_does_not_skip(self):
+        findings = MIG.check_migration_safety({
+            "m/1.sql": (
+                "CREATE INDEX i ON t(x);\n-- DOWN\n-- no-transaction\n"
+                "DROP INDEX i;\n"
+            ),
+        })
+        self.assertTrue(findings)
+        self.assertIn("CONCURRENTLY", findings[0])
 
     def test_no_transaction_marker_keeps_using(self):
         findings = MIG.check_migration_safety({
@@ -176,6 +192,13 @@ class SameTableAndTransactionalTest(unittest.TestCase):
     def test_gate_accepts_transactional_dialect(self):
         text = (STAGE / "migration-gate.yml").read_text()
         self.assertIn("postgres-transactional", text)
+        # The gate's `case` allow-list must accept the new value: the
+        # input description already mentions it, so a bare `assertIn`
+        # survives dropping it from the case statement.
+        self.assertRegex(
+            text,
+            r"auto\|postgres\|sqlite\|postgres-transactional",
+        )
 
 
 class WithInputScopeTest(unittest.TestCase):

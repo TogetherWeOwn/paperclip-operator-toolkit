@@ -184,6 +184,20 @@ check("pull_request trigger has no paths filter",
 check("pull_request re-runs on ready_for_review",
       re.search(r"(?m)^\s+types:\s*\[.*ready_for_review", pr_block) is not None)
 
+# Step-presence, guarded from OUTSIDE the step itself: the sdlc_foundation
+# suite asserts its own wiring, but a deleted step never runs that
+# assertion, and a header comment still names the files. This gate runs
+# in its own step, so deleting the sdlc_foundation step (comments kept)
+# must turn this check red: non-comment lines must execute all three
+# commands.
+noncomment = "\n".join(
+    line for line in text.splitlines()
+    if not line.lstrip().startswith("#"))
+for cmd in ("./test_sdlc_foundation_placement.sh",
+            "python3 -m unittest test_sdlc_foundation_acceptance",
+            "./templates/org-github/tests/test_sdlc_foundation.sh"):
+    check(f"ci.yml executes {cmd}", cmd in noncomment)
+
 # The drain keeps describing red runs; it must not become a required gate.
 drain = bodies.get("failure-log-drain")
 check("failure-log-drain exists", drain is not None)

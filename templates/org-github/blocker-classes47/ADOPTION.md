@@ -103,17 +103,26 @@ annotations.
   back to it on `pull_request`, where `workflow_call` inputs are empty);
   an explicit caller `with:` still wins when present.
 - Migration per-file carve-outs (plain `postgres` only): a `CREATE INDEX`
-  on a table created in the same up-section never reports (brand-new
-  table, no concurrent writers); a file carrying `-- no-transaction`
-  skips CONCURRENTLY for that file; a file carrying `-- forward-only`
-  (or `forward-only: acknowledged`) skips the down-path check for that
-  file. `ALTER ... TYPE` inside `DO $$`, function bodies, and
+  on a table created at top level in the same up-section never reports
+  (brand-new persistent table, no concurrent writers) — the match is
+  strict (full qualified name, never `TEMP`, never `IF NOT EXISTS`,
+  never inside string literals or `DO`/function bodies); a file
+  carrying `-- forward-only` (or `forward-only: acknowledged`) skips the
+  down-path check for that file. There is deliberately no per-file
+  CONCURRENTLY skip: `-- no-transaction` (sqlx: this file does NOT run
+  in a transaction) is exactly where CONCURRENTLY works, so it still
+  requires it — transactional runners pin `postgres-transactional`
+  instead. `ALTER ... TYPE` inside `DO $$`, function bodies, and
   `EXECUTE '...'` strings still reports (searched, not start-anchored).
 - Concurrency callers are never self-flagging: the gate's own
   `blocker-*-gate.yml` refs never count as migrating, and only
   command-carrying `with:` inputs (`command`/`args`/`run`/`script`/
   `preCommands`/`postCommands`/`entrypoint`) are scanned — `ref`/`name`/
   cache-`key` values mentioning `migrate` do not make a job migrating.
+  Step `run:` text matches whole command tokens only (`migrate`,
+  `db:migrate`, `alembic upgrade`, `migrations apply`): `cargo test`,
+  `selftest`, `echo`, and `git` lines never count, and
+  `staging_migrate_db` / `unmigrated` / `migrated` prose never flags.
 
 ## Rollout: adopt, activate, warn 24h, then required
 

@@ -1,0 +1,5 @@
+# Day-1 CODEOWNERS (TOG-24386, staged for the public repo-template repo).
+# Goes to `.github/CODEOWNERS` in the new repo. Replace the placeholder team
+# at creation (BOOTSTRAP step 3); a CODEOWNERS file naming nobody owns
+# nothing, so an unreplaced placeholder fails the bootstrap check.
+* @TogetherWeOwn/<OWNING-TEAM>

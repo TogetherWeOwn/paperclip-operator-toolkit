@@ -50,12 +50,15 @@ _ALTER_TABLE_SEARCH_RE = re.compile(
     + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*\s*\*?\s+",
     re.IGNORECASE,
 )
-# Per-file opt-outs (case-insensitive `--` comments): a transactional
-# runner cannot run CONCURRENTLY inside its single-transaction apply, and
-# a forward-only file has no DOWN path by contract. Markers are read from
-# the raw file text (comments included) so they work even though safety
-# checks run on comment-stripped SQL.
-_NO_TRANSACTION_RE = re.compile(r"--\s*no-transaction\b", re.IGNORECASE)
+# Per-file opt-outs (case-insensitive `--` comments): a forward-only file
+# has no DOWN path by contract. Markers are read from the raw file text
+# (comments included) so they work even though safety checks run on
+# comment-stripped SQL.
+# NOTE: `-- no-transaction` (the sqlx marker for a migration that does NOT
+# run in a transaction) is deliberately NOT a CONCURRENTLY skip: a
+# non-transactional file is exactly where CONCURRENTLY works, so the gate
+# still requires it there. Transactional runners pin the
+# `postgres-transactional` dialect instead of a per-file marker.
 _FORWARD_ONLY_RE = re.compile(
     r"--\s*forward-only\b|forward-only\s*:\s*acknowledged", re.IGNORECASE
 )
@@ -227,14 +230,9 @@ def _split_top_level_commas(stmt):
     return parts
 
 
-def _normalize_table(name):
-    """Last identifier part, unquoted and lowercased, for same-file compare.
-
-    `public."MyTable"` and `mytable` compare equal: Postgres folds
-    unquoted identifiers, and the exemption is intentionally lenient (a
-    missed exemption only adds a warning, never hides a real lock).
-    """
-    text = (name or "").strip().split(".")[-1].strip()
+def _normalize_ident_part(part):
+    """One identifier part, unquoted and lowercased (Postgres folds unquoted)."""
+    text = (part or "").strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'`":
         text = text[1:-1]
     if text.startswith("[") and text.endswith("]"):
@@ -242,14 +240,89 @@ def _normalize_table(name):
     return text.lower()
 
 
+def _normalize_table(name):
+    """Full normalised qualified name, for strict same-file compare.
+
+    Every dotted part is unquoted/lowercased and the qualification is
+    preserved: `public.events` and `archive.events` never compare equal,
+    and a qualified side never matches an unqualified side (an unqualified
+    `CREATE TABLE t` is not proof that `public.t` is new — fail closed and
+    warn). Only two unqualified names compare bare.
+    """
+    parts = [p for p in (name or "").strip().split(".")]
+    normed = [_normalize_ident_part(p) for p in parts]
+    normed = [p for p in normed if p]
+    return ".".join(normed)
+
+
+_SINGLE_QUOTE_RE = re.compile(r"'(?:[^']|'')*'")
+_DOLLAR_TAG_RE = re.compile(r"\$[A-Za-z_][\w$]*\$|\$\$")
+
+
+def _strip_single_quoted_literals(text):
+    """Blank single-quoted string contents (keep the quotes for structure).
+
+    A `COMMENT ON TABLE events IS 'create table events ...'` literal must
+    never count as a table creation. Doubled `''` escapes are honoured.
+    """
+    return _SINGLE_QUOTE_RE.sub("''", text or "")
+
+
+def _strip_dollar_quoted_blocks(text):
+    """Remove Postgres dollar-quoted bodies (`$$ ... $$`, `$tag$ ... $tag$`).
+
+    `CREATE TABLE` inside a `DO $$` guard or a `CREATE FUNCTION ... $$`
+    body is conditional/procedural code, never proof the table is new.
+    Unmatched tags are left alone (fail closed: the statements still scan).
+    """
+    out = text or ""
+    # Iterate over opening tags; each needs its matching close.
+    pos = 0
+    while True:
+        m = _DOLLAR_TAG_RE.search(out, pos)
+        if not m:
+            break
+        tag = m.group(0)
+        close = out.find(tag, m.end())
+        if close == -1:
+            pos = m.end()
+            continue
+        out = out[: m.start()] + " " + out[close + len(tag):]
+        pos = m.start() + 1
+    return out
+
+
 def _created_tables(up):
-    """Tables created in the up-section (comment-stripped, all statements)."""
-    stripped = _strip_sql_comments(up)
-    return {
-        _normalize_table(m.group(1))
-        for m in _CREATE_TABLE_RE.finditer(stripped)
-        if _normalize_table(m.group(1))
-    }
+    """Tables created at top level of the up-section (strict, fail closed).
+
+    Comment-stripped, single-quoted literals blanked (literal prose never
+    counts), dollar-quoted `DO`/function bodies removed, then scanned per
+    `;`-separated statement. Skipped as proof: `TEMP`/`TEMPORARY` tables
+    (a temp object is never the persistent table the index builds on),
+    `CREATE TABLE IF NOT EXISTS` (the guard itself says the table may
+    already exist), and any creation inside a `DO`/function/`EXECUTE`
+    fragment (dollar-quote remnants, `DO ` prefix, or `EXECUTE` keyword).
+    """
+    no_comments = _strip_sql_comments(up)
+    no_literals = _strip_single_quoted_literals(no_comments)
+    top_level = _strip_dollar_quoted_blocks(no_literals)
+    created = set()
+    for stmt in _statements(top_level):
+        lowered = stmt.lower()
+        if "execute" in lowered:
+            continue
+        if re.search(r"(?m)^\s*do\b", stmt, re.IGNORECASE):
+            continue
+        for m in _CREATE_TABLE_RE.finditer(stmt):
+            whole = m.group(0)
+            if re.search(r"\btemp(orary)?\b", whole, re.IGNORECASE):
+                continue
+            if re.search(r"\bif\s+not\s+exists\b", whole, re.IGNORECASE):
+                continue
+            table = _normalize_table(m.group(1))
+            if table:
+                created.add(table)
+    return created
 
 
 def _index_table(stmt):
@@ -291,10 +364,13 @@ def check_migration_safety(contents, dialect="postgres"):
     `dialect="postgres-transactional"` (forward-only runner applying each
     file in one transaction) skips CONCURRENTLY (it cannot run inside a
     transaction block) but keeps USING; destructive-DDL still reports.
-    Under plain `postgres`, a file carrying a `-- no-transaction` comment
-    skips CONCURRENTLY for that file only, and a `CREATE INDEX` on a
-    table created in the same up-section never reports (a brand-new table
-    has no concurrent writers to block).
+    Under plain `postgres` there is no per-file CONCURRENTLY skip:
+    `-- no-transaction` (sqlx: this file does NOT run in a transaction) is
+    exactly where CONCURRENTLY works, so it still requires it. A
+    `CREATE INDEX` on a table created at top level in the same up-section
+    never reports (a brand-new persistent table has no concurrent writers
+    to block); the match is strict (full qualified name, no TEMP, no
+    `IF NOT EXISTS`, never inside literals or DO/function bodies).
     """
     if dialect not in DIALECTS:
         raise ValueError("unknown dialect: %r" % (dialect,))
@@ -313,9 +389,7 @@ def check_migration_safety(contents, dialect="postgres"):
         ) and SAFETY_ACK.lower() not in text.lower():
             reasons.append("destructive DDL without safety ack")
         if not sqlite:
-            skip_concurrently = transactional or bool(
-                _NO_TRANSACTION_RE.search(text or "")
-            )
+            skip_concurrently = transactional
             created = _created_tables(up) if not skip_concurrently else set()
             for stmt in _statements(up):
                 if (
