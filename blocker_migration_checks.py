@@ -15,8 +15,9 @@ MIGRATION_DIRS = ("migrations/", "alembic/versions/")
 SAFETY_ACK = "safety: acknowledged"
 
 # Dialects: postgres enforces CONCURRENTLY/USING; sqlite (D1) skips them
-# because SQLite rejects that syntax. Destructive-DDL and down-path
-# checks run under every dialect.
+# because SQLite rejects that syntax. Destructive-DDL reports under every
+# dialect; the down-path check is postgres-only because D1 migrations are
+# forward-only (no DOWN marker or sibling down file exists).
 DIALECTS = ("postgres", "sqlite")
 
 _DOWN_RE = re.compile(r"--\s*down\b", re.IGNORECASE)
@@ -28,7 +29,6 @@ _CONCURRENTLY_RE = re.compile(r"\bconcurrently\b", re.IGNORECASE)
 _ALTER_TYPE_RE = re.compile(r"\balter\s+column\b.*\btype\b", re.IGNORECASE | re.DOTALL)
 _ALTER_CLAUSE_RE = re.compile(r"\balter\s+column\b.*\btype\b", re.IGNORECASE | re.DOTALL)
 _USING_RE = re.compile(r"\busing\b", re.IGNORECASE)
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
 def is_migration_path(path):
@@ -47,21 +47,41 @@ def _strip_sql_comments(sql):
 
     Guards must match code, never prose: without this a comment containing
     CONCURRENTLY/USING masks an unguarded statement in the same chunk.
-    Quote-aware: `--` inside single/double-quoted literals is kept.
+    Single-pass and quote-aware for both comment forms: a `/*` inside a
+    single/double-quoted literal is kept (seed rows with glob patterns are
+    common in migrations), and Postgres-nested `/* /* */ */` blocks are
+    removed by depth. An unterminated block is kept verbatim (fail closed:
+    its content still reports) rather than swallowing the rest of the file.
     """
-    no_block = _BLOCK_COMMENT_RE.sub(" ", sql or "")
+    text = sql or ""
     out = []
     i = 0
-    n = len(no_block)
+    n = len(text)
     quote = None
+    depth = 0
+    block_start = 0
     while i < n:
-        ch = no_block[i]
+        ch = text[i]
+        if depth > 0:
+            # Inside a block comment: quotes are comment text, nesting counts.
+            if ch == "/" and i + 1 < n and text[i + 1] == "*":
+                depth += 1
+                i += 2
+                continue
+            if ch == "*" and i + 1 < n and text[i + 1] == "/":
+                depth -= 1
+                i += 2
+                if depth == 0:
+                    out.append(" ")
+                continue
+            i += 1
+            continue
         if quote is not None:
             out.append(ch)
             if ch == quote:
                 # SQL escapes '' by doubling; a doubled quote stays quoted.
-                if i + 1 < n and no_block[i + 1] == quote:
-                    out.append(no_block[i + 1])
+                if i + 1 < n and text[i + 1] == quote:
+                    out.append(text[i + 1])
                     i += 2
                     continue
                 quote = None
@@ -72,13 +92,22 @@ def _strip_sql_comments(sql):
             out.append(ch)
             i += 1
             continue
-        if ch == "-" and i + 1 < n and no_block[i + 1] == "-":
+        if ch == "-" and i + 1 < n and text[i + 1] == "-":
             # Line comment: skip to (not including) the newline.
-            while i < n and no_block[i] != "\n":
+            while i < n and text[i] != "\n":
                 i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            depth = 1
+            block_start = i
+            i += 2
             continue
         out.append(ch)
         i += 1
+    if depth > 0:
+        # Unterminated block: fail closed, keep the raw text so its
+        # statements still report instead of vanishing silently.
+        out.append(text[block_start:])
     return "".join(out)
 
 
@@ -210,12 +239,19 @@ def _down_siblings(path):
     return siblings
 
 
-def check_migration_down(changed_files, contents):
+def check_migration_down(changed_files, contents, dialect="postgres"):
     """Every changed *.sql migration file present in contents must carry
     a -- DOWN marker (case-insensitive) or have a sibling down file in
     changed_files. Paths missing from contents (e.g. deleted files, which
     the gate excludes via --diff-filter=d) are skipped. One finding per
-    migration missing both. Non-migration files are ignored."""
+    migration missing both. Non-migration files are ignored.
+
+    `dialect="sqlite"` (Cloudflare D1) skips the check entirely: D1
+    migrations are forward-only, so every file would otherwise warn."""
+    if (dialect or "postgres") not in DIALECTS:
+        raise ValueError("unknown dialect: %r" % (dialect,))
+    if (dialect or "postgres") == "sqlite":
+        return []
     findings = []
     for path in changed_files:
         if str(path).endswith(".down.sql"):
@@ -237,18 +273,102 @@ def check_migration_down(changed_files, contents):
     return findings
 
 
-def detect_migration_dialect(explicit="postgres", repo_files=()):
+_MIGRATIONS_DIR_RE = re.compile(
+    r"""migrations_dir\s*[:=]\s*["']([^"']+)["']""", re.IGNORECASE
+)
+
+
+def _code_lines(text):
+    """Yield uncommented code lines: drop full-line `#` / `//` comments and
+    strip inline `#` / `//` tails outside single/double-quoted strings.
+
+    A commented `# d1_databases` line must never flip detection, and the
+    check reads config text (never the PR diff), so a PR cannot smuggle
+    the marker in through an unrelated file.
+    """
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        out = []
+        quote = None
+        i = 0
+        n = len(raw)
+        while i < n:
+            ch = raw[i]
+            if quote is not None:
+                out.append(ch)
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                out.append(ch)
+                i += 1
+                continue
+            if ch == "#" or (ch == "/" and i + 1 < n and raw[i + 1] == "/"):
+                break
+            out.append(ch)
+            i += 1
+        code = "".join(out).strip()
+        if code:
+            yield code
+
+
+def _wrangler_declares_d1(wrangler_texts):
+    """True when any wrangler config text declares `d1_databases` in code
+    (comments ignored)."""
+    for text in wrangler_texts or ():
+        for line in _code_lines(text):
+            if "d1_databases" in line.lower():
+                return True
+    return False
+
+
+def _wrangler_migrations_dirs(wrangler_texts):
+    """All `migrations_dir` values declared in wrangler config texts."""
+    dirs = []
+    for text in wrangler_texts or ():
+        for line in _code_lines(text):
+            m = _MIGRATIONS_DIR_RE.search(line)
+            if m:
+                dirs.append(m.group(1).strip().strip("/"))
+    return dirs
+
+
+def detect_migration_dialect(
+    explicit="auto", repo_files=(), wrangler_texts=(), changed_paths=()
+):
     """Resolve the effective migration dialect.
 
-    `explicit` (the gate's `dialect` input, default postgres) wins unless
-    it is postgres and `repo_files` names a D1 signal (a path mentioning
-    d1, e.g. wrangler D1 config); then sqlite is returned so D1 repos are
-    not flagged for Postgres-only syntax SQLite rejects. The gate itself
-    greps wrangler configs for `d1_databases` before calling this.
+    `explicit="postgres"` / `"sqlite"` (the gate's `dialect` input) is
+    final and never auto-switched, so a mixed repo can always pin
+    Postgres. `explicit="auto"` (the gate default) selects sqlite only
+    when a wrangler config declares `d1_databases` in uncommented code
+    AND a declared `migrations_dir` (default `migrations`) covers one of
+    `changed_paths`; otherwise postgres. A bare `d1_databases` string in a
+    PR diff or a commented config line never flips the result.
+
+    `repo_files` keeps the legacy path-name signal: when no wrangler
+    texts are given, a path mentioning d1 still resolves sqlite.
     """
-    if (explicit or "postgres") != "postgres":
+    if (explicit or "auto") in ("postgres", "sqlite"):
         return explicit
+    texts = list(wrangler_texts or ())
+    if _wrangler_declares_d1(texts):
+        dirs = _wrangler_migrations_dirs(texts) or ["migrations"]
+        paths = [str(p).lstrip("./") for p in (changed_paths or ())]
+        if not paths:
+            return "sqlite"
+        for path in paths:
+            for d in dirs:
+                if d and (path == d or path.startswith(d.rstrip("/") + "/")):
+                    return "sqlite"
+        return "postgres"
     names = [str(p).lower() for p in (repo_files or ())]
+    if texts:
+        return "postgres"
     if any("d1" in name for name in names):
         return "sqlite"
     return "postgres"

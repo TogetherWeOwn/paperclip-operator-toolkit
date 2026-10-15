@@ -75,10 +75,13 @@ annotations.
   `<stem>.up.sql` / `<stem>.down.sql` pair); the gate diffs with
   `--diff-filter=d`, so deleted files are never flagged but both files of
   a pair must be in the change.
-- Migration `dialect:` (`postgres` default, `sqlite` for Cloudflare D1) —
-  sqlite skips the CONCURRENTLY/USING checks SQLite rejects. The gate
-  auto-selects sqlite when a wrangler config declares `d1_databases`;
-  otherwise pass `dialect: sqlite` explicitly in the caller `with:` block.
+- Migration `dialect:` (`auto` default, explicit `postgres`|`sqlite`
+  always wins) — sqlite (Cloudflare D1) skips the CONCURRENTLY/USING
+  checks SQLite rejects plus the down-path check (D1 is forward-only).
+  `auto` selects sqlite only when a wrangler config declares
+  `d1_databases` in uncommented code AND a declared `migrations_dir`
+  covers a changed migration path (tested `detect_migration_dialect`).
+  Mixed repos pin `dialect: postgres` explicitly in the caller `with:`.
 
 ## Rollout: adopt, activate, warn 24h, then required
 

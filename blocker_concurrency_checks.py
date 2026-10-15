@@ -18,7 +18,7 @@ SEED_MARKERS = ("seed",)
 
 _TOP_CONCURRENCY_RE = re.compile(r"(?m)^concurrency\s*:")
 _JOBS_RE = re.compile(r"^(\s*)jobs\s*:\s*(#.*)?$")
-_JOB_KEY_RE = re.compile(r"^(\s*)([\w\-.]+)\s*:\s*(#.*)?$")
+_JOB_KEY_RE = re.compile(r"""^(\s*)(?:"([^"]+)"|'([^']+)'|([\w\-.]+))\s*:\s*(#.*)?$""")
 _CONCURRENCY_LINE_RE = re.compile(r"^(\s*)concurrency\s*:")
 _STEPS_RE = re.compile(r"^\s*steps\s*:\s*(#.*)?$")
 
@@ -35,19 +35,43 @@ def step_runs_migrations(step):
 
 
 def _indent_of(line):
-    return len(line) - len(line.lstrip(" "))
+    expanded = line.expandtabs(2)
+    return len(expanded) - len(expanded.lstrip(" "))
 
 
 def _migration_job_has_own_concurrency(lines, job_start, job_indent, next_start):
-    """True when the job block declares `concurrency:` directly under the
-    job key (job-key indent + 2) and the same job runs migrations."""
+    """True when the job block declares `concurrency:` as a direct child of
+    the job key and the same job runs migrations.
+
+    The direct-child indent is derived from the block itself (the shallowest
+    indented mapping line under the job key), so 2-space and 4-space
+    workflows both match; quoted job keys are accepted by `_JOB_KEY_RE`.
+    A `concurrency:` nested deeper (a `with:` step input, or run-script
+    text) does not satisfy the check. Line-anchored heuristic: a
+    `concurrency:` line inside a run script at exactly the direct-child
+    indent would also match.
+    """
     block = lines[job_start + 1:next_start]
     block_text = "\n".join(block)
     if not _contains_any(block_text, MIGRATION_RUN_MARKERS):
         return False
-    want = job_indent + 2
+    want = None
     for raw in block:
-        if not raw.strip() or raw.strip().startswith("#"):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = _indent_of(raw)
+        if indent <= job_indent:
+            continue
+        if want is None or indent < want:
+            want = indent
+    if want is None:
+        return False
+    for raw in block:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- ") or stripped == "-":
             continue
         m = _CONCURRENCY_LINE_RE.match(raw)
         if m and _indent_of(raw) == want:
@@ -56,14 +80,15 @@ def _migration_job_has_own_concurrency(lines, job_start, job_indent, next_start)
 
 
 def has_concurrency_group(workflow_text):
-    """True when the workflow serialises the migration job.
+    """True when every migrating job is serialised.
 
-    Accepts a top-level `concurrency:` (column 0) or a `concurrency:`
-    block directly under the job key whose steps run migrations
-    (job-key indent + 2). A `concurrency:` on an unrelated job, or a
-    `concurrency:` step input (`with:`), does not satisfy the check.
-    Line-anchored heuristic: a `concurrency:` line inside a run script
-    at the same indent would also match.
+    Accepts a top-level `concurrency:` (column 0), which serialises the
+    whole workflow, or a `concurrency:` block directly under EACH job key
+    whose steps run migrations (direct-child indent is derived from the
+    block, so 2-space and 4-space workflows both match). A `concurrency:`
+    on a non-migrating job, or a `concurrency:` step input (`with:`),
+    does not satisfy the check; one serialised migrating job never covers
+    a second migrating job without its own group.
     """
     text = workflow_text or ""
     if _TOP_CONCURRENCY_RE.search(text):
@@ -75,11 +100,26 @@ def has_concurrency_group(workflow_text):
         m = _JOBS_RE.match(raw)
         if m:
             jobs_at = idx
-            jobs_indent = len(m.group(1).replace("\t", "  "))
+            jobs_indent = _indent_of(raw)
             break
     if jobs_at is None:
         return False
-    # Collect job-key starts at jobs_indent + 2.
+    # Derive the job-key indent from the block itself (first job-key line
+    # under `jobs:`), so 2-space and 4-space workflows both match. Quoted
+    # job keys ("deploy":) are accepted.
+    job_indent = None
+    for idx in range(jobs_at + 1, len(lines)):
+        raw = lines[idx]
+        if not raw.strip() or raw.strip().startswith("#"):
+            continue
+        if _indent_of(raw) <= jobs_indent:
+            break
+        if _JOB_KEY_RE.match(raw):
+            indent = _indent_of(raw)
+            if job_indent is None or indent < job_indent:
+                job_indent = indent
+    if job_indent is None:
+        return False
     starts = []
     for idx in range(jobs_at + 1, len(lines)):
         raw = lines[idx]
@@ -88,25 +128,28 @@ def has_concurrency_group(workflow_text):
         indent = _indent_of(raw)
         if indent <= jobs_indent:
             break
-        if indent == jobs_indent + 2:
-            m = _JOB_KEY_RE.match(raw)
-            if m:
-                starts.append((idx, indent))
-    for si, (start, job_indent) in enumerate(starts):
+        if indent == job_indent and _JOB_KEY_RE.match(raw):
+            starts.append((idx, indent))
+    migrating = []
+    for si, (start, ji) in enumerate(starts):
         end = starts[si + 1][0] if si + 1 < len(starts) else len(lines)
         # Trim at dedent to jobs level (next top-level key).
         for idx in range(start + 1, end):
             raw = lines[idx]
             if not raw.strip() or raw.strip().startswith("#"):
                 continue
-            if _indent_of(raw) <= jobs_indent - 2 and raw.strip():
-                # Reached the next top-level section; shouldn't happen
-                # inside jobs, but bound the block anyway.
+            if _indent_of(raw) <= jobs_indent:
                 end = idx
                 break
-        if _migration_job_has_own_concurrency(lines, start, job_indent, end):
-            return True
-    return False
+        block_text = "\n".join(lines[start + 1:end])
+        if _contains_any(block_text, MIGRATION_RUN_MARKERS):
+            migrating.append((start, ji, end))
+    if not migrating:
+        return False
+    return all(
+        _migration_job_has_own_concurrency(lines, start, ji, end)
+        for start, ji, end in migrating
+    )
 
 
 def check_workflow_concurrency(workflows):
@@ -154,8 +197,9 @@ def job_step_blocks(text):
     Line-based subset parser: follows each `steps:` list, `name:`
     / `run:` scalars and `run: |` blocks. One block per `steps:`
     section, so a migrate step in one job never pairs with a seed
-    step in another. Anything unrecognized is skipped; never
-    raises (worst case the seed check sees no steps).
+    step in another. Compact sequence lists (a `- ` item at the same
+    indent as the `steps:` key) are parsed; anything else unrecognized
+    is skipped; never raises (worst case the seed check sees no steps).
     """
     blocks = []
     lines = (text or "").splitlines()
@@ -177,10 +221,17 @@ def job_step_blocks(text):
                 i += 1
                 continue
             indent = len(raw) - len(raw.lstrip(" "))
-            if indent <= base:
+            if indent < base:
+                break
+            if indent == base and not (
+                stripped == "-" or stripped.startswith("- ")
+            ):
+                # Sibling mapping key at the `steps:` level (e.g. the next
+                # job key or `jobs:` section end); a `- ` item at this
+                # indent is a compact sequence entry and belongs to us.
                 break
             item = re.match(r"^(\s*)-\s+(.*)$", raw)
-            if item and indent > base:
+            if item and indent >= base:
                 if cur is not None:
                     block.append(cur)
                 cur = {"name": "", "run": ""}

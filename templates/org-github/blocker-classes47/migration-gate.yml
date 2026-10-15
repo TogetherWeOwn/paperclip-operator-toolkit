@@ -27,9 +27,9 @@ on:
         default: "warn"
         type: string
       dialect:
-        description: "postgres (default) or sqlite (Cloudflare D1: skips CONCURRENTLY/USING SQLite rejects)"
+        description: "auto (default: sqlite iff a wrangler config declares d1_databases with a migrations_dir covering the changed paths) or an explicit postgres|sqlite pin (explicit always wins)"
         required: false
-        default: "postgres"
+        default: "auto"
         type: string
 
 permissions:
@@ -78,25 +78,24 @@ jobs:
             changed="$(git ls-files)"
           fi
           printf '%s\n' "$changed" > /tmp/blocker-changed.txt
-          # Dialect: explicit `dialect:` input wins; a wrangler config declaring
-          # D1 (`d1_databases`) auto-selects sqlite so D1 repos are not flagged
-          # for Postgres-only CONCURRENTLY/USING that SQLite rejects.
-          dialect="${GATE_DIALECT:-postgres}"
-          if [[ "$dialect" == "postgres" ]]; then
-            if grep -rqi "d1_databases" --include="wrangler.toml" --include="wrangler.json" --include="wrangler.jsonc" . 2>/dev/null; then
-              dialect="sqlite"
-              echo "blocker-migration: D1 detected via wrangler config; using dialect=sqlite"
-            fi
-          fi
+          # Dialect: `auto` (default) resolves via the tested lib helper
+          # `detect_migration_dialect` below; an explicit `postgres`/`sqlite`
+          # input is final and never auto-switched, so a mixed repo can pin
+          # Postgres. Detection reads wrangler config FILES (comment-aware),
+          # never the PR diff, and requires the wrangler `migrations_dir` to
+          # cover a changed migration path -- a bare `d1_databases` string in
+          # a PR or a commented config line never flips the result.
           # -I: ignore cwd so a PR-root module (re.py, json.py, glob.py)
           # can never shadow stdlib inside the gate.
-          GATE_CHANGED=/tmp/blocker-changed.txt GATE_DIALECT="$dialect" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_DIALECT="${GATE_DIALECT:-auto}" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
+          import glob
           import os
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", "blocker-classes47"))
           from blocker_migration_checks import (
               check_migration_down,
               check_migration_safety,
+              detect_migration_dialect,
               is_migration_path,
           )
           changed = [
@@ -105,7 +104,23 @@ jobs:
               if line.strip()
           ]
           changed_set = set(changed)
-          dialect = os.environ.get("GATE_DIALECT", "postgres")
+          wrangler_texts = []
+          for pattern in ("wrangler.toml", "wrangler.json", "wrangler.jsonc"):
+              for hit in glob.glob(
+                  os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "**", pattern),
+                  recursive=True,
+              ):
+                  try:
+                      with open(hit, encoding="utf-8") as f:
+                          wrangler_texts.append(f.read())
+                  except OSError:
+                      pass
+          dialect = detect_migration_dialect(
+              os.environ.get("GATE_DIALECT", "auto") or "auto",
+              changed_paths=[p for p in changed if p in changed_set],
+              wrangler_texts=wrangler_texts,
+          )
+          print("blocker-migration: dialect=%s" % dialect)
           contents = {}
           for path in changed:
               if not (is_migration_path(path) and path.endswith(".sql")):
@@ -116,7 +131,7 @@ jobs:
               except OSError:
                   pass
           findings = check_migration_safety(contents, dialect=dialect) + check_migration_down(
-              [p for p in changed if p in changed_set], contents
+              [p for p in changed if p in changed_set], contents, dialect=dialect
           )
           if findings:
               print("::warning::blocker-migration findings:")
