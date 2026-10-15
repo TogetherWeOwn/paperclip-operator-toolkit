@@ -1,5 +1,15 @@
 # Never commit operational state or credentials.
 *.env
+# Review-trigger runtime state: the control-plane credential file plus the
+# reconciler/sweeper state, parked list and focus-gate dir all default inside
+# the checkout. A routine `git add -A` after a run must never stage them.
+.pc.curl
+ops/productivity/*.state.json
+ops/productivity/unreviewed-parked-prs.txt
+.focus-gate/
+# Legacy in-checkout operator log (the reconciler default before it moved
+# under REVIEW_RERQ_STATE_DIR); a stray copy must never be staged.
+ops/worker-vps/operator-actions.log
 # The default rehearsal DB capture contains a raw live SQLite pre-image. Keep
 # the whole directory unstageable even when an operator runs `git add -A`.
 omniroute/rehearsal/private-db/
@@ -37,6 +47,13 @@ secure-drop/
 # which somebody runs `git add -A`. Verified with `git check-ignore`.
 *.jsonl.lock
 *.jsonl.lock/
+
+# pr_hygiene_sweep run state (also defaulted outside the checkout via
+# PR_HYGIENE_STATE_DIR): sweep.log carries card ids and agent names.
+state.json
+sweep.log
+sweep.lock
+PAUSE
 
 # Per-operator agent-harness config. Not a secret, but it is local machine state
 # and pins absolute paths that mean nothing on anyone else's checkout.
