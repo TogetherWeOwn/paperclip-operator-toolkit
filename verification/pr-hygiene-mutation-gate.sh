@@ -182,6 +182,51 @@ mutate state-nonnumeric-crashes 'isinstance(v, (int, float)) and now - v < 86400
 mutate sent-count-any-dict 'and r.get("id"): sent += 1' 'and isinstance(r, dict): sent += 1' test_empty_patch_response_counts_as_not_sent
 mutate held-lock-exits-one 'log("skip: another PR-hygiene sweep holds the run lock"); return 0' 'log("skip: another PR-hygiene sweep holds the run lock"); return 1' test_held_lock_exits_zero_with_skip_log
 
+mutate refs-regex-widened 're.findall(r"[A-Z]{2,}-\d+"' 're.findall(r"[A-Z]{2,}-\S+"' test_board_query_inlist_is_exactly_quoted_tracker_ids
+mutate inlist-join-unquoted "f\"'{r}'\"" "f\"{r}\"" test_board_query_inlist_is_exactly_quoted_tracker_ids
+mutate live-uuid-fullmatch-to-search '_UUID.fullmatch' '_UUID.search' test_live_work_uuid_must_fullmatch
+mutate mint-check-dropped 'check=True, capture_output=True' 'capture_output=True' test_mint_nonzero_exit_fails_without_echoing_output
+mutate mint-capture-dropped 'check=True, capture_output=True' 'check=True' test_mint_nonzero_exit_fails_without_echoing_output
+mutate mint-stderr-echoed 'log(f"token mint failed: {type(e).__name__}"); return 1' 'log(f"token mint failed: {type(e).__name__} {e.stderr}"); return 1' test_mint_nonzero_exit_fails_without_echoing_output
+mutate api-error-body-echoed 'fault(f"board api failed: HTTP {code}: {method} {path}"); return {"_err": f"http-{code}"}' 'fault(f"board api failed: HTTP {code}: {method} {path} {body_text[:200]}"); return {"_err": f"http-{code}"}' test_board_error_bodies_are_not_echoed
+mutate api-get-error-body-echoed 'fault(f"board api failed: HTTP {code}: GET {path}"); return None' 'fault(f"board api failed: HTTP {code}: GET {path} {body_text[:200]}"); return None' test_board_error_bodies_are_not_echoed
+mutate gh-error-body-echoed 'fault(f"{where} failed: HTTP {e.code}"); return {"_err": e.code}' 'fault(f"{where} failed: HTTP {e.code} {e.read()[:200]}"); return {"_err": e.code}' test_gh_http_error_body_is_not_echoed
+mutate blocked-only-flip-dropped 'if status == "blocked" and has_edge == "f":' 'if has_edge == "f":' test_nonblocked_cards_are_not_flipped_to_todo
+mutate board-patch-method-changed 'api("PATCH", f"issues/{iid}", body)' 'api("PUT", f"issues/{iid}", body)' test_board_patch_request_shape_is_pinned
+mutate board-patch-path-ident 'api("PATCH", f"issues/{iid}", body)' 'api("PATCH", f"issues/{ident}", body)' test_board_patch_request_shape_is_pinned
+mutate board-patch-path-comments 'api("PATCH", f"issues/{iid}", body)' 'api("PATCH", f"issues/{iid}/comments", body)' test_board_patch_request_shape_is_pinned
+mutate board-content-type-dropped '"-H", "content-type: application/json",' '' test_board_patch_request_shape_is_pinned
+mutate board-api-curl-config-dropped '["curl", "-sS", "-K", CURL_CONFIG, "-m", "90", "-X", method,' '["curl", "-sS", "-m", "90", "-X", method,' test_board_patch_request_shape_is_pinned
+mutate board-api-get-curl-config-dropped '["curl", "-sS", "-K", CURL_CONFIG, "-m", "90", "-w",' '["curl", "-sS", "-m", "90", "-w",' test_board_patch_request_shape_is_pinned
+mutate token-strip-dropped 'T = f.read().strip()' 'T = f.read()' test_token_newline_is_stripped_before_github_calls
+mutate psql-strip-dropped 'out = out.strip()' '' test_live_work_psql_newline_output_is_accepted
+mutate board-split-partition '(stdout or "").rpartition("\n")' '(stdout or "").partition("\n")' test_board_multiline_json_body_is_parsed
+mutate per-attempt-state-save-dropped '        atomic_write_state(STATE, state)
+        if isinstance(r, dict) and r.get("id")' '        if isinstance(r, dict) and r.get("id")' test_state_is_saved_after_each_patch_attempt
+mutate dry-run-state-written '    if not DRY:
+        # Heal a torn state file' '    if True:
+        # Heal a torn state file' test_dry_run_does_not_write_state_file
+mutate state-temp-dir-default 'tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=directory)' 'tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=None)' test_atomic_write_temp_file_stays_in_state_dir
+mutate sweep-log-write-dropped 'f.write(line + "\n")' 'f.write("")' test_sweep_log_file_receives_rows
+mutate env-state-dir-renamed '"PR_HYGIENE_STATE_DIR"' '"PR_HYGIENE_STATE_DIRx"' test_env_vars_configure_module_paths
+mutate env-company-renamed '"PAPERCLIP_COMPANY_ID"' '"PAPERCLIP_COMPANY_IDx"' test_env_vars_configure_module_paths
+mutate env-token-file-renamed '"PR_HYGIENE_TOKEN_FILE"' '"PR_HYGIENE_TOKEN_FILEx"' test_env_vars_configure_module_paths
+mutate env-mint-renamed '"PR_HYGIENE_MINT"' '"PR_HYGIENE_MINTx"' test_env_vars_configure_module_paths
+mutate env-curl-config-renamed '"PR_HYGIENE_CURL_CONFIG"' '"PR_HYGIENE_CURL_CONFIGx"' test_env_vars_configure_module_paths
+mutate gh-success-reset-dropped '    RUN["gh_streak"] = 0
+    return out' '    return out' test_gh_breaker_resets_on_success
+mutate gh-breaker-threshold-lowered 'GH_BREAKER = 3' 'GH_BREAKER = 2' test_gh_breaker_two_faults_leave_it_closed
+mutate gh-404-reset-dropped 'RUN["gh_streak"] = 0; log(f"{where} failed: HTTP {e.code}")' 'log(f"{where} failed: HTTP {e.code}")' test_gh_breaker_resets_on_404
+mutate gh-nonjson-counted 'RUN["gh_streak"] += kind != "non-json"' 'RUN["gh_streak"] += 1' test_gh_nonjson_bodies_do_not_trip_breaker
+mutate project-workspaces-renamed 'project.get("workspaces")' 'project.get("workspace")' test_card_facts_project_repos_are_returned
+mutate project-repo-url-renamed 'w.get("repoUrl") for w in project.get("workspaces")' 'w.get("repo_url") for w in project.get("workspaces")' test_card_facts_project_repos_are_returned
+mutate project-path-renamed 'f"projects/{project_id}"' 'f"project/{project_id}"' test_card_facts_project_repos_are_returned
+mutate project-path-renamed-e2e 'f"projects/{project_id}"' 'f"project/{project_id}"' test_project_only_branch_card_is_nudged_end_to_end
+mutate repo-url-dotgit-dropped '(?:\.git)?/?' '/?' test_repo_url_forms_and_case_are_normalised
+mutate repo-url-slash-dropped '(?:\.git)?/?' '(?:\.git)?' test_repo_url_forms_and_case_are_normalised
+mutate repo-url-group-greedy '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?' '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:\.git)?/?' test_repo_url_forms_and_case_are_normalised
+mutate owner-key-lower-dropped '"%s#%d" % (repo.lower(), int(number))' '"%s#%d" % (repo, int(number))' test_repo_url_forms_and_case_are_normalised
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re

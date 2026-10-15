@@ -13,10 +13,13 @@ Stdlib only, offline; reuses the acceptance harness by import.
 """
 
 import http.client
+import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -931,6 +934,292 @@ class Coverage(base.SweepCase):
         finally:
             first.close()
         self.assertIn("holds the run lock", self.log_text())
+
+    # --- Round 6 finding 1: regex-only guards in front of SQL string building ---
+
+    def test_board_query_inlist_is_exactly_quoted_tracker_ids(self):
+        detail = base.pull_detail()
+        detail["body"] = "Refs: " + base.REF + " and " + base.REF + "-9') or ('1'='1"
+        self._route_pr(detail)
+        self.assertEqual(self.run_main(), 0)
+        queries = [argv[argv.index("-c") + 1] for argv, _ in self.proc.calls
+                   if argv[0] == "docker" and "identifier in" in argv[argv.index("-c") + 1]]
+        self.assertEqual(len(queries), 1)
+        self.assertIn(f"identifier in ('{base.REF}')", queries[0],
+                      "only the exact regex-shaped id, single-quoted, may reach the IN list")
+        self.assertNotIn("or ('1'", queries[0])
+
+    def test_live_work_uuid_must_fullmatch(self):
+        for bad in ("x" + base.IID, base.IID + "' or true --", base.IID + "\n"):
+            with self.subTest(bad=bad):
+                with mock.patch("subprocess.run") as run:
+                    self.assertTrue(sweep.issue_has_live_work(bad),
+                                    "an id with anything around the uuid must fail closed")
+                run.assert_not_called()
+
+    # --- Round 6 finding 2: mint exit status and no-echo contracts ---
+
+    def test_mint_nonzero_exit_fails_without_echoing_output(self):
+        self.route_one_green_pr()
+        canary = "mint-output-canary-0123456789"
+        seen = []
+        def run(argv, **kwargs):
+            if argv[0] == "bash":
+                seen.append(kwargs)
+                raise subprocess.CalledProcessError(3, argv, output=canary, stderr=canary)
+            return self.proc(argv, **kwargs)
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 1,
+                             "a mint exiting non-zero must fail the run (check=True)")
+        self.assertNotIn(canary, self.log_text(),
+                         "mint stdout/stderr must never reach the log")
+        self.assertTrue(seen, "the mint call must be recorded")
+        self.assertIs(seen[0].get("check"), True)
+        self.assertIs(seen[0].get("capture_output"), True)
+
+    def test_board_error_bodies_are_not_echoed(self):
+        calls = (("api", lambda: sweep.api("PATCH", "issues/x", {})),
+                 ("api_get", lambda: sweep.api_get("issues/x")))
+        for name, call in calls:
+            with self.subTest(name=name):
+                sweep.reset_run()
+                self.out.seek(0); self.out.truncate()
+                with mock.patch("subprocess.run", curl_proc(base.CANARY + "\n500")):
+                    call()
+                self.assertNotIn(base.CANARY, self.log_text(),
+                                 f"{name} must log only the HTTP code, never the body")
+                self.assertEqual(len(sweep.RUN["faults"]), 1)
+
+    def test_gh_http_error_body_is_not_echoed(self):
+        err = urllib.error.HTTPError("https://api.github.com/x", 500, "err", {},
+                                     io.BytesIO(base.CANARY.encode()))
+        self.net.route("x", err)
+        self.assertEqual(sweep.gh("x"), {"_err": 500})
+        self.assertNotIn(base.CANARY, self.log_text(),
+                         "gh() must log only the HTTP code, never the error body")
+
+    # --- Round 6 finding 3: only blocked cards may be flipped to todo ---
+
+    def test_nonblocked_cards_are_not_flipped_to_todo(self):
+        for status in ("in_progress", "in_review", "todo"):
+            with self.subTest(status=status):
+                if os.path.exists(sweep.STATE):
+                    os.unlink(sweep.STATE)
+                self.route_one_green_pr()
+                self.proc.docker = lambda q, s=status: (
+                    "f" if "heartbeat_runs" in q else f"{base.IID}|{base.REF}|{s}|Some Agent|f")
+                captured, run = self._patch_capture({"id": base.IID})
+                with mock.patch("subprocess.run", run):
+                    self.assertEqual(self.run_main(), 0)
+                self.assertEqual(len(captured), 1)
+                self.assertNotIn("status", json.loads(captured[0]),
+                                 f"a {status} card must be nudged without a status flip")
+
+    # --- Round 6 finding 4: board request method/path/header/auth config ---
+
+    def test_board_patch_request_shape_is_pinned(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        curls = [argv for argv, _ in self.proc.calls if argv[0] == "curl"]
+        patches = [a for a in curls if "-X" in a]
+        gets = [a for a in curls if "-X" not in a]
+        self.assertEqual(len(patches), 1)
+        self.assertTrue(gets, "card_facts GETs must be captured too")
+        patch = patches[0]
+        self.assertEqual(patch[patch.index("-X") + 1], "PATCH")
+        url = next(a for a in patch if "/api/" in a)
+        self.assertTrue(url.endswith(f"/api/issues/{base.IID}"), url)
+        self.assertEqual(patch[patch.index("-H") + 1], "content-type: application/json")
+        self.assertEqual(patch[patch.index("-K") + 1], sweep.CURL_CONFIG,
+                         "the board credential config must ride on the write")
+        for get in gets:
+            self.assertEqual(get[get.index("-K") + 1], sweep.CURL_CONFIG,
+                             "the board credential config must ride on every GET")
+
+    # --- Round 6 finding 5: token newline, psql newline, multi-line bodies ---
+
+    def test_token_newline_is_stripped_before_github_calls(self):
+        self.route_one_green_pr()
+        headers = []
+        def urlopen(request, *args, **kwargs):
+            headers.append(request.get_header("Authorization"))
+            return self.net(request, *args, **kwargs)
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.run_main(), 0)
+        self.assertTrue(headers)
+        self.assertTrue(all(h == "Bearer " + base.CANARY for h in headers),
+                        "the token file's trailing newline must be stripped before header use")
+
+    def test_live_work_psql_newline_output_is_accepted(self):
+        seen = []
+        for out, expected in (("f\n", False), ("t\n", True)):
+            with self.subTest(out=out):
+                proc = subprocess.CompletedProcess(["docker"], 0, out, "")
+                with mock.patch("subprocess.run", return_value=proc):
+                    self.assertIs(sweep.issue_has_live_work(base.IID, on_error=seen.append), expected)
+        self.assertEqual(seen, [], "newline-terminated psql output is normal, not a fault")
+
+    def test_board_multiline_json_body_is_parsed(self):
+        body = '{\n"id": "x"\n}\n200'
+        with mock.patch("subprocess.run", curl_proc(body)):
+            self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"id": "x"})
+        sweep.reset_run()
+        with mock.patch("subprocess.run", curl_proc(body)):
+            self.assertEqual(sweep.api_get("issues/x"), {"id": "x"})
+
+    # --- Round 6 finding 6: state save, dry-run state, temp dir, log, env ---
+
+    def test_state_is_saved_after_each_patch_attempt(self):
+        self.route_one_green_pr()
+        original_log = sweep.log
+        def crashing_log(msg):
+            if "summary:" in msg:
+                raise RuntimeError("crash after the PATCH, before the final save")
+            return original_log(msg)
+        with mock.patch.object(sweep, "log", crashing_log):
+            with self.assertRaises(RuntimeError):
+                self.run_main()
+        with open(sweep.STATE) as f:
+            state = json.load(f)
+        self.assertIn(f"{base.REPO}#7@{base.SHA[:10]}:green", state,
+                      "the cooldown must already be on disk after the PATCH attempt")
+
+    def test_dry_run_does_not_write_state_file(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main("--dry-run"), 0)
+        self.assertFalse(os.path.exists(sweep.STATE),
+                         "dry-run must not rewrite or prune the state file")
+
+    def test_atomic_write_temp_file_stays_in_state_dir(self):
+        seen = []
+        real_mkstemp = tempfile.mkstemp
+        def recording(*args, **kwargs):
+            seen.append(kwargs.get("dir"))
+            return real_mkstemp(*args, **kwargs)
+        with mock.patch.object(tempfile, "mkstemp", recording):
+            sweep.atomic_write_state(sweep.STATE, {"k": 1})
+        self.assertEqual(seen, [os.path.dirname(sweep.STATE)],
+                         "the temp file must live beside the state file for os.replace")
+        with open(sweep.STATE) as f:
+            self.assertEqual(json.load(f), {"k": 1})
+
+    def test_sweep_log_file_receives_rows(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        with open(sweep.LOG) as f:
+            self.assertIn("summary:", f.read(),
+                          "the persisted sweep.log must carry the run's rows, not only stdout")
+
+    def test_env_vars_configure_module_paths(self):
+        state_dir = os.path.join(self.tmp.name, "env-state")
+        env = {"PR_HYGIENE_STATE_DIR": state_dir, "PAPERCLIP_COMPANY_ID": "company-env-probe",
+               "PR_HYGIENE_TOKEN_FILE": "/tmp/env-probe-token", "PR_HYGIENE_MINT": "/tmp/env-probe-mint",
+               "PR_HYGIENE_CURL_CONFIG": "/tmp/env-probe-curl"}
+        spec = importlib.util.spec_from_file_location("sweep_env_probe", sweep.__file__)
+        fresh = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, env):
+            spec.loader.exec_module(fresh)
+        self.assertEqual(fresh.STATE, os.path.join(state_dir, "state.json"))
+        self.assertEqual(fresh.LOG, os.path.join(state_dir, "sweep.log"))
+        self.assertEqual(fresh.LOCK, os.path.join(state_dir, "sweep.lock"))
+        self.assertEqual(fresh.PAUSE, os.path.join(state_dir, "PAUSE"))
+        self.assertEqual(fresh.C, "company-env-probe")
+        self.assertEqual(fresh.TOKEN_FILE, "/tmp/env-probe-token")
+        self.assertEqual(fresh.MINT, "/tmp/env-probe-mint")
+        self.assertEqual(fresh.CURL_CONFIG, "/tmp/env-probe-curl")
+
+    # --- Round 6 finding 7: breaker consecutiveness, threshold, exemption ---
+
+    def _gh_next(self, value):
+        self.net.routes.clear()
+        self.net.route("x", value)
+        return sweep.gh("x")
+
+    def test_gh_breaker_resets_on_success(self):
+        sweep.reset_run()
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next({"ok": 1}), {"ok": 1})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        calls_before = len(self.net.calls)
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500},
+                         "the third consecutive fault must still reach the network")
+        self.assertGreater(len(self.net.calls), calls_before)
+        calls_before = len(self.net.calls)
+        self.assertEqual(self._gh_next({"ok": 1}), {"_err": "skipped"})
+        self.assertEqual(len(self.net.calls), calls_before)
+
+    def test_gh_breaker_two_faults_leave_it_closed(self):
+        sweep.reset_run()
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next({"ok": 1}), {"ok": 1},
+                         "two consecutive faults must not open a breaker of three")
+
+    def test_gh_breaker_resets_on_404(self):
+        sweep.reset_run()
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next(http_error(404)), {"_err": 404})
+        self.assertEqual(self._gh_next(http_error(500)), {"_err": 500})
+        self.assertEqual(self._gh_next({"ok": 1}), {"ok": 1},
+                         "a 404 miss must reset the consecutive-fault streak")
+
+    def test_gh_nonjson_bodies_do_not_trip_breaker(self):
+        sweep.reset_run()
+        for _ in range(4):
+            self.assertEqual(self._gh_next(b"<html>not json</html>"), {"_err": "non-json"})
+        self.assertEqual(self._gh_next({"ok": 1}), {"ok": 1},
+                         "non-JSON bodies must not count toward the breaker streak")
+
+    # --- Round 6 finding 8: project plumbing and repo URL/case normalisation ---
+
+    def test_card_facts_project_repos_are_returned(self):
+        payloads = {
+            f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": "proj-env-1"},
+            f"issues/{base.IID}/work-products": [],
+            "projects/proj-env-1": {"id": "proj-env-1", "workspaces": [
+                {"repoUrl": f"https://github.com/{base.ORG_REPO}"},
+                {"repoUrl": "https://github.com/TogetherWeOwn/other-repo"}]},
+        }
+        with mock.patch.object(sweep, "api_get", lambda path: payloads.get(path, {})):
+            facts = sweep.card_facts(base.IID)
+        self.assertIsNotNone(facts)
+        self.assertIsNone(facts["workspace_repo"])
+        self.assertEqual(facts["project_repos"],
+                         [f"https://github.com/{base.ORG_REPO}",
+                          "https://github.com/TogetherWeOwn/other-repo"])
+        self.assertEqual(sweep.RUN["faults"], [])
+
+    def test_project_only_branch_card_is_nudged_end_to_end(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        detail = base.pull_detail()
+        detail["body"] = ""
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {
+            f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": "proj-env-1"},
+            f"issues/{base.IID}/work-products": [],
+            "projects/proj-env-1": {"id": "proj-env-1", "workspaces": [
+                {"repoUrl": f"https://github.com/{base.ORG_REPO}"}]},
+        }
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.proc.board_writes()), 1,
+                         "a branch-named card registered only via its project must be nudged")
+
+    def test_repo_url_forms_and_case_are_normalised(self):
+        for repo_url in (f"https://github.com/{base.ORG_REPO}.git",
+                         f"https://github.com/{base.ORG_REPO}/",
+                         f"https://github.com/{base.ORG_REPO.lower()}"):
+            with self.subTest(repo_url=repo_url):
+                card = self._card([], workspace_repo=repo_url)
+                owner, why = self._choose([card])
+                self.assertIsNotNone(owner, why)
+        product = self._product(externalId="togetherweown/EXAMPLE-REPO#7")
+        owner, why = self._choose([self._card([product])])
+        self.assertIsNotNone(owner, why or "a case-differing externalId must still key-match")
 
     def test_draft_and_release_please_are_skipped(self):
         self.route_org()
