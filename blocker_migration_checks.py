@@ -38,11 +38,13 @@ _DROP_COLUMN_RE = re.compile(r"\bdrop\s+column\b", re.IGNORECASE)
 # An ALTER TABLE DROP clause drops a column (PostgreSQL makes the COLUMN
 # keyword optional: `ALTER TABLE t DROP [COLUMN] [IF EXISTS] col`). Any
 # DROP clause counts except DROP CONSTRAINT (metadata, not column data).
-# Checked per comma-split clause so `DROP a, DROP b` flags while
-# `ALTER COLUMN x DROP NOT NULL` (a clause starting with ALTER, not DROP)
-# stays clean.
+# The CONSTRAINT lookahead sits before `\s+` (`drop\b(?!\s+constraint\b)`):
+# a lookahead after greedy `\s+` backtracks on two-or-more spaces and flags
+# `DROP  CONSTRAINT c`. Checked per comma-split clause so `DROP a, DROP b`
+# flags while `ALTER COLUMN x DROP NOT NULL` (a clause starting with ALTER,
+# not DROP) stays clean.
 _ALTER_DROP_CLAUSE_RE = re.compile(
-    r"^\s*drop\s+(?!constraint\b)", re.IGNORECASE
+    r"^\s*drop\b(?!\s+constraint\b)", re.IGNORECASE
 )
 _TRUNCATE_RE = re.compile(r"\btruncate\b", re.IGNORECASE)
 _CREATE_INDEX_RE = re.compile(r"\bcreate\s+(unique\s+)?index\b", re.IGNORECASE)

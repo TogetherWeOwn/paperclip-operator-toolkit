@@ -166,12 +166,18 @@ def extract_step_1b_script():
     return match.group(1) + "\n"
 
 
-def payload(repo_id, sha, include=("*",)):
+# A real exclude list: the validator requires the payload's exclude to
+# equal the injected single org list and to be non-empty, so an empty
+# render (wrong STAGE path, empty exclude file, jq step skipped) fails.
+REAL_EXCLUDE = [".github", "replay-mirror"]
+
+
+def payload(repo_id, sha, include=("*",), exclude=REAL_EXCLUDE):
     return {
         "conditions": {
             "repository_name": {
                 "include": list(include),
-                "exclude": [],
+                "exclude": list(exclude),
             },
         },
         "rules": [
@@ -214,16 +220,22 @@ class RunbookStep1bValidatorTest(unittest.TestCase):
         with open("/tmp/%s" % name, "w") as fh:
             json.dump(obj, fh)
 
-    def run_validator(self):
+    def run_validator(self, excl=REAL_EXCLUDE):
+        env = dict(os.environ, EXCL_JSON=json.dumps(excl))
         return subprocess.run(
             [sys.executable, "-I", "-"],
             input=extract_step_1b_script(),
             capture_output=True, text=True, timeout=30,
+            env=env,
         )
 
     def test_valid_payloads_pass(self):
-        self.write("blocker-classes47-test-a.json", payload(123, "abc123"))
-        self.write("blocker-classes47-test-b.json", payload(123, "def456"))
+        self.write(
+            "blocker-classes47-test-a.json",
+            payload(123, "abc123", exclude=REAL_EXCLUDE))
+        self.write(
+            "blocker-classes47-test-b.json",
+            payload(123, "def456", exclude=REAL_EXCLUDE))
         proc = self.run_validator()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(

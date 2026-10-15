@@ -49,8 +49,12 @@ for f in blocker-classes47-report-only blocker-classes47-required; do
      | (.rules[] | select(.type == "workflows") | .parameters.workflows[]) |= (.repository_id = $repo | .sha = $sha)' \
     $STAGE/rulesets/$f.json > /tmp/$f.json
 done
-python3 - <<'PY'
-import glob, json
+EXCL_JSON="$EXCL_JSON" python3 - <<'PY'
+import glob, json, os
+expected_exclude = json.loads(os.environ.get("EXCL_JSON") or "[]")
+assert expected_exclude, (
+    'exclude list is empty or missing: refusing to validate '
+    '(wrong STAGE path, empty exclude file, or the jq step skipped)')
 files = sorted(glob.glob('/tmp/blocker-classes47-*.json'))
 assert files, 'no blocker payloads rendered'
 bad = []
@@ -58,7 +62,10 @@ for f in files:
     d = json.load(open(f))
     wfs = [w for r in d.get('rules', []) if r.get('type') == 'workflows'
            for w in r.get('parameters', {}).get('workflows', [])]
-    ok = (d['conditions']['repository_name']['include'] == ['*'] and wfs
+    ok = (d['conditions']['repository_name']['include'] == ['*']
+          and d['conditions']['repository_name'].get('exclude')
+          == expected_exclude
+          and wfs
           and all(isinstance(w.get('repository_id'), int)
                   and w.get('ref') == 'refs/heads/main'
                   and w.get('sha') not in ('', 'PINNED_SHA') for w in wfs))
