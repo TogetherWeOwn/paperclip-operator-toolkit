@@ -1,13 +1,26 @@
-# Org `.github` additions: test-missing gate
+# Org `.github` additions
 
-Staged source for the org `TogetherWeOwn/.github` repo. Our credential
-scope does not cover that repo, so an Operator applies these files there
-after this change merges. The gate logic is public, stdlib-only code: the
-canonical source is the repo-root `blocker_test_checks.py`, and the staged
-copy under `test-missing/` is verbatim — fix the root source first, then
-re-copy, never hand-edit the copy.
+This tree stages org-level additions for the `TogetherWeOwn/.github`
+repo. Our credential scope does not cover that repo, so an Operator
+applies these files there after this change merges. Nothing here is
+live by existing in this repo; each file reaches its destination only
+through the apply path in the maps below.
 
-## Destination map
+It currently stages two independent additions:
+
+- the **test-missing gate** (reusable workflow + wrapper + ruleset twins);
+- the **SDLC 1.0 shared CI/policy foundation stage** (baseline ruleset
+  twins, exclude list, discovery, repo template, decision + runbook).
+
+## Test-missing gate
+
+Staged source for the org `TogetherWeOwn/.github` repo. The gate logic
+is public, stdlib-only code: the canonical source is the repo-root
+`blocker_test_checks.py`, and the staged copy under `test-missing/` is
+verbatim — fix the root source first, then re-copy, never hand-edit
+the copy.
+
+### Destination map
 
 | This file | Goes to (in `TogetherWeOwn/.github`) |
 |---|---|
@@ -39,7 +52,7 @@ caller at `.github/workflows/test-missing.yml`, pinned to the org-repo
 merge SHA that first contains `test-missing-gate.yml` — a pinned SHA,
 never a moving tag.
 
-## Local verification (no credentials)
+### Local verification (no credentials)
 
 ```sh
 python3 -B -m unittest test_test_missing_gate
@@ -48,3 +61,35 @@ bash test_test_missing_gate_placement.sh
 
 Rollback: revert the commit that added this staging directory; no ruleset
 or credential change is part of this change.
+
+## SDLC 1.0 shared CI/policy foundation stage
+
+This section stages the org SDLC baseline for adoption: the evaluate/active
+ruleset twins, the one repo exclude list, dynamic repo discovery, the
+day-1 repo template, the central-repo decision and the operator runbook.
+
+### Destination map
+
+| Staged file | Destination |
+| --- | --- |
+| `rulesets/sdlc-baseline-evaluate.json` | org SDLC baseline ruleset, stage 1 (`evaluate`); applied via `gh api`, not copied |
+| `rulesets/sdlc-baseline-active.json` | org SDLC baseline ruleset, stage 2 (`active`, no earlier than 24h after stage 1 + pre-flip audit); applied via `gh api`, not copied |
+| `rulesets/SDLC-BASELINE-RUNBOOK.md` | reference only (stays here; exact admin commands, exclude injection, rename-trap procedure, rollback) |
+| `sdlc-foundation/DECISION-central-repo.md` | reference only (stays here; why `.github` is the central repo, no `ci-shared`, responsibility split) |
+| `sdlc-foundation/repo-exclude-list.txt` | reference only (stays here; THE one exclude list, injected into ruleset payloads + read by discovery) |
+| `sdlc-foundation/discover-repos.sh` | reference only (stays here; dynamic `gh repo list` minus excludes for host scripts) |
+| `sdlc-foundation/BOOTSTRAP-new-repo.md` | reference only (stays here; template-repo creation + day-1 per-repo steps) |
+| `sdlc-foundation/repo-template/ci.yml` | new public `repo-template` repo as `.github/workflows/ci.yml` (pins filled at creation) |
+| `sdlc-foundation/repo-template/pr-lint.yml` | new public `repo-template` repo as `.github/workflows/pr-lint.yml` (the baseline's required `pr-lint` producer; copied from the org workflow template, which GitHub never applies automatically) |
+| `sdlc-foundation/repo-template/CODEOWNERS` | new public `repo-template` repo as `.github/CODEOWNERS` (owning team filled at creation) |
+| `sdlc-foundation/repo-template/policy-bot.yml.disabled` | new public `repo-template` repo, renamed to `.github/policy-bot.yml` only after risk lanes leave advisory shadow |
+| `sdlc-foundation/repo-template/STAGING-MIGRATE-CONTRACT.md` | new public `repo-template` repo (day-1 contract) |
+| `tests/test_sdlc_foundation.sh` | reference only (stays here; structural contract for everything above) |
+
+### Verify
+
+```bash
+./templates/org-github/tests/test_sdlc_foundation.sh
+./test_sdlc_foundation_placement.sh
+python3 -m unittest test_sdlc_foundation_acceptance
+```

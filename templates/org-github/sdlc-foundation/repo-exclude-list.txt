@@ -1,0 +1,17 @@
+# THE one exclude list for org SDLC policy (TOG-24386).
+#
+# Single source: the runbook injects these lines into the org ruleset
+# payloads (`repository_name.exclude`), and discover-repos.sh subtracts them
+# from live `gh repo list` output. Add a repo here, never in a second list.
+#
+# Format: one entry per line, `#` comments and blank lines ignored. Entries
+# are repo names (no owner prefix); a trailing `*` is a prefix glob.
+# Names must match `^[A-Za-z0-9_.-]+\*?$`.
+
+# Snapshot mirrors: read-only replays, never gated.
+replay-*
+
+# The policy repo itself: its own CI does not (yet) produce the org `ci-ok`
+# context, so requiring it would block policy publishes forever. Remove this
+# line once TogetherWeOwn/.github reports ci-ok on its PRs.
+.github
