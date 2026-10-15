@@ -1117,7 +1117,7 @@ jobs:
       # (migration, API contract, concurrency, lockfile). Pure stdlib,
       # no network, no clock, no credentials.
       - name: blocker-ledger classes 4-7 suites
-        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression
+        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression
 
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh

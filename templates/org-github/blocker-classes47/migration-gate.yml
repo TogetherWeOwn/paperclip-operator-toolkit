@@ -81,15 +81,25 @@ jobs:
           # Dialect: `auto` (default) resolves via the tested lib helper
           # `detect_migration_dialect` below; an explicit `postgres`/`sqlite`
           # input is final and never auto-switched, so a mixed repo can pin
-          # Postgres. Detection reads wrangler config FILES (comment-aware),
-          # never the PR diff, and requires the wrangler `migrations_dir` to
-          # cover a changed migration path -- a bare `d1_databases` string in
-          # a PR or a commented config line never flips the result.
+          # Postgres. Any other value is rejected (no silent fallback to
+          # auto: a `Postgres` typo must fail closed, never weaken checks).
+          # Detection reads wrangler configs from the BASE commit
+          # (`git show "$base:<path>"`), never the PR checkout and never
+          # the PR diff: a PR-added `wrangler.toml` cannot flip this PR's
+          # result. It further requires the wrangler `migrations_dir`
+          # (resolved relative to the config's own directory) to cover a
+          # changed migration path -- a bare `d1_databases` string in a PR
+          # or a commented config line never flips the result.
           # -I: ignore cwd so a PR-root module (re.py, json.py, glob.py)
           # can never shadow stdlib inside the gate.
-          GATE_CHANGED=/tmp/blocker-changed.txt GATE_DIALECT="${GATE_DIALECT:-auto}" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
-          import glob
+          case "${GATE_DIALECT:-auto}" in
+            auto|postgres|sqlite) ;;
+            *) echo "blocker-migration: unknown dialect: ${GATE_DIALECT:-auto} (want auto|postgres|sqlite)"; exit 1;;
+          esac
+          GATE_CHANGED=/tmp/blocker-changed.txt GATE_BASE="$base" GATE_DIALECT="${GATE_DIALECT:-auto}" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import os
+          import re
+          import subprocess
           import sys
           sys.path.insert(0, os.environ.get("GATE_LOGIC", "blocker-classes47"))
           from blocker_migration_checks import (
@@ -104,21 +114,31 @@ jobs:
               if line.strip()
           ]
           changed_set = set(changed)
-          wrangler_texts = []
-          for pattern in ("wrangler.toml", "wrangler.json", "wrangler.jsonc"):
-              for hit in glob.glob(
-                  os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "**", pattern),
-                  recursive=True,
-              ):
-                  try:
-                      with open(hit, encoding="utf-8") as f:
-                          wrangler_texts.append(f.read())
-                  except OSError:
-                      pass
+          # Wrangler configs come from the BASE commit only: list config
+          # paths at base, then read each one with `git show`. A
+          # PR-added or PR-modified wrangler file is invisible here by
+          # design, so it cannot flip this PR from postgres to sqlite.
+          wrangler_entries = []
+          base = os.environ.get("GATE_BASE", "")
+          if base:
+              listing = subprocess.run(
+                  ["git", "ls-tree", "-r", "--name-only", base],
+                  capture_output=True, text=True,
+              )
+              for line in listing.stdout.splitlines():
+                  p = line.strip()
+                  if re.search(r"(^|/)wrangler\.(toml|json|jsonc)$", p):
+                      read = subprocess.run(
+                          ["git", "show", "%s:%s" % (base, p)],
+                          capture_output=True, text=True,
+                      )
+                      if read.returncode == 0:
+                          wrangler_entries.append((p, read.stdout))
           dialect = detect_migration_dialect(
               os.environ.get("GATE_DIALECT", "auto") or "auto",
               changed_paths=[p for p in changed if p in changed_set],
-              wrangler_texts=wrangler_texts,
+              wrangler_texts=[t for _, t in wrangler_entries],
+              wrangler_paths=[p for p, _ in wrangler_entries],
           )
           print("blocker-migration: dialect=%s" % dialect)
           contents = {}

@@ -76,12 +76,16 @@ annotations.
   `--diff-filter=d`, so deleted files are never flagged but both files of
   a pair must be in the change.
 - Migration `dialect:` (`auto` default, explicit `postgres`|`sqlite`
-  always wins) — sqlite (Cloudflare D1) skips the CONCURRENTLY/USING
-  checks SQLite rejects plus the down-path check (D1 is forward-only).
-  `auto` selects sqlite only when a wrangler config declares
-  `d1_databases` in uncommented code AND a declared `migrations_dir`
-  covers a changed migration path (tested `detect_migration_dialect`).
-  Mixed repos pin `dialect: postgres` explicitly in the caller `with:`.
+  always wins, anything else rejected) — sqlite (Cloudflare D1) skips
+  the CONCURRENTLY/USING checks SQLite rejects plus the down-path check
+  (D1 is forward-only). `auto` selects sqlite only when a wrangler config
+  read from the BASE commit (a PR-added `wrangler.toml` cannot flip the
+  result) declares `d1_databases` in uncommented code AND that D1
+  config's `migrations_dir` (config-relative; quoted JSON keys and `./`
+  accepted) covers a changed migration path (tested
+  `detect_migration_dialect`). Mixed repos pin `dialect: postgres`
+  explicitly in the caller `with:` (the required wrapper passes
+  `dialect` through).
 
 ## Rollout: adopt, activate, warn 24h, then required
 

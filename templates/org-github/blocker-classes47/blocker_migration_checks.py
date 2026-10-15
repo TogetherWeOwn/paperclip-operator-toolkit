@@ -274,8 +274,46 @@ def check_migration_down(changed_files, contents, dialect="postgres"):
 
 
 _MIGRATIONS_DIR_RE = re.compile(
-    r"""migrations_dir\s*[:=]\s*["']([^"']+)["']""", re.IGNORECASE
+    # The key may be quoted (wrangler.json/.jsonc `"migrations_dir": ...`),
+    # so allow one optional closing quote before the `:`/`=`.
+    r"""migrations_dir\s*["']?\s*[:=]\s*["']([^"']+)["']""", re.IGNORECASE
 )
+
+
+def _normalize_dir(value):
+    """Normalise a `migrations_dir` value for path comparison: strip
+    whitespace, drop leading `./` segments, drop trailing slashes."""
+    v = (value or "").strip()
+    while v.startswith("./"):
+        v = v[2:]
+    return v.strip().strip("/")
+
+
+def _config_dir(wrangler_path):
+    """The wrangler config's own directory (`worker/wrangler.toml` ->
+    `worker`, root configs -> `""`): `migrations_dir` resolves relative
+    to it, never to the repo root."""
+    p = str(wrangler_path or "").replace("\\", "/").strip()
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.strip("/")
+    if not p or "/" not in p:
+        return ""
+    return p.rsplit("/", 1)[0]
+
+
+def _join_config_dir(cfg_dir, value):
+    full = ((cfg_dir + "/" + value).strip("/") if cfg_dir else value.strip("/"))
+    while full.startswith("./"):
+        full = full[2:]
+    return full.strip("/")
+
+
+def _normalize_changed_path(path):
+    p = str(path or "").replace("\\", "/").strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/")
 
 
 def _code_lines(text):
@@ -326,42 +364,96 @@ def _wrangler_declares_d1(wrangler_texts):
     return False
 
 
-def _wrangler_migrations_dirs(wrangler_texts):
-    """All `migrations_dir` values declared in wrangler config texts."""
+def _text_declares_d1(text):
+    """True when one wrangler config text declares `d1_databases` in code
+    (comments ignored)."""
+    for line in _code_lines(text):
+        if "d1_databases" in line.lower():
+            return True
+    return False
+
+
+def _wrangler_migrations_dirs(wrangler_texts, wrangler_paths=()):
+    """All `migrations_dir` values declared in wrangler config texts,
+    resolved relative to each config's own directory.
+
+    `wrangler_paths` parallels `wrangler_texts` (empty/absent entries mean
+    repo root, preserving the legacy root-relative behaviour). Each value
+    is normalised (leading `./` dropped); configs declaring no
+    `migrations_dir` contribute their config-relative `migrations`
+    default.
+    """
     dirs = []
-    for text in wrangler_texts or ():
+    texts = list(wrangler_texts or ())
+    paths = list(wrangler_paths or ())
+    for i, text in enumerate(texts):
+        cfg = _config_dir(paths[i] if i < len(paths) else "")
+        declared = []
         for line in _code_lines(text):
             m = _MIGRATIONS_DIR_RE.search(line)
             if m:
-                dirs.append(m.group(1).strip().strip("/"))
+                declared.append(_join_config_dir(cfg, _normalize_dir(m.group(1))))
+        if declared:
+            dirs.extend(declared)
+        else:
+            dirs.append(_join_config_dir(cfg, "migrations"))
     return dirs
 
 
 def detect_migration_dialect(
-    explicit="auto", repo_files=(), wrangler_texts=(), changed_paths=()
+    explicit="auto",
+    repo_files=(),
+    wrangler_texts=(),
+    changed_paths=(),
+    wrangler_paths=(),
 ):
     """Resolve the effective migration dialect.
 
     `explicit="postgres"` / `"sqlite"` (the gate's `dialect` input) is
     final and never auto-switched, so a mixed repo can always pin
-    Postgres. `explicit="auto"` (the gate default) selects sqlite only
-    when a wrangler config declares `d1_databases` in uncommented code
-    AND a declared `migrations_dir` (default `migrations`) covers one of
-    `changed_paths`; otherwise postgres. A bare `d1_databases` string in a
-    PR diff or a commented config line never flips the result.
+    Postgres. Any other non-`"auto"` value (including `"Postgres"`)
+    raises `ValueError` instead of silently falling back to auto.
+    `explicit="auto"` (the gate default) selects sqlite only when a
+    wrangler config declares `d1_databases` in uncommented code AND that
+    D1 config's `migrations_dir` (default: `migrations` relative to the
+    config's own directory) covers one of `changed_paths`; otherwise
+    postgres. A bare `d1_databases` string in a PR diff or a commented
+    config line never flips the result.
 
-    `repo_files` keeps the legacy path-name signal: when no wrangler
-    texts are given, a path mentioning d1 still resolves sqlite.
+    `wrangler_paths` parallels `wrangler_texts` with each config's
+    repo-relative path so `migrations_dir` resolves as
+    `<config dir>/<migrations_dir>` (wrangler semantics); absent entries
+    mean repo root. `repo_files` keeps the legacy path-name signal: when
+    no wrangler texts are given, a path mentioning d1 still resolves
+    sqlite.
     """
-    if (explicit or "auto") in ("postgres", "sqlite"):
+    explicit = explicit or "auto"
+    if explicit in ("postgres", "sqlite"):
         return explicit
+    if explicit != "auto":
+        raise ValueError("unknown dialect: %r" % (explicit,))
     texts = list(wrangler_texts or ())
-    if _wrangler_declares_d1(texts):
-        dirs = _wrangler_migrations_dirs(texts) or ["migrations"]
-        paths = [str(p).lstrip("./") for p in (changed_paths or ())]
-        if not paths:
+    paths = list(wrangler_paths or ())
+    d1_indexes = [i for i, t in enumerate(texts) if _text_declares_d1(t)]
+    if d1_indexes:
+        dirs = []
+        for i in d1_indexes:
+            cfg = _config_dir(paths[i] if i < len(paths) else "")
+            declared = []
+            for line in _code_lines(texts[i]):
+                m = _MIGRATIONS_DIR_RE.search(line)
+                if m:
+                    declared.append(
+                        _join_config_dir(cfg, _normalize_dir(m.group(1)))
+                    )
+            if declared:
+                dirs.extend(declared)
+            else:
+                dirs.append(_join_config_dir(cfg, "migrations"))
+        normed = [_normalize_changed_path(p) for p in (changed_paths or ())]
+        if not normed:
             return "sqlite"
-        for path in paths:
+        for path in normed:
             for d in dirs:
                 if d and (path == d or path.startswith(d.rstrip("/") + "/")):
                     return "sqlite"

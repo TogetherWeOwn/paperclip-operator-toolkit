@@ -8,6 +8,18 @@
 name: Blocker migration required wrapper
 
 on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+      dialect:
+        description: "auto (default) or an explicit postgres|sqlite pin (mixed repos pin postgres); unknown values are rejected"
+        required: false
+        default: "auto"
+        type: string
   pull_request:
   merge_group:
 
@@ -19,6 +31,7 @@ jobs:
     name: migration
     uses: TogetherWeOwn/.github/.github/workflows/blocker-migration-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
     with:
-      mode: warn
+      mode: ${{ inputs.mode || 'warn' }}
+      dialect: ${{ inputs.dialect || 'auto' }}
     permissions:
       contents: read

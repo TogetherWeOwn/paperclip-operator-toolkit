@@ -39,11 +39,32 @@ def _indent_of(line):
     return len(expanded) - len(expanded.lstrip(" "))
 
 
+def _job_block_runs_migrations(job_text):
+    """True when any step `run:` in the job block runs migrations.
+
+    Parses the block with `job_step_blocks` and tests each step's `run:`
+    text with `step_runs_migrations`, so `needs:`, names, and comments
+    mentioning migrate never count. Never raises (worst case False).
+    """
+    try:
+        for block in job_step_blocks(job_text or ""):
+            for step in block:
+                if step_runs_migrations(step):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def _migration_job_has_own_concurrency(lines, job_start, job_indent, next_start):
     """True when the job block declares `concurrency:` as a direct child of
     the job key and the same job runs migrations.
 
-    The direct-child indent is derived from the block itself (the shallowest
+    "Runs migrations" is decided from the job's step `run:` text (via
+    `job_step_blocks` / `step_runs_migrations`), never the raw block text:
+    a `needs: migrate`, a job/step name, or a comment mentioning migrate
+    must not make a non-migrating job count as migrating. The direct-child
+    indent is derived from the block itself (the shallowest
     indented mapping line under the job key), so 2-space and 4-space
     workflows both match; quoted job keys are accepted by `_JOB_KEY_RE`.
     A `concurrency:` nested deeper (a `with:` step input, or run-script
@@ -51,10 +72,10 @@ def _migration_job_has_own_concurrency(lines, job_start, job_indent, next_start)
     `concurrency:` line inside a run script at exactly the direct-child
     indent would also match.
     """
-    block = lines[job_start + 1:next_start]
-    block_text = "\n".join(block)
-    if not _contains_any(block_text, MIGRATION_RUN_MARKERS):
+    job_text = "\n".join(lines[job_start + 1:next_start])
+    if not _job_block_runs_migrations(job_text):
         return False
+    block = lines[job_start + 1:next_start]
     want = None
     for raw in block:
         stripped = raw.strip()
@@ -141,8 +162,10 @@ def has_concurrency_group(workflow_text):
             if _indent_of(raw) <= jobs_indent:
                 end = idx
                 break
-        block_text = "\n".join(lines[start + 1:end])
-        if _contains_any(block_text, MIGRATION_RUN_MARKERS):
+        # Migrating is decided from step `run:` text only (see
+        # `_job_block_runs_migrations`): `needs:`, names, and comments
+        # mentioning migrate never count.
+        if _job_block_runs_migrations("\n".join(lines[start + 1:end])):
             migrating.append((start, ji, end))
     if not migrating:
         return False
@@ -153,18 +176,75 @@ def has_concurrency_group(workflow_text):
 
 
 def check_workflow_concurrency(workflows):
-    """One finding per workflow whose text runs migrations without a
-    concurrency group. Findings name the workflow path."""
+    """One finding per workflow with a migrating job (a step whose `run:`
+    text runs migrations) and no concurrency group. A bare `needs:`,
+    name, or comment mentioning migrate is not a migrating job, so it
+    never flags on its own. Findings name the workflow path."""
     findings = []
     for path in sorted(workflows):
         text = workflows[path] or ""
-        if _contains_any(text, MIGRATION_RUN_MARKERS) and not has_concurrency_group(
+        if _workflow_has_migrating_job(text) and not has_concurrency_group(
             text
         ):
             findings.append(
                 "%s: runs migrations without a concurrency group" % path
             )
     return findings
+
+
+def _workflow_has_migrating_job(workflow_text):
+    """True when any job in the workflow has a step whose `run:` text runs
+    migrations. Never raises (worst case False)."""
+    try:
+        text = workflow_text or ""
+        lines = text.splitlines()
+        jobs_at = None
+        jobs_indent = None
+        for idx, raw in enumerate(lines):
+            m = _JOBS_RE.match(raw)
+            if m:
+                jobs_at = idx
+                jobs_indent = _indent_of(raw)
+                break
+        if jobs_at is None:
+            return False
+        job_indent = None
+        for idx in range(jobs_at + 1, len(lines)):
+            raw = lines[idx]
+            if not raw.strip() or raw.strip().startswith("#"):
+                continue
+            if _indent_of(raw) <= jobs_indent:
+                break
+            if _JOB_KEY_RE.match(raw):
+                indent = _indent_of(raw)
+                if job_indent is None or indent < job_indent:
+                    job_indent = indent
+        if job_indent is None:
+            return False
+        starts = []
+        for idx in range(jobs_at + 1, len(lines)):
+            raw = lines[idx]
+            if not raw.strip() or raw.strip().startswith("#"):
+                continue
+            indent = _indent_of(raw)
+            if indent <= jobs_indent:
+                break
+            if indent == job_indent and _JOB_KEY_RE.match(raw):
+                starts.append(idx)
+        for si, start in enumerate(starts):
+            end = starts[si + 1] if si + 1 < len(starts) else len(lines)
+            for idx in range(start + 1, end):
+                raw = lines[idx]
+                if not raw.strip() or raw.strip().startswith("#"):
+                    continue
+                if _indent_of(raw) <= jobs_indent:
+                    end = idx
+                    break
+            if _job_block_runs_migrations("\n".join(lines[start + 1:end])):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def check_migration_seed_same_lock(steps):

@@ -28,10 +28,16 @@ Dialect: `postgres` enforces CONCURRENTLY/USING; `sqlite` (Cloudflare D1)
 skips CONCURRENTLY/USING and the down check because SQLite rejects that
 syntax (plain `CREATE INDEX` passes, destructive-DDL still reports). The
 gate takes `dialect: auto|postgres|sqlite` (default `auto`): explicit
-`postgres`/`sqlite` always wins; `auto` selects sqlite only when a
-wrangler config declares `d1_databases` in uncommented code AND a
-declared `migrations_dir` (default `migrations`) covers a changed
-migration path (tested `detect_migration_dialect`; no shell grep).
+`postgres`/`sqlite` always wins and any other value (including
+`Postgres`) is rejected instead of falling back to auto; `auto` selects
+sqlite only when a wrangler config read from the BASE commit (never the
+PR checkout, so a PR-added `wrangler.toml` cannot flip the result)
+declares `d1_databases` in uncommented code AND that D1 config's
+`migrations_dir` (default `migrations`, resolved relative to the
+config's own directory; quoted JSON keys and leading `./` accepted)
+covers a changed migration path (tested `detect_migration_dialect`;
+the required wrapper passes `dialect` through so mixed repos pin
+`postgres`).
 
 ## API contract (`blocker_api_contract_checks.py`)
 
@@ -50,7 +56,10 @@ migrations (direct-child indent derived from the block, so 2-space and
 4-space workflows match; quoted job keys accepted). A `concurrency:` on a
 non-migrating job or a `with:` step input does not satisfy the check, and
 one serialised migrating job never covers a second migrating job without
-its own group. Isolated migration steps followed by a separate seed step
+its own group. "Migrating" is decided from step `run:` text only
+(`job_step_blocks` + `step_runs_migrations` per job): a `needs: migrate`,
+a job/step name, or a comment mentioning migrate never makes a
+non-migrating job count as migrating. Isolated migration steps followed by a separate seed step
 (seed outside the mutex) also report.
 The gate parses each job's `steps:` via the lib `job_step_blocks`
 (including `run: |` blocks and compact `- ` lists at the `steps:` indent)
@@ -74,7 +83,8 @@ proof: `python3 -B -m unittest test_blocker_migration_checks
 test_blocker_api_contract_checks test_blocker_concurrency_checks
 test_blocker_lockfile_checks test_blocker_classes47_org_template
 test_blocker_classes47_round2_regression
-test_blocker_classes47_round3_regression` (65 frozen + 22 + 27 regression)
+test_blocker_classes47_round3_regression
+test_blocker_classes47_round4_regression` (65 frozen + 22 + 27 + 17 regression)
 plus YAML/JSON parse. Every `*-gate.yml` runs `python3 -I -` (PR-root
 modules can never shadow stdlib); migration/lockfile gates diff with
 `--diff-filter=d` (deleted paths never flagged).
