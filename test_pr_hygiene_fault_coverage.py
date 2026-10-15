@@ -1531,6 +1531,18 @@ class Coverage(base.SweepCase):
                 self.assertTrue(any("check-runs malformed" in f for f in sweep.RUN["faults"]))
                 self.assertEqual(self.proc.board_writes(), [])
 
+    def test_check_runs_404_is_a_logged_miss_not_a_fault(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", base.pull_detail("unstable"))
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/commits/{base.SHA}/check-runs",
+                       base.http_error(404))
+        self.proc.docker = self.docker_rows
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(sweep.RUN["faults"], [])
+        self.assertIn("check-runs unavailable", self.log_text())
+        self.assertEqual(self.proc.board_writes(), [])
+
     # --- Round 8 finding 3: mergeable_state unknown-retry loop ---
 
     def _seq_urlopen(self, bodies):
@@ -1567,6 +1579,31 @@ class Coverage(base.SweepCase):
         with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
             self.assertEqual(self.run_main(), 0)
         self.assertEqual(len(calls), 1, "a settled PR must be read exactly once")
+        self.assertEqual(len(self.proc.board_writes()), 1)
+
+    def test_mergeable_retry_delay_is_pinned(self):
+        # Unknown then clean: exactly one 3-second pause between the reads,
+        # so GitHub has time to settle mergeable_state in the same run.
+        self.route_one_green_pr()
+        calls, urlopen = self._seq_urlopen(
+            [self._detail_with_state("unknown"), self._detail_with_state("clean")])
+        slept = []
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(sweep.time, "sleep", slept.append):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(slept, [3])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(self.proc.board_writes()), 1)
+        # Already settled: read once, with no pause at all.
+        self._reset_for_reroute()
+        self.route_one_green_pr()
+        calls, urlopen = self._seq_urlopen([self._detail_with_state("clean")])
+        slept = []
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(sweep.time, "sleep", slept.append):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(slept, [])
+        self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.proc.board_writes()), 1)
 
     def test_mergeable_unknown_forever_reads_three_times(self):

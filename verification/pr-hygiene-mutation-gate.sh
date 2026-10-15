@@ -270,6 +270,10 @@ mutate mergeable-retry-range-one 'for _ in range(3):' 'for _ in range(1):' test_
 mutate mergeable-retry-condition-inverted 'd.get("mergeable_state") not in (None, "unknown")' 'd.get("mergeable_state") in (None, "unknown")' test_mergeable_settled_is_read_once
 mutate mergeable-retry-break-removed 'if not isinstance(d, dict) or "_err" in d or d.get("mergeable_state") not in (None, "unknown"): break' 'pass' test_mergeable_settled_is_read_once
 mutate mergeable-retry-range-one-forever 'for _ in range(3):' 'for _ in range(1):' test_mergeable_unknown_forever_reads_three_times
+mutate mergeable-retry-sleep-dropped 'time.sleep(3)' 'pass' test_mergeable_retry_delay_is_pinned
+mutate mergeable-retry-sleep-zero 'time.sleep(3)' 'time.sleep(0)' test_mergeable_retry_delay_is_pinned
+mutate checkruns-404-becomes-fault 'if isinstance(runs, dict) and "_err" in runs:' 'if False:' test_check_runs_404_is_a_logged_miss_not_a_fault
+mutate checkruns-err-check-inverted 'if isinstance(runs, dict) and "_err" in runs:' 'if isinstance(runs, dict) and "_err" not in runs:' test_check_runs_404_is_a_logged_miss_not_a_fault
 
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
