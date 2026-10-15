@@ -1,0 +1,67 @@
+{
+  "admission_authorized": false,
+  "breach_heads_report_but_is_not_delete_order": true,
+  "dry_run_report": {
+    "candidate_fields": ["ageMin", "bucket", "createdAt", "name", "pool", "runnerStatus", "status"],
+    "human_first_line_prefix": "audit_stale_instances — ",
+    "human_proposal_header": "PROPOSAL (hand to an Operator card to the CEO — see TTL-REAPER-POLICY.md):",
+    "human_verdict_line_prefix": "verdict=",
+    "required_top_level": ["breachReasons", "candidates", "errors", "now", "orphanMin", "pools", "tool", "ttlMin", "verdict"],
+    "verdicts": ["BREACH", "OK", "PROPOSE"]
+  },
+  "evidence_class": "synthetic",
+  "host_verified": false,
+  "installed": false,
+  "missing_input_disposition": "HOLD; nulls are not pins and cannot be used to reap, delete, or execute",
+  "pools": {
+    "canary": {
+      "mode": "observe-only",
+      "never_candidate": true,
+      "orphan_min": 480,
+      "roles": ["canary"],
+      "stuck_still_breaches": true,
+      "ttl_min": 240
+    },
+    "ephemeral-default": {
+      "mode": "propose",
+      "never_candidate": false,
+      "orphan_min": 480,
+      "roles": ["isolated-private", "privileged-private"],
+      "ttl_min": 240
+    },
+    "static": {
+      "labels": ["two-isolated", "two-selfhosted"],
+      "mode": "out-of-scope",
+      "never_candidate": true,
+      "never_in_report": true
+    }
+  },
+  "rationale": {
+    "drain_stuck_60": "inside the 210m drain grace so a stuck drain surfaces while the operator window is still open",
+    "orphan_480": "2x TTL; past this a candidate needs operator eyes (breach), never silent reaping",
+    "prov_stuck_30": "above the 20m upstream bootstrap timeout so slow starts are not misread as stuck",
+    "ttl_240": "covers the longest eligible job (suites timeout-minutes 210) with 30m margin; the 210m drain grace floor bounds drain, not TTL"
+  },
+  "reap_order": ["idle-excess", "stale", "busy"],
+  "reaper_defaults": {
+    "drain_stuck_min": 60,
+    "orphan_min": 480,
+    "orphan_mult": 2,
+    "prov_stuck_min": 30,
+    "ttl_min": 240
+  },
+  "schema": "garm-idle-ttl-contracts.v1",
+  "source_baseline": {
+    "garm": "0.2.1",
+    "lxd": "5.21",
+    "provider": "0.1.3",
+    "verified_live": false
+  },
+  "status": "synthetic-proposal-only",
+  "timeout_disposition": {
+    "force_delete": "separate_reviewed_operator_action_only",
+    "new_admissions": "stopped_at_signal",
+    "running_job": "continues_to_natural_completion"
+  },
+  "within_bucket": "oldest-first"
+}
