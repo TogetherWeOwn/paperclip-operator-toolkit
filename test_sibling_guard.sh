@@ -184,6 +184,10 @@ const PULLS = {
   crossforeign: [{ number: 913, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-907', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossbranchown: [{ number: 914, title: 'unrelated title', body: 'Refs: TOG-900', head: { ref: 'tog-900-feature', sha: 'DISTINCT' } }],
   crossbranchforeign: [{ number: 915, title: 'unrelated title', body: 'Refs: TOG-907', head: { ref: 'tog-900-feature', sha: 'DISTINCT' } }],
+  // The cross-card branch from 5a/5b WITH an open PR: our key is only a
+  // secondary token of another card's branch, the title carries no key, and
+  // the Refs line names only the foreign card — not relevant, stays clear.
+  crosscardpr: [{ number: 927, title: 'bump pin', body: 'Refs: TOG-907', head: { ref: 'tog-907-bump-pin-so-tog-900-reruns-green', sha: 'DISTINCT' } }],
   crosslower: [{ number: 916, title: 'Do the thing (TOG-900)', body: 'refs: tog-900', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossexact: [{ number: 917, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-9000', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossmidrelevant: [{ number: 918, title: 'Do the thing (TOG-900)', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
@@ -518,6 +522,27 @@ run_guard "$BAREKEY" TOG-900 --repo=stub/none
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "a local branch exactly equal to this card key and ahead exits 1" "rc=$RC out=$OUT"
 
+# (c) Namespaced branches still refuse: the key starting a whole path segment
+# behind a namespace (`ops/<key>-...`), or as a segment of its own
+# (`<key>/...`), is primary ownership, not a secondary mention.
+NSPREFIX="$TMP/nsprefix"; mkclone "$NSPREFIX"
+(cd "$NSPREFIX" && git checkout --quiet -b ops/tog-900-widget && echo ns >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "namespaced work" && git checkout --quiet main)
+run_guard "$NSPREFIX" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card as a namespaced segment prefix and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "ops/tog-900-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced local branch is named in the report" "$OUT"
+
+NSSEG="$TMP/nsseg"; mkclone "$NSSEG"
+(cd "$NSSEG" && git checkout --quiet -b tog-900/widget && echo ns >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "segment work" && git checkout --quiet main)
+run_guard "$NSSEG" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card as its own path segment and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900/widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the segment local branch is named in the report" "$OUT"
+
 # ===========================================================================
 hdr "5b. Remote branch-name attribution ignores cross-card substrings."
 # Same primary-prefix rule through the remote detector, isolated: each fresh
@@ -543,10 +568,35 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "tog-900-remote-widget-work" <<< "$OUT" && echo 0 || echo 1)" \
   "the prefix-owned pushed branch is named in the report" "$OUT"
 
+# Namespaced pushed branches still refuse through the remote detector too.
+REMNS="$TMP/remns-push"; mkclone "$REMNS"
+(cd "$REMNS" && git checkout --quiet -b ops/tog-900-remote-widget && echo rn >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "namespaced pushed" \
+   && git push --quiet -u origin ops/tog-900-remote-widget)
+REMNSF="$TMP/remns-fresh"; mkclone "$REMNSF"
+run_guard "$REMNSF" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a pushed branch with this card as a namespaced segment prefix exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "ops/tog-900-remote-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the namespaced pushed branch is named in the report" "$OUT"
+
+REMSEG="$TMP/remseg-push"; mkclone "$REMSEG"
+(cd "$REMSEG" && git checkout --quiet -b tog-900/remote-widget && echo rs >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "segment pushed" \
+   && git push --quiet -u origin tog-900/remote-widget)
+REMSEGF="$TMP/remseg-fresh"; mkclone "$REMSEGF"
+run_guard "$REMSEGF" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a pushed branch with this card as its own path segment exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "tog-900/remote-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the segment pushed branch is named in the report" "$OUT"
+
 # Hermetic cleanup: remove the pushed refs so later start-phase asserts that
 # fetch the shared origin never see them.
 (cd "$REMXC" && git push --quiet origin --delete tog-907-bump-pin-so-tog-900-reruns-remote-green >/dev/null 2>&1) || true
 (cd "$REMOWN" && git push --quiet origin --delete tog-900-remote-widget-work >/dev/null 2>&1) || true
+(cd "$REMNS" && git push --quiet origin --delete ops/tog-900-remote-widget >/dev/null 2>&1) || true
+(cd "$REMSEG" && git push --quiet origin --delete tog-900/remote-widget >/dev/null 2>&1) || true
 
 # ===========================================================================
 hdr "5c. Same-head and blind detectors still fail closed."
@@ -717,6 +767,14 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "a branch-relevant PR on a foreign branch whose Refs line names only another card exits 1" "rc=$RC out=$OUT"
 assert "$(grep -q "TOG-907" <<< "$OUT" && echo 0 || echo 1)" \
   "the branch-relevant foreign claimant is named in the report" "$OUT"
+
+# Same cross-card branch WITH an open PR: head relevance uses the primary-key
+# segment rule, not a substring, so a branch that only mentions this key as a
+# secondary token of another card's branch stays clear even though its Refs
+# line names only the foreign card.
+run_guard "$CLEAN" TOG-900 --repo=stub/crosscardpr
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "an open PR on another card's branch naming this key only secondarily stays clear" "rc=$RC out=$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossexact
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
