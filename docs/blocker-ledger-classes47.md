@@ -7,11 +7,15 @@ a staged copy: fix the repo-root module, then re-copy byte-identical.
 
 ## Migration (`blocker_migration_checks.py`)
 
-Flags destructive DDL (`DROP TABLE/COLUMN`, `TRUNCATE`) without the
+Flags destructive DDL (`DROP TABLE`/`SCHEMA`/`DATABASE`, any `ALTER TABLE
+.. DROP` column clause with or without the `COLUMN` keyword, `TRUNCATE`)
+without the
 case-insensitive `safety: acknowledged` marker, `CREATE INDEX` without
 `CONCURRENTLY`, `ALTER COLUMN .. TYPE` without `USING`, and `*.sql`
 migrations with neither a `-- DOWN` marker nor a sibling down file.
-Index/alter checks run per `;`-separated statement on comment-stripped
+`DROP CONSTRAINT` and `ALTER COLUMN .. DROP NOT NULL`/`DROP DEFAULT`
+reshape metadata, not column data, and stay clean. The DROP-clause check
+runs per `;`-separated statement on comment-stripped
 SQL (single-pass quote-aware removal of `--` line comments and
 nesting-aware `/* */` blocks: `/*` inside a string literal is kept, so
 seed rows with glob patterns never eat sibling statements; Postgres

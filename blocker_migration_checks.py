@@ -29,8 +29,21 @@ SAFETY_ACK = "safety: acknowledged"
 DIALECTS = ("postgres", "sqlite", "postgres-transactional")
 
 _DOWN_RE = re.compile(r"(?m)^\s*--\s*down\s*$", re.IGNORECASE)
-_DROP_TABLE_RE = re.compile(r"\bdrop\s+table\b", re.IGNORECASE)
+# Whole-object drops: tables, schemas and databases are all unrecoverable
+# data loss without a restore, so all three are destructive.
+_DROP_TABLE_RE = re.compile(
+    r"\bdrop\s+(table|schema|database)\b", re.IGNORECASE
+)
 _DROP_COLUMN_RE = re.compile(r"\bdrop\s+column\b", re.IGNORECASE)
+# An ALTER TABLE DROP clause drops a column (PostgreSQL makes the COLUMN
+# keyword optional: `ALTER TABLE t DROP [COLUMN] [IF EXISTS] col`). Any
+# DROP clause counts except DROP CONSTRAINT (metadata, not column data).
+# Checked per comma-split clause so `DROP a, DROP b` flags while
+# `ALTER COLUMN x DROP NOT NULL` (a clause starting with ALTER, not DROP)
+# stays clean.
+_ALTER_DROP_CLAUSE_RE = re.compile(
+    r"^\s*drop\s+(?!constraint\b)", re.IGNORECASE
+)
 _TRUNCATE_RE = re.compile(r"\btruncate\b", re.IGNORECASE)
 _CREATE_INDEX_RE = re.compile(r"\bcreate\s+(unique\s+)?index\b", re.IGNORECASE)
 _CONCURRENTLY_RE = re.compile(r"\bconcurrently\b", re.IGNORECASE)
@@ -353,6 +366,29 @@ def _alter_type_missing_using(stmt):
     return False
 
 
+def _alter_table_drops_column(up):
+    """True when an ALTER TABLE drops a column, with or without COLUMN.
+
+    PostgreSQL documents the keyword as optional (`ALTER TABLE name
+    DROP [ COLUMN ] [ IF EXISTS ] column_name`), so matching only
+    `DROP COLUMN` misses `DROP legacy`, `DROP IF EXISTS legacy` and
+    multi-clause `DROP a, DROP b`. Each ALTER TABLE's clauses (split
+    from its match end to the next match, like `_alter_type_missing_using`)
+    flag on a leading DROP unless it is DROP CONSTRAINT. Runs per
+    `;`-separated statement so a trailing clause cannot leak across
+    statements. Search (not start-anchored) so ALTERs nested in DO
+    blocks and function bodies still report.
+    """
+    for stmt in _statements(up):
+        matches = list(_ALTER_TABLE_SEARCH_RE.finditer(stmt))
+        for idx, match in enumerate(matches):
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(stmt)
+            for clause in _split_top_level_commas(stmt[match.end():end]):
+                if _ALTER_DROP_CLAUSE_RE.match(clause):
+                    return True
+    return False
+
+
 def check_migration_safety(contents, dialect="postgres"):
     """One finding per file with destructive DDL (un-acked), a
     non-concurrent CREATE INDEX, or an ALTER COLUMN TYPE without USING.
@@ -388,6 +424,7 @@ def check_migration_safety(contents, dialect="postgres"):
         if (
             _DROP_TABLE_RE.search(_strip_sql_comments(up))
             or _DROP_COLUMN_RE.search(_strip_sql_comments(up))
+            or _alter_table_drops_column(up)
             or _TRUNCATE_RE.search(_strip_sql_comments(up))
         ) and SAFETY_ACK.lower() not in text.lower():
             reasons.append("destructive DDL without safety ack")

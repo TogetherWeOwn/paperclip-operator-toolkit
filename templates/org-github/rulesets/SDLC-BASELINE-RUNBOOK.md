@@ -49,7 +49,25 @@ for f in blocker-classes47-report-only blocker-classes47-required; do
      | (.rules[] | select(.type == "workflows") | .parameters.workflows[]) |= (.repository_id = $repo | .sha = $sha)' \
     $STAGE/rulesets/$f.json > /tmp/$f.json
 done
-python3 -c "import json,glob; [print(f, 'payload-valid') for f in sorted(glob.glob('/tmp/blocker-classes47-*.json')) for d in [json.load(open(f))] if d['conditions']['repository_name']['include']==['*'] and all(isinstance(w['repository_id'], int) and w['ref']=='refs/heads/main' and w['sha'] not in ('', 'PINNED_SHA') for r in d['rules'] if r['type']=='workflows' for w in r['parameters']['workflows'])]"
+python3 - <<'PY'
+import glob, json
+files = sorted(glob.glob('/tmp/blocker-classes47-*.json'))
+assert files, 'no blocker payloads rendered'
+bad = []
+for f in files:
+    d = json.load(open(f))
+    wfs = [w for r in d.get('rules', []) if r.get('type') == 'workflows'
+           for w in r.get('parameters', {}).get('workflows', [])]
+    ok = (d['conditions']['repository_name']['include'] == ['*'] and wfs
+          and all(isinstance(w.get('repository_id'), int)
+                  and w.get('ref') == 'refs/heads/main'
+                  and w.get('sha') not in ('', 'PINNED_SHA') for w in wfs))
+    if ok:
+        print(f, 'payload-valid')
+    else:
+        bad.append(f)
+assert not bad, 'invalid blocker payloads: %s' % bad
+PY
 ```
 
 Applied as shipped (empty `exclude`, `repository_id` 0, `sha`
