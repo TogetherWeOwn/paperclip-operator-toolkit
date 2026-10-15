@@ -28,32 +28,36 @@ from every push:
 | `.github/workflows/review-trigger.yml` | Fires on CI completion; runs the step below. |
 | `.github/scripts/review_trigger.py` | Pure stdlib decision (`decide()`); no network, no model. |
 | `.github/scripts/review_trigger_step.py` | GitHub reads + idempotent trigger post. |
-| `ops/productivity/review_dedup.py` | Shared same-head idempotency guard, also used by `review_error_rerequest.py`. The step resolves it relative to the repo root, so the workflow sparse-checkout includes `ops/productivity`. |
+| `review_dedup.py` (repo root) | Shared same-head idempotency guard, single source, also used by `review_error_rerequest.py`. The step resolves it relative to the repo root, so the workflow sparse-checkout includes the root file (non-cone). |
 | `test_review_trigger.py`, `test_review_trigger_step.py` | Offline unit tests, run in CI. |
 
 Precedence: draft → already-reviewed head → ci-ok red → release-please →
-risky → checklist → audit sample → ready head. Every skip exits 0 with a
+risky → audit sample → checklist → ready head. The audit sample waives the
+checklist (like risky/release-please); every skip exits 0 with a
 notice; anything that prevents reaching a decision exits 1 (fail closed).
 Check-run and comment reads follow `page=N` to the last page, and exit 1 past
 3000 items rather than decide on a partial view. The file list is capped at
 one page; a full page routes the PR to review.
 
 Trigger record per head: one `@togetherweown-reviewer review <sha>` comment
-(audit trail, checked before posting) plus the `review-ready` label (machine
-signal). The verdict check-run test is the one-review-per-head enforcer:
-a success/failure verdict is never re-requested on the same head, but
-incomplete runs (action_required, cancelled, timed_out, stale) never block a
-re-request on the next CI completion. Same-head idempotency: just
+(audit trail: only comments authored by github-actions[bot] count, so a
+third-party or manual mention can never suppress the automatic trigger)
+plus the `review-ready` label (machine signal). The verdict check-run test
+is the one-review-per-head enforcer: a success/failure verdict is never
+re-requested on the same head. Incomplete runs (action_required, cancelled,
+timed_out, stale) never block decide(), and the step allows exactly one
+CI-driven re-post per head after an error (a second bot marker suppresses;
+further recovery belongs to the reconciler). Same-head idempotency: just
 before posting, the step re-reads the head's check-runs and suppresses the
 post when a live Paperclip Review run already covers the head (manual
 mention, gate listing, or an overlapping delivery started it without leaving
-the sha marker the comment check looks for). Error outcomes stay retryable;
-the reconciler owns the one-retry path for those heads.
+the sha marker the comment check looks for).
 
 ## Same-head idempotency guard
 
-`ops/productivity/review_dedup.py` is pure stdlib decision logic over GitHub
+`review_dedup.py` (repo root) is pure stdlib decision logic over GitHub
 check-runs and server review row states: no network, no DB, no credentials.
+It is the single source; there is no second copy under `ops/productivity/`.
 
 - Never request (repository, pull_number, head_sha) with a completed or
   in-flight review already covering that head.
@@ -87,9 +91,9 @@ manual `@togetherweown-reviewer review` mentions, nothing else changes.
 1. Land here, watch 5+ PRs: one trigger per ready head,
    zero drafts, release-please auto-invoked.
 2. Adopting repos copy the five files (the four above plus
-   `ops/productivity/review_dedup.py`, which the step imports) and widen the
-   workflow sparse-checkout to include `ops/productivity`, or the step fails
-   closed instead of posting.
+   `review_dedup.py`, which the step imports) and widen the
+   workflow sparse-checkout to include the root file (non-cone mode), or the
+   step fails closed instead of posting.
 3. Measure weekly: first-pass 5/5 rate per repo (target ≥80%), reviews per
    merged PR, reviewer cost. Tune `LARGE_DIFF_LINES` from data, not by feel.
 

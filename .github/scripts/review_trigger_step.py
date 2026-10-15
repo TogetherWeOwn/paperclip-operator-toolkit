@@ -24,12 +24,13 @@ from pathlib import Path
 import review_trigger
 
 try:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ops" / "productivity"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     import review_dedup
 except ImportError:
     review_dedup = None
 
 TRIGGER_PREFIX = "@togetherweown-reviewer review"
+TRIGGER_BOT = "github-actions[bot]"
 READY_LABEL = "review-ready"
 REVIEW_CHECK = "Paperclip Review"
 CI_OK_CHECK = "ci-ok"
@@ -81,6 +82,35 @@ def paginate(path, key=None):
 
 def notice(msg):
     print("review-trigger: %s" % msg)
+
+
+def is_own_trigger_comment(comment, marker):
+    """True when a comment is this workflow's own trigger post for the head.
+
+    Only the workflow actor's posts count: on a public repo any account can
+    post the marker text (the head SHA is public), and a manual mention
+    through another identity must never suppress the automatic trigger. The
+    workflow posts as github-actions[bot], so only that login counts.
+    """
+    if marker not in ((comment or {}).get("body") or ""):
+        return False
+    user = (comment or {}).get("user") or {}
+    if user.get("login") != TRIGGER_BOT:
+        return False
+    ctype = user.get("type")
+    return ctype in (None, "", "Bot")
+
+
+def has_error_outcome(runs):
+    """True when the head carries a completed non-verdict Paperclip Review run."""
+    for r in runs or []:
+        if r.get("name") != REVIEW_CHECK:
+            continue
+        if r.get("status") != "completed":
+            continue
+        if r.get("conclusion") not in ("success", "failure"):
+            return True
+    return False
 
 
 def main():
@@ -146,27 +176,37 @@ def main():
 
     comments = paginate("/issues/%d/comments" % number)
     marker = "%s %s" % (TRIGGER_PREFIX, head_sha)
-    if any(marker in (c.get("body") or "") for c in comments):
-        notice("trigger already posted for head %s; one review per head"
-               % head_sha[:12])
-        return 0
+    own_markers = [c for c in comments if is_own_trigger_comment(c, marker)]
 
     if review_dedup is None:
-        raise SystemExit("::error::ops/productivity/review_dedup.py is missing from this checkout; "
+        raise SystemExit("::error::review_dedup.py is missing from this checkout; "
                          "refusing to post a review trigger without the same-head guard")
     # Same-head idempotency: re-read the head's check-runs just
     # before posting. The decision above fires on verdicts (success/failure),
     # but a review requested through another path (manual mention, gate
     # listing, an overlapping delivery) shows as a live run with no verdict
     # and no marker comment yet; posting on top of it opens a second
-    # same-head review row. Error outcomes stay retryable: the reconciler owns
-    # the one-retry path for those heads.
+    # same-head review row.
     fresh_runs = paginate("/commits/%s/check-runs" % head_sha, key="check_runs")
     if any(review_dedup.check_run_suppresses(r.get("name"), r.get("status"), r.get("conclusion"))
            for r in fresh_runs):
         notice("a Paperclip Review run already covers head %s; one review per head"
                % head_sha[:12])
         return 0
+
+    if own_markers:
+        # The marker is the audit trail of this workflow's own post, not of
+        # any manual mention: is_own_trigger_comment already restricts it to
+        # github-actions[bot]. An errored review keeps exactly one CI-driven
+        # retry (matching the reconciler's one-retry rule); anything else with
+        # our marker already posted stays suppressed, and further recovery
+        # after the retry belongs to the reconciler.
+        if len(own_markers) >= 2 or not has_error_outcome(fresh_runs):
+            notice("trigger already posted for head %s; one review per head"
+                   % head_sha[:12])
+            return 0
+        notice("retrying errored head %s after one errored review (one retry max)"
+               % head_sha[:12])
 
     api("/issues/%d/comments" % number, method="POST",
         body={"body": "%s\n\n%s" % (marker, reason)})

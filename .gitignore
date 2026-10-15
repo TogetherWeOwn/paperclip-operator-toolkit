@@ -1,5 +1,12 @@
 # Never commit operational state or credentials.
 *.env
+# Review-trigger runtime state: the control-plane credential file plus the
+# reconciler/sweeper state, parked list and focus-gate dir all default inside
+# the checkout. A routine `git add -A` after a run must never stage them.
+.pc.curl
+ops/productivity/*.state.json
+ops/productivity/unreviewed-parked-prs.txt
+.focus-gate/
 # The default rehearsal DB capture contains a raw live SQLite pre-image. Keep
 # the whole directory unstageable even when an operator runs `git add -A`.
 omniroute/rehearsal/private-db/

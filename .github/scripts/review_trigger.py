@@ -171,10 +171,11 @@ def decide(payload):
 
     Precedence (first match wins):
       draft -> already-reviewed head -> ci-ok red -> release-please ->
-      risky -> checklist -> audit sample -> ready head.
-    Risky and release-please heads need ci-ok green but not the checklist:
-    the review itself records the missing boxes as findings. Everything else
-    waits for a complete checklist so the reviewer stays the final check.
+      risky -> audit sample -> checklist -> ready head.
+    Risky, release-please and audit-sampled heads need ci-ok green but not
+    the checklist: the review itself records the missing boxes as findings.
+    Everything else waits for a complete checklist so the reviewer stays the
+    final check.
     """
     is_draft = bool(payload.get("is_draft"))
     ci_ok_green = bool(payload.get("ci_ok_green"))
@@ -204,12 +205,12 @@ def decide(payload):
     if risky:
         return "request", "risky PR (%s) on head %s" % ("; ".join(reasons), short)
 
+    if in_audit_sample(head_sha):
+        return "request", "10pct audit sample on head %s" % short
+
     complete, missing = checklist_status(payload.get("body") or "")
     if not complete:
         return "skip", "checklist incomplete (%s)" % "; ".join(missing)
-
-    if in_audit_sample(head_sha):
-        return "request", "10pct audit sample on head %s" % short
 
     return "request", "ready head %s: ci-ok green, checklist complete" % short
 

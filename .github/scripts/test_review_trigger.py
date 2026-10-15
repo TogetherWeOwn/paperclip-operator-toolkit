@@ -222,6 +222,15 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(action, "request")
         self.assertIn("audit sample", reason)
 
+    def test_audit_sample_waives_an_incomplete_checklist(self):
+        action, reason = rt.decide(base_payload(head_sha=IN_SAMPLE_SHA, body=""))
+        self.assertEqual(action, "request")
+        self.assertIn("audit sample", reason)
+
+    def test_out_of_sample_with_incomplete_checklist_still_skips(self):
+        action, _ = rt.decide(base_payload(head_sha=OUT_OF_SAMPLE_SHA, body=""))
+        self.assertEqual(action, "skip")
+
     def test_audit_sample_is_deterministic(self):
         self.assertTrue(rt.in_audit_sample(IN_SAMPLE_SHA))
         self.assertFalse(rt.in_audit_sample(OUT_OF_SAMPLE_SHA))

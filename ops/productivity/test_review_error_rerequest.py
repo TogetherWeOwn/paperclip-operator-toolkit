@@ -297,30 +297,30 @@ class Wiring(unittest.TestCase):
         out = self.tick(merge=[(REPO.lower(), 7, SHA)], facts_now=facts(), live=True)
         self.assertEqual(out['comments'], [])
         self.assertIn('has a live run', out['stdout'])
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), live=True)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), live=True)
         self.assertEqual(out['comments'], [])
 
     def test_backlog_card_gets_no_review_wake_after_a_review_error(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(status='backlog'))
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(status='backlog'))
         self.assertEqual(out['comments'], [])
 
     def test_review_wakes_are_held_by_descriptor_recovery_and_blockers(self):
         for changes in ({'descriptor': True}, {'recovery': 1}, {'blockers': 1}):
             with self.subTest(changes=changes):
-                out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(**changes))
+                out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(**changes))
                 self.assertEqual(out['comments'], [])
                 out = self.tick(unreviewed=[(REPO, 9, SHA)], facts_now=facts(**changes))
                 self.assertEqual(out['comments'], [])
 
     def test_review_wake_still_goes_out_for_a_card_awaiting_approval(self):
         awaiting = facts(status='in_review', pending=1)
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=awaiting)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=awaiting)
         self.assertEqual(out['comments'], [CARD_ID])
         out = self.tick(unreviewed=[(REPO, 9, SHA)], facts_now=awaiting)
         self.assertEqual(out['comments'], [CARD_ID])
 
     def test_review_wake_never_orders_a_merge_without_a_condition(self):
-        for stranded, unreviewed in (([[REPO, '7', SHA]], ()), ((), [(REPO, 9, SHA)])):
+        for stranded, unreviewed in (([[REPO, '7', SHA, 'error']], ()), ((), [(REPO, 9, SHA)])):
             with self.subTest(stranded=bool(stranded)):
                 out = self.tick(stranded=stranded, unreviewed=unreviewed, facts_now=facts())
                 self.assertEqual(len(out['bodies']), 1)
@@ -328,7 +328,7 @@ class Wiring(unittest.TestCase):
                 self.assertIn('pending decision', out['bodies'][0])
 
     def test_eligible_card_still_gets_the_review_error_wake(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts())
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts())
         self.assertEqual(out['comments'], [CARD_ID])
         self.assertIn(f'{REPO}#7@{SHA}', out['state'])
 
@@ -347,9 +347,9 @@ class Wiring(unittest.TestCase):
         self.assertEqual(out['parked'], '')
 
     def test_out_of_focus_card_gets_no_wake_while_focus_gate_is_active(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(in_focus=False), focus=True)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(in_focus=False), focus=True)
         self.assertEqual(out['comments'], [])
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(in_focus=False), focus=False)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(in_focus=False), focus=False)
         self.assertEqual(out['comments'], [CARD_ID])
 
     def test_failed_eligibility_check_holds_only_that_card(self):
@@ -360,7 +360,7 @@ class Wiring(unittest.TestCase):
                 raise ValueError('unexpected count')
             return facts()
 
-        out = self.tick(stranded=[[REPO, '7', SHA], [REPO, '9', SHA]], cards=cards, facts_fn=facts_fn)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error'], [REPO, '9', SHA, 'error']], cards=cards, facts_fn=facts_fn)
         self.assertEqual(out['comments'], [OTHER_ID])
         self.assertEqual(list(out['state']), [f'{REPO}#9@{SHA}'])
 
@@ -376,7 +376,7 @@ class Wiring(unittest.TestCase):
         def slow_query(issue_id, focus_on):
             raise subprocess.TimeoutExpired('psql', r.PSQL_TIMEOUT_S)
 
-        for kind in ({'stranded': [[REPO, '7', SHA]]}, {'unreviewed': [(REPO, 9, SHA)]},
+        for kind in ({'stranded': [[REPO, '7', SHA, 'error']]}, {'unreviewed': [(REPO, 9, SHA)]},
                      {'merge': [(REPO.lower(), 7, SHA)]}):
             with self.subTest(kind=list(kind)):
                 out = self.tick(**kind, facts_fn=slow_query)
@@ -388,7 +388,7 @@ class Wiring(unittest.TestCase):
         def slow_owner(repo, n):
             raise subprocess.TimeoutExpired('psql', r.PSQL_TIMEOUT_S)
 
-        for kind in ({'stranded': [[REPO, '7', SHA]]}, {'merge': [(REPO.lower(), 7, SHA)]}):
+        for kind in ({'stranded': [[REPO, '7', SHA, 'error']]}, {'merge': [(REPO.lower(), 7, SHA)]}):
             with self.subTest(kind=list(kind)):
                 out = self.tick(**kind, card=slow_owner, facts_now=facts())
                 self.assertIsNone(out['error'])
@@ -398,7 +398,7 @@ class Wiring(unittest.TestCase):
 
     def test_timed_out_pr_lookup_holds_the_card_and_retries_next_tick(self):
         real_pr_head = r.pr_head
-        for kind in ({'stranded': [[REPO, '7', SHA]]}, {'unreviewed': [(REPO, 9, SHA)]},
+        for kind in ({'stranded': [[REPO, '7', SHA, 'error']]}, {'unreviewed': [(REPO, 9, SHA)]},
                      {'merge': [(REPO.lower(), 7, SHA)]}):
             with self.subTest(kind=list(kind)), mock.patch.object(r.subprocess, 'run', side_effect=timed_out):
                 out = self.tick(**kind, facts_now=facts(), head=real_pr_head)
@@ -410,7 +410,7 @@ class Wiring(unittest.TestCase):
 
     def test_timed_out_comment_post_is_a_failed_post_retried_next_tick(self):
         real_comment = r.comment
-        for kind in ({'stranded': [[REPO, '7', SHA]]}, {'merge': [(REPO.lower(), 7, SHA)]}):
+        for kind in ({'stranded': [[REPO, '7', SHA, 'error']]}, {'merge': [(REPO.lower(), 7, SHA)]}):
             with self.subTest(kind=list(kind)), mock.patch.object(r.subprocess, 'run', side_effect=timed_out):
                 out = self.tick(**kind, facts_now=facts(), http=real_comment)
                 self.assertIsNone(out['error'])
@@ -419,7 +419,7 @@ class Wiring(unittest.TestCase):
                 self.assertIn('comment failed (HTTP timeout); retry next tick', out['stdout'])
 
     def test_recorded_key_is_not_repeated(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(),
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(),
                         state={f'{REPO}#7@{SHA}': 'CARD-900 200 2026-10-08T00:00:00Z'})
         self.assertEqual(out['comments'], [])
 
@@ -429,18 +429,18 @@ class Wiring(unittest.TestCase):
         self.assertEqual(out['state'], {})
 
     def test_failed_pr_lookup_is_retried_not_marked_moot(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), head=(None, None))
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), head=(None, None))
         self.assertEqual(out['comments'], [])
         self.assertEqual(out['state'], {})
         self.assertIn('PR lookup failed', out['stdout'])
 
     def test_closed_pr_is_still_marked_moot(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), head=('CLOSED', SHA))
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), head=('CLOSED', SHA))
         self.assertEqual(out['comments'], [])
         self.assertEqual(out['state'], {f'{REPO}#7@{SHA}': 'moot'})
 
     def test_failed_review_wake_is_not_recorded_so_the_next_tick_retries(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), http='500')
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), http='500')
         self.assertEqual(out['comments'], [CARD_ID])
         self.assertEqual(out['state'], {})
 
@@ -450,7 +450,7 @@ class Wiring(unittest.TestCase):
         self.assertEqual(out['state'], {})
 
     def test_posts_made_before_a_later_failure_stay_recorded(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), broken_parked=True)
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), broken_parked=True)
         self.assertIsInstance(out['error'], IsADirectoryError)
         self.assertEqual(out['comments'], [CARD_ID])
         self.assertEqual(list(out['state']), [f'{REPO}#7@{SHA}'])
@@ -461,20 +461,20 @@ class Wiring(unittest.TestCase):
         self.assertEqual(list(out['state']), [f'{REPO.lower()}#7@{SHA}:mergeready'])
 
     def test_owner_lookup_failure_skips_only_that_pr(self):
-        out = self.tick(stranded=[[REPO, '7', SHA], [REPO, '9', SHA]], cards={'9': (OTHER_ID, 'CARD-901')},
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error'], [REPO, '9', SHA, 'error']], cards={'9': (OTHER_ID, 'CARD-901')},
                         facts_now=facts())
         self.assertIsNone(out['error'])
         self.assertEqual(out['comments'], [OTHER_ID])
         self.assertIn('owner lookup failed', out['stdout'])
 
     def test_host_under_pressure_starts_no_wakes(self):
-        out = self.tick(stranded=[[REPO, '7', SHA]], facts_now=facts(), host=(False, 'disk 97%'))
+        out = self.tick(stranded=[[REPO, '7', SHA, 'error']], facts_now=facts(), host=(False, 'disk 97%'))
         self.assertEqual(out['comments'], [])
         self.assertEqual(out['state'], {})
         self.assertIn('host under pressure', out['stdout'])
 
     def test_failed_posts_count_toward_the_tick_cap(self):
-        stranded = [[REPO, str(n), SHA] for n in range(1, r.MAX_PER_TICK + 6)]
+        stranded = [[REPO, str(n), SHA, 'error'] for n in range(1, r.MAX_PER_TICK + 6)]
         out = self.tick(stranded=stranded, facts_now=facts(), http='500')
         self.assertEqual(len(out['comments']), r.MAX_PER_TICK)
         self.assertEqual(out['state'], {})
@@ -517,6 +517,49 @@ class DedupGuard(unittest.TestCase):
         self.assertIsNone(out['error'])
         self.assertEqual(out['comments'], [])
         self.assertEqual(out['state'], {})
+
+    def test_missing_state_blob_suppresses_fail_closed(self):
+        for stranded in ([[REPO, '7', SHA]], [[REPO, '7', SHA, '']], [[REPO, '7', SHA, None]]):
+            with self.subTest(stranded=stranded):
+                out = self.tick(stranded=stranded, facts_now=facts())
+                self.assertIsNone(out['error'])
+                self.assertEqual(out['comments'], [])
+                self.assertEqual(out['state'], {})
+                self.assertIn('no second request', out['stdout'])
+
+    def test_stranded_query_selects_the_state_aggregate(self):
+        with mock.patch.object(r, 'psql', return_value=[]) as psql:
+            with mock.patch.object(r, 'gh_env', return_value={}), \
+                    mock.patch.object(r, 'merge_ready', return_value=[]), \
+                    mock.patch.object(r, 'unreviewed', return_value=[]), \
+                    mock.patch.object(r, 'pr_head', return_value=(None, None)):
+                r.main()
+        sql = psql.call_args.args[0]
+        self.assertIn('string_agg', sql)
+        self.assertIn('chat_github_reviews', sql)
+
+    def test_stranded_query_joins_repositories_case_insensitively(self):
+        with mock.patch.object(r, 'psql', return_value=[]) as psql:
+            with mock.patch.object(r, 'gh_env', return_value={}), \
+                    mock.patch.object(r, 'merge_ready', return_value=[]), \
+                    mock.patch.object(r, 'unreviewed', return_value=[]), \
+                    mock.patch.object(r, 'pr_head', return_value=(None, None)):
+                r.main()
+        sql = psql.call_args.args[0]
+        self.assertIn('lower(c.repository)=lower(l.repository)', sql.replace(' ', ''))
+
+    def test_mixed_case_row_states_still_decide(self):
+        action, _ = r.review_dedup.head_decision(r.head_row_states('Error'))
+        self.assertEqual(action, 'request')
+        action, _ = r.review_dedup.head_decision(r.head_row_states('COMPLETED,error'))
+        self.assertEqual(action, 'suppress')
+
+    def test_log_write_creates_missing_parents_and_never_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / 'nested' / 'operator-actions.log'
+            with mock.patch.object(r, 'LOG', target):
+                r.append_log('clean-tree probe')
+            self.assertIn('clean-tree probe', target.read_text())
 
 
 class GhAndCurl(unittest.TestCase):

@@ -6,8 +6,9 @@ name: Review trigger
 # complete, requests one review of that exact head.
 #
 # Never reviewed: drafts, heads that already carry a success/failure Paperclip
-# Review verdict (incomplete runs never block a re-request), heads without
-# ci-ok green.
+# Review verdict (incomplete runs never block a re-request in decide(); the
+# step allows one re-post per head after an error, further recovery belongs
+# to the reconciler), heads without ci-ok green.
 # Always invoked: release-please PRs and risky paths (security boundary,
 # flagged risk labels, over 600 changed lines), plus a deterministic 10%
 # audit sample. Risky/release-please heads need ci-ok green but not the
@@ -18,11 +19,12 @@ name: Review trigger
 # plus one idempotent comment). No model call, no Claude/Codex dependency.
 #
 # Trigger record: one `@togetherweown-reviewer review <sha>` comment plus a
-# `review-ready` label per head. The comment is the audit trail; the label is
-# the machine signal the bot invocation config watches (see
-# docs/review-trigger.md for the platform half). Both are written at most
-# once per head: the script skips reviewed heads, the post step re-checks
-# for an existing trigger comment on the same SHA before writing, and
+# `review-ready` label per head. The comment is the audit trail (only posts
+# authored by github-actions[bot] count; anyone can post the marker text on a
+# public repo); the label is the machine signal the bot invocation config
+# watches (see docs/review-trigger.md for the platform half). Both are
+# written at most once per head, plus one retry after an errored review: the
+# script skips reviewed heads, suppresses on a second bot marker, and
 # re-reads the head's check-runs just before posting so a live Paperclip
 # Review run started through another path (manual mention, gate listing, an
 # overlapping delivery) suppresses the post.
@@ -51,13 +53,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # Cone-mode directory prefixes. The gate step shares
-          # ops/productivity/review_dedup.py (same-head idempotency);
-          # keep this in sync with the template copy list in docs/review-trigger.md.
+          # The gate step shares the repo-root review_dedup.py (same-head
+          # idempotency, single source); cone mode cannot address a single
+          # root file, so this checkout is non-cone. Keep in sync with the
+          # template copy list in docs/review-trigger.md.
           sparse-checkout: |
             .github
             ops/productivity
-          sparse-checkout-cone-mode: true
+            review_dedup.py
+          sparse-checkout-cone-mode: false
 
       - name: Decide and request at most one review
         env:

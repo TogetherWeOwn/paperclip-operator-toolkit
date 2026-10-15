@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = os.environ.get('OPERATOR_ROOT', str(Path(__file__).resolve().parents[2]))
 CID = os.environ.get('PAPERCLIP_COMPANY_ID', '00000000-0000-0000-0000-000000000000')
+PAPERCLIP_API = os.environ.get('PAPERCLIP_API', 'http://127.0.0.1:3100/api').rstrip('/')
 
 
 def _default_repos():
@@ -35,6 +36,20 @@ STATE_DIR = os.environ.get('ORPHAN_STATE_DIR', os.path.expanduser('~/.local/stat
 # Parent step bound for the run-deadline guard (the scheduler step that hosts
 # this sweeper). The deadline above must stay below it; see TimeoutConfig.
 PARENT_STEP_BOUND_SECONDS = int(os.environ.get('ORPHAN_PARENT_STEP_BOUND_SECONDS', '120'))
+
+# Operational log for attempt/created/backfill lines. Defaults under
+# ORPHAN_STATE_DIR (not the checkout) so --apply works on a clean tree, and
+# is overridable via ORPHAN_LOG. A logging failure never aborts a write loop.
+LOG_PATH = Path(os.environ.get('ORPHAN_LOG', os.path.join(STATE_DIR, 'orphan-prs-operator-actions.log')))
+
+
+def log_line(msg):
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open('a') as f:
+            f.write(msg + '\n')
+    except OSError as e:
+        print(f'orphan-prs: log write failed ({e}); continuing', file=sys.stderr)
 
 
 def timeout_seconds(name, default):
@@ -65,7 +80,7 @@ def psql(sql):
 def api(method, path, body):
     try:
         out = subprocess.run(['curl', '-sK', f'{ROOT}/.pc.curl', '-m', '60', '-X', method, '-H', 'content-type: application/json',
-                              f'http://127.0.0.1:3100/api/{path}', '--data-binary', json.dumps(body)],
+                              f'{PAPERCLIP_API}/{path}', '--data-binary', json.dumps(body)],
                              capture_output=True, text=True, timeout=CURL_TIMEOUT_SECONDS).stdout
     except subprocess.TimeoutExpired:
         print(f'{method} {path} timed out after {CURL_TIMEOUT_SECONDS}s; outcome unknown, not retried', file=sys.stderr)
@@ -211,9 +226,8 @@ def main():
         backfill_writes += 1
         if not isinstance(wp, dict) or not wp.get('id'):
             continue
-        with open(f'{ROOT}/ops/worker-vps/operator-actions.log', 'a') as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: backfilled work product for "
-                    f"{repo}#{n} on {ident}; the card POST predated its link.\n")
+        log_line(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: backfilled work product for "
+                 f"{repo}#{n} on {ident}; the card POST predated its link.")
         print('backfilled', ident, repo, n)
     pending = orphans[:MAX_NEW]
     for idx, (repo, who, proj, p) in enumerate(pending):
@@ -222,9 +236,8 @@ def main():
                   file=sys.stderr)
             break
         n, author = p['number'], p['author']['login']
-        with open(f'{ROOT}/ops/worker-vps/operator-actions.log', 'a') as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: attempting {repo}#{n} "
-                    f"(by {author}) for {who}; outcome unknown if interrupted.\n")
+        log_line(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: attempting {repo}#{n} "
+                 f"(by {author}) for {who}; outcome unknown if interrupted.")
         card = api('POST', f'companies/{CID}/issues', {
             'title': f"Shepherd {repo.split('/')[1]}#{n} to merge", 'description': card_description(p['url']),
             'status': 'todo', 'priority': 'medium', 'assigneeAgentId': agents.get(who), 'projectId': projects.get(proj)})
@@ -236,9 +249,8 @@ def main():
             continue
         api('POST', f"issues/{card['id']}/work-products", {'type': 'pull_request', 'provider': 'github',
                                                          'url': p['url'], 'title': f'{repo}#{n}', 'status': 'active'})
-        with open(f'{ROOT}/ops/worker-vps/operator-actions.log', 'a') as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: {repo}#{n} (by {author}) had no card; "
-                    f"created {card.get('identifier')} for {who}. Rollback: cancel the card.\n")
+        log_line(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} orphan-prs: {repo}#{n} (by {author}) had no card; "
+                 f"created {card.get('identifier')} for {who}. Rollback: cancel the card.")
         print('created', card.get('identifier'), repo, n)
 
 

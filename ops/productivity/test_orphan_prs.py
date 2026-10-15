@@ -75,9 +75,9 @@ class TimeoutPass(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout=out, stderr='')
 
         with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / 'ops/worker-vps/operator-actions.log'
-            log_path.parent.mkdir(parents=True)
+            log_path = Path(tmp) / 'orphan-prs-operator-actions.log'
             with mock.patch.object(op, 'ROOT', tmp), mock.patch.object(op, 'STATE_DIR', tmp), \
+                    mock.patch.object(op, 'LOG_PATH', log_path), \
                     mock.patch.object(op, 'REPOS', repos), mock.patch.object(op, 'APPLY', apply), \
                     mock.patch.object(op.subprocess, 'run', side_effect=fake_run), \
                     mock.patch('builtins.print') as output:
@@ -176,6 +176,26 @@ class TimeoutPass(unittest.TestCase):
         self.assertIn('attempting', log)
         self.assertIn('created CARD-900', log)
         self.assertLess(log.index('attempting'), log.index('created CARD-900'))
+
+    def test_apply_creates_missing_log_parents_on_a_clean_tree(self):
+        calls, _, log = self.run_pass()
+        self.assertIn('attempting', log)
+        self.assertIn('created CARD-900', log)
+
+    def test_api_base_comes_from_paperclip_api_env(self):
+        self.assertTrue(hasattr(op, 'PAPERCLIP_API'))
+        self.assertTrue(op.PAPERCLIP_API.startswith('http'))
+
+    def test_log_path_defaults_under_state_dir_not_the_checkout(self):
+        self.assertTrue(hasattr(op, 'LOG_PATH'))
+        self.assertNotIn('ops/worker-vps', str(op.LOG_PATH))
+
+    def test_log_line_creates_missing_parents_and_never_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / 'nested' / 'dir' / 'operator-actions.log'
+            with mock.patch.object(op, 'LOG_PATH', target):
+                op.log_line('clean-tree probe')
+            self.assertIn('clean-tree probe', target.read_text())
 
     def test_run_deadline_defers_remaining_cards(self):
         prs = {REPO: [pr(number=1), pr(number=2)]}

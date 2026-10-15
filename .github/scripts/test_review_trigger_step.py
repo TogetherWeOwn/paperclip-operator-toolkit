@@ -60,7 +60,8 @@ class Stub:
             return page_of(self.comments, path)
         if path == "/issues/7/comments" and method == "POST":
             self.posts.append(body["body"])
-            self.comments.append({"body": body["body"]})
+            self.comments.append({"body": body["body"],
+                                  "user": {"login": "github-actions[bot]", "type": "Bot"}})
             return {}
         if path == "/issues/7/labels" and method == "POST":
             if self.fail_labels_404 and not self.created_label:
@@ -101,9 +102,19 @@ class StepTest(unittest.TestCase):
     def test_existing_trigger_is_not_reposted(self):
         stub = Stub(runs=green_runs(), comments=[
             {"body": "@togetherweown-reviewer review %s\n\nready head"
-             % OUT_OF_SAMPLE_SHA}])
+             % OUT_OF_SAMPLE_SHA,
+             "user": {"login": "github-actions[bot]", "type": "Bot"}}])
         self.assertEqual(run_with(stub), 0)
         self.assertEqual(stub.posts, [])
+
+    def test_non_bot_marker_does_not_suppress_the_post(self):
+        stub = Stub(runs=green_runs(), comments=[
+            {"body": "@togetherweown-reviewer review %s\n\nready head"
+             % OUT_OF_SAMPLE_SHA,
+             "user": {"login": "drive-by-user", "type": "User"}}])
+        self.assertEqual(run_with(stub), 0)
+        self.assertTrue(any("@togetherweown-reviewer review %s"
+                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
 
     def test_ci_red_exits_zero_without_posting(self):
         stub = Stub(runs=[{"name": "ci-ok", "status": "completed",
@@ -142,7 +153,8 @@ class StepTest(unittest.TestCase):
     def test_trigger_marker_past_first_comment_page_is_not_reposted(self):
         filler = [{"body": "chatter %d" % i} for i in range(150)]
         marker = {"body": "@togetherweown-reviewer review %s\n\nready head"
-                  % OUT_OF_SAMPLE_SHA}
+                  % OUT_OF_SAMPLE_SHA,
+                  "user": {"login": "github-actions[bot]", "type": "Bot"}}
         stub = Stub(runs=green_runs(), comments=filler + [marker])
         self.assertEqual(run_with(stub), 0)
         self.assertEqual(stub.posts, [])
@@ -175,6 +187,27 @@ class StepTest(unittest.TestCase):
         self.assertEqual(run_with(stub), 0)
         self.assertTrue(any("@togetherweown-reviewer review %s"
                             % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+
+    def test_marker_plus_error_outcome_posts_one_retry(self):
+        runs = green_runs() + [{"name": "Paperclip Review", "status": "completed",
+                                "conclusion": "action_required"}]
+        stub = Stub(runs=runs, comments=[
+            {"body": "@togetherweown-reviewer review %s\n\nready head"
+             % OUT_OF_SAMPLE_SHA,
+             "user": {"login": "github-actions[bot]", "type": "Bot"}}])
+        self.assertEqual(run_with(stub), 0)
+        self.assertTrue(any("@togetherweown-reviewer review %s"
+                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+
+    def test_second_marker_means_retry_already_used(self):
+        runs = green_runs() + [{"name": "Paperclip Review", "status": "completed",
+                                "conclusion": "action_required"}]
+        marker = {"body": "@togetherweown-reviewer review %s\n\nready head"
+                  % OUT_OF_SAMPLE_SHA,
+                  "user": {"login": "github-actions[bot]", "type": "Bot"}}
+        stub = Stub(runs=runs, comments=[dict(marker), dict(marker)])
+        self.assertEqual(run_with(stub), 0)
+        self.assertEqual(stub.posts, [])
 
     def test_second_overlapping_delivery_posts_no_second_trigger(self):
         stub = Stub(runs=green_runs())

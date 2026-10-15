@@ -28,6 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT))  # single-source guard lives at repo-root review_dedup.py
 try:
     sys.path.insert(0, str(ROOT / 'ops/lib'))
     import live_run_guard  # noqa: E402  (private host guard; public fallback below)
@@ -40,7 +41,7 @@ except ImportError:
         subprocess=subprocess,
         issue_has_live_work=lambda issue_id: True if not issue_id or not _UUID.fullmatch(str(issue_id)) else _live_work_default(issue_id))
     del _re, _types
-import review_dedup  # noqa: E402  (same-head idempotency guard)
+import review_dedup  # noqa: E402  (same-head idempotency guard, repo-root single source)
 
 
 def _live_work_default(issue_id):
@@ -69,6 +70,18 @@ API = os.environ.get('PAPERCLIP_API', 'http://127.0.0.1:3100/api')
 STATE = Path(os.environ.get('REVIEW_RERQ_STATE', str(ROOT / 'ops/productivity/review-error-rerequest.state.json')))
 LOG = Path(os.environ.get('REVIEW_RERQ_LOG', str(ROOT / 'ops/worker-vps/operator-actions.log')))
 PARKED = Path(os.environ.get('REVIEW_RERQ_PARKED', str(ROOT / 'ops/productivity/unreviewed-parked-prs.txt')))
+
+
+def append_log(line):
+    """Append one operator-actions line; a logging failure never aborts the tick."""
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open('a') as f:
+            f.write(line + '\n')
+    except OSError as e:
+        print(f'review-error-rerequest: log write failed ({e}); continuing')
+
+
 APPLY = '--apply' in sys.argv
 MIN_AGE_MIN = 10
 MAX_PER_TICK = 15
@@ -156,14 +169,16 @@ def comment(issue_id, body):
 def head_row_states(blob):
     """Server row states for one stranded head, from the query's state blob.
 
-    A missing blob predates the TOG-24349 column and means exactly one known
-    error: the failure this tick is handling, so the first retry stays
-    allowed. The stranded query only returns heads whose latest row is
-    error/incomplete, so a legacy-shaped row is always that failure.
+    A missing/empty blob means the state aggregate did not come back (wrong
+    query shape, not the TOG-24349 column): fail closed toward suppress via
+    an unrecognized marker, never toward a wake. Callers log the suppression;
+    the next tick re-reads once the query is fixed.
     """
     if blob:
-        return [s for s in str(blob).split(',') if s]
-    return ['error']
+        states = [s for s in str(blob).split(',') if s]
+        if states:
+            return states
+    return ['__missing_state_blob__']
 
 
 def save_state(state):
@@ -319,8 +334,10 @@ def main():
         and l.updated_at < now() - interval '{MIN_AGE_MIN} minutes' order by l.updated_at""")
     env = gh_env()
     done = 0
-    # The 4th column (state blob) postdates TOG-24349; 3-tuples mean one known
-    # error (head_row_states maps them to the first retry, as before).
+    # The 4th column (state blob) carries the head's recent row states for the
+    # dedup guard. A row without it fails closed: head_row_states maps the
+    # missing blob to an unrecognized marker so head_decision suppresses the
+    # wake instead of re-requesting every errored head.
     stranded = ([(row[0], row[1], row[2], 'error', row[3] if len(row) > 3 else None) for row in stranded]
                 + [(r, n, s, 'none', None) for r, n, s in unreviewed(env)]
                 + [(r, n, s, 'ready', None) for r, n, s in merge_ready(env)])
@@ -358,9 +375,8 @@ def main():
                 continue
             state[key] = f'{card[1]} {code} {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}'
             save_state(state)
-            with LOG.open('a') as f:
-                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} review-error-rerequest: merge notice to "
-                        f"{card[1]} for {key} (HTTP {code})\n")
+            append_log(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} review-error-rerequest: merge notice to "
+                       f"{card[1]} for {key} (HTTP {code})")
             continue
         if pr_state != 'OPEN' or head != sha:
             state[key] = 'moot'
@@ -414,9 +430,8 @@ def main():
             continue
         state[key] = f'{ident} {code} {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}'
         save_state(state)
-        with LOG.open('a') as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} review-error-rerequest: woke {ident} "
-                    f"to re-request review for {key} (HTTP {code})\n")
+        append_log(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} review-error-rerequest: woke {ident} "
+                   f"to re-request review for {key} (HTTP {code})")
         print(f'woke {ident} for {key} HTTP {code}')
     PARKED.write_text(''.join(f'{line}\n' for line in parked))
     if parked:

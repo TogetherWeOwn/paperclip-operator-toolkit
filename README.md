@@ -277,13 +277,15 @@ These are load-bearing and were each learned by breaking something:
 
 Paperclip Review runs exactly once per ready head. `.github/workflows/review-trigger.yml`
 fires on CI completion and `.github/scripts/review_trigger_step.py` posts at most one
-`@togetherweown-reviewer review <sha>` trigger per head. `ops/productivity/review_dedup.py`
-is the shared same-head idempotency guard (pure stdlib, no network/DB/credentials): never
-request (repository, pull_number, head_sha) with a completed or in-flight review, one retry
-max on errored heads. `ops/productivity/review_error_rerequest.py` (one-retry reconciler) and
-`ops/productivity/orphan_prs.py` (orphan-PR sweeper) consume it; both read their deployment
-from the environment (see `docs/review-trigger.md`). Offline suites:
-`ops/productivity/test_review_dedup.py`, `.github/scripts/test_review_trigger.py`,
+`@togetherweown-reviewer review <sha>` trigger per head. `review_dedup.py`
+(repo root) is the shared same-head idempotency guard, single source (pure
+stdlib, no network/DB/credentials): never request (repository, pull_number,
+head_sha) with a completed or in-flight review, one retry max on errored
+heads. `ops/productivity/review_error_rerequest.py` (one-retry reconciler)
+and `ops/productivity/orphan_prs.py` (orphan-PR sweeper) consume it; both
+read their deployment from the environment (see `docs/review-trigger.md`).
+Offline suites: `test_review_dedup.py`,
+`.github/scripts/test_review_trigger.py`,
 `.github/scripts/test_review_trigger_step.py`,
 `ops/productivity/test_review_error_rerequest.py`,
 `ops/productivity/test_orphan_prs.py`.
