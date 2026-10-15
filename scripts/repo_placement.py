@@ -16,6 +16,7 @@ Verdicts:
 
 Usage:
   git -C PRIVATE_REPO ls-files | repo_placement.py --fail-on-public
+  git -C PRIVATE_REPO ls-files -z | repo_placement.py --fail-on-public
   repo_placement.py --fail-on-public < paths.txt
 
 Exit codes: 0 no public paths in the input, 1 public paths remain (or a
@@ -80,6 +81,63 @@ def _strip_backup(base: str) -> str:
     return stripped
 
 
+def _decode_git_path(line: str) -> str | None:
+    """Decode one `git ls-files` output line to a repo-relative path.
+
+    With the default `core.quotepath`, git C-quotes any path containing
+    non-ASCII bytes, quotes, backslashes or control characters, e.g. a file
+    named `caf\\u00e9.pem` arrives as `"caf\\303\\251.pem"` including the
+    surrounding quotes. Matching suffixes on the still-quoted text defeats
+    every `endswith` rule, so decode before classifying. Returns None when
+    a quoted line cannot be decoded (caller keeps it private: fail closed).
+    Plain (unquoted) lines are returned unchanged.
+    """
+    s = line.strip()
+    if not (len(s) >= 2 and s.startswith('"') and s.endswith('"')):
+        return s
+    inner = s[1:-1]
+    raw = bytearray()
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if c != "\\":
+            raw.extend(c.encode("utf-8"))
+            i += 1
+            continue
+        if i + 1 >= len(inner):
+            return None
+        nxt = inner[i + 1]
+        if nxt == "\\":
+            raw.append(0x5C)
+            i += 2
+        elif nxt == '"':
+            raw.append(0x22)
+            i += 2
+        elif nxt == "t":
+            raw.append(0x09)
+            i += 2
+        elif nxt == "n":
+            raw.append(0x0A)
+            i += 2
+        elif nxt in "01234567":
+            digits = nxt
+            j = i + 2
+            while j < len(inner) and len(digits) < 3 and inner[j] in "01234567":
+                digits += inner[j]
+                j += 1
+            try:
+                raw.append(int(digits, 8) & 0xFF)
+            except ValueError:
+                return None
+            i += 1 + len(digits)
+        else:
+            return None
+    try:
+        return bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        return bytes(raw).decode("utf-8", errors="surrogateescape")
+
+
 def _is_fixture(path: str) -> bool:
     base = path.rsplit("/", 1)[-1]
     return ("/fixtures/" in f"/{path}" or base.startswith("fixture-")
@@ -88,7 +146,11 @@ def _is_fixture(path: str) -> bool:
 
 def classify(path: str) -> tuple[str, str]:
     """Return (verdict, rule) for one repo-relative path."""
-    p = path.strip()
+    decoded = _decode_git_path(path)
+    if decoded is None:
+        # Undecodable C-quoted line: fail closed, never report as movable.
+        return "PRIVATE-DATA", "undecodable-quoted-path"
+    p = decoded
     while p.startswith("./"):
         p = p[2:]
     base = p.rsplit("/", 1)[-1].lower()
@@ -149,6 +211,8 @@ def main(argv=None, stdin_text=None) -> int:
         print(f"repo placement: unknown argument: {unknown[0]}", file=sys.stderr)
         return 2
     text = sys.stdin.read() if stdin_text is None else stdin_text
+    # Accept NUL-delimited input (`git ls-files -z`) as well as newlines.
+    text = text.replace("\0", "\n")
     paths = [line.strip() for line in text.splitlines() if line.strip()]
     if not paths:
         print("repo placement: UNMEASURED - no paths", file=sys.stderr)

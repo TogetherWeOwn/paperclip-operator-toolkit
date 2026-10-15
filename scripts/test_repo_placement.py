@@ -109,9 +109,41 @@ class Classify(unittest.TestCase):
                      "external_disclosure_authorizers.json"):
             self.assertEqual(classify(path)[0], "PRIVATE-CONFIG", path)
 
+    def test_git_quoted_non_ascii_paths_stay_private(self):
+        # git C-quotes non-ASCII names: cafe.pem arrives with octal
+        # escapes and surrounding quotes; the trailing quote must not
+        # defeat the suffix rules.
+        for path in ('"caf\\303\\251.pem"',
+                     '"caf\\303\\251.key"',
+                     '"keys/caf\\303\\251.env"'):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+        # NUL-delimited (`git ls-files -z`) input classifies the same.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text='"caf\\303\\251.pem"\nquota_brake.sh\n'), 1)
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text='"caf\\303\\251.pem"\0keys/app.pem\n'), 0)
+
+    def test_undecodable_quoted_paths_fail_closed(self):
+        # A quoted line that cannot be decoded is never movable.
+        self.assertEqual(classify('"caf\\999.pem"')[0], "PRIVATE-DATA")
+
     def test_synthetic_fixtures_are_not_private_config(self):
-        path = "tests/fixtures/combo-mapping/combo-allowlist.txt"
-        self.assertEqual(classify(path)[0], "PUBLIC-ABLE")
+        # These paths match a pin/allowlist sheet rule and stay public
+        # ONLY because of the fixture exemption: without it they would
+        # be PRIVATE-CONFIG (verified by the positive control below).
+        for path in ("tests/fixtures/combo_allowlist.txt",
+                     "github-runner/garm/fixture-isolated-private.json",
+                     "github-runner/garm/fixture-privileged-private.json"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
+        # Positive control: the same sheet name outside a fixture
+        # directory is private config.
+        for path in ("combo_allowlist.txt",
+                     "sheets/combo_allowlist.txt",
+                     "github-runner/garm/real-isolated-private.json"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-CONFIG", path)
 
     def test_host_config_stays_private(self):
         for path in ("systemd/paperclip-liveness-reconciler.service",
