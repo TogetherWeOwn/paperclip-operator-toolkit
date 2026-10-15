@@ -6,8 +6,7 @@
     "ref_name": { "include": ["refs/heads/main"], "exclude": [] },
     "repository_name": {
       "include": ["*"],
-      "exclude": ["paperclip-operator-toolkit"],
-      "protected": true
+      "exclude": ["paperclip-operator-toolkit", ".github", "replay-*"]
     }
   },
   "rules": [
@@ -22,5 +21,5 @@
       }
     }
   ],
-  "_note": "Apply only after the reusable workflow and checker are merged to TogetherWeOwn/.github, the caller placeholder is replaced with that commit SHA in every consumer, and the config-deploy / config-deploy check is verified. This template adds no merge queue or unrelated branch-protection rules."
+  "_note": "Apply only after the reusable workflow and checker are merged to TogetherWeOwn/.github, the caller placeholder is replaced with that commit SHA in every consumer, and the config-deploy / config-deploy check is verified. Excludes this toolkit (no caller here) plus the single exclude list entries (.github policy repo, replay-* mirrors). This template adds no merge queue, no rename lock, and no unrelated branch-protection rules."
 }

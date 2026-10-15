@@ -14,7 +14,8 @@ permissions:
   contents: read
 jobs:
   config-deploy:
+    # No mode input: the reusable workflow always runs in error mode, so a
+    # PR cannot weaken this required check by editing the caller.
     uses: TogetherWeOwn/.github/.github/workflows/config-deploy.yml@CONFIG_DEPLOY_ORG_GITHUB_SHA
     with:
       checker_ref: CONFIG_DEPLOY_ORG_GITHUB_SHA
-      mode: error

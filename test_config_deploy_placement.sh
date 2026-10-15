@@ -143,6 +143,14 @@ if [[ -f "$STAGE/config-deploy.yml" ]]; then
   assert $? "the staged workflow declares a checker_ref input" \
     "without it the caller cannot pin the shared checker checkout to the same .github commit as the reusable workflow"
 
+  ! grep -qE "^[[:space:]]*mode:" "$STAGE/config-deploy.yml"
+  assert $? "the staged workflow exposes no mode input (always error)" \
+    "a reusable mode input is PR-editable through the caller and turns the required gate into a no-op that still reports success"
+
+  grep -qF -- "--mode error" "$STAGE/config-deploy.yml"
+  assert $? "the staged workflow runs the checker in hard-coded error mode" \
+    "without a hard-coded --mode error the gate can print findings and still pass"
+
   # The shared checker lives in TogetherWeOwn/.github, not in the
   # consumer: it must be checked out separately at inputs.checker_ref
   # into its own path, the consumer checkout must stay the default
@@ -219,9 +227,9 @@ if [[ -f "$STAGE/caller-workflow.yml" ]]; then
   assert $? "the caller does not replace the marker with an arbitrary 40-character SHA" \
     "a made-up hex pin names no commit in TogetherWeOwn/.github before the shared release exists"
 
-  grep -q "mode: error" "$STAGE/caller-workflow.yml"
-  assert $? "the caller template runs in error mode" \
-    "the caller is the required-check path -- warn mode would report findings and still pass"
+  ! grep -qE "^[[:space:]]*mode:" "$STAGE/caller-workflow.yml"
+  assert $? "the caller template sets no mode (the reusable workflow always runs in error mode)" \
+    "a PR edits the caller from its own merge commit -- a mode line there lets any PR flip the required gate to warn and still pass"
 
   grep -qE "^\s{2}config-deploy:\s*$" "$STAGE/caller-workflow.yml"
   assert $? "the caller job id is config-deploy" \
@@ -260,6 +268,17 @@ if [[ -f "$CHECKER" && -f "$STAGE/config_deploy_check.py" ]]; then
     "a hand-edited copy drifts from the tested root source"
 fi
 
+if [[ -f "$CHECKER" && -f "$STAGE/config-deploy.yml" ]]; then
+  DIGEST="$(sha256sum "$CHECKER" | awk '{print $1}')"
+  grep -qF "$DIGEST" "$STAGE/config-deploy.yml"
+  assert $? "the staged workflow pins the current checker sha256" \
+    "a stale hard-coded digest fails every consumer's required check once released, while both suites stay green"
+fi
+
+[[ ! -f "$STAGE/host-context-workflow.yml" ]]
+assert $? "no host-context workflow is staged (.github is excluded, so no host producer is needed)" \
+  "a plain-job host workflow reports bare config-deploy while the ruleset requires config-deploy / config-deploy"
+
 hdr "Org ruleset template and rollout doc"
 
 if [[ -f "$STAGE/org-ruleset.json" ]]; then
@@ -271,8 +290,10 @@ refs = doc.get("conditions", {}).get("ref_name", {}).get("include", [])
 assert "refs/heads/main" in refs, "ruleset must cover main"
 repo = doc.get("conditions", {}).get("repository_name", {})
 assert repo.get("include") == ["*"], "ruleset must apply org-wide by default"
-assert repo.get("exclude") == ["paperclip-operator-toolkit"], \
-    "ruleset repo exclusions must stay the expected baseline exclusions"
+assert repo.get("exclude") == ["paperclip-operator-toolkit", ".github", "replay-*"], \
+    "ruleset exclusions must mirror the single exclude list (.github, replay-*) plus this toolkit, got %s" % (repo.get("exclude"),)
+assert "protected" not in repo, \
+    "repository_name must not carry a rename lock: it changes policy org-wide beyond a status-check baseline"
 types = [r.get("type") for r in doc.get("rules", [])]
 assert types == ["required_status_checks"], \
     "baseline must contain only required_status_checks (no merge_queue or unrelated branch-protection rules), got %s" % types

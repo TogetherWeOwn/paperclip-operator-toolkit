@@ -12,11 +12,10 @@ on:
         description: "Merged .github commit containing this workflow and checker"
         type: string
         required: true
-      mode:
-        description: "warn prints findings without failing; error fails the job"
-        type: string
-        required: false
-        default: error
+      # No mode input by design: the gate always runs in error mode. A
+      # pull_request run uses the caller file from the PR's own merge
+      # commit, so a caller-controlled mode would let any PR flip the
+      # required check to warn (findings printed, exit 0, still green).
 
 permissions:
   contents: read
@@ -38,7 +37,7 @@ jobs:
           persist-credentials: false
       - name: Verify shared checker content
         working-directory: .config-deploy/.github/scripts
-        run: echo "bfabcfbd2db283b40415855c307a317a4ed4028891ae59f81aefb66477627283  config_deploy_check.py" | sha256sum --check --status
+        run: echo "16ce362a71ba411051bfd060e7a632d71eafeae205f1d59caf83051087354e39  config_deploy_check.py" | sha256sum --check --status
       - name: Run shared config/deploy checks
         working-directory: .config-deploy/.github/scripts
-        run: python3 config_deploy_check.py --root "${{ github.workspace }}" --mode "${{ inputs.mode || 'error' }}"
+        run: python3 config_deploy_check.py --root "${{ github.workspace }}" --mode error

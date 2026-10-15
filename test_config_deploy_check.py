@@ -149,6 +149,20 @@ class ComposeTest(unittest.TestCase):
                 """)
             self.assertEqual(codes(d), [])
 
+    def test_latest_image_with_trailing_comment_fails(self):
+        """Fails if a YAML comment after an image hides a mutable tag.
+
+        `image: redis:latest # TODO pin` must still report COMPOSE_PIN;
+        a trailing comment is common and must not disable the check.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "docker-compose.yml", """\
+                services:
+                  app:
+                    image: redis:latest # TODO pin
+                """)
+            self.assertIn("COMPOSE_PIN", codes(d))
+
 
 class EnvContractTest(unittest.TestCase):
     def test_env_sample_is_also_checked(self):
@@ -301,6 +315,54 @@ class WorkflowLintTest(unittest.TestCase):
                 """.replace("PIN", SHA))
             self.assertIn("WORKFLOW_TIMEOUT", codes(d))
 
+    def test_commented_job_header_does_not_hide_missing_timeout(self):
+        """Fails if a trailing comment on a job header merges its block
+        into the previous job. build has no timeout and must still flag
+        WORKFLOW_TIMEOUT when lint's header carries a `# fast lane`
+        comment."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/ci.yml", """\
+                name: CI
+                on: [push]
+                jobs:
+                  build:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - uses: actions/checkout@PIN
+                  lint: # fast lane
+                    runs-on: ubuntu-latest
+                    timeout-minutes: 5
+                    steps:
+                      - uses: actions/checkout@PIN
+                """.replace("PIN", SHA))
+            self.assertIn("WORKFLOW_TIMEOUT", codes(d))
+
+    def test_nonstandard_job_indent_still_requires_timeouts(self):
+        """Fails if a valid 4-space-indented workflow yields no jobs and
+        WORKFLOW_TIMEOUT is silently skipped."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/ci.yml", """\
+                name: CI
+                on: [push]
+                jobs:
+                    test:
+                        runs-on: ubuntu-latest
+                        steps:
+                            - uses: actions/checkout@PIN
+                """.replace("PIN", SHA))
+            self.assertIn("WORKFLOW_TIMEOUT", codes(d))
+
+    def test_jobs_key_without_readable_jobs_fails_closed(self):
+        """Fails if `jobs:` with no parseable headers reports clean."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/ci.yml", """\
+                name: CI
+                on: [push]
+                jobs:
+                  # jobs to be added
+                """)
+            self.assertIn("WORKFLOW_PARSE", codes(d))
+
 
 class RequiredCheckTest(unittest.TestCase):
     def test_unparseable_required_checks_fails_closed(self):
@@ -420,6 +482,32 @@ class RequiredCheckTest(unittest.TestCase):
         only the bare name requires a check nothing produces."""
         got = self._codes_with_required(["config-deploy"], self.REUSABLE_TREE)
         self.assertIn("REQUIRED_CHECK_MISSING", got)
+
+    DUAL_TRIGGER_TREE = {
+        ".github/workflows/ci.yml": """\
+            name: CI
+            on:
+              pull_request:
+              workflow_call:
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                steps:
+                  - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_dual_trigger_workflow_still_produces_bare_context(self):
+        """Fails if a workflow triggered by both pull_request and
+        workflow_call is treated as caller-only. On PRs GitHub still
+        reports the bare job name, so requiring `test` must produce no
+        REQUIRED_CHECK_* finding."""
+        got = self._codes_with_required(["test"], self.DUAL_TRIGGER_TREE)
+        self.assertFalse(
+            [c for c in got if c.startswith("REQUIRED_CHECK")],
+            f"expected no REQUIRED_CHECK_* finding, got {got}",
+        )
 
     MATRIX_TREE = {
         ".github/workflows/ci.yml": """\

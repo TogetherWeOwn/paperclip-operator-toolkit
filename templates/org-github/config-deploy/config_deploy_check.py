@@ -75,30 +75,78 @@ def _yaml_scalar(value):
     return value.strip()
 
 
+def _workflow_triggers(text):
+    """Return (has_workflow_call, has_other_trigger) for the `on:` block.
+
+    A file is caller-only when `workflow_call` is its sole trigger. A
+    workflow that is both reusable and directly triggered (e.g. `on:`
+    `pull_request` plus `workflow_call`, which is common) still reports
+    bare job names on those events, so its jobs must match bare contexts
+    too.
+    """
+    block_match = re.search(r"(?m)^on:\s*(?:#.*)?$", text)
+    if block_match:
+        rest = text[block_match.end():]
+        end = re.search(
+            r"(?m)^(jobs|name|permissions|env|defaults|concurrency|run-name):\s*(?:#.*)?$",
+            rest,
+        )
+        on_block = rest[: end.start()] if end else rest
+        triggers = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):", on_block)
+        has_call = "workflow_call" in triggers
+        return has_call, any(t != "workflow_call" for t in triggers)
+    inline = re.search(r"(?m)^on:\s*(.+?)\s*(?:#.*)?$", text)
+    if inline:
+        parts = [
+            p.rstrip(":")
+            for p in re.split(r"[\s,\[\]{}]+", inline.group(1).strip())
+            if p
+        ]
+        has_call = "workflow_call" in parts
+        return has_call, any(p != "workflow_call" for p in parts)
+    return False, False
+
+
 def _workflow_jobs(text):
-    is_reusable_workflow = bool(
-        re.search(r"(?m)^  workflow_call:\s*(?:#.*)?$", text)
-        or re.search(r"(?m)^on:\s*\[[^]]*\bworkflow_call\b[^]]*\]", text)
-        or re.search(r"(?m)^on:\s*\{[^}]*\bworkflow_call\s*:", text)
-    )
+    has_call, has_other = _workflow_triggers(text)
+    is_reusable_workflow = has_call and not has_other
     jobs_match = re.search(r"(?m)^jobs:\s*(?:#.*)?$", text)
     if not jobs_match:
         return []
     jobs_section = text[jobs_match.end():]
-    headers = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_section))
+    candidates = list(
+        re.finditer(r"(?m)^( +)([A-Za-z0-9_-]+):\s*(?:#.*)?$", jobs_section)
+    )
+    candidates = [c for c in candidates if len(c.group(1)) > 0]
+    if not candidates:
+        return []
+    indent = min(len(c.group(1)) for c in candidates)
+    if indent == 0:
+        return []
+    headers = [c for c in candidates if len(c.group(1)) == indent]
+    key = indent + 2
+    sub = indent + 4
+    pad = lambda n: " {" + str(n) + "}"
     jobs = []
     for i, header in enumerate(headers):
         end = headers[i + 1].start() if i + 1 < len(headers) else len(jobs_section)
         block = jobs_section[header.end():end]
-        name_match = re.search(r"(?m)^ {4}name:\s*(.*?)\s*$", block)
+        name_match = re.search(r"(?m)^" + pad(key) + r"name:\s*(.*?)\s*$", block)
         name = _yaml_scalar(name_match.group(1)).strip("'\\\"") if name_match else None
-        uses = bool(re.search(r"(?m)^ {4}uses:\s*\S+", block))
-        strategy = re.search(r"(?ms)^ {4}strategy:\s*\n(.*?)(?=^ {4}\S|\Z)", block)
-        has_matrix = bool(strategy and re.search(r"(?m)^ {6}matrix:\s*", strategy.group(1)))
-        has_timeout = bool(re.search(r"(?m)^ {4}timeout-minutes:\s*\S+", block))
+        uses = bool(re.search(r"(?m)^" + pad(key) + r"uses:\s*\S+", block))
+        strategy = re.search(
+            r"(?ms)^" + pad(key) + r"strategy:\s*\n(.*?)(?=^" + pad(key) + r"\S|\Z)",
+            block,
+        )
+        has_matrix = bool(
+            strategy and re.search(r"(?m)^" + pad(sub) + r"matrix:\s*", strategy.group(1))
+        )
+        has_timeout = bool(
+            re.search(r"(?m)^" + pad(key) + r"timeout-minutes:\s*\S+", block)
+        )
         jobs.append(
             WorkflowJob(
-                header.group(1), name, uses, has_matrix, has_timeout,
+                header.group(2), name, uses, has_matrix, has_timeout,
                 is_reusable_workflow,
             )
         )
@@ -218,9 +266,9 @@ def check_tree(root):
         if not p.is_file():
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
-        if not re.search(r"(?m)^services:\s*$", text):
+        if not re.search(r"(?m)^services:\s*(?:#.*)?$", text):
             add("COMPOSE_SERVICES", p, "compose file declares no `services:`")
-        for m in re.finditer(r"(?m)^\s*image:\s*(\S+)\s*$", text):
+        for m in re.finditer(r"(?m)^\s*image:\s*(\S+)\s*(?:#.*)?$", text):
             img = m.group(1).strip("'\"")
             if ":latest" in img and "@sha256:" not in img:
                 add("COMPOSE_PIN", p, f"image {img!r} uses :latest without a digest pin")
@@ -255,6 +303,8 @@ def check_tree(root):
     for p in wf_files:
         text = p.read_text(encoding="utf-8", errors="replace")
         jobs = _workflow_jobs(text)
+        if not jobs and re.search(r"(?m)^jobs:\s*(?:#.*)?$", text):
+            add("WORKFLOW_PARSE", p, "workflow has `jobs:` but no job headers were parsed")
         workflow_jobs.extend(jobs)
         for job in jobs:
             # Reusable-workflow caller jobs cannot carry timeout-minutes.

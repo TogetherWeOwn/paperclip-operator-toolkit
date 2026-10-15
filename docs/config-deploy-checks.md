@@ -13,9 +13,12 @@ Reusable workflow: `templates/org-github/config-deploy/config-deploy.yml`
 (`workflow_call`), staged for the org `.github` repository. It checks out
 the calling repo for analysis and checks out the `.github` repo separately
 for the shared checker. The checker digest is verified before execution, so a
-caller-controlled `checker_ref` cannot substitute arbitrary code. Both
-workflows use GitHub-hosted runners; a separate host-context workflow ensures
-the `.github` repo itself produces the required composite check context.
+caller-controlled `checker_ref` cannot substitute arbitrary code. The
+workflow takes no mode input and always runs in error mode, so a pull request
+cannot weaken the gate by editing the caller. Both workflows use
+GitHub-hosted runners. The `.github` policy repo and `replay-*` mirrors are
+excluded from the ruleset (see the single exclude list), so no host-context
+workflow is staged.
 
 Consumer: copy `templates/org-github/config-deploy/caller-workflow.yml`
 to a repo as `.github/workflows/config-deploy.yml`. The caller contains the
@@ -36,15 +39,19 @@ apply the template to consumers while the marker remains.
 | Required-check stability | `REQUIRED_CHECK_*` | ruleset names a check no job produces |
 
 Fail-closed: a tree with zero measured files exits 2, never 0. Malformed
-JSON shapes are findings, never crashes. Required-check matching accepts
-exact, reusable-workflow, matrix, and dynamic job contexts. Reusable-workflow
-matching is best-effort: it accepts a non-empty `caller / inner-job` context
+JSON shapes are findings, never crashes. A file with `jobs:` but no readable
+job headers is a `WORKFLOW_PARSE` finding, and an image hidden behind a YAML
+comment is still an unpinned image. Required-check matching accepts
+exact, reusable-workflow, matrix, and dynamic job contexts. A workflow that is
+both reusable (`workflow_call`) and directly triggered still produces bare
+contexts on those events. Reusable-workflow matching is best-effort: it
+accepts a non-empty `caller / inner-job` context
 because the referenced workflow's internal jobs are unavailable to this offline
 checker.
 
 ## Org rollout
 
-1. Stage the reusable workflow, host-context workflow and verbatim checker
+1. Stage the reusable workflow and verbatim checker
    into `TogetherWeOwn/.github` and merge that repository change.
 2. Record its merge SHA, replace both caller markers with that exact SHA,
    and copy the caller into each consumer repo (one PR each, or via the repo
@@ -54,9 +61,11 @@ template for new repos). Verify the reported check context is
    (org admin) apply `templates/org-github/config-deploy/org-ruleset.json`
    once via `POST /orgs/TogetherWeOwn/rulesets`. The ruleset requires only
    `config-deploy / config-deploy`; it deliberately does not turn on merge
-   queues or modify unrelated branch-protection policy. The caller also handles
+   queues, lock renames, or modify unrelated branch-protection policy. The
+   caller also handles
    `merge_group` checks so it can run with an existing queue. It excludes this
-   toolkit because it does not use the caller.
+   toolkit (no caller here) plus the single exclude list entries (`.github`
+   policy repo, `replay-*` mirrors).
 4. Host scripts must discover repos dynamically with one exclude list;
    no hardcoded repo lists.
 
