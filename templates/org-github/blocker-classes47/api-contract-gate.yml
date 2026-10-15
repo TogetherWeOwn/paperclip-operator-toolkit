@@ -102,6 +102,12 @@ jobs:
               check_required_request_fields_added,
               check_response_fields_removed,
           )
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: PR-controlled schema
+              # text must never emit a raw CR/LF that forges a second
+              # ::cmd:: line (or hides later annotations).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           old = json.load(open("/tmp/blocker-old-schema.json", encoding="utf-8"))
           new = json.load(open("/tmp/blocker-new-schema.json", encoding="utf-8"))
           findings = (
@@ -112,7 +118,7 @@ jobs:
           if findings:
               print("::warning::blocker-api-contract findings:")
               for finding in findings:
-                  print("::warning::%s" % finding)
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
           else:
               print("blocker-api-contract: clean")
           if findings and os.environ.get("GATE_MODE") == "enforce":

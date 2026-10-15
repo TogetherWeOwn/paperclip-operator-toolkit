@@ -116,6 +116,12 @@ jobs:
               is_parseable_lockfile,
           )
           import os as _os
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: a PR-controlled path
+              # must never emit a raw CR/LF that forges a second ::cmd::
+              # line (or hides later annotations via ::stop-commands::).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           def _read_nul_list(env_key):
               raw = open(os.environ[env_key], "rb").read()
               if b"\x00" in raw:
@@ -187,7 +193,7 @@ jobs:
           if findings:
               print("::warning::blocker-lockfile findings:")
               for finding in findings:
-                  print("::warning::%s" % finding)
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
           else:
               print("blocker-lockfile: clean")
           if findings and os.environ.get("GATE_MODE") == "enforce":

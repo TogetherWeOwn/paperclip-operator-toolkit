@@ -68,6 +68,12 @@ jobs:
               check_workflow_concurrency,
               job_step_blocks,
           )
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: a PR-controlled workflow
+              # path must never emit a raw CR/LF that forges a second
+              # ::cmd:: line (or hides later annotations).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
           workflows = {}
@@ -78,11 +84,11 @@ jobs:
           for path in sorted(workflows):
               for block in job_step_blocks(workflows[path]):
                   for finding in check_migration_seed_same_lock(block):
-                      findings.append("%s: %s" % (path, finding))
+                      findings.append("%s: %s" % (_encode_workflow_command_data(path), finding))
           if findings:
               print("::warning::blocker-concurrency findings:")
               for finding in findings:
-                  print("::warning::%s" % finding)
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
           else:
               print("blocker-concurrency: clean")
           if findings and os.environ.get("GATE_MODE") == "enforce":

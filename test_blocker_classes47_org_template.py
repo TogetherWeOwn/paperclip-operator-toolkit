@@ -27,8 +27,10 @@ pattern like tier-0 / test-missing):
   (fix upstream, then re-copy; never hand-edit the copy).
 - `templates/org-github/rulesets/blocker-classes47-report-only.json`
   (evaluate) and `blocker-classes47-required.json` (active): valid JSON,
-  differ only in enforcement, carry a `required_workflows` entry with
-  the string placeholder `REPO_ID_OF_DOT_GITHUB`.
+  differ only in enforcement, carry a `workflows` rule (the GitHub
+  org-ruleset type) with `conditions.repository_name`, integer
+  `repository_id` placeholder `0`, `ref: refs/heads/main` and
+  `sha: PINNED_SHA` per workflow entry.
 - `templates/org-github/blocker-classes47/ADOPTION.md`: caller snippets
   with a pinned-SHA placeholder, warn mode, single-context wiring.
 - `templates/org-github/README.md` destination map names every new file.
@@ -181,17 +183,27 @@ class RulesetPayloadTest(unittest.TestCase):
         stage1 = json.loads(
             (RULESETS / "blocker-classes47-report-only.json").read_text()
         )
+        # GitHub org-ruleset type is `workflows` (rest-api-description
+        # repository-rule-workflows enum); `required_workflows` is rejected.
         wfs = [
             w
             for r in stage1.get("rules", [])
-            if r.get("type") == "required_workflows"
+            if r.get("type") == "workflows"
             for w in r.get("parameters", {}).get("workflows", [])
         ]
-        self.assertTrue(wfs, "ruleset must carry a required_workflows entry")
-        self.assertTrue(
-            any(w.get("repository_id") == "REPO_ID_OF_DOT_GITHUB" for w in wfs),
-            "repository_id stays a string placeholder until the runbook fills it",
-        )
+        self.assertTrue(wfs, "ruleset must carry a workflows entry")
+        self.assertEqual(len(wfs), 4, "one entry per blocker gate")
+        for w in wfs:
+            self.assertIsInstance(
+                w.get("repository_id"), int,
+                "repository_id stays an integer placeholder until the runbook fills it",
+            )
+            self.assertEqual(w.get("ref"), "refs/heads/main")
+            self.assertEqual(w.get("sha"), "PINNED_SHA")
+            self.assertTrue(w.get("path", "").startswith(".github/workflows/"))
+        cond = stage1.get("conditions", {})
+        self.assertIn("repository_name", cond)
+        self.assertEqual(cond["repository_name"].get("include"), ["*"])
 
 
 class AdoptionMapTest(unittest.TestCase):

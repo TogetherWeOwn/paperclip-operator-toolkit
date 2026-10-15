@@ -123,6 +123,12 @@ jobs:
               dialect_for_migration_path,
               is_migration_path,
           )
+          def _encode_workflow_command_data(value):
+              # GitHub workflow-command escaping: a PR-controlled path
+              # must never emit a raw CR/LF that forges a second ::cmd::
+              # line (or hides later annotations via ::stop-commands::).
+              text = value if isinstance(value, str) else str(value)
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           def _read_nul_list(env_key):
               raw = open(os.environ[env_key], "rb").read()
               if b"\x00" in raw:
@@ -226,7 +232,7 @@ jobs:
                       wrangler_paths=[p for p, _ in wrangler_entries],
                   )
               file_dialects[path] = dialect
-              print("blocker-migration: %s dialect=%s" % (path, dialect))
+              print("blocker-migration: %s dialect=%s" % (_encode_workflow_command_data(path), dialect))
               findings += check_migration_safety({path: sql}, dialect=dialect)
           down_candidates = [
               p for p in changed
@@ -248,7 +254,7 @@ jobs:
           if findings:
               print("::warning::blocker-migration findings:")
               for finding in findings:
-                  print("::warning::%s" % finding)
+                  print("::warning::%s" % _encode_workflow_command_data(finding))
           else:
               print("blocker-migration: clean")
           if findings and os.environ.get("GATE_MODE") == "enforce":
