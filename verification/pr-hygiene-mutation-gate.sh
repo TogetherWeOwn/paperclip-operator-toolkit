@@ -227,6 +227,34 @@ mutate repo-url-slash-dropped '(?:\.git)?/?' '(?:\.git)?' test_repo_url_forms_an
 mutate repo-url-group-greedy '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?' '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:\.git)?/?' test_repo_url_forms_and_case_are_normalised
 mutate owner-key-lower-dropped '"%s#%d" % (repo.lower(), int(number))' '"%s#%d" % (repo, int(number))' test_repo_url_forms_and_case_are_normalised
 
+mutate api-timeout-fault-dropped 'RUN["api_down"] = True; fault(f"board api timed out after {API_TIMEOUT}s: {method} {path}"); return {"_err": "timeout"}' 'RUN["api_down"] = True; return {"_err": "timeout"}' test_patch_timeout_is_a_fault_in_main
+mutate api-oserror-fault-dropped 'RUN["api_down"] = True; fault(f"board api could not run: {type(e).__name__}: {method} {path}"); return {"_err": "unavailable"}' 'RUN["api_down"] = True; return {"_err": "unavailable"}' test_patch_oserror_is_a_fault_in_main
+mutate sql-oserror-fault-dropped 'RUN["sql_down"] = True; fault(f"sql could not run: {type(e).__name__}"); return None' 'RUN["sql_down"] = True; return None' test_docker_oserror_is_a_fault_in_main
+mutate mint-log-dropped 'log(f"token mint failed: {type(e).__name__}"); return 1' 'return 1' test_mint_failure_logs_its_reason
+mutate owner-rebind-dropped 'iid, ident, status, agent, has_edge = owner["iid"], owner["identifier"], owner["status"], owner["agent"], owner["has_edge"]' 'pass  # owner rebind dropped' test_patch_goes_to_chosen_owner_not_last_board_row
+mutate refs-regex-digit-quote-widened 're.findall(r"[A-Z]{2,}-\d+"' "re.findall(r\"[A-Z]{2,}-[0-9']+\"" test_board_query_inlist_multi_ref_and_direct_quote_injection
+mutate inlist-join-separator-changed '",".join' '",x".join' test_board_query_inlist_multi_ref_and_direct_quote_injection
+mutate gh-streak-increment-dropped 'RUN["gh_streak"] += kind != "non-json"' 'RUN["gh_streak"] += 0' test_gh_network_faults_feed_breaker
+mutate gh-kind-unwrap-dropped 'reason = e.reason if isinstance(e, urllib.error.URLError) else e' 'reason = e' test_gh_network_faults_feed_breaker
+mutate gh-kind-dns-dropped 'if isinstance(reason, socket.gaierror): return "dns"' 'if False: return "dns"' test_gh_network_faults_feed_breaker
+mutate gh-kind-refused-dropped 'if isinstance(reason, ConnectionRefusedError): return "refused"' 'if False: return "refused"' test_gh_network_faults_feed_breaker
+mutate gh-kind-nonjson-always 'if isinstance(e, ValueError): return "non-json"' 'if True: return "non-json"' test_gh_network_faults_feed_breaker
+mutate entry-statement-deleted 'sys.exit(main(sys.argv[1:]))' 'pass' test_script_entry_point_mint_failure_exits_nonzero
+mutate entry-exit-dropped 'sys.exit(main(sys.argv[1:]))' 'main(sys.argv[1:])' test_script_entry_point_mint_failure_exits_nonzero
+mutate entry-argv-shifted 'sys.argv[1:]' 'sys.argv[2:]' test_script_entry_point_mint_failure_exits_nonzero
+mutate pulls-page-start-skipped '        page = 1' '        page = 2' test_second_pulls_page_is_scanned_after_full_first_page
+mutate product-url-key-dropped 'url_key = _match_key(_PR_URL, url) if url is not None else None' 'url_key = None' test_owner_url_product_is_trusted
+mutate match-key-isinstance-dropped 'match = pattern.fullmatch(text) if isinstance(text, str) else None' 'match = pattern.fullmatch(text)' test_owner_nonstring_identity_is_rejected_without_crashing
+mutate registered-repo-isinstance-dropped 'names = (_REPO_URL.fullmatch(url) if isinstance(url, str) else None for url in urls)' 'names = (_REPO_URL.fullmatch(url) for url in urls)' test_owner_nonstring_identity_is_rejected_without_crashing
+mutate board-split-and-to-or 'if sep and re.fullmatch(r"[1-5][0-9]{2}", code):' 'if sep or re.fullmatch(r"[1-5][0-9]{2}", code):' test_board_trailer_canary_is_not_logged_or_accepted
+mutate api-get-trailer-check-dropped '    if code is None:
+        fault(f"board api failed: invalid HTTP status trailer: GET {path}"); return None' '    if False:
+        fault(f"board api failed: invalid HTTP status trailer: GET {path}"); return None' test_api_get_missing_trailer_is_a_fault
+mutate api-get-trailer-fault-dropped 'fault(f"board api failed: invalid HTTP status trailer: GET {path}"); return None' 'return None' test_api_get_missing_trailer_is_a_fault
+mutate token-read-dropped 'T = f.read().strip()' 'T = ""' test_token_file_is_read_by_main
+mutate live-guard-nontext-returns-open 'return fail_closed("psql returned non-text output")' 'return None' test_live_work_guard_nontext_output_fails_closed
+mutate live-guard-nontext-check-dropped 'if not isinstance(out, str):' 'if False:' test_live_work_guard_nontext_output_fails_closed
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re

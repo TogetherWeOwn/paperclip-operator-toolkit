@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pr_hygiene_sweep as sweep
 import test_pr_hygiene_fault_visibility as base
+
+# The harness patches subprocess.run; the entry-point test needs the real one.
+_REAL_RUN = subprocess.run
 
 
 def http_error(code):
@@ -1228,6 +1232,237 @@ class Coverage(base.SweepCase):
         self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", [draft, rel])
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.proc.board_writes(), [])
+
+    # --- Round 7 finding 1: fault/log rows on write, sql and mint paths ---
+
+    def _patch_raising(self, error):
+        orig = self.proc
+        def run(argv, **kwargs):
+            if argv[0] == "curl" and "-X" in argv:
+                raise error
+            return orig(argv, **kwargs)
+        return run
+
+    def test_patch_timeout_is_a_fault_in_main(self):
+        self.route_one_green_pr()
+        with mock.patch("subprocess.run", self._patch_raising(subprocess.TimeoutExpired(["curl"], sweep.API_TIMEOUT))):
+            self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("timed out" in f for f in sweep.RUN["faults"]),
+                        "a hung board PATCH must be a counted fault, not only a patch-failed row")
+
+    def test_patch_oserror_is_a_fault_in_main(self):
+        self.route_one_green_pr()
+        with mock.patch("subprocess.run", self._patch_raising(OSError("curl missing"))):
+            self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("could not run" in f for f in sweep.RUN["faults"]),
+                        "a missing curl on the PATCH must be a counted fault")
+
+    def test_docker_oserror_is_a_fault_in_main(self):
+        self.route_one_green_pr()
+        orig = self.proc
+        def run(argv, **kwargs):
+            if argv[0] == "docker":
+                raise OSError("docker missing")
+            return orig(argv, **kwargs)
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 1)
+        self.assertTrue(any("sql could not run" in f for f in sweep.RUN["faults"]),
+                        "a missing docker binary must be a counted fault, not a quiet skip")
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_mint_failure_logs_its_reason(self):
+        def run(argv, **kwargs):
+            if argv[0] == "bash":
+                raise subprocess.CalledProcessError(1, argv)
+            return self.proc(argv, **kwargs)
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 1)
+        self.assertIn("token mint failed: CalledProcessError", self.log_text(),
+                      "a failed mint must leave a row saying why")
+
+    # --- Round 7 finding 2: PATCH goes to the chosen owner, not the last row ---
+
+    def test_patch_goes_to_chosen_owner_not_last_board_row(self):
+        ref2 = "TO" + "G-124"
+        iid2 = "22222222-3333-4444-5555-666666666666"
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        detail = base.pull_detail()
+        detail["body"] = "Refs: " + base.REF + " and " + ref2
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        def docker(query):
+            if "heartbeat_runs" in query:
+                return "f"
+            return (f"{base.IID}|{base.REF}|todo|Some Agent|f\n"
+                    f"{iid2}|{ref2}|todo|Other Agent|f")
+        self.proc.docker = docker
+        self.proc.curl_get = {
+            f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+            f"issues/{base.IID}/work-products": [self._product()],
+            f"issues/{iid2}": {"id": iid2, "executionWorkspaceId": None, "projectId": None},
+            f"issues/{iid2}/work-products": [],
+        }
+        self.assertEqual(self.run_main(), 0)
+        writes = self.proc.board_writes()
+        self.assertEqual(len(writes), 1)
+        url = next(a for a in writes[0] if "/api/" in a)
+        self.assertTrue(url.endswith(f"/api/issues/{base.IID}"),
+                        f"the PATCH must target the chosen owner, not the last board row: {url}")
+
+    # --- Round 7 finding 3: IN-list quoting, direct-quote widening, join ---
+
+    def test_board_query_inlist_multi_ref_and_direct_quote_injection(self):
+        ref2 = "TO" + "G-124"
+        detail = base.pull_detail()
+        detail["body"] = "Refs: " + base.REF + " and " + ref2 + "') or ('1'='1"
+        self._route_pr(detail)
+        self.assertEqual(self.run_main(), 0)
+        queries = [argv[argv.index("-c") + 1] for argv, _ in self.proc.calls
+                   if argv[0] == "docker" and "identifier in" in argv[argv.index("-c") + 1]]
+        self.assertEqual(len(queries), 1)
+        self.assertIn(f"identifier in ('{base.REF}','{ref2}')", queries[0],
+                      "every ref must be quoted, comma-joined with no separator drift")
+        self.assertNotIn("or ('1'", queries[0])
+        self.assertNotIn(ref2 + "'", queries[0].split("identifier in (", 1)[1].split(")", 1)[0].replace(f"'{ref2}'", ""),
+                         "a quote directly after the digits must not enter the IN list")
+
+    # --- Round 7 finding 4: network-level GitHub faults feed the breaker ---
+
+    def test_gh_network_faults_feed_breaker(self):
+        cases = [
+            (TimeoutError("timed out"), "timeout"),
+            (urllib.error.URLError(socket.timeout("timed out")), "timeout"),
+            (urllib.error.URLError(socket.gaierror("dns failed")), "dns"),
+            (urllib.error.URLError(ConnectionRefusedError("refused")), "refused"),
+            (ConnectionResetError("reset by peer"), "network"),
+        ]
+        for error, kind in cases:
+            with self.subTest(kind=kind, error=type(error).__name__):
+                sweep.reset_run()
+                self.net.routes.clear()
+                self.net.calls.clear()
+                self.out.seek(0); self.out.truncate()
+                self.net.route("x", error)
+                for _ in range(3):
+                    self.assertEqual(sweep.gh("x"), {"_err": kind})
+                calls_before = len(self.net.calls)
+                self.assertEqual(sweep.gh("x"), {"_err": "skipped"},
+                                 f"three {kind} faults must open the GitHub breaker")
+                self.assertEqual(len(self.net.calls), calls_before)
+
+    # --- Round 7 finding 5: script entry point and multi-page listing ---
+
+    def test_script_entry_point_mint_failure_exits_nonzero(self):
+        mint = os.path.join(self.tmp.name, "mint.sh")
+        with open(mint, "w") as f:
+            f.write("exit 3\n")
+        sweep_path = os.path.abspath(sweep.__file__)
+        for args, label in ((["--dry-run"], "dry"), ([], "live")):
+            with self.subTest(label=label):
+                state_dir = os.path.join(self.tmp.name, "entry-" + label)
+                env = dict(os.environ, PR_HYGIENE_STATE_DIR=state_dir, PR_HYGIENE_MINT=mint)
+                proc = _REAL_RUN([sys.executable, sweep_path] + args,
+                                      capture_output=True, text=True, timeout=30,
+                                      cwd=os.path.dirname(sweep_path), env=env)
+                self.assertEqual(proc.returncode, 1,
+                                 "a faulted script run must exit non-zero via the entry point")
+                self.assertIn("token mint failed", proc.stdout)
+                log_path = os.path.join(state_dir, "sweep.log")
+                if label == "dry":
+                    self.assertFalse(os.path.exists(log_path),
+                                     "--dry-run must reach main() (argv[1:]) and write no log")
+                else:
+                    self.assertTrue(os.path.exists(log_path),
+                                    "a live script run must write its log rows")
+
+    def test_second_pulls_page_is_scanned_after_full_first_page(self):
+        self.route_org()
+        page_one = [base.pull_list(7)[0]] + [
+            dict(base.pull_list(100 + n)[0], draft=True) for n in range(99)]
+        self.net.route("pulls?state=open&per_page=100&page=1", page_one)
+        self.net.route("pulls?state=open&per_page=100&page=2", base.pull_list(8))
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", base.pull_detail())
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/8", base.pull_detail())
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {
+            f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+            f"issues/{base.IID}/work-products": [self._product(7), self._product(8)],
+        }
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.proc.board_writes()), 2,
+                         "page 1 and page 2 PRs must both be inspected and nudged")
+
+    # --- Round 7 finding 6: url half of _product_key and non-string guards ---
+
+    def test_owner_url_product_is_trusted(self):
+        url_only = self._product(externalId=None,
+                                 url=f"https://github.com/{base.ORG_REPO}/pull/7")
+        owner, why = self._choose([self._card([url_only])])
+        self.assertIsNotNone(owner, why or "a url-only product for this PR must be trusted")
+        both = self._product(url=f"https://github.com/{base.ORG_REPO}/pull/7")
+        owner, why = self._choose([self._card([both])])
+        self.assertIsNotNone(owner, why or "a product with matching externalId and url must be trusted")
+
+    def test_owner_nonstring_identity_is_rejected_without_crashing(self):
+        cases = [
+            self._card([self._product(externalId=7)]),
+            self._card([self._product(externalId=None, url=["x"])]),
+            self._card([self._product(externalId=None, url=12)]),
+            self._card([], workspace_repo=5),
+        ]
+        for card in cases:
+            with self.subTest(card=card):
+                owner, _why = self._choose([card])
+                self.assertIsNone(owner, "non-string identity fields must be no-match, never a crash")
+
+    # --- Round 7 finding 7: status-trailer validation ---
+
+    def test_board_trailer_canary_is_not_logged_or_accepted(self):
+        canary = "TRAILER-CANARY-9"
+        sweep.reset_run()
+        self.out.seek(0); self.out.truncate()
+        with mock.patch("subprocess.run", curl_proc("{}\n" + canary)):
+            self.assertEqual(sweep.api("PATCH", "issues/x", {}), {"_err": "invalid-status"})
+        self.assertEqual(len(sweep.RUN["faults"]), 1)
+        self.assertNotIn(canary, self.log_text(),
+                         "an unvalidated trailer must never reach the log as an HTTP code")
+        sweep.reset_run()
+        self.out.seek(0); self.out.truncate()
+        with mock.patch("subprocess.run", curl_proc("{}\n" + canary)):
+            self.assertIsNone(sweep.api_get("issues/x"))
+        self.assertEqual(len(sweep.RUN["faults"]), 1)
+        self.assertNotIn(canary, self.log_text())
+
+    def test_api_get_missing_trailer_is_a_fault(self):
+        with mock.patch("subprocess.run", curl_proc("{}")):
+            self.assertIsNone(sweep.api_get("issues/x"))
+        self.assertEqual(len(sweep.RUN["faults"]), 1)
+        self.assertIn("invalid HTTP status trailer", self.log_text())
+
+    # --- Round 7 finding 8: token read and non-text psql fail-closed ---
+
+    def test_token_file_is_read_by_main(self):
+        self.route_one_green_pr()
+        sweep.T = ""
+        headers = []
+        def urlopen(request, *args, **kwargs):
+            headers.append(request.get_header("Authorization"))
+            return self.net(request, *args, **kwargs)
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.run_main(), 0)
+        self.assertTrue(headers)
+        self.assertTrue(all(h == "Bearer " + base.CANARY for h in headers),
+                        "main() must read the token from the minted token file")
+
+    def test_live_work_guard_nontext_output_fails_closed(self):
+        for out in (None, b"f"):
+            with self.subTest(out=out):
+                seen = []
+                proc = subprocess.CompletedProcess(["docker"], 0, out, "")
+                with mock.patch("subprocess.run", return_value=proc):
+                    self.assertTrue(sweep.issue_has_live_work(base.IID, on_error=seen.append),
+                                    "non-text psql output must fail closed as live work")
+                self.assertEqual(len(seen), 1)
 
 
 if __name__ == "__main__":
