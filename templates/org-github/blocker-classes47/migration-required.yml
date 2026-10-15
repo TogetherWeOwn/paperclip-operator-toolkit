@@ -16,7 +16,7 @@ on:
         default: "warn"
         type: string
       dialect:
-        description: "auto (default) or an explicit postgres|sqlite pin (mixed repos pin postgres via the BLOCKER_MIGRATION_DIALECT repo variable); unknown values are rejected"
+        description: "auto (default) or an explicit postgres|sqlite|postgres-transactional pin (mixed repos pin postgres via the BLOCKER_MIGRATION_DIALECT repo variable; single-transaction forward-only Postgres runners pin postgres-transactional); unknown values are rejected"
         required: false
         default: "auto"
         type: string

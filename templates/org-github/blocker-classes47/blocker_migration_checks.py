@@ -18,10 +18,15 @@ MIGRATION_DIRS = ("migrations/", "alembic/versions/")
 SAFETY_ACK = "safety: acknowledged"
 
 # Dialects: postgres enforces CONCURRENTLY/USING; sqlite (D1) skips them
-# because SQLite rejects that syntax. Destructive-DDL reports under every
-# dialect; the down-path check is postgres-only because D1 migrations are
-# forward-only (no DOWN marker or sibling down file exists).
-DIALECTS = ("postgres", "sqlite")
+# because SQLite rejects that syntax. postgres-transactional is a
+# forward-only transactional Postgres runner (each file applied in one
+# transaction, no DOWN files): CONCURRENTLY cannot run inside a transaction
+# block, so it is skipped like sqlite, but USING is kept (valid in a
+# transaction). Destructive-DDL reports under every dialect; the down-path
+# check is postgres-only because D1 migrations are forward-only (no DOWN
+# marker or sibling down file exists) and postgres-transactional repos
+# are forward-only by runner contract.
+DIALECTS = ("postgres", "sqlite", "postgres-transactional")
 
 _DOWN_RE = re.compile(r"(?m)^\s*--\s*down\s*$", re.IGNORECASE)
 _DROP_TABLE_RE = re.compile(r"\bdrop\s+table\b", re.IGNORECASE)
@@ -33,6 +38,39 @@ _SQL_IDENTIFIER = r'''(?:"(?:[^"]|"")+"|'(?:[^']|'')+'|`[^`]+`|\[[^\]]+\]|[\w$]+
 _ALTER_TABLE_RE = re.compile(
     r"^\s*alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?"
     + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*\s*\*?\s+",
+    re.IGNORECASE,
+)
+# Search version (no `^` anchor) for ALTERs nested in DO blocks, function
+# bodies, and EXECUTE strings: `_statements` splits on every `;`, so an
+# ALTER inside `DO $$ BEGIN ... ; END $$` sits in a chunk starting with
+# `DO`, never with `ALTER`. Searching finds each inner prefix; clauses are
+# split from the end of one match to the start of the next.
+_ALTER_TABLE_SEARCH_RE = re.compile(
+    r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?"
+    + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*\s*\*?\s+",
+    re.IGNORECASE,
+)
+# Per-file opt-outs (case-insensitive `--` comments): a transactional
+# runner cannot run CONCURRENTLY inside its single-transaction apply, and
+# a forward-only file has no DOWN path by contract. Markers are read from
+# the raw file text (comments included) so they work even though safety
+# checks run on comment-stripped SQL.
+_NO_TRANSACTION_RE = re.compile(r"--\s*no-transaction\b", re.IGNORECASE)
+_FORWARD_ONLY_RE = re.compile(
+    r"--\s*forward-only\b|forward-only\s*:\s*acknowledged", re.IGNORECASE
+)
+_CREATE_TABLE_RE = re.compile(
+    r"\bcreate\s+(?:temporary\s+|temp\s+|unlogged\s+|global\s+|local\s+)*"
+    r"table\s+(?:if\s+not\s+exists\s+)?"
+    + r"(" + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*)",
+    re.IGNORECASE,
+)
+_INDEX_TABLE_RE = re.compile(
+    r"\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?"
+    r"(?:if\s+not\s+exists\s+)?"
+    + r"(?:" + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*\s+)?"
+    + r"on\s+(?:only\s+)?"
+    + r"(" + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*)",
     re.IGNORECASE,
 )
 # A present COLUMN keyword cannot backtrack into a column named "column".
@@ -189,14 +227,55 @@ def _split_top_level_commas(stmt):
     return parts
 
 
+def _normalize_table(name):
+    """Last identifier part, unquoted and lowercased, for same-file compare.
+
+    `public."MyTable"` and `mytable` compare equal: Postgres folds
+    unquoted identifiers, and the exemption is intentionally lenient (a
+    missed exemption only adds a warning, never hides a real lock).
+    """
+    text = (name or "").strip().split(".")[-1].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'`":
+        text = text[1:-1]
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text.lower()
+
+
+def _created_tables(up):
+    """Tables created in the up-section (comment-stripped, all statements)."""
+    stripped = _strip_sql_comments(up)
+    return {
+        _normalize_table(m.group(1))
+        for m in _CREATE_TABLE_RE.finditer(stripped)
+        if _normalize_table(m.group(1))
+    }
+
+
+def _index_table(stmt):
+    """Indexed table for a CREATE INDEX statement, or None."""
+    m = _INDEX_TABLE_RE.search(stmt)
+    return _normalize_table(m.group(1)) if m else None
+
+
 def _alter_type_missing_using(stmt):
-    """Check each ALTER [COLUMN] .. TYPE action, not the table identifier."""
-    table = _ALTER_TABLE_RE.match(stmt)
-    if table is None:
+    """Check each ALTER [COLUMN] .. TYPE action, not the table identifier.
+
+    Searches (not start-anchored) so ALTERs nested in `DO $$` blocks,
+    function bodies, and `EXECUTE '...'` strings still report: the chunk
+    starts with `DO`/`CREATE FUNCTION`, but the inner `ALTER TABLE`
+    prefix is found and clauses split from its end to the next match.
+    Short-form `ALTER c TYPE`, per-clause USING, and the column/table
+    named `type` negatives are preserved.
+    """
+    matches = list(_ALTER_TABLE_SEARCH_RE.finditer(stmt))
+    if not matches:
         return False
-    for clause in _split_top_level_commas(stmt[table.end():]):
-        if _ALTER_CLAUSE_RE.match(clause) and not _USING_RE.search(clause):
-            return True
+    for idx, match in enumerate(matches):
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(stmt)
+        for clause in _split_top_level_commas(stmt[match.end():end]):
+            if _ALTER_CLAUSE_RE.match(clause) and not _USING_RE.search(clause):
+                return True
     return False
 
 
@@ -209,10 +288,18 @@ def check_migration_safety(contents, dialect="postgres"):
 
     `dialect="sqlite"` (Cloudflare D1) skips the CONCURRENTLY and USING
     checks SQLite rejects; destructive-DDL still reports.
+    `dialect="postgres-transactional"` (forward-only runner applying each
+    file in one transaction) skips CONCURRENTLY (it cannot run inside a
+    transaction block) but keeps USING; destructive-DDL still reports.
+    Under plain `postgres`, a file carrying a `-- no-transaction` comment
+    skips CONCURRENTLY for that file only, and a `CREATE INDEX` on a
+    table created in the same up-section never reports (a brand-new table
+    has no concurrent writers to block).
     """
     if dialect not in DIALECTS:
         raise ValueError("unknown dialect: %r" % (dialect,))
     sqlite = dialect == "sqlite"
+    transactional = dialect == "postgres-transactional"
     findings = []
     for path, text in contents.items():
         if str(path).endswith(".down.sql"):
@@ -226,13 +313,22 @@ def check_migration_safety(contents, dialect="postgres"):
         ) and SAFETY_ACK.lower() not in text.lower():
             reasons.append("destructive DDL without safety ack")
         if not sqlite:
+            skip_concurrently = transactional or bool(
+                _NO_TRANSACTION_RE.search(text or "")
+            )
+            created = _created_tables(up) if not skip_concurrently else set()
             for stmt in _statements(up):
-                if _CREATE_INDEX_RE.search(
-                    stmt
-                ) and not _CONCURRENTLY_RE.search(stmt):
+                if (
+                    not skip_concurrently
+                    and _CREATE_INDEX_RE.search(stmt)
+                    and not _CONCURRENTLY_RE.search(stmt)
+                ):
+                    table = _index_table(stmt)
+                    if table and table in created:
+                        continue
                     if "CREATE INDEX without CONCURRENTLY" not in reasons:
                         reasons.append("CREATE INDEX without CONCURRENTLY")
-                if _alter_type_missing_using(stmt):
+                if not sqlite and _alter_type_missing_using(stmt):
                     if "ALTER COLUMN TYPE without USING" not in reasons:
                         reasons.append("ALTER COLUMN TYPE without USING")
         if reasons:
@@ -263,10 +359,14 @@ def check_migration_down(changed_files, contents, dialect="postgres"):
     migration missing both. Non-migration files are ignored.
 
     `dialect="sqlite"` (Cloudflare D1) skips the check entirely: D1
-    migrations are forward-only, so every file would otherwise warn."""
+    migrations are forward-only, so every file would otherwise warn.
+    `dialect="postgres-transactional"` likewise skips it: the runner is
+    forward-only by contract. Under plain `postgres`, a file carrying a
+    `-- forward-only` (or `forward-only: acknowledged`) comment is
+    forward-only by declaration and skips the check for that file only."""
     if (dialect or "postgres") not in DIALECTS:
         raise ValueError("unknown dialect: %r" % (dialect,))
-    if (dialect or "postgres") == "sqlite":
+    if (dialect or "postgres") in ("sqlite", "postgres-transactional"):
         return []
     findings = []
     for path in changed_files:
@@ -278,6 +378,8 @@ def check_migration_down(changed_files, contents, dialect="postgres"):
             continue
         text = contents.get(path, "")
         if _DOWN_RE.search(text):
+            continue
+        if _FORWARD_ONLY_RE.search(text or ""):
             continue
         siblings = _down_siblings(path)
         if any(sibling in changed_files for sibling in siblings):
@@ -454,10 +556,12 @@ def detect_migration_dialect(
 ):
     """Resolve the effective migration dialect.
 
-    `explicit="postgres"` / `"sqlite"` (the gate's `dialect` input) is
-    final and never auto-switched, so a mixed repo can always pin
-    Postgres. Any other non-`"auto"` value (including `"Postgres"`)
-    raises `ValueError` instead of silently falling back to auto.
+    `explicit="postgres"` / `"sqlite"` / `"postgres-transactional"`
+    (the gate's `dialect` input) is final and never auto-switched, so a
+    mixed repo can always pin Postgres and a forward-only transactional
+    runner can pin `postgres-transactional`. Any other non-`"auto"`
+    value (including `"Postgres"`) raises `ValueError` instead of
+    silently falling back to auto.
     `explicit="auto"` (the gate default) selects sqlite only when a
     wrangler config declares `d1_databases` in uncommented code AND that
     D1 config's `migrations_dir` (default: `migrations` relative to the
@@ -473,7 +577,7 @@ def detect_migration_dialect(
     sqlite.
     """
     explicit = explicit or "auto"
-    if explicit in ("postgres", "sqlite"):
+    if explicit in ("postgres", "sqlite", "postgres-transactional"):
         return explicit
     if explicit != "auto":
         raise ValueError("unknown dialect: %r" % (explicit,))

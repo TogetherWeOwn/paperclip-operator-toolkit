@@ -28,6 +28,20 @@ def _contains_any(text, markers):
     return any(marker.lower() in lowered for marker in markers)
 
 
+def _is_gate_uses(value):
+    """True for the blocker-ledger gate's own reusable-workflow refs.
+
+    The documented adopter caller
+    (`.../blocker-migration-gate.yml@<sha>`) and the staged
+    `migration-required.yml` wrapper contain `migration` in the path but
+    run no migrations themselves: they ARE the gate. Without this carve-
+    out every adopter's gate caller trips the concurrency check on
+    itself. Gate paths always carry `blocker-` and/or `-gate.yml`.
+    """
+    lowered = (value or "").lower()
+    return "blocker-" in lowered or "-gate.yml" in lowered
+
+
 def _uses_text_runs_migrations(uses):
     """True when a step (or job) `uses:` reference runs migrations.
 
@@ -35,11 +49,67 @@ def _uses_text_runs_migrations(uses):
     stem, so a local composite action such as
     `./.github/actions/run-migrations` counts: action paths name what
     the action does, unlike `needs:`, names, and comments, which are
-    never consulted here. Inline `#` comments are stripped first.
+    never consulted here. Inline `#` comments are stripped first. The
+    blocker gate's own refs (`blocker-*-gate.yml`) never count, even
+    though the path contains `migration`.
     """
     value = (uses or "").split(" #", 1)[0]
+    if _is_gate_uses(value):
+        return False
     lowered = value.lower()
     return _contains_any(value, MIGRATION_RUN_MARKERS) or "migrat" in lowered
+
+
+# Only these `with:` inputs can carry migration commands (wrangler-action
+# `command`/`postCommands`, composite `args`/`script`, container
+# `entrypoint`, ...). Inputs like `ref`, `name`, or cache `key` often
+# mention `migrate` (`ref: migrate-to-v2`, `name: migrate-logs`,
+# `key: hashFiles('db/migrate/**')`) without running anything, so they
+# are never consulted. The parser (`job_step_blocks`) stores only these
+# keys; this helper enforces the same rule for direct `with:` strings.
+_COMMAND_WITH_KEYS = frozenset({
+    "command", "commands", "args", "run", "script",
+    "precommands", "postcommands", "entrypoint",
+})
+
+_WITH_KEY_RE = re.compile(r"^([\w\-.]+)\s*:\s*(.*)$")
+
+
+def _with_text_runs_migrations(with_text):
+    """True when command-carrying `with:` inputs run migrations.
+
+    When the text has `key: value` lines, only `command`/`args`/`run`/
+    `script`/`preCommands`/`postCommands`/`entrypoint` values are scanned
+    (as command tokens via `MIGRATION_RUN_MARKERS`); `ref`/`name`/`key`
+    and friends never count. Bare values with no keys come from the
+    parser, which already filtered to command keys, so they are scanned
+    whole. Continuation lines belong to the preceding key's context.
+    """
+    text = with_text or ""
+    if not text.strip():
+        return False
+    lines = text.splitlines()
+    if not any(
+        _WITH_KEY_RE.match(ln.strip()) for ln in lines if ln.strip()
+    ):
+        return _contains_any(text, MIGRATION_RUN_MARKERS)
+    current_is_command = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _WITH_KEY_RE.match(stripped)
+        if m:
+            current_is_command = m.group(1).lower() in _COMMAND_WITH_KEYS
+            if current_is_command and _contains_any(
+                m.group(2), MIGRATION_RUN_MARKERS
+            ):
+                return True
+        elif current_is_command and _contains_any(
+            stripped, MIGRATION_RUN_MARKERS
+        ):
+            return True
+    return False
 
 
 def step_runs_migrations(step):
@@ -47,15 +117,17 @@ def step_runs_migrations(step):
 
     Consults the step's `run:` shell text, its `uses:` action reference
     (markers plus the `migrat` stem, so `run-migrations` composites
-    count), and its `with:` input values (markers) — never `needs:`,
-    names, or comments.
+    count, gate refs excluded), and its command-carrying `with:` inputs
+    only (`command`/`args`/`run`/`script`/`preCommands`/`postCommands`/
+    `entrypoint`) — never `needs:`, names, `ref`/`name`/`key` inputs, or
+    comments.
     """
     step = step or {}
     if _contains_any(step.get("run", ""), MIGRATION_RUN_MARKERS):
         return True
     if _uses_text_runs_migrations(step.get("uses", "")):
         return True
-    return _contains_any(step.get("with", ""), MIGRATION_RUN_MARKERS)
+    return _with_text_runs_migrations(step.get("with", ""))
 
 
 _USES_LINE_RE = re.compile(r"^\s*uses\s*:\s*(.+?)\s*(#.*)?$")
@@ -344,14 +416,17 @@ def job_step_blocks(text):
     """Split workflow text into per-job [{name, run, uses, with}] steps.
 
     Line-based subset parser: follows each `steps:` list, `name:` /
-    `run:` / `uses:` scalars, literal/folded blocks, and `with:` input
-    mappings (including multiline command/script values). One block
-    per `steps:` section, so a migrate step in one job never pairs
-    with a seed step in another. Compact sequence lists (a `- ` item
-    at the same indent as the `steps:` key) are parsed; anything else
-    unrecognized is skipped; never raises (worst case the seed check
-    sees no steps). `needs:`, job/step names, and comments are never
-    captured — only `run:`/`uses:`/`with:` values.
+    `run:` / `uses:` scalars, literal/folded blocks, and command-carrying
+    `with:` inputs only (`command`/`args`/`run`/`script`/`preCommands`/
+    `postCommands`/`entrypoint`, including multiline values). `ref`/
+    `name`/cache-`key` inputs are skipped (they often mention `migrate`
+    without running anything). One block per `steps:` section, so a
+    migrate step in one job never pairs with a seed step in another.
+    Compact sequence lists (a `- ` item at the same indent as the
+    `steps:` key) are parsed; anything else unrecognized is skipped;
+    never raises (worst case the seed check sees no steps). `needs:`,
+    job/step names, and comments are never captured — only `run:`/
+    `uses:`/command-`with:` values.
     """
     blocks = []
     lines = (text or "").splitlines()
@@ -403,6 +478,20 @@ def job_step_blocks(text):
                 if indent > with_indent:
                     pair = re.match(r"^([\w\-.]+)\s*:\s*(.*)$", stripped)
                     if pair:
+                        # Only command-carrying inputs are stored: `ref`,
+                        # `name`, cache `key`, etc. often mention `migrate`
+                        # without running anything.
+                        if pair.group(1).lower() not in _COMMAND_WITH_KEYS:
+                            i += 1
+                            # Still consume a block scalar under a skipped
+                            # key so its lines never leak into the next key.
+                            if _BLOCK_SCALAR_RE.fullmatch(
+                                pair.group(2).strip()
+                            ):
+                                _, i = _block_scalar(
+                                    lines, i + 1, indent, False
+                                )
+                            continue
                         val = pair.group(2).strip()
                         if _BLOCK_SCALAR_RE.fullmatch(val):
                             val, i = _block_scalar(
@@ -427,10 +516,17 @@ def job_step_blocks(text):
             if with_key and indent > item_indent:
                 inline = with_key.group(1).strip()
                 if inline and inline not in ("{}",):
-                    cur["with"] = (
-                        (cur["with"] + "\n" + inline)
-                        if cur["with"] else inline
+                    m_inline = re.match(
+                        r"^([\w\-.]+)\s*:\s*(.*)$", inline
                     )
+                    if m_inline and m_inline.group(1).lower() \
+                            not in _COMMAND_WITH_KEYS:
+                        pass
+                    else:
+                        cur["with"] = (
+                            (cur["with"] + "\n" + inline)
+                            if cur["with"] else inline
+                        )
                 with_indent = indent
                 i += 1
                 continue

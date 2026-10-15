@@ -27,7 +27,7 @@ on:
         default: "warn"
         type: string
       dialect:
-        description: "auto (default: sqlite iff a wrangler config declares d1_databases with a migrations_dir covering the changed paths) or an explicit postgres|sqlite pin (explicit always wins)"
+        description: "auto (default: sqlite iff a wrangler config declares d1_databases with a migrations_dir covering the changed paths) or an explicit postgres|sqlite|postgres-transactional pin (explicit always wins; transactional skips CONCURRENTLY+DOWN for single-transaction forward-only Postgres runners, keeps USING)"
         required: false
         default: "auto"
         type: string
@@ -93,8 +93,8 @@ jobs:
           # -I: ignore cwd so a PR-root module (re.py, json.py, glob.py)
           # can never shadow stdlib inside the gate.
           case "${GATE_DIALECT:-auto}" in
-            auto|postgres|sqlite) ;;
-            *) echo "blocker-migration: unknown dialect: ${GATE_DIALECT:-auto} (want auto|postgres|sqlite)"; exit 1;;
+            auto|postgres|sqlite|postgres-transactional) ;;
+            *) echo "blocker-migration: unknown dialect: ${GATE_DIALECT:-auto} (want auto|postgres|sqlite|postgres-transactional)"; exit 1;;
           esac
           GATE_CHANGED=/tmp/blocker-changed.txt GATE_BASE="$base" GATE_DIALECT="${GATE_DIALECT:-auto}" GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 -I - <<'PY'
           import os

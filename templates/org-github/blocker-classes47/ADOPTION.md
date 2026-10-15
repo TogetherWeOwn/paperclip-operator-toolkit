@@ -80,24 +80,40 @@ annotations.
   `<stem>.up.sql` / `<stem>.down.sql` pair); the gate diffs with
   `--diff-filter=d`, so deleted files are never flagged but both files of
   a pair must be in the change.
-- Migration `dialect:` (`auto` default, explicit `postgres`|`sqlite`
-  always wins, anything else rejected) — sqlite (Cloudflare D1) skips
-  the CONCURRENTLY/USING checks SQLite rejects plus the down-path check
-  (D1 is forward-only). `auto` selects sqlite only when a wrangler config
-  read from the BASE commit (a PR-added `wrangler.toml` cannot flip the
-  result) declares `d1_databases` in uncommented code AND that D1
-  config's `migrations_dir` (per root/env binding, config-relative, `..`
-  normalised; quoted TOML env names, JSON keys and `./` accepted) covers a
-  changed `.sql` migration path (tested `detect_migration_dialect`;
-  non-SQL files never flip the result). JSONC comments/trailing commas are
-  parsed without treating comment apostrophes as quotes. Invalid configs
-  keep Postgres checks. Only `auto` resolves dialect per migration file
-  (tested `dialect_for_migration_path`); explicit pins apply to safety and
-  down-path checks alike. Mixed repos pin
-  `dialect: postgres` with the `BLOCKER_MIGRATION_DIALECT` repo variable
-  (the required wrapper falls back to it on `pull_request`, where
-  `workflow_call` inputs are empty); an explicit caller `with:` still
-  wins when present.
+- Migration `dialect:` (`auto` default, explicit
+  `postgres`|`sqlite`|`postgres-transactional` always wins, anything
+  else rejected) — sqlite (Cloudflare D1) skips the CONCURRENTLY/USING
+  checks SQLite rejects plus the down-path check (D1 is forward-only).
+  `postgres-transactional` is a forward-only Postgres runner applying
+  each file in one transaction: CONCURRENTLY (unrunnable inside a
+  transaction) and the down-path check are skipped, USING and
+  destructive-DDL still report. `auto` selects sqlite only when a
+  wrangler config read from the BASE commit (a PR-added `wrangler.toml`
+  cannot flip the result) declares `d1_databases` in uncommented code
+  AND that D1 config's `migrations_dir` (per root/env binding,
+  config-relative, `..` normalised; quoted TOML env names, JSON keys and
+  `./` accepted) covers a changed `.sql` migration path (tested
+  `detect_migration_dialect`; non-SQL files never flip the result).
+  JSONC comments/trailing commas are parsed without treating comment
+  apostrophes as quotes. Invalid configs keep Postgres checks. Only
+  `auto` resolves dialect per migration file (tested
+  `dialect_for_migration_path`); explicit pins apply to safety and
+  down-path checks alike. Mixed repos pin `dialect: postgres` with the
+  `BLOCKER_MIGRATION_DIALECT` repo variable (the required wrapper falls
+  back to it on `pull_request`, where `workflow_call` inputs are empty);
+  an explicit caller `with:` still wins when present.
+- Migration per-file carve-outs (plain `postgres` only): a `CREATE INDEX`
+  on a table created in the same up-section never reports (brand-new
+  table, no concurrent writers); a file carrying `-- no-transaction`
+  skips CONCURRENTLY for that file; a file carrying `-- forward-only`
+  (or `forward-only: acknowledged`) skips the down-path check for that
+  file. `ALTER ... TYPE` inside `DO $$`, function bodies, and
+  `EXECUTE '...'` strings still reports (searched, not start-anchored).
+- Concurrency callers are never self-flagging: the gate's own
+  `blocker-*-gate.yml` refs never count as migrating, and only
+  command-carrying `with:` inputs (`command`/`args`/`run`/`script`/
+  `preCommands`/`postCommands`/`entrypoint`) are scanned — `ref`/`name`/
+  cache-`key` values mentioning `migrate` do not make a job migrating.
 
 ## Rollout: adopt, activate, warn 24h, then required
 

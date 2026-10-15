@@ -344,12 +344,16 @@ class PerFileDialectTest(unittest.TestCase):
 
 class DownMarkerStrictnessTest(unittest.TestCase):
     def test_prose_down_comment_does_not_hide_index(self):
+        # Indexes a pre-existing table (`other`), not the table created
+        # above: same-file indexes are exempt (brand-new table, no
+        # writers), so this pins the prose-comment behaviour on a table
+        # that must still report.
         findings = MIG.check_migration_safety(
             {
                 "m/0001.sql": (
                     "CREATE TABLE a(id int);\n"
                     "-- down-sizing the cache table\n"
-                    "CREATE INDEX i ON a(id);\n"
+                    "CREATE INDEX i ON other(id);\n"
                 )
             }
         )
