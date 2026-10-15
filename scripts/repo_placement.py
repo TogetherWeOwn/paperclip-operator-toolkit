@@ -233,7 +233,12 @@ def main(argv=None, stdin_text=None) -> int:
     if "\0" in text:
         paths = [r.strip() for r in text.split("\0") if r.strip()]
     else:
-        paths = [line.strip() for line in text.splitlines() if line.strip()]
+        # Split on LF only: splitlines() also splits on VT/FF/U+0085/
+        # U+2028/U+2029, which cuts a raw name (core.quotepath=false
+        # leaves those bytes unquoted) into phantom public fragments.
+        # `git ls-files` terminates records with LF, so LF is the only
+        # separator here; strip() still trims a trailing CR from CRLF.
+        paths = [line.strip() for line in text.split("\n") if line.strip()]
     if not paths:
         print("repo placement: UNMEASURED - no paths", file=sys.stderr)
         return 2

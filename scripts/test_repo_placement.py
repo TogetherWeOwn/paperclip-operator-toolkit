@@ -178,6 +178,22 @@ class Classify(unittest.TestCase):
         self.assertEqual(main(["--fail-on-public"],
                               stdin_text="new\nline.pem\0"), 0)
 
+    def test_non_nul_input_splits_on_lf_only(self):
+        # With core.quotepath=false, U+0085/U+2028/U+2029 arrive raw.
+        # splitlines() cuts them into phantom PUBLIC-ABLE fragments;
+        # splitting on LF only keeps each record whole.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a b.pem\n"), 0)
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="keys\x85prod.env\n"), 0)
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a b.pem\nkeys\x85prod.env\n"), 0)
+        # VT/FF inside a private name are not separators either.
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a\x0bb.pem\0"), 0)
+        self.assertEqual(main(["--fail-on-public"],
+                              stdin_text="a\x0cb.pem\n"), 0)
+
     def test_undecodable_quoted_paths_fail_closed(self):
         # A quoted line that cannot be decoded is never movable.
         verdict, rule = classify('"caf\\999.pem"')
