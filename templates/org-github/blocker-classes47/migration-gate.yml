@@ -106,6 +106,7 @@ jobs:
               check_migration_down,
               check_migration_safety,
               detect_migration_dialect,
+              dialect_for_migration_path,
               is_migration_path,
           )
           changed = [
@@ -150,8 +151,39 @@ jobs:
                       contents[path] = f.read()
               except OSError:
                   pass
-          findings = check_migration_safety(contents, dialect=dialect) + check_migration_down(
-              [p for p in changed if p in changed_set], contents, dialect=dialect
+          # Per-file dialect: only a changed `.sql` migration under a
+          # D1 `migrations_dir` runs the sqlite rules; every other file
+          # keeps the Postgres checks. Touching a README under a D1
+          # directory therefore never hides a plain CREATE INDEX in a
+          # Postgres migration in the same PR.
+          findings = []
+          for path, sql in contents.items():
+              dialect = dialect_for_migration_path(
+                  path,
+                  wrangler_texts=[t for _, t in wrangler_entries],
+                  wrangler_paths=[p for p, _ in wrangler_entries],
+              )
+              findings += check_migration_safety({path: sql}, dialect=dialect)
+          down_candidates = [
+              p for p in changed
+              if p in changed_set
+              and is_migration_path(p)
+              and p.endswith(".sql")
+              and (
+                  p.endswith(".down.sql")
+                  or dialect_for_migration_path(
+                      p,
+                      wrangler_texts=[t for _, t in wrangler_entries],
+                      wrangler_paths=[p for p, _ in wrangler_entries],
+                  ) == "postgres"
+              )
+          ]
+          # `down_candidates` holds only Postgres migrations (plus
+          # `.down.sql` siblings, which the check skips but honours),
+          # so the down check always runs in Postgres mode here;
+          # sqlite (D1 forward-only) files never reach it.
+          findings += check_migration_down(
+              down_candidates, contents, dialect="postgres"
           )
           if findings:
               print("::warning::blocker-migration findings:")

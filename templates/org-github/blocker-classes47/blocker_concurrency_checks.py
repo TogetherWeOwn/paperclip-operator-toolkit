@@ -28,10 +28,56 @@ def _contains_any(text, markers):
     return any(marker.lower() in lowered for marker in markers)
 
 
+def _uses_text_runs_migrations(uses):
+    """True when a step (or job) `uses:` reference runs migrations.
+
+    Tests the value against `MIGRATION_RUN_MARKERS` plus the `migrat`
+    stem, so a local composite action such as
+    `./.github/actions/run-migrations` counts: action paths name what
+    the action does, unlike `needs:`, names, and comments, which are
+    never consulted here. Inline `#` comments are stripped first.
+    """
+    value = (uses or "").split(" #", 1)[0]
+    lowered = value.lower()
+    return _contains_any(value, MIGRATION_RUN_MARKERS) or "migrat" in lowered
+
+
 def step_runs_migrations(step):
-    """True when the step's run shell text contains a migration marker
-    (case-insensitive)."""
-    return _contains_any(step.get("run", ""), MIGRATION_RUN_MARKERS)
+    """True when the step runs migrations (case-insensitive).
+
+    Consults the step's `run:` shell text, its `uses:` action reference
+    (markers plus the `migrat` stem, so `run-migrations` composites
+    count), and its `with:` input values (markers) — never `needs:`,
+    names, or comments.
+    """
+    step = step or {}
+    if _contains_any(step.get("run", ""), MIGRATION_RUN_MARKERS):
+        return True
+    if _uses_text_runs_migrations(step.get("uses", "")):
+        return True
+    return _contains_any(step.get("with", ""), MIGRATION_RUN_MARKERS)
+
+
+_USES_LINE_RE = re.compile(r"^\s*uses\s*:\s*(.+?)\s*(#.*)?$")
+
+
+def _job_level_uses_runs_migrations(job_text):
+    """True when the job itself is a `uses:` reference that runs
+    migrations (a reusable-workflow call such as
+    `uses: ./.github/workflows/migrate.yml`, which has no `steps:` at
+    all). Only line-anchored `uses:` keys are consulted — full-line
+    comments are skipped — so `needs:`, names, and comments never
+    count. A `uses:` line inside a `run:` script block would also
+    match; shell scripts never contain one in practice.
+    """
+    for raw in (job_text or "").splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _USES_LINE_RE.match(raw)
+        if m and _uses_text_runs_migrations(m.group(1)):
+            return True
+    return False
 
 
 def _indent_of(line):
@@ -40,17 +86,21 @@ def _indent_of(line):
 
 
 def _job_block_runs_migrations(job_text):
-    """True when any step `run:` in the job block runs migrations.
+    """True when the job block runs migrations.
 
-    Parses the block with `job_step_blocks` and tests each step's `run:`
-    text with `step_runs_migrations`, so `needs:`, names, and comments
-    mentioning migrate never count. Never raises (worst case False).
+    Parses the block with `job_step_blocks` and tests each step's
+    `run:`/`uses:`/`with:` text with `step_runs_migrations`, plus the
+    job-level `uses:` (reusable-workflow calls have no `steps:`), so
+    `needs:`, names, and comments mentioning migrate never count.
+    Never raises (worst case False).
     """
     try:
         for block in job_step_blocks(job_text or ""):
             for step in block:
                 if step_runs_migrations(step):
                     return True
+        if _job_level_uses_runs_migrations(job_text or ""):
+            return True
     except Exception:
         return False
     return False
@@ -176,8 +226,9 @@ def has_concurrency_group(workflow_text):
 
 
 def check_workflow_concurrency(workflows):
-    """One finding per workflow with a migrating job (a step whose `run:`
-    text runs migrations) and no concurrency group. A bare `needs:`,
+    """One finding per workflow with a migrating job (a step whose
+    `run:`/`uses:`/`with:` text runs migrations, or a job-level `uses:`
+    reusable-workflow call) and no concurrency group. A bare `needs:`,
     name, or comment mentioning migrate is not a migrating job, so it
     never flags on its own. Findings name the workflow path."""
     findings = []
@@ -193,8 +244,9 @@ def check_workflow_concurrency(workflows):
 
 
 def _workflow_has_migrating_job(workflow_text):
-    """True when any job in the workflow has a step whose `run:` text runs
-    migrations. Never raises (worst case False)."""
+    """True when any job in the workflow runs migrations (a step whose
+    `run:`/`uses:`/`with:` text runs migrations, or a job-level `uses:`
+    call). Never raises (worst case False)."""
     try:
         text = workflow_text or ""
         lines = text.splitlines()
@@ -272,14 +324,17 @@ def check_migration_seed_same_lock(steps):
 
 
 def job_step_blocks(text):
-    """Split workflow text into per-job [{name, run}] step lists.
+    """Split workflow text into per-job [{name, run, uses, with}] steps.
 
-    Line-based subset parser: follows each `steps:` list, `name:`
-    / `run:` scalars and `run: |` blocks. One block per `steps:`
-    section, so a migrate step in one job never pairs with a seed
-    step in another. Compact sequence lists (a `- ` item at the same
-    indent as the `steps:` key) are parsed; anything else unrecognized
-    is skipped; never raises (worst case the seed check sees no steps).
+    Line-based subset parser: follows each `steps:` list, `name:` /
+    `run:` / `uses:` scalars, `run: |` blocks, and `with:` input
+    mappings (whose scalar values are joined into `with`). One block
+    per `steps:` section, so a migrate step in one job never pairs
+    with a seed step in another. Compact sequence lists (a `- ` item
+    at the same indent as the `steps:` key) are parsed; anything else
+    unrecognized is skipped; never raises (worst case the seed check
+    sees no steps). `needs:`, job/step names, and comments are never
+    captured — only `run:`/`uses:`/`with:` values.
     """
     blocks = []
     lines = (text or "").splitlines()
@@ -294,6 +349,7 @@ def job_step_blocks(text):
         block = []
         cur = None
         item_indent = base
+        with_indent = None
         while i < total:
             raw = lines[i]
             stripped = raw.strip()
@@ -314,8 +370,9 @@ def job_step_blocks(text):
             if item and indent >= base:
                 if cur is not None:
                     block.append(cur)
-                cur = {"name": "", "run": ""}
+                cur = {"name": "", "run": "", "uses": "", "with": ""}
                 item_indent = indent
+                with_indent = None
                 rest = item.group(2).strip()
                 if not rest:
                     i += 1
@@ -325,7 +382,36 @@ def job_step_blocks(text):
             if cur is None:
                 i += 1
                 continue
-            key = re.match(r"^(name|run)\s*:\s*(.*)$", stripped)
+            if with_indent is not None:
+                if indent > with_indent:
+                    pair = re.match(r"^([\w\-.]+)\s*:\s*(.*)$", stripped)
+                    if pair:
+                        val = pair.group(2).strip()
+                        if len(val) >= 2 and val[0] == val[-1] \
+                                and val[0] in "\"'":
+                            val = val[1:-1]
+                        if val and val not in (
+                            "|", ">", "|-", "|+", ">-", ">+",
+                        ):
+                            cur["with"] = (
+                                (cur["with"] + "\n" + val)
+                                if cur["with"] else val
+                            )
+                    i += 1
+                    continue
+                with_indent = None
+            with_key = re.match(r"^with\s*:\s*(.*)$", stripped)
+            if with_key and indent > item_indent:
+                inline = with_key.group(1).strip()
+                if inline and inline not in ("{}",):
+                    cur["with"] = (
+                        (cur["with"] + "\n" + inline)
+                        if cur["with"] else inline
+                    )
+                with_indent = indent
+                i += 1
+                continue
+            key = re.match(r"^(name|run|uses)\s*:\s*(.*)$", stripped)
             if key and indent > item_indent:
                 field, val = key.group(1), key.group(2).strip()
                 if field == "run" and val in (
@@ -348,7 +434,10 @@ def job_step_blocks(text):
             i += 1
         if cur is not None:
             block.append(cur)
-        blocks.append([s for s in block if s.get("run")])
+        blocks.append([
+            s for s in block
+            if s.get("run") or s.get("uses") or s.get("with")
+        ])
     return blocks
 
 

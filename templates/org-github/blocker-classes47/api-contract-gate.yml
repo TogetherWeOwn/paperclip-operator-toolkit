@@ -71,13 +71,22 @@ jobs:
           else
             base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
           fi
+          # Whether the BASE commit declares the wire schema is recorded
+          # BEFORE any `{}` placeholder is written: testing `-s` on a
+          # file we just wrote `{}` into could never fire, so the
+          # no-schema skip below keys off `base_has_schema` instead.
+          base_has_schema=0
           if [[ -n "$base" ]]; then
             git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
-            git show "$base:docs/api-schema.json" > /tmp/blocker-old-schema.json 2>/dev/null || echo '{}' > /tmp/blocker-old-schema.json
+            if git show "$base:docs/api-schema.json" > /tmp/blocker-old-schema.json 2>/dev/null; then
+              base_has_schema=1
+            else
+              echo '{}' > /tmp/blocker-old-schema.json
+            fi
           else
             echo '{}' > /tmp/blocker-old-schema.json
           fi
-          if [[ ! -e docs/api-schema.json && ! -s /tmp/blocker-old-schema.json ]]; then
+          if [[ ! -e docs/api-schema.json && "$base_has_schema" == "0" ]]; then
             echo "no docs/api-schema.json — skipping (adopt the wire schema to enable)"
             exit 0
           fi

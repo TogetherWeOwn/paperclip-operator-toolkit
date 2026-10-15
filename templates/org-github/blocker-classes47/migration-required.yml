@@ -16,7 +16,7 @@ on:
         default: "warn"
         type: string
       dialect:
-        description: "auto (default) or an explicit postgres|sqlite pin (mixed repos pin postgres); unknown values are rejected"
+        description: "auto (default) or an explicit postgres|sqlite pin (mixed repos pin postgres via the BLOCKER_MIGRATION_DIALECT repo variable); unknown values are rejected"
         required: false
         default: "auto"
         type: string
@@ -30,8 +30,12 @@ jobs:
   migration:
     name: migration
     uses: TogetherWeOwn/.github/.github/workflows/blocker-migration-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
+    # On `pull_request` / `merge_group` the `workflow_call` inputs are
+    # empty, so a mixed repo pins its dialect with the
+    # `BLOCKER_MIGRATION_DIALECT` repo variable (set once to `postgres`
+    # or `sqlite`); an explicit caller `with:` still wins when present.
     with:
       mode: ${{ inputs.mode || 'warn' }}
-      dialect: ${{ inputs.dialect || 'auto' }}
+      dialect: ${{ inputs.dialect || vars.BLOCKER_MIGRATION_DIALECT || 'auto' }}
     permissions:
       contents: read
