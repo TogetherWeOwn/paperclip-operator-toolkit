@@ -183,6 +183,17 @@ class EnvContractTest(unittest.TestCase):
             write(d, ".env.example", f"DEPLOY_KEY={synthetic}\n")
             self.assertIn("ENV_SECRET_VALUE", codes(d))
 
+    def test_invalid_utf8_env_example_does_not_crash(self):
+        """Fails if invalid UTF-8 in .env.example crashes the checker.
+
+        A fail-closed gate must degrade to findings (or a clean key
+        list), never raise UnicodeDecodeError out of check_tree.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".env.example").write_bytes(b"VALID_KEY=\xff\xfe\n")
+            got = codes(d)
+            self.assertIsInstance(got, list)
+
     def test_no_example_file_means_no_contract_finding(self):
         """Pins current scope: vars are cross-checked only when an
         example file exists to declare them in."""
@@ -271,6 +282,25 @@ class WorkflowLintTest(unittest.TestCase):
                 """.replace("PIN", SHA))
             self.assertEqual(codes(d).count("WORKFLOW_TIMEOUT"), 1)
 
+    def test_step_level_uses_does_not_exempt_job_from_timeout(self):
+        """Fails if a step-level uses: exempts a regular job from
+        WORKFLOW_TIMEOUT. Only a job-level reusable-workflow call
+        (a job with no runs-on/steps of its own) is exempt, because
+        such a caller job cannot carry timeout-minutes; a normal job
+        that merely runs an action step can, and must."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/ci.yml", """\
+                name: CI
+                on: [push]
+                jobs:
+                  regular:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - name: Checkout
+                        uses: actions/checkout@PIN
+                """.replace("PIN", SHA))
+            self.assertIn("WORKFLOW_TIMEOUT", codes(d))
+
 
 class RequiredCheckTest(unittest.TestCase):
     def test_unparseable_required_checks_fails_closed(self):
@@ -314,6 +344,120 @@ class RequiredCheckTest(unittest.TestCase):
                       - uses: actions/checkout@PIN
                 """.replace("PIN", SHA))
             self.assertEqual(codes(d), [])
+
+
+    def test_malformed_required_entries_fail_closed(self):
+        """Fails if a malformed required entry is silently dropped.
+
+        Entries must be objects with a non-empty string context.
+        Silently filtering a bad entry out would shrink the contract
+        while the gate still reports clean, so every shape below must
+        produce REQUIRED_CHECKS_PARSE, never a crash or a pass.
+        """
+        payloads = [
+            '{"required": [42]}',
+            '{"required": ["config-deploy / config-deploy"]}',
+            '{"required": [{}]}',
+            '{"required": [{"name": "config-deploy"}]}',
+            '{"required": [{"context": 42}]}',
+            '{"required": [{"context": true}]}',
+            '{"required": [{"context": null}]}',
+            '{"required": [{"context": ""}]}',
+            '{"required": [{"context": "   "}]}',
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as d:
+                    write(d, "required_checks.json", payload + "\n")
+                    self.assertIn("REQUIRED_CHECKS_PARSE", codes(d))
+
+    def _codes_with_required(self, contexts, workflows):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "required_checks.json",
+                  json.dumps({"required": [{"context": c} for c in contexts]}))
+            for rel, body in workflows.items():
+                write(d, rel, body.replace("PIN", SHA))
+            return codes(d)
+
+    REUSABLE_TREE = {
+        ".github/workflows/caller.yml": """\
+            name: config-deploy
+            on: [push]
+            jobs:
+              config-deploy:
+                uses: TogetherWeOwn/.github/.github/workflows/config-deploy.yml@PIN
+            """,
+        ".github/workflows/config-deploy.yml": """\
+            name: config-deploy
+            on:
+              workflow_call:
+            jobs:
+              config-deploy:
+                name: config-deploy
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                steps:
+                  - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_reusable_workflow_context_matches_produced_check(self):
+        """Fails if the produced check for a reusable-workflow call is
+        not `<caller job> / <called job>`: GitHub reports exactly
+        `config-deploy / config-deploy` for this tree, so requiring
+        that exact context must produce no REQUIRED_CHECK_* finding."""
+        got = self._codes_with_required(
+            ["config-deploy / config-deploy"], self.REUSABLE_TREE)
+        self.assertFalse(
+            [c for c in got if c.startswith("REQUIRED_CHECK")],
+            f"expected no REQUIRED_CHECK_* finding, got {got}",
+        )
+
+    def test_bare_context_does_not_match_reusable_produced_check(self):
+        """Fails if the bare `config-deploy` is accepted as the check
+        a reusable-workflow call produces. The produced context is the
+        composite `config-deploy / config-deploy`; a ruleset naming
+        only the bare name requires a check nothing produces."""
+        got = self._codes_with_required(["config-deploy"], self.REUSABLE_TREE)
+        self.assertIn("REQUIRED_CHECK_MISSING", got)
+
+    MATRIX_TREE = {
+        ".github/workflows/ci.yml": """\
+            name: CI
+            on: [push]
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                strategy:
+                  matrix:
+                    os:
+                      - ubuntu-latest
+                      - windows-latest
+                steps:
+                  - uses: actions/checkout@PIN
+            """,
+    }
+
+    def test_matrix_contexts_match_produced_job_checks(self):
+        """Fails if matrix-expanded contexts are not produced checks:
+        GitHub reports `build (ubuntu-latest)` and
+        `build (windows-latest)` for this job, so requiring both must
+        produce no REQUIRED_CHECK_* finding."""
+        got = self._codes_with_required(
+            ["build (ubuntu-latest)", "build (windows-latest)"],
+            self.MATRIX_TREE)
+        self.assertFalse(
+            [c for c in got if c.startswith("REQUIRED_CHECK")],
+            f"expected no REQUIRED_CHECK_* finding, got {got}",
+        )
+
+    def test_bare_job_id_does_not_match_matrix_produced_checks(self):
+        """Fails if the bare job id is accepted as a matrix job's
+        check: every produced context carries its matrix values, so
+        requiring `build` alone names a check nothing produces."""
+        got = self._codes_with_required(["build"], self.MATRIX_TREE)
+        self.assertIn("REQUIRED_CHECK_MISSING", got)
 
 
 class MeasuredAndExitTest(unittest.TestCase):
