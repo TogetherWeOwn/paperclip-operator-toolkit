@@ -27,7 +27,8 @@ class Classify(unittest.TestCase):
     def test_suffixless_secret_and_credential_files_are_private_data(self):
         for path in ("id_rsa", "keys/id_ed25519", "keys/id_ecdsa",
                      "keys/id_dsa", ".netrc", ".npmrc", ".pypirc",
-                     ".git-credentials", ".pgpass", ".htpasswd", ".my.cnf",
+                     ".git-credentials", ".pgpass", ".htpasswd", "htpasswd",
+                     ".my.cnf", "my.cnf",
                      ".docker/config.json",
                      "credentials.json", "config/credentials",
                      "secrets.yaml", "secret.txt", "kubeconfig",
@@ -42,6 +43,7 @@ class Classify(unittest.TestCase):
 
     def test_backup_copies_of_secrets_stay_private_data(self):
         for path in ("id_rsa.bak", "id_rsa.old", "id_rsa~",
+                     "id_rsa.bak.bak", "credentials.json.bak.old",
                      "keys/id_ed25519.bak",
                      "credentials.json.bak", "credentials.bak",
                      "secrets.yaml.orig", "secret.txt~",
@@ -49,6 +51,30 @@ class Classify(unittest.TestCase):
                      "token.age.orig", "AuthKey_X.p8.bak"):
             with self.subTest(path=path):
                 self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+
+    def test_secret_stem_docs_stay_private_data(self):
+        # A full secret/credentials stem is secret material even as docs;
+        # only source code is excluded from this rule.
+        for path in ("secrets.md", "docs/credentials.md",
+                     "secret.rst", "credentials.markdown"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+
+    def test_backup_copies_of_pin_sheets_stay_private_config(self):
+        for path in ("upstream_draft_pins.txt.bak",
+                     "external_disclosure_authorizers.json.old",
+                     "operator_runbook_classification.json.orig",
+                     "credential_chain_pins.txt~"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-CONFIG", path)
+
+    def test_config_json_outside_docker_stays_public(self):
+        # Only .docker/config.json is credential material; any other
+        # config.json (or bare "config") is generic and stays public.
+        for path in ("app/config.json", "docker/config.json",
+                     "app/config", "docker/config"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
 
     def test_public_key_files_are_not_private_data(self):
         self.assertEqual(classify("keys/id_ed25519.pub")[0], "PUBLIC-ABLE")
@@ -62,7 +88,9 @@ class Classify(unittest.TestCase):
                      "api/secrets.py", "secretary.py", "config/secretary.json",
                      "kubeconfig.py", "src/kubeconfig_loader.py",
                      "test_kubeconfig.py", "scripts/kubeconfig.sh",
-                     "kubeconfig_test.go", "docs/kubeconfig-guide.md"):
+                     "kubeconfig_test.go", "docs/kubeconfig-guide.md",
+                     "docs/kubeconfig-guide.markdown",
+                     "docs/kubeconfig-guide.rst"):
             with self.subTest(path=path):
                 self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
 

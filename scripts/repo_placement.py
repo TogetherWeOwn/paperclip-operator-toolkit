@@ -93,9 +93,9 @@ def classify(path: str) -> tuple[str, str]:
         p = p[2:]
     base = p.rsplit("/", 1)[-1].lower()
 
-    if base in CONFIG_BASENAMES:
-        return "PRIVATE-CONFIG", "named-config"
     match = _strip_backup(base)
+    if match in CONFIG_BASENAMES:
+        return "PRIVATE-CONFIG", "named-config"
     if (match.endswith(SECRET_SUFFIXES) or match == ".env"
             or match.startswith(".env.")
             or match.endswith(".tfvars.json")):
@@ -106,10 +106,13 @@ def classify(path: str) -> tuple[str, str]:
     # the canonical ~/.kube/config path names it only by directory.
     # Source code and docs are excluded: a kubeconfig parser or guide is
     # generic code, not cluster material (same rule as the stem check).
+    # A full secret/credentials stem stays private even as docs
+    # (secrets.md is a plausible paste target); only source code is
+    # excluded here. The docs exclusion lives on the kubeconfig rule only.
     if not match.endswith(".pub") and (
             match in SECRET_BASENAMES
             or (stem in SECRET_STEMS
-                and not match.endswith(CODE_SUFFIXES + DOC_SUFFIXES))
+                and not match.endswith(CODE_SUFFIXES))
             or ("kubeconfig" in match
                 and not match.endswith(CODE_SUFFIXES + DOC_SUFFIXES))
             or (match == "config" and ".kube" in p.lower().split("/"))
@@ -127,8 +130,9 @@ def classify(path: str) -> tuple[str, str]:
     if p.startswith("github-runner/") and not p.startswith("github-runner/garm/"):
         return "PRIVATE-CONFIG", "runner-host-config"
     if not _is_fixture(p):
-        if base.endswith(("_pins.txt", "_exempt.txt", "_allowlist.txt",
-                          "_pins.json", "-private.json", "_private.json")):
+        # Backup copies are the same sheet: match on the stripped name.
+        if match.endswith(("_pins.txt", "_exempt.txt", "_allowlist.txt",
+                           "_pins.json", "-private.json", "_private.json")):
             return "PRIVATE-CONFIG", "pin-or-allowlist-sheet"
     if p.startswith(".github/workflows/"):
         return "PUBLIC-AFTER-SCRUB", "workflow-split"
