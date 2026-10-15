@@ -1,0 +1,150 @@
+# Test-missing deterministic gate (TOG-24380, staged for TogetherWeOwn/.github).
+#
+# Ported from paperclip-ops-tooling@<source-sha> (this PR, unmerged at stage
+# time): the Operator re-syncs this copy after the source PR merges, then
+# applies it to TogetherWeOwn/.github at
+# `.github/workflows/test-missing-gate.yml`. Do not hand-edit the port: fix
+# upstream in the source PR, then re-port. The canonical logic lives in
+# `.github/scripts/blocker_test_checks.py` (staged next to this file); the
+# gate below embeds the same rules inline so v1 has zero caller-repo
+# dependencies.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into
+# with a single `uses:` line (see ADOPTION.md next to this file). It runs
+# the blocker-ledger 'test missing/wrong' deterministic checks BEFORE any
+# review model is involved: changed src without changed tests (waived by the
+# `tests-exempt` label), changed-line coverage on the diff, and vacuity
+# guards on changed test files.
+#
+# WARN FIRST (the rollout rule): `mode: warn` (the default) never fails the
+# run for its own findings — every gate job sets `continue-on-error`, writes
+# findings to the step summary and to a `test-missing-findings` artifact. A
+# repo flips to `mode: enforcing` only after its false-positive rate over the
+# last 20 PRs measures under 5%.
+#
+# FEEDING ci-ok: this workflow ends in exactly one aggregator,
+# `test-missing-ok` (`if: ${{ !cancelled() }}`), so a consumer repo wires ONE
+# context into its own required aggregator. Never add a second aggregator.
+
+name: Test-missing gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforcing (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect changed files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compute changed files
+        id: diff
+        env:
+          GATE_EVENT: ${{ github.event_name }}
+          GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GATE_PR_BASE:-}" ]; then
+            git diff --name-only "${GATE_PR_BASE}" HEAD > changed.txt
+          else
+            git diff --name-only HEAD~1 HEAD > changed.txt || true
+          fi
+          {
+            echo "changed<<EOF"
+            cat changed.txt
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  test-missing:
+    name: Test-missing checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect]
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run test-missing checks
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+          GATE_CHANGED: ${{ needs.detect.outputs.changed }}
+          GATE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          changed = [l.strip() for l in os.environ.get("GATE_CHANGED", "").splitlines() if l.strip()]
+          labels = [l.strip() for l in os.environ.get("GATE_MODE", "") and os.environ.get("GATE_LABELS", "").split(",") if l.strip()]
+          mode = os.environ.get("GATE_MODE", "warn")
+          suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
+          test_dirs = ("test", "tests", "__tests__")
+
+          def is_test(p):
+              parts = p.replace("\\", "/").split("/")
+              name = parts[-1]
+              stem = name.rsplit(".", 1)[0] if "." in name else name
+              if name.startswith("test_") or stem.endswith("_test"):
+                  return True
+              return any(d in test_dirs for d in parts[:-1])
+
+          def is_src(p):
+              return not is_test(p) and p.lower().endswith(suffixes)
+
+          findings = []
+          if "tests-exempt" not in labels:
+              src = [f for f in changed if is_src(f)]
+              if src and not any(is_test(f) for f in changed):
+                  findings += ["src change without tests: %s" % f for f in src]
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if findings:
+              print("test-missing gate findings:")
+              for f in findings:
+                  print("- %s" % f)
+              if summary:
+                  with open(summary, "a") as h:
+                      h.write("## test-missing gate\n")
+                      for f in findings:
+                          h.write("- %s\n" % f)
+          else:
+              print("test-missing gate: no findings")
+          if findings and mode == "enforcing":
+              raise SystemExit(1)
+          PY
+      - name: Upload findings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6ff3b3d0c3c8c19a5beaa33b0d53f4a3 # v4
+        with:
+          name: test-missing-findings
+          path: changed.txt
+          if-no-files-found: warn
+
+  test-missing-ok:
+    name: test-missing-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect, test-missing]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Aggregate
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          echo "test-missing gate ran in ${GATE_MODE} mode"
