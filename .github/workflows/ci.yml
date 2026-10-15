@@ -5151,6 +5151,9 @@ jobs:
       - name: Disclosure scan over plugins/
         run: bash scripts/disclosure-scan.sh plugins
 
+      - name: Repo placement acceptance suite
+        run: python3 scripts/test_repo_placement_acceptance.py
+
   # Secret scan over the full history. Pinned binary, checksum-verified, no
   # third-party action: the org-licensed action is not needed for a public repo.
   #
