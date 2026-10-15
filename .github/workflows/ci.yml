@@ -1132,6 +1132,18 @@ jobs:
       - name: review_dedup placement gate
         run: ./test_review_dedup_placement.sh
 
+      - name: pr-hygiene fault-visibility suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_visibility.py
+
+      - name: pr-hygiene fault-visibility placement
+        run: ./test_pr_hygiene_fault_visibility_placement.sh
+
+      - name: pr-hygiene fault-coverage suite
+        run: python3 -m unittest -v test_pr_hygiene_fault_coverage.py
+
+      - name: pr-hygiene gates are load-bearing (mutation-gated)
+        run: ./verification/pr-hygiene-mutation-gate.sh
+
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
 
