@@ -37,6 +37,13 @@ jobs:
           else
             git -c core.quotePath=false diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
           fi
+          # core.quotePath=false covers only non-ASCII: a name containing
+          # " or \ stays quoted, so the classifier below could never match
+          # it and the edit would silently pass. Fail closed instead.
+          if grep -q '^"' changed.txt; then
+            echo "test-missing gate: quoted path in changed list, failing closed" >&2
+            exit 1
+          fi
           relevant=$(python3 - <<'PY'
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
           test_dirs = ("test", "tests", "__tests__")

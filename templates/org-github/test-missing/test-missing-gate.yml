@@ -84,6 +84,15 @@ jobs:
           else
             git -c core.quotePath=false diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
           fi
+          # core.quotePath=false covers only non-ASCII: a name containing
+          # " or \ stays quoted ("src/a\"b.py"), so the suffix check below
+          # could never classify it and the edit would silently pass. A
+          # quoted entry is unclassifiable: fail the step closed. The
+          # aggregator keeps warn advisory and fails every other mode.
+          if grep -q '^"' changed.txt; then
+            echo "test-missing gate: quoted path in changed list, failing closed" >&2
+            exit 1
+          fi
           {
             echo "changed<<EOF"
             cat changed.txt

@@ -731,6 +731,30 @@ class DetectDiffFixtureTest(unittest.TestCase):
             "non-ASCII test file missing from changed list: %r" % (changed,))
         self.assertEqual(rc, 0)
 
+    def test_double_quote_in_name_fails_closed(self):
+        def mutate(repo):
+            with open(os.path.join(repo, 'src/a"b.py'), "a") as handle:
+                handle.write("# edited\n")
+        detect = self._run_detect_only(
+            {"src/a.py": self._big_src()}, mutate,
+            pr_base="", merge_base="")
+        self.assertNotEqual(
+            detect.returncode, 0,
+            "a quoted (unclassifiable) path must fail the detect step, "
+            "never produce a classified list and a passing gate")
+
+    def test_backslash_in_name_fails_closed(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a\\b.py"), "a") as handle:
+                handle.write("# edited\n")
+        detect = self._run_detect_only(
+            {"src/a.py": self._big_src()}, mutate,
+            pr_base="", merge_base="")
+        self.assertNotEqual(
+            detect.returncode, 0,
+            "a quoted (unclassifiable) path must fail the detect step, "
+            "never produce a classified list and a passing gate")
+
 
 class AdoptionSnippetFixtureTest(unittest.TestCase):
     """Pin the ADOPTION.md caller snippet adopters copy verbatim.
@@ -764,7 +788,7 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
             cls._block = textwrap.dedent(run.group("body"))
         return cls._block
 
-    def _run_adoption(self, base_files, mutate):
+    def _run_adoption_raw(self, base_files, mutate, base="pr", middle=None):
         import subprocess
         import tempfile
         block = self._load_block()
@@ -789,21 +813,46 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
             git("add", "-A")
             git("commit", "-qm", "base")
             base_sha = git("rev-parse", "HEAD").stdout.strip()
+            if middle is not None:
+                middle(repo)
+                git("add", "-A")
+                git("commit", "-qm", "middle")
             mutate(repo)
             git("add", "-A")
             git("commit", "-qm", "head")
+            if base == "pr":
+                pr_base = base_sha
+            elif base == "fallback":
+                pr_base = ""
+            else:
+                raise ValueError(
+                    "unknown adoption entry path: %r" % (base,))
             env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "GATE_PR_BASE": base_sha,
+                "GATE_PR_BASE": pr_base,
                 "GITHUB_OUTPUT": out,
             }
             detect = subprocess.run(
                 ["bash", "-c", block], cwd=repo, capture_output=True,
                 text=True, env=env, timeout=60)
-            assert detect.returncode == 0, detect.stderr[-2000:]
-            with open(os.path.join(repo, "changed.txt")) as handle:
-                changed = [line.strip() for line in handle if line.strip()]
-        return changed
+            try:
+                with open(os.path.join(repo, "changed.txt")) as handle:
+                    changed = [line.strip() for line in handle
+                               if line.strip()]
+            except OSError:
+                changed = []
+            relevant = None
+            with open(out) as handle:
+                for line in handle:
+                    if line.startswith("relevant="):
+                        relevant = line[len("relevant="):].strip()
+        return changed, relevant, detect.returncode
+
+    def _run_adoption(self, base_files, mutate, base="pr", middle=None):
+        changed, relevant, returncode = self._run_adoption_raw(
+            base_files, mutate, base=base, middle=middle)
+        assert returncode == 0, "adoption detect step failed"
+        return changed, relevant
 
     @staticmethod
     def _big_src(tag="a"):
@@ -816,23 +865,137 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
                       os.path.join(repo, "src/b.py"))
             with open(os.path.join(repo, "src/b.py"), "a") as handle:
                 handle.write("# edited line one\n# edited line two\n")
-        changed = self._run_adoption({"src/a.py": self._big_src()}, mutate)
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate)
         self.assertEqual(changed, ["src/b.py"], changed)
+        self.assertEqual(relevant, "true", relevant)
 
     def test_pure_rename_lists_nothing(self):
         def mutate(repo):
             os.rename(os.path.join(repo, "src/a.py"),
                       os.path.join(repo, "src/b.py"))
-        changed = self._run_adoption({"src/a.py": self._big_src()}, mutate)
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate)
         self.assertEqual(changed, [], changed)
+        self.assertEqual(relevant, "false", relevant)
 
     def test_nonascii_src_lists_unquoted(self):
         def mutate(repo):
             with open(os.path.join(repo, "src/café.py"), "a") as handle:
                 handle.write("# edited\n")
-        changed = self._run_adoption({"src/café.py": self._big_src()},
-                                     mutate)
+        changed, relevant = self._run_adoption(
+            {"src/café.py": self._big_src()}, mutate)
         self.assertIn("src/café.py", changed, changed)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_fallback_rename_and_edit_lists_new_path(self):
+        def mutate(repo):
+            os.rename(os.path.join(repo, "src/a.py"),
+                      os.path.join(repo, "src/b.py"))
+            with open(os.path.join(repo, "src/b.py"), "a") as handle:
+                handle.write("# edited line one\n# edited line two\n")
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate, base="fallback")
+        self.assertEqual(changed, ["src/b.py"], changed)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_fallback_pure_rename_lists_nothing(self):
+        def mutate(repo):
+            os.rename(os.path.join(repo, "src/a.py"),
+                      os.path.join(repo, "src/b.py"))
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate, base="fallback")
+        self.assertEqual(changed, [], changed)
+        self.assertEqual(relevant, "false", relevant)
+
+    def test_fallback_diffs_head_minus_one(self):
+        def middle(repo):
+            with open(os.path.join(repo, "src/other.py"), "w") as handle:
+                handle.write(self._big_src(tag="other"))
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# head edit\n")
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate,
+            base="fallback", middle=middle)
+        # Correct: HEAD~1..HEAD lists only the head edit. A HEAD~2
+        # mutant would also list the middle commit's file.
+        self.assertEqual(changed, ["src/a.py"], changed)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_fallback_nonascii_src_lists_unquoted(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/café.py"), "a") as handle:
+                handle.write("# edited\n")
+        changed, relevant = self._run_adoption(
+            {"src/café.py": self._big_src()}, mutate, base="fallback")
+        self.assertIn("src/café.py", changed, changed)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_relevant_true_for_src_edit(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited\n")
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, ["src/a.py"], changed)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_relevant_false_for_docs_only(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "docs/guide.md"), "a") as handle:
+                handle.write("more docs\n")
+        changed, relevant = self._run_adoption(
+            {"docs/guide.md": "docs\n"}, mutate)
+        self.assertEqual(changed, ["docs/guide.md"], changed)
+        # A mutant that always prints true would run the gate on
+        # docs-only PRs, burning a runner against the change-gating
+        # policy; a mutant that always prints false silently disables
+        # the gate for every adopter.
+        self.assertEqual(relevant, "false", relevant)
+
+    def test_relevant_true_for_test_only(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "tests/a_test.py"), "a") as handle:
+                handle.write("# touched\n")
+        changed, relevant = self._run_adoption(
+            {"tests/a_test.py": "def test_it():\n    assert True\n"},
+            mutate)
+        self.assertEqual(relevant, "true", relevant)
+
+    def test_relevant_false_for_empty_changed(self):
+        def mutate(repo):
+            os.remove(os.path.join(repo, "src/a.py"))
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, [], changed)
+        self.assertEqual(relevant, "false", relevant)
+
+    def test_quoted_name_fails_closed(self):
+        def mutate(repo):
+            with open(os.path.join(repo, 'src/a"b.py'), "a") as handle:
+                handle.write("# edited\n")
+        changed, relevant, returncode = self._run_adoption_raw(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertNotEqual(
+            returncode, 0,
+            "a quoted (unclassifiable) path must fail the detect step, "
+            "never produce a classified list and a passing gate: %r"
+            % (changed,))
+
+    def test_snippet_exposes_relevant_output(self):
+        text = open(self.ADOPTION).read()
+        self.assertIn(
+            "relevant: ${{ steps.diff.outputs.relevant }}", text)
+        self.assertIn('echo "relevant=${relevant}"', text)
+
+    def test_snippet_fallback_pins(self):
+        text = open(self.ADOPTION).read()
+        self.assertIn("--diff-filter=AMR", text)
+        self.assertIn("R100", text)
+        self.assertIn("HEAD~1 HEAD", text)
+        self.assertIn("print $NF", text)
+        self.assertIn('^"', text)
 
 
 class WorkflowWiringTest(unittest.TestCase):
@@ -903,6 +1066,14 @@ class WorkflowWiringTest(unittest.TestCase):
             self.assertNotIn("--diff-filter=AM ", line + " ",
                              "bare AM filter drops every rename: %s"
                              % line.strip())
+
+    def test_diff_fails_closed_on_quoted_paths(self):
+        text = self._text()
+        self.assertIn(
+            '^"', text,
+            "a quoted-path guard must fail the detect step closed: "
+            "names containing \" or \\ stay quoted under "
+            "core.quotePath=false and would otherwise silently pass")
 
     def test_diff_leaves_paths_unquoted(self):
         text = self._text()

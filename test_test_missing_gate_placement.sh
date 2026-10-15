@@ -302,6 +302,10 @@ PY
   assert $? "the detect diff lists non-ASCII paths unquoted (core.quotePath=false)" \
     "a quoted octal path never matches .py so an untested non-ASCII src silently passes"
 
+  grep -qF '^"' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect step fails closed on still-quoted paths (\" or \\ in the name)" \
+    "core.quotePath=false covers only non-ASCII -- a quoted entry would otherwise silently pass"
+
   grep -q 'set -euo pipefail' "$STAGE/test-missing-gate.yml"
   assert $? "the detect run block sets pipefail (git|awk fails closed)" \
     "without pipefail a git failure writes an empty changed list and the gate passes"
@@ -342,6 +346,33 @@ PY
     grep -q 'set -euo pipefail' "$STAGE/ADOPTION.md"
     assert $? "the adoption snippet sets pipefail" \
       "without pipefail an adopter git failure passes the gate"
+
+    grep -qF '^"' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet fails closed on still-quoted paths" \
+      "a copy-paste adopter with a quotePath-only diff regains the silent pass on \" or \\ names"
+
+    grep -q 'HEAD~1 HEAD' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet fallback diffs HEAD~1 (not HEAD~2)" \
+      "a HEAD~2 fallback diffs two commits of files for copy-paste adopters"
+
+    grep -q 'print $NF' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet fallback lists the new path (print \$NF)" \
+      "printing \$2 lists the old deleted path for renames with no failing test"
+
+    if grep -qF -- '--diff-filter=AM "' "$STAGE/ADOPTION.md"; then
+      assert 1 "the adoption snippet never uses the bare AM filter" \
+        "bare AM drops every rename including renamed-and-edited files for copy-paste adopters"
+    else
+      assert 0 "the adoption snippet never uses the bare AM filter"
+    fi
+
+    grep -q 'relevant: ${{ steps.diff.outputs.relevant }}' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet exposes the relevant output" \
+      "without the output the adopter gate never knows whether to run"
+
+    grep -q 'echo "relevant=${relevant}"' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet writes the relevant output" \
+      "a snippet that never writes relevant starves its own gate"
   else
     assert 1 "the adoption snippet carries the detect pins" \
       "ADOPTION.md absent -- adopter copy-paste has no pinned snippet"
@@ -370,7 +401,9 @@ PY
   # silent-regression window the 4/5 review found.
   grep -q "EmbeddedGateScriptTest" "$HERE/test_test_missing_gate.py" && \
     grep -q "merge_group" "$HERE/test_test_missing_gate.py" && \
-    grep -q "Enforcing" "$HERE/test_test_missing_gate.py"
+    grep -q "Enforcing" "$HERE/test_test_missing_gate.py" && \
+    grep -q "AdoptionSnippetFixtureTest" "$HERE/test_test_missing_gate.py" && \
+    grep -q "relevant" "$HERE/test_test_missing_gate.py"
   assert $? "the embedded gate script has a behavioural case matrix in the unit suite" \
     "without the matrix the waiver/mode/merge_group mutants survive both suites again"
 fi
