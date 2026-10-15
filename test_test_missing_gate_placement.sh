@@ -283,9 +283,20 @@ PY
   assert $? "both checkouts fetch full history (fetch-depth 0)" \
     "a shallow checkout cannot fetch the base SHA, so the diff is empty with no failing test"
 
-  grep -qF -- '--diff-filter=AM' "$STAGE/test-missing-gate.yml"
-  assert $? "the detect diff excludes deleted and renamed paths (--diff-filter=AM)" \
-    "a deleted test would otherwise satisfy the test-evidence check while deleted src and pure renames false-fail"
+  grep -qF -- '--diff-filter=AMR' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect diff keeps renames for the R100 drop (--diff-filter=AMR)" \
+    "a bare AM filter drops renamed-and-edited files, a silent pass in enforcing mode"
+
+  grep -q 'R100' "$STAGE/test-missing-gate.yml"
+  assert $? "the detect diff drops only pure renames (R100)" \
+    "without the R100 drop a pure rename counts as a new src file and false-fails"
+
+  if grep -qF -- '--diff-filter=AM "' "$STAGE/test-missing-gate.yml"; then
+    assert 1 "the detect diff never uses the bare AM filter" \
+      "bare AM drops every rename including renamed-and-edited files (silent pass in enforcing mode)"
+  else
+    assert 0 "the detect diff never uses the bare AM filter"
+  fi
 
   grep -q 'merge_group.base_sha' "$STAGE/test-missing-gate.yml"
   assert $? "the detect job diffs the merge_group base_sha in queue runs" \

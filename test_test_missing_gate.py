@@ -375,9 +375,9 @@ class EmbeddedGateScriptTest(unittest.TestCase):
                            ["src/a.py", "app.spec"]), 0)
 
     def test_embedded_filtered_src_only_still_fails(self):
-        # The detect job filters deleted/renamed paths out with
-        # --diff-filter=AM before the script runs: a src edit whose only
-        # accompanying test was deleted arrives here as src-only.
+        # The detect job drops deleted paths (and pure renames) before the
+        # script runs: a src edit whose only accompanying test was deleted
+        # arrives here as src-only.
         self.assertEqual(
             self._run_gate("pull_request", "enforcing", ["src/a.py"]), 1)
 
@@ -388,6 +388,159 @@ class EmbeddedGateScriptTest(unittest.TestCase):
             self._run_gate("pull_request", "enforcing", []), 0)
 
 
+class DetectDiffFixtureTest(unittest.TestCase):
+    """End-to-end pin for the detect step's git diff: the changed-file list
+    is the gate's central input, and grep-only pins let diff mutants through
+    (dropping the filter, or widening AM to AMR, passes both suites). This
+    fixture builds real git repos, runs the SHIPPED detect run block with
+    GATE_PR_BASE set, and feeds the resulting changed.txt to the SHIPPED
+    embedded script in enforcing mode.
+    """
+
+    STAGED_GATE = EmbeddedGateScriptTest.STAGED_GATE
+    _detect_block = None
+
+    @classmethod
+    def _load_detect_block(cls):
+        import re
+        import textwrap
+        if cls._detect_block is None:
+            text = open(cls.STAGED_GATE).read()
+            region = re.search(
+                r"(?m)^  detect:\n(.*?)(?=^  \w)",
+                text, re.DOTALL)
+            assert region, "detect job not found in staged workflow"
+            run = re.search(
+                r"(?m)^(?P<ind>\s*)run: \|\s*$\n(?P<body>(?:(?P=ind) +\S.*\n?)+)",
+                region.group(1))
+            assert run, "detect run block not found in staged workflow"
+            cls._detect_block = textwrap.dedent(run.group("body"))
+        return cls._detect_block
+
+    def _run_scenario(self, base_files, mutate):
+        import subprocess
+        import tempfile
+        block = self._load_detect_block()
+        script = EmbeddedGateScriptTest._load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(repo)
+            out = os.path.join(tmp, "github_output.txt")
+            open(out, "w").close()
+
+            def git(*args, **kwargs):
+                return subprocess.run(
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     *args], cwd=repo, capture_output=True, text=True,
+                    timeout=60, check=True, **kwargs)
+
+            git("init", "-qb", "main")
+            for path, content in base_files.items():
+                full = os.path.join(repo, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write(content)
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base_sha = git("rev-parse", "HEAD").stdout.strip()
+            mutate(repo)
+            git("add", "-A")
+            git("commit", "-qm", "head")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GATE_EVENT": "pull_request",
+                "GATE_PR_BASE": base_sha,
+                "GATE_MERGE_BASE": "",
+                "GATE_MODE": "enforcing",
+                "GATE_LABELS": "",
+                "GITHUB_OUTPUT": out,
+            }
+            detect = subprocess.run(
+                ["bash", "-c", block], cwd=repo, capture_output=True,
+                text=True, env=env, timeout=60)
+            assert detect.returncode == 0, detect.stderr[-2000:]
+            with open(os.path.join(repo, "changed.txt")) as handle:
+                changed = [line.strip() for line in handle if line.strip()]
+            gate_env = dict(env, GATE_CHANGED="\n".join(changed))
+            gate = subprocess.run(
+                [sys.executable, "-"], input=script, capture_output=True,
+                text=True, env=gate_env, cwd=tmp, timeout=60)
+        return changed, gate.returncode
+
+    @staticmethod
+    def _big_src(tag="a", edits=()):
+        lines = ["# %s line %d" % (tag, i) for i in range(60)]
+        for lineno, text in edits:
+            lines[lineno] = text
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _rename(repo, old, new):
+        os.rename(os.path.join(repo, old), os.path.join(repo, new))
+
+    def test_edit_src_alone_fails(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited\n")
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, ["src/a.py"])
+        self.assertEqual(rc, 1)
+
+    def test_edit_src_plus_delete_test_fails(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited\n")
+            os.remove(os.path.join(repo, "test_a.py"))
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src(),
+             "test_a.py": "def test_it():\n    assert True\n"}, mutate)
+        self.assertEqual(changed, ["src/a.py"])
+        self.assertEqual(rc, 1)
+
+    def test_delete_src_passes(self):
+        def mutate(repo):
+            os.remove(os.path.join(repo, "src/a.py"))
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, [])
+        self.assertEqual(rc, 0)
+
+    def test_pure_rename_passes(self):
+        def mutate(repo):
+            self._rename(repo, "src/a.py", "src/b.py")
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, [])
+        self.assertEqual(rc, 0)
+
+    def test_rename_and_edit_src_without_tests_fails(self):
+        def mutate(repo):
+            self._rename(repo, "src/a.py", "src/b.py")
+            with open(os.path.join(repo, "src/b.py"), "a") as handle:
+                handle.write("# edited line one\n# edited line two\n")
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertEqual(changed, ["src/b.py"])
+        self.assertEqual(rc, 1)
+
+    def test_edit_src_plus_rename_and_edit_test_passes(self):
+        def mutate(repo):
+            with open(os.path.join(repo, "src/keep.py"), "a") as handle:
+                handle.write("# edited\n")
+            self._rename(repo, "test_keep.py", "test_kept.py")
+            with open(os.path.join(repo, "test_kept.py"), "a") as handle:
+                handle.write("# edited test\nassert True\n")
+        changed, rc = self._run_scenario(
+            {"src/keep.py": self._big_src(tag="keep"),
+             "test_keep.py": self._big_src(tag="test")}, mutate)
+        self.assertIn("src/keep.py", changed)
+        self.assertTrue(
+            any("test_kept.py" in path for path in changed),
+            "renamed test must stay in the changed list: %r" % (changed,))
+        self.assertEqual(rc, 0)
+
+
 class WorkflowWiringTest(unittest.TestCase):
     """Pin the workflow env/output wiring the behavioural matrix cannot see.
 
@@ -395,7 +548,8 @@ class WorkflowWiringTest(unittest.TestCase):
     GATE_CHANGED, hard-wired warn mode, blank labels/output, wrong base
     SHA, missing fetch-depth) turns enforcing into a silent no-op with
     no failing test. These pins assert the exact wiring lines plus the
-    --diff-filter=AM that keeps deleted/renamed paths out of the gate.
+    --diff-filter=AMR plus the awk R100 drop that keeps deleted paths and
+    pure renames out of the gate while renamed-and-edited files still gate.
     """
 
     STAGED_GATE = EmbeddedGateScriptTest.STAGED_GATE
@@ -437,16 +591,24 @@ class WorkflowWiringTest(unittest.TestCase):
             text.count("fetch-depth: 0"), 2,
             "both checkouts need full history so the base SHA is fetchable")
 
-    def test_diff_excludes_deleted_and_renames(self):
-        import re
+    def test_diff_excludes_deleted_and_pure_renames(self):
         text = self._text()
-        self.assertIn("--diff-filter=AM", text)
         diff_lines = [line for line in text.splitlines()
-                      if "git diff --name-only" in line]
-        self.assertTrue(diff_lines, "no git diff --name-only line found")
+                      if "git diff " in line]
+        self.assertTrue(diff_lines, "no git diff line found")
         for line in diff_lines:
-            self.assertIn("--diff-filter=AM", line,
-                          "unfiltered diff line: %s" % line.strip())
+            self.assertIn("--diff-filter=AMR", line,
+                          "diff line must keep renames for the R100 drop: %s"
+                          % line.strip())
+            self.assertIn("'R100'", line.replace('"', "'"),
+                          "diff line must drop only pure renames: %s"
+                          % line.strip())
+        # The old --diff-filter=AM form drops renamed-and-edited files
+        # (R<100) from the gate: a silent pass in enforcing mode.
+        for line in diff_lines:
+            self.assertNotIn("--diff-filter=AM ", line + " ",
+                             "bare AM filter drops every rename: %s"
+                             % line.strip())
 
 
 if __name__ == "__main__":

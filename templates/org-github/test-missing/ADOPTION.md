@@ -28,12 +28,14 @@ jobs:
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Only Added/Modified paths count: deleted and renamed paths are
-          # not present-file changes (see test-missing-gate.yml).
+          # Only present-file changes count: deleted paths are dropped, and
+          # renames stay except pure renames (R100, no content change) --
+          # a renamed-and-edited file (R<100) still gates (see
+          # test-missing-gate.yml).
           if [ -n "${GATE_PR_BASE:-}" ]; then
-            git diff --name-only --diff-filter=AM "${GATE_PR_BASE}" HEAD > changed.txt
+            git diff --name-status --diff-filter=AMR "${GATE_PR_BASE}" HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt
           else
-            git diff --name-only --diff-filter=AM HEAD~1 HEAD > changed.txt || true
+            git diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
           fi
           relevant=$(python3 - <<'PY'
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
