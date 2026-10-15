@@ -24,6 +24,13 @@ from report-only to required smuggles in no rule change. This repo's own
 warn-only caller lives at `.github/workflows/test-missing.yml` and reaches
 the org reusable by pinned SHA, never a moving tag.
 
+After applying the staged gate to the org repo, the Operator must repin
+that caller to the org-repo merge SHA that first contains
+`test-missing-gate.yml`: the staged pin is a placeholder SHA and does not
+yet resolve to the reusable workflow. Until the repin lands, the caller's
+`test-missing` job reports "workflow not found" (it is in no required set,
+so nothing blocks, but the warn signal does not run).
+
 ## Local verification (no credentials)
 
 ```sh

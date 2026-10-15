@@ -13,8 +13,9 @@
 # with a single `uses:` line (see ADOPTION.md next to this file). It runs
 # the blocker-ledger 'test missing/wrong' deterministic checks BEFORE any
 # review model is involved: changed src without changed tests (waived by the
-# `tests-exempt` label), changed-line coverage on the diff, and vacuity
-# guards on changed test files.
+# `tests-exempt` label). The changed-line coverage and vacuity-guard rules
+# live in the staged `blocker_test_checks.py` library; the workflow's
+# embedded v1 check below runs only the src-without-tests rule.
 #
 # WARN FIRST (the rollout rule): `mode: warn` (the default) never fails the
 # run for its own findings — every gate job sets `continue-on-error`, writes
@@ -32,7 +33,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: "warn (advisory, never fails) or enforcing (findings fail the run)"
+        description: "warn (advisory, never fails) or enforcing/enforce (findings fail the run)"
         required: false
         default: "warn"
         type: string
@@ -57,10 +58,15 @@ jobs:
         env:
           GATE_EVENT: ${{ github.event_name }}
           GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GATE_MERGE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          if [ -n "${GATE_PR_BASE:-}" ]; then
-            git diff --name-only "${GATE_PR_BASE}" HEAD > changed.txt
+          # In a merge_group run there is no pull_request context; diff
+          # against the merge group's base instead of HEAD~1, which would
+          # span other queued PRs' files.
+          GATE_BASE="${GATE_PR_BASE:-${GATE_MERGE_BASE:-}}"
+          if [ -n "${GATE_BASE}" ]; then
+            git diff --name-only "${GATE_BASE}" HEAD > changed.txt
           else
             git diff --name-only HEAD~1 HEAD > changed.txt || true
           fi
@@ -93,6 +99,9 @@ jobs:
           changed = [l.strip() for l in os.environ.get("GATE_CHANGED", "").splitlines() if l.strip()]
           labels = [l.strip() for l in os.environ.get("GATE_MODE", "") and os.environ.get("GATE_LABELS", "").split(",") if l.strip()]
           mode = os.environ.get("GATE_MODE", "warn")
+          if mode not in ("warn", "enforcing", "enforce"):
+              print("test-missing gate: unknown mode %r (want warn, enforcing or enforce)" % mode)
+              raise SystemExit(2)
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
           test_dirs = ("test", "tests", "__tests__")
 
@@ -113,6 +122,15 @@ jobs:
               if src and not any(is_test(f) for f in changed):
                   findings += ["src change without tests: %s" % f for f in src]
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          # The artifact is written in THIS job: each job gets a fresh
+          # runner filesystem, so a file from the detect job cannot be
+          # uploaded here.
+          with open("test-missing-findings.txt", "w") as h:
+              if findings:
+                  for f in findings:
+                      h.write("- %s\n" % f)
+              else:
+                  h.write("test-missing gate: no findings\n")
           if findings:
               print("test-missing gate findings:")
               for f in findings:
@@ -124,7 +142,7 @@ jobs:
                           h.write("- %s\n" % f)
           else:
               print("test-missing gate: no findings")
-          if findings and mode == "enforcing":
+          if findings and mode in ("enforcing", "enforce"):
               raise SystemExit(1)
           PY
       - name: Upload findings
@@ -132,7 +150,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6ff3b3d0c3c8c19a5beaa33b0d53f4a3 # v4
         with:
           name: test-missing-findings
-          path: changed.txt
+          path: test-missing-findings.txt
           if-no-files-found: warn
 
   test-missing-ok:

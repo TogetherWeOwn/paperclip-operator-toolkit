@@ -2,8 +2,14 @@ name: test-missing
 
 # TogetherWeOwn SDLC standard caller for the org test-missing gate (TOG-24380).
 # Warn mode: reports but never fails. Do NOT add this check to any ruleset
-# until the repo flips to enforce. Pinned to the merge SHA of the reusable
-# workflow; repin the same way on later updates — never a moving tag.
+# until the repo flips to enforce. The pin below is the staged placeholder
+# SHA from the source change: it does not yet name a commit that contains
+# the reusable workflow in the org repo. After an Operator applies the
+# staged gate to the org repo, repin this caller to that merge SHA (and
+# repin the same way on later updates) — never a moving tag. Until the
+# repin lands, the test-missing job reports "workflow not found"; it is in
+# no required set, so nothing is blocked, but treat that repin as the
+# immediate follow-up to the org application.
 #
 # CI change-gating (TOG-14912, error mode): `timeout-minutes` is rejected on
 # `uses:` jobs by GitHub schema, so the caller cannot carry its own bound —

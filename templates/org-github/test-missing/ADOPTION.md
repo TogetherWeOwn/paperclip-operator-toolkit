@@ -95,5 +95,7 @@ always passes; findings land in the step summary and the
 ## Exemptions
 
 Add the `tests-exempt` label to waive the src-without-tests gate (docs-only
-changes pass without the label). Changed-line coverage and test-guard
-(vacuity) checks always run on changed test files.
+changes pass without the label). The changed-line coverage and test-guard
+(vacuity) rules are implemented in the `blocker_test_checks.py` library for
+callers that supply coverage data and test contents; the reusable workflow
+v1 above runs only the src-without-tests rule.
