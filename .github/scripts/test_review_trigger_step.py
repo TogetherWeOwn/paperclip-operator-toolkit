@@ -307,6 +307,30 @@ class StepTest(unittest.TestCase):
         self.assertEqual(stub.posts, [])
 
 
+    def test_non_review_non_verdict_runs_do_not_spend_error_budget(self):
+        # The shared retry budget counts only Paperclip Review runs: other
+        # completed non-verdict checks (skipped/cancelled/neutral) must not
+        # spend it, so a green head with such runs still gets its trigger.
+        other = [{"name": "lint-%d" % i, "status": "completed",
+                  "conclusion": c}
+                 for i, c in enumerate(("skipped", "cancelled", "neutral"))]
+        stub = Stub(runs=green_runs() + other)
+        self.assertEqual(run_with(stub), 0)
+        self.assertTrue(any("@togetherweown-reviewer review %s"
+                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+
+    def test_skipped_non_review_check_is_not_an_error_outcome(self):
+        # has_error_outcome looks only at Paperclip Review runs: one own
+        # marker plus a skipped non-review check is already-posted, not an
+        # errored review awaiting its single retry.
+        other = [{"name": "lint-%d" % i, "status": "completed",
+                  "conclusion": c}
+                 for i, c in enumerate(("skipped", "cancelled", "neutral"))]
+        stub = Stub(runs=green_runs() + other[:1],
+                    comments=[self.own_marker()])
+        self.assertEqual(run_with(stub), 0)
+        self.assertEqual(stub.posts, [])
+
     def test_second_overlapping_delivery_posts_no_second_trigger(self):
         stub = Stub(runs=green_runs())
         self.assertEqual(run_with(stub), 0)
