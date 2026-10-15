@@ -157,6 +157,31 @@ mutate api-curl-hang-breaker-dropped '        if r.returncode in (7, 28): RUN["a
         fault(f"board api failed: curl exit {r.returncode}: {method} {path}")' '        if r.returncode in (7,): RUN["api_down"] = True
         fault(f"board api failed: curl exit {r.returncode}: {method} {path}")' test_api_curl_hang_sets_breaker
 
+mutate owner-key-equality-dropped 'if key in {_product_key(product) for product in card["products"]}:' 'if any(_product_key(product) for product in card["products"]):' test_owner_product_for_other_pr_or_repo_is_rejected
+mutate owner-key-equality-dropped-e2e 'if key in {_product_key(product) for product in card["products"]}:' 'if any(_product_key(product) for product in card["products"]):' test_product_for_other_pr_is_not_nudged_end_to_end
+mutate product-key-fullmatch-relaxed 'match = pattern.fullmatch(text) if isinstance(text, str) else None' 'match = pattern.search(text) if isinstance(text, str) else None' test_owner_product_key_strict_parsing_is_pinned
+mutate product-url-rejection-dropped 'if url is not None and url_key is None:' 'if False:' test_owner_product_key_strict_parsing_is_pinned
+mutate live-guard-exception-fails-open 'return fail_closed("psql lookup failed: %s: %s" % (type(error).__name__, str(error)[:200]))' 'return False' test_live_work_guard_exception_fails_closed
+mutate live-guard-exception-fails-open-main 'return fail_closed("psql lookup failed: %s: %s" % (type(error).__name__, str(error)[:200]))' 'return False' test_live_work_guard_exception_in_main_fails_closed
+mutate gh-bearer-header-dropped '"Authorization": "Bearer " + T, ' '' test_gh_sends_bearer_token_header
+mutate archived-repo-filter-dropped ' and not r.get("archived")' '' test_archived_repo_is_not_scanned
+mutate cancelled-check-treated-red '("failure", "timed_out", "startup_failure")' '("failure", "timed_out", "startup_failure", "cancelled")' test_cancelled_check_is_not_a_red_nudge
+mutate title-ref-source-dropped ' + " " + d["title"]' '' test_title_only_reference_is_nudged
+mutate dry-run-live-work-runs '        if not DRY:
+            if RUN["sql_down"]:' '        if True:
+            if RUN["sql_down"]:' test_dry_run_skips_live_work_and_log_file
+mutate dry-run-log-writes '    if not DRY:
+        try:
+            os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)' '    if True:
+        try:
+            os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)' test_dry_run_skips_live_work_and_log_file
+mutate log-oserror-not-swallowed '        except OSError:
+            pass  # stdout already carries the row; a missing log must not crash the sweep' '        except ValueError:
+            pass  # stdout already carries the row; a missing log must not crash the sweep' test_unwritable_log_does_not_crash_the_sweep
+mutate state-nonnumeric-crashes 'isinstance(v, (int, float)) and now - v < 86400' 'now - v < 86400' test_non_numeric_state_value_is_dropped
+mutate sent-count-any-dict 'and r.get("id"): sent += 1' 'and isinstance(r, dict): sent += 1' test_empty_patch_response_counts_as_not_sent
+mutate held-lock-exits-one 'log("skip: another PR-hygiene sweep holds the run lock"); return 0' 'log("skip: another PR-hygiene sweep holds the run lock"); return 1' test_held_lock_exits_zero_with_skip_log
+
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
 import os, pathlib, re

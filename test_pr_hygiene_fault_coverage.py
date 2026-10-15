@@ -797,6 +797,141 @@ class Coverage(base.SweepCase):
             self.assertIsNone(sweep.api_get("issues/x"))
         run.assert_not_called()
 
+    # --- Round 5 findings: owner key, guard exceptions, parsing, headers ---
+
+    def test_owner_product_for_other_pr_or_repo_is_rejected(self):
+        cases = [self._product(number=8),
+                 self._product(externalId="TogetherWeOwn/other-repo#7")]
+        for product in cases:
+            with self.subTest(product=product):
+                owner, _why = self._choose([self._card([product])])
+                self.assertIsNone(owner,
+                                  "a well-formed product for another PR/repo must not pick the owner")
+
+    def test_product_for_other_pr_is_not_nudged_end_to_end(self):
+        self.route_one_green_pr()
+        self.proc.curl_get[f"issues/{base.IID}/work-products"] = [self._product(number=8)]
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [],
+                         "a PR whose body names a card whose only product is for another PR gets no write")
+
+    def test_owner_product_key_strict_parsing_is_pinned(self):
+        cases = [
+            self._product(externalId="evil/" + base.ORG_REPO + "#7"),
+            self._product(externalId=None,
+                          url="https://evil.example/https://github.com/" + base.ORG_REPO + "/pull/7"),
+            self._product(url="https://example.com/not-a-pr"),
+        ]
+        for product in cases:
+            with self.subTest(product=product):
+                owner, _why = self._choose([self._card([product])])
+                self.assertIsNone(owner, "embedded, prefixed or unparseable product identity must not be trusted")
+
+    def test_live_work_guard_exception_fails_closed(self):
+        errors = [subprocess.TimeoutExpired(["docker"], 30),
+                  OSError("docker missing"), RuntimeError("boom")]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                sweep.reset_run()
+                seen = []
+                with mock.patch("subprocess.run", side_effect=error):
+                    self.assertTrue(sweep.issue_has_live_work(base.IID, on_error=seen.append),
+                                    "a guard exception must fail closed as live work")
+                self.assertEqual(len(seen), 1)
+
+    def test_live_work_guard_exception_in_main_fails_closed(self):
+        self.route_one_green_pr()
+        orig = self.proc
+        def run(argv, **kwargs):
+            if argv[0] == "docker" and "heartbeat_runs" in argv[argv.index("-c") + 1]:
+                raise OSError("docker missing")
+            return orig(argv, **kwargs)
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 1)
+        self.assertEqual(self.proc.board_writes(), [])
+
+    def test_gh_sends_bearer_token_header(self):
+        captured = {}
+        def urlopen(request, *args, **kwargs):
+            captured["auth"] = request.get_header("Authorization")
+            captured["accept"] = request.get_header("Accept")
+            return base.Resp(json.dumps({"ok": 1}).encode())
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sweep.gh("x"), {"ok": 1})
+        self.assertEqual(captured.get("auth"), "Bearer " + base.CANARY)
+        self.assertEqual(captured.get("accept"), "application/vnd.github+json")
+
+    # --- Round 5 finding 5: scan scope, check classification, ref sources ---
+
+    def test_archived_repo_is_not_scanned(self):
+        self.route_org(repos=[{"name": base.REPO, "archived": True},
+                              {"name": "live-repo", "archived": False}])
+        self.net.route("repos/TogetherWeOwn/live-repo/pulls?state=open", [])
+        self.assertEqual(self.run_main(), 0)
+        pulls_calls = [url for url, _timeout in self.net.calls if f"{base.REPO}/pulls" in url]
+        self.assertEqual(pulls_calls, [], "an archived repo must never be scanned for PRs")
+
+    def test_cancelled_check_is_not_a_red_nudge(self):
+        self._route_pr(base.pull_detail("unstable"),
+                       check_runs=[{"name": "ci", "conclusion": "cancelled"},
+                                   {"name": "docs", "conclusion": "neutral"}])
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.proc.board_writes(), [],
+                         "a cancelled or neutral check must not read as failing CI")
+
+    def test_title_only_reference_is_nudged(self):
+        self.route_org()
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+        detail = base.pull_detail()
+        detail["body"] = ""
+        detail["title"] = "fix: " + base.REF + " thing"
+        detail["head"]["ref"] = "plain-branch"
+        self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", detail)
+        self.proc.docker = self.docker_rows
+        self.proc.curl_get = {f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+                              f"issues/{base.IID}/work-products": [self._product()]}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.proc.board_writes()), 1,
+                         "a tracker id carried only by the PR title must still be nudged")
+
+    # --- Round 5 finding 6: dry-run, log, state and sent-count contracts ---
+
+    def test_dry_run_skips_live_work_and_log_file(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main("--dry-run"), 0)
+        self.assertEqual(self.proc.board_writes(), [])
+        guard_calls = [argv for argv, _ in self.proc.calls
+                       if argv[0] == "docker" and "heartbeat_runs" in argv[argv.index("-c") + 1]]
+        self.assertEqual(guard_calls, [], "dry-run must not run the live-work lookup")
+        self.assertFalse(os.path.exists(sweep.LOG), "dry-run must not append to the sweep log")
+
+    def test_unwritable_log_does_not_crash_the_sweep(self):
+        with mock.patch.object(sweep, "LOG", self.tmp.name), mock.patch.object(sweep, "DRY", False):
+            sweep.log("unwritable log probe")
+        self.assertIn("unwritable log probe", self.log_text())
+
+    def test_non_numeric_state_value_is_dropped(self):
+        with open(sweep.STATE, "w") as f:
+            json.dump({"bad": "x", "fresh": time.time()}, f)
+        self.assertEqual(set(sweep.load_state()), {"fresh"})
+
+    def test_empty_patch_response_counts_as_not_sent(self):
+        self.route_one_green_pr()
+        _captured, run = self._patch_capture({})
+        with mock.patch("subprocess.run", run):
+            self.assertEqual(self.run_main(), 0)
+        self.assertIn("sent 0", self.log_text(),
+                      "a PATCH response without an id must not count as sent")
+
+    def test_held_lock_exits_zero_with_skip_log(self):
+        first = sweep.acquire_run_lock(sweep.LOCK)
+        self.assertIsNotNone(first)
+        try:
+            self.assertEqual(self.run_main(), 0)
+        finally:
+            first.close()
+        self.assertIn("holds the run lock", self.log_text())
+
     def test_draft_and_release_please_are_skipped(self):
         self.route_org()
         draft = dict(base.pull_list(7)[0]); draft["draft"] = True
