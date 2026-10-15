@@ -183,6 +183,16 @@ command -v node >/dev/null 2>&1 || die "node is required"
 # Lowercased key used for branch matching. `TOG-345` -> `tog-345`.
 KEY_LC="$(printf '%s' "$ISSUE_ARG" | tr '[:upper:]' '[:lower:]')"
 
+# Branch attribution follows the PRIMARY card key: a branch belongs to the
+# requested key only when its lowercased name is exactly the key or starts
+# with `<key>-`. A secondary mention later in another card's branch name
+# (for example `tog-907-...-so-tog-900-...` when asked for `tog-900`) is not
+# sibling work for the requested key.
+branch_is_primary_for_key() {
+  local branch_lc="$1" key_lc="$2"
+  [[ "$branch_lc" == "$key_lc" || "$branch_lc" == "$key_lc"-* ]]
+}
+
 # --- verdict accumulation ----------------------------------------------------
 # FINDINGS holds sibling evidence. BLIND holds detectors that could not run.
 # They are separate on purpose: a finding outranks blindness (you already know
@@ -330,7 +340,7 @@ detect_local_refs() {
       find_it "local-refs: branch $b is $ahead commit(s) ahead of $(basename "$base")$where. Work for this issue already exists in this clone, pushed or not. Read it before writing anything: \`git log $base..$b\`."
     fi
   done < <(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null \
-             | while read -r n; do [[ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" == *"$KEY_LC"* ]] && printf '%s\n' "$n"; done)
+             | while read -r n; do lc="$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')"; branch_is_primary_for_key "$lc" "$KEY_LC" && printf '%s\n' "$n"; done)
 
   [[ "$found" -eq 1 ]] || note "local-refs: no local branch names $ISSUE_ARG"
 }
@@ -366,7 +376,7 @@ detect_remote() {
     [[ "${rb#origin/}" != "$current_branch" ]] || continue
     find_it "remote: origin/$( basename "$rb" ) exists on the remote and names this issue. Someone has already pushed work for it."
   done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin 2>/dev/null \
-             | while read -r n; do [[ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" == *"$KEY_LC"* ]] && printf '%s\n' "$n"; done)
+             | while read -r n; do short="${n#origin/}"; lc="$(printf '%s' "$short" | tr '[:upper:]' '[:lower:]')"; branch_is_primary_for_key "$lc" "$KEY_LC" && printf '%s\n' "$n"; done)
 
   # -- open pull requests ----------------------------------------------------
   local slug="$REPO_SLUG"
