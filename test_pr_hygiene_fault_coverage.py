@@ -1465,5 +1465,118 @@ class Coverage(base.SweepCase):
                 self.assertEqual(len(seen), 1)
 
 
+    # --- Round 8 finding 1: credential destinations are pinned ---
+
+    def test_request_destinations_are_pinned(self):
+        self.route_one_green_pr()
+        self.assertEqual(self.run_main(), 0)
+        self.assertTrue(self.net.calls)
+        for url, _timeout in self.net.calls:
+            self.assertTrue(url.startswith("https://api.github.com/"), url)
+        curls = [argv for argv, _ in self.proc.calls if argv[0] == "curl"]
+        self.assertTrue(curls)
+        for argv in curls:
+            url = next(a for a in argv if "/api/" in a)
+            self.assertTrue(url.startswith("http://127.0.0.1:3100/api/"), url)
+
+    # --- Round 8 finding 2: malformed per-PR bodies are counted faults ---
+
+    def test_gh_scalar_body_is_a_fault(self):
+        for value in (None, 5, "x"):
+            with self.subTest(value=value):
+                sweep.reset_run()
+                self.net.routes.clear()
+                self.net.calls.clear()
+                self.out.seek(0); self.out.truncate()
+                self.net.route("x", value)
+                self.assertEqual(sweep.gh("x"), {"_err": "non-json"})
+                self.assertEqual(len(sweep.RUN["faults"]), 1)
+
+    def _reset_for_reroute(self):
+        sweep.reset_run()
+        self.net.routes.clear()
+        self.net.calls.clear()
+        self.proc.calls.clear()
+        self.out.seek(0); self.out.truncate()
+        if os.path.exists(sweep.STATE):
+            os.unlink(sweep.STATE)
+
+    def test_pr_detail_malformed_body_is_a_fault(self):
+        for body in ([], {"message": "x"}, {"mergeable_state": "clean", "head": None},
+                     {"mergeable_state": "clean", "head": {}},
+                     {"mergeable_state": "clean", "head": {"ref": "x"}}):
+            with self.subTest(body=body):
+                self._reset_for_reroute()
+                self.route_org()
+                self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+                self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", body)
+                self.proc.docker = self.docker_rows
+                self.assertEqual(self.run_main(), 1)
+                self.assertTrue(any("PR detail malformed" in f for f in sweep.RUN["faults"]))
+                self.assertEqual(self.proc.board_writes(), [])
+
+    def test_check_runs_malformed_body_is_a_fault(self):
+        for body in ([], {}, {"message": "x"}, {"check_runs": [None]}, {"check_runs": ["x"]}):
+            with self.subTest(body=body):
+                self._reset_for_reroute()
+                self.route_org()
+                self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls?state=open", base.pull_list())
+                self.net.route(f"repos/TogetherWeOwn/{base.REPO}/pulls/7", base.pull_detail("unstable"))
+                self.net.route(f"repos/TogetherWeOwn/{base.REPO}/commits/{base.SHA}/check-runs", body)
+                self.proc.docker = self.docker_rows
+                self.proc.curl_get = {
+                    f"issues/{base.IID}": {"id": base.IID, "executionWorkspaceId": None, "projectId": None},
+                    f"issues/{base.IID}/work-products": [self._product()]}
+                self.assertEqual(self.run_main(), 1)
+                self.assertTrue(any("check-runs malformed" in f for f in sweep.RUN["faults"]))
+                self.assertEqual(self.proc.board_writes(), [])
+
+    # --- Round 8 finding 3: mergeable_state unknown-retry loop ---
+
+    def _seq_urlopen(self, bodies):
+        calls = []
+        queue = list(bodies)
+        def urlopen(request, *args, **kwargs):
+            url = request.full_url
+            if f"repos/TogetherWeOwn/{base.REPO}/pulls/7" in url:
+                calls.append(url)
+                body = queue.pop(0) if len(queue) > 1 else queue[0]
+                return base.Resp(json.dumps(body).encode())
+            return self.net(request, *args, **kwargs)
+        return calls, urlopen
+
+    @staticmethod
+    def _detail_with_state(state):
+        detail = base.pull_detail()
+        detail["mergeable_state"] = state
+        return detail
+
+    def test_mergeable_unknown_then_clean_is_retried(self):
+        self.route_one_green_pr()
+        calls, urlopen = self._seq_urlopen(
+            [self._detail_with_state("unknown"), self._detail_with_state("clean")])
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(self.proc.board_writes()), 1,
+                         "an unknown-then-clean PR must be nudged in the same run")
+
+    def test_mergeable_settled_is_read_once(self):
+        self.route_one_green_pr()
+        calls, urlopen = self._seq_urlopen([self._detail_with_state("clean")])
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(calls), 1, "a settled PR must be read exactly once")
+        self.assertEqual(len(self.proc.board_writes()), 1)
+
+    def test_mergeable_unknown_forever_reads_three_times(self):
+        self.route_one_green_pr()
+        calls, urlopen = self._seq_urlopen([self._detail_with_state(None)])
+        with mock.patch.object(sweep.urllib.request, "urlopen", urlopen):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(calls), 3, "an unsettled PR must be re-read exactly three times")
+        self.assertEqual(self.proc.board_writes(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

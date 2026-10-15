@@ -22,6 +22,9 @@ numbers never choose an owner; ambiguous or unmatched PRs are logged and skipped
 Faults fail visibly and bounded: every GitHub request, docker psql, curl and the token mint carries a
 timeout; a timeout, DNS/refused/reset error, non-JSON body, unexpected HTTP status (any except 404) or
 non-zero curl exit or invalid board status trailer is logged as a failure row and the run exits 1.
+A malformed 2xx PR-detail body (non-dict, or a dict whose `head` is not a dict holding string
+`sha`/`ref`) or check-runs body (not a dict holding a `check_runs` list of objects) is likewise a
+counted fault, never a silent skip; a 404 stays a logged miss.
 Three consecutive GitHub faults, one hung docker call, or one hung/refused board call stop further calls
 of that kind for the run. A live-work guard failure also opens the SQL breaker and stops remaining
 nudges; only a successful lookup counts as a clean live-run deferral. Guard diagnostics (exception
@@ -397,8 +400,10 @@ def _run(argv):
                 d = gh(f"repos/TogetherWeOwn/{repo}/pulls/{p['number']}")
                 if not isinstance(d, dict) or "_err" in d or d.get("mergeable_state") not in (None, "unknown"): break
                 time.sleep(3)
-            if not isinstance(d, dict) or "_err" in d or "head" not in d:
-                log(f"skip {repo}#{p['number']}: PR detail unavailable {d if not isinstance(d, dict) else d.get('_err', 'no head')}"); continue
+            if not isinstance(d, dict) or "_err" in d or not isinstance(d.get("head"), dict) or not isinstance(d["head"].get("sha"), str) or not isinstance(d["head"].get("ref"), str):
+                if isinstance(d, dict) and "_err" in d:
+                    log(f"skip {repo}#{p['number']}: PR detail unavailable {d.get('_err', 'no head')}"); continue
+                fault(f"skip {repo}#{p['number']}: PR detail malformed ({type(d).__name__ if not isinstance(d, dict) else 'no head'})"); continue
             ms, sha = d.get("mergeable_state"), d["head"]["sha"]
             kind = None
             failing = []
@@ -407,8 +412,13 @@ def _run(argv):
             elif ms in ("unstable", "blocked"):
                 runs = gh(f"repos/TogetherWeOwn/{repo}/commits/{sha}/check-runs?per_page=100")
                 if not isinstance(runs, dict) or "_err" in runs:
-                    log(f"skip {repo}#{p['number']}: check-runs unavailable {runs if not isinstance(runs, dict) else runs['_err']}"); continue
-                runs = runs.get("check_runs", [])
+                    if isinstance(runs, dict) and "_err" in runs:
+                        log(f"skip {repo}#{p['number']}: check-runs unavailable {runs['_err']}"); continue
+                    fault(f"skip {repo}#{p['number']}: check-runs malformed ({type(runs).__name__})"); continue
+                check_runs = runs.get("check_runs")
+                if not isinstance(check_runs, list) or not all(isinstance(c, dict) for c in check_runs):
+                    fault(f"skip {repo}#{p['number']}: check-runs malformed (no check_runs list)"); continue
+                runs = check_runs
                 failing = sorted({c["name"] for c in runs if c.get("conclusion") in ("failure", "timed_out", "startup_failure") and c.get("name")})
                 if failing: kind = "red"
             if not kind: continue

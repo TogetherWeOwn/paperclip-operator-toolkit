@@ -123,7 +123,7 @@ mutate blocked-open-edge-flipped 'if status == "blocked" and has_edge == "f":' '
 mutate parked-unblock-descriptor-dropped ' or issue.get("unblockDescriptor")' '' test_blocked_parked_via_unblock_descriptor_is_not_nudged
 mutate parked-marker-search-dropped ' or PARK_MARKER.search(issue.get("description") or "")' '' test_blocked_parked_via_parked_until_line_is_not_nudged
 mutate parked-do-not-mutate-dropped 'parked until|do not mutate' 'parked until' test_blocked_parked_via_do_not_mutate_line_is_not_nudged
-mutate pr-detail-skip-dropped 'if not isinstance(d, dict) or "_err" in d or "head" not in d:' 'if False:' test_pr_detail_404_skips_that_pr_and_nudges_others
+mutate pr-detail-skip-dropped 'if not isinstance(d, dict) or "_err" in d or not isinstance(d.get("head"), dict) or not isinstance(d["head"].get("sha"), str) or not isinstance(d["head"].get("ref"), str):' 'if False:' test_pr_detail_404_skips_that_pr_and_nudges_others
 mutate no-refs-board-query 'if not refs: continue' 'if False: continue' test_pr_without_tracker_id_issues_no_board_query
 mutate gh-incomplete-read-crashes 'except (OSError, http.client.HTTPException, ValueError) as e:' 'except (OSError, ValueError) as e:' test_incomplete_read_on_listing_is_a_counted_fault
 mutate skipped-patch-cooldown-recorded 'if isinstance(r, dict) and r.get("_err") == "skipped":' 'if False:' test_skipped_patch_records_no_cooldown
@@ -254,6 +254,22 @@ mutate api-get-trailer-fault-dropped 'fault(f"board api failed: invalid HTTP sta
 mutate token-read-dropped 'T = f.read().strip()' 'T = ""' test_token_file_is_read_by_main
 mutate live-guard-nontext-returns-open 'return fail_closed("psql returned non-text output")' 'return None' test_live_work_guard_nontext_output_fails_closed
 mutate live-guard-nontext-check-dropped 'if not isinstance(out, str):' 'if False:' test_live_work_guard_nontext_output_fails_closed
+
+mutate gh-destination-host-changed '"https://api.github.com/"' '"https://example.invalid/"' test_request_destinations_are_pinned
+mutate gh-destination-scheme-downgraded '"https://api.github.com/"' '"http://api.github.com/"' test_request_destinations_are_pinned
+mutate board-api-destination-changed 'f"http://127.0.0.1:3100/api/{path}", "-d", json.dumps(body)' 'f"http://example.invalid:3100/api/{path}", "-d", json.dumps(body)' test_request_destinations_are_pinned
+mutate board-api-get-destination-changed 'f"http://127.0.0.1:3100/api/{path}"], capture_output=True, text=True, timeout=API_TIMEOUT' 'f"http://example.invalid:3100/api/{path}"], capture_output=True, text=True, timeout=API_TIMEOUT' test_request_destinations_are_pinned
+mutate gh-scalar-guard-dropped 'if not isinstance(out, (dict, list)): raise ValueError("unexpected JSON shape")' 'pass' test_gh_scalar_body_is_a_fault
+mutate detail-malformed-silent 'fault(f"skip {repo}#{p['"'"'number'"'"']}: PR detail malformed' 'log(f"skip {repo}#{p['"'"'number'"'"']}: PR detail malformed' test_pr_detail_malformed_body_is_a_fault
+mutate checkruns-malformed-silent 'fault(f"skip {repo}#{p['"'"'number'"'"']}: check-runs malformed ({type(runs).__name__})' 'log(f"skip {repo}#{p['"'"'number'"'"']}: check-runs malformed ({type(runs).__name__})' test_check_runs_malformed_body_is_a_fault
+mutate checkruns-list-check-dropped 'if not isinstance(check_runs, list) or not all(isinstance(c, dict) for c in check_runs):' 'if False:' test_check_runs_malformed_body_is_a_fault
+mutate detail-head-shape-dropped 'not isinstance(d.get("head"), dict)' '"head" not in d' test_pr_detail_malformed_body_is_a_fault
+mutate checkruns-element-check-dropped ' or not all(isinstance(c, dict) for c in check_runs)' '' test_check_runs_malformed_body_is_a_fault
+mutate mergeable-retry-break-always 'if not isinstance(d, dict) or "_err" in d or d.get("mergeable_state") not in (None, "unknown"): break' 'break' test_mergeable_unknown_then_clean_is_retried
+mutate mergeable-retry-range-one 'for _ in range(3):' 'for _ in range(1):' test_mergeable_unknown_then_clean_is_retried
+mutate mergeable-retry-condition-inverted 'd.get("mergeable_state") not in (None, "unknown")' 'd.get("mergeable_state") in (None, "unknown")' test_mergeable_settled_is_read_once
+mutate mergeable-retry-break-removed 'if not isinstance(d, dict) or "_err" in d or d.get("mergeable_state") not in (None, "unknown"): break' 'pass' test_mergeable_settled_is_read_once
+mutate mergeable-retry-range-one-forever 'for _ in range(3):' 'for _ in range(1):' test_mergeable_unknown_forever_reads_three_times
 
 reset_stage
 UNCOVERED="$(COVERED="$(printf '%s\n' "${covered[@]}")" SUITE_PATH="$STAGE/$SUITE" python3 - <<'PY'
