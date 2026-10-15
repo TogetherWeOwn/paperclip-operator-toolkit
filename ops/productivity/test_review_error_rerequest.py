@@ -561,6 +561,20 @@ class DedupGuard(unittest.TestCase):
                 r.append_log('clean-tree probe')
             self.assertIn('clean-tree probe', target.read_text())
 
+    def test_log_default_lives_outside_the_checkout(self):
+        # Re-exec the module with REVIEW_RERQ_LOG/REVIEW_RERQ_STATE_DIR
+        # scrubbed: the default LOG must not be created inside the repo, so
+        # a tick never leaves an untracked file for `git add -A` to stage.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('rerequest_log_default_fixture', r.__file__)
+        module = importlib.util.module_from_spec(spec)
+        scrubbed = {k: v for k, v in os.environ.items()
+                    if k not in ('REVIEW_RERQ_LOG', 'REVIEW_RERQ_STATE_DIR')}
+        with mock.patch.dict(os.environ, scrubbed, clear=True):
+            spec.loader.exec_module(module)
+        self.assertNotIn('ops/worker-vps', str(module.LOG))
+        self.assertFalse(str(module.LOG).startswith(str(module.ROOT)))
+
 
 class GhAndCurl(unittest.TestCase):
     def test_pr_head_is_none_when_gh_output_is_not_json(self):

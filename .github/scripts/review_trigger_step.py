@@ -194,13 +194,32 @@ def main():
                % head_sha[:12])
         return 0
 
+    # One error retry max, shared across every trigger path (this workflow,
+    # the reconciler, manual mentions): each completed non-verdict Paperclip
+    # Review run on this head is one spent error attempt, and the shared
+    # guard decides whether any retry is left. The live/verdict guard above
+    # already handled live and verdict runs, so the non-verdict completed
+    # runs counted here are exactly the error attempts.
+    error_attempts = sum(
+        1 for r in fresh_runs
+        if r.get("name") == REVIEW_CHECK
+        and r.get("status") == "completed"
+        and r.get("conclusion") not in ("success", "failure"))
+    budget_action, budget_why = review_dedup.head_decision(["error"] * error_attempts)
+    if budget_action != "request":
+        notice("head %s already used its error retry budget (%s); no new trigger"
+               % (head_sha[:12], budget_why))
+        return 0
+
     if own_markers:
         # The marker is the audit trail of this workflow's own post, not of
         # any manual mention: is_own_trigger_comment already restricts it to
-        # github-actions[bot]. An errored review keeps exactly one CI-driven
-        # retry (matching the reconciler's one-retry rule); anything else with
-        # our marker already posted stays suppressed, and further recovery
-        # after the retry belongs to the reconciler.
+        # github-actions[bot]. The shared error budget above already capped
+        # cross-path retries, so one marker plus an error outcome means this
+        # workflow's first post errored and its single retry is still
+        # available; anything else with our marker already posted stays
+        # suppressed, and further recovery after the retry belongs to the
+        # reconciler.
         if len(own_markers) >= 2 or not has_error_outcome(fresh_runs):
             notice("trigger already posted for head %s; one review per head"
                    % head_sha[:12])

@@ -45,9 +45,13 @@ third-party or manual mention can never suppress the automatic trigger)
 plus the `review-ready` label (machine signal). The verdict check-run test
 is the one-review-per-head enforcer: a success/failure verdict is never
 re-requested on the same head. Incomplete runs (action_required, cancelled,
-timed_out, stale) never block decide(), and the step allows exactly one
-CI-driven re-post per head after an error (a second bot marker suppresses;
-further recovery belongs to the reconciler). Same-head idempotency: just
+timed_out, stale) never block decide(). The one-retry budget is shared
+across every trigger path (this workflow, the reconciler, manual mentions):
+the step maps each completed non-verdict Paperclip Review run on the head to
+one spent error attempt and calls the shared guard, so a head the reconciler
+already retried gets no further CI-driven trigger; a second bot marker
+likewise suppresses, and further recovery belongs to the reconciler.
+Same-head idempotency: just
 before posting, the step re-reads the head's check-runs and suppresses the
 post when a live Paperclip Review run already covers the head (manual
 mention, gate listing, or an overlapping delivery started it without leaving

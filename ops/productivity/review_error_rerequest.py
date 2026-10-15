@@ -68,7 +68,11 @@ def _live_work_default(issue_id):
 CID = os.environ.get('PAPERCLIP_COMPANY_ID', '00000000-0000-0000-0000-000000000000')
 API = os.environ.get('PAPERCLIP_API', 'http://127.0.0.1:3100/api')
 STATE = Path(os.environ.get('REVIEW_RERQ_STATE', str(ROOT / 'ops/productivity/review-error-rerequest.state.json')))
-LOG = Path(os.environ.get('REVIEW_RERQ_LOG', str(ROOT / 'ops/worker-vps/operator-actions.log')))
+# Operator log defaults under REVIEW_RERQ_STATE_DIR (not the checkout) so a
+# tick never creates an untracked file inside the repo; override with
+# REVIEW_RERQ_LOG. STATE/PARKED still default in-tree but are gitignored.
+_RERQ_STATE_DIR = os.environ.get('REVIEW_RERQ_STATE_DIR', os.path.expanduser('~/.local/state/flow-guard'))
+LOG = Path(os.environ.get('REVIEW_RERQ_LOG', os.path.join(_RERQ_STATE_DIR, 'review-error-rerequest-operator-actions.log')))
 PARKED = Path(os.environ.get('REVIEW_RERQ_PARKED', str(ROOT / 'ops/productivity/unreviewed-parked-prs.txt')))
 
 

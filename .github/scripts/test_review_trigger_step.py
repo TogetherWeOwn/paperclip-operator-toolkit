@@ -116,6 +116,18 @@ class StepTest(unittest.TestCase):
         self.assertTrue(any("@togetherweown-reviewer review %s"
                             % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
 
+    def test_other_bot_marker_does_not_suppress_the_post(self):
+        # The login check matters, not just the type: a marker from another
+        # bot account (same type "Bot", different login) must not count as
+        # this workflow's own post.
+        stub = Stub(runs=green_runs(), comments=[
+            {"body": "@togetherweown-reviewer review %s\n\nready head"
+             % OUT_OF_SAMPLE_SHA,
+             "user": {"login": "dependabot[bot]", "type": "Bot"}}])
+        self.assertEqual(run_with(stub), 0)
+        self.assertTrue(any("@togetherweown-reviewer review %s"
+                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+
     def test_ci_red_exits_zero_without_posting(self):
         stub = Stub(runs=[{"name": "ci-ok", "status": "completed",
                            "conclusion": "failure"}])
@@ -181,33 +193,63 @@ class StepTest(unittest.TestCase):
         self.assertEqual(stub.posts, [])
 
     def test_error_outcome_still_posts_when_no_marker(self):
-        runs = green_runs() + [{"name": "Paperclip Review", "status": "completed",
-                                "conclusion": "action_required"}]
-        stub = Stub(runs=runs)
-        self.assertEqual(run_with(stub), 0)
-        self.assertTrue(any("@togetherweown-reviewer review %s"
-                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+        # One error attempt leaves the single shared retry available, for
+        # every retryable error conclusion.
+        for conclusion in self.ERROR_CONCLUSIONS:
+            with self.subTest(conclusion=conclusion):
+                stub = Stub(runs=self.error_runs(1, conclusion))
+                self.assertEqual(run_with(stub), 0)
+                self.assertTrue(any("@togetherweown-reviewer review %s"
+                                    % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+
+    ERROR_CONCLUSIONS = ("action_required", "cancelled", "timed_out", "stale")
+
+    def error_runs(self, n=1, conclusion="action_required"):
+        return (green_runs()
+                + [{"name": "Paperclip Review", "status": "completed",
+                    "conclusion": conclusion}
+                   for _ in range(n)])
+
+    def own_marker(self):
+        return {"body": "@togetherweown-reviewer review %s\n\nready head"
+                % OUT_OF_SAMPLE_SHA,
+                "user": {"login": "github-actions[bot]", "type": "Bot"}}
 
     def test_marker_plus_error_outcome_posts_one_retry(self):
-        runs = green_runs() + [{"name": "Paperclip Review", "status": "completed",
-                                "conclusion": "action_required"}]
-        stub = Stub(runs=runs, comments=[
-            {"body": "@togetherweown-reviewer review %s\n\nready head"
-             % OUT_OF_SAMPLE_SHA,
-             "user": {"login": "github-actions[bot]", "type": "Bot"}}])
-        self.assertEqual(run_with(stub), 0)
-        self.assertTrue(any("@togetherweown-reviewer review %s"
-                            % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
+        # Every retryable error conclusion (not just action_required) earns
+        # the single retry.
+        for conclusion in self.ERROR_CONCLUSIONS:
+            with self.subTest(conclusion=conclusion):
+                stub = Stub(runs=self.error_runs(1, conclusion),
+                            comments=[self.own_marker()])
+                self.assertEqual(run_with(stub), 0)
+                self.assertTrue(any("@togetherweown-reviewer review %s"
+                                    % OUT_OF_SAMPLE_SHA in p for p in stub.posts))
 
     def test_second_marker_means_retry_already_used(self):
-        runs = green_runs() + [{"name": "Paperclip Review", "status": "completed",
-                                "conclusion": "action_required"}]
-        marker = {"body": "@togetherweown-reviewer review %s\n\nready head"
-                  % OUT_OF_SAMPLE_SHA,
-                  "user": {"login": "github-actions[bot]", "type": "Bot"}}
-        stub = Stub(runs=runs, comments=[dict(marker), dict(marker)])
+        for conclusion in self.ERROR_CONCLUSIONS:
+            with self.subTest(conclusion=conclusion):
+                marker = self.own_marker()
+                stub = Stub(runs=self.error_runs(1, conclusion),
+                            comments=[dict(marker), dict(marker)])
+                self.assertEqual(run_with(stub), 0)
+                self.assertEqual(stub.posts, [])
+
+    def test_marker_plus_exhausted_error_budget_posts_nothing(self):
+        # One marker plus two errored runs: the retry was already spent
+        # (possibly by the reconciler or a manual mention), so the shared
+        # one-retry budget suppresses a further CI-driven trigger.
+        stub = Stub(runs=self.error_runs(2), comments=[self.own_marker()])
         self.assertEqual(run_with(stub), 0)
         self.assertEqual(stub.posts, [])
+
+    def test_no_marker_plus_exhausted_error_budget_posts_nothing(self):
+        # Same budget on the first-post path: a head whose manual reviews
+        # already errored twice gets no CI-driven trigger either.
+        stub = Stub(runs=self.error_runs(2))
+        self.assertEqual(run_with(stub), 0)
+        self.assertEqual(stub.posts, [])
+
 
     def test_second_overlapping_delivery_posts_no_second_trigger(self):
         stub = Stub(runs=green_runs())

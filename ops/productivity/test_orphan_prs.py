@@ -75,7 +75,9 @@ class TimeoutPass(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout=out, stderr='')
 
         with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / 'orphan-prs-operator-actions.log'
+            # Nested and non-existent: every run honestly exercises the
+            # missing-parent creation in log_line.
+            log_path = Path(tmp) / 'nested' / 'state' / 'orphan-prs-operator-actions.log'
             with mock.patch.object(op, 'ROOT', tmp), mock.patch.object(op, 'STATE_DIR', tmp), \
                     mock.patch.object(op, 'LOG_PATH', log_path), \
                     mock.patch.object(op, 'REPOS', repos), mock.patch.object(op, 'APPLY', apply), \
@@ -183,8 +185,21 @@ class TimeoutPass(unittest.TestCase):
         self.assertIn('created CARD-900', log)
 
     def test_api_base_comes_from_paperclip_api_env(self):
-        self.assertTrue(hasattr(op, 'PAPERCLIP_API'))
-        self.assertTrue(op.PAPERCLIP_API.startswith('http'))
+        # A hard-coded host regressing into api() must fail: drive api()
+        # with a sentinel PAPERCLIP_API and require it in the curl argv.
+        sentinel = 'https://sentinel-api.example/api'
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            seen['argv'] = list(args)
+            return types.SimpleNamespace(returncode=0, stdout='{}', stderr='')
+
+        with mock.patch.object(op, 'PAPERCLIP_API', sentinel), \
+                mock.patch.object(op.subprocess, 'run', side_effect=fake_run):
+            op.api('POST', 'issues/x/comments', {'body': 'probe'})
+        self.assertTrue(any(sentinel in a for a in seen['argv']),
+                        f'sentinel API base missing from curl argv: {seen["argv"]}')
+        self.assertFalse(any('paperclip-cloud' in a for a in seen['argv']))
 
     def test_log_path_defaults_under_state_dir_not_the_checkout(self):
         self.assertTrue(hasattr(op, 'LOG_PATH'))
@@ -196,6 +211,18 @@ class TimeoutPass(unittest.TestCase):
             with mock.patch.object(op, 'LOG_PATH', target):
                 op.log_line('clean-tree probe')
             self.assertIn('clean-tree probe', target.read_text())
+
+    def test_log_line_swallows_oserror_and_warns(self):
+        # LOG_PATH under a regular file: the write must fail into a stderr
+        # notice, never raise out of the write loop.
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / 'blocker'
+            blocker.write_text('not a directory')
+            with mock.patch.object(op, 'LOG_PATH', blocker / 'operator-actions.log'), \
+                    mock.patch('builtins.print') as output:
+                op.log_line('must not raise')
+            self.assertTrue(any('log write failed' in c.args[0]
+                                for c in output.call_args_list))
 
     def test_run_deadline_defers_remaining_cards(self):
         prs = {REPO: [pr(number=1), pr(number=2)]}
