@@ -183,6 +183,19 @@ command -v node >/dev/null 2>&1 || die "node is required"
 # Lowercased key used for branch matching. `TOG-345` -> `tog-345`.
 KEY_LC="$(printf '%s' "$ISSUE_ARG" | tr '[:upper:]' '[:lower:]')"
 
+# Branch attribution follows the PRIMARY card key: a branch belongs to the
+# requested key only when the key starts a whole path segment of its
+# lowercased name — at the start or after a `/`, and followed by the end of
+# the name or one of `-_./` (so `ops/<key>-x`, `work/<key>-x`, `<key>/x`,
+# `<key>_x` and `<key>.1-x` are owned). A secondary mention later in another
+# card's branch name (for example `tog-907-...-so-tog-900-...` when asked for
+# `tog-900`, or a longer key such as `tog-9000-x`) is not sibling work for the
+# requested key.
+branch_is_primary_for_key() {
+  local branch_lc="$1" key_lc="$2"
+  [[ "$branch_lc" =~ (^|/)"$key_lc"($|[-_./]) ]]
+}
+
 # --- verdict accumulation ----------------------------------------------------
 # FINDINGS holds sibling evidence. BLIND holds detectors that could not run.
 # They are separate on purpose: a finding outranks blindness (you already know
@@ -330,7 +343,7 @@ detect_local_refs() {
       find_it "local-refs: branch $b is $ahead commit(s) ahead of $(basename "$base")$where. Work for this issue already exists in this clone, pushed or not. Read it before writing anything: \`git log $base..$b\`."
     fi
   done < <(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null \
-             | while read -r n; do [[ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" == *"$KEY_LC"* ]] && printf '%s\n' "$n"; done)
+             | while read -r n; do lc="$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')"; branch_is_primary_for_key "$lc" "$KEY_LC" && printf '%s\n' "$n"; done)
 
   [[ "$found" -eq 1 ]] || note "local-refs: no local branch names $ISSUE_ARG"
 }
@@ -364,9 +377,9 @@ detect_remote() {
   while read -r rb; do
     [[ -n "$rb" ]] || continue
     [[ "${rb#origin/}" != "$current_branch" ]] || continue
-    find_it "remote: origin/$( basename "$rb" ) exists on the remote and names this issue. Someone has already pushed work for it."
+    find_it "remote: $rb exists on the remote and names this issue. Someone has already pushed work for it."
   done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin 2>/dev/null \
-             | while read -r n; do [[ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" == *"$KEY_LC"* ]] && printf '%s\n' "$n"; done)
+             | while read -r n; do short="${n#origin/}"; lc="$(printf '%s' "$short" | tr '[:upper:]' '[:lower:]')"; branch_is_primary_for_key "$lc" "$KEY_LC" && printf '%s\n' "$n"; done)
 
   # -- open pull requests ----------------------------------------------------
   local slug="$REPO_SLUG"
@@ -472,7 +485,8 @@ detect_remote() {
         # same-commit own already refuses — a distinct-head own claim is no
         # safer. Foreign-only Refs on a relevant candidate refuses naming
         # owner and PR. Relevant with no anchored line keeps the old refusal
-        # (title/branch substring). Unrelated foreign-only stays clear.
+        # (title substring, or a head branch whose primary key is ours).
+        # Unrelated foreign-only stays clear.
         # Claimed same-commit rows are skipped here only when SAMESHA will
         # evaluate them (HEAD ahead of main): SAMESHA owns them then.
         # When HEAD carries no local commits SAMESHA notes and skips them,
@@ -571,8 +585,9 @@ detect_remote() {
                   continue
                 fi
               fi
-              local hay
-              hay="$(printf '%s %s' "$g_title" "$g_ref" | tr '[:upper:]' '[:lower:]')"
+              local title_lc ref_lc
+              title_lc="$(printf '%s' "$g_title" | tr '[:upper:]' '[:lower:]')"
+              ref_lc="$(printf '%s' "$g_ref" | tr '[:upper:]' '[:lower:]')"
               local mine_present="" foreign=""
               local -a parts=()
               if [[ -n "${g_claims:-}" ]]; then
@@ -586,9 +601,15 @@ detect_remote() {
                   foreign="$pc"
                 fi
               done
-              # Relevance: title/branch substring OR own Refs claim. Unrelated
-              # foreign-only (no substring, no own claim) stays clear.
-              if [[ "$hay" != *"$generic_mykey"* && -z "$mine_present" ]]; then
+              # Relevance: title substring, a head branch whose primary key
+              # is ours (same segment rule as the branch detectors), OR own
+              # Refs claim. A head branch that only mentions our key as a
+              # secondary token of another card's branch is not relevant, so
+              # foreign-only there stays clear. Unrelated foreign-only (no
+              # title/branch relevance, no own claim) stays clear too.
+              if [[ "$title_lc" != *"$generic_mykey"* ]] \
+                 && ! branch_is_primary_for_key "$ref_lc" "$generic_mykey" \
+                 && [[ -z "$mine_present" ]]; then
                 continue
               fi
               if [[ -n "$mine_present" ]]; then
