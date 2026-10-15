@@ -73,9 +73,13 @@ jobs:
           fi
           if [[ -n "$base" ]]; then
             git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
-            changed="$(git diff --name-only --no-renames --diff-filter=d "$base" HEAD --)"
+            # quotepath=off: git quotes non-ASCII paths with octal
+            # escapes by default, which would silently skip the `.sql`
+            # check for a PR-controlled `002_café.sql`. The raw UTF-8
+            # path must reach the heredoc unquoted.
+            changed="$(git -c core.quotepath=off diff --name-only --no-renames --diff-filter=d "$base" HEAD --)"
           else
-            changed="$(git ls-files)"
+            changed="$(git -c core.quotepath=off ls-files)"
           fi
           printf '%s\n' "$changed" > /tmp/blocker-changed.txt
           # Dialect: `auto` (default) resolves via the tested lib helper
@@ -111,7 +115,9 @@ jobs:
           )
           changed = [
               line.strip()
-              for line in open(os.environ["GATE_CHANGED"], encoding="utf-8")
+              for line in open(
+                  os.environ["GATE_CHANGED"], encoding="utf-8",
+                  errors="replace")
               if line.strip()
           ]
           changed_set = set(changed)
@@ -122,19 +128,38 @@ jobs:
           wrangler_entries = []
           base = os.environ.get("GATE_BASE", "")
           if base:
-              listing = subprocess.run(
-                  ["git", "ls-tree", "-r", "--name-only", base],
-                  capture_output=True, text=True,
-              )
-              for line in listing.stdout.splitlines():
-                  p = line.strip()
-                  if re.search(r"(^|/)wrangler\.(toml|json|jsonc)$", p):
-                      read = subprocess.run(
-                          ["git", "show", "%s:%s" % (base, p)],
-                          capture_output=True, text=True,
-                      )
-                      if read.returncode == 0:
-                          wrangler_entries.append((p, read.stdout))
+              # Bytes + replace throughout: `text=True` decodes strictly
+              # and a base file with a non-UTF-8 byte would kill the gate
+              # with a traceback in both modes instead of a finding.
+              try:
+                  listing = subprocess.run(
+                      ["git", "-c", "core.quotepath=off", "ls-tree",
+                       "-r", "--name-only", base],
+                      capture_output=True,
+                  )
+              except OSError:
+                  listing = None
+              if listing is not None and listing.returncode == 0:
+                  tree_text = listing.stdout.decode("utf-8", "replace")
+                  for line in tree_text.splitlines():
+                      p = line.strip()
+                      if re.search(r"(^|/)wrangler\.(toml|json|jsonc)$", p):
+                          try:
+                              read = subprocess.run(
+                                  ["git", "show", "%s:%s" % (base, p)],
+                                  capture_output=True,
+                              )
+                          except OSError:
+                              continue
+                          if read.returncode == 0:
+                              try:
+                                  wrangler_entries.append((
+                                      p,
+                                      read.stdout.decode(
+                                          "utf-8", "replace"),
+                                  ))
+                              except (UnicodeDecodeError, ValueError):
+                                  pass
           requested_dialect = os.environ.get("GATE_DIALECT", "auto") or "auto"
           # Validate even an empty diff. Only auto may infer per-file dialects.
           pinned_dialect = detect_migration_dialect(requested_dialect)
@@ -143,9 +168,9 @@ jobs:
               if not (is_migration_path(path) and path.endswith(".sql")):
                   continue
               try:
-                  with open(path, encoding="utf-8") as f:
+                  with open(path, encoding="utf-8", errors="replace") as f:
                       contents[path] = f.read()
-              except OSError:
+              except (OSError, UnicodeDecodeError, ValueError):
                   pass
           # Explicit pins apply to safety AND down checks for every file.
           # In auto, only files under a base D1 binding get sqlite rules;

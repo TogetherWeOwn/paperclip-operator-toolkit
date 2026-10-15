@@ -123,7 +123,11 @@ evidence: no `main.rs`, no `src/bin/` file, no `[[bin]]` target) never
 reports; `lockfile: none` (case-insensitive; for `package.json` use the
 JSON-valid form `"//": "lockfile: none"`) or `ignore_manifests` (gate
 input, required-wrapper input, or the `BLOCKER_LOCKFILE_IGNORE` repo
-variable) opts a manifest out. Parseability covers text lockfiles only:
+variable) opts a manifest out. The delivered gate honours the marker
+only from the base revision (an opt-out must be merged first — a PR
+cannot waive itself by adding the marker in the same diff), matched by
+exact path (a new manifest never inherits another directory's opt-out).
+Parseability covers text lockfiles only:
 the binary `bun.lockb` is never opened as text and `requirements*.txt`
 is never emptiness-checked. Presence, not freshness: an already-vendored
 lockfile satisfies the gate even when the manifest changes without it,

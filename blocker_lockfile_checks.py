@@ -172,13 +172,27 @@ def _is_library_crate_hint(
     return has_lib and not has_bin
 
 
-def _lookup_contents(contents, path, name):
-    """Return the text for a manifest path, accepting basename keys."""
+def _lookup_contents(contents, path, name, basename_fallback=True):
+    """Return the text for a manifest path, accepting basename keys.
+
+    The basename fallback exists for unit-test convenience (a bare
+    `"package.json"` key covers `"sub/dir/package.json"`) and only
+    applies to directory-less keys: a key that names another directory
+    (`"docs/package.json"`) never satisfies a different path with the
+    same basename. The delivered gate keys `marker_contents` by exact
+    base-revision path, so without this guard a PR that touches an
+    opted-out `docs/package.json` and adds `svc/api/package.json`
+    with dependencies would inherit the opt-out and exit 0 in
+    enforce mode. Pass `basename_fallback=False` to require an exact
+    path match.
+    """
     if not isinstance(contents, dict):
         return None
     text = contents.get(path)
-    if text is None and contents:
+    if text is None and basename_fallback and contents:
         for key, value in contents.items():
+            if "/" in str(key).replace("\\", "/"):
+                continue
             if _basename(key) == name:
                 text = value
                 break
@@ -214,7 +228,10 @@ def check_lockfile_present(
     passes base-revision contents here so an opt-out must be merged
     first and a PR cannot waive itself. When omitted (`None`) the
     marker falls back to `manifest_contents` for backward compatibility
-    with library callers and unit tests.
+    with library callers and unit tests. Marker lookup never leaks
+    across directories: only an exact-path key or a directory-less
+    basename key satisfies a manifest, so a new `svc/api/package.json`
+    never inherits the opt-out of a touched `docs/package.json`.
     """
     have = {_basename(p) for p in list(changed_files) + list(present_files)}
     ignored = {_basename(p) for p in (ignore_manifests or ())}
