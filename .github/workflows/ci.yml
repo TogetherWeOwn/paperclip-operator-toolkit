@@ -112,6 +112,13 @@ name: CI
 #     test_liveness_reconciler.py       four recurring task-liveness gaps, native-path
 #                                       diagnostics, bounded owned repair, and owner-HOLD refusal
 #                                       — TOG-586
+#     test_review_dedup.py              review_dedup.py: whether a covered head
+#                                       can be review-requested twice — one
+#                                       retry max on errors, unknown states
+#                                       fail closed toward suppress
+#     test_review_dedup_placement.sh    whether that public, stdlib-only guard
+#                                       lives in this repo at all, and still
+#                                       exposes the idempotency API
 #     test_pacing_verdict.py            pacing_verdict.py: whether a sample older
 #                                       than the 120m cutoff can still be read as
 #                                       a live verdict. Every age case carries a
@@ -1129,6 +1136,15 @@ jobs:
 
       - name: same-head review idempotency suites
         run: (cd ops/productivity && python3 -B -m unittest -v test_review_dedup test_review_error_rerequest test_orphan_prs)
+
+      # Same-head review idempotency guard: never request a covered head,
+      # one retry max on errors, unknown states fail closed toward suppress.
+      # Pure fixtures: no API, database, credential or timer.
+      - name: same-head review idempotency guard suite
+        run: python3 -m unittest -v test_review_dedup.py
+
+      - name: review_dedup placement gate
+        run: ./test_review_dedup_placement.sh
 
       # Host deployment contracts (systemd units, installers) live outside the
       # public tree with their suites; they are covered in their source repo.
