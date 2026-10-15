@@ -135,13 +135,9 @@ jobs:
                       )
                       if read.returncode == 0:
                           wrangler_entries.append((p, read.stdout))
-          dialect = detect_migration_dialect(
-              os.environ.get("GATE_DIALECT", "auto") or "auto",
-              changed_paths=[p for p in changed if p in changed_set],
-              wrangler_texts=[t for _, t in wrangler_entries],
-              wrangler_paths=[p for p, _ in wrangler_entries],
-          )
-          print("blocker-migration: dialect=%s" % dialect)
+          requested_dialect = os.environ.get("GATE_DIALECT", "auto") or "auto"
+          # Validate even an empty diff. Only auto may infer per-file dialects.
+          pinned_dialect = detect_migration_dialect(requested_dialect)
           contents = {}
           for path in changed:
               if not (is_migration_path(path) and path.endswith(".sql")):
@@ -151,18 +147,21 @@ jobs:
                       contents[path] = f.read()
               except OSError:
                   pass
-          # Per-file dialect: only a changed `.sql` migration under a
-          # D1 `migrations_dir` runs the sqlite rules; every other file
-          # keeps the Postgres checks. Touching a README under a D1
-          # directory therefore never hides a plain CREATE INDEX in a
-          # Postgres migration in the same PR.
+          # Explicit pins apply to safety AND down checks for every file.
+          # In auto, only files under a base D1 binding get sqlite rules;
+          # touching a D1 migration never weakens a Postgres sibling.
           findings = []
+          file_dialects = {}
           for path, sql in contents.items():
-              dialect = dialect_for_migration_path(
-                  path,
-                  wrangler_texts=[t for _, t in wrangler_entries],
-                  wrangler_paths=[p for p, _ in wrangler_entries],
-              )
+              dialect = pinned_dialect
+              if requested_dialect == "auto":
+                  dialect = dialect_for_migration_path(
+                      path,
+                      wrangler_texts=[t for _, t in wrangler_entries],
+                      wrangler_paths=[p for p, _ in wrangler_entries],
+                  )
+              file_dialects[path] = dialect
+              print("blocker-migration: %s dialect=%s" % (path, dialect))
               findings += check_migration_safety({path: sql}, dialect=dialect)
           down_candidates = [
               p for p in changed
@@ -171,11 +170,7 @@ jobs:
               and p.endswith(".sql")
               and (
                   p.endswith(".down.sql")
-                  or dialect_for_migration_path(
-                      p,
-                      wrangler_texts=[t for _, t in wrangler_entries],
-                      wrangler_paths=[p for p, _ in wrangler_entries],
-                  ) == "postgres"
+                  or file_dialects.get(p) == "postgres"
               )
           ]
           # `down_candidates` holds only Postgres migrations (plus

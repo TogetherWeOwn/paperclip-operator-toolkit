@@ -323,12 +323,29 @@ def check_migration_seed_same_lock(steps):
     return []
 
 
+_BLOCK_SCALAR_RE = re.compile(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$")
+
+
+def _block_scalar(lines, start, indent, folded):
+    """Read one scalar to its dedent, never a sibling input, step or job."""
+    chunk = []
+    i = start
+    while i < len(lines) and (
+        not lines[i].strip() or _indent_of(lines[i]) > indent
+    ):
+        value = lines[i].strip()
+        if value and not value.startswith("#"):
+            chunk.append(value)
+        i += 1
+    return (" " if folded else "\n").join(chunk), i
+
+
 def job_step_blocks(text):
     """Split workflow text into per-job [{name, run, uses, with}] steps.
 
     Line-based subset parser: follows each `steps:` list, `name:` /
-    `run:` / `uses:` scalars, `run: |` blocks, and `with:` input
-    mappings (whose scalar values are joined into `with`). One block
+    `run:` / `uses:` scalars, literal/folded blocks, and `with:` input
+    mappings (including multiline command/script values). One block
     per `steps:` section, so a migrate step in one job never pairs
     with a seed step in another. Compact sequence lists (a `- ` item
     at the same indent as the `steps:` key) are parsed; anything else
@@ -387,12 +404,18 @@ def job_step_blocks(text):
                     pair = re.match(r"^([\w\-.]+)\s*:\s*(.*)$", stripped)
                     if pair:
                         val = pair.group(2).strip()
+                        if _BLOCK_SCALAR_RE.fullmatch(val):
+                            val, i = _block_scalar(
+                                lines, i + 1, indent, val.startswith(">")
+                            )
+                            cur["with"] = "\n".join(
+                                v for v in (cur["with"], val) if v
+                            )
+                            continue
                         if len(val) >= 2 and val[0] == val[-1] \
                                 and val[0] in "\"'":
                             val = val[1:-1]
-                        if val and val not in (
-                            "|", ">", "|-", "|+", ">-", ">+",
-                        ):
+                        if val:
                             cur["with"] = (
                                 (cur["with"] + "\n" + val)
                                 if cur["with"] else val
@@ -414,19 +437,10 @@ def job_step_blocks(text):
             key = re.match(r"^(name|run|uses)\s*:\s*(.*)$", stripped)
             if key and indent > item_indent:
                 field, val = key.group(1), key.group(2).strip()
-                if field == "run" and val in (
-                    "|", ">", "|-", "|+", ">-", ">+",
-                ):
-                    i += 1
-                    chunk = []
-                    while i < total and (
-                        not lines[i].strip()
-                        or len(lines[i]) - len(lines[i].lstrip(" ")) > indent
-                    ):
-                        if lines[i].strip():
-                            chunk.append(lines[i].strip())
-                        i += 1
-                    cur["run"] = "\n".join(chunk)
+                if field == "run" and _BLOCK_SCALAR_RE.fullmatch(val):
+                    cur["run"], i = _block_scalar(
+                        lines, i + 1, indent, val.startswith(">")
+                    )
                     continue
                 if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
                     val = val[1:-1]

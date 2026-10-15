@@ -1114,10 +1114,13 @@ jobs:
         run: python3 -m unittest -v test_pr_closeout_ledger.py
 
       # Blocker-ledger classes 4-7: deterministic pre-review gates
-      # (migration, API contract, concurrency, lockfile). Pure stdlib,
-      # no network, no clock, no credentials.
+      # (migration, API contract, concurrency, lockfile). Logic is stdlib;
+      # acceptance parses delivered workflows with the pinned PyYAML above.
+      # No network, clock or credentials in the suites.
       - name: blocker-ledger classes 4-7 suites
-        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression
+        env:
+          PYTHONPATH: ${{ runner.temp }}/static-label-guard-deps
+        run: python3 -B -m unittest test_blocker_migration_checks test_blocker_api_contract_checks test_blocker_concurrency_checks test_blocker_lockfile_checks test_blocker_classes47_org_template test_blocker_classes47_round2_regression test_blocker_classes47_round3_regression test_blocker_classes47_round4_regression test_blocker_classes47_round5_regression test_blocker_classes47_review_acceptance
 
       - name: admitted-PR closeout gates are load-bearing (mutation-gated)
         run: ./verification/closeout-ledger-mutation-gate.sh

@@ -8,8 +8,10 @@ changes, and migrations missing a down path.
 Stdlib only, pure functions, no network/clock/filesystem.
 """
 
+import json
 import posixpath
 import re
+import tomllib
 
 MIGRATION_DIRS = ("migrations/", "alembic/versions/")
 
@@ -27,13 +29,18 @@ _DROP_COLUMN_RE = re.compile(r"\bdrop\s+column\b", re.IGNORECASE)
 _TRUNCATE_RE = re.compile(r"\btruncate\b", re.IGNORECASE)
 _CREATE_INDEX_RE = re.compile(r"\bcreate\s+(unique\s+)?index\b", re.IGNORECASE)
 _CONCURRENTLY_RE = re.compile(r"\bconcurrently\b", re.IGNORECASE)
-_ALTER_TYPE_RE = re.compile(
-    r"\balter\s+column\s+(?:if\s+exists\s+)?"
-    r"(?:\"[^\"]+\"|'[^']+'|`[^`]+`|\[[^\]]+\]|[\w$.]+)"
-    r"\s+(?:set\s+data\s+)?type\b",
+_SQL_IDENTIFIER = r'''(?:"(?:[^"]|"")+"|'(?:[^']|'')+'|`[^`]+`|\[[^\]]+\]|[\w$]+)'''
+_ALTER_TABLE_RE = re.compile(
+    r"^\s*alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?"
+    + _SQL_IDENTIFIER + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*\s*\*?\s+",
     re.IGNORECASE,
 )
-_ALTER_CLAUSE_RE = _ALTER_TYPE_RE
+# A present COLUMN keyword cannot backtrack into a column named "column".
+_ALTER_CLAUSE_RE = re.compile(
+    r"^\s*alter\s+(?:column\s+|(?!column\b))(?:if\s+exists\s+)?"
+    + _SQL_IDENTIFIER + r"\s+(?:set\s+data\s+)?type\b",
+    re.IGNORECASE,
+)
 _USING_RE = re.compile(r"\busing\b", re.IGNORECASE)
 
 
@@ -183,9 +190,12 @@ def _split_top_level_commas(stmt):
 
 
 def _alter_type_missing_using(stmt):
-    """True when any ALTER COLUMN .. TYPE clause in the statement lacks USING."""
-    for clause in _split_top_level_commas(stmt):
-        if _ALTER_CLAUSE_RE.search(clause) and not _USING_RE.search(clause):
+    """Check each ALTER [COLUMN] .. TYPE action, not the table identifier."""
+    table = _ALTER_TABLE_RE.match(stmt)
+    if table is None:
+        return False
+    for clause in _split_top_level_commas(stmt[table.end():]):
+        if _ALTER_CLAUSE_RE.match(clause) and not _USING_RE.search(clause):
             return True
     return False
 
@@ -279,13 +289,6 @@ def check_migration_down(changed_files, contents, dialect="postgres"):
     return findings
 
 
-_MIGRATIONS_DIR_RE = re.compile(
-    # The key may be quoted (wrangler.json/.jsonc `"migrations_dir": ...`),
-    # so allow one optional closing quote before the `:`/`=`.
-    r"""migrations_dir\s*["']?\s*[:=]\s*["']([^"']+)["']""", re.IGNORECASE
-)
-
-
 def _normalize_dir(value):
     """Normalise a `migrations_dir` value for path comparison: strip
     whitespace, drop leading `./` segments, drop trailing slashes."""
@@ -331,214 +334,95 @@ def _normalize_changed_path(path):
     return p.lstrip("/")
 
 
-def _code_lines(text):
-    """Yield uncommented code lines: drop full-line `#` / `//` comments and
-    strip inline `#` / `//` tails outside single/double-quoted strings.
+def _jsonc_text(text):
+    """Strip JSONC comments/trailing commas outside double-quoted strings.
 
-    A commented `# d1_databases` line must never flip detection, and the
-    check reads config text (never the PR diff), so a PR cannot smuggle
-    the marker in through an unrelated file.
+    Apostrophes in comments are not quotes. Preserve escaped quotes and
+    comment delimiters inside strings; let json.loads reject malformed
+    data rather than guessing a directory that could weaken the gate.
     """
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("//"):
-            continue
-        out = []
-        quote = None
-        i = 0
-        n = len(raw)
-        while i < n:
-            ch = raw[i]
-            if quote is not None:
-                out.append(ch)
-                if ch == quote:
-                    quote = None
-                i += 1
-                continue
-            if ch in ("'", '"'):
-                quote = ch
-                out.append(ch)
-                i += 1
-                continue
-            if ch == "#" or (ch == "/" and i + 1 < n and raw[i + 1] == "/"):
-                break
-            out.append(ch)
-            i += 1
-        code = "".join(out).strip()
-        if code:
-            yield code
-
-
-def _wrangler_declares_d1(wrangler_texts):
-    """True when any wrangler config text declares `d1_databases` in code
-    (comments ignored)."""
-    for text in wrangler_texts or ():
-        for line in _code_lines(text):
-            if "d1_databases" in line.lower():
-                return True
-    return False
-
-
-def _text_declares_d1(text):
-    """True when one wrangler config text declares `d1_databases` in code
-    (comments ignored)."""
-    for line in _code_lines(text):
-        if "d1_databases" in line.lower():
-            return True
-    return False
-
-
-def _split_d1_tables(text):
-    """Split a TOML wrangler text into its `[[d1_databases]]` tables.
-
-    Returns None when the text has no TOML D1 table (JSON configs and
-    D1-free files take other paths); otherwise one body per binding.
-    A body runs to the next `[` header so a second table's
-    `migrations_dir` never leaks into the first binding.
-    """
-    parts = re.split(
-        r"(?im)^\s*\[\[\s*d1_databases\s*\]\]", text or ""
-    )
-    if len(parts) < 2:
-        return None
-    bodies = []
-    for section in parts[1:]:
-        bodies.append(re.split(r"(?m)^\s*\[", section, maxsplit=1)[0])
-    return bodies
-
-
-def _d1_json_array_span(text):
-    """Span of the `"d1_databases": [...]` array in a JSON wrangler text.
-
-    Returns None when there is no JSON D1 array (TOML configs and D1-free
-    files take other paths). Bracket depth is tracked outside string
-    literals so a `]` inside a value never ends the array early.
-    """
-    match = re.search(r'"d1_databases"\s*:\s*\[', text or "")
-    if not match:
-        return None
-    i = match.end() - 1
-    n = len(text)
-    depth = 0
-    quote = None
-    while i < n:
-        ch = text[i]
-        if quote is not None:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return text[match.start():i + 1]
-        i += 1
-    return None
-
-
-def _split_json_objects(array_span):
-    """Top-level `{...}` objects of a JSON array span (brace depth outside
-    string literals). Returns [] when the span holds no objects."""
-    objs = []
-    depth = 0
-    quote = None
-    start = None
+    out = []
+    quoted = False
     i = 0
-    n = len(array_span or "")
-    while i < n:
-        ch = array_span[i]
-        if quote is not None:
+    while i < len(text):
+        ch = text[i]
+        if quoted:
+            out.append(ch)
             if ch == "\\":
+                out.append(text[i + 1:i + 2])
                 i += 2
                 continue
-            if ch == quote:
-                quote = None
-            i += 1
+            if ch == '"':
+                quoted = False
+        elif ch == '"':
+            quoted = True
+            out.append(ch)
+        elif text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            i = len(text) if end == -1 else end
+            out.append(" ")
             continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end == -1:
+                raise ValueError("unterminated JSONC comment")
+            out.append(" ")
+            i = end + 2
             continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    objs.append(array_span[start:i + 1])
-                    start = None
+        else:
+            # Whitespace/comments can follow a trailing comma. Remove
+            # it only when the next code token closes the array/object.
+            if ch in "]}":
+                j = len(out) - 1
+                while j >= 0 and out[j].isspace():
+                    j -= 1
+                if j >= 0 and out[j] == ",":
+                    out[j] = " "
+            out.append(ch)
         i += 1
-    return objs
+    return "".join(out)
+
+
+def _wrangler_config(text):
+    """Parse TOML or JSONC with stdlib (Python 3.11+); invalid means no D1."""
+    text = text or ""
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        try:
+            config = json.loads(_jsonc_text(text))
+        except ValueError:
+            return {}
+        return config if isinstance(config, dict) else {}
 
 
 def _d1_binding_dirs(text, cfg_dir):
-    """One resolved `migrations_dir` per `[[d1_databases]]` binding.
+    """Resolve root and env-scoped D1 bindings without leaking defaults.
 
-    Each binding without its own `migrations_dir` keeps the
-    config-relative `migrations` default, so a second binding never
-    loses its directory. Returns [] when the text declares no D1
-    database (comments ignored, so `# d1_databases` never counts).
+    Each scope may supply its own legacy `migrations_dir` default; each
+    binding otherwise defaults to config-relative `migrations`. Parsing
+    the config makes quoted TOML env names and every JSON env array work,
+    while comments or marker strings outside bindings cannot select D1.
     """
-    if not _text_declares_d1(text):
-        return []
-    tables = _split_d1_tables(text)
-    if tables is not None:
-        preface = re.split(
-            r"(?im)^\s*\[\[\s*d1_databases\s*\]\]", text or "", maxsplit=1
-        )[0]
-        fallback = None
-        for line in _code_lines(preface):
-            m = _MIGRATIONS_DIR_RE.search(line)
-            if m:
-                fallback = m.group(1)
-                break
-        dirs = []
-        for body in tables:
-            code = "\n".join(_code_lines(body))
-            m = _MIGRATIONS_DIR_RE.search(code)
-            val = m.group(1) if m else (fallback or "migrations")
-            dirs.append(_join_config_dir(cfg_dir, _normalize_dir(val)))
-        return dirs
-    span = _d1_json_array_span(text or "")
-    if span is not None:
-        outside = (text or "").replace(span, " ")
-        fallback = None
-        for line in _code_lines(outside):
-            m = _MIGRATIONS_DIR_RE.search(line)
-            if m:
-                fallback = m.group(1)
-                break
-        objs = _split_json_objects(span)
-        if not objs:
-            return [
-                _join_config_dir(cfg_dir, _normalize_dir(fallback or "migrations"))
-            ]
-        dirs = []
-        for obj in objs:
-            found = None
-            for line in _code_lines(obj):
-                m = _MIGRATIONS_DIR_RE.search(line)
-                if m:
-                    found = m.group(1)
-                    break
-            dirs.append(
-                _join_config_dir(
-                    cfg_dir, _normalize_dir(found or fallback or "migrations")
-                )
+    config = _wrangler_config(text)
+    scopes = [config]
+    envs = config.get("env", {})
+    if isinstance(envs, dict):
+        scopes.extend(v for v in envs.values() if isinstance(v, dict))
+    dirs = []
+    for scope in scopes:
+        bindings = scope.get("d1_databases", [])
+        if not isinstance(bindings, list):
+            continue
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            value = binding.get(
+                "migrations_dir", scope.get("migrations_dir", "migrations")
             )
-        return dirs
-    return [_join_config_dir(cfg_dir, "migrations")]
+            if isinstance(value, str) and value.strip():
+                dirs.append(_join_config_dir(cfg_dir, _normalize_dir(value)))
+    return dirs
 
 
 def _wrangler_migrations_dirs(wrangler_texts, wrangler_paths=()):
@@ -595,12 +479,8 @@ def detect_migration_dialect(
         raise ValueError("unknown dialect: %r" % (explicit,))
     texts = list(wrangler_texts or ())
     paths = list(wrangler_paths or ())
-    d1_indexes = [i for i, t in enumerate(texts) if _text_declares_d1(t)]
-    if d1_indexes:
-        dirs = []
-        for i in d1_indexes:
-            cfg = _config_dir(paths[i] if i < len(paths) else "")
-            dirs.extend(_d1_binding_dirs(texts[i], cfg))
+    dirs = _wrangler_migrations_dirs(texts, paths)
+    if dirs:
         # Only changed `.sql` migration files can select sqlite: a
         # README or any other non-SQL file under a D1 directory must
         # never switch off the Postgres checks for the real migrations
@@ -640,12 +520,7 @@ def dialect_for_migration_path(path, wrangler_texts=(), wrangler_paths=()):
     """
     if not str(path or "").endswith(".sql"):
         return "postgres"
-    texts = list(wrangler_texts or ())
-    paths = list(wrangler_paths or ())
-    dirs = []
-    for i, text in enumerate(texts):
-        cfg = _config_dir(paths[i] if i < len(paths) else "")
-        dirs.extend(_d1_binding_dirs(text, cfg))
+    dirs = _wrangler_migrations_dirs(wrangler_texts, wrangler_paths)
     if not dirs:
         return "postgres"
     normed = _normalize_changed_path(path)

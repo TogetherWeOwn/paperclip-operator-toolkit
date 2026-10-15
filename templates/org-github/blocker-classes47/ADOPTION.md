@@ -44,6 +44,11 @@ jobs:
       contents: read
 ```
 
+Migration logic requires Python 3.11+ for stdlib `tomllib`; the staged
+`ubuntu-latest` runner supplies it. No third-party parser is needed by
+the deployed gate. Local acceptance suites also need PyYAML (CI reuses
+the hash-pinned static-label-guard installation).
+
 Cross-repo `uses:` needs a pinned SHA, never a branch name. Replace
 `<pinned-sha>` with the org adoption commit. `timeout-minutes` is rejected
 on `uses:` jobs by GitHub schema — each gate sets its own per-job timeouts
@@ -81,11 +86,14 @@ annotations.
   (D1 is forward-only). `auto` selects sqlite only when a wrangler config
   read from the BASE commit (a PR-added `wrangler.toml` cannot flip the
   result) declares `d1_databases` in uncommented code AND that D1
-  config's `migrations_dir` (per binding, config-relative, `..`
-  normalised; quoted JSON keys and `./` accepted) covers a changed
-  `.sql` migration path (tested `detect_migration_dialect`; non-SQL
-  files never flip the result). The gate then resolves the dialect per
-  migration file (tested `dialect_for_migration_path`). Mixed repos pin
+  config's `migrations_dir` (per root/env binding, config-relative, `..`
+  normalised; quoted TOML env names, JSON keys and `./` accepted) covers a
+  changed `.sql` migration path (tested `detect_migration_dialect`;
+  non-SQL files never flip the result). JSONC comments/trailing commas are
+  parsed without treating comment apostrophes as quotes. Invalid configs
+  keep Postgres checks. Only `auto` resolves dialect per migration file
+  (tested `dialect_for_migration_path`); explicit pins apply to safety and
+  down-path checks alike. Mixed repos pin
   `dialect: postgres` with the `BLOCKER_MIGRATION_DIALECT` repo variable
   (the required wrapper falls back to it on `pull_request`, where
   `workflow_call` inputs are empty); an explicit caller `with:` still
