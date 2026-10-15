@@ -160,6 +160,12 @@ mutate ciok-blind-to-scan '      - disclosure-scan
     steps:
       - name: Aggregate gated results'
 expect_fail ciok-blind-to-scan "$MUTANT_FILE"
+# sdlc_foundation step deleted (its header comment kept): the suite cannot
+# guard its own presence, so this independent gate must go red.
+mutate sdlc-step-deleted '          ./test_sdlc_foundation_placement.sh
+          python3 -m unittest test_sdlc_foundation_acceptance -v
+          ./templates/org-github/tests/test_sdlc_foundation.sh' '          echo "sdlc_foundation step deleted"'
+expect_fail sdlc-step-deleted "$MUTANT_FILE"
 
 printf '%s passed, %s failed\n' "$pass" "$fail"
 (( fail == 0 ))

@@ -1,0 +1,97 @@
+# Day-1 CI caller for a new TogetherWeOwn repo (TOG-24386, staged for the
+# public repo-template repo). Goes to `.github/workflows/ci.yml` in the new
+# repo, alongside `pr-lint.yml` (the org baseline's other required producer).
+# Fill the <PINNED_CHANGES_SHA> ref at creation (BOOTSTRAP step 2), then
+# never float it: every `uses:` into the org repo pins a full 40-hex SHA.
+# The tier-0 job ships as a plain disabled job with NO `uses:`: its gate
+# is not on org `.github` main yet, and a reusable `uses:` is resolved when
+# the workflow loads -- an unresolvable ref is a startup failure with no
+# ci-ok, even under `if: false`. When the gate lands on org main, replace
+# the plain job with the BOOTSTRAP copy-in snippet (pin filled, step 2).
+#
+# NEVER add workflow-level `on: pull_request: paths:` here: it would suppress
+# the required `ci-ok` check on filtered-out paths. Job-level `if:` gating
+# via the `changes` job is the only filter. `merge_group` keeps the caller
+# merge-queue ready (the queue itself enables later, per repo family).
+
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: changes
+    uses: TogetherWeOwn/.github/.github/workflows/changes.yml@<PINNED_CHANGES_SHA>
+    with:
+      areas-json: '{"app":["app/**","src/**"],"docs":["**.md","docs/**"]}'
+      full-run-globs-json: '["package.json","**/package.json",".github/**"]'
+
+  tier-0:
+    name: tier-0
+    # Plain disabled job, deliberately NO `uses:` to resolve at workflow
+    # load. Replace with the BOOTSTRAP copy-in snippet once the gate is
+    # on org main; until then it reads `skipped` and ci-ok stays green.
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "tier-0 gate not on org main yet; see BOOTSTRAP copy-in snippet"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes]
+    # Docs-only PRs skip the heavy job (ci-ok counts skipped as pass);
+    # non-PR events always run -- main never skips (empty self-diff).
+    if: github.event_name != 'pull_request' || needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).app
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: echo "replace with the repo stack lint"
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: echo "replace with the repo secret scan (gitleaks); always runs"
+
+  ci-ok:
+    name: ci-ok
+    needs: [changes, tier-0, lint, secret-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          python3 -I - "$NEEDS_JSON" <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          bad = {k: v.get("result") for k, v in needs.items()
+                 if v.get("result") not in ("success", "skipped")}
+          if bad:
+              print(f"failing jobs: {bad}")
+              sys.exit(1)
+          print("ci-ok: every needed job succeeded or was skipped")
+          EOF
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}

@@ -1,0 +1,44 @@
+{
+  "_comment": "TOG-24386 stage 2: identical to sdlc-baseline-evaluate.json with enforcement ACTIVE. Apply no earlier than 24h after the evaluate ruleset lands, and only when the runbook pre-flip audit passes on every non-excluded repo (a ci-ok and a pr-lint producer exist and report on open PRs; false-positive rate under 5% over the last 20 PRs). Same deliberate omissions: no merge queue (verified 2026-10-15: org-rules schema excludes it — stage 3 is merge_queue_ready property + reconciler, TOG-24376), no Paperclip Review (TOG-19598).",
+  "name": "sdlc-baseline",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": ["*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "required_status_checks": [
+          {
+            "context": "ci-ok",
+            "integration_id": 15368
+          },
+          {
+            "context": "pr-lint",
+            "integration_id": 15368
+          }
+        ],
+        "strict_required_status_checks_policy": false
+      }
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": true
+      }
+    }
+  ]
+}

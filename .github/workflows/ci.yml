@@ -58,6 +58,10 @@ name: CI
 #                                       cannot reach a database, and whether
 #                                       their refusal assertions name the gate
 #                                       they claim to test — TOG-402
+#     test_sdlc_foundation_*.{sh,py}     templates/org-github/: whether the staged
+#                                       SDLC foundation (ruleset twins, one exclude
+#                                       list, discovery, day-1 template) still
+#                                       holds its adoption contract
 #     test_tool_drift.sh                tool_drift.sh: whether the copy that RUNS
 #                                       is the copy that is REVIEWED — TOG-212
 #     test_channel_drift.sh             channel_drift.sh: whether a runnable file
@@ -1792,6 +1796,18 @@ jobs:
       # Paperclip and the GitHub API. No credential, nothing leaves loopback.
       - name: sibling-run guard suite
         run: ./test_sibling_guard.sh
+
+      # The staged SDLC 1.0 foundation under templates/org-github/ is
+      # public code whose landing is only complete while it lives here and
+      # keeps its contract: ruleset twins differing only in enforcement,
+      # the one exclude list driving discovery and the rendered payload,
+      # and a day-1 template that never path-filters the required check.
+      # Offline and hermetic: the discovery seam reads a fixture file.
+      - name: sdlc_foundation suite
+        run: |
+          ./test_sdlc_foundation_placement.sh
+          python3 -m unittest test_sdlc_foundation_acceptance -v
+          ./templates/org-github/tests/test_sdlc_foundation.sh
 
       # TOG-212. Whether the copy of a tool that RUNS is the copy that is
       # REVIEWED. The suite fabricates a throwaway git repo and a "deployed"
