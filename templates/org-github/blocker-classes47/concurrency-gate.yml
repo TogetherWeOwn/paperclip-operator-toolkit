@@ -1,0 +1,83 @@
+# Blocker-ledger concurrency gate (staged for TogetherWeOwn/.github).
+#
+# Staged source: this whole `blocker-classes47/` directory lands in the org
+# `.github` repo (`concurrency-gate.yml` at `.github/workflows/`). An
+# Operator applies it there after the source PR merges; repin callers to the
+# adoption SHA at that point. Never hand-edit this file: fix upstream, then
+# re-copy.
+#
+# WHAT THIS IS. One reusable workflow every TogetherWeOwn repo opts into with
+# a single caller (`uses`) line (see ADOPTION.md next to this file). It runs the
+# deterministic concurrency checks (blocker-ledger class 6) BEFORE any
+# review model is involved: migration steps with no concurrency group
+# (concurrent runners migrating at once), and seed steps running outside
+# the migration lock.
+#
+# REPORT-ONLY FIRST: `mode: warn` (the default) never fails the run for its
+# own findings — the job sets `continue-on-error` in warn mode and writes
+# findings to the step summary. Flip to `mode: enforce` once the
+# false-positive rate over the last 20 PRs measures under 5%.
+
+name: Blocker concurrency gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "warn (advisory, never fails) or enforce (findings fail the run)"
+        required: false
+        default: "warn"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  concurrency:
+    name: concurrency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ inputs.mode == 'warn' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out the org gate logic (single source of truth)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TogetherWeOwn/.github
+          ref: 11bd71901bbe5b1630ceea73d27597364c9af683 # repin to the adoption SHA
+          path: .org-gate-logic
+          persist-credentials: false
+      - name: Run concurrency checks on caller workflows
+        env:
+          GATE_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          GATE_LOGIC="${GITHUB_WORKSPACE}/.org-gate-logic/blocker-classes47" python3 - <<'PY'
+          import glob
+          import os
+          import sys
+          sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
+          from blocker_concurrency_checks import check_workflow_concurrency
+          workflows = {}
+          for path in glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"):
+              with open(path, encoding="utf-8") as f:
+                  workflows[path] = f.read()
+          findings = check_workflow_concurrency(workflows)
+          if findings:
+              print("::warning::blocker-concurrency findings:")
+              for finding in findings:
+                  print("::warning::%s" % finding)
+          else:
+              print("blocker-concurrency: clean")
+          if findings and os.environ.get("GATE_MODE") == "enforce":
+              raise SystemExit(1)
+          PY
+      - name: Summarise findings
+        if: always()
+        env:
+          GATE_STATUS: ${{ job.status }}
+          GATE_MODE: ${{ inputs.mode }}
+        run: 'echo "### blocker-concurrency: $GATE_STATUS (mode $GATE_MODE)" >> "$GITHUB_STEP_SUMMARY"'

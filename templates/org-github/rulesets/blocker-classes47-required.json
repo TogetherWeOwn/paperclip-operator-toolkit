@@ -1,0 +1,41 @@
+{
+  "_comment": "Stage 2: org ruleset, ACTIVE. Applied no earlier than 24h after stage 1 (blocker-classes47-report-only.json) once the false-positive rate measures under 5%.",
+  "name": "blocker-classes47",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-migration-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-api-contract-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-concurrency-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-lockfile-required.yml",
+            "ref": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+name: blocker-api-contract (warn-only)
+
+# TogetherWeOwn SDLC standard, thin caller for the org blocker-ledger gate
+# Calls the org reusable by pinned SHA, never a moving tag.
+# Lands in warn mode: it reports but never fails. Do NOT add this check to
+# any ruleset until the repo flips to enforce.
+# Repin to the org adoption SHA when the Operator lands the gate.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blocker-api-contract-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  api-contract:
+    name: api-contract
+    uses: TogetherWeOwn/.github/.github/workflows/blocker-api-contract-gate.yml@11bd71901bbe5b1630ceea73d27597364c9af683 # adoption pin
+    with:
+      mode: warn
+    permissions:
+      contents: read

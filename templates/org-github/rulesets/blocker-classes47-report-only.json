@@ -1,0 +1,41 @@
+{
+  "_comment": "Stage 1: org ruleset, EVALUATE (advisory) for the first 24h. The Operator fills REPO_ID_OF_DOT_GITHUB and PINNED_SHA, creates it with the runbook, then flips to blocker-classes47-required.json.",
+  "name": "blocker-classes47",
+  "target": "branch",
+  "enforcement": "evaluate",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-migration-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-api-contract-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-concurrency-required.yml",
+            "ref": "PINNED_SHA"
+          },
+          {
+            "repository_id": "REPO_ID_OF_DOT_GITHUB",
+            "path": ".github/workflows/blocker-lockfile-required.yml",
+            "ref": "PINNED_SHA"
+          }
+        ]
+      }
+    }
+  ]
+}

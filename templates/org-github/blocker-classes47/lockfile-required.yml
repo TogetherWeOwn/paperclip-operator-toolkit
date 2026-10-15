@@ -1,0 +1,24 @@
+# Blocker-ledger lockfile required wrapper (staged for TogetherWeOwn/.github).
+#
+# Thin wrapper so an org ruleset can require the WORKFLOW: it re-exports the
+# bare `lockfile` check from the reusable gate. Stays in warn mode until the
+# Operator flips the gate after measuring the false-positive rate. Never
+# hand-edit this file: fix upstream, then re-copy.
+
+name: Blocker lockfile required wrapper
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    name: lockfile
+    uses: TogetherWeOwn/.github/.github/workflows/blocker-lockfile-gate.yml@11bd71901bbe5b1630ceea73d27597364c9af683 # repin to the adoption SHA
+    with:
+      mode: warn
+    permissions:
+      contents: read
