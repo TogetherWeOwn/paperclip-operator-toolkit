@@ -73,16 +73,20 @@ jobs:
           fi
           if [[ -n "$base" ]]; then
             git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
-            # quotepath=off: git quotes non-ASCII paths with octal
-            # escapes by default, which would silently skip the manifest
-            # check for a PR-controlled `café/package.json`. The raw
-            # UTF-8 path must reach the heredoc unquoted.
-            changed="$(git -c core.quotepath=off diff --name-only --no-renames --diff-filter=d "$base" HEAD --)"
+            # NUL-delimited enumeration: `core.quotepath=off` only stops
+            # quoting of bytes above 0x80 — git still wraps a path in
+            # double quotes with C-style escapes when it contains `"`,
+            # `\`, a tab or another control character, which would fail
+            # `is_manifest()` and silently skip the file in enforce mode.
+            # `-z` never quotes: names are NUL-separated raw bytes and the
+            # heredoc splits on `\0` with `os.fsdecode` (surrogateescape)
+            # so every name round-trips to `open()`, including non-ASCII,
+            # quoted-special, and invalid-UTF-8 paths.
+            git -c core.quotepath=off diff -z --name-only --no-renames --diff-filter=d "$base" HEAD -- > /tmp/blocker-changed.txt
           else
-            changed="$(git -c core.quotepath=off ls-files)"
+            git -c core.quotepath=off ls-files -z > /tmp/blocker-changed.txt
           fi
-          printf '%s\n' "$changed" > /tmp/blocker-changed.txt
-          git -c core.quotepath=off ls-files > /tmp/blocker-present.txt
+          git -c core.quotepath=off ls-files -z > /tmp/blocker-present.txt
           # -I: ignore cwd so a PR-root module can never shadow stdlib.
           # Binary lockfiles (`bun.lockb`) are never opened as UTF-8 text
           # and `requirements*.txt` never reaches the emptiness check (see
@@ -99,6 +103,11 @@ jobs:
           import re
           import subprocess
           import sys
+          try:
+              sys.stdout.reconfigure(errors="replace")
+              sys.stderr.reconfigure(errors="replace")
+          except Exception:
+              pass
           sys.path.insert(0, os.environ.get("GATE_LOGIC", ".org-gate-logic/blocker-classes47"))
           from blocker_lockfile_checks import (
               check_lockfile_parseable,
@@ -107,20 +116,26 @@ jobs:
               is_parseable_lockfile,
           )
           import os as _os
-          changed = [
-              line.strip()
-              for line in open(
-                  os.environ["GATE_CHANGED"], encoding="utf-8",
-                  errors="replace")
-              if line.strip()
-          ]
-          present = [
-              line.strip()
-              for line in open(
-                  os.environ["GATE_PRESENT"], encoding="utf-8",
-                  errors="replace")
-              if line.strip()
-          ]
+          def _read_nul_list(env_key):
+              raw = open(os.environ[env_key], "rb").read()
+              if b"\x00" in raw:
+                  chunks = raw.split(b"\x00")
+              else:
+                  chunks = re.split(rb"\r?\n", raw)
+              out = []
+              for chunk in chunks:
+                  if not chunk:
+                      continue
+                  try:
+                      name = os.fsdecode(chunk)
+                  except Exception:
+                      name = chunk.decode("utf-8", "replace")
+                  name = name.strip()
+                  if name:
+                      out.append(name)
+              return out
+          changed = _read_nul_list("GATE_CHANGED")
+          present = _read_nul_list("GATE_PRESENT")
           manifest_contents = {}
           for path in changed:
               if not is_manifest(path):

@@ -128,12 +128,16 @@ class MarkerFromBaseTest(unittest.TestCase):
         ), [])
 
     def test_marker_basename_keys(self):
+        # Legacy library path only (`marker_contents=None`, marker
+        # falls back to `manifest_contents`): a directory-less key
+        # still covers a nested path. The delivered gate always passes
+        # an explicit marker map (exact-path only) — see round-12.
         self.assertEqual(LOCK.check_lockfile_present(
             ["sub/dir/package.json"], [],
-            manifest_contents={"sub/dir/package.json": '{"name": "x"}\n'},
-            marker_contents={
+            manifest_contents={
                 "package.json": '{"//": "lockfile: none"}\n',
             },
+            marker_contents=None,
         ), [])
 
     def test_no_marker_still_flags(self):

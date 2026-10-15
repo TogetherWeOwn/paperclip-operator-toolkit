@@ -73,15 +73,20 @@ jobs:
           fi
           if [[ -n "$base" ]]; then
             git cat-file -e "$base" || { echo "base not in local history; failing closed"; exit 1; }
-            # quotepath=off: git quotes non-ASCII paths with octal
-            # escapes by default, which would silently skip the `.sql`
-            # check for a PR-controlled `002_café.sql`. The raw UTF-8
-            # path must reach the heredoc unquoted.
-            changed="$(git -c core.quotepath=off diff --name-only --no-renames --diff-filter=d "$base" HEAD --)"
+            # NUL-delimited enumeration: `core.quotepath=off` only stops
+            # quoting of bytes above 0x80 — git still wraps a path in
+            # double quotes with C-style escapes when it contains `"`,
+            # `\`, a tab or another control character, which would fail
+            # `is_migration_path()`/`endswith(".sql")` and silently skip
+            # the file in enforce mode. `-z` never quotes: names are
+            # NUL-separated raw bytes and the heredoc splits on `\0`
+            # with `os.fsdecode` (surrogateescape) so every name
+            # round-trips to `open()`, including non-ASCII,
+            # quoted-special, and invalid-UTF-8 paths.
+            git -c core.quotepath=off diff -z --name-only --no-renames --diff-filter=d "$base" HEAD -- > /tmp/blocker-changed.txt
           else
-            changed="$(git -c core.quotepath=off ls-files)"
+            git -c core.quotepath=off ls-files -z > /tmp/blocker-changed.txt
           fi
-          printf '%s\n' "$changed" > /tmp/blocker-changed.txt
           # Dialect: `auto` (default) resolves via the tested lib helper
           # `detect_migration_dialect` below; an explicit `postgres`/`sqlite`
           # input is final and never auto-switched, so a mixed repo can pin
@@ -105,6 +110,11 @@ jobs:
           import re
           import subprocess
           import sys
+          try:
+              sys.stdout.reconfigure(errors="replace")
+              sys.stderr.reconfigure(errors="replace")
+          except Exception:
+              pass
           sys.path.insert(0, os.environ.get("GATE_LOGIC", "blocker-classes47"))
           from blocker_migration_checks import (
               check_migration_down,
@@ -113,13 +123,25 @@ jobs:
               dialect_for_migration_path,
               is_migration_path,
           )
-          changed = [
-              line.strip()
-              for line in open(
-                  os.environ["GATE_CHANGED"], encoding="utf-8",
-                  errors="replace")
-              if line.strip()
-          ]
+          def _read_nul_list(env_key):
+              raw = open(os.environ[env_key], "rb").read()
+              if b"\x00" in raw:
+                  chunks = raw.split(b"\x00")
+              else:
+                  chunks = re.split(rb"\r?\n", raw)
+              out = []
+              for chunk in chunks:
+                  if not chunk:
+                      continue
+                  try:
+                      name = os.fsdecode(chunk)
+                  except Exception:
+                      name = chunk.decode("utf-8", "replace")
+                  name = name.strip()
+                  if name:
+                      out.append(name)
+              return out
+          changed = _read_nul_list("GATE_CHANGED")
           changed_set = set(changed)
           # Wrangler configs come from the BASE commit only: list config
           # paths at base, then read each one with `git show`. A
@@ -134,15 +156,24 @@ jobs:
               try:
                   listing = subprocess.run(
                       ["git", "-c", "core.quotepath=off", "ls-tree",
-                       "-r", "--name-only", base],
+                       "-r", "--name-only", "-z", base],
                       capture_output=True,
                   )
               except OSError:
                   listing = None
               if listing is not None and listing.returncode == 0:
-                  tree_text = listing.stdout.decode("utf-8", "replace")
-                  for line in tree_text.splitlines():
-                      p = line.strip()
+                  raw_tree = listing.stdout
+                  if b"\x00" in raw_tree:
+                      tree_chunks = raw_tree.split(b"\x00")
+                  else:
+                      tree_chunks = re.split(rb"\r?\n", raw_tree)
+                  for chunk in tree_chunks:
+                      if not chunk:
+                          continue
+                      try:
+                          p = os.fsdecode(chunk).strip()
+                      except Exception:
+                          p = chunk.decode("utf-8", "replace").strip()
                       if re.search(r"(^|/)wrangler\.(toml|json|jsonc)$", p):
                           try:
                               read = subprocess.run(
@@ -164,6 +195,7 @@ jobs:
           # Validate even an empty diff. Only auto may infer per-file dialects.
           pinned_dialect = detect_migration_dialect(requested_dialect)
           contents = {}
+          unreadable = []
           for path in changed:
               if not (is_migration_path(path) and path.endswith(".sql")):
                   continue
@@ -171,11 +203,19 @@ jobs:
                   with open(path, encoding="utf-8", errors="replace") as f:
                       contents[path] = f.read()
               except (OSError, UnicodeDecodeError, ValueError):
-                  pass
+                  # Fail closed: a migration name that reached this point
+                  # passed `is_migration_path` but cannot be opened (stale
+                  # U+FFFD decoding, raw-byte name, permission). Skipping
+                  # would turn the gate clean (exit 0) on an unchecked
+                  # migration; report it instead.
+                  unreadable.append(path)
           # Explicit pins apply to safety AND down checks for every file.
           # In auto, only files under a base D1 binding get sqlite rules;
           # touching a D1 migration never weakens a Postgres sibling.
-          findings = []
+          findings = [
+              "%s: migration file unreadable (fail-closed)" % p
+              for p in unreadable
+          ]
           file_dialects = {}
           for path, sql in contents.items():
               dialect = pinned_dialect

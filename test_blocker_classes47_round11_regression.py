@@ -90,13 +90,30 @@ class MarkerScopeTest(unittest.TestCase):
         ), [])
 
     def test_bare_basename_key_still_opts_out(self):
-        # Round-10 pin preserved: a directory-less key covers a nested
-        # path (unit-test convenience shape).
+        # Legacy compatibility path ONLY (`marker_contents=None`, marker
+        # falls back to `manifest_contents`): a directory-less key still
+        # covers a nested path for library callers and unit tests. The
+        # delivered gate always passes an explicit `marker_contents`
+        # dict (exact-path only), so a root `package.json` key never
+        # opts out a new nested manifest there — see round-12.
         self.assertEqual(LOCK.check_lockfile_present(
             ["sub/dir/package.json"], [],
-            manifest_contents={"sub/dir/package.json": '{"name": "x"}\n'},
-            marker_contents={"package.json": MARKER},
+            manifest_contents={"package.json": MARKER},
+            marker_contents=None,
         ), [])
+
+    def test_explicit_marker_map_is_exact_path_only(self):
+        # The delivered gate path: an explicit (even directory-less)
+        # root key must NOT opt out a different directory.
+        findings = LOCK.check_lockfile_present(
+            ["packages/new/package.json"], [],
+            manifest_contents={
+                "packages/new/package.json":
+                    '{"name": "n", "dependencies": {"a": "1"}}\n',
+            },
+            marker_contents={"package.json": MARKER},
+        )
+        self.assertEqual(len(findings), 1, findings)
 
     def test_no_marker_still_flags(self):
         findings = LOCK.check_lockfile_present(
@@ -140,24 +157,67 @@ class GateShellPinTest(unittest.TestCase):
         text = (STAGE / "migration-gate.yml").read_text()
         self.assertNotIn("text=True,", text)
 
-    def test_lockfile_gate_quotepath_off(self):
-        text = (STAGE / "lockfile-gate.yml").read_text()
-        hits = text.count("core.quotepath=off")
-        self.assertGreaterEqual(
-            hits, 3,
-            "diff + both ls-files enumerations must disable quotepath")
+    def test_lockfile_gate_diff_is_nul_delimited(self):
+        lines = (STAGE / "lockfile-gate.yml").read_text().splitlines()
+        diff_lines = [ln for ln in lines if "diff -z --name-only" in ln]
+        self.assertTrue(diff_lines, "lockfile diff enumeration must use -z")
+        for ln in diff_lines:
+            self.assertIn(
+                "core.quotepath=off", ln,
+                "diff line must also disable quotepath (defence in depth)")
 
-    def test_migration_gate_quotepath_off(self):
+    def test_lockfile_gate_lsfiles_is_nul_delimited(self):
+        lines = (STAGE / "lockfile-gate.yml").read_text().splitlines()
+        ls_lines = [ln for ln in lines if "ls-files -z" in ln]
+        self.assertGreaterEqual(
+            len(ls_lines), 2,
+            "both lockfile ls-files enumerations (changed fallback + "
+            "present) must use -z")
+        for ln in ls_lines:
+            self.assertIn("core.quotepath=off", ln)
+
+    def test_migration_gate_diff_is_nul_delimited(self):
+        lines = (STAGE / "migration-gate.yml").read_text().splitlines()
+        diff_lines = [ln for ln in lines if "diff -z --name-only" in ln]
+        self.assertTrue(
+            diff_lines, "migration diff enumeration must use -z")
+        for ln in diff_lines:
+            self.assertIn("core.quotepath=off", ln)
+
+    def test_migration_gate_lstree_is_nul_delimited(self):
         text = (STAGE / "migration-gate.yml").read_text()
-        hits = text.count("core.quotepath=off")
-        self.assertGreaterEqual(
-            hits, 2, "diff + ls-tree enumerations must disable quotepath")
+        self.assertIn(
+            '"-z", base', text,
+            "wrangler ls-tree enumeration must pass -z")
+        idx = text.find('"ls-tree"')
+        self.assertNotEqual(idx, -1, "ls-tree call must exist")
+        window = text[max(0, idx - 200):idx + 300]
+        self.assertIn("core.quotepath=off", window)
+        self.assertIn('"-z"', window)
 
-    def test_both_gates_decode_with_replace(self):
+    def test_both_gates_split_nul_with_fsdecode(self):
+        for gate in ("lockfile-gate.yml", "migration-gate.yml"):
+            text = (STAGE / gate).read_text()
+            self.assertIn("os.fsdecode", text, gate)
+            self.assertIn(r"\x00", text, gate)
+            self.assertIn('_read_nul_list("GATE_CHANGED")', text, gate)
+
+    def test_changed_list_not_replace_decoded(self):
+        for gate in ("lockfile-gate.yml", "migration-gate.yml"):
+            text = (STAGE / gate).read_text()
+            self.assertNotIn('GATE_CHANGED"], encoding="utf-8"', text, gate)
+
+    def test_both_gates_decode_contents_with_replace(self):
+        # File CONTENT reads (Latin-1 bodies) still decode with
+        # replace; only the changed-list/name path uses fsdecode.
         for gate in ("lockfile-gate.yml", "migration-gate.yml"):
             text = (STAGE / gate).read_text()
             self.assertIn('errors="replace"', text, gate)
-            self.assertIn('"utf-8", "replace"', text, gate)
+
+    def test_migration_gate_unreadable_is_fail_closed(self):
+        text = (STAGE / "migration-gate.yml").read_text()
+        self.assertIn("unreadable", text)
+        self.assertIn("fail-closed", text)
 
 
 class ScratchRepoMixin:
@@ -268,17 +328,23 @@ class LockfileGateBehaviorTest(ScratchRepoMixin, unittest.TestCase):
 
 class MigrationGateBehaviorTest(ScratchRepoMixin, unittest.TestCase):
     def run_migration_heredoc(self, files):
-        for name, data in files.items():
-            p = self.repo / name
-            p.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(data, (bytes, bytearray)):
-                p.write_bytes(bytes(data))
-            else:
-                p.write_text(data, encoding="utf-8")
+        # Real-enumeration path: commit a base, commit the PR files,
+        # then run the YAML's own `git diff -z` enumeration so the
+        # changed list the heredoc sees is byte-identical to the
+        # delivered gate (no hand-written changed.txt).
+        base = self.commit_files({"README.md": "fixture\n"})
+        self.commit_files(files)
+        raw = subprocess.run(
+            ["/usr/bin/git", "-c", "core.quotepath=off",
+             "diff", "-z", "--name-only", "--no-renames",
+             "--diff-filter=d", base, "HEAD", "--"],
+            cwd=self.repo, env=self.env,
+            capture_output=True, timeout=20,
+        ).stdout
         changed = self.repo / "changed.txt"
-        changed.write_text("".join("%s\n" % n for n in files))
+        changed.write_bytes(raw if raw else b"")
         env = dict(
-            self.env, GATE_CHANGED=str(changed), GATE_BASE="",
+            self.env, GATE_CHANGED=str(changed), GATE_BASE=base,
             GATE_DIALECT="postgres", GATE_LOGIC=str(HERE),
             GATE_MODE="enforce",
         )

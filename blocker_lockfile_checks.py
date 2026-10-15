@@ -180,11 +180,11 @@ def _lookup_contents(contents, path, name, basename_fallback=True):
     applies to directory-less keys: a key that names another directory
     (`"docs/package.json"`) never satisfies a different path with the
     same basename. The delivered gate keys `marker_contents` by exact
-    base-revision path, so without this guard a PR that touches an
-    opted-out `docs/package.json` and adds `svc/api/package.json`
-    with dependencies would inherit the opt-out and exit 0 in
-    enforce mode. Pass `basename_fallback=False` to require an exact
-    path match.
+    base-revision path, so the gate path must pass
+    `basename_fallback=False` (exact path only): without it a root
+    `package.json` key (directory-less by construction) would still
+    satisfy a new `packages/new/package.json`. Pass
+    `basename_fallback=False` to require an exact path match.
     """
     if not isinstance(contents, dict):
         return None
@@ -224,14 +224,15 @@ def check_lockfile_present(
     `marker_contents` (optional path -> text) is the opt-out source for
     the `lockfile: none` marker (case-insensitive; for `package.json`
     use the JSON-valid form `"//": "lockfile: none"`). When provided
-    (even as an empty dict) only it is consulted: the delivered gate
+    (even as an empty dict) only it is consulted with exact-path
+    matching only (`basename_fallback=False`): the delivered gate
     passes base-revision contents here so an opt-out must be merged
-    first and a PR cannot waive itself. When omitted (`None`) the
-    marker falls back to `manifest_contents` for backward compatibility
-    with library callers and unit tests. Marker lookup never leaks
-    across directories: only an exact-path key or a directory-less
-    basename key satisfies a manifest, so a new `svc/api/package.json`
-    never inherits the opt-out of a touched `docs/package.json`.
+    first and a PR cannot waive itself, and a new nested manifest
+    never inherits another directory's opt-out — not even a root
+    manifest's directory-less key. When omitted (`None`) the marker
+    falls back to `manifest_contents` for backward compatibility
+    with library callers and unit tests, and only that legacy path
+    keeps the directory-less basename fallback.
     """
     have = {_basename(p) for p in list(changed_files) + list(present_files)}
     ignored = {_basename(p) for p in (ignore_manifests or ())}
@@ -245,7 +246,11 @@ def check_lockfile_present(
         if name in ignored:
             continue
         text = _lookup_contents(contents, path, name)
-        marker_text = _lookup_contents(markers, path, name)
+        if marker_contents is not None:
+            marker_text = _lookup_contents(
+                markers, path, name, basename_fallback=False)
+        else:
+            marker_text = _lookup_contents(markers, path, name)
         if isinstance(marker_text, str) and "lockfile: none" in marker_text.lower():
             continue
         if name == "pyproject.toml" and contents is not None and text is not None:

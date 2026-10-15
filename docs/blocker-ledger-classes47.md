@@ -126,7 +126,14 @@ input, required-wrapper input, or the `BLOCKER_LOCKFILE_IGNORE` repo
 variable) opts a manifest out. The delivered gate honours the marker
 only from the base revision (an opt-out must be merged first — a PR
 cannot waive itself by adding the marker in the same diff), matched by
-exact path (a new manifest never inherits another directory's opt-out).
+exact path only (a new manifest never inherits another directory's
+opt-out — not even a root manifest's directory-less key; the
+directory-less basename fallback lives only on the legacy
+`marker_contents=None` library path). Both gates enumerate with
+NUL-delimited git output (`diff -z`, `ls-files -z`, `ls-tree -z`) and
+split on `\\0` with `os.fsdecode`, so `"`, backslash, tab and
+invalid-UTF-8 names round-trip to `open()`; an unreadable `.sql`
+migration is fail-closed (a finding, never a silent clean pass).
 Parseability covers text lockfiles only:
 the binary `bun.lockb` is never opened as text and `requirements*.txt`
 is never emptiness-checked. Presence, not freshness: an already-vendored
@@ -150,7 +157,10 @@ test_blocker_classes47_review_acceptance
 test_blocker_classes47_round6_regression
 test_blocker_classes47_round7_regression
 test_blocker_classes47_round8_regression
-test_blocker_classes47_round9_regression`
+test_blocker_classes47_round9_regression
+test_blocker_classes47_round10_regression
+test_blocker_classes47_round11_regression
+test_blocker_classes47_round12_regression`
 plus YAML/JSON parse. The blind review-acceptance module exercises the
 actual migration heredoc, missing-schema API skip and required-wrapper
 mapping, not comments containing their names. Every `*-gate.yml` runs
