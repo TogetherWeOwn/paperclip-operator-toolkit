@@ -1,0 +1,11 @@
+# Day-1 policy-bot config, DISABLED by construction (TOG-24386, staged for
+# the public repo-template repo). Rename to `.github/policy-bot.yml` to arm
+# it, only after the risk-lanes track leaves advisory shadow (TOG-24383):
+# an enforcing bot on day 1 would gate the repo on unmeasured lanes.
+# Replace <OWNING-TEAM> at creation (BOOTSTRAP step 3).
+#
+# policy:
+#   approval_rules:
+#     - name: owning-team
+#       requires:
+#         teams: ["<OWNING-TEAM>"]
