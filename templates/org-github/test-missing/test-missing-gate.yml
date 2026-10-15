@@ -24,10 +24,11 @@
 # ejected by the queue.
 #
 # WARN FIRST (the rollout rule): `mode: warn` (the default) never fails the
-# run for its own findings — every gate job sets `continue-on-error`, writes
-# findings to the step summary and to a `test-missing-findings` artifact. A
-# repo flips to `mode: enforcing` only after its false-positive rate over the
-# last 20 PRs measures under 5%.
+# run for its own findings — the check job sets `continue-on-error` in warn
+# mode, and detect never fails classification (unclassifiable entries flow
+# to the mode-aware check). Findings land in the step summary and in a
+# `test-missing-findings` artifact. A repo flips to `mode: enforcing` only
+# after its false-positive rate over the last 20 PRs measures under 5%.
 #
 # FEEDING ci-ok: this workflow ends in exactly one aggregator,
 # `test-missing-ok` (`if: ${{ !cancelled() }}`), so a consumer repo wires ONE
@@ -85,14 +86,12 @@ jobs:
             git -c core.quotePath=false diff --name-status --diff-filter=AMR HEAD~1 HEAD | awk -F'\t' '$1 != "R100" {print $NF}' > changed.txt || true
           fi
           # core.quotePath=false covers only non-ASCII: a name containing
-          # " or \ stays quoted ("src/a\"b.py"), so the suffix check below
-          # could never classify it and the edit would silently pass. A
-          # quoted entry is unclassifiable: fail the step closed. The
-          # aggregator keeps warn advisory and fails every other mode.
-          if grep -q '^"' changed.txt; then
-            echo "test-missing gate: quoted path in changed list, failing closed" >&2
-            exit 1
-          fi
+          # " or \ stays quoted ("src/a\"b.py") and flows through
+          # unclassified. The check job below fails closed on such entries
+          # outside warn mode (advisory finding in warn). The decision lives
+          # there because detect has no mode context -- a red detect job
+          # would red the required wrapper even in warn mode, contradicting
+          # the header promise.
           {
             echo "changed<<EOF"
             cat changed.txt
@@ -152,10 +151,20 @@ jobs:
               # evaluated, so the queue relies on the PR-time run (see
               # header). Skipping here never ejects a tests-exempt PR.
               print("test-missing gate: merge_group run relies on the PR-time check")
-          elif "tests-exempt" not in labels:
-              src = [f for f in changed if is_src(f)]
-              if src and not any(is_test(f) for f in changed):
-                  findings += ["src change without tests: %s" % f for f in src]
+          else:
+              quoted = [f for f in changed if f.startswith('"')]
+              if quoted:
+                  # core.quotePath=false leaves " and \ quoted, so such an
+                  # entry is unclassifiable and would otherwise silently
+                  # pass. Fail closed outside warn; in warn the finding
+                  # below stays advisory (this job carries
+                  # continue-on-error in warn mode).
+                  findings += ["unclassifiable quoted path: %s" % f
+                               for f in quoted]
+              if "tests-exempt" not in labels:
+                  src = [f for f in changed if is_src(f)]
+                  if src and not any(is_test(f) for f in changed):
+                      findings += ["src change without tests: %s" % f for f in src]
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           # The artifact is written in THIS job: each job gets a fresh
           # runner filesystem, so a file from the detect job cannot be

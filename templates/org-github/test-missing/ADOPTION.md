@@ -39,11 +39,11 @@ jobs:
           fi
           # core.quotePath=false covers only non-ASCII: a name containing
           # " or \ stays quoted, so the classifier below could never match
-          # it and the edit would silently pass. Fail closed instead.
-          if grep -q '^"' changed.txt; then
-            echo "test-missing gate: quoted path in changed list, failing closed" >&2
-            exit 1
-          fi
+          # it and the edit would silently pass. Route it to the gate
+          # instead: a quoted entry forces relevant=true and the gate job
+          # (mode-aware, warn by default) fails closed outside warn mode.
+          # Detect itself stays green -- it has no mode, and a red detect
+          # would red the run even in warn mode.
           relevant=$(python3 - <<'PY'
           suffixes = (".py", ".sh", ".js", ".ts", ".mjs")
           test_dirs = ("test", "tests", "__tests__")
@@ -66,7 +66,8 @@ jobs:
                   files = [l.strip() for l in h if l.strip()]
           except OSError:
               files = []
-          print("true" if any(is_src(f) or is_test(f) for f in files) else "false")
+          print("true" if any(is_src(f) or is_test(f) or f.startswith('"')
+                            for f in files) else "false")
           PY
           )
           echo "relevant=${relevant}" >> "${GITHUB_OUTPUT}"
@@ -101,7 +102,9 @@ failed gate.
 ## Rollout: warn 24h, then required
 
 1. Land the caller in `warn` (default). The workflow never fails the run for
-   its own findings — every gate job sets `continue-on-error` in warn mode.
+   its own findings — the gate job sets `continue-on-error` in warn mode
+   and detect never fails classification (unclassifiable entries route to
+   the gate via `relevant=true`).
 2. After 24h, read the `test-missing-findings` artifacts across PRs. Flip to
    `mode: enforcing` once the false-positive rate over the last 20 PRs
    measures under 5%.

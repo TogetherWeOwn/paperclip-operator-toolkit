@@ -302,9 +302,9 @@ PY
   assert $? "the detect diff lists non-ASCII paths unquoted (core.quotePath=false)" \
     "a quoted octal path never matches .py so an untested non-ASCII src silently passes"
 
-  grep -qF '^"' "$STAGE/test-missing-gate.yml"
-  assert $? "the detect step fails closed on still-quoted paths (\" or \\ in the name)" \
-    "core.quotePath=false covers only non-ASCII -- a quoted entry would otherwise silently pass"
+  grep -q "startswith" "$STAGE/test-missing-gate.yml" && grep -q "unclassifiable quoted path" "$STAGE/test-missing-gate.yml"
+  assert $? "the mode-aware gate fails closed on still-quoted paths (\" or \\ in the name)" \
+    "core.quotePath=false covers only non-ASCII -- a quoted entry would otherwise silently pass; the guard lives in the gate (which knows the mode), never in detect (which has no mode and would red even warn-mode wrappers)"
 
   grep -q 'set -euo pipefail' "$STAGE/test-missing-gate.yml"
   assert $? "the detect run block sets pipefail (git|awk fails closed)" \
@@ -347,9 +347,9 @@ PY
     assert $? "the adoption snippet sets pipefail" \
       "without pipefail an adopter git failure passes the gate"
 
-    grep -qF '^"' "$STAGE/ADOPTION.md"
-    assert $? "the adoption snippet fails closed on still-quoted paths" \
-      "a copy-paste adopter with a quotePath-only diff regains the silent pass on \" or \\ names"
+    grep -q "startswith" "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet routes still-quoted paths to the gate (relevant=true)" \
+      "a copy-paste adopter with a quotePath-only diff regains the silent pass on \" or \\ names; adoption detect has no mode so it must stay green and let the mode-aware gate decide"
 
     grep -q 'HEAD~1 HEAD' "$STAGE/ADOPTION.md"
     assert $? "the adoption snippet fallback diffs HEAD~1 (not HEAD~2)" \
@@ -373,6 +373,26 @@ PY
     grep -q 'echo "relevant=${relevant}"' "$STAGE/ADOPTION.md"
     assert $? "the adoption snippet writes the relevant output" \
       "a snippet that never writes relevant starves its own gate"
+
+    # The fixture sets GATE_PR_BASE directly, so these YAML wirings
+    # regress silently without exact-line pins: base.sha->head.sha diffs
+    # an empty set, fetch-depth 1 cannot fetch the base, `always()` runs
+    # the gate on docs-only PRs, and a non-warn mode fails adopter runs.
+    grep -qF 'GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet diffs the pull-request base SHA" \
+      "a GATE_PR_BASE pointed at head.sha diffs to an empty set with no failing test"
+
+    grep -q 'fetch-depth: 0' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet fetches full history (fetch-depth 0)" \
+      "a shallow checkout cannot fetch the base SHA, so the diff is empty with no failing test"
+
+    grep -qF "if: needs.detect.outputs.relevant == 'true'" "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet gates the gate job on relevant" \
+      "an always() gate burns a runner on docs-only PRs against the change-gating policy"
+
+    grep -qF 'mode: warn' "$STAGE/ADOPTION.md"
+    assert $? "the adoption snippet lands in warn mode" \
+      "adopters must land warn-first before any enforce flip"
   else
     assert 1 "the adoption snippet carries the detect pins" \
       "ADOPTION.md absent -- adopter copy-paste has no pinned snippet"

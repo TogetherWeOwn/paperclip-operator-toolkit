@@ -274,6 +274,9 @@ class EmbeddedGateScriptTest(unittest.TestCase):
         return cls._script
 
     def _run_gate(self, event, mode, changed, labels=()):
+        return self._run_gate_capture(event, mode, changed, labels)[0]
+
+    def _run_gate_capture(self, event, mode, changed, labels=()):
         import subprocess
         import tempfile
         script = self._load_script()
@@ -290,7 +293,7 @@ class EmbeddedGateScriptTest(unittest.TestCase):
                 input=script, capture_output=True, text=True,
                 env=env, cwd=tmp, timeout=60,
             )
-        return proc.returncode
+        return proc.returncode, proc.stdout
 
     def test_enforcing_src_only_fails(self):
         self.assertEqual(
@@ -386,6 +389,23 @@ class EmbeddedGateScriptTest(unittest.TestCase):
         # list once the detect job excludes it: no present src change.
         self.assertEqual(
             self._run_gate("pull_request", "enforcing", []), 0)
+
+    def test_quoted_path_fails_in_enforcing(self):
+        # A " or \ in a name leaves the entry quoted under
+        # core.quotePath=false, so the gate cannot classify it. Failing
+        # closed here is what lets detect stay green: detect has no mode
+        # context, and a red detect job would red the warn-mode wrapper.
+        rc, out = self._run_gate_capture(
+            "pull_request", "enforcing", ['"src/a\\"b.py"'])
+        self.assertEqual(rc, 1)
+        self.assertIn("unclassifiable quoted path", out)
+
+    def test_quoted_path_advisory_in_warn(self):
+        # Warn mode records the finding but never fails the run.
+        rc, out = self._run_gate_capture(
+            "pull_request", "warn", ['"src/a\\"b.py"'])
+        self.assertEqual(rc, 0)
+        self.assertIn("unclassifiable quoted path", out)
 
 
 class DetectDiffFixtureTest(unittest.TestCase):
@@ -731,29 +751,45 @@ class DetectDiffFixtureTest(unittest.TestCase):
             "non-ASCII test file missing from changed list: %r" % (changed,))
         self.assertEqual(rc, 0)
 
-    def test_double_quote_in_name_fails_closed(self):
+    def test_double_quote_in_name_fails_at_gate_not_detect(self):
         def mutate(repo):
             with open(os.path.join(repo, 'src/a"b.py'), "a") as handle:
                 handle.write("# edited\n")
+        # Detect has no mode context: it must stay green and hand the
+        # unclassifiable entry to the mode-aware gate, or the warn-mode
+        # wrapper (hard-wired to warn) goes red on a legitimate filename.
         detect = self._run_detect_only(
             {"src/a.py": self._big_src()}, mutate,
             pr_base="", merge_base="")
-        self.assertNotEqual(
+        self.assertEqual(
             detect.returncode, 0,
-            "a quoted (unclassifiable) path must fail the detect step, "
-            "never produce a classified list and a passing gate")
+            "detect must stay green on quoted paths; the gate decides: %s"
+            % detect.stderr[-2000:])
+        # The gate (enforcing here) then fails closed on the quoted entry.
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertTrue(
+            any(path.startswith('"') for path in changed),
+            "quoted entry must reach the gate unclassified: %r" % (changed,))
+        self.assertEqual(rc, 1)
 
-    def test_backslash_in_name_fails_closed(self):
+    def test_backslash_in_name_fails_at_gate_not_detect(self):
         def mutate(repo):
             with open(os.path.join(repo, "src/a\\b.py"), "a") as handle:
                 handle.write("# edited\n")
         detect = self._run_detect_only(
             {"src/a.py": self._big_src()}, mutate,
             pr_base="", merge_base="")
-        self.assertNotEqual(
+        self.assertEqual(
             detect.returncode, 0,
-            "a quoted (unclassifiable) path must fail the detect step, "
-            "never produce a classified list and a passing gate")
+            "detect must stay green on quoted paths; the gate decides: %s"
+            % detect.stderr[-2000:])
+        changed, rc = self._run_scenario(
+            {"src/a.py": self._big_src()}, mutate)
+        self.assertTrue(
+            any(path.startswith('"') for path in changed),
+            "quoted entry must reach the gate unclassified: %r" % (changed,))
+        self.assertEqual(rc, 1)
 
 
 class AdoptionSnippetFixtureTest(unittest.TestCase):
@@ -941,6 +977,50 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
         self.assertEqual(changed, ["src/a.py"], changed)
         self.assertEqual(relevant, "true", relevant)
 
+    def test_relevant_true_for_each_src_suffix(self):
+        # The snippet's suffix tuple gates every language: dropping any
+        # one entry silently skips the gate for that language's edits.
+        for path in ("src/x.py", "src/x.sh", "src/x.js", "src/x.ts",
+                      "src/x.mjs"):
+            def mutate(repo, path=path):
+                with open(os.path.join(repo, path), "a") as handle:
+                    handle.write("# edited\n")
+            changed, relevant = self._run_adoption({path: "# base\n"},
+                                                   mutate)
+            self.assertEqual(relevant, "true", path)
+            self.assertEqual(changed, [path], path)
+
+    def test_relevant_false_for_non_code_suffix(self):
+        for path in ("docs/x.md", "config/x.json", ".github/x.yml"):
+            def mutate(repo, path=path):
+                with open(os.path.join(repo, path), "a") as handle:
+                    handle.write("more\n")
+            base = {path: "base\n"}
+            changed, relevant = self._run_adoption(base, mutate)
+            self.assertEqual(relevant, "false", path)
+            self.assertEqual(changed, [path], path)
+
+    def test_pr_base_covers_earlier_commits(self):
+        # The PR arm diffs the pull-request base commit, not HEAD~1: a src
+        # edit in an earlier commit with a docs-only head must still gate.
+        # Kills the `if false` mutant on the GATE_PR_BASE arm (which falls
+        # through to HEAD~1, lists only the docs commit, and silently
+        # skips the adopter's gate).
+        def middle(repo):
+            with open(os.path.join(repo, "src/a.py"), "a") as handle:
+                handle.write("# edited without tests\n")
+
+        def mutate(repo):
+            with open(os.path.join(repo, "docs/guide.md"), "a") as handle:
+                handle.write("more docs\n")
+
+        changed, relevant = self._run_adoption(
+            {"src/a.py": self._big_src(), "docs/guide.md": "docs\n"},
+            mutate, base="pr", middle=middle)
+        self.assertIn("src/a.py", changed, changed)
+        self.assertIn("docs/guide.md", changed, changed)
+        self.assertEqual(relevant, "true", relevant)
+
     def test_relevant_false_for_docs_only(self):
         def mutate(repo):
             with open(os.path.join(repo, "docs/guide.md"), "a") as handle:
@@ -971,17 +1051,23 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
         self.assertEqual(changed, [], changed)
         self.assertEqual(relevant, "false", relevant)
 
-    def test_quoted_name_fails_closed(self):
+    def test_quoted_name_routes_to_gate(self):
+        # Adoption detect has no mode: it stays green and forces
+        # relevant=true so the mode-aware gate job runs and decides
+        # (fail closed outside warn, advisory finding in warn).
         def mutate(repo):
             with open(os.path.join(repo, 'src/a"b.py'), "a") as handle:
                 handle.write("# edited\n")
         changed, relevant, returncode = self._run_adoption_raw(
             {"src/a.py": self._big_src()}, mutate)
-        self.assertNotEqual(
+        self.assertEqual(
             returncode, 0,
-            "a quoted (unclassifiable) path must fail the detect step, "
-            "never produce a classified list and a passing gate: %r"
-            % (changed,))
+            "adoption detect must stay green on quoted paths; the gate "
+            "decides: %r" % (changed,))
+        self.assertTrue(
+            any(path.startswith('"') for path in changed),
+            "quoted entry must reach the gate unclassified: %r" % (changed,))
+        self.assertEqual(relevant, "true", relevant)
 
     def test_snippet_exposes_relevant_output(self):
         text = open(self.ADOPTION).read()
@@ -995,7 +1081,19 @@ class AdoptionSnippetFixtureTest(unittest.TestCase):
         self.assertIn("R100", text)
         self.assertIn("HEAD~1 HEAD", text)
         self.assertIn("print $NF", text)
-        self.assertIn('^"', text)
+        self.assertIn('startswith(\'"\')', text)
+
+    def test_snippet_pr_base_and_gate_wiring_pins(self):
+        # The fixture sets GATE_PR_BASE directly, so these YAML wirings
+        # regress silently: base.sha->head.sha diffs an empty set,
+        # fetch-depth 1 cannot fetch the base, `always()` runs the gate
+        # on docs-only PRs, and a non-warn mode fails adopter runs.
+        text = open(self.ADOPTION).read()
+        self.assertIn(
+            "GATE_PR_BASE: ${{ github.event.pull_request.base.sha }}", text)
+        self.assertIn("fetch-depth: 0", text)
+        self.assertIn("if: needs.detect.outputs.relevant == 'true'", text)
+        self.assertIn("mode: warn", text)
 
 
 class WorkflowWiringTest(unittest.TestCase):
@@ -1067,13 +1165,16 @@ class WorkflowWiringTest(unittest.TestCase):
                              "bare AM filter drops every rename: %s"
                              % line.strip())
 
-    def test_diff_fails_closed_on_quoted_paths(self):
+    def test_gate_fails_closed_on_quoted_paths(self):
         text = self._text()
+        # The guard lives in the mode-aware gate script, not in detect:
+        # detect has no mode context, and a red detect job reds even the
+        # warn-mode wrapper. Names containing " or \ stay quoted under
+        # core.quotePath=false and would otherwise silently pass.
         self.assertIn(
-            '^"', text,
-            "a quoted-path guard must fail the detect step closed: "
-            "names containing \" or \\ stay quoted under "
-            "core.quotePath=false and would otherwise silently pass")
+            'startswith(\'"\')', text,
+            "the gate must fail closed on unclassifiable quoted paths")
+        self.assertIn("unclassifiable quoted path", text)
 
     def test_diff_leaves_paths_unquoted(self):
         text = self._text()
