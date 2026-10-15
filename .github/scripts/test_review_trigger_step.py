@@ -51,7 +51,13 @@ class Stub:
         if path == "/pulls/7":
             return dict(self.pr)
         if path.startswith("/commits/") and "/check-runs?" in path:
-            return {"check_runs": page_of(self.runs, path)}
+            query = dict(kv.split("=") for kv in path.split("?", 1)[1].split("&"))
+            runs = self.runs
+            if query.get("filter", "latest") != "all":
+                # Fixtures append newer runs last. GitHub defaults to only
+                # the newest run for each name, before pagination.
+                runs = list({r["name"]: r for r in runs}.values())
+            return {"check_runs": page_of(runs, path)}
         if path == "/pulls/7/files?per_page=100":
             return list(self.files)
         if path.startswith("/issues/7/comments?"):
@@ -239,14 +245,64 @@ class StepTest(unittest.TestCase):
         # One marker plus two errored runs: the retry was already spent
         # (possibly by the reconciler or a manual mention), so the shared
         # one-retry budget suppresses a further CI-driven trigger.
-        stub = Stub(runs=self.error_runs(2), comments=[self.own_marker()])
-        self.assertEqual(run_with(stub), 0)
-        self.assertEqual(stub.posts, [])
+        for conclusion in self.ERROR_CONCLUSIONS:
+            with self.subTest(conclusion=conclusion):
+                stub = Stub(runs=self.error_runs(2, conclusion),
+                            comments=[self.own_marker()])
+                self.assertEqual(run_with(stub), 0)
+                self.assertEqual(stub.posts, [])
 
     def test_no_marker_plus_exhausted_error_budget_posts_nothing(self):
         # Same budget on the first-post path: a head whose manual reviews
         # already errored twice gets no CI-driven trigger either.
-        stub = Stub(runs=self.error_runs(2))
+        for conclusion in self.ERROR_CONCLUSIONS:
+            with self.subTest(conclusion=conclusion):
+                stub = Stub(runs=self.error_runs(2, conclusion))
+                self.assertEqual(run_with(stub), 0)
+                self.assertEqual(stub.posts, [])
+
+    def test_stub_filters_latest_before_paginating_unless_all_requested(self):
+        runs = self.error_runs(1, "action_required")
+        runs += self.error_runs(1, "timed_out")[1:]
+        stub = Stub(runs=runs)
+        path = "/commits/%s/check-runs?" % OUT_OF_SAMPLE_SHA
+        latest = [runs[0], runs[-1]]
+        for query in ("", "filter=latest&"):
+            with self.subTest(query=query):
+                self.assertEqual(stub.api(path + query + "per_page=100&page=1"),
+                                 {"check_runs": latest})
+                self.assertEqual(stub.api(path + query + "per_page=1&page=2"),
+                                 {"check_runs": [runs[-1]]})
+        self.assertEqual(stub.api(path + "filter=all&per_page=100&page=1"),
+                         {"check_runs": runs})
+
+    def test_mixed_error_conclusions_share_the_exhausted_budget(self):
+        for markers in ([], [self.own_marker()]):
+            for conclusions in (("action_required", "timed_out"),
+                                ("cancelled", "stale"),
+                                ("action_required",) * 5):
+                with self.subTest(markers=len(markers), conclusions=conclusions):
+                    runs = green_runs() + [
+                        {"name": "Paperclip Review", "status": "completed",
+                         "conclusion": conclusion} for conclusion in conclusions]
+                    stub = Stub(runs=runs, comments=markers)
+                    self.assertEqual(run_with(stub), 0)
+                    self.assertEqual(stub.posts, [])
+
+    def test_older_verdict_is_not_hidden_by_a_later_error(self):
+        for verdict in ("success", "failure"):
+            with self.subTest(verdict=verdict):
+                runs = self.error_runs(1, verdict)
+                runs += self.error_runs(1, "timed_out")[1:]
+                stub = Stub(runs=runs)
+                self.assertEqual(run_with(stub), 0)
+                self.assertEqual(stub.posts, [])
+
+    def test_error_history_beyond_first_page_exhausts_budget(self):
+        filler = [{"name": "job-%d" % i, "status": "completed",
+                   "conclusion": "success"} for i in range(100)]
+        stub = Stub(runs=self.error_runs(1) + filler
+                    + self.error_runs(1, "timed_out")[1:])
         self.assertEqual(run_with(stub), 0)
         self.assertEqual(stub.posts, [])
 

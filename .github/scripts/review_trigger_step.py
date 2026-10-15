@@ -187,7 +187,9 @@ def main():
     # listing, an overlapping delivery) shows as a live run with no verdict
     # and no marker comment yet; posting on top of it opens a second
     # same-head review row.
-    fresh_runs = paginate("/commits/%s/check-runs" % head_sha, key="check_runs")
+    # GitHub defaults to the latest run per name, hiding spent attempts and
+    # older verdicts. The shared budget requires the complete head history.
+    fresh_runs = paginate("/commits/%s/check-runs?filter=all" % head_sha, key="check_runs")
     if any(review_dedup.check_run_suppresses(r.get("name"), r.get("status"), r.get("conclusion"))
            for r in fresh_runs):
         notice("a Paperclip Review run already covers head %s; one review per head"
