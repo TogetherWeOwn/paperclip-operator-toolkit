@@ -10,13 +10,13 @@ Stdlib only, pure functions, no network/clock/filesystem.
 
 import re
 
-MIGRATION_RUN_MARKERS = ("migrate", "alembic upgrade")
+MIGRATION_RUN_MARKERS = ("migrate", "alembic upgrade", "migrations apply")
 
 ISOLATION_MARKERS = ("--isolated",)
 
 SEED_MARKERS = ("seed",)
 
-_CONCURRENCY_RE = re.compile(r"(?m)^concurrency\s*:")
+_CONCURRENCY_RE = re.compile(r"(?m)^[ \t]*concurrency\s*:")
 
 
 def _contains_any(text, markers):
@@ -31,8 +31,10 @@ def step_runs_migrations(step):
 
 
 def has_concurrency_group(workflow_text):
-    """True when the workflow YAML text declares a top-level
-    concurrency: block."""
+    """True when the workflow YAML text declares a top-level or
+    job-level concurrency: block (a job that serialises its own deploy
+    still serialises the migration). Line-anchored heuristic: a
+    `concurrency:` line inside a run script would also match."""
     return bool(_CONCURRENCY_RE.search(workflow_text or ""))
 
 

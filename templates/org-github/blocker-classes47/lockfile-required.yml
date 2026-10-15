@@ -17,7 +17,7 @@ permissions:
 jobs:
   lockfile:
     name: lockfile
-    uses: TogetherWeOwn/.github/.github/workflows/blocker-lockfile-gate.yml@11bd71901bbe5b1630ceea73d27597364c9af683 # repin to the adoption SHA
+    uses: TogetherWeOwn/.github/.github/workflows/blocker-lockfile-gate.yml@3e82c42a1151f1fb333ffb59650a05bae1a7bec5 # repin to the adoption SHA
     with:
       mode: warn
     permissions:

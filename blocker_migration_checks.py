@@ -35,10 +35,23 @@ def _up_section(text):
     return _DOWN_RE.split(text, maxsplit=1)[0]
 
 
+def _statements(up):
+    """Split the up-section into `;`-terminated statements.
+
+    Index/alter checks run per statement so one guarded statement cannot
+    mask an unguarded sibling (e.g. a CONCURRENTLY index hiding a second
+    blocking index, or an index's USING satisfying an unrelated ALTER).
+    Splitting is syntactic: a `;` inside a string literal also splits,
+    which may add a finding but never hides a blocking lock.
+    """
+    return [part.strip() for part in up.split(";") if part.strip()]
+
+
 def check_migration_safety(contents):
     """One finding per file with destructive DDL (un-acked), a
     non-concurrent CREATE INDEX, or an ALTER COLUMN TYPE without USING.
-    Findings name the file. Safe migrations pass."""
+    Index/alter checks run per `;`-separated statement. Findings name
+    the file. Safe migrations pass."""
     findings = []
     for path, text in contents.items():
         if str(path).endswith(".down.sql"):
@@ -51,33 +64,57 @@ def check_migration_safety(contents):
             or _TRUNCATE_RE.search(up)
         ) and SAFETY_ACK.lower() not in text.lower():
             reasons.append("destructive DDL without safety ack")
-        if _CREATE_INDEX_RE.search(up) and not _CONCURRENTLY_RE.search(up):
-            reasons.append("CREATE INDEX without CONCURRENTLY")
-        if _ALTER_TYPE_RE.search(up) and not _USING_RE.search(up):
-            reasons.append("ALTER COLUMN TYPE without USING")
+        for stmt in _statements(up):
+            if _CREATE_INDEX_RE.search(
+                stmt
+            ) and not _CONCURRENTLY_RE.search(stmt):
+                if "CREATE INDEX without CONCURRENTLY" not in reasons:
+                    reasons.append("CREATE INDEX without CONCURRENTLY")
+            if _ALTER_TYPE_RE.search(stmt) and not _USING_RE.search(stmt):
+                if "ALTER COLUMN TYPE without USING" not in reasons:
+                    reasons.append("ALTER COLUMN TYPE without USING")
         if reasons:
             findings.append("%s: %s" % (path, "; ".join(reasons)))
     return findings
 
 
+def _down_siblings(path):
+    """Candidate sibling down files for a migration path.
+
+    Accepts the `<stem>.down.sql` form and the golang-migrate
+    `<stem>.up.sql` / `<stem>.down.sql` pair (for which the naive
+    `<stem>.up.down.sql` never exists).
+    """
+    text = str(path)
+    siblings = []
+    if text.endswith(".up.sql"):
+        siblings.append(text[: -len(".up.sql")] + ".down.sql")
+    siblings.append(text[:-4] + ".down.sql")
+    return siblings
+
+
 def check_migration_down(changed_files, contents):
-    """Every changed *.sql migration file must carry a -- DOWN marker
-    (case-insensitive) or have a sibling <same-stem>.down.sql in
-    changed_files. One finding per migration missing both."""
+    """Every changed *.sql migration file present in contents must carry
+    a -- DOWN marker (case-insensitive) or have a sibling down file in
+    changed_files. Paths missing from contents (e.g. deleted files, which
+    the gate excludes via --diff-filter=d) are skipped. One finding per
+    migration missing both. Non-migration files are ignored."""
     findings = []
     for path in changed_files:
         if str(path).endswith(".down.sql"):
             continue
         if not (is_migration_path(path) and str(path).endswith(".sql")):
             continue
+        if path not in contents:
+            continue
         text = contents.get(path, "")
         if _DOWN_RE.search(text):
             continue
-        sibling = str(path)[:-4] + ".down.sql"
-        if sibling in changed_files:
+        siblings = _down_siblings(path)
+        if any(sibling in changed_files for sibling in siblings):
             continue
         findings.append(
             "%s: migration has no -- DOWN marker and no sibling %s"
-            % (path, sibling)
+            % (path, siblings[0])
         )
     return findings

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic lockfile checks (blocker-ledger class 7).
 
-Flags manifest changes that land without their lockfile
-(non-reproducible installs) or with an empty/corrupt lockfile.
+Flags manifest changes that land with no accepted lockfile basename in
+the change or the tree (missing lockfile, non-reproducible installs),
+or with an empty/corrupt lockfile.
+
+Presence, not freshness: a repo that already vendors a lockfile passes
+even when the manifest changes without it, and matching is by basename
+(any lockfile anywhere satisfies any manifest). Stale-lockfile and
+monorepo directory-scoped detection are follow-ups.
 
 Stdlib only, pure functions, no network/clock/filesystem.
 """
@@ -41,7 +47,10 @@ def is_lockfile(path):
 def check_lockfile_present(changed_files, present_files):
     """One finding per changed manifest whose accepted lockfile is in
     neither changed_files nor present_files (basename comparison).
-    Findings name the manifest and the expected lockfile name(s)."""
+    Findings name the manifest and the expected lockfile name(s).
+    Non-manifest changes pass. A lockfile already present in the tree
+    satisfies the check even when the manifest changes without it
+    (presence, not freshness)."""
     have = {_basename(p) for p in list(changed_files) + list(present_files)}
     findings = []
     for path in changed_files:

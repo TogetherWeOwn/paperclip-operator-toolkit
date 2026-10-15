@@ -2,7 +2,10 @@
 
 Destination: this whole `blocker-classes47/` directory lands in
 `TogetherWeOwn/.github` (each `*-gate.yml` at `.github/workflows/`, the
-`blocker_*_checks.py` logic beside them, `ADOPTION.md` next to those).
+`blocker_*_checks.py` logic at repo-root `blocker-classes47/` — the gates
+check out the org repo and import from `<checkout>/blocker-classes47`,
+so logic beside the workflows would `ModuleNotFoundError` —
+`ADOPTION.md` next to those).
 Private reusable workflows are unreachable from public callers and private
 repos have no Actions minutes, so the org `.github` repo — public — is the
 only home that serves every repo.
@@ -68,12 +71,21 @@ annotations.
   explicit human review. Non-concurrent `CREATE INDEX` and `USING`-less
   `ALTER COLUMN .. TYPE` still report.
 - Down path — every changed `*.sql` migration carries a `-- DOWN` marker
-  or a sibling `<same-stem>.down.sql`; the gate reads the PR diff, so both
-  files must be in the change.
+  or a sibling down file (`<same-stem>.down.sql`, or the golang-migrate
+  `<stem>.up.sql` / `<stem>.down.sql` pair); the gate diffs with
+  `--diff-filter=d`, so deleted files are never flagged but both files of
+  a pair must be in the change.
 
-## Rollout: warn 24h, then required
+## Rollout: adopt, activate, warn 24h, then required
 
-1. Land the callers in `warn` (default). The workflows never fail the run
+0. The repo callers land inert (`workflow_dispatch` only): the org
+   reusable does not exist until step 1, and an unresolvable `uses:`
+   fails the run at parse time (`continue-on-error` cannot help).
+1. Adoption follow-up (one Operator PR to `TogetherWeOwn/.github`):
+   land this directory (gates at `.github/workflows/`, logic at
+   repo-root `blocker-classes47/`), repin every caller and gate `ref:`
+   to the adoption commit, and flip the repo callers to `pull_request`
+   + `merge_group` in `warn` (default). The workflows never fail the run
    for their own findings.
 2. After 24h, read the step summaries across PRs. A gate whose
    false-positive rate over the last 20 PRs measures under 5% flips to

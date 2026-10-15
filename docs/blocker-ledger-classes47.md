@@ -10,7 +10,11 @@ a staged copy: fix the repo-root module, then re-copy byte-identical.
 Flags destructive DDL (`DROP TABLE/COLUMN`, `TRUNCATE`) without the
 case-insensitive `safety: acknowledged` marker, `CREATE INDEX` without
 `CONCURRENTLY`, `ALTER COLUMN .. TYPE` without `USING`, and `*.sql`
-migrations with neither a `-- DOWN` marker nor a sibling `.down.sql`.
+migrations with neither a `-- DOWN` marker nor a sibling down file.
+Index/alter checks run per `;`-separated statement, so one guarded
+statement never masks an unguarded sibling. The down check accepts the
+golang-migrate `<stem>.up.sql` / `<stem>.down.sql` pair, and deleted
+files are never flagged (gate diffs with `--diff-filter=d`).
 Down-section statements are not findings. Ack waives destructive-DDL only
 after explicit human review.
 
@@ -23,17 +27,23 @@ follow-up, never a failure.
 
 ## Concurrency (`blocker_concurrency_checks.py`)
 
-Flags workflow files that run migrations (`migrate`, `alembic upgrade`)
-without a `concurrency:` group, and isolated migration steps followed by a
-separate seed step (seed outside the mutex). Single-step migrate-and-seed
-passes.
+Flags workflow files that run migrations (`migrate`, `alembic upgrade`,
+`migrations apply`) without a top-level or job-level `concurrency:`
+group, and isolated migration steps followed by a separate seed step
+(seed outside the mutex). The gate parses each job's `steps:` (including
+`run: |` blocks) and runs the seed check per job. Single-step
+migrate-and-seed passes.
 
 ## Lockfile (`blocker_lockfile_checks.py`)
 
 Flags changed manifests (`package.json`, `Cargo.toml`, `pyproject.toml`,
-`go.mod`, `Gemfile`) with no accepted lockfile in the change or the tree,
-and empty/corrupt lockfiles (content-free `package-lock.json`, version-less
-`pnpm-lock.yaml`, package-less `Cargo.lock`).
+`go.mod`, `Gemfile`) with no accepted lockfile basename in the change or
+the tree, and empty/corrupt lockfiles (content-free `package-lock.json`,
+version-less `pnpm-lock.yaml`, package-less `Cargo.lock`). Presence, not
+freshness: an already-vendored lockfile satisfies the gate even when the
+manifest changes without it, and matching is by basename (any lockfile
+anywhere satisfies any manifest). Stale-lockfile and directory-scoped
+detection are follow-ups.
 
 ## Rollout
 
