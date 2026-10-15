@@ -24,6 +24,30 @@ class Classify(unittest.TestCase):
                      "host/id_rsa.key", "certs/bundle.p12"):
             self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
 
+    def test_suffixless_secret_and_credential_files_are_private_data(self):
+        for path in ("id_rsa", "keys/id_ed25519", "keys/id_ecdsa",
+                     "keys/id_dsa", ".netrc", ".npmrc", ".pypirc",
+                     "credentials.json", "config/credentials",
+                     "secrets.yaml", "secret.txt", "kubeconfig",
+                     "config/kubeconfig", ".kube/config",
+                     "clusters/kubeconfig-prod.yaml", "my-kubeconfig",
+                     "prod.tfvars", "backup.gpg",
+                     "token.age", "vault.kdbx", "app.jks", "app.keystore"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PRIVATE-DATA", path)
+
+    def test_public_key_files_are_not_private_data(self):
+        self.assertEqual(classify("keys/id_ed25519.pub")[0], "PUBLIC-ABLE")
+
+    def test_secret_named_code_files_are_not_private_data(self):
+        # Only a full secret/credentials stem is material; code that merely
+        # handles secrets (or an English word starting with "secret") is
+        # generic code and stays public-able.
+        for path in ("src/secrets_manager.py", "src/credentials_provider.js",
+                     "api/secrets.py", "secretary.py", "config/secretary.json"):
+            with self.subTest(path=path):
+                self.assertEqual(classify(path)[0], "PUBLIC-ABLE", path)
+
     def test_pin_and_allowlist_sheets_are_private_config(self):
         for path in ("credential_chain_pins.txt", "quota_brake_exempt.txt",
                      "vendor/toolchain-isolated-private.json",

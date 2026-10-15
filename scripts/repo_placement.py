@@ -35,7 +35,24 @@ TRACKER_NAME = re.compile(r"(tog|pap)-?[0-9]+", re.IGNORECASE)
 PRIVATE_CONFIG_TREES = ("host-ops/", "host-bootstrap/", "deploy/", "systemd/")
 PRIVATE_DATA_TREES = ("ops/", "patches/", "upstream-memory/")
 
-SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".env")
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".env", ".tfvars",
+                   ".gpg", ".age", ".kdbx", ".jks", ".keystore")
+# Suffix-less secret material: bare SSH private keys (their ".pub" halves
+# are public), credential dotfiles and kubeconfig. A basename whose full
+# stem is "credentials"/"secret"/"secrets" is secret material; code that
+# merely handles secrets (secrets_manager.py) or an English word that
+# starts with "secret" (secretary.py) is not.
+SECRET_BASENAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+                    "id_ecdsa_sk", "id_ed25519_sk",
+                    ".netrc", ".npmrc", ".pypirc", "kubeconfig",
+                    ".kubeconfig"}
+SECRET_STEMS = {"credentials", "secret", "secrets"}
+# Source code is never secret *material* by name alone (secrets.py is the
+# stdlib module name); embedded secrets are a content scan, not placement.
+CODE_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+                 ".go", ".rs", ".rb", ".java", ".kt", ".c", ".h", ".cpp",
+                 ".hpp", ".cs", ".php", ".swift", ".scala", ".sh", ".bash",
+                 ".zsh", ".pl", ".lua", ".r", ".m", ".mm")
 CONFIG_BASENAMES = {"external_disclosure_authorizers.json",
                     "operator_runbook_classification.json"}
 
@@ -56,6 +73,16 @@ def classify(path: str) -> tuple[str, str]:
     if base in CONFIG_BASENAMES:
         return "PRIVATE-CONFIG", "named-config"
     if base.endswith(SECRET_SUFFIXES) or base == ".env" or base.startswith(".env."):
+        return "PRIVATE-DATA", "secret-or-env-material"
+    stem = base.rsplit(".", 1)[0] if "." in base[1:] else base
+    # "kubeconfig" has no common English-word collisions, so an affixed
+    # name (kubeconfig-prod.yaml, my-kubeconfig) is still cluster material;
+    # the canonical ~/.kube/config path names it only by directory.
+    if not base.endswith(".pub") and (
+            base in SECRET_BASENAMES
+            or (stem in SECRET_STEMS and not base.endswith(CODE_SUFFIXES))
+            or "kubeconfig" in base
+            or (base == "config" and ".kube" in p.lower().split("/"))):
         return "PRIVATE-DATA", "secret-or-env-material"
     if p.startswith(PRIVATE_DATA_TREES):
         return "PRIVATE-DATA", "internal-notes-tree"

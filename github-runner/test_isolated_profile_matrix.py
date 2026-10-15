@@ -6,6 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from garm.validate_generic_profile import (
+    parse as parse_generic_receipt,
+)
+from garm.validate_generic_profile import (
+    validate as validate_generic_receipt,
+)
 from garm.validate_profile_matrix import (
     PROFILE_GLOB,
     RESULT,
@@ -78,6 +84,22 @@ class ProfileMatrixTest(unittest.TestCase):
         self.assertEqual(result["profiles"], on_disk)
         for name in KNOWN:
             self.assertIn(name, result["profiles"])
+
+    def test_generic_definition_matches_generic_checker(self):
+        definition = parse((GARM / "generic-image-profile.json").read_bytes())
+        receipt = parse_generic_receipt(
+            (GARM / "fixture-generic-profile.json").read_bytes())
+        # The checked-in fixture must already describe the definition.
+        self.assertEqual(receipt["labels"]["eligible"],
+                         definition["labels"]["eligible"])
+        self.assertEqual(
+            set(receipt["labels"]["ineligible"]),
+            set(definition["labels"]["explicitly_ineligible"]))
+        receipt["labels"] = {
+            "eligible": definition["labels"]["eligible"],
+            "ineligible": definition["labels"]["explicitly_ineligible"]}
+        result = validate_generic_receipt(receipt)
+        self.assertEqual(result["result"], "offline_profile_valid")
 
     def test_checked_in_lists_are_symmetric_for_the_known_roles(self):
         profiles = real_profiles()

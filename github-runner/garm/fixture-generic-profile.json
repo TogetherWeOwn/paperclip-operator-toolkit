@@ -45,11 +45,13 @@
   "labels": {
     "eligible": [
       "self-hosted",
-      "two-ephemeral"
+      "two-ephemeral",
+      "two-selfhosted"
     ],
     "ineligible": [
       "two-isolated",
-      "two-selfhosted"
+      "two-test",
+      "two-build"
     ]
   },
   "network_deny": {
