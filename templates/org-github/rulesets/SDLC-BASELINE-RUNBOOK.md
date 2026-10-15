@@ -43,21 +43,42 @@ runs appear but cannot block (evaluate mode).
 ## 3. Pre-flip audit (required before stage 2)
 
 Every non-excluded repo must have a producer for each required check, or the
-active flip blocks its PRs forever (the required-check-rename trap). Run the
-dynamic discovery plus the existing audit, one repo at a time:
+active flip blocks its PRs forever (the required-check-rename trap).
+
+Audit against the RENDERED PAYLOAD, not live branch rules. The audit's
+`--repo` mode builds its required set from
+`repos/{repo}/rules/branches/{branch}`, and GitHub omits rules from rulesets
+in evaluate or disabled enforcement from that endpoint — during stage 1 the
+baseline is exactly such a ruleset, so `--repo` mode cannot see the checks
+being vetted and a repo producing neither `ci-ok` nor `pr-lint` reports
+clean. Manifest mode takes the required set from the stage-1 payload
+instead and measures each repo's own workflows against it:
 
 ```bash
 STAGE=templates/org-github
 $STAGE/sdlc-foundation/discover-repos.sh > /tmp/sdlc-repos.txt
+jq '{branch: "main", required: [.rules[]
+      | select(.type == "required_status_checks")
+      | .parameters.required_status_checks[]]}' \
+  /tmp/sdlc-stage1.json > /tmp/sdlc-required.json
 while read -r repo; do
   echo "== $repo"
-  python3 ci_required_checks_audit.py --repo "$repo" --branch main
+  WF=$(mktemp -d)
+  if gh repo clone "$repo" "$WF/repo" -- --depth 1 --branch main >/dev/null 2>&1; then
+    python3 ci_required_checks_audit.py --manifest /tmp/sdlc-required.json \
+      --workflows "$WF/repo/.github/workflows"
+  else
+    echo "FAIL: cannot clone $repo (unauditable counts as unproven)"
+  fi
+  rm -rf "$WF"
 done < /tmp/sdlc-repos.txt
 ```
 
-Flip only when: every repo reports `ci-ok` and `pr-lint` producers, no gate's
-false-positive rate over the last 20 PRs exceeds 5%, and 24h have passed
-since stage 1.
+Flip only when: every repo's audit exits 0 (a `ci-ok` and a `pr-lint`
+producer each), no gate's false-positive rate over the last 20 PRs exceeds
+5%, and 24h have passed since stage 1. A missing producer is fixed by
+shipping the day-1 file set (or its `pr-lint.yml`) to that repo, never by
+weakening the payload.
 
 ## 4. Stage 2 — active
 

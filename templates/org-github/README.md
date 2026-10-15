@@ -18,6 +18,7 @@ destination only through the apply path in the map below.
 | `sdlc-foundation/discover-repos.sh` | reference only (stays here; dynamic `gh repo list` minus excludes for host scripts) |
 | `sdlc-foundation/BOOTSTRAP-new-repo.md` | reference only (stays here; template-repo creation + day-1 per-repo steps) |
 | `sdlc-foundation/repo-template/ci.yml` | new public `repo-template` repo as `.github/workflows/ci.yml` (pins filled at creation) |
+| `sdlc-foundation/repo-template/pr-lint.yml` | new public `repo-template` repo as `.github/workflows/pr-lint.yml` (the baseline's required `pr-lint` producer; copied from the org workflow template, which GitHub never applies automatically) |
 | `sdlc-foundation/repo-template/CODEOWNERS` | new public `repo-template` repo as `.github/CODEOWNERS` (owning team filled at creation) |
 | `sdlc-foundation/repo-template/policy-bot.yml.disabled` | new public `repo-template` repo, renamed to `.github/policy-bot.yml` only after risk lanes leave advisory shadow |
 | `sdlc-foundation/repo-template/STAGING-MIGRATE-CONTRACT.md` | new public `repo-template` repo (day-1 contract) |

@@ -8,7 +8,9 @@ at org level in the repo that already holds that role.
 - It exists and is public (`TogetherWeOwn/.github`, main): free Actions
   minutes on public repos, no provisioning step, no second source of truth.
 - It already hosts org reusable workflows (`.github/workflows/changes.yml`,
-  `test-guard.yml`, `test-guard-required.yml`, `tier-0-quality-gate.yml`),
+  `test-guard.yml`, `test-guard-required.yml`; the tier-0 quality gate
+  reusable is staged on the tier-0 adoption branch, not yet on main — see
+  below),
   new-repo workflow templates (`workflow-templates/starter-ci.yml`,
   `pr-lint.yml`, `test-guard.yml`, `gitleaks.yml`, deploy/staging/production,
   web-quality, web-zap-staging) and the standards (`CI-STANDARD.md`,
@@ -41,12 +43,16 @@ Already live/staged before this slice (reused, not duplicated):
 
 - `changes.yml` reusable + `starter-ci.yml` caller with `merge_group`,
   concurrency, timeouts and inline `ci-ok` aggregator.
-- `tier-0-quality-gate.yml` reusable: actionlint, zizmor, gitleaks, semgrep
-  and squawk run inside it at pinned versions, report-only first. There is
-  deliberately NO standalone `actionlint.yml` / `security-scan.yml` /
-  `squawk.yml` reusable: one gate, one aggregator (`tier-0-ok`), fed into
-  each caller's `ci-ok`. A second aggregator per scanner would multiply
-  required-check names for no extra signal.
+- `tier-0-quality-gate.yml` reusable — STAGED on the tier-0 adoption branch
+  only, NOT yet on org `.github` main (verified 2026-10-15, org main
+  `82c5b36`): actionlint, zizmor, gitleaks, semgrep and squawk run inside it
+  at pinned versions, report-only first. There is deliberately NO standalone
+  `actionlint.yml` / `security-scan.yml` / `squawk.yml` reusable: one gate,
+  one aggregator (`tier-0-ok`), fed into each caller's `ci-ok`. A second
+  aggregator per scanner would multiply required-check names for no extra
+  signal. Until the gate lands on org main, the day-1 template ships its
+  tier-0 caller disabled (`if: false`): an enabled caller against a missing
+  reusable fails at workflow startup and reports no `ci-ok` at all.
 - `tier0-report-only.json` / `tier0-required.json` ruleset pair + runbook.
 
 This slice adds:
@@ -71,4 +77,5 @@ This slice adds:
 - `repo-exclude-list.txt` + `discover-repos.sh`: the one exclude list and
   dynamic discovery for host scripts. No hardcoded repo lists in new code.
 - `repo-template/` + `BOOTSTRAP-new-repo.md`: day-1 file set (pinned caller,
-  CODEOWNERS, disabled policy-bot stub, staging-migrate contract).
+  the `pr-lint.yml` producer the baseline requires on every repo, CODEOWNERS,
+  disabled policy-bot stub, staging-migrate contract).

@@ -7,25 +7,40 @@ template repo and when cutting a repo from it. No step runs from CI.
 
 1. Create public `TogetherWeOwn/repo-template` from the
    `sdlc-foundation/repo-template/` file set in this directory
-   (`ci.yml` -> `.github/workflows/ci.yml`, plus `CODEOWNERS`,
-   `policy-bot.yml.disabled`, `STAGING-MIGRATE-CONTRACT.md`). Scrub private
-   card IDs from file content first; the staged headers name this card.
+   (`ci.yml` -> `.github/workflows/ci.yml`, `pr-lint.yml` ->
+   `.github/workflows/pr-lint.yml`, plus `CODEOWNERS`,
+   `policy-bot.yml.disabled`, `STAGING-MIGRATE-CONTRACT.md`). The
+   `pr-lint.yml` copy is load-bearing: the org baseline requires the
+   `pr-lint` context on every repo, and GitHub never applies the org
+   `workflow-templates/pr-lint.yml` to a repo by itself, so the producer
+   must ship inside the template. Scrub private card IDs from file content
+   first; the staged headers name this card.
 2. Mark it a template repository (Settings > Template repository).
 
 ## Per repo: cut from the template (zero per-repo setup)
 
 1. Create with the template (owner: TogetherWeOwn, visibility per plan).
-2. Fill the two pins in `.github/workflows/ci.yml` from live org main:
-   `<PINNED_CHANGES_SHA>` and `<PINNED_GATE_SHA>` become the 40-hex commit
-   SHAs of `.github/workflows/changes.yml` and
-   `.github/workflows/tier-0-quality-gate.yml`. No `uses:` into the org repo
-   may float on a branch name after this step.
+2. Fill the pins in `.github/workflows/ci.yml` from live org main.
+   `<PINNED_CHANGES_SHA>` becomes the 40-hex commit SHA of
+   `.github/workflows/changes.yml` on org `.github` main — fillable today.
+   `<PINNED_GATE_SHA>` is BLOCKED: `.github/workflows/tier-0-quality-gate.yml`
+   is staged on the tier-0 adoption branch only and is NOT on org main
+   (verified 2026-10-15, org main `82c5b36`). Until it lands on main, keep
+   the template's tier-0 job at `if: false` and do not claim tier-0
+   coverage: never pin an unmerged branch SHA, and never enable the job
+   against the missing reusable (a startup failure reports no `ci-ok`, and
+   an active baseline then blocks every PR). When the gate lands: fill
+   `<PINNED_GATE_SHA>`, delete the `if: false`, and re-run step 4. No `uses:`
+   into the org repo may float on a branch name after this step.
 3. Replace `<OWNING-TEAM>` in `.github/CODEOWNERS` with the owning team.
    Leave `policy-bot.yml.disabled` renamed until the risk-lanes track leaves
    advisory shadow (TOG-24383); the staging-migrate contract applies now.
-4. Open a docs-only PR and a code PR. Acceptance: both show `ci-ok`,
-   `pr-lint` and the tier-0 gate with no further setup; the docs-only PR
-   skips heavy jobs with `ci-ok` green.
+4. Open a docs-only PR and a code PR. Acceptance: both report `ci-ok` and
+   `pr-lint`; the docs-only PR skips `lint` via the `changes` outputs with
+   `ci-ok` green (`secret-scan` always runs). The tier-0 job must read
+   `skipped` — never a startup failure — until step 2's gate dependency
+   lands, after which it must report green before the repo counts as
+   day-1 complete.
 5. Merge queue: leave org custom property `merge_queue_ready` unset (false).
    Set it `true` only after all required producing workflows handle
    `merge_group` and review carry is available — the day-1 `ci.yml` already
@@ -40,5 +55,7 @@ template repo and when cutting a repo from it. No step runs from CI.
 ## Rollback
 
 Delete the repo before its first promotion, or revert the template commit
-and re-cut. No org ruleset change is part of cutting a repo; the baseline
-evaluate ruleset already covers new repos with zero setup.
+and re-cut. No org ruleset change is part of cutting a repo: the baseline
+ruleset already targets new repos, and its required checks report because
+the day-1 file set above ships their producers (`ci-ok` in `ci.yml`,
+`pr-lint` in `pr-lint.yml`).

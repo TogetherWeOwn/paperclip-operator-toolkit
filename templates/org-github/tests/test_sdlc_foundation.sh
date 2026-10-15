@@ -28,6 +28,7 @@ STAGED=(
   "$FOUND/discover-repos.sh"
   "$FOUND/BOOTSTRAP-new-repo.md"
   "$FOUND/repo-template/ci.yml"
+  "$FOUND/repo-template/pr-lint.yml"
   "$FOUND/repo-template/CODEOWNERS"
   "$FOUND/repo-template/policy-bot.yml.disabled"
   "$FOUND/repo-template/STAGING-MIGRATE-CONTRACT.md"
@@ -41,8 +42,11 @@ for f in "${STAGED[@]}"; do
   if [[ -f "$f" ]]; then ok "staged: $f"; else bad "staged: $f missing"; fi
 done
 
+TMPD="$(mktemp -d "${PAPERCLIP_RUN_SCRATCH_DIR:-/tmp}/sdlc-red.XXXXXX")"
+trap 'rm -rf "$TMPD"' EXIT
+
 hdr "ruleset twins (python3 stdlib)"
-python3 - "$BASE" <<'PY' > /tmp/sdlc-twins.out 2>&1
+TWIN_PY=$(cat <<'PY'
 import json, sys
 base = sys.argv[1]
 ev = json.load(open(f"{base}/rulesets/sdlc-baseline-evaluate.json"))
@@ -80,17 +84,24 @@ check(pr.get("required_review_thread_resolution") is True,
 print("\n".join(out))
 sys.exit(0 if all(l.startswith("PASS") for l in out) else 1)
 PY
-if [[ $? == 0 ]]; then
-  while IFS= read -r line; do
-    if [[ "$line" == PASS:* ]]; then ok "${line#PASS: }"; else bad "${line#FAIL: }"; fi
-  done < /tmp/sdlc-twins.out
-else
-  bad "ruleset twin check crashed"; cat /tmp/sdlc-twins.out
+)
+# Capture the status WITHOUT tripping set -e: a failing twin assertion must
+# still render its FAIL line and let every later section run, not kill the
+# suite right after the heading.
+TWIN_RC=0
+python3 -c "$TWIN_PY" "$BASE" > "$TMPD/twins.out" 2>&1 || TWIN_RC=$?
+TWIN_LINES=0
+while IFS= read -r line; do
+  case "$line" in
+    PASS:*) ok "${line#PASS: }"; TWIN_LINES=$((TWIN_LINES+1)) ;;
+    FAIL:*) bad "${line#FAIL: }"; TWIN_LINES=$((TWIN_LINES+1)) ;;
+  esac
+done < "$TMPD/twins.out"
+if [[ "$TWIN_LINES" == 0 ]]; then
+  bad "ruleset twin check crashed (rc=$TWIN_RC, no PASS/FAIL lines)"; cat "$TMPD/twins.out"
 fi
 
 hdr "red control: tampered twin must fail the twin-diff"
-TMPD="$(mktemp -d "${PAPERCLIP_RUN_SCRATCH_DIR:-/tmp}/sdlc-red.XXXXXX")"
-trap 'rm -rf "$TMPD"' EXIT
 python3 - "$BASE/rulesets/sdlc-baseline-evaluate.json" "$TMPD/tampered.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -107,6 +118,20 @@ sys.exit(0 if a == b else 1)
 PY
 then bad "tampered twin passed twin-diff (control broken)"
 else ok "tampered twin fails twin-diff"; fi
+mkdir -p "$TMPD/twinbase/rulesets"
+cp "$BASE/rulesets/sdlc-baseline-evaluate.json" "$TMPD/twinbase/rulesets/"
+python3 - "$BASE/rulesets/sdlc-baseline-active.json" "$TMPD/twinbase/rulesets/sdlc-baseline-active.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+pr = [r for r in d["rules"] if r["type"] == "pull_request"][0]
+pr["parameters"]["required_approving_review_count"] = 1
+json.dump(d, open(sys.argv[2], "w"))
+PY
+CTL_RC=0
+python3 -c "$TWIN_PY" "$TMPD/twinbase" > "$TMPD/twin-ctl.out" 2>&1 || CTL_RC=$?
+if [[ "$CTL_RC" != 0 ]] && grep -q '^FAIL: ' "$TMPD/twin-ctl.out"; then
+  ok "tampered twin FAIL line is rendered (suite survives to report it)"
+else bad "tampered twin FAIL line not rendered (rc=$CTL_RC)"; cat "$TMPD/twin-ctl.out"; fi
 
 hdr "exclude list + discovery (offline fixture)"
 if grep -Eq '^[A-Za-z0-9_.-]+\*?$' <(grep -vE '^\s*(#|$)' "$FOUND/repo-exclude-list.txt"); then
@@ -166,12 +191,52 @@ if grep -q 'policy-bot.yml.disabled' "$FOUND/BOOTSTRAP-new-repo.md" \
   && grep -q '<PINNED_GATE_SHA>' "$FOUND/BOOTSTRAP-new-repo.md"; then
   ok "bootstrap documents pin fill + stub rename"
 else bad "bootstrap misses pin fill or stub rename"; fi
+PR_LINT="$FOUND/repo-template/pr-lint.yml"
+if grep -q 'name: pr-lint' "$PR_LINT" && grep -q 'merge_group:' "$PR_LINT"; then
+  ok "template ships the required pr-lint producer (with merge_group)"
+else bad "template pr-lint producer missing or lacks merge_group"; fi
+if grep -Eq '^[[:space:]]+uses:' "$PR_LINT"; then
+  bad "pr-lint template must stay self-contained (an org uses: would need a pin)"
+else ok "pr-lint template is self-contained (no uses:)"; fi
+if grep -A6 '^  tier-0:' "$TEMPL" | grep -q 'if: false'; then
+  ok "tier-0 ships disabled until its gate is on org main (no startup failure)"
+else bad "tier-0 not disabled (an unfilled pin would suppress ci-ok)"; fi
+if grep -A8 '^  lint:' "$TEMPL" | grep -q 'needs.changes.outputs'; then
+  ok "docs-only PRs skip lint via the changes outputs"
+else bad "lint not gated on changes outputs (docs-only claim false)"; fi
 
 hdr "red control: floating uses: must fail the pin check"
 sed 's/@<PINNED_CHANGES_SHA>/@main/' "$TEMPL" > "$TMPD/float.yml"
 if grep -Eq 'uses:[[:space:]]+TogetherWeOwn/[^@]+@(main|master|latest)"? *$' "$TMPD/float.yml"; then
   ok "floating uses: detected (control holds)"
 else bad "floating uses: NOT detected (control broken)"; fi
+
+hdr "pre-flip audit control: manifest mode sees a missing producer"
+# The runbook's pre-flip audit must measure the evaluate payload, which the
+# live branch-rules endpoint omits. Prove the manifest rendering from the
+# real payload flags a repo whose workflows lack a pr-lint producer, and
+# that the day-1 file set itself produces every baseline-required check.
+python3 - "$BASE/rulesets/sdlc-baseline-evaluate.json" "$TMPD/required.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+req = [c for r in d["rules"] if r["type"] == "required_status_checks"
+       for c in r["parameters"]["required_status_checks"]]
+assert {c["context"] for c in req} == {"ci-ok", "pr-lint"}, req
+json.dump({"branch": "main", "required": req}, open(sys.argv[2], "w"))
+PY
+mkdir -p "$TMPD/wf-day1" "$TMPD/wf-no-prlint"
+cp "$FOUND/repo-template/ci.yml" "$FOUND/repo-template/pr-lint.yml" "$TMPD/wf-day1/"
+cp "$FOUND/repo-template/ci.yml" "$TMPD/wf-no-prlint/"
+if python3 ci_required_checks_audit.py --manifest "$TMPD/required.json" \
+    --workflows "$TMPD/wf-day1" > "$TMPD/audit-ok.out" 2>&1; then
+  ok "day-1 template produces every baseline-required check"
+else bad "day-1 template fails its own baseline audit"; cat "$TMPD/audit-ok.out"; fi
+if python3 ci_required_checks_audit.py --manifest "$TMPD/required.json" \
+    --workflows "$TMPD/wf-no-prlint" > "$TMPD/audit-miss.out" 2>&1; then
+  bad "audit passed a workflows dir with no pr-lint producer (control broken)"
+elif grep -Eq 'FAIL.*NO_PRODUCER.*"pr-lint"' "$TMPD/audit-miss.out"; then
+  ok "manifest audit flags a missing pr-lint producer (evaluate payload is auditable)"
+else bad "audit failed without naming pr-lint"; cat "$TMPD/audit-miss.out"; fi
 
 hdr "destination map + runbook wiring"
 MISSING=0
@@ -183,14 +248,29 @@ if grep -q 'repo-exclude-list.txt' "$BASE/rulesets/SDLC-BASELINE-RUNBOOK.md" \
   && grep -q 'discover-repos.sh' "$BASE/rulesets/SDLC-BASELINE-RUNBOOK.md"; then
   ok "runbook wires exclude list + discovery"
 else bad "runbook misses exclude/discovery wiring"; fi
-if grep -q 'test_sdlc_foundation.sh' scripts/verify-fast.sh 2>/dev/null; then
+# wired_in_ci <file> — true only when a NON-COMMENT line executes the staged
+# suite. A bare mention (e.g. a header comment naming the file) must not
+# count: that passed vacuously with the CI step deleted.
+wired_in_ci() {
+  grep -Ev '^[[:space:]]*#' "$1" > "$TMPD/noncomments.txt" 2>/dev/null || true
+  grep -Eq '(^|[[:space:]])\./templates/org-github/tests/test_sdlc_foundation\.sh([[:space:]]|$)' "$TMPD/noncomments.txt"
+}
+if [[ -f scripts/verify-fast.sh ]] \
+  && grep -Eq '^[[:space:]]*[^#].*test_sdlc_foundation\.sh' scripts/verify-fast.sh; then
   ok "suite wired into verify-fast"
-elif grep -q 'test_sdlc_foundation' .github/workflows/ci.yml 2>/dev/null; then
+elif wired_in_ci .github/workflows/ci.yml; then
   # This public mirror has no scripts/verify-fast.sh; its fast tier is
   # .github/workflows/ci.yml. Accept either wiring so the same staged
   # contract holds in both repos.
   ok "suite wired into ci.yml"
 else bad "suite NOT wired into verify-fast or ci.yml"; fi
+if [[ -f .github/workflows/ci.yml ]]; then
+  grep -Ev '^[[:space:]]*\./templates/org-github/tests/test_sdlc_foundation\.sh[[:space:]]*$' \
+    .github/workflows/ci.yml > "$TMPD/unwired.yml"
+  if grep -q 'test_sdlc_foundation' "$TMPD/unwired.yml" && ! wired_in_ci "$TMPD/unwired.yml"; then
+    ok "wiring check fails when the CI step is deleted (mentions kept)"
+  else bad "wiring check passes with the CI step deleted (control broken)"; fi
+fi
 
 echo
 echo "sdlc-foundation: $PASS passed, $FAIL failed"
