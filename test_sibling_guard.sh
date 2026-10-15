@@ -195,6 +195,10 @@ const PULLS = {
   nsprseg: [{ number: 929, title: 'widget', body: 'just a description', head: { ref: 'tog-900/widget', sha: 'DISTINCT' } }],
   nsprforeign: [{ number: 930, title: 'widget', body: 'Refs: TOG-907', head: { ref: 'ops/tog-900-widget', sha: 'DISTINCT' } }],
   nsprown: [{ number: 931, title: 'widget', body: 'Refs: TOG-900', head: { ref: 'ops/tog-900-widget', sha: 'DISTINCT' } }],
+  // Uppercase head ref (the fleet's real `TOG-NNNN-...` form): title and body
+  // carry no key, so relevance can only come from the lowercased branch rule
+  // at the generic open-PR call site.
+  upperpr: [{ number: 932, title: 'widget', body: 'just a description', head: { ref: 'TOG-900-widget', sha: 'DISTINCT' } }],
   crosslower: [{ number: 916, title: 'Do the thing (TOG-900)', body: 'refs: tog-900', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossexact: [{ number: 917, title: 'Do the thing (TOG-900)', body: 'Refs: TOG-9000', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
   crossmidrelevant: [{ number: 918, title: 'Do the thing (TOG-900)', body: 'Related work (see Refs: TOG-900 for detail)', head: { ref: 'quality/meta-only-assets', sha: 'DISTINCT' } }],
@@ -510,6 +514,17 @@ assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "VERDICT: clear" <<< "$OUT" && echo 0 || echo 1)" \
   "the cross-card substring verdict is reported as clear" "$OUT"
 
+# A longer key is not this card either: `tog-9000-...` must not match
+# `tog-900` as a prefix — the trailing boundary after the key is required.
+LONGERKEY="$TMP/longerkey"; mkclone "$LONGERKEY"
+(cd "$LONGERKEY" && git checkout --quiet -b tog-9000-widget && echo long >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "longer key work" && git checkout --quiet main)
+run_guard "$LONGERKEY" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 0 ]] && echo 0 || echo 1)" \
+  "a local branch owned by a longer key stays clear" "rc=$RC out=$OUT"
+assert "$(grep -q "VERDICT: clear" <<< "$OUT" && echo 0 || echo 1)" \
+  "the longer-key verdict is reported as clear" "$OUT"
+
 # (b) Prefix-owned branches still refuse: the requested key is the primary
 # prefix and the branch carries commits ahead of origin/main.
 OWNPREFIX="$TMP/ownprefix"; mkclone "$OWNPREFIX"
@@ -571,6 +586,17 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "tog-900.1-widget" <<< "$OUT" && echo 0 || echo 1)" \
   "the dot-separated local branch is named in the report" "$OUT"
 
+# Uppercase branch names (the fleet's real `TOG-NNNN-...` form) are owned
+# too: the local detector lowercases before the primary-key rule.
+UPPERLOCAL="$TMP/upperlocal"; mkclone "$UPPERLOCAL"
+(cd "$UPPERLOCAL" && git checkout --quiet -b TOG-900-Widget && echo up >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "uppercase work" && git checkout --quiet main)
+run_guard "$UPPERLOCAL" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a local branch with this card in uppercase and ahead exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-900-Widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uppercase local branch is named in the report" "$OUT"
+
 # ===========================================================================
 hdr "5b. Remote branch-name attribution ignores cross-card substrings."
 # Same primary-prefix rule through the remote detector, isolated: each fresh
@@ -619,12 +645,26 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
 assert "$(grep -q "tog-900/remote-widget" <<< "$OUT" && echo 0 || echo 1)" \
   "the segment pushed branch is named in the report" "$OUT"
 
+# Uppercase pushed branches still refuse through the remote detector too:
+# it lowercases the short ref before the primary-key rule.
+REMUPPER="$TMP/remupper-push"; mkclone "$REMUPPER"
+(cd "$REMUPPER" && git checkout --quiet -b TOG-900-Remote-Upper && echo ru >> file.txt \
+   && git -c user.name=suite -c user.email=suite@example.invalid commit --quiet -am "uppercase pushed" \
+   && git push --quiet -u origin TOG-900-Remote-Upper)
+REMUPPERF="$TMP/remupper-fresh"; mkclone "$REMUPPERF"
+run_guard "$REMUPPERF" TOG-900 --repo=stub/none
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "a pushed branch with this card in uppercase exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "TOG-900-Remote-Upper" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uppercase pushed branch is named in the report" "$OUT"
+
 # Hermetic cleanup: remove the pushed refs so later start-phase asserts that
 # fetch the shared origin never see them.
 (cd "$REMXC" && git push --quiet origin --delete tog-907-bump-pin-so-tog-900-reruns-remote-green >/dev/null 2>&1) || true
 (cd "$REMOWN" && git push --quiet origin --delete tog-900-remote-widget-work >/dev/null 2>&1) || true
 (cd "$REMNS" && git push --quiet origin --delete ops/tog-900-remote-widget >/dev/null 2>&1) || true
 (cd "$REMSEG" && git push --quiet origin --delete tog-900/remote-widget >/dev/null 2>&1) || true
+(cd "$REMUPPER" && git push --quiet origin --delete TOG-900-Remote-Upper >/dev/null 2>&1) || true
 
 # ===========================================================================
 hdr "5c. Same-head and blind detectors still fail closed."
@@ -832,6 +872,16 @@ assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
   "an open PR on a namespaced branch whose Refs line names only this card exits 1" "rc=$RC out=$OUT"
 assert "$(grep -q "#931" <<< "$OUT" && echo 0 || echo 1)" \
   "the namespaced own-PR duplicate names the PR number" "$OUT"
+
+# Uppercase open-PR heads are relevant at this call site too: the head ref
+# is lowercased before the primary-key rule, and the title/body carry no key.
+run_guard "$CLEAN" TOG-900 --repo=stub/upperpr
+assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
+  "an open PR on a branch with this card in uppercase exits 1" "rc=$RC out=$OUT"
+assert "$(grep -q "#932" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uppercase open-PR duplicate names the PR number" "$OUT"
+assert "$(grep -q "TOG-900-widget" <<< "$OUT" && echo 0 || echo 1)" \
+  "the uppercase open-PR duplicate names the full head ref" "$OUT"
 
 run_guard "$CLEAN" TOG-900 --repo=stub/crossexact
 assert "$([[ "$RC" -eq 1 ]] && echo 0 || echo 1)" \
